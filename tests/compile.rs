@@ -2143,10 +2143,11 @@ fn compile_lines_within(root: &Path, seconds: u64, hard: bool) -> (Output, f64) 
 /// A loop over a trillion numbers, which no rule or proof ends in time.
 const ENDLESS: &str = "Id.run do\n  let mut n := 0\n  for i in [0:1000000000000] do\n    n := n + i\n  return n == 0";
 
-/// A loop that takes about 2 processor seconds on an Apple M-series core, a fifth of the limit the test below sets, so
-/// ten of them run past it on a machine twice as fast, and one ends within it on a machine twice as slow.
-fn slow(length: u64) -> String {
-    ENDLESS.replace("1000000000000", &(30_000_000 + length).to_string())
+/// A loop of `steps` steps. Ten million take about 1.1 processor seconds on an Apple M-series core and about 3 on Linux
+/// aarch64, so one such rule ends well within the 10 seconds the test below sets, and thirty of them pass a runner's
+/// own limit of 20 seconds.
+fn looping(steps: u64) -> String {
+    ENDLESS.replace("1000000000000", &steps.to_string())
 }
 
 /// Lean work that runs past the processor-time limit, or waits until the deadline, stops there once instead of holding
@@ -2164,10 +2165,10 @@ fn slow(length: u64) -> String {
 /// processor time, so each runs on its own thread meanwhile.
 ///
 /// Then slow rules run under a limit of 10 seconds, one row at a time, since a loaded machine raises the processor time
-/// of each rule. Each takes about 3 processor seconds, so ten of them pass the runner's own limit of twice the limit:
-/// a slow rule runs; ten slow rules that one `attribute [rule]` line marks all run; ten slow rules a macro of a helper
-/// file declares all run; and ten shorter rules under a hard limit of 10 seconds, which keeps the runner's own limit
-/// at 9 seconds, all run.
+/// of each rule. Each is a `looping` of ten million steps, so thirty of them pass the runner's own limit of twice the
+/// limit: a slow rule runs; thirty slow rules that one `attribute [rule]` line marks all run; thirty slow rules a macro
+/// of a helper file declares all run; and thirty shorter rules under a hard limit of 10 seconds, which keeps the
+/// runner's own limit at 9 seconds, all run.
 #[cfg(unix)]
 #[test]
 fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other_rule_runs() {
@@ -2205,32 +2206,26 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other
     let sleeping_eval = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}\n#eval IO.sleep 4000000000"));
     let slow_rule = rules(
         "App.Tenant.Store",
-        &format!("{IMPORTS_ONLY}\n@[rule] def slow : Rule := .imports fun _ _ => {}", slow(0)),
+        &format!("{IMPORTS_ONLY}\n@[rule] def slow : Rule := .imports fun _ _ => {}", looping(10_000_000)),
     );
     // Each loop has its own length, so Lean shares no loop between rules.
-    let slow_definitions: String =
-        (1..=10).map(|rule| format!("\ndef slow{rule} : Rule := .imports fun _ _ => {}", slow(rule))).collect();
-    let marked_rules = rules(
-        "App.Tenant.Store",
-        &format!(
-            "{IMPORTS_ONLY}{slow_definitions}\nattribute [rule] slow1 slow2 slow3 slow4 slow5 slow6 slow7 slow8 slow9 slow10"
-        ),
-    );
+    let slow_definitions: String = (1..=30)
+        .map(|rule| format!("\ndef slow{rule} : Rule := .imports fun _ _ => {}", looping(10_000_000 + rule)))
+        .collect();
+    let marked: Vec<String> = (1..=30).map(|rule| format!("slow{rule}")).collect();
+    let marked_rules =
+        rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}{slow_definitions}\nattribute [rule] {}", marked.join(" ")));
     let slow_macro = format!(
         "import Code.App.Tenant.Store.Slow\nopen Sharp\n\nmacro \"slow_rule \" name:ident length:num : command =>\n  `(@[rule] def $name : Rule := .imports fun _ _ => {})\n",
-        slow(0).replace("30000000", "$length").replace('\n', "\n    ")
+        looping(10_000_000).replace("10000000", "$length").replace('\n', "\n    ")
     );
-    let macro_rules: String = (1..=10).map(|rule| format!("\nslow_rule slow{rule} {}", 30_000_000 + rule)).collect();
+    let macro_rules: String = (1..=30).map(|rule| format!("\nslow_rule slow{rule} {}", 10_000_000 + rule)).collect();
     let macro_rules = format!(
         "import Code.App.Tenant.Store.Module\nimport App.Tenant.Store.Slow\nopen Sharp\n\n{IMPORTS_ONLY}{macro_rules}\n"
     );
-    // Two thirds of a slow rule, so a runner's start and its first rule stay within the 9 seconds a hard limit of 10
-    // leaves on a machine twice as slow, while ten of them pass it on a machine twice as fast.
-    let shorter_rules: String = (1..=10)
-        .map(|rule| {
-            let loop_ = ENDLESS.replace("1000000000000", &(20_000_000 + rule).to_string());
-            format!("\n@[rule] def shorter{rule} : Rule := .imports fun _ _ => {loop_}")
-        })
+    // Two thirds of a slow rule, so thirty of them still pass the 9 seconds a hard limit of 10 leaves each runner.
+    let shorter_rules: String = (1..=30)
+        .map(|rule| format!("\n@[rule] def shorter{rule} : Rule := .imports fun _ _ => {}", looping(6_700_000 + rule)))
         .collect();
     let shorter_rules = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}{shorter_rules}"));
     let endless = [
@@ -2312,11 +2307,13 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other
     }
 }
 
-/// Ctrl-C ends a compile and the Lean it waits on, though Mago runs Lake in a process group of its own so it can end
-/// Lake's at the deadline: the terminal sends it to the compile's group, and Mago sends it on to Lake's.
+/// Each signal that ends a compile from a terminal or `kill` ends the Lean it waits on too, though Mago runs Lake in a
+/// process group of its own so it can end Lake's at the deadline: the signal reaches the compile's group, and Mago
+/// sends it on to Lake's. Its rows are Ctrl-C's SIGINT, Ctrl-\'s SIGQUIT, a closed terminal's SIGHUP, and `kill`'s
+/// SIGTERM.
 #[cfg(unix)]
 #[test]
-fn ctrl_c_ends_a_compile_and_the_lean_it_waits_on() {
+fn a_signal_that_ends_a_compile_ends_the_lean_it_waits_on() {
     use std::os::unix::process::CommandExt;
     use std::os::unix::process::ExitStatusExt;
     use std::process::Stdio;
@@ -2324,37 +2321,48 @@ fn ctrl_c_ends_a_compile_and_the_lean_it_waits_on() {
     use std::time::Instant;
 
     let sleeping_eval = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}\n#eval IO.sleep 4000000000"));
-    let directory = structured(&[("app/Tenant/Store/Module.lean", sleeping_eval.as_str())]);
-    let sleeping = format!(
-        "{}/.sharp/.lean/Proofs/App/Tenant/Store/Module.lean",
-        directory.path().file_name().unwrap().to_string_lossy()
-    );
-    let leans = || String::from_utf8(Command::new("pgrep").args(["-f", &sleeping]).output().unwrap().stdout).unwrap();
-    let mut compile = command(directory.path(), "never")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .unwrap();
-    let started = Instant::now();
-    while leans().is_empty() {
-        assert!(started.elapsed() < Duration::from_secs(300), "the sleeping Lean never started");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGHUP, libc::SIGTERM] {
+        let directory = structured(&[("app/Tenant/Store/Module.lean", sleeping_eval.as_str())]);
+        let sleeping = format!(
+            "{}/.sharp/.lean/Proofs/App/Tenant/Store/Module.lean",
+            directory.path().file_name().unwrap().to_string_lossy()
+        );
+        let leans =
+            || String::from_utf8(Command::new("pgrep").args(["-f", &sleeping]).output().unwrap().stdout).unwrap();
+        let mut compiling = command(directory.path(), "never");
+        compiling.stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
+        // SAFETY: `setrlimit` is async-signal-safe, and the closure allocates nothing.
+        unsafe {
+            compiling.pre_exec(|| {
+                // SIGQUIT dumps no core.
+                let none = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                if libc::setrlimit(libc::RLIMIT_CORE, &raw const none) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            })
+        };
+        let mut compile = compiling.spawn().unwrap();
+        let started = Instant::now();
+        while leans().is_empty() {
+            assert!(started.elapsed() < Duration::from_secs(300), "{signal}: the sleeping Lean never started");
+            std::thread::sleep(Duration::from_millis(100));
+        }
 
-    // SAFETY: `kill` only sends a signal, to the group the compile leads, as a terminal's Ctrl-C does.
-    assert_eq!(unsafe { libc::kill(-i32::try_from(compile.id()).unwrap(), libc::SIGINT) }, 0);
+        // SAFETY: `kill` only sends a signal, to the group the compile leads, as a terminal does.
+        assert_eq!(unsafe { libc::kill(-i32::try_from(compile.id()).unwrap(), signal) }, 0);
 
-    assert_eq!(compile.wait().unwrap().signal(), Some(libc::SIGINT));
-    let ended = Instant::now();
-    while !leans().is_empty() && ended.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(compile.wait().unwrap().signal(), Some(signal));
+        let ended = Instant::now();
+        while !leans().is_empty() && ended.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let left = leans();
+        if !left.is_empty() {
+            Command::new("pkill").args(["-f", &sleeping]).status().unwrap();
+        }
+        assert_eq!(left, "", "{signal}: Lean outlived the compile");
     }
-    let left = leans();
-    if !left.is_empty() {
-        Command::new("pkill").args(["-f", &sleeping]).status().unwrap();
-    }
-    assert_eq!(left, "", "Lean outlived the compile");
 }
 
 #[test]

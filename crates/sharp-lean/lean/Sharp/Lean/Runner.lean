@@ -365,15 +365,23 @@ def pastLimit : UInt8 := 124
 def pastDeadline : UInt8 := 125
 
 /-- Runs `act` on a thread of its own while this thread reads the time every 50 milliseconds, and ends the runner as
-`pastLimit` once `act` has used `limit` processor milliseconds, or as `pastDeadline` once `deadline` milliseconds have
-passed, as when it waits. Lean holds no global lock, so evaluated code never keeps this thread from reading. -/
+`pastLimit` once `act` has used `limit` processor milliseconds, or as `pastDeadline` once it has waited `deadline`
+milliseconds. It waits while its processor time stands still, so a rule a busy machine starves still computes, and ends
+only at its limit. Lean holds no global lock, so evaluated code never keeps this thread from reading. -/
 def watched {α : Type} (limit deadline : Nat) (act : IO α) : IO α := do
   let started ← processorTime
-  let startedAt ← IO.monoMsNow
+  let mut used := started
+  let mut last ← IO.monoMsNow
+  let mut waited := 0
   let task ← IO.asTask act (prio := .dedicated)
   while !(← IO.hasFinished task) do
-    if (← processorTime) - started ≥ limit then IO.Process.exit pastLimit
-    if (← IO.monoMsNow) - startedAt ≥ deadline then IO.Process.exit pastDeadline
+    let now ← processorTime
+    let wall ← IO.monoMsNow
+    if now - started ≥ limit then IO.Process.exit pastLimit
+    if now == used then waited := waited + (wall - last)
+    if waited ≥ deadline then IO.Process.exit pastDeadline
+    used := now
+    last := wall
     IO.sleep 50
   IO.ofExcept task.get
 

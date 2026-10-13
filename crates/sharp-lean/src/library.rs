@@ -237,6 +237,15 @@ pub(crate) fn deadline() -> Duration {
 #[cfg(unix)]
 static WAITED_ON: AtomicI32 = AtomicI32::new(0);
 
+/// What `WAITED_ON` holds while `command.spawn()` starts the group.
+#[cfg(unix)]
+const STARTING: libc::pid_t = -1;
+
+/// The signal `forward` received, which `output_before_deadline` sends on once the group it started is known: a
+/// signal can reach any of Mago's threads while one of them spawns.
+#[cfg(unix)]
+static PENDING: AtomicI32 = AtomicI32::new(0);
+
 /// Keeps `output_before_deadline` to one group at a time, the one `WAITED_ON` holds.
 #[cfg(unix)]
 static ONE_GROUP: Mutex<()> = Mutex::new(());
@@ -253,9 +262,21 @@ pub(crate) fn output_before_deadline(command: &mut Command) -> io::Result<(Outpu
         forward_signals();
         ONE_GROUP.lock().unwrap_or_else(PoisonError::into_inner)
     };
-    let mut child = command.spawn()?;
     #[cfg(unix)]
-    WAITED_ON.store(libc::pid_t::try_from(child.id()).map_err(io::Error::other)?, Ordering::SeqCst);
+    WAITED_ON.store(STARTING, Ordering::SeqCst);
+    let spawned = command.spawn();
+    // `forward` writes `PENDING` before it reads `WAITED_ON`, and this thread writes `WAITED_ON` before it reads
+    // `PENDING`, so at least one of them sends a signal that arrived during the spawn to the group.
+    #[cfg(unix)]
+    {
+        let group = spawned.as_ref().ok().and_then(|child| libc::pid_t::try_from(child.id()).ok()).unwrap_or(0);
+        WAITED_ON.store(group, Ordering::SeqCst);
+        let signal = PENDING.load(Ordering::SeqCst);
+        if signal != 0 {
+            forward(signal);
+        }
+    }
+    let mut child = spawned?;
     let output = wait_before_deadline(&mut child);
     #[cfg(unix)]
     WAITED_ON.store(0, Ordering::SeqCst);
@@ -291,10 +312,15 @@ fn forward_signals() {
     });
 }
 
-/// Sends `signal` to the group `WAITED_ON` holds, then raises it again, which `SA_RESETHAND` made end Mago.
+/// Sends `signal` to the group `WAITED_ON` holds, then raises it again, which `SA_RESETHAND` made end Mago. While the
+/// group starts, it only records `signal` in `PENDING`, for the spawning thread to send on.
 #[cfg(unix)]
 extern "C" fn forward(signal: libc::c_int) {
+    PENDING.store(signal, Ordering::SeqCst);
     let group = WAITED_ON.load(Ordering::SeqCst);
+    if group == STARTING {
+        return;
+    }
     if group != 0 {
         // SAFETY: `kill` is async-signal-safe.
         unsafe { libc::kill(-group, signal) };
