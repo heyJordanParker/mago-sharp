@@ -1978,8 +1978,7 @@ fn report_interface_member_access(modifier: &Modifier, context: &mut Context<'_,
 }
 
 /// Reports each name in a `uses` that is no effect, spec section 29. A name is an effect when it resolves to one of the
-/// [`STANDARD_EFFECTS`], written bare or imported, and names compare as PHP's class names do, ignoring case. An
-/// effect's own name that an import shadows, spec section 23, is refused with the imported class it names instead.
+/// [`STANDARD_EFFECTS`], written bare or imported, and names compare as PHP's class names do, ignoring case.
 fn check_uses(uses: &Uses, context: &mut Context<'_, '_, '_>) {
     for effect in &uses.names {
         let resolved = context.get_name(effect.span.start);
@@ -1987,21 +1986,10 @@ fn check_uses(uses: &Uses, context: &mut Context<'_, '_, '_>) {
             continue;
         }
 
-        let written = BytesDisplay(effect.value);
-        let message = if context.names.is_imported(&effect.span.start)
-            && STANDARD_EFFECTS.iter().any(|standard| short_name(standard).as_bytes() == effect.value)
-        {
-            let imported = String::from_utf8_lossy(resolved).replace('\\', ".");
-
-            format!(
-                "`{written}` here is the imported `{imported}`, not the effect `{written}`. Import it under another name, as in `import {imported} as System{written};`."
-            )
-        } else {
-            let [rest @ .., last] = &STANDARD_EFFECTS;
-            let rest = rest.iter().map(short_name).collect::<Vec<_>>().join(", ");
-
-            format!("`{written}` is not an effect: `uses` takes {rest} or {}.", short_name(last))
-        };
+        let [rest @ .., last] = &STANDARD_EFFECTS;
+        let rest = rest.iter().map(short_name).collect::<Vec<_>>().join(", ");
+        let message =
+            format!("`{}` is not an effect: `uses` takes {rest} or {}.", BytesDisplay(effect.value), short_name(last));
 
         context.report(
             Issue::error(message).with_annotation(Annotation::primary(effect.span).with_message("Written here.")),
