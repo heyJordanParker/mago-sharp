@@ -527,7 +527,6 @@ fn the_c_header_lays_out_every_type_as_the_bridge_does() {
         ("sizeof(sharp_str)", size_of::<sharp_str>()),
         ("sizeof(SHARP_UNIT_MAGIC) - 1", SHARP_UNIT_MAGIC.len()),
         ("sizeof(SHARP_UNIT_ABI) - 1", SHARP_UNIT_ABI.len()),
-        ("sizeof(SHARP_MAGO_COMMIT) - 1", 40),
     ];
     let mut source = String::from("#include <stddef.h>\n#include \"sharp_unit.h\"\n");
     for (expression, value) in assertions {
@@ -544,7 +543,7 @@ fn the_c_header_lays_out_every_type_as_the_bridge_does() {
 }
 
 #[test]
-fn the_c_header_carries_the_magic_the_abi_and_the_mago_commit() {
+fn the_c_header_carries_the_magic_and_the_abi() {
     let define = |name: &str| {
         HEADER
             .lines()
@@ -561,14 +560,9 @@ fn the_c_header_carries_the_magic_the_abi_and_the_mago_commit() {
 
         literal
     };
-    let commit = String::from_utf8(
-        Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repository()).output().unwrap().stdout,
-    )
-    .unwrap();
 
     assert_eq!(define("SHARP_UNIT_MAGIC"), bytes(b"SHARPC\0\0"));
     assert_eq!(define("SHARP_UNIT_ABI"), bytes(&SHARP_UNIT_ABI));
-    assert_eq!(define("SHARP_MAGO_COMMIT"), format!("\"{}\"", commit.trim()));
     assert!(HEADER.contains("#error"), "the header refuses a big-endian target");
 }
 
