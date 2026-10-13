@@ -4,7 +4,6 @@ use mago_allocator::LocalArena;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::union::TUnion;
-use mago_names::CHANGING_COLLECTION_METHODS;
 use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
@@ -1784,13 +1783,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
 
                 let is_property_call = tested && self.is_property_call(expression, call.object);
-                let object = if tested {
-                    self.expression(call.object)
-                } else if self.changes_list_element(expression, call.object) {
-                    self.null_safe_index(call.object)
-                } else {
-                    self.null_safe_object(call.object)
-                };
+                let object = if tested { self.expression(call.object) } else { self.null_safe_object(call.object) };
                 let method = self.member(&call.method);
                 let keys = self.types.key_arguments(expression);
                 let arguments = self.arguments(&call.argument_list, &keys);
@@ -2316,31 +2309,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[condition, null, rest])
     }
 
-    /// Whether the null-safe `call` changes the element the `List` index `object` reads, as `rows[0]?.add(5)` does. A
-    /// `List` index is a place (spec section 12), so the change reaches the element the list stores, through the index
-    /// itself and not a copy of it.
-    fn changes_list_element(&self, call: &Expression, object: &Expression) -> bool {
-        matches!(object.unparenthesized(), Expression::ArrayAccess(access) if self.is_list(access.array))
-            && self.types.collection_method(call).is_some_and(|(_, method)| {
-                CHANGING_COLLECTION_METHODS.iter().any(|changing| changing.as_bytes() == method)
-            })
-    }
-
-    /// The `List` index a change after `?.` runs on, marked with `ZEND_DIM_IS`, the mark php-src gives an index `??`
-    /// reads. The engine reads the element through the list's collection, as it does for the change without `?.`, and
-    /// a missing index reads as null, which `?.` skips as it skips a null element (spec section 12).
-    fn null_safe_index(&mut self, index: &Expression) -> u32 {
-        let index = self.expression(index);
-        self.nodes[index as usize].attr |= ZEND_DIM_IS;
-
-        index
-    }
-
-    /// The object of `?.`. An index there reads a missing key as null, as `??` does, so `x[k]?.name` is
-    /// `($x[$k] ?? null)?->name`, where a bare `x[k]` throws on a missing key (spec section 12).
+    /// The object of `?.`. An index there reads a missing key as null, which `?.` skips, where a bare read throws on a
+    /// missing key (spec section 12). A `List` index is the index itself, marked with `ZEND_DIM_IS`, the mark php-src
+    /// gives an index `??` reads: a change after `?.` then reaches the element the list stores, as `rows[0]?.add(5)`
+    /// does, and only that index reads quietly, so `cube[9][0]?.x` still throws on `cube[9]`. A `Map` index, which no
+    /// change runs through, is `($x[$k] ?? null)?->name`.
     fn null_safe_object(&mut self, object: &Expression) -> u32 {
         let value = self.expression(object);
-        if !matches!(object.unparenthesized(), Expression::ArrayAccess(_)) {
+        let Expression::ArrayAccess(access) = object.unparenthesized() else {
+            return value;
+        };
+        if self.is_list(access.array) {
+            self.nodes[value as usize].attr |= ZEND_DIM_IS;
+
             return value;
         }
 
@@ -3064,8 +3045,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A read of the collection a method call runs on, which is also where the method writes it. The read that tests
-    /// a null-safe call's receiver reads a property with `?->`, and a `List` index as `??` does, so a missing index
-    /// skips the call as a null element does (spec section 12).
+    /// a null-safe call's receiver reads a property with `?->`, and marks a `List` index with `ZEND_DIM_IS`, as
+    /// `null_safe_object` does, so a missing index skips the call as a null element does while the indexes before it
+    /// stay bare reads (spec section 12).
     fn read_collection(&mut self, collection: &mut CollectionReceiver, line: u32, null_safe: bool) -> u32 {
         match collection {
             CollectionReceiver::Place(place) => self.target(place),
@@ -3079,13 +3061,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             CollectionReceiver::Index(list, index) => {
                 let list = self.read_collection(list, line, false);
                 let index = self.read(index);
-                let element = self.node(SHARP_AST_DIM, 0, line, &[list, index]);
-                if !null_safe {
-                    return element;
-                }
-                let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
 
-                self.node(SHARP_AST_COALESCE, 0, line, &[element, null])
+                self.node(SHARP_AST_DIM, if null_safe { ZEND_DIM_IS } else { 0 }, line, &[list, index])
             }
             CollectionReceiver::Value(value) if null_safe => self.read_as(value, Self::null_safe_object),
             CollectionReceiver::Value(value) => self.read(value),
