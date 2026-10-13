@@ -121,6 +121,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
             Call::Method(call) if report_full_name(context, call.object, None) => {
                 call.argument_list.analyze(context, block_context, artifacts)
             }
+            // PHP# calls a plain PHP function through its namespace, `Pdf.render(html)` or `global.now()`.
+            Call::Method(call)
+                if context.dialect.is_sharp()
+                    && let Some(function) = function_call::namespace_function_name(context, call) =>
+            {
+                function_call::analyze_namespace_function_call(context, block_context, artifacts, call, function)
+            }
             // PHP# writes the static call `Class::m()` as `Class.m()`, with a bare name the binder bound to a class.
             Call::Method(call)
                 if context.dialect.is_sharp()

@@ -643,7 +643,7 @@ where
                         .map_or(function_name, |metadata| metadata.original_name);
                     let declaration =
                         extern_of(self.codebase(), empty_word(), ascii_lowercase_word(function_name.as_bytes()));
-                    self.plain_php(declaration, span, (empty_word(), sharp_name(cause)));
+                    self.plain_php(declaration, span, (empty_word(), cause));
                 }
                 CallTarget::FunctionLike {
                     callee: FunctionLikeIdentifier::Method(declaring_class, method_name),
@@ -1057,11 +1057,17 @@ where
 }
 
 /// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)
-/// falls under: the member's, then the class's, then the same for each parent class, nearest first.
+/// falls under: the member's, then the class's, then the same for each parent class, nearest first. A function in a
+/// namespace is declared as `extern Pdf.render`, which the binder reads as a class and its member, spec section 23.
 fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) -> Option<&ExternMetadata> {
     let declared = |key: (Word, Word)| codebase.externs.get(&key).and_then(|declarations| declarations.first());
     if class.is_empty() {
-        return declared((empty_word(), member));
+        return declared((empty_word(), member)).or_else(|| {
+            let name = member.as_bytes();
+            let separator = name.iter().rposition(|byte| *byte == b'\\')?;
+
+            declared((word(&name[..separator]), word(&name[separator + 1..])))
+        });
     }
 
     let mut current = Some(ascii_lowercase_word(class.as_bytes()));
@@ -1131,11 +1137,4 @@ fn declared_effects(value_type: &TUnion) -> Vec<Word> {
     }
 
     effects
-}
-
-/// A plain PHP name as PHP# writes it: `App\now` as `App.now`.
-fn sharp_name(name: Word) -> Word {
-    let bytes: Vec<u8> = name.as_bytes().iter().map(|&byte| if byte == b'\\' { b'.' } else { byte }).collect();
-
-    word(&bytes)
 }

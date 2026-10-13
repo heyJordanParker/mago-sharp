@@ -169,10 +169,18 @@ impl Impurity {
 }
 
 /// A class name and a member as a message writes them, the class named by `class_name`: `Clock.now`, `trim` with no
-/// class, and `Clock` with no member.
+/// class, `Pdf.render` for the function `Vendor\Pdf\render`, named through its namespace as spec section 23 calls it,
+/// and `Clock` with no member.
 fn written((class, member): (Word, Word), class_name: &dyn Fn(Word) -> String) -> String {
     if class.is_empty() {
-        member.to_string()
+        let name = member.as_bytes();
+        match name.iter().rposition(|byte| *byte == b'\\') {
+            Some(separator) => display_sharp_member(
+                class_name(word(&name[..separator])),
+                String::from_utf8_lossy(&name[separator + 1..]),
+            ),
+            None => member.to_string(),
+        }
     } else if member.is_empty() {
         class_name(class)
     } else {

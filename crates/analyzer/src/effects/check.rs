@@ -13,6 +13,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Extern;
 use mago_word::Word;
+use mago_word::word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
@@ -21,6 +22,7 @@ use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
 use crate::effects::Runs;
+use crate::utils::names::namespace_function;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
 use crate::utils::names::sharp_effect_name;
@@ -156,8 +158,18 @@ fn impure(
 
     match impurity.effect {
         Some(Effect::Unknown(Some((class, member)))) => {
+            // A plain PHP function is declared through its namespace, spec section 23: `global.trim`, or `Pdf.render`
+            // after `import Vendor.Pdf;`.
             let (target, import) = if class.is_empty() {
-                (member.to_string(), None)
+                match member.as_bytes().iter().rposition(|byte| *byte == b'\\') {
+                    Some(separator) => {
+                        let namespace = word(&member.as_bytes()[..separator]);
+                        let function = String::from_utf8_lossy(&member.as_bytes()[separator + 1..]);
+
+                        (format!("{}.{function}", code_class_name(namespace)), missing_import(namespace))
+                    }
+                    None => (format!("global.{member}"), None),
+                }
             } else {
                 let name = code_class_name(class);
                 let target = if member.is_empty() { name } else { display_sharp_member(&name, member) };
@@ -212,7 +224,16 @@ where
     let target = r#extern.target.span();
     let (class, member) = own.target;
     if class.is_empty() {
-        if context.codebase.get_function(member.as_bytes()).is_none() {
+        // Spec section 23 names a function of PHP's root namespace as `global.now`, in an `extern` as in a call.
+        if !written.starts_with("global.") {
+            context.collector.report_with_code(
+                IssueCode::BareFunctionCall,
+                Issue::error(format!(
+                    "An `extern` names a plain PHP function through its namespace: write `extern global.{written}`."
+                ))
+                .with_annotation(Annotation::primary(target)),
+            );
+        } else if context.codebase.get_function(member.as_bytes()).is_none() {
             context.collector.report_with_code(
                 IssueCode::NonExistentFunction,
                 Issue::error(format!("Function `{written}` does not exist."))
@@ -224,6 +245,12 @@ where
     }
 
     let Some(class_metadata) = context.codebase.get_class_like(class.as_bytes()) else {
+        // `extern Pdf.render` after `import Vendor.Pdf;` declares the function `render` of that namespace, spec
+        // section 23.
+        if namespace_function(context.codebase, class, member).is_some() {
+            return;
+        }
+
         context.collector.report_with_code(
             IssueCode::NonExistentClassLike,
             Issue::error(format!("Cannot find class, interface, enum, or type alias `{written}`."))

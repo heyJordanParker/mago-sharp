@@ -22,14 +22,14 @@ public class Report
     public string name { get; set; }
     public int id { get; }
     private Calc calc = new Calc(Calc.make(), rate: 2);
-    public string slug => strtolower(this.name);
+    public string slug => global.strtolower(this.name);
     private int|Calc|string key = 1;
     private (int|string)? code;
     public Calc? owner { get; set; }
     public int? limit { get; } = null;
     private Map<string, int> sizes = [:];
     public List<Calc> lines { get; private set; } = [];
-    public string title { get => field; set => field = trim(value); } = "";
+    public string title { get => field; set => field = global.trim(value); } = "";
     public int stock { get; private set { if (value < 0) { return; } field = value; } } = 0;
     public int half { get { return this.stock / 2; } }
 
@@ -89,10 +89,10 @@ public class Report
     private string text(string text = 'none')
     {
         const plain = "${text} {$text} $text";
-        const line = `${text}: ${strlen(text) + 1} \u{41}\`
+        const line = `${text}: ${global.strlen(text) + 1} \u{41}\`
 `;
         const constant = `v${1}${""}${`x`}`;
-        return `${sprintf("%s: %d", text, strlen(text))}${plain}${line}${constant}`;
+        return `${global.sprintf("%s: %d", text, global.strlen(text))}${plain}${line}${constant}`;
     }
 
     private string constantTemplate()
@@ -172,7 +172,7 @@ public class Report
             throw new Calc(value);
         }
         if (value < -100) {
-            exit(value);
+            global.exit(value);
         }
         if (value > 10) {
             return 1;
@@ -261,7 +261,7 @@ public class Report
         (int|string)? found = null;
         const made = new Calc(first, ...values);
         made.add(...values);
-        return label == null ? null : Report.part(2, ...values) + max(1, ...values);
+        return label == null ? null : Report.part(2, ...values) + global.max(1, ...values);
     }
 
     [Entity(["a", "b"], ["x": 1])]
@@ -272,7 +272,7 @@ public class Report
         const Map<string, int> empty = [:];
         Map<int, string>? labels = null;
         sizes["a"] = (sizes["a"] ?? 0) + numbers[1];
-        this.sizes["b"] = array_sum(numbers);
+        this.sizes["b"] = global.array_sum(numbers);
         const nested = [["a": items[1].rate]];
         nested[0]["a"] = items[0]?.rate ?? items[1].rate;
         for (const [string name, size] of sizes) {
@@ -300,14 +300,14 @@ public class Report
             mark();
             extra -= 1;
         }
-        count += twice(half(4)) + add(1, by: 2) + bump() + array_sum(array_map(x => x * 2, [1, 2]));
+        count += twice(half(4)) + add(1, by: 2) + bump() + global.array_sum(global.array_map(x => x * 2, [1, 2]));
         return n => check("n", n) ? n + count : n;
     }
 
     public Function<(int|string)?(int|string, List<int>|Calc)> mixed(List<int>|string items, int ...values)
     {
         (List<int>|string)? maybe = items;
-        const pick = (int|string key, (int|Calc)? fallback, int ...rest) => array_sum(rest) + values[0];
+        const pick = (int|string key, (int|Calc)? fallback, int ...rest) => global.array_sum(rest) + values[0];
         const total = pick(1, null, ...values) + pick(key: "a", fallback: null);
         return (a, b) => total > 0 ? a : null;
     }
@@ -353,7 +353,7 @@ enum Suit
 
     public string label() => this.name;
 
-    public static int size() => count(Suit.cases());
+    public static int size() => global.count(Suit.cases());
 }
 
 enum Rank : int

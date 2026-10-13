@@ -316,6 +316,18 @@ impl<'analysis> Types<'analysis> {
         Some((collection, method.as_bytes().to_ascii_lowercase()))
     }
 
+    /// The plain PHP function the method call `call` runs, as `Pdf.render(html)` and `global.now()` call one, spec
+    /// section 23, with the name its declaration writes. None for a call of a method.
+    pub(crate) fn namespace_function(&self, call: &Expression) -> Option<Word> {
+        let Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function), .. }) =
+            self.artifacts.get_callees(call).next()
+        else {
+            return None;
+        };
+
+        Some(self.codebase.get_function(function.as_bytes()).map_or(*function, |metadata| metadata.original_name))
+    }
+
     /// Whether the property `property` of an object of `r#type` has hooks in a class the object can be. PHP gives no
     /// reference to a hooked property, so a write into the `Map` it holds cannot go through one.
     pub(crate) fn property_has_hooks(&self, r#type: &TUnion, property: &[u8]) -> bool {

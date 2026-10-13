@@ -303,7 +303,6 @@ impl<'arena> NameWalker<'arena> {
             b"Bool" => b"Sharp\\Bool",
             b"Position" => b"Sharp\\Position",
             b"List" => b"Sharp\\List",
-            b"Replaces" => b"Sharp\\Replaces",
             _ => return (fqn, imported),
         };
 
@@ -517,10 +516,19 @@ where
 
     /// An `extern` target is a class when it is `Class.member` or the file imports or declares it, and a global
     /// function otherwise, since PHP# declares no functions. `Class.member` resolves its class and keeps the member as
-    /// written.
+    /// written. `global.now` is the function `now` of PHP's root namespace, spec section 23, and `Pdf.render` binds as
+    /// a class whose member the analysis finds as a function when the import names a namespace.
     fn walk_in_extern(&mut self, r#extern: &'ast Extern<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         let target = &r#extern.target;
         let written = target.value();
+        if r#extern.event.is_none()
+            && let Some(function) = written.strip_prefix(b"global.")
+        {
+            self.resolved_names.insert_at(target.span(), function, false);
+
+            return;
+        }
+
         let class = written.split(|byte| *byte == b'.').next().unwrap_or(written);
         let (fqn, imported) = self.resolve_class(context, class);
         // An `extern event` always names a class, spec section 15.

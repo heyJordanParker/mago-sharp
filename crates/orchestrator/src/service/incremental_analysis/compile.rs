@@ -131,9 +131,8 @@ impl IncrementalAnalysisService {
     /// An accepted file's inputs are its own source, `composer.lock`, and each file outside `vendor/` whose edit makes
     /// the warm path re-analyze it: each file whose signature edit reaches it through the cascade or reaches a symbol
     /// its extension hooks or providers read, every file when they listed names, each file that declares a class alias
-    /// or a patch, each standard library file, whose `[Replaces]` decides which calls compile, and each file that
-    /// declares a method whose return it reads from that method's body, along every chain of such returns, with that
-    /// file's own inputs.
+    /// or a patch, and each file that declares a method whose return it reads from that method's body, along every
+    /// chain of such returns, with that file's own inputs.
     ///
     /// A file that states a law also lists its proof file and every source its laws reach. A file outside `vendor/`
     /// lists the workspace-relative Lean files `rules` gives for its name, whose structure rules may judge it. `check`
@@ -225,12 +224,7 @@ impl IncrementalAnalysisService {
             .codebase
             .class_like_alias_declarations()
             .map(|(_, _, span)| span.file_id)
-            .chain(
-                self.database
-                    .files()
-                    .filter(|file| file.file_type.is_patch() || file.is_standard_library)
-                    .map(|file| file.id),
-            )
+            .chain(self.database.files().filter(|file| file.file_type.is_patch()).map(|file| file.id))
             .collect();
 
         let inputs_start = std::time::Instant::now();
@@ -1071,7 +1065,7 @@ mod tests {
         );
     }
 
-    const TEXT: &str = "namespace Sharp;\n\npublic class Text\n{\n    public static string shout(string text) => strtoupper(text);\n}\n";
+    const TEXT: &str = "namespace Sharp;\n\npublic class Text\n{\n    public static string shout(string text) => global.strtoupper(text);\n}\n";
     const TITLE: &str = "namespace App;\n\nimport Sharp.Text;\n\npublic class Title\n{\n    public string of(string name)\n    {\n        return Text.shout(name);\n    }\n}\n";
     const TEXT_PATH: &str = "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text.sharp";
 

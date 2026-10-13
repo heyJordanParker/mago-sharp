@@ -7,7 +7,6 @@ use mago_word::word;
 
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
-use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
@@ -17,7 +16,6 @@ use mago_codex::ttype::union::TUnion;
 
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_method_name;
-use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -187,8 +185,6 @@ where
             .with_note("A native body is compiled into the PHP# engine, which ships only the standard library's."),
         );
     }
-
-    check_replaced_functions(context, class_like_metadata, method_metadata);
 
     let body = match method.body {
         MethodBody::Abstract(_) => None,
@@ -593,56 +589,5 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
         );
 
         Ok(())
-    }
-}
-
-/// Decision 040: only the standard library's `[Replaces]` wraps a PHP function, and a library method names each
-/// function once.
-fn check_replaced_functions<A>(
-    context: &mut Context<'_, '_, A>,
-    class: &ClassLikeMetadata,
-    method: &FunctionLikeMetadata,
-) where
-    A: Arena,
-{
-    if !context.source_file.is_standard_library {
-        for attribute in method
-            .attributes
-            .iter()
-            .filter(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Replaces"))
-        {
-            context.collector.report_with_code(
-                IssueCode::ReplacesOutsideLibrary,
-                Issue::error(format!(
-                    "Only the standard library declares which PHP functions it wraps: remove `[Replaces]` from `{}`.",
-                    method.original_name
-                ))
-                .with_annotation(Annotation::primary(attribute.span).with_message("Written here.")),
-            );
-        }
-
-        return;
-    }
-
-    let mut named: Vec<(Word, Span)> = Vec::new();
-    for (function, span) in method.replaced_functions() {
-        let first = named
-            .iter()
-            .find(|(earlier, _)| earlier.as_bytes().eq_ignore_ascii_case(function.as_bytes()))
-            .map(|(_, first)| *first);
-        let Some(first) = first else {
-            named.push((function, span));
-            continue;
-        };
-
-        context.collector.report_with_code(
-            IssueCode::DuplicateDefinition,
-            Issue::error(format!(
-                "`{}` names `{function}` twice: name each function once.",
-                display_sharp_member(display_class_like_name(context, class.original_name), method.original_name)
-            ))
-            .with_annotation(Annotation::primary(span).with_message("Named again here."))
-            .with_annotation(Annotation::secondary(first).with_message("First named here.")),
-        );
     }
 }

@@ -309,10 +309,10 @@ const ANY: &[u8] = b"Any";
 /// - Casts: `(int)`, `(float)` and `(string)` in a method body, as spec section 24 writes them. PHP's other casts and
 ///   its cast aliases, such as `(bool)` and `(integer)`, are errors. A cast is lowercase only, so the lexer reads
 ///   `(Int)` as the class `Int` in parentheses, as in `typeof(Int)`.
-/// - A bare `Int`, `Float`, `Bool`, `Position`, `Environment`, `List` or `Replaces` names the class `Sharp\<Name>` of
-///   the standard library wherever a class is named, unless the file imports or declares a class-like of that name,
-///   spec section 23. So `Int.parse(text)`, `Bool.tryParse(value)`, `Position.current()`, `new Environment()` and
-///   `List.wrap(value)` call it, and `[Replaces("date")]` is its attribute. PHP reserves `Int`, `Float`, `Bool` and
+/// - A bare `Int`, `Float`, `Bool`, `Position`, `Environment` or `List` names the class `Sharp\<Name>` of the
+///   standard library wherever a class is named, unless the file imports or declares a class-like of that name, spec
+///   section 23. So `Int.parse(text)`, `Bool.tryParse(value)`, `Position.current()`, `new Environment()` and
+///   `List.wrap(value)` call it. PHP reserves `Int`, `Float`, `Bool` and
 ///   `List`, so no file declares or imports a class of those, except the standard library's own `Sharp.Int`,
 ///   `Sharp.Float` and `Sharp.Bool`: a file whose namespace is exactly `Sharp` declares them, as the engine allows,
 ///   and any file may import them.
@@ -340,17 +340,15 @@ const ANY: &[u8] = b"Any";
 ///   `report_sharp_type_class_outside_library`, because only the analyzer knows the file's package. The nearest
 ///   `composer.json` above a file names it.
 /// - a bare call that finds no function while the enclosing class declares a method of that name, in
-///   `bare_member_call`, because only the codebase knows which functions exist. A bare call is the global function's.
+///   `bare_member_call`, because only the codebase knows which functions exist.
+/// - a bare call of a plain PHP function, `exit` included, which spec section 23 makes an error, in
+///   `report_bare_function_call`, because only the codebase knows the standard library member that replaces it.
 /// - `+` that may join a string with any other value, which spec section 18 makes an error, in
 ///   `analyze_arithmetic_operation`. `+` on two strings joins them.
 /// - a condition of `if`, `while`, `do … while`, `for` or `? :`, or an operand of `&&`, `||` or `!`, that is not
 ///   `bool`, which spec section 21 makes an error, in `Context::report_non_bool_condition`.
 /// - a cast of a value that is not an `int` or a `float`, which spec section 24 makes an error, in `UnaryPrefix`'s
 ///   `analyze`.
-/// - an `exit` argument that is not an `int`, which spec section 8 makes an error, in `ExitConstruct`'s `analyze`.
-///   `check_slice` refuses a string literal or template argument, because the engine runs `.sharp` files without the
-///   analyzer.
-/// - a call that resolves to a namespaced function, in `report_namespaced_function_call`.
 /// - a spread of a value that is not a list, which spec section 7 spreads, in `report_non_list_spread`.
 /// - a named argument that names a variadic parameter or no parameter, on a method or a plain PHP function that
 ///   takes any number of arguments too, which spec section 16 makes an error, in `analyze_invocation`.
@@ -1152,36 +1150,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::ForOfVariable(_),
             Body,
         ) => Some(Body),
-        // Spec section 8 makes output and `exit` function calls, and keeps `exit(code)` as PHP 8.4's built-in
-        // function. The analyzer refuses an `exit` argument that is not an `int`.
+        // Spec section 8 makes output a function call. `exit` is PHP's function `exit`, which the analyzer refuses
+        // bare as it refuses any bare call of a plain PHP function, spec section 23.
         (Node::Statement(Statement::Echo(_)) | Node::Expression(Expression::Construct(Construct::Print(_))), Body) => {
             let form: &[u8] = if matches!(node, Node::Statement(_)) { b"echo" } else { b"print" };
             report_removed_construct(form, node.span(), context);
-
-            None
-        }
-        (Node::Expression(Expression::Construct(Construct::Exit(exit))), Body) if exit.arguments.is_none() => {
-            context.report(
-                Issue::error("PHP# calls `exit` as a function: write `exit(0)`.")
-                    .with_annotation(Annotation::primary(exit.exit.span).with_message("Written here."))
-                    .with_note("`exit` is PHP 8.4's built-in function in PHP#."),
-            );
-
-            None
-        }
-        // The engine runs a `.sharp` file without the analyzer, so a string literal or template argument, in any
-        // number of parentheses, is refused here.
-        (Node::Expression(Expression::Construct(Construct::Exit(exit))), Body)
-            if exit.arguments.as_ref().and_then(|arguments| arguments.arguments.first()).is_some_and(|argument| {
-                let mut value = argument.value();
-                while let Expression::Parenthesized(parenthesized) = value {
-                    value = parenthesized.expression;
-                }
-
-                matches!(value, Expression::Literal(Literal::String(_)) | Expression::CompositeString(_))
-            }) =>
-        {
-            report_removed_construct(b"die", node.span(), context);
 
             None
         }
@@ -3346,11 +3319,11 @@ fn report_removed(span: Span, form: &[u8], instead: &str, note: &str, context: &
 /// and why. A `.sharp` file reads the word as a plain name, so the construct written as a call, or a bare `die`,
 /// reaches the checker as a call of a function, or a read of a constant, that no code declares.
 const REMOVED_CONSTRUCTS: [(&[u8], &str, &str); 8] = [
-    (b"echo", "write `printf` or `fwrite`.", "Output is a function call in PHP#."),
-    (b"print", "write `printf` or `fwrite`.", "Output is a function call in PHP#."),
+    (b"echo", "write `global.printf` or `global.fwrite`.", "Output is a function call in PHP#."),
+    (b"print", "write `global.printf` or `global.fwrite`.", "Output is a function call in PHP#."),
     (
         b"die",
-        "write the message to STDERR, then `exit(1)`.",
+        "write the message to STDERR, then `global.exit(1)`.",
         "`die(\"…\")` and `exit(\"…\")` print the message and exit with status 0, which reports success.",
     ),
     (b"isset", "test it against null, as in `value != null`.", "A PHP# value is never undefined."),

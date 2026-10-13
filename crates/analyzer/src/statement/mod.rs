@@ -177,13 +177,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                     if context.dialect.is_sharp()
                         && let UseItems::Sequence(sequence) = &r#use.items
                     {
-                        let imported_names = Arc::make_mut(&mut context.imported_names);
                         for item in &sequence.items {
+                            use_statement::check_sharp_import(context, &item.name);
                             let imported_name = item
                                 .alias
                                 .as_ref()
                                 .map_or_else(|| item.name.last_segment(), |alias| alias.identifier.value);
-                            imported_names.insert(ascii_lowercase_word(&php_name(&item.name)), word(imported_name));
+                            Arc::make_mut(&mut context.imported_names)
+                                .insert(ascii_lowercase_word(&php_name(&item.name)), word(imported_name));
                         }
                     }
                     if context.settings.check_use_statements {

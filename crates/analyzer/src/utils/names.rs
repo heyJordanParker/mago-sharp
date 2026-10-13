@@ -6,6 +6,7 @@ use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -688,7 +689,7 @@ pub(crate) fn is_prelude_stub(class: Word) -> bool {
 }
 
 /// Produces a user-facing display string for a `FunctionLikeIdentifier`: a method reads `Order::total` in PHP and
-/// `Order.total` in a `.sharp` file.
+/// `Order.total` in a `.sharp` file, and a namespace's function `Vendor\Pdf\render` reads `Pdf.render` there.
 #[must_use]
 pub(crate) fn display_function_like_identifier<A>(
     context: &Context<'_, '_, A>,
@@ -698,7 +699,17 @@ where
     A: Arena,
 {
     match identifier {
-        FunctionLikeIdentifier::Function(name) => display_function_name(context, *name).to_string(),
+        FunctionLikeIdentifier::Function(name) => {
+            let name = display_function_name(context, *name);
+            match name.as_bytes().iter().rposition(|byte| *byte == b'\\') {
+                Some(separator) if context.dialect.is_sharp() => display_member(
+                    context,
+                    display_class_like_name(context, word(&name.as_bytes()[..separator])),
+                    String::from_utf8_lossy(&name.as_bytes()[separator + 1..]),
+                ),
+                _ => name.to_string(),
+            }
+        }
         FunctionLikeIdentifier::Method(class_name, method_name) => display_member(
             context,
             display_class_like_name(context, *class_name),
@@ -706,4 +717,23 @@ where
         ),
         FunctionLikeIdentifier::Closure(name) => name.to_string(),
     }
+}
+
+/// The plain PHP function `member` of the namespace `namespace`, empty for PHP's root namespace, as PHP# calls one:
+/// `Pdf.render(html)` after `import Vendor.Pdf;`, or `global.now()`, spec section 23. A namespace that is also a
+/// class's name holds the class's static methods instead.
+#[must_use]
+pub(crate) fn namespace_function(
+    codebase: &CodebaseMetadata,
+    namespace: Word,
+    member: Word,
+) -> Option<&FunctionLikeMetadata> {
+    if namespace.is_empty() {
+        return codebase.get_function(member.as_bytes());
+    }
+    if codebase.get_class_like(namespace.as_bytes()).is_some() {
+        return None;
+    }
+
+    codebase.get_function(&[namespace.as_bytes(), b"\\", member.as_bytes()].concat())
 }

@@ -837,12 +837,13 @@ fn compact_extract_and_global_are_errors() {
     );
 }
 
-/// Spec section 8 removes `echo` and `print`: output goes through `printf` or `fwrite`. Spec section 2 makes `echo` a
-/// plain name, so `echo` written as a call is a call of a function no code declares, refused the same way.
+/// Spec section 8 removes `echo` and `print`: output goes through `global.printf` or `global.fwrite`. Spec section 2
+/// makes `echo` a plain name, so `echo` written as a call is a call of a function no code declares, refused the same
+/// way.
 #[test]
 fn echo_is_an_error_that_names_printf_and_fwrite() {
     let code = leak(method("        echo \"total\", extra;\n        echo(\"total\");\n        return extra;\n"));
-    let message = "PHP# has no `echo`: write `printf` or `fwrite`.";
+    let message = "PHP# has no `echo`: write `global.printf` or `global.fwrite`.";
 
     assert_eq!(issues(code), [format!("7:9 {message}"), format!("8:9 {message}")]);
 }
@@ -851,7 +852,7 @@ fn echo_is_an_error_that_names_printf_and_fwrite() {
 fn print_is_an_error_that_names_printf_and_fwrite() {
     let code =
         leak(method("        const shown = print \"total\";\n        print(\"total\");\n        return extra;\n"));
-    let message = "PHP# has no `print`: write `printf` or `fwrite`.";
+    let message = "PHP# has no `print`: write `global.printf` or `global.fwrite`.";
 
     assert_eq!(issues(code), [format!("7:23 {message}"), format!("8:9 {message}")]);
 }
@@ -1001,7 +1002,7 @@ fn die_in_every_form_is_an_error_that_names_stderr_and_exit() {
     let code = leak(method(
         "        die;\n        die();\n        die(\"failed\");\n        die(1);\n        return extra;\n",
     ));
-    let message = "PHP# has no `die`: write the message to STDERR, then `exit(1)`.";
+    let message = "PHP# has no `die`: write the message to STDERR, then `global.exit(1)`.";
 
     assert_eq!(
         issues(code),
@@ -1009,40 +1010,12 @@ fn die_in_every_form_is_an_error_that_names_stderr_and_exit() {
     );
 }
 
-/// `exit("…")` prints its message and exits with status 0, as `die("…")` does. The engine runs a `.sharp` file
-/// without the analyzer, which refuses an argument that is not an `int`, so `check_slice` refuses a string literal or
-/// a template, in parentheses or not.
+/// `exit` is PHP's function `exit`, which the analyzer refuses bare as it refuses any bare call of a plain PHP
+/// function, spec section 23, so `check_slice` takes it in every form.
 #[test]
-fn exit_with_a_string_literal_is_an_error_as_die_is() {
-    let code = leak(method(
-        "        exit(\"failed\");\n        exit(status: \"failed\");\n        exit(`failed`);\n        exit((\"failed\"));\n        exit(((\"failed\")));\n        return extra;\n",
-    ));
-    let message = "PHP# has no `die`: write the message to STDERR, then `exit(1)`.";
-
-    assert_eq!(
-        issues(code),
-        [
-            format!("7:9 {message}"),
-            format!("8:9 {message}"),
-            format!("9:9 {message}"),
-            format!("10:9 {message}"),
-            format!("11:9 {message}"),
-        ]
-    );
-}
-
-#[test]
-fn exit_without_parentheses_is_an_error_that_names_the_call() {
-    let code = leak(method("        exit;\n        return extra;\n"));
-
-    assert_eq!(issues(code), ["7:9 PHP# calls `exit` as a function: write `exit(0)`."]);
-}
-
-/// Spec section 8 keeps `exit(code)` as PHP 8.4's built-in function.
-#[test]
-fn exit_with_a_code_or_without_arguments_is_in_the_slice() {
+fn exit_in_every_form_is_in_the_slice() {
     let code = leak(
-        method("        exit(1);\n        exit(code);\n        exit(status: code);\n        exit();\n        return code;\n")
+        method("        exit(1);\n        exit(code);\n        exit(status: code);\n        exit();\n        exit;\n        return code;\n")
             .replace("int extra", "int code"),
     );
 
@@ -2166,7 +2139,7 @@ fn a_method_refused_at_its_name_has_its_body_checked() {
         [
             "5:17 A method named after its class is not supported yet in PHP#.",
             "7:22 PHP# has no superglobals; take a Request",
-            "8:9 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "8:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
         ]
     );
 }
@@ -2183,7 +2156,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "5:10 This method name is not supported yet in PHP#.".to_owned(),
             "5:30 PHP# has no superglobals; take a Request".to_owned(),
             "12:12 An enum has no constructor: its cases are its only values.".to_owned(),
-            "14:9 PHP# has no `echo`: write `printf` or `fwrite`.".to_owned(),
+            "14:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
             format!("20:17 PHP# has no `__LINE__`: {line}"),
             "21:15 A constant without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             format!("21:21 PHP# has no `__LINE__`: {line}"),
@@ -2194,7 +2167,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "27:9 A method without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             "29:13 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.".to_owned(),
             "29:20 This type is not supported yet in PHP#.".to_owned(),
-            "30:9 PHP# has no `echo`: write `printf` or `fwrite`.".to_owned(),
+            "30:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
         ]
     );
 }
@@ -2243,14 +2216,17 @@ fn a_function_or_namespace_refused_at_its_name_has_its_code_checked() {
         issues(code),
         [
             "3:10 PHP# has no top-level functions: move `helper` into a class as a static method.",
-            "5:5 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "5:5 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
             "8:1 This namespace is not supported yet in PHP#.",
-            "14:9 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "14:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
         ]
     );
     assert_eq!(
         issues(braced),
-        ["1:1 This namespace is not supported yet in PHP#.", "6:13 PHP# has no `echo`: write `printf` or `fwrite`."]
+        [
+            "1:1 This namespace is not supported yet in PHP#.",
+            "6:13 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
+        ]
     );
 }
 
@@ -2724,7 +2700,7 @@ fn an_extern_method_with_a_body_has_its_body_checked() {
         issues(code),
         [
             "5:33 An `extern` method is `public static`, in a static class, with no body.",
-            "7:9 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "7:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
         ]
     );
 }
@@ -4682,7 +4658,10 @@ fn an_operator_body_is_a_method_body() {
         "    public static Money operator +(Money a, Money b)\n    {\n        echo \"adding\";\n        return a;\n    }\n",
     );
 
-    assert_eq!(issues_in("src/Money.sharp", code), ["7:9 PHP# has no `echo`: write `printf` or `fwrite`."]);
+    assert_eq!(
+        issues_in("src/Money.sharp", code),
+        ["7:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`."]
+    );
 }
 
 #[test]

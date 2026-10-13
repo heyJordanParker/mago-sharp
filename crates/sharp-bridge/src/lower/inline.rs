@@ -13,7 +13,6 @@ use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::MethodCall;
@@ -221,7 +220,8 @@ impl Lowering<'_, '_> {
     }
 
     /// Appends what `expression` runs to `steps`, and whether the inlining rule takes all of it: a literal, a read of
-    /// one of the slots `names` names, and a call of a global function or a method whose receiver it takes.
+    /// one of the slots `names` names, and a call of a plain PHP function through its namespace, as `global.trim(x)`
+    /// calls one, or of a method whose receiver it takes.
     fn steps(&self, expression: &Expression, names: &[&[u8]], steps: &mut Vec<Step>) -> bool {
         match expression {
             Expression::Parenthesized(parenthesized) => self.steps(parenthesized.expression, names, steps),
@@ -239,11 +239,8 @@ impl Lowering<'_, '_> {
             Expression::ConstantAccess(name) if self.names.binding(&name.name) == Some(Binding::Constant) => {
                 !self.types.constant_target(name).as_bytes().contains(&b'\\')
             }
-            Expression::Call(Call::Function(FunctionCall {
-                function: Expression::Identifier(function),
-                argument_list,
-            })) if !matches!(self.names.binding(function), Some(Binding::Local(_))) => {
-                self.argument_steps(argument_list, names, steps) && self.call_step(steps)
+            Expression::Call(Call::Method(call)) if self.types.namespace_function(expression).is_some() => {
+                self.argument_steps(&call.argument_list, names, steps) && self.call_step(steps)
             }
             Expression::Call(Call::Method(call)) => self.method_call_steps(expression, call, names, steps),
             _ => false,

@@ -456,15 +456,6 @@ fn a_standard_library_name_in_a_catch_a_header_or_an_attribute_is_the_class_in_t
     }
 }
 
-#[test]
-fn a_bare_replaces_attribute_is_the_attribute_of_the_standard_library() {
-    const CODE: &str = "namespace Sharp.Time;\n\npublic static class Date\n{\n    [Replaces(\"date\")]\n    public static string format(int timestamp) => \"\";\n}\n";
-    let arena = LocalArena::new();
-    let names = bind(&arena, CODE);
-
-    assert_eq!(resolved(&names, CODE, "Replaces", 0), b"Sharp\\Replaces");
-}
-
 /// An `extern` target binds through the file's imports as a class first, and `Class.member` binds its class and keeps
 /// the member name as written, spec section 29.
 #[test]

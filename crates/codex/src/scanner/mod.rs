@@ -383,18 +383,6 @@ impl Scanner {
             class_like_metadata.flags |= MetadataFlags::CONSISTENT_CONSTRUCTOR;
         }
 
-        if context.file.is_standard_library {
-            let file = word(context.file.name.as_ref());
-            for (function, _) in function_like_metadata.replaced_functions() {
-                let wrapper = (file, function_like_metadata.span, method_identifier);
-                let wrappers =
-                    self.codebase.wrapped_functions.entry(ascii_lowercase_word(function.as_bytes())).or_default();
-                if !wrappers.contains(&wrapper) {
-                    wrappers.push(wrapper);
-                }
-            }
-        }
-
         self.template_constraints.push(
             function_like_metadata
                 .template_types
