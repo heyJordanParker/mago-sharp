@@ -677,7 +677,7 @@ where
             if context.dialect.is_sharp() {
                 report_statement_that_never_runs(context, statement, &statements[..index]);
 
-                continue;
+                break;
             }
 
             if context.settings.find_unused_expressions {
@@ -720,9 +720,10 @@ where
     Ok(())
 }
 
-/// Refuses `statement`, which never runs because a statement before it in its block ends the block, as Java and Zig
-/// refuse an unreachable statement (spec section 7). The analysis never reads such a statement, so PHP# compiles none.
-/// `before` holds the statements before it in its block, and the last of them is the one that ends it. With none before
+/// Refuses `statement`, the first statement of its block that never runs because the statement before it ends the
+/// block, as Java and Zig refuse an unreachable statement (spec section 7). The analysis reads no statement after it, so
+/// PHP# compiles none, and the rest of the block gets no refusal of its own, as in Java. `before` holds the statements
+/// before it in its block, and the last of them is the one that ends it. With none before
 /// it, the code before the block never finishes, as the condition `global.exit(1)` does, and `statement` is the block.
 fn report_statement_that_never_runs<A>(
     context: &mut Context<'_, '_, A>,

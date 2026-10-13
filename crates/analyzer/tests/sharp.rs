@@ -1878,11 +1878,11 @@ fn check_throws_skips_sharp_files_and_keeps_reporting_in_php() {
 
 /// Spec section 7 refuses a statement that can never run, as Java and Zig do: one after `return`, `throw`,
 /// `global.exit(…)`, `break` or `continue` in its block, one after an `if` whose every branch ends the block, and a block
-/// after a condition that never finishes. The refusal names the line that ends the block, and a bare call that never
-/// runs is refused for that alone. A `.php` file keeps Mago's help.
+/// after a condition that never finishes. The first statement that never runs is refused once for its block, naming the
+/// line that ends the block, and a bare call that never runs is refused for that alone. A `.php` file keeps Mago's help.
 #[test]
 fn a_statement_that_can_never_run_is_refused() {
-    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Flow\n{\n    public static int afterReturn()\n    {\n        return 1;\n        return 2;\n    }\n\n    public static int afterThrow()\n    {\n        throw new RuntimeException(\"no\");\n        return 3;\n    }\n\n    public static void afterExit()\n    {\n        global.exit(1);\n        return;\n    }\n\n    public static void afterBreak()\n    {\n        while (true) {\n            break;\n            global.printf(\"never\");\n        }\n    }\n\n    public static void afterContinue(List<int> items)\n    {\n        for (const item of items) {\n            continue;\n            global.printf(\"%d\", item);\n        }\n    }\n\n    public static int bareCall()\n    {\n        return 4;\n        strlen(\"never\");\n    }\n\n    public static int afterEveryBranch(bool up)\n    {\n        if (up) {\n            return 5;\n        } else {\n            return 6;\n        }\n        return 7;\n    }\n\n    public static void conditionNeverFinishes()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Flow\n{\n    public static int afterReturn()\n    {\n        return 1;\n        return 2;\n    }\n\n    public static int afterThrow()\n    {\n        throw new RuntimeException(\"no\");\n        return 3;\n    }\n\n    public static void afterExit()\n    {\n        global.exit(1);\n        return;\n    }\n\n    public static void afterBreak()\n    {\n        while (true) {\n            break;\n            global.printf(\"never\");\n        }\n    }\n\n    public static void afterContinue(List<int> items)\n    {\n        for (const item of items) {\n            continue;\n            global.printf(\"%d\", item);\n        }\n    }\n\n    public static int bareCall()\n    {\n        return 4;\n        strlen(\"never\");\n    }\n\n    public static int afterEveryBranch(bool up)\n    {\n        if (up) {\n            return 5;\n        } else {\n            return 6;\n        }\n        return 7;\n    }\n\n    public static void conditionNeverFinishes()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n\n    public static int afterReturnThree()\n    {\n        return 8;\n        global.printf(\"one\");\n        global.printf(\"two\");\n        global.printf(\"three\");\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Flow\n{\n    public static function afterReturn(): int\n    {\n        return 1;\n        return 2;\n    }\n}\n";
 
     assert_eq!(
@@ -1896,6 +1896,7 @@ fn a_statement_that_can_never_run_is_refused() {
             "44:9 unevaluated-code This statement never runs, because line 43 ends the block. | Delete it, or move it above line 43.",
             "54:9 unevaluated-code This statement never runs, because line 49 ends the block. | Delete it, or move it above line 49.",
             "59:29 unevaluated-code This block never runs, because the code before it never finishes. | Delete it.",
+            "67:9 unevaluated-code This statement never runs, because line 66 ends the block. | Delete it, or move it above line 66.",
         ]
     );
     assert_eq!(issues(("src/Demo/Flow.php", php), &[]), ["10:9 unevaluated-code"]);
