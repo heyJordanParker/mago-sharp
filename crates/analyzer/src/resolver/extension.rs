@@ -39,8 +39,8 @@ pub(crate) enum Extension {
 /// receiver. The receiver is the value that is not `null`: `?.` skips `null`, and the access reports a `.` on a
 /// receiver that may be `null` as it does for any member.
 ///
-/// The receiver's type picks among the extensions the file imports and the standard library's on the types every file
-/// has them for.
+/// The receiver's type picks among the extensions the file imports or its namespace declares, and only where none of
+/// those fits, among the standard library's on the types every file has them for.
 /// Two that fit are an error naming both classes, and one that fits but the file does not import is an error naming
 /// the import to add. Either still reaches its member, so the access is checked as it would run.
 pub(crate) fn resolve_extension<'ctx, A>(
@@ -71,8 +71,12 @@ where
         .filter_map(|(_, method)| Some((*method, codebase.get_method_by_id(method)?)))
         .filter(|(_, metadata)| fits(codebase, receiver, metadata))
         .collect();
-    let (in_scope, elsewhere): (Vec<_>, Vec<_>) =
-        fitting.iter().partition(|(method, metadata)| is_in_scope(context, method.get_class_name(), metadata));
+    let (own, others): (Vec<_>, Vec<_>) =
+        fitting.iter().partition(|(method, _)| is_imported_or_in_namespace(context, method.get_class_name()));
+    let (default, elsewhere): (Vec<_>, Vec<_>) = others
+        .into_iter()
+        .partition(|(method, metadata)| is_imported_by_default(context, method.get_class_name(), metadata));
+    let in_scope = if own.is_empty() { default } else { own };
     let (in_scope, other_kind): (Vec<_>, Vec<_>) =
         in_scope.into_iter().partition(|(_, metadata)| metadata.flags.contains(flag));
     let elsewhere = elsewhere.into_iter().find(|(_, metadata)| metadata.flags.contains(flag));
@@ -159,9 +163,9 @@ fn fits(codebase: &CodebaseMetadata, receiver: &TUnion, metadata: &FunctionLikeM
     })
 }
 
-/// Whether the extension member `metadata` of the static class `class` applies in this file: the file imports the
-/// class, is in the class's namespace, as the declaring file is, or every file has it.
-fn is_in_scope<A>(context: &Context<'_, '_, A>, class: Word, metadata: &FunctionLikeMetadata) -> bool
+/// Whether the extensions of the static class `class` apply in this file ahead of the ones every file has, spec
+/// sections 23 and 26: the file imports the class, or is in the class's namespace, as the declaring file is.
+fn is_imported_or_in_namespace<A>(context: &Context<'_, '_, A>, class: Word) -> bool
 where
     A: Arena,
 {
@@ -170,7 +174,6 @@ where
 
     namespace.eq_ignore_ascii_case(context.scope.namespace_name().unwrap_or_default())
         || context.imported_names.contains_key(&ascii_lowercase_word(name))
-        || is_imported_by_default(context, class, metadata)
 }
 
 /// Whether this file has the extension member `metadata` of the static class `class` with no import, spec section

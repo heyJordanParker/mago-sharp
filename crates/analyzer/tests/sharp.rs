@@ -4984,6 +4984,42 @@ fn the_standard_library_extensions_on_the_default_types_need_no_import() {
     );
 }
 
+/// Spec sections 23 and 26: an extension of the file's own namespace, or of a class the file imports, shadows a
+/// standard library extension of the same name that every file has, as a class does. Two of the file's own still
+/// compete.
+#[test]
+fn an_extension_the_file_imports_or_its_namespace_declares_shadows_a_default_one() {
+    let words = (
+        "src/Sharp/Text/Words.sharp",
+        "namespace Sharp.Text;\n\npublic static class Words\n{\n    extension(string text)\n    {\n        public string shout() => text;\n    }\n}\n",
+    );
+    let own = (
+        "src/Demo/Loud.sharp",
+        "namespace Demo;\n\npublic static class Loud\n{\n    extension(string text)\n    {\n        public int shout() => 1;\n    }\n}\n",
+    );
+    let imported = (
+        "src/App/Text/Loud.sharp",
+        "namespace App.Text;\n\npublic static class Loud\n{\n    extension(string text)\n    {\n        public int shout() => 1;\n    }\n}\n",
+    );
+    let louder = (
+        "src/Demo/Other/Louder.sharp",
+        "namespace Demo.Other;\n\npublic static class Louder\n{\n    extension(string text)\n    {\n        public int shout() => 1;\n    }\n}\n",
+    );
+    let report = "namespace Demo;\n\npublic class Report\n{\n    public int text(string name) => name.shout();\n}\n";
+    let importing = "namespace Demo;\n\nimport App.Text.Loud;\n\npublic class Report\n{\n    public int text(string name) => name.shout();\n}\n";
+    let both = "namespace Demo;\n\nimport Demo.Other.Louder;\n\npublic class Report\n{\n    public int text(string name) => name.shout();\n}\n";
+
+    assert_messages(report, &[words, own], &[]);
+    assert_messages(importing, &[words, imported], &[]);
+    assert_messages(
+        both,
+        &[words, own, louder],
+        &[
+            "7:42 ambiguous-object-method-access: The imported extensions `Louder` and `Loud` each add `shout` to `string`.",
+        ],
+    );
+}
+
 /// Decision 040 and spec section 8: a call of a PHP function the standard library wraps names the member to write. An
 /// extension's member, spec section 26, is written on the call's first argument, with `(…)` when it takes more than
 /// the receiver, and needs no import on `string`. A static method is written on its class. Each names the import its

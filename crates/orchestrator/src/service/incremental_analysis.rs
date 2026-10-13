@@ -43,6 +43,7 @@ use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
 use mago_codex::signature_builder;
 use mago_codex::symbol::SymbolIdentifier;
+use mago_codex::ttype::TType;
 use mago_collector::DeferredPragmas;
 use mago_database::DatabaseReader;
 use mago_database::ReadDatabase;
@@ -926,6 +927,17 @@ impl IncrementalAnalysisService {
                 .any(|file_id| !current_file_ids.contains(file_id) && !externs_in(&self.codebase, *file_id).is_empty());
 
         if externs_changed {
+            return self.analyze();
+        }
+
+        let extensions_changed = new_file_scans
+            .iter()
+            .any(|(file_id, metadata)| extensions_in(metadata, *file_id) != extensions_in(&self.codebase, *file_id))
+            || self.file_states.keys().any(|file_id| {
+                !current_file_ids.contains(file_id) && !extensions_in(&self.codebase, *file_id).is_empty()
+            });
+
+        if extensions_changed {
             return self.analyze();
         }
 
@@ -1994,6 +2006,30 @@ fn wrappers_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<(Word, Metho
         .collect();
     wrappers.sort_by_key(|(function, _)| *function);
     wrappers
+}
+
+/// The extension members `file_id` declares, spec section 26, each with its method and its receiver's type as written,
+/// in the codebase's order. A file's call reaches the member that fits its receiver among those in its scope, and a
+/// member of its namespace applies with no import, so a change to them changes files that the signature diff cannot
+/// see.
+fn extensions_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<(Word, MethodIdentifier, Option<Word>)> {
+    let mut extensions: Vec<(Word, MethodIdentifier, Option<Word>)> = codebase
+        .extensions
+        .iter()
+        .flat_map(|(name, members)| {
+            members.iter().filter(|(span, _)| span.file_id == file_id).map(|(_, method)| {
+                let receiver = codebase
+                    .get_method_by_id(method)
+                    .and_then(|metadata| metadata.parameters.first())
+                    .and_then(|receiver| receiver.get_type_declaration_metadata())
+                    .map(|receiver| receiver.type_union.get_id());
+
+                (*name, *method, receiver)
+            })
+        })
+        .collect();
+    extensions.sort_by_key(|(name, method, _)| (*name, *method));
+    extensions
 }
 
 /// The symbols the extension hooks and providers of each of `files` read, by file name, for the invalidation cascade.

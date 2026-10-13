@@ -1951,6 +1951,65 @@ mod tests {
         }
     }
 
+    /// Spec section 26: an extension of the file's namespace shadows the standard library's of the same name that fits
+    /// the same receiver, so the unchanged `Report`, whose `name.shout()` ran `Sharp.Text.Words`'s and returned its
+    /// `string`, is refused once `app/App/Loud.sharp` declares `App.Loud`'s `int` one on `string`, and compiles again
+    /// once it is removed or takes an `int`, in a one-off compile and under `mago analyze --watch`.
+    #[test]
+    fn a_compile_after_the_namespace_gains_or_loses_an_extension_that_shadows_a_default_one_matches_a_clean_compile() {
+        let words = "namespace Sharp.Text;\n\npublic static class Words\n{\n    extension(string text)\n    {\n        public string shout() => text;\n    }\n}\n";
+        let loud = |receiver: &str| {
+            format!(
+                "namespace App;\n\npublic static class Loud\n{{\n    extension({receiver} text)\n    {{\n        public int shout() => 1;\n    }}\n}}\n"
+            )
+        };
+        let report =
+            "namespace App;\n\npublic class Report\n{\n    public string text(string name) => name.shout();\n}\n";
+        let alone = vec![
+            ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Words.sharp", words.to_string()),
+            ("app/App/Report.sharp", report.to_string()),
+        ];
+        let beside = |receiver: &str| {
+            let mut files = alone.clone();
+            files.push(("app/App/Loud.sharp", loud(receiver)));
+            files
+        };
+        let (on_string, on_int) = (beside("string"), beside("int"));
+
+        for diff in [false, true] {
+            for (name, before, after, accepted) in [
+                ("Loud added", &alone, &on_string, false),
+                ("Loud removed", &on_string, &alone, true),
+                ("Loud's receiver became string", &on_int, &on_string, false),
+                ("Loud's receiver became int", &on_string, &on_int, true),
+            ] {
+                let (base, edited) = (shop_project(before), shop_project(after));
+
+                let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
+                compile(&mut warm, empty_stamp);
+                warm.update_database(edited.read_only());
+                warm.analyze_incremental(None).expect("the warm path runs");
+                let warm_compiled = compile(&mut warm, empty_stamp);
+                let clean_compiled = compile(&mut analyzed(&edited), empty_stamp);
+
+                let row = format!("diff {diff}: {name}");
+                assert_eq!(outcomes(&clean_compiled)["app/App/Report.sharp"].is_ok(), accepted, "{row}");
+                assert_eq!(outcomes(&warm_compiled), outcomes(&clean_compiled), "{row}");
+            }
+        }
+
+        let mut edited = on_int.clone();
+        edited[2].1 = edited[2].1.replace("=> 1;", "=> 2;");
+        let mut warm = analyzed(&shop_project(&on_int));
+        warm.update_database(shop_project(&edited).read_only());
+        warm.analyze_incremental(None).expect("the warm path runs");
+        assert_eq!(
+            warm.analyzed_files,
+            HashSet::from_iter([FileId::new(b"app/App/Loud.sharp")]),
+            "an edit to a member's body analyzes only its own file"
+        );
+    }
+
     /// An editor analyzes one file against the classes of its namespace too, so `Shape`'s bare `Cache` is `App.Cache`.
     #[test]
     fn one_file_analyzed_alone_names_the_class_of_its_namespace() {
