@@ -14,6 +14,7 @@ use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner;
 use mago_codex::ttype::combiner::CombinerOptions;
@@ -33,6 +34,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::DeclareBody;
 use mago_syntax::cst::Emit;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ExpressionStatement;
@@ -51,6 +53,7 @@ use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UseItems;
+use mago_syntax::error::ParseError;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
@@ -148,6 +151,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
             }
 
             let result = match self {
+                // The semantic checks refuse a `.sharp` file's `declare`, whose help writes its body without it, so
+                // the body runs as written there, and its `return` ends the method.
+                Statement::Declare(declare) if context.dialect.is_sharp() => match &declare.body {
+                    DeclareBody::Statement(statement) => statement.analyze(context, block_context, artifacts),
+                    DeclareBody::ColonDelimited(body) => {
+                        analyze_statements(body.statements.as_slice(), context, block_context, artifacts)
+                    }
+                },
                 Statement::Inline(_)
                 | Statement::OpeningTag(_)
                 | Statement::Declare(_)
@@ -397,13 +408,32 @@ where
         &TypeExpansionOptions { self_class: block_context.scope.get_class_like_name(), ..Default::default() },
     );
 
-    report_undefined_types(context, &local_type, hint.span());
+    match miscased_local_keyword(hint, &local_type) {
+        // The parser reads `CONST total = 1;` as a local typed `CONST`, so the keyword's parse error is reported here.
+        Some(keyword) => {
+            context.collector.report(Issue::from(&ParseError::MiscasedKeywordInSharp(keyword, hint.span())));
+        }
+        None => report_undefined_types(context, &local_type, hint.span()),
+    }
     report_map_keys_without_backing_value(context, &local_type, hint.span());
     report_unsupported_set_elements(context, &local_type, hint.span());
     let local_type = (Rc::new(known_type_or_error(local_type)), hint.span());
     block_context.local_types.insert(variable_id, local_type.clone());
 
     Some(local_type)
+}
+
+/// The keyword `const` or `let` a local's written type spells in another case, as in `CONST total = 1;`, when that
+/// type names no declared type. A plain PHP class named `Let` keeps `Let total = …;` a local of that class.
+fn miscased_local_keyword(hint: &Hint<'_>, local_type: &TUnion) -> Option<&'static str> {
+    let Hint::Identifier(identifier) = hint else {
+        return None;
+    };
+
+    ["const", "let"].into_iter().find(|keyword| {
+        keyword.as_bytes().eq_ignore_ascii_case(identifier.value())
+            && matches!(local_type.get_single(), TAtomic::Reference(TReference::Symbol { .. }))
+    })
 }
 
 /// Analyzes a PHP# `for … of` as the PHP `foreach` over its collection, into the variables it declares. A written type

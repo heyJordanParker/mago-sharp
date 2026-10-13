@@ -808,13 +808,12 @@ mod tests {
     #[test]
     fn the_runner_trusts_the_roots_lean_and_mago_own() {
         let runner = include_str!("../lean/Sharp/Lean/Runner.lean");
-        let list = runner
-            .lines()
-            .find_map(|line| line.strip_prefix("def ownedRoots : Array Name := #[")?.strip_suffix(']'))
-            .expect("Runner.lean declares ownedRoots on one line");
-        let trusted: Vec<&str> = list.split(", ").map(|root| root.trim_start_matches('`')).collect();
+        let list =
+            runner.lines().find_map(|line| line.strip_prefix("def ownedRoots : Array Name := #[")?.strip_suffix(']'));
+        let trusted: Option<Vec<&str>> =
+            list.map(|list| list.split(", ").map(|root| root.trim_start_matches('`')).collect());
 
-        assert_eq!(trusted, OWNED_ROOTS);
+        assert_eq!(trusted.as_deref(), Some(OWNED_ROOTS.as_slice()), "Runner.lean declares ownedRoots on one line");
     }
 
     #[test]

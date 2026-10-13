@@ -108,7 +108,7 @@ fn array_threshold_zero_with_two_inputs_generalises() {
         t_sealed_list(BTreeMap::from([(0usize, (false, ui(2)))])),
     ];
     let result = combine_with_array_threshold(inputs, 0);
-    assert!(!result.is_empty());
+    assert!(!result.is_empty(), "expected a combined type");
 }
 
 fn n_i64(n: usize) -> i64 {

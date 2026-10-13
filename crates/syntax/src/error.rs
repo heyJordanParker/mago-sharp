@@ -96,6 +96,9 @@ pub enum ParseError {
     /// class-like as a message names it, `A class`, and the type's name, at the whole type. Every type, events and
     /// interfaces included, is declared in its own file.
     NestedTypeInSharp(&'static str, Box<str>, Span),
+    /// A PHP# keyword written in another case, as in `Return 5;`, with the keyword as PHP# writes it, at the keyword.
+    /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are.
+    MiscasedKeywordInSharp(&'static str, Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -134,7 +137,8 @@ impl HasFileId for ParseError {
             | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
-            | ParseError::NestedTypeInSharp(_, _, span) => span.file_id,
+            | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::MiscasedKeywordInSharp(_, span) => span.file_id,
         }
     }
 }
@@ -177,7 +181,8 @@ impl HasSpan for ParseError {
             | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
-            | ParseError::NestedTypeInSharp(_, _, span) => *span,
+            | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::MiscasedKeywordInSharp(_, span) => *span,
         }
     }
 }
@@ -302,6 +307,7 @@ impl std::fmt::Display for ParseError {
             ParseError::NestedTypeInSharp(owner, name, _) => {
                 format!("{owner} can't declare a type inside it: declare `{name}` in its own file.")
             }
+            ParseError::MiscasedKeywordInSharp(keyword, _) => format!("Write the keyword `{keyword}` in lowercase."),
         };
 
         write!(f, "{message}")
@@ -356,7 +362,8 @@ impl From<&ParseError> for Issue {
             | ParseError::ComputedParameterInSharp(..)
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)
-            | ParseError::NestedTypeInSharp(..) => Issue::error(error.to_string())
+            | ParseError::NestedTypeInSharp(..)
+            | ParseError::MiscasedKeywordInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             ParseError::NotSupportedYetInSharp(_, span) => Issue::error(error.to_string())

@@ -2086,6 +2086,8 @@ fn compile_checks_a_structure_rule_over_thousands_of_imports() {
 /// `each_process_a_lake_starts_runs_under_the_processor_time_limit`'s to prove: Mago takes the lower of 120 seconds and
 /// this limit, so no compile can tell the two apart.
 #[cfg(unix)]
+// `wait4` reaps the compile, which clippy can't see.
+#[allow(clippy::zombie_processes)]
 fn compile_lines_within(root: &Path, seconds: u64) -> (Output, f64) {
     use std::io::Read;
     use std::os::unix::process::CommandExt;

@@ -261,7 +261,7 @@ fn body_effects_stop_at_function_like_boundaries() {
     let only_nested = functions[1];
     assert!(!only_nested.flags.contains(FunctionFlag::Throws));
     assert!(!only_nested.flags.contains(FunctionFlag::Yields));
-    assert!(only_nested.direct_accessed_globals.is_empty());
+    assert_eq!(global_names(only_nested.direct_accessed_globals), Vec::<String>::new());
 }
 
 const DEPRECATION_CONFLICT: &str = "<?php
