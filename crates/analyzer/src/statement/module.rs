@@ -93,8 +93,12 @@ where
         match &binding_metadata.value {
             BindingValueMetadata::Class(class, span) => {
                 if let Some(class) = check_class_value(context, service, *class, *span) {
-                    let builds = Builds::Bound(class.original_name, *span, binding_metadata.lifetime);
-                    check_class_services(context, &services, class, builds);
+                    check_class_services(
+                        context,
+                        &services,
+                        class,
+                        Builds::Bound(class.original_name, binding_metadata, *span),
+                    );
                 }
             }
             BindingValueMetadata::Classes(classes) => {
@@ -112,7 +116,7 @@ where
                 };
                 for (class, span) in classes {
                     if let Some(class) = check_class_value(context, element, *class, *span) {
-                        let builds = Builds::Bound(class.original_name, *span, binding_metadata.lifetime);
+                        let builds = Builds::Bound(class.original_name, binding_metadata, *span);
                         check_class_services(context, &services, class, builds);
                     }
                 }
@@ -243,12 +247,12 @@ fn check_class_services<A>(
     }
 }
 
-/// What the container builds when it fills a parameter: a class a binding binds, with the span of the binding's
-/// class value and its lifetime, the service of a binding's expression, or a listener's class, with the first event
-/// it listens to.
+/// What the container builds when it fills a parameter: a class a binding binds, with that binding and the span of
+/// the class in its value, the service of a binding's expression, or a listener's class, with the first event it
+/// listens to.
 #[derive(Clone, Copy)]
 enum Builds<'ctx> {
-    Bound(Word, Span, Lifetime),
+    Bound(Word, &'ctx BindingMetadata, Span),
     Binding(&'ctx TUnion),
     Listener(Word, Word),
 }
@@ -311,10 +315,14 @@ fn report_missing_service<A>(
                 None => format!("`{}` with no type", display_variable_name(context, parameter.name.0)),
             };
             let help = match builds {
-                Builds::Bound(_, _, lifetime) => format!(
-                    "Bind `{name}` to an expression that creates it, as in `{} {name}(…) = new {name}(…);`.",
-                    lifetime.as_str()
-                ),
+                Builds::Bound(_, binding, _) => {
+                    let service = display_sharp_type(context, &binding.service.type_union);
+                    format!(
+                        "Bind `{service}` to an expression that creates it, as in `{} {service}(…) = {};`.",
+                        binding.lifetime.as_str(),
+                        binding_expression(context, binding)
+                    )
+                }
                 Builds::Binding(_) | Builds::Listener(..) => {
                     "Take a service that gives the value, such as `Environment`, and read the value from it.".to_owned()
                 }
@@ -326,7 +334,7 @@ fn report_missing_service<A>(
         }
     };
     let issue = match builds {
-        Builds::Bound(_, bound, _) => issue
+        Builds::Bound(_, _, bound) => issue
             .with_annotation(Annotation::primary(bound).with_message("Bound here."))
             .with_annotation(Annotation::secondary(parameter.span).with_message("Needed here.")),
         Builds::Binding(_) | Builds::Listener(..) => {
@@ -335,6 +343,30 @@ fn report_missing_service<A>(
     };
 
     context.collector.report_with_code(IssueCode::MissingService, issue);
+}
+
+/// The expression that creates what `binding`'s class value creates: `new` of its class, or a list of `new` of each
+/// class of its list. A class whose main constructor takes parameters shows them as `(…)`.
+fn binding_expression<A>(context: &Context<'_, '_, A>, binding: &BindingMetadata) -> String
+where
+    A: Arena,
+{
+    let creates = |class: Word| {
+        let metadata = context.codebase.get_class_like(class.as_bytes());
+        let takes = metadata
+            .and_then(|metadata| context.codebase.get_declaring_method(metadata.name.as_bytes(), b"__construct"));
+        let arguments = if takes.is_some_and(|constructor| !constructor.parameters.is_empty()) { "…" } else { "" };
+        let name = metadata.map_or(class, |metadata| metadata.original_name);
+        format!("new {}({arguments})", display_class_like_name(context, name))
+    };
+
+    match &binding.value {
+        BindingValueMetadata::Classes(classes) => {
+            format!("[{}]", classes.iter().map(|(class, _)| creates(*class)).collect::<Vec<_>>().join(", "))
+        }
+        BindingValueMetadata::Class(class, _) => creates(*class),
+        BindingValueMetadata::Expression(_) => unreachable!("a binding's expression builds no class value"),
+    }
 }
 
 /// The modules one set of services reads: every folder's base module, and the modules whose bindings win over them,

@@ -11962,7 +11962,13 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
         "app/Shop/LegacyMailer.php",
         "<?php\n\nnamespace App\\Shop;\n\nuse App\\Mail\\Mailer;\n\nfinal class LegacyMailer implements Mailer\n{\n    public function __construct($dsn) { }\n}\n",
     );
-    let untyped = "13:30 missing-service `LegacyMailer` takes `dsn` with no type, which no binding can give: the container can't build `LegacyMailer`. | Bind `LegacyMailer` to an expression that creates it, as in `singleton LegacyMailer(…) = new LegacyMailer(…);`.";
+    // A price rule that takes a value no binding gives, bound in a list beside one that takes nothing.
+    let coupon = (
+        "app/Shop/CouponRule.sharp",
+        "namespace App.Shop;\n\nimport App.Pricing.PriceRule;\n\npublic class CouponRule : PriceRule\n{\n    public CouponRule(private string code) { }\n}\n",
+    );
+    let untyped = "13:24 missing-service `LegacyMailer` takes `dsn` with no type, which no binding can give: the container can't build `LegacyMailer`. | Bind `Mailer` to an expression that creates it, as in `singleton Mailer(…) = new LegacyMailer(…);`.";
+    let code = "13:43 missing-service `CouponRule` takes a `string`, which no binding can give: the container can't build `CouponRule`. | Bind `List<PriceRule>` to an expression that creates it, as in `singleton List<PriceRule>(…) = [new TaxRule(), new CouponRule(…)];`.";
     let mailer = |line: u32, column: u32| {
         format!(
             "{line}:{column} missing-service `SendReceipt` needs a `Mailer`, and no module binds one: the container can't build `SendReceipt`. | Bind `Mailer` in a module of `SendReceipt`'s namespace or one above it, as in `singleton Mailer = …;`."
@@ -12007,7 +12013,8 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
         (vec![], "    singleton Mailer(string url) = new SmtpMailer();", vec![value.to_owned()]),
         (vec![], store, vec![environment.to_owned()]),
         (vec![library], store, vec![]),
-        (vec![legacy], "    singleton LegacyMailer = LegacyMailer;", vec![untyped.to_owned()]),
+        (vec![legacy], "    singleton Mailer = LegacyMailer;", vec![untyped.to_owned()]),
+        (vec![coupon], "    singleton List<PriceRule> = [TaxRule, CouponRule];", vec![code.to_owned()]),
     ] {
         let shop = module("app/Shop/Module.sharp", "App.Shop", members);
         let files: Vec<_> =
@@ -12015,6 +12022,18 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
         let refused: Vec<_> =
             refusals(shop, &files).into_iter().filter(|refusal| refusal.contains(" missing-service ")).collect();
         assert_eq!(refused, expected, "{modules:?}: {members}");
+    }
+
+    // The fix each "to an expression" help shows, with its arguments written, compiles with no refusal at all.
+    for (modules, fix) in [
+        (vec![library], store),
+        (vec![legacy], "    singleton Mailer = new LegacyMailer(\"smtp://localhost\");"),
+        (vec![coupon], "    singleton List<PriceRule> = [new TaxRule(), new CouponRule(\"SPRING\")];"),
+    ] {
+        let shop = module("app/Shop/Module.sharp", "App.Shop", fix);
+        let files: Vec<_> =
+            BOUND_SERVICES.iter().copied().chain([margin_rule]).chain(modules.iter().copied()).collect();
+        assert_eq!(refusals(shop, &files), Vec::<String>::new(), "{fix}");
     }
 
     let send_receipt = BOUND_SERVICES[9];
