@@ -47,6 +47,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -81,6 +82,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     {
         let classnames = resolve_classnames_from_expression(context, block_context, artifacts, self.class, false)?;
         if classnames.is_empty() {
+            return Ok(());
+        }
+        // A refused value, as `value as Function<int()>` gives, reported itself, so `new` of it reports nothing again.
+        if artifacts.get_expression_type(self.class.unparenthesized()).is_some_and(is_refused_type) {
+            self.argument_list.analyze(context, block_context, artifacts)?;
+            artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
             return Ok(());
         }
 

@@ -7001,10 +7001,12 @@ fn new_creates_the_imported_class_by_its_full_name() {
 /// $page = new \Lib\PaginatedList($rows);
 /// $payload = \Lib\Json::decode($body);
 /// $found = $this->repository?->find($id);
+/// $type = \Lib\PaginatedList::class;
 /// ```
 ///
-/// A plain PHP class's `@template` type arguments are erased, so those of its `new` lower to nothing. A call of its
-/// generic method, static or null-safe, carries them, since a PHP# method that overrides or implements it reads them.
+/// A plain PHP class's `@template` type arguments are erased, so those of its `new` and its `typeof` lower to nothing.
+/// A call of its generic method, static or null-safe, carries them, since a PHP# method that overrides or implements it
+/// reads them.
 #[test]
 fn type_arguments_of_a_plain_php_new_lower_to_nothing_and_of_a_call_to_its_type_arguments() {
     let lowered = Lowered::with(
@@ -7026,6 +7028,7 @@ fn type_arguments_of_a_plain_php_new_lower_to_nothing_and_of_a_call_to_its_type_
                 const page = new PaginatedList<Order>(rows);
                 const payload = Json.decode<WebhookPayload>(body);
                 const found = this.repository?.find<Order>(id);
+                const type = typeof(PaginatedList<Order>);
             }
         }
     "},
@@ -7074,6 +7077,11 @@ fn type_arguments_of_a_plain_php_new_lower_to_nothing_and_of_a_call_to_its_type_
                     SHARP_TYPE_ARGS
                       null
                       ZVAL "Lib.Order"
+              ASSIGN
+                VAR
+                  ZVAL "type"
+                CLASS_NAME
+                  ZVAL "Lib\\PaginatedList"
         "#}
     );
 }

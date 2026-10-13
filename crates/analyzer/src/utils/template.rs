@@ -456,9 +456,10 @@ fn find_method_positions(
     for parameter_type in method.parameters.iter().filter_map(|parameter| parameter.type_metadata.as_ref()) {
         find_template_positions(codebase, &parameter_type.type_union, owner, Variance::Contravariant, &mut positions);
     }
-    if let Some(return_type) = &method.return_type_metadata {
-        find_template_positions(codebase, &return_type.type_union, owner, Variance::Covariant, &mut positions);
-    }
+    let Some(return_type) = &method.return_type_metadata else {
+        unreachable!("a PHP# method other than a constructor declares its return type");
+    };
+    find_template_positions(codebase, &return_type.type_union, owner, Variance::Covariant, &mut positions);
 
     positions
 }
@@ -544,13 +545,15 @@ fn find_atomic_template_positions(
         }
         TAtomic::Callable(TCallable::Signature(signature)) => {
             for parameter in signature.get_parameters() {
-                if let Some(parameter_type) = parameter.get_type_signature() {
-                    find_template_positions(codebase, parameter_type, owner, position.flip(), positions);
-                }
+                let Some(parameter_type) = parameter.get_type_signature() else {
+                    unreachable!("a PHP# function type writes the type of each parameter");
+                };
+                find_template_positions(codebase, parameter_type, owner, position.flip(), positions);
             }
-            if let Some(return_type) = signature.get_return_type() {
-                find_template_positions(codebase, return_type, owner, position, positions);
-            }
+            let Some(return_type) = signature.get_return_type() else {
+                unreachable!("a PHP# function type writes its return type");
+            };
+            find_template_positions(codebase, return_type, owner, position, positions);
         }
         _ => {
             for child in atomic.get_child_nodes() {

@@ -8970,6 +8970,29 @@ fn a_refused_type_test_still_declares_its_name() {
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
 
+/// A value whose conversion PHP# refuses has no type, so `new` of it names no class and reports nothing more than the
+/// refusal.
+#[test]
+fn new_of_a_refused_value_reports_nothing_more() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any make(Any value)\n    {\n        const type = value as Function<int()>;\n        return new (type)();\n    }\n}\n";
+
+    assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// A generic class in an intersection is refused, and an argument checked against that intersection keeps its own
+/// message: the type arguments agree, so it names none of them.
+#[test]
+fn an_argument_for_a_refused_intersection_names_no_type_argument() {
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic interface Sized\n{\n    int size();\n}\n\npublic class Holder<TItem>\n{\n    public TItem? item() => null;\n}\n\npublic class Report\n{\n    public static void take(Holder<Order> & Sized holder)\n    {\n    }\n\n    public static void pass(Holder<Order> holder)\n    {\n        Report.take(holder);\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        vec![
+            "25:21 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Report.take`: expected `Holder<Order> & Sized`, but possibly received `Holder<Order>`. Ensure the argument always has the expected type using checks or assertions."
+        ]
+    );
+}
+
 /// A class value of an enum reads the enum's static members, as a class value of a class does.
 #[test]
 fn a_class_value_of_an_enum_reads_its_static_members() {
