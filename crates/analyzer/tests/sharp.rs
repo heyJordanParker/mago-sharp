@@ -4971,14 +4971,14 @@ fn the_standard_library_extensions_on_the_default_types_need_no_import() {
 /// Decision 040 and spec section 8: a call of a PHP function the standard library wraps names the member to write. An
 /// extension's member, spec section 26, is written on the call's first argument, with `(…)` when it takes more than
 /// the receiver, and needs no import on `string`. A static method is written on its class. Each names the import its
-/// class needs.
+/// class needs. A function the library does not wrap but PHP# syntax replaces still names that syntax.
 #[test]
 fn a_call_of_a_function_the_standard_library_wraps_names_the_member_that_replaces_it() {
     let replaces = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_METHOD)]\npublic class Replaces\n{\n    public Replaces(string ...functions)\n    {\n    }\n}\n";
     let text = "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    extension(string text)\n    {\n        [Replaces(\"ucfirst\")]\n        public string capital() => ucfirst(text);\n\n        [Replaces(\"strlen\")]\n        public int length => strlen(text);\n\n        [Replaces(\"str_repeat\")]\n        public string repeated(int times) => str_repeat(text, times);\n    }\n}\n";
     let flags = "namespace Sharp.Data;\n\npublic static class Flags\n{\n    extension(bool flag)\n    {\n        [Replaces(\"boolval\")]\n        public bool truthy() => boolval(flag);\n    }\n}\n";
     let date = "namespace Sharp.Time;\n\npublic static class Date\n{\n    [Replaces(\"date\")]\n    public static string format(string pattern) => date(pattern);\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public string label(string name) => ucfirst(name);\n\n    public int size(string name) => strlen(name);\n\n    public string twice(string name) => str_repeat(name, 2);\n\n    public bool on(bool ready) => boolval(ready);\n\n    public string year() => date(\"Y\");\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public string label(string name) => ucfirst(name);\n\n    public int size(string name) => strlen(name);\n\n    public string twice(string name) => str_repeat(name, 2);\n\n    public bool on(bool ready) => boolval(ready);\n\n    public string year() => date(\"Y\");\n\n    public bool text(Any value) => is_string(value);\n}\n";
 
     assert_messages(
         sharp,
@@ -4994,6 +4994,7 @@ fn a_call_of_a_function_the_standard_library_wraps_names_the_member_that_replace
             "9:41 wrapped-function: `str_repeat` is wrapped by the standard library: write `name.repeated(…)`.",
             "11:35 wrapped-function: `boolval` is wrapped by the standard library: write `ready.truthy()`. Add `import Sharp.Data.Flags;` to the file.",
             "13:29 wrapped-function: `date` is wrapped by the standard library: write `Date.format(…)`. Add `import Sharp.Time.Date;` to the file.",
+            "15:36 replaced-by-syntax: `is_string` is replaced by PHP# syntax: write `value is string`.",
         ],
     );
 }

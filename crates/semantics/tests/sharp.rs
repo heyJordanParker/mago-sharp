@@ -2770,6 +2770,20 @@ fn this_in_an_extension_member_is_an_error() {
     );
 }
 
+/// An extension member's body is checked as a method's, a computed property's too.
+#[test]
+fn an_extension_member_body_is_checked_as_a_method_body() {
+    let code = "namespace App.Shared;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string orDash() => value ?: \"-\";\n        public string dashed => value ?: \"-\";\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:41 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition.",
+            "8:39 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition.",
+        ]
+    );
+}
+
 /// A static class runs each extension member as a static method of its name, so two members, in its extensions or
 /// its own, cannot share a name.
 #[test]
