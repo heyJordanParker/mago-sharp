@@ -25,7 +25,7 @@ where
 
                 self.parse_classlike_member_with_attributes(attributes)?
             }
-            k if k.is_modifier() => {
+            k if k.is_modifier() || self.is_internal(token) => {
                 let modifiers = self.parse_modifier_sequence()?;
 
                 self.parse_classlike_member_with_attributes_and_modifiers(Sequence::empty(), modifiers)?
@@ -55,7 +55,7 @@ where
         self.read_php_construct()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {
-            k if k.is_modifier() => {
+            k if k.is_modifier() || self.is_internal(token) => {
                 let modifiers = self.parse_modifier_sequence()?;
 
                 self.parse_classlike_member_with_attributes_and_modifiers(attributes, modifiers)?

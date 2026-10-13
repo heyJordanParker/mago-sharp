@@ -38,6 +38,12 @@ where
     fn parse_statement_inner(&mut self) -> Result<Statement<'arena>, ParseError> {
         self.read_php_statement()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
+        // It returns here, not from an arm of the match below: an unoptimized build gives each arm's result its own stack
+        // slot, and this frame sits between two `ensure_sufficient_stack` calls, so it must stay inside their red zone.
+        if !self.state.within_block && self.is_internal(token) {
+            return self.parse_modified_class_like_with_attributes(Sequence::empty());
+        }
+
         Ok(match token.kind {
             T![InlineText | InlineShebang] => Statement::Inline(self.parse_inline()?),
             T!["<?php"] | T!["<?"] => Statement::OpeningTag(self.parse_opening_tag()?),
@@ -66,6 +72,7 @@ where
             T![Identifier] if !self.state.within_block && self.is_at_event()? => {
                 Statement::Event(self.parse_event_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?)
             }
+            T![Identifier] if self.is_at_emit()? => Statement::Emit(self.parse_emit()?),
             T!["const" | Identifier | "("] if self.is_at_local_declaration()? => {
                 Statement::LocalDeclaration(self.parse_local_declaration()?)
             }
@@ -95,7 +102,9 @@ where
                         expression: self.parse_closure_with_attributes(attributes)?,
                         terminator: self.parse_terminator()?,
                     }),
-                    kind if kind.is_modifier() => self.parse_modified_class_like_with_attributes(attributes)?,
+                    kind if kind.is_modifier() || self.is_internal(next) => {
+                        self.parse_modified_class_like_with_attributes(attributes)?
+                    }
                     T![Identifier] if self.is_at_event()? => {
                         Statement::Event(self.parse_event_with_attributes_and_modifiers(attributes, Sequence::empty())?)
                     }
