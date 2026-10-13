@@ -26,6 +26,7 @@ where
     }
 
     pub(crate) fn parse_optional_modifier(&mut self) -> Result<Option<Modifier<'arena>>, ParseError> {
+        self.read_php_construct()?;
         Ok(Some(match self.stream.peek_kind(0)? {
             Some(T!["public"]) => Modifier::Public(self.expect_any_keyword()?),
             Some(T!["protected"]) => Modifier::Protected(self.expect_any_keyword()?),

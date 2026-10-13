@@ -3293,7 +3293,7 @@ where
     };
 
     context.collector.report_with_code(
-        IssueCode::IncompatibleStaticModifier,
+        IssueCode::NamedConstructorClash,
         Issue::error(message).with_annotation(Annotation::primary(primary_span).with_message("Declared here.")),
     );
 

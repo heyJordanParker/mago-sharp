@@ -16,6 +16,7 @@ use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Class;
+use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Constant;
@@ -77,6 +78,7 @@ use crate::scanner::constant::scan_defined_constant;
 use crate::scanner::function_like::scan_arrow_function;
 use crate::scanner::function_like::scan_closure;
 use crate::scanner::function_like::scan_function;
+use crate::scanner::function_like::scan_initial_values_constructor;
 use crate::scanner::function_like::scan_method;
 use crate::scanner::property::scan_promoted_property;
 use crate::ttype::get_named_object;
@@ -990,7 +992,25 @@ where
     }
 
     #[inline]
-    fn walk_out_class(&mut self, _class: &'arena Class<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+    fn walk_out_class(&mut self, class: &'arena Class<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        // The bridge gives a PHP# class without a constructor one for its initial values that are not constant, so a
+        // subclass's `: super()` reaches it from any file.
+        if !self.has_constructor
+            && context.program.dialect.is_sharp()
+            && class.members.iter().any(|member| {
+                matches!(member, ClassLikeMember::Property(property) if property.initial_value_runs_in_constructor())
+            })
+            && let Some(class_like_metadata) = self.stack.last().and_then(|class| self.codebase.class_likes.get_mut(class))
+        {
+            let constructor = scan_initial_values_constructor(class, context);
+            let method_identifier = MethodIdentifier::new(class_like_metadata.name, constructor.name);
+            class_like_metadata.methods.insert(constructor.name);
+            class_like_metadata.add_declaring_method_id(constructor.name, method_identifier);
+            class_like_metadata.inheritable_method_ids.insert(constructor.name, method_identifier);
+            self.codebase.function_likes.insert((class_like_metadata.name, constructor.name), constructor);
+            self.has_constructor = true;
+        }
+
         finalize_class_like(self, context);
     }
 

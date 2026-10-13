@@ -34,11 +34,12 @@ where
         Ok(DirectVariable { span: token.span_for(self.stream.file_id()), name: token.value })
     }
 
-    /// Parses the bare name a PHP# parameter declares, which has no `$`.
+    /// Parses the bare name a PHP# field, catch clause or lambda declares, which has no `$`. A keyword parses as the
+    /// name too: a member may take any word, and the checker names a keyword a local can't take.
     pub(crate) fn parse_bare_variable(&mut self) -> Result<DirectVariable<'arena>, ParseError> {
-        let token = self.stream.eat(T![Identifier])?;
+        let name = self.parse_local_identifier()?;
 
-        Ok(DirectVariable { span: token.span_for(self.stream.file_id()), name: token.value })
+        Ok(DirectVariable { span: name.span, name: name.value })
     }
 
     pub(crate) fn parse_indirect_variable(&mut self) -> Result<IndirectVariable<'arena>, ParseError> {

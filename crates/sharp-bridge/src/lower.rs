@@ -228,6 +228,7 @@ const ZEND_TYPE_NULLABLE: u32 = 1 << 8;
 const IS_STATIC: u32 = 15;
 const ZEND_PARAM_VARIADIC: u32 = 1 << 4;
 const ZEND_PARENTHESIZED_CONDITIONAL: u32 = 1;
+const ZEND_DIM_IS: u32 = 1;
 const ZEND_BIND_REF: u32 = 1;
 const IS_LONG: u32 = 4;
 const IS_DOUBLE: u32 = 5;
@@ -2423,11 +2424,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[condition, null, rest])
     }
 
-    /// The object of `?.`. An index there reads a missing key as null, as `??` does, so `x[k]?.name` is
-    /// `($x[$k] ?? null)?->name`, where a bare `x[k]` throws on a missing key (spec section 12).
+    /// The object of `?.`. An index there reads a missing key as null, which `?.` skips, where a bare read throws on a
+    /// missing key (spec section 12). A `List` index is the index itself, marked with `ZEND_DIM_IS`, the mark php-src
+    /// gives an index `??` reads: a change after `?.` then reaches the element the list stores, as `rows[0]?.add(5)`
+    /// does, and only that index reads quietly, so `cube[9][0]?.x` still throws on `cube[9]`. A `Map` index, which no
+    /// change runs through, is `($x[$k] ?? null)?->name`.
     fn null_safe_object(&mut self, object: &Expression) -> u32 {
         let value = self.expression(object);
-        if !matches!(object.unparenthesized(), Expression::ArrayAccess(_)) {
+        let Expression::ArrayAccess(access) = object.unparenthesized() else {
+            return value;
+        };
+        if self.is_list(access.array) {
+            self.nodes[value as usize].attr |= ZEND_DIM_IS;
+
             return value;
         }
 
@@ -3157,7 +3166,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A read of the collection a method call runs on, which is also where the method writes it. The read that tests
-    /// a null-safe call's receiver reads a property with `?->`.
+    /// a null-safe call's receiver reads a property with `?->`, and marks a `List` index with `ZEND_DIM_IS`, as
+    /// `null_safe_object` does, so a missing index skips the call as a null element does while the indexes before it
+    /// stay bare reads (spec section 12).
     fn read_collection(&mut self, collection: &mut CollectionReceiver, line: u32, null_safe: bool) -> u32 {
         match collection {
             CollectionReceiver::Place(place) => self.target(place),
@@ -3172,7 +3183,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let list = self.read_collection(list, line, false);
                 let index = self.read(index);
 
-                self.node(SHARP_AST_DIM, 0, line, &[list, index])
+                self.node(SHARP_AST_DIM, if null_safe { ZEND_DIM_IS } else { 0 }, line, &[list, index])
             }
             CollectionReceiver::Value(value) if null_safe => self.read_as(value, Self::null_safe_object),
             CollectionReceiver::Value(value) => self.read(value),
