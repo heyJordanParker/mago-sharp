@@ -34,6 +34,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::DeclareBody;
 use mago_syntax::cst::Emit;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ExpressionStatement;
@@ -52,6 +53,7 @@ use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UseItems;
+use mago_syntax::error::ParseError;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
@@ -149,6 +151,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
             }
 
             let result = match self {
+                // The semantic checks refuse a `.sharp` file's `declare`, whose help writes its body without it, so
+                // the body runs as written there, and its `return` ends the method.
+                Statement::Declare(declare) if context.dialect.is_sharp() => match &declare.body {
+                    DeclareBody::Statement(statement) => statement.analyze(context, block_context, artifacts),
+                    DeclareBody::ColonDelimited(body) => {
+                        analyze_statements(body.statements.as_slice(), context, block_context, artifacts)
+                    }
+                },
                 Statement::Inline(_)
                 | Statement::OpeningTag(_)
                 | Statement::Declare(_)
@@ -399,7 +409,10 @@ where
     );
 
     match miscased_local_keyword(hint, &local_type) {
-        Some(keyword) => report_miscased_local_keyword(context, keyword, hint.span()),
+        // The parser reads `CONST total = 1;` as a local typed `CONST`, so the keyword's parse error is reported here.
+        Some(keyword) => {
+            context.collector.report(Issue::from(&ParseError::MiscasedKeywordInSharp(keyword, hint.span())));
+        }
         None => report_undefined_types(context, &local_type, hint.span()),
     }
     report_map_keys_without_backing_value(context, &local_type, hint.span());
@@ -421,26 +434,6 @@ fn miscased_local_keyword(hint: &Hint<'_>, local_type: &TUnion) -> Option<&'stat
         keyword.as_bytes().eq_ignore_ascii_case(identifier.value())
             && matches!(local_type.get_single(), TAtomic::Reference(TReference::Symbol { .. }))
     })
-}
-
-/// Reports `keyword`, written in another case at `span`, with its line written in lowercase.
-fn report_miscased_local_keyword<A>(context: &mut Context<'_, '_, A>, keyword: &str, span: Span)
-where
-    A: Arena,
-{
-    let file = context.source_file;
-    let line_number = file.line_number(span.start.offset);
-    let start = file.get_line_start_offset(line_number).unwrap_or(span.start.offset);
-    let end = file.get_line_end_offset(line_number).unwrap_or(span.end.offset);
-    let mut line = file.contents[start as usize..end as usize].to_vec();
-    line[span.start.offset as usize - start as usize..][..keyword.len()].make_ascii_lowercase();
-
-    context.collector.report_with_code(
-        IssueCode::NonExistentClassLike,
-        Issue::error(format!("Write the keyword `{keyword}` in lowercase."))
-            .with_annotation(Annotation::primary(span).with_message("Written here."))
-            .with_help(format!("Write `{}`.", String::from_utf8_lossy(&line).trim())),
-    );
 }
 
 /// Analyzes a PHP# `for … of` as the PHP `foreach` over its collection, into the variables it declares. A written type

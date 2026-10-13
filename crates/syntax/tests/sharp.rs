@@ -2097,12 +2097,13 @@ fn a_php_keyword_reads_as_its_construct_only_where_the_construct_follows() {
     }
 }
 
-/// PHP#'s keywords are lowercase. A PHP# keyword written in another case where only its construct can follow reads as
-/// the keyword with one error, whose help writes the line in lowercase, as rustc reads `Fn`. A PHP keyword PHP#
-/// doesn't use reads as its construct, whose own error names the PHP# form, and a word that starts a local stays a
-/// name.
+/// PHP#'s keywords are lowercase. A PHP# keyword written in another case reads as the keyword, with one error each,
+/// wherever its construct follows and the name could not stand, as rustc's `eat_keyword_case` reads `Fn`: at a
+/// statement's or an expression's head, after a `try` or an `if` statement's body, where only the keyword can stand,
+/// and among a declaration's modifiers. A PHP keyword PHP# doesn't use reads as its construct, whose own error names
+/// the PHP# form, and a word that can be a name stays one.
 #[test]
-fn a_keyword_written_in_another_case_is_one_error_that_writes_it_in_lowercase() {
+fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() {
     let method = |body: &str| -> &'static str {
         Box::leak(
             format!("class Report\n{{\n    public Any run(Any value, bool flag)\n    {{\n{body}    }}\n}}\n")
@@ -2110,24 +2111,41 @@ fn a_keyword_written_in_another_case_is_one_error_that_writes_it_in_lowercase() 
         )
     };
 
-    for (code, keyword, line) in [
-        (method("        Return 5;\n"), "return", "return 5;"),
-        (method("        RETURN value;\n"), "return", "return value;"),
-        (method("        IF (flag) { }\n        return 1;\n"), "if", "if (flag) { }"),
-        (method("        const c = New Report();\n        return c;\n"), "new", "const c = new Report();"),
-        (method("        New Report();\n        return 1;\n"), "new", "new Report();"),
-        (method("        return flag ? New Report() : value;\n"), "new", "return flag ? new Report() : value;"),
+    for (code, keywords) in [
+        (method("        Return 5;\n"), &["return"][..]),
+        (method("        RETURN value;\n"), &["return"]),
+        (method("        IF (flag) { }\n        return 1;\n"), &["if"]),
+        (method("        const c = New Report();\n        return c;\n"), &["new"]),
+        (method("        const c = New\n            Report();\n        return c;\n"), &["new"]),
+        (method("        New Report();\n        return 1;\n"), &["new"]),
+        (method("        return flag ? New Report() : value;\n"), &["new"]),
+        (method("        IF (flag) { Return 5; }\n        return 1;\n"), &["if", "return"]),
+        (method("        Throw new Exception();\n"), &["throw"]),
+        (method("        Emit new Report();\n        return 1;\n"), &["emit"]),
+        (method("        Try { return 1; } catch (Exception e) { return 2; }\n"), &["try"]),
+        (method("        try { return 1; } Catch (Exception e) { return 2; }\n"), &["catch"]),
+        (method("        try { return 1; } Finally { }\n"), &["finally"]),
+        (method("        try { } catch (Exception e) { } Finally { }\n        return 1;\n"), &["finally"]),
+        (method("        if (flag) { return 1; } Else { return 2; }\n"), &["else"]),
+        (method("        if (flag) { return 1; } Else If (value) { return 2; }\n        return 3;\n"), &["else", "if"]),
+        (method("        Do { } While (flag);\n        return 1;\n"), &["do", "while"]),
+        (method("        for (const item of value) { Break; }\n        return 1;\n"), &["break"]),
+        (method("        for (const item of value) { Continue; }\n        return 1;\n"), &["continue"]),
+        ("class Report\n{\n    Public int run() { return 1; }\n}\n", &["public"]),
+        ("class Report\n{\n    public Static int run() { return 1; }\n}\n", &["static"]),
+        ("class Report\n{\n    Public Static List<int> run() { return []; }\n}\n", &["public", "static"]),
+        ("public Class Report\n{\n}\n", &["class"]),
+        ("Import Lib.Calc;\n\nclass Report\n{\n}\n", &["import"]),
+        ("Namespace App;\n\nclass Report\n{\n}\n", &["namespace"]),
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/Report.sharp", code);
 
         let issues: Vec<(String, Option<String>)> =
             program.errors.iter().map(Issue::from).map(|issue| (issue.message, issue.help)).collect();
-        assert_eq!(
-            issues,
-            [(format!("Write the keyword `{keyword}` in lowercase."), Some(format!("Write `{line}`.")))],
-            "{code}"
-        );
+        let expected: Vec<(String, Option<String>)> =
+            keywords.iter().map(|keyword| (format!("Write the keyword `{keyword}` in lowercase."), None)).collect();
+        assert_eq!(issues, expected, "{code}");
     }
 
     let messages = |code: &'static str| -> Vec<String> {
@@ -2142,8 +2160,14 @@ fn a_keyword_written_in_another_case_is_one_error_that_writes_it_in_lowercase() 
 
     for (code, word, names) in [
         (method("        Return refund = new Return();\n        return refund;\n"), "Return", 2),
+        (method("        Return? maybe = null;\n        Return.count = 2;\n        return maybe;\n"), "Return", 2),
+        (method("        If branch = If.of();\n        return New.of();\n"), "If", 2),
         (method("        List<int> items = [];\n        return items;\n"), "List", 1),
         (method("        const print = Print.make();\n        return print;\n"), "Print", 1),
+        (method("        Static s = new Static();\n        return Static.make();\n"), "Static", 3),
+        (method("        const f = (Static s) => s;\n        return f;\n"), "Static", 1),
+        ("class Report\n{\n    public Static run() { return new Static(); }\n}\n", "Static", 2),
+        ("class Report\n{\n    private Static items;\n\n    public Static(int x) { }\n}\n", "Static", 2),
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/Report.sharp", code);

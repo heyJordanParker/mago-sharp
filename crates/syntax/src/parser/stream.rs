@@ -61,11 +61,6 @@ where
         self.position
     }
 
-    /// The line of the source that holds the byte at `offset`, without its line break, and the offset it starts at.
-    pub(crate) fn line_at(&self, offset: u32) -> (u32, &'input [u8]) {
-        self.lexer.line_at(offset)
-    }
-
     /// Returns whether the stream has consumed all tokens up to EOF.
     ///
     /// # Errors
@@ -216,6 +211,16 @@ where
     pub(crate) fn read_as(&mut self, n: usize, kind: TokenKind) {
         if let Some(token) = self.buffer.get_mut(n) {
             token.kind = kind;
+        }
+    }
+
+    /// Reads the nth (0-indexed) significant token ahead as the keyword `word`, of kind `kind`, from now on, as `Return`
+    /// reads as `return`. `word` spells the token in another case, so the token keeps its span. The token is one a
+    /// `lookahead(n)` already buffered.
+    pub(crate) fn read_as_keyword(&mut self, n: usize, kind: TokenKind, word: &'static str) {
+        if let Some(token) = self.buffer.get_mut(n) {
+            token.kind = kind;
+            token.value = word.as_bytes();
         }
     }
 

@@ -28,6 +28,7 @@ where
     }
 
     pub(crate) fn parse_optional_try_catch_clause(&mut self) -> Result<Option<TryCatchClause<'arena>>, ParseError> {
+        self.read_php_statement()?;
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["catch"]) => {
                 let catch = self.expect_any_keyword()?;

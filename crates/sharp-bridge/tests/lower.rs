@@ -418,11 +418,12 @@ fn a_php_keyword_or_a_capitalized_php_sharp_keyword_names_an_event() {
     );
 }
 
-/// The lowercase line each error on a keyword, `true`, `false` or `null` written in another case quotes compiles.
+/// Each keyword an error on a keyword, `true`, `false` or `null` written in another case names compiles once written
+/// in lowercase, in every place the error fires: a statement on two lines and two keywords on one line included.
 #[test]
-fn the_lowercase_line_a_keyword_in_another_case_names_compiles() {
+fn the_lowercase_keyword_a_keyword_in_another_case_names_compiles() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public int run(bool flag)\n    {\n        const base = 2;\n        let total = 1;\n        if (flag) { }\n        const c = new Report();\n        new Report();\n        let on = true;\n        let off = false;\n        int? none = null;\n        return flag ? base : total;\n    }\n}\n",
+        "class Report\n{\n    public static int count() { return 1; }\n\n    public int run(bool flag, List<int> items)\n    {\n        const base = 2;\n        let total = 1;\n        if (flag) { }\n        const c = new\n            Report();\n        new Report();\n        let on = true;\n        let off = false;\n        int? none = null;\n        if (flag) { return 5; }\n        try { total = 3; } catch (Exception e) { total = 4; } finally { }\n        if (flag) { total = 5; } else if (items.count() == 0) { total = 6; } else { total = 7; }\n        do { total = 8; } while (off);\n        for (const item of items) { if (flag) { break; } continue; }\n        return flag ? base : total;\n    }\n}\n",
     );
 
     assert_eq!(lowered.diagnostics(), Vec::<String>::new());

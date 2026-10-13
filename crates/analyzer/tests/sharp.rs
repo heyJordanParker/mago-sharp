@@ -7347,14 +7347,14 @@ fn a_local_typed_const_or_let_in_another_case_is_the_keyword_written_in_another_
         )
     };
 
-    for (body, keyword, line) in [
-        ("        CONST base = 2;\n        return base;\n", "const", "const base = 2;"),
-        ("        Let total = 1;\n        return total;\n", "let", "let total = 1;"),
-        ("        LET total = 1; return total;\n", "let", "let total = 1; return total;"),
+    for (body, keyword) in [
+        ("        CONST base = 2;\n        return base;\n", "const"),
+        ("        Let total = 1;\n        return total;\n", "let"),
+        ("        LET total = 1; return total;\n", "let"),
     ] {
         assert_eq!(
             refusals(("src/Demo/Report.sharp", method(body)), &[]),
-            [format!("7:9 non-existent-class-like Write the keyword `{keyword}` in lowercase. | Write `{line}`.")],
+            [format!("7:9 parse Write the keyword `{keyword}` in lowercase. | ")],
             "{body}"
         );
     }
@@ -7362,6 +7362,24 @@ fn a_local_typed_const_or_let_in_another_case_is_the_keyword_written_in_another_
     let let_class = ("src/Demo/Let.php", "<?php\n\nnamespace Demo;\n\nclass Let\n{\n}\n");
     let typed = method("        Let total = new Let();\n        return 1;\n");
     assert_eq!(issues(("src/Demo/Report.sharp", typed), &[let_class]), Vec::<String>::new());
+}
+
+/// The semantic checks refuse a `.sharp` file's `declare`, whose help writes its body without it, so its body runs as
+/// written, and its `return` ends the method. Plain PHP keeps Mago's reading, which skips a `declare` body.
+#[test]
+fn a_declare_body_runs_as_written_in_a_sharp_file() {
+    for body in
+        ["declare(ticks=1) { return 1; }", "declare(ticks=1) return 1;", "declare(ticks=1): return 1; enddeclare;"]
+    {
+        let code = Box::leak(
+            format!("namespace Demo;\n\nclass Report\n{{\n    public int run()\n    {{\n        {body}\n    }}\n}}\n")
+                .into_boxed_str(),
+        );
+        assert_eq!(issues(("src/Demo/Report.sharp", code), &[]), Vec::<String>::new(), "{body}");
+    }
+
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function run(): int\n    {\n        declare(ticks=1) { return 1; }\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["7:21 missing-return-statement"]);
 }
 
 /// The semantic checks refuse `TRUE` as `true` written in another case, so its value keeps its type and adds no issue.
