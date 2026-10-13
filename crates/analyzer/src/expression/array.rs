@@ -32,6 +32,7 @@ use mago_codex::ttype::get_literal_string;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_string;
+use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -57,7 +58,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::statement::class_like::r#struct::report_class_held_by_key;
-use crate::statement::function_like::map_key_error;
+use crate::statement::function_like::collection_key_error;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_atomic;
@@ -302,10 +303,10 @@ where
                     .get_expression_type(key_value_array_element.key)
                     .map_or((None, get_mixed()), |item_key_type| {
                         let key_type = if context.dialect.is_sharp() {
-                            // PHP# casts only between numbers, so a key PHP would cast, such as `1.5`, `true` or
-                            // `null`, names the rule a `Map` type keeps, and its error is its only report. A backed
-                            // enum or a struct keys a `Map` too.
-                            if get_backing_key_type(item_key_type, context.codebase).is_always_array_key(true) {
+                            // A `Map` keeps each key as itself, so `1.5`, `true` and `null` stay keys PHP would
+                            // cast. A key without `==` and `hash()` names the rule a `Map` type keeps, and its error is
+                            // its only report.
+                            if is_key_type(item_key_type, context.codebase) {
                                 let span = key_value_array_element.key.span();
                                 if report_class_held_by_key(context, item_key_type, false, span) {
                                     get_never()
@@ -314,10 +315,9 @@ where
                                 }
                             } else {
                                 let item_key_type_id = display_value_type(context, item_key_type, &get_arraykey());
-                                let error = map_key_error(
-                                    context,
-                                    item_key_type,
-                                    &item_key_type_id,
+                                let error = collection_key_error(
+                                    item_key_type_id.as_str(),
+                                    false,
                                     key_value_array_element.key.span(),
                                 );
                                 context.collector.report_with_code(IssueCode::InvalidArrayElementKey, error);
@@ -356,7 +356,12 @@ where
 
                         let item_key_value =
                             if let Some(item_key_literal_type) = key_type.get_single_literal_string_value() {
-                                Some(ArrayKey::from_string(word(item_key_literal_type)))
+                                // A `Map` keeps `"5"` a string, where PHP casts it to the int `5`.
+                                Some(if context.dialect.is_sharp() {
+                                    ArrayKey::String(word(item_key_literal_type))
+                                } else {
+                                    ArrayKey::from_string(word(item_key_literal_type))
+                                })
                             } else if let Some(literal_integer) = key_type.get_single_literal_int_value() {
                                 // The most recent integer key becomes the next available integer key
                                 array_creation_info.int_offset = literal_integer;
@@ -1014,33 +1019,29 @@ fn handle_variadic_array_element<'arena, A>(
                 continue;
             }
 
-            // A PHP# `Map` spread may hold a backed enum or a struct key, which a `Map` literal takes. Plain PHP
-            // spreads into a PHP array, whose keys are `int` or `string` alone.
-            let stored_key_type = if context.dialect.is_sharp() {
-                get_backing_key_type(&key_type, context.codebase)
-            } else {
-                Cow::Borrowed(&*key_type)
-            };
-            let is_string_key = union_comparator::is_contained_by(
-                context.codebase,
-                &stored_key_type,
-                &get_string(),
-                false,
-                false,
-                false,
-                &mut ComparisonResult::new(),
-            );
-
-            let is_array_key_key = is_string_key
-                || union_comparator::is_contained_by(
+            // A PHP# `Map` spread may hold any key a `Map` literal takes. Plain PHP spreads into a PHP array, whose
+            // keys are `int` or `string` alone.
+            let is_sharp = context.dialect.is_sharp();
+            let stored_key_type =
+                if is_sharp { get_backing_key_type(&key_type, context.codebase) } else { Cow::Borrowed(&*key_type) };
+            let is_contained = |container: &TUnion| {
+                union_comparator::is_contained_by(
                     context.codebase,
                     &stored_key_type,
-                    &get_arraykey(),
+                    container,
                     false,
                     false,
                     false,
                     &mut ComparisonResult::new(),
-                );
+                )
+            };
+            let is_string_key = is_contained(&get_string());
+
+            let is_array_key_key = if is_sharp {
+                is_key_type(&key_type, context.codebase)
+            } else {
+                is_string_key || is_contained(&get_arraykey())
+            };
 
             if is_string_key {
                 array_creation_info.is_list = false;

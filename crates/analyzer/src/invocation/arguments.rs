@@ -52,8 +52,9 @@ use crate::utils::names::display_variable_name;
 use crate::utils::report_int_for_float;
 
 /// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
-/// keys are `int` or `string`. A `Map` keyed by a backed enum or a struct, an object, has no such array, so its call
-/// is refused here rather than failing where it runs. Returns whether it refused the call.
+/// keys are `int` or `string`. A `Map` keyed by anything else, as an enum, a struct or a `float`, has no such array,
+/// where PHP would cast or refuse each key, so its call is refused here rather than failing where it runs. Returns
+/// whether it refused the call.
 pub(super) fn check_array_crossing<A>(
     context: &mut Context<'_, '_, A>,
     input_type: &TUnion,
@@ -75,7 +76,7 @@ where
     }) else {
         return false;
     };
-    if !key_type.types.iter().any(TAtomic::is_object_type) {
+    if key_type.is_always_array_key(true) {
         return false;
     }
 

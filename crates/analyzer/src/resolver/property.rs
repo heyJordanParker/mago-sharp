@@ -52,6 +52,7 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
 use crate::expression::with::CREATED_OBJECT_PREFIX;
+use crate::expression::with::is_set_by_with;
 use crate::external::PropertyAccessKind;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::method::run_forwarded_methods;
@@ -1148,11 +1149,19 @@ where
                 });
 
         if is_struct && !writes_its_storage && !creates_this {
-            let message = match first_copying_method(context, declaring_class_metadata) {
-                Some(method) => {
-                    format!("A struct never changes; return a changed copy from a method, such as `{method}`.")
-                }
-                None => "A struct never changes; return a changed copy built with `with`.".to_owned(),
+            // `with` can't set a get-only property, so neither `with` nor a method, which may be a `with` on it, is
+            // named as its fix. The main constructor sets every property.
+            let message = if !is_set_by_with(property_metadata) {
+                let name = display_class_like_name(context, declaring_class_metadata.name);
+                let property = display_property_name(context, prop_name);
+
+                format!(
+                    "A struct never changes; return a changed copy built with its main constructor, `new {name}(…)`, or declare `{property}` `{{ get; init; }}` and return a changed copy built with `with`."
+                )
+            } else if let Some(method) = first_copying_method(context, declaring_class_metadata) {
+                format!("A struct never changes; return a changed copy from a method, such as `{method}`.")
+            } else {
+                "A struct never changes; return a changed copy built with `with`.".to_owned()
             };
             context.collector.report_with_code(
                 IssueCode::InvalidPropertyWrite,

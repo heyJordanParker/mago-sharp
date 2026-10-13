@@ -1420,9 +1420,9 @@ pub fn get_iterable_parameters(atomic: &TAtomic, codebase: &CodebaseMetadata) ->
 /// declares or inherits `operator ==` by `string`.
 ///
 /// A PHP# `Map` keeps each such key as itself and finds it by its `==` and `hash()`, which a struct has with nothing
-/// declared and a class has when it declares `operator ==`, as the checker requires `hash()` beside it. Its key type is
-/// one a `Map` takes when this result is always `int` or `string`. A plain PHP array that crosses into a `Map` keyed by a
-/// backed enum holds each case's backing value, which this result types.
+/// declared and a class has when it declares `operator ==`, as the checker requires `hash()` beside it. A plain PHP
+/// array that crosses into a `Map` keyed by a backed enum holds each case's backing value, which this result types.
+/// `is_key_type` says which key types a `Map` takes.
 #[must_use]
 pub fn get_backing_key_type<'key>(key_type: &'key TUnion, codebase: &CodebaseMetadata) -> Cow<'key, TUnion> {
     let backing_type = |atomic: &TAtomic| match atomic {
@@ -1445,6 +1445,36 @@ pub fn get_backing_key_type<'key>(key_type: &'key TUnion, codebase: &CodebaseMet
     Cow::Owned(TUnion::from_vec(
         key_type.types.iter().map(|atomic| backing_type(atomic).unwrap_or_else(|| atomic.clone())).collect(),
     ))
+}
+
+/// Whether every value of `key_type` keys a PHP# `Map` and joins a `Set`.
+///
+/// Spec section 12 keys a `Map` by anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`
+/// and an enum case, which section 19 gives `==` with no code, a struct, and a class that declares or inherits
+/// `operator ==`, which the checker requires `hash()` beside.
+#[must_use]
+pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    key_type.types.iter().all(|atomic| match atomic {
+        TAtomic::Never | TAtomic::Error | TAtomic::Null | TAtomic::Object(TObject::Enum(_)) => true,
+        TAtomic::Scalar(scalar) => matches!(
+            scalar,
+            TScalar::ArrayKey
+                | TScalar::Numeric
+                | TScalar::Integer(_)
+                | TScalar::Float(_)
+                | TScalar::String(_)
+                | TScalar::Bool(_)
+                | TScalar::ClassLikeString(_)
+        ),
+        TAtomic::Object(TObject::Named(named_object)) => {
+            let name = named_object.name.as_bytes();
+
+            codebase.get_class_like(name).is_some_and(|class_like| class_like.flags.is_struct())
+                || codebase.get_declaring_method(name, b"op_Equality").is_some()
+        }
+        TAtomic::GenericParameter(parameter) => is_key_type(&parameter.constraint, codebase),
+        _ => false,
+    })
 }
 
 /// The object a PHP# `Map<K, V>` or `Set<T>` runs as, `Sharp\Map<K, V>` or `Sharp\Set<T>`, each key as itself, or

@@ -881,19 +881,25 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         (Node::GenericHint(generic), FieldOrProperty | Method | Signature | Parameter | Body) => {
-            // The analyzer refuses a named key type without `==` and `hash()`. A key type outside the slice, nullable or
-            // not, is refused once, by the walk, as that type.
-            if let [key, _] = generic.arguments.as_slice()
-                && !matches!(key, Hint::Integer(_) | Hint::String(_) | Hint::Identifier(_))
+            // A `Set`'s element takes exactly what a `Map`'s key takes. The analyzer refuses a named key type without
+            // `==` and `hash()`. A key type outside the slice, nullable or not, is refused once, by the walk, as that
+            // type.
+            let key = match (generic.name.value, generic.arguments.as_slice()) {
+                (b"Map", [key, _]) => Some((key, "A `Map`'s key")),
+                (b"Set", [element]) => Some((element, "A `Set`'s element")),
+                _ => None,
+            };
+            if let Some((key, rule)) = key
+                && !is_key_hint(key)
                 && is_slice_type(match key {
                     Hint::Nullable(nullable) => nullable.hint,
                     key => key,
                 })
             {
                 return report_refusal(
-                    Issue::error(
-                        "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.",
-                    )
+                    Issue::error(format!(
+                        "{rule} is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
+                    ))
                     .with_annotation(Annotation::primary(key.span()).with_message("Key type written here.")),
                     generic.span(),
                     place,
@@ -2962,10 +2968,20 @@ fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
     }
 }
 
+/// Whether `hint` keys a `Map` and is a `Set`'s element by its kind alone, spec section 12: a type with `==` and
+/// `hash()` with no code, or a named type, which the analyzer accepts when it is an enum, a struct, or a class that
+/// declares `operator ==`.
+fn is_key_hint(hint: &Hint) -> bool {
+    match hint {
+        Hint::Integer(_) | Hint::Float(_) | Hint::Bool(_) | Hint::String(_) | Hint::Identifier(_) => true,
+        Hint::Nullable(nullable) => is_key_hint(nullable.hint),
+        _ => false,
+    }
+}
+
 /// Whether the slice has a type: the built-in types of spec section 24, or a class written by its short name, or a
 /// nullable type, or `List<T>`, `Map<TKey, TValue>` or `Set<T>` of spec section 12, or a function type of spec section
-/// 14.1 without a `void` parameter, whose inner types the walk checks next. A `Set` holds an `int`, a `string` or a
-/// named type, which the analyzer accepts only as a backed enum, because its elements run as the keys of a PHP array.
+/// 14.1 without a `void` parameter, whose inner types the walk checks next.
 fn is_slice_type(hint: &Hint) -> bool {
     match hint {
         Hint::Integer(_)
@@ -2979,9 +2995,7 @@ fn is_slice_type(hint: &Hint) -> bool {
         Hint::Generic(generic) => match (generic.name.value, generic.arguments.as_slice()) {
             (b"List", [element]) => !matches!(element, Hint::Void(_)),
             (b"Map", [key, value]) => !matches!(key, Hint::Void(_)) && !matches!(value, Hint::Void(_)),
-            (b"Set", [element]) => {
-                matches!(element, Hint::Integer(_) | Hint::String(_) | Hint::Identifier(Identifier::Local(_)))
-            }
+            (b"Set", [element]) => !matches!(element, Hint::Void(_)),
             _ => false,
         },
         Hint::Function(function) => !function.parameters.iter().any(|parameter| matches!(parameter, Hint::Void(_))),

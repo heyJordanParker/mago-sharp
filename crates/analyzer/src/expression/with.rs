@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use mago_allocator::Arena;
+use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::get_mixed;
@@ -184,9 +185,14 @@ where
         };
         let class = context.codebase.get_class_like(object.name.as_bytes())?;
         let property = context.codebase.get_declaring_property(class.name.as_bytes(), property_name.as_bytes())?;
-        let settable = !property.flags.is_readonly()
-            && (!property.flags.is_virtual_property() || property.hooks.contains_key(&mago_word::word("set")));
 
-        (!settable).then(|| class.flags.is_sharp())
+        (!is_set_by_with(property)).then(|| class.flags.is_sharp())
     })
+}
+
+/// Whether `with` and an object initializer can set `property`: it has storage that is not `readonly`, as an `init` or a
+/// `set` accessor gives, or a `set` hook.
+pub(crate) fn is_set_by_with(property: &PropertyMetadata) -> bool {
+    !property.flags.is_readonly()
+        && (!property.flags.is_virtual_property() || property.hooks.contains_key(&mago_word::word("set")))
 }

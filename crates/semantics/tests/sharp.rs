@@ -2251,7 +2251,7 @@ fn a_method_refused_at_its_name_has_its_body_checked() {
 /// A member refused at its name, a modifier or a type keeps its parameters, initial values and body checked.
 #[test]
 fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    void __get(string name = _SERVER[\"x\"]);\n}\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n        echo \"a\";\n    }\n}\n\nclass Report\n{\n    int count = __LINE__;\n    const int MAX = __LINE__;\n\n    public Report(public int id = __LINE__, &total = __LINE__)\n    {\n    }\n\n    int run()\n    {\n        Map<float, callable> rows = [:];\n        echo \"b\";\n        return 1;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    void __get(string name = _SERVER[\"x\"]);\n}\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n        echo \"a\";\n    }\n}\n\nclass Report\n{\n    int count = __LINE__;\n    const int MAX = __LINE__;\n\n    public Report(public int id = __LINE__, &total = __LINE__)\n    {\n    }\n\n    int run()\n    {\n        Map<Any, callable> rows = [:];\n        echo \"b\";\n        return 1;\n    }\n}\n";
     let line = "write `Position.current().line`.";
 
     assert_eq!(
@@ -2269,8 +2269,8 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "23:45 A by-reference parameter is not supported yet in PHP#.".to_owned(),
             format!("23:54 PHP# has no `__LINE__`: {line}"),
             "27:9 A method without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
-            "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.".to_owned(),
-            "29:20 This type is not supported yet in PHP#.".to_owned(),
+            "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.".to_owned(),
+            "29:18 This type is not supported yet in PHP#.".to_owned(),
             "30:9 PHP# has no `echo`: write `printf` or `fwrite`.".to_owned(),
         ]
     );
@@ -2350,9 +2350,9 @@ fn a_constructor_in_a_refused_namespace_is_a_constructor() {
 #[test]
 fn a_map_key_is_refused_once() {
     let code = leak(method(
-        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<float, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<int?, int> counts = [:];\n        return 1;\n",
+        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        return 1;\n",
     ));
-    let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.";
+    let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.";
 
     assert_eq!(
         issues(code),
@@ -3676,12 +3676,12 @@ fn a_type_argument_takes_a_question_mark_in_a_signature_and_a_local() {
 
 #[test]
 fn an_interface_method_takes_and_returns_list_and_map_types() {
-    let code = "interface Grouped\n{\n    List<int> sizes(Map<string, List<int>> groups);\n\n    Map<float, int> rounded();\n}\n";
+    let code = "interface Grouped\n{\n    List<int> sizes(Map<string, List<int>> groups);\n\n    Map<Any, int> rounded();\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "5:9 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`."
+            "5:9 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
         ]
     );
 }
@@ -3727,33 +3727,30 @@ fn a_type_with_type_arguments_other_than_list_map_or_set_is_not_supported_yet() 
     );
 }
 
-/// The first `Set` slice holds `int`, `string` and backed enums, which run as the keys of a PHP array. A named type
-/// may be a backed enum, which only the analyzer knows, so it passes here.
+/// A `Set`'s element takes exactly what a `Map`'s key takes. A named type may be an enum, a struct or a class that
+/// declares `operator ==`, which only the analyzer knows, so it passes here.
 #[test]
-fn a_set_of_an_element_other_than_int_string_or_a_named_type_is_not_supported_yet() {
+fn a_set_element_takes_what_a_map_key_takes() {
     let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e)\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:55 This type is not supported yet in PHP#.",
-            "3:69 This type is not supported yet in PHP#.",
-            "3:82 This type is not supported yet in PHP#.",
+            "3:86 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
         ]
     );
 }
 
-/// A named key type may have a backing value, which only the analyzer knows, so it passes here.
+/// A key of a built-in type with `==` and `hash()`, nullable or not, keys a `Map`. A named key type may be an enum, a
+/// struct or a class that declares `operator ==`, which only the analyzer knows, so it passes here.
 #[test]
-fn a_map_key_that_is_not_int_string_or_a_named_type_is_an_error() {
-    let code = "class Report\n{\n    public Map<float, int> run(Map<Line, int> a, Map<int?, int> b, Map<string, Map<bool, int>> c)\n    {\n        return [:];\n    }\n}\n";
+fn a_map_key_without_equality_by_its_kind_is_an_error() {
+    let code = "class Report\n{\n    public Map<float, int> run(Map<Line, int> a, Map<int?, int> b, Map<string, Map<bool, int>> c, Map<List<int>, int> d)\n    {\n        return [:];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:16 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.",
-            "3:54 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.",
-            "3:84 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.",
+            "3:103 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
         ]
     );
 }

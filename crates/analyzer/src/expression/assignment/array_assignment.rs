@@ -48,9 +48,11 @@ use crate::expression::array::get_set_literal_type;
 use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
+use crate::expression::assignment::static_property_assignment;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::get_declared_type;
 use crate::resolver::method::with_declared_kinds;
+use crate::resolver::static_property::StaticProperty;
 use crate::utils::expression::array::ArrayTarget;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::get_block_expression_id;
@@ -269,21 +271,33 @@ where
         }
     }
 
+    // A PHP# `Class.name` names a static property, which the write updates as `Class::$name` does.
     if let Expression::Access(Access::Property(property_access)) = &root_array_expression {
-        property_assignment::analyze(
-            context,
-            block_context,
-            artifacts,
-            property_access,
-            false,
-            &root_array_type,
-            Some(root_array_expression),
-            if root_is_array_access_object {
-                PropertyWriteKind::ArrayAccessMutation
-            } else {
-                PropertyWriteKind::Mutation
-            },
-        )?;
+        match StaticProperty::from_property_access(property_access, context.resolved_names) {
+            Some(static_property) => static_property_assignment::analyze(
+                context,
+                block_context,
+                artifacts,
+                static_property,
+                &root_array_type,
+                Some(root_array_expression),
+                root_var_id,
+            )?,
+            None => property_assignment::analyze(
+                context,
+                block_context,
+                artifacts,
+                property_access,
+                false,
+                &root_array_type,
+                Some(root_array_expression),
+                if root_is_array_access_object {
+                    PropertyWriteKind::ArrayAccessMutation
+                } else {
+                    PropertyWriteKind::Mutation
+                },
+            )?,
+        }
     }
 
     let root_array_type = Rc::new(root_array_type);

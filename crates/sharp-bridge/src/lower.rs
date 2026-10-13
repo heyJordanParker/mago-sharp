@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use mago_allocator::LocalArena;
-use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::scanner::get_union_from_hint;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -210,6 +209,7 @@ pub(crate) mod inline;
 pub(crate) mod types;
 
 use types::DeclarationKind;
+use types::PlainParameter;
 use types::Types;
 use types::agreed_kind;
 use types::class_value_classes;
@@ -2542,11 +2542,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 if let Expression::ArrayAccess(access) = assignment.lhs
                     && match access.array.unparenthesized() {
                         Expression::ArrayAccess(element) => self.is_list(element.array),
-                        Expression::Access(Access::Property(PropertyAccess {
-                            object,
-                            property: ClassLikeMemberSelector::Identifier(name),
-                            ..
-                        })) => self.types.property_has_hooks(self.types.expression_type(object), name.value),
+                        // `Class.name` is a static property, which PHP gives no hooks.
+                        Expression::Access(Access::Property(
+                            property @ PropertyAccess {
+                                object,
+                                property: ClassLikeMemberSelector::Identifier(name),
+                                ..
+                            },
+                        )) if self.names.static_property_class(property).is_none() => {
+                            self.types.property_has_hooks(self.types.expression_type(object), name.value)
+                        }
                         _ => false,
                     }
                 {
@@ -2600,16 +2605,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             Expression::Call(Call::Method(call)) => self.method_call(expression, call),
             Expression::Call(Call::Function(FunctionCall {
-                function: Expression::Identifier(function),
+                function: call_function @ Expression::Identifier(function),
                 argument_list,
             })) => {
-                // A local holds a function, so `f(x)` calls it as PHP's `$f($x)`, and any other name is the global
-                // function's.
-                let function = match self.names.binding(function) {
-                    Some(Binding::Local(_)) => self.variable(function.span(), function.value()),
-                    _ => self.string(ZEND_NAME_FQ, self.line(function), function.value()),
+                // A local holds a function, so `f(x)` calls it as PHP's `$f($x)`, with the parameters of the closure
+                // it holds, and any other name is the global function's.
+                let (function, parameters) = match self.names.binding(function) {
+                    Some(Binding::Local(_)) => {
+                        (self.variable(function.span(), function.value()), self.types.closure_parameters(call_function))
+                    }
+                    _ => (
+                        self.string(ZEND_NAME_FQ, self.line(function), function.value()),
+                        self.types.call_parameters(expression),
+                    ),
                 };
-                let parameters = self.types.call_parameters(expression);
 
                 self.call(argument_list, parameters, |this, arguments| {
                     this.node(SHARP_AST_CALL, 0, line, &[function, arguments])
@@ -3633,7 +3642,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// gave a PHP array, spec section 12: the one conversion where plain PHP's value enters PHP#. `first` is the first
     /// read of `name`, which may assign it. The caller asks only about a type [`Self::crossing_array`] finds a
     /// collection in. A `Map` is `\Sharp\Map::from($name)` and a `Set` is `new \Sharp\Set($name)`. PHP holds an
-    /// all-digit `string` key as an `int`, so a `Map` whose key type is `string` takes each key back as its `string`:
+    /// all-digit `string` key as an `int`, so a `Map` whose key type holds `string` and no `int` takes each key back as
+    /// its `string`:
     /// `new \Sharp\Map(\array_merge([], ...\array_map(fn ($key#N, $value#M) => [(string) $key#N, $value#M],
     /// \array_keys($name), $name)))`, and a `Map` keyed by a backed enum takes each backing value back as its case,
     /// `\App\Status::from($key#N)`, as plain PHP passes it. The elements cross first,
@@ -3660,7 +3670,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let built = match array {
             TArray::List(_) => values,
             TArray::Set(_) => self.collection_new(line, b"Sharp\\Set", Some(values)),
-            TArray::Keyed(_) if key_type.is_string() || self.backed_enum(&key_type).is_some() => {
+            TArray::Keyed(_)
+                if key_type.has_string() && !key_type.has_int() || self.backed_enum(&key_type).is_some() =>
+            {
                 let [key, value] = ["key", "value"].map(|base| self.hidden(base));
                 let key_read = self.variable(span, &key);
                 let key_text = match self.backed_enum(&key_type) {
@@ -4317,7 +4329,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn call(
         &mut self,
         list: &ArgumentList,
-        parameters: Option<&[FunctionLikeParameterMetadata]>,
+        parameters: Option<Vec<PlainParameter>>,
         call: impl FnOnce(&mut Self, u32) -> u32,
     ) -> u32 {
         let Some(parameters) = parameters else {
@@ -4336,18 +4348,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let parameter = match argument {
                 Argument::Positional(_) => parameters
                     .get(position)
-                    .or_else(|| parameters.last().filter(|parameter| parameter.flags.is_variadic())),
-                Argument::Named(named) => parameters
-                    .iter()
-                    .find(|parameter| parameter.get_name().0.as_bytes().get(1..) == Some(named.name.value)),
+                    .or_else(|| parameters.last().filter(|parameter| parameter.is_variadic()))
+                    .copied(),
+                Argument::Named(named) => {
+                    parameters.iter().copied().find(|parameter| parameter.name() == Some(named.name.value))
+                }
             };
-            let takes_array = parameter.and_then(|parameter| parameter.get_type_metadata()).is_some_and(|declared| {
-                declared.type_union.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_)))
-            });
+            let takes_array = parameter
+                .and_then(PlainParameter::declared_type)
+                .is_some_and(|declared| declared.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))));
             let crossed = match (takes_array, spread, self.typed_local(value)) {
-                (_, false, Some((name, declared)))
-                    if parameter.is_some_and(|parameter| parameter.flags.is_by_reference()) =>
-                {
+                (_, false, Some((name, declared))) if parameter.is_some_and(PlainParameter::is_by_reference) => {
                     if self.crossing_array(&declared).is_some() {
                         written.push((value.span(), name, declared, takes_array));
                     }

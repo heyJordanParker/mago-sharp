@@ -8,10 +8,10 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::get_array_parameters;
-use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_php_received_type;
+use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
@@ -29,8 +29,8 @@ use crate::invocation::Invocation;
 use crate::invocation::InvocationTarget;
 use crate::invocation::resolver::resolve_invocation_type;
 use crate::statement::class_like::r#struct::report_class_held_by_key;
+use crate::statement::function_like::collection_key_error;
 use crate::statement::function_like::known_type_or_error;
-use crate::statement::function_like::map_key_error;
 use crate::utils::names::display_sharp_type;
 
 pub fn fetch_invocation_return_type<'ctx, 'arena, A>(
@@ -71,11 +71,11 @@ where
             check_sorted_by_key(context, selector, key_type);
         } else if keys_a_map_by_its_function(&invocation.target) && fills_key_parameter {
             // A key that keys no `Map`, or a struct that holds a class instance, spec section 10, is refused.
-            let is_refused = if get_backing_key_type(key_type, context.codebase).is_always_array_key(true) {
+            let is_refused = if is_key_type(key_type, context.codebase) {
                 report_class_held_by_key(context, key_type, false, selector.span())
             } else {
                 let key_name = display_sharp_type(context, key_type);
-                let error = map_key_error(context, key_type, &key_name, selector.span());
+                let error = collection_key_error(key_name.as_str(), false, selector.span());
                 context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
 
                 true

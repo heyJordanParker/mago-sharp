@@ -10,6 +10,8 @@ use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::callable::parameter::TCallableParameter;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
@@ -359,7 +361,7 @@ impl<'analysis> Types<'analysis> {
     /// The parameters of the plain PHP function or method the call `call` runs, as the analysis resolved it, which a
     /// `Map` or a `Set` crosses into as a PHP array where the parameter's declared type names `array`. None for a PHP#
     /// one, which takes the object.
-    pub(crate) fn call_parameters(&self, call: &Expression) -> Option<&'analysis [FunctionLikeParameterMetadata]> {
+    pub(crate) fn call_parameters(&self, call: &Expression) -> Option<Vec<PlainParameter<'analysis>>> {
         let mut callees = self.artifacts.get_callees(call);
         let (Some(CallTarget::FunctionLike { callee, .. }), None) = (callees.next(), callees.next()) else {
             return None;
@@ -372,18 +374,31 @@ impl<'analysis> Types<'analysis> {
         plain_parameters(owner, self.codebase.get_function_like(callee))
     }
 
+    /// The parameters of the plain PHP closure a local holds, which the call `local(…)` runs, as the signature of the
+    /// local's type gives them, as [`Self::call_parameters`] gives a call's. None for a function value whose signature
+    /// PHP# wrote, which takes the object.
+    pub(crate) fn closure_parameters(&self, local: &Expression) -> Option<Vec<PlainParameter<'analysis>>> {
+        let mut signatures =
+            self.artifacts.get_expression_type(local)?.types.iter().filter_map(|atomic| match atomic {
+                TAtomic::Callable(TCallable::Signature(signature)) => Some(signature),
+                _ => None,
+            });
+        let (Some(signature), None) = (signatures.next(), signatures.next()) else {
+            return None;
+        };
+
+        signature.effects.is_none().then(|| signature.get_parameters().iter().map(PlainParameter::Callable).collect())
+    }
+
     /// The parameters of the constructor `new` runs for the fully qualified class name `class`, as
     /// [`Self::call_parameters`] gives a call's.
-    pub(crate) fn constructor_parameters(&self, class: &[u8]) -> Option<&'analysis [FunctionLikeParameterMetadata]> {
+    pub(crate) fn constructor_parameters(&self, class: &[u8]) -> Option<Vec<PlainParameter<'analysis>>> {
         plain_parameters(class, self.codebase.get_declaring_method(class, b"__construct"))
     }
 
     /// The parameters of the constructor `parent::__construct` reaches from the fully qualified class name `class`, as
     /// [`Self::call_parameters`] gives a call's.
-    pub(crate) fn parent_constructor_parameters(
-        &self,
-        class: &[u8],
-    ) -> Option<&'analysis [FunctionLikeParameterMetadata]> {
+    pub(crate) fn parent_constructor_parameters(&self, class: &[u8]) -> Option<Vec<PlainParameter<'analysis>>> {
         plain_parameters(b"", self.codebase.get_parent_constructor(class))
     }
 
@@ -554,12 +569,54 @@ pub(crate) fn class_value_classes(r#type: &TUnion) -> Option<Vec<&[u8]>> {
 fn plain_parameters<'function>(
     owner: &[u8],
     function: Option<&'function FunctionLikeMetadata>,
-) -> Option<&'function [FunctionLikeParameterMetadata]> {
+) -> Option<Vec<PlainParameter<'function>>> {
     let function = function?;
     let sharp =
         function.flags.is_sharp() || owner.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"sharp\\"));
 
-    (!sharp).then_some(function.parameters.as_slice())
+    (!sharp).then(|| function.parameters.iter().map(PlainParameter::Declared).collect())
+}
+
+/// A parameter of plain PHP code a call runs, which a `Map` or a `Set` crosses into: a declared function's, method's or
+/// constructor's, or one of the signature of a plain PHP closure a local holds.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PlainParameter<'analysis> {
+    Declared(&'analysis FunctionLikeParameterMetadata),
+    Callable(&'analysis TCallableParameter),
+}
+
+impl<'analysis> PlainParameter<'analysis> {
+    /// The name a named argument gives the parameter, without its `$`.
+    pub(crate) fn name(self) -> Option<&'analysis [u8]> {
+        let name = match self {
+            Self::Declared(parameter) => parameter.get_name(),
+            Self::Callable(parameter) => parameter.get_name()?,
+        };
+
+        name.0.as_bytes().get(1..)
+    }
+
+    /// The type the parameter declares.
+    pub(crate) fn declared_type(self) -> Option<&'analysis TUnion> {
+        match self {
+            Self::Declared(parameter) => parameter.get_type_metadata().map(|declared| &declared.type_union),
+            Self::Callable(parameter) => parameter.get_type_signature(),
+        }
+    }
+
+    pub(crate) fn is_variadic(self) -> bool {
+        match self {
+            Self::Declared(parameter) => parameter.flags.is_variadic(),
+            Self::Callable(parameter) => parameter.is_variadic(),
+        }
+    }
+
+    pub(crate) fn is_by_reference(self) -> bool {
+        match self {
+            Self::Declared(parameter) => parameter.flags.is_by_reference(),
+            Self::Callable(parameter) => parameter.is_by_reference(),
+        }
+    }
 }
 
 /// The kind of member every class a receiver can be declares, which the checker requires to be one kind. Its details,

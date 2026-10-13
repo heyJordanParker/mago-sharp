@@ -187,8 +187,12 @@ where
         return if block_context.flags.inside_isset() { value_type.as_nullable() } else { value_type };
     }
 
+    // A PHP# `Map` keeps `null` as a key of its own, where PHP turns it into `''`, so its key type alone decides whether
+    // a `null` index fits.
     let mut null_index_issues = vec![];
-    if index_type.is_null() && !index_type.is_keyed_array() {
+    let keeps_null = context.dialect.is_sharp()
+        && array_like_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
+    if !keeps_null && index_type.is_null() && !index_type.is_keyed_array() {
         null_index_issues.push((
             IssueCode::NullArrayIndex,
             Issue::error(format!(
@@ -206,7 +210,7 @@ where
         ));
     }
 
-    if index_type.is_nullable() && !index_type.ignore_nullable_issues() {
+    if !keeps_null && index_type.is_nullable() && !index_type.ignore_nullable_issues() {
         null_index_issues.push((
             IssueCode::PossiblyNullArrayIndex,
             Issue::warning(format!(

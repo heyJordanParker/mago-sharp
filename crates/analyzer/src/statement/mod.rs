@@ -67,9 +67,8 @@ use crate::expression::assignment::analyze_assignment;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
 use crate::statement::function_like::known_type_or_error;
-use crate::statement::function_like::report_map_keys_without_backing_value;
+use crate::statement::function_like::report_collection_keys_without_equality;
 use crate::statement::function_like::report_undefined_types;
-use crate::statement::function_like::report_unsupported_set_elements;
 use crate::utils::docblock::populate_docblock_variables;
 use crate::utils::docblock::populate_docblock_variables_excluding;
 use crate::utils::expression::expression_has_observable_side_effect;
@@ -417,8 +416,7 @@ where
         }
         None => report_undefined_types(context, &local_type, hint.span()),
     }
-    report_map_keys_without_backing_value(context, &local_type, hint.span());
-    report_unsupported_set_elements(context, &local_type, hint.span());
+    report_collection_keys_without_equality(context, &local_type, hint.span());
     let local_type = (Rc::new(known_type_or_error(local_type)), hint.span());
     block_context.local_types.insert(variable_id, local_type.clone());
 
