@@ -332,7 +332,9 @@ fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
 }
 
 /// `SOURCE_LISTING` stamps the names of a folder's `.sharp` files, so a file appearing, going or being renamed changes
-/// the stamp, and an edit, a file of another kind, a folder named like a source, and a file below the folder leave it.
+/// the stamp, and an edit, a file of another kind, a folder named like a source, a file below the folder, a file named
+/// only `.sharp`, and a dangling link, such as the one Emacs leaves beside an unsaved buffer, leave it, as the engine
+/// leaves them.
 #[test]
 fn a_source_listing_stamps_the_names_of_the_sharp_files_of_its_folder() {
     let directory = tempfile::tempdir().unwrap();
@@ -349,7 +351,10 @@ fn a_source_listing_stamps_the_names_of_the_sharp_files_of_its_folder() {
     write(root, "app/Report.sharp", "namespace App;\n");
     write(root, "app/Model.php", "<?php\n");
     write(root, "app/Deep/Inner.sharp", SOURCE);
+    write(root, "app/.sharp", SOURCE);
     fs::create_dir_all(root.join("app/Folder.sharp")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("dev@laptop.4242:1760000000", root.join("app/.#Report.sharp")).unwrap();
     assert_eq!(listing(root), stamped, "no name of a .sharp file of the folder changed");
 
     write(root, "app/Quiet.sharp", SOURCE);

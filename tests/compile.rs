@@ -110,6 +110,29 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
     assert!(printed(&output).contains("Compiled 2 PHP# files into .sharp/."), "{}", printed(&output));
 }
 
+/// A dangling link named like a source, as Emacs leaves beside a buffer with unsaved changes, is no source: the loader
+/// skips it, and so does the listing of the folder of a file whose code reaches an extension, spec section 26.
+#[cfg(unix)]
+#[test]
+fn compile_skips_a_dangling_link_beside_a_file_that_reaches_an_extension() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "app/Shout.sharp",
+        "namespace App;\n\npublic static class Shout\n{\n    extension(string text)\n    {\n        public string loud() => text;\n    }\n}\n",
+    );
+    write(
+        root,
+        "app/Report.sharp",
+        "namespace App;\n\npublic class Report\n{\n    public string text(string name) => name.loud();\n}\n",
+    );
+    std::os::unix::fs::symlink("dev@laptop.4242:1760000000", root.join("app/.#Report.sharp")).unwrap();
+
+    compile_succeeds(root);
+    assert!(compiled(root, "app/Report.sharp").exists());
+}
+
 #[test]
 fn compile_refuses_a_file_with_an_error_writes_the_others_and_deletes_its_old_compiled_file() {
     let directory = project(ORDER, MONEY);
@@ -897,12 +920,14 @@ fn compile_proves_a_law_whose_calls_go_from_one_file_to_another_and_back_with_no
     assert!(!read(root, ".sharp/.lean/Code/App/Shared/Alpha.lean").contains("import Code."));
 }
 
+/// A call through the class, as `ShapeMath.doubled(s)`, is that static call already, as in C#, so it compiles and its
+/// law is proved the same way.
 #[test]
 fn compile_proves_a_law_through_an_extension_member_as_the_static_call_it_runs_as() {
     let directory = lawful_project(&[
         (
             "app/Shared/Shape.sharp",
-            "namespace App.Shared;\n\nimport App.Shared.ShapeMath;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    public static int doubledOr(Shape? s) => s?.doubled() ?? 0;\n    public static bool flatOr(Shape? s) => s?.isFlat ?? true;\n\n    law doubles(Shape s) => s.doubled() == s.sides + s.sides;\n    law flat(Shape s) => s.isFlat == (s.sides < 3);\n    law twice(int n) => n.twice() == n + n;\n    law absent(int unused) => Shape.doubledOr(null) == 0 && Shape.flatOr(null);\n}\n",
+            "namespace App.Shared;\n\nimport App.Shared.ShapeMath;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    public static int doubledOr(Shape? s) => s?.doubled() ?? 0;\n    public static bool flatOr(Shape? s) => s?.isFlat ?? true;\n    public static int direct(Shape s) => ShapeMath.doubled(s) + (ShapeMath.isFlat(s) ? 1 : 0);\n\n    law doubles(Shape s) => s.doubled() == s.sides + s.sides;\n    law flat(Shape s) => s.isFlat == (s.sides < 3);\n    law twice(int n) => n.twice() == n + n;\n    law absent(int unused) => Shape.doubledOr(null) == 0 && Shape.flatOr(null);\n    law throughTheClass(Shape s) => ShapeMath.doubled(s) == s.doubled() && ShapeMath.isFlat(s) == s.isFlat;\n}\n",
         ),
         (
             "app/Shared/ShapeMath.sharp",

@@ -33,8 +33,9 @@ pub const COMPILED_FOLDER: &str = ".sharp";
 
 /// The last segment of an input that stands for the `.sharp` files of its folder, as in `app/Shop/*.sharp`.
 ///
-/// Its stamp is the listing of the names of the regular files whose name ends in `.sharp`, each followed by a newline,
-/// in byte order: its size is the listing's length, its modification time zero, and its hash the listing's. A file
+/// Its stamp is the listing of the names of the regular files whose name ends in `.sharp` after at least one other
+/// byte, each followed by a newline, in byte order: its size is the listing's length, its modification time zero, and
+/// its hash the listing's. A link counts as the file it reaches, and a link that reaches none is left out. A file
 /// appearing or going changes it, and an edit doesn't.
 pub const SOURCE_LISTING: &str = "*.sharp";
 
@@ -343,7 +344,12 @@ fn source_listing(folder: &Path) -> io::Result<Vec<u8>> {
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name().into_encoded_bytes();
-        if name.ends_with(b".sharp") && std::fs::metadata(entry.path())?.is_file() {
+        // A link whose target is gone, or a file deleted since the folder was read, is no file, as the loader and the
+        // engine skip it.
+        if name.len() > b".sharp".len()
+            && name.ends_with(b".sharp")
+            && std::fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_file())
+        {
             names.push(name);
         }
     }

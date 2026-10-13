@@ -10,6 +10,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::union::TUnion;
+use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -40,9 +41,10 @@ pub(crate) enum Extension {
 /// receiver that may be `null` as it does for any member.
 ///
 /// The receiver's type picks among the extensions the file imports or its namespace declares, and only where none of
-/// those fits, among the standard library's on the types every file has them for.
-/// Two that fit are an error naming both classes, and one that fits but the file does not import is an error naming
-/// the import to add. Either still reaches its member, so the access is checked as it would run.
+/// those fits, among the standard library's on the types every file has them for. Of those, the one whose receiver
+/// fits inside every other's runs. Two that fit with neither inside the other are an error naming where each comes
+/// from, and one that fits but the file does not import is an error naming the import to add. Either still reaches its
+/// member, so the access is checked as it would run.
 pub(crate) fn resolve_extension<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     receiver: &TUnion,
@@ -79,6 +81,7 @@ where
     let in_scope = if own.is_empty() { default } else { own };
     let (in_scope, other_kind): (Vec<_>, Vec<_>) =
         in_scope.into_iter().partition(|(_, metadata)| metadata.flags.contains(flag));
+    let in_scope = most_specific(codebase, in_scope);
     let elsewhere = elsewhere.into_iter().find(|(_, metadata)| metadata.flags.contains(flag));
     let receiver = display_type(context, receiver);
     let (code, access) = if flag == MetadataFlags::EXTENSION_METHOD {
@@ -89,25 +92,18 @@ where
 
     match (in_scope.as_slice(), other_kind.first(), elsewhere) {
         ([(method, _)], ..) => Some(Extension::Member(*method)),
-        ([(method, _), others @ ..], ..) => {
-            let classes: Vec<String> = std::iter::once(method)
-                .chain(others.iter().map(|(other, _)| other))
-                .map(|method| format!("`{}`", display_class_like_name(context, method.get_class_name())))
-                .collect();
-            let (last, rest) = classes.split_last()?;
+        ([(method, _), ..], ..) => {
+            let written = String::from_utf8_lossy(name.value);
+            let (message, help) = ambiguity(context, &in_scope, &written);
             context.collector.report_with_code(
                 if flag == MetadataFlags::EXTENSION_METHOD {
                     IssueCode::AmbiguousObjectMethodAccess
                 } else {
                     IssueCode::AmbiguousObjectPropertyAccess
                 },
-                Issue::error(format!(
-                    "The imported extensions {} and {last} each add `{}` to `{receiver}`.",
-                    rest.join(", "),
-                    String::from_utf8_lossy(name.value)
-                ))
-                .with_annotation(Annotation::primary(name.span()).with_message(access))
-                .with_help("Import only one of them."),
+                Issue::error(format!("{message} each add `{written}` to `{receiver}`."))
+                    .with_annotation(Annotation::primary(name.span()).with_message(access))
+                    .with_help(help),
             );
 
             Some(Extension::Member(*method))
@@ -163,9 +159,109 @@ fn fits(codebase: &CodebaseMetadata, receiver: &TUnion, metadata: &FunctionLikeM
     })
 }
 
-/// Whether the extensions of the static class `class` apply in this file ahead of the ones every file has, spec
-/// sections 23 and 26: the file imports the class, or is in the class's namespace, as the declaring file is.
-fn is_imported_or_in_namespace<A>(context: &Context<'_, '_, A>, class: Word) -> bool
+/// The members of `candidates` whose receiver fits inside every other candidate's, as C# overload resolution and
+/// Kotlin pick the most specific receiver, spec section 26: an extension on `AuditedWallet` over one on `Wallet`. All
+/// of `candidates` when none does, so they stay ambiguous.
+fn most_specific<'ctx>(
+    codebase: &CodebaseMetadata,
+    candidates: Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)>,
+) -> Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)> {
+    let specific: Vec<_> = candidates
+        .iter()
+        .filter(|(_, metadata)| {
+            metadata
+                .parameters
+                .first()
+                .and_then(|parameter| parameter.get_type_metadata())
+                .is_some_and(|own| candidates.iter().all(|(_, other)| fits(codebase, &own.type_union, other)))
+        })
+        .copied()
+        .collect();
+
+    if specific.is_empty() { candidates } else { specific }
+}
+
+/// The start of the error for the extensions `candidates`, which compete for the member `written`, naming where each
+/// comes from, and the help whose fix removes the competition. The candidates are all of one tier: the file's
+/// namespace and its imports, or else the standard library's that every file has.
+fn ambiguity<A>(
+    context: &Context<'_, '_, A>,
+    candidates: &[(MethodIdentifier, &FunctionLikeMetadata)],
+    written: &str,
+) -> (String, String)
+where
+    A: Arena,
+{
+    let mut own = Vec::new();
+    let mut imported = Vec::new();
+    let mut default = Vec::new();
+    for (method, _) in candidates {
+        let class = method.get_class_name();
+        let named = format!("`{}`", display_class_like_name(context, class));
+        if is_in_namespace(context, class) {
+            own.push(named);
+        } else if let Some(alias) = context.imported_names.get(&ascii_lowercase_word(class.as_bytes())) {
+            let full = context.codebase.get_class_like(class.as_bytes()).map_or(class, |class| class.original_name);
+            let renamed = if alias.as_bytes().eq_ignore_ascii_case(short_name(full).as_bytes()) {
+                String::new()
+            } else {
+                format!(" as {alias}")
+            };
+            imported.push((named, format!("`import {}{renamed};`", full.as_str_lossy().replace('\\', "."))));
+        } else {
+            default.push(named);
+        }
+    }
+    own.sort();
+    imported.sort();
+    default.sort();
+
+    let namespace = match context.scope.namespace_name() {
+        Some(namespace) if !namespace.is_empty() => {
+            format!("namespace `{}`", String::from_utf8_lossy(namespace).replace('\\', "."))
+        }
+        _ => "the global namespace".to_owned(),
+    };
+    let (imported, imports): (Vec<String>, Vec<String>) = imported.into_iter().unzip();
+    let groups: Vec<String> = [
+        (!own.is_empty()).then(|| format!("{} of {namespace}", extensions("extension", &own))),
+        (!imported.is_empty()).then(|| extensions("imported extension", &imported)),
+        (!default.is_empty()).then(|| extensions("standard library extension", &default)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let message = format!("The {}", groups.join(" and the "));
+
+    let help = match (own.as_slice(), imports.as_slice(), default.as_slice()) {
+        ([], [_, _, ..], _) => format!("Remove all but one of {}.", listed(&imports)),
+        ([_], [_, ..], _) => format!("Remove {}.", listed(&imports)),
+        ([], [], [_, ..]) => {
+            "Import the class of the one to call. An imported extension shadows the standard library's.".to_owned()
+        }
+        _ => format!("Rename `{written}` in all but one of them."),
+    };
+
+    (message, help)
+}
+
+/// `{kind} A` for one name, and `{kind}s A and B` for more.
+fn extensions(kind: &str, names: &[String]) -> String {
+    if let [name] = names { format!("{kind} {name}") } else { format!("{kind}s {}", listed(names)) }
+}
+
+/// `a`, `a and b`, or `a, b and c`.
+fn listed(items: &[String]) -> String {
+    match items.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
+/// Whether the static class `class` is in this file's namespace, as the declaring file is, so its extensions apply with
+/// no import, spec section 26.
+fn is_in_namespace<A>(context: &Context<'_, '_, A>, class: Word) -> bool
 where
     A: Arena,
 {
@@ -173,7 +269,15 @@ where
     let namespace = name.iter().rposition(|byte| *byte == b'\\').map_or(&b""[..], |end| &name[..end]);
 
     namespace.eq_ignore_ascii_case(context.scope.namespace_name().unwrap_or_default())
-        || context.imported_names.contains_key(&ascii_lowercase_word(name))
+}
+
+/// Whether the extensions of the static class `class` apply in this file ahead of the ones every file has, spec
+/// sections 23 and 26: the file imports the class, or is in the class's namespace, as the declaring file is.
+fn is_imported_or_in_namespace<A>(context: &Context<'_, '_, A>, class: Word) -> bool
+where
+    A: Arena,
+{
+    is_in_namespace(context, class) || context.imported_names.contains_key(&ascii_lowercase_word(class.as_bytes()))
 }
 
 /// Whether this file has the extension member `metadata` of the static class `class` with no import, spec section

@@ -175,9 +175,16 @@ impl<'analysis> Types<'analysis> {
 
     /// The extension member, spec section 26, that the method call or property read `access` runs, as the analysis
     /// resolved it: the public static method of its static class, which takes the receiver first. None for any other
-    /// call or read.
+    /// call or read, and for a call through the class, as `WalletExtensions.total(wallet)`, which is that static call
+    /// already, as in C#.
     #[must_use]
     pub fn extension(&self, access: &Expression) -> Option<Declaration> {
+        if let Expression::Call(Call::Method(call)) = access
+            && self.names.static_call_class(call).is_some()
+        {
+            return None;
+        }
+
         let mut callees = self.artifacts.get_callees(access);
         let (Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }), None) =
             (callees.next(), callees.next())

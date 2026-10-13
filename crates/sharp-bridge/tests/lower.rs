@@ -13196,7 +13196,8 @@ fn extension_body(signature: &str, statements: &str) -> String {
 ///
 /// Spec section 26: a member an extension adds runs as the static call of its method with the receiver first, for a
 /// method and a computed property alike, on any receiver: a `string`, an object of a final class or of a class a
-/// subclass can extend, and a value of `Any`. The checker chose it from the type the code shows.
+/// subclass can extend, and a value of `Any`. The checker chose it from the type the code shows. Called through its
+/// class, as `Extensions.total(order, 2)`, it is that static call already, as in C#.
 #[test]
 fn an_extension_member_is_the_static_call_of_its_method() {
     assert_eq!(
@@ -13260,6 +13261,34 @@ fn an_extension_member_is_the_static_call_of_its_method() {
                         ZVAL "value"
         "#}
     );
+    assert_eq!(
+        extension_body(
+            "string run(Order order)",
+            "        return (string) Extensions.total(order, 2) + (Extensions.isEmpty(order) ? \"y\" : \"n\");\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [8]
+                  CAST [6]
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "total"
+                      ARG_LIST
+                        VAR
+                          ZVAL "order"
+                        ZVAL 2
+                  CONDITIONAL [1]
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "isEmpty"
+                      ARG_LIST
+                        VAR
+                          ZVAL "order"
+                    ZVAL "y"
+                    ZVAL "n"
+        "#}
+    );
 }
 
 /// ```php
@@ -13306,6 +13335,46 @@ fn the_type_the_code_shows_chooses_between_an_extension_and_a_subclass_member() 
                     ZVAL "total"
                     ARG_LIST
                       ZVAL 2
+        "#}
+    );
+}
+
+/// ```php
+/// return \App\Rush\Ranks::rank($rush) + \App\Text\Ranks::rank($order);
+/// ```
+///
+/// Spec section 26: of two imported extensions that fit, the one whose receiver is the most specific runs, as in C# and
+/// Kotlin: `Rush.Ranks` on a value shown as a `RushOrder`, and `Text.Ranks` on one shown as an `Order`.
+#[test]
+fn the_extension_with_the_most_specific_receiver_runs() {
+    let orders = (
+        "src/App/Text/Ranks.sharp",
+        "namespace App.Text;\n\nimport App.Order;\n\npublic static class Ranks\n{\n    extension(Order order)\n    {\n        public int rank() => 1;\n    }\n}\n",
+    );
+    let rush = (
+        "src/App/Rush/Ranks.sharp",
+        "namespace App.Rush;\n\nimport App.RushOrder;\n\npublic static class Ranks\n{\n    extension(RushOrder order)\n    {\n        public int rank() => 2;\n    }\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport App.Order;\nimport App.RushOrder;\nimport App.Rush.Ranks as RushRanks;\nimport App.Text.Ranks;\n\nclass Report\n{\n    public int run(RushOrder rush, Order order)\n    {\n        return rush.rank() + order.rank();\n    }\n}\n";
+
+    assert_eq!(
+        Lowered::with(code, &[ORDERS, orders, rush]).body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [1]
+                  STATIC_CALL
+                    ZVAL "App\\Rush\\Ranks"
+                    ZVAL "rank"
+                    ARG_LIST
+                      VAR
+                        ZVAL "rush"
+                  STATIC_CALL
+                    ZVAL "App\\Text\\Ranks"
+                    ZVAL "rank"
+                    ARG_LIST
+                      VAR
+                        ZVAL "order"
         "#}
     );
 }

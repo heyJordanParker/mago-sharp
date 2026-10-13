@@ -5001,22 +5001,84 @@ fn an_extension_the_file_imports_or_its_namespace_declares_shadows_a_default_one
         "src/App/Text/Loud.sharp",
         "namespace App.Text;\n\npublic static class Loud\n{\n    extension(string text)\n    {\n        public int shout() => 1;\n    }\n}\n",
     );
-    let louder = (
-        "src/Demo/Other/Louder.sharp",
-        "namespace Demo.Other;\n\npublic static class Louder\n{\n    extension(string text)\n    {\n        public int shout() => 1;\n    }\n}\n",
-    );
     let report = "namespace Demo;\n\npublic class Report\n{\n    public int text(string name) => name.shout();\n}\n";
     let importing = "namespace Demo;\n\nimport App.Text.Loud;\n\npublic class Report\n{\n    public int text(string name) => name.shout();\n}\n";
-    let both = "namespace Demo;\n\nimport Demo.Other.Louder;\n\npublic class Report\n{\n    public int text(string name) => name.shout();\n}\n";
 
     assert_messages(report, &[words, own], &[]);
     assert_messages(importing, &[words, imported], &[]);
-    assert_messages(
-        both,
-        &[words, own, louder],
-        &[
-            "7:42 ambiguous-object-method-access: The imported extensions `Louder` and `Loud` each add `shout` to `string`.",
-        ],
+}
+
+/// Spec section 26: two extensions the file has, each fitting the receiver as well as the other, are an error that
+/// names where each comes from, the file's namespace, an import or the standard library, and a help whose fix removes
+/// the competition: removing an import where that leaves one, importing one of the standard library's, and renaming
+/// the member otherwise.
+#[test]
+fn an_ambiguous_extension_names_where_each_competitor_comes_from() {
+    let wallet = ("src/Lib/Wallet.php", "<?php\n\nnamespace Lib;\n\nclass Wallet\n{\n}\n");
+    let own_one = (
+        "src/App/OwnOne.sharp",
+        "namespace App;\n\nimport Lib.Wallet;\n\npublic static class OwnOne\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 1;\n    }\n}\n",
+    );
+    let own_two = (
+        "src/App/OwnTwo.sharp",
+        "namespace App;\n\nimport Lib.Wallet;\n\npublic static class OwnTwo\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 2;\n    }\n}\n",
+    );
+    let far_one = (
+        "src/App/Far/FarOne.sharp",
+        "namespace App.Far;\n\nimport Lib.Wallet;\n\npublic static class FarOne\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 3;\n    }\n}\n",
+    );
+    let far_two = (
+        "src/App/Far/FarTwo.sharp",
+        "namespace App.Far;\n\nimport Lib.Wallet;\n\npublic static class FarTwo\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 4;\n    }\n}\n",
+    );
+    let own = (
+        "src/App/Caller.sharp",
+        "namespace App;\n\nimport Lib.Wallet;\n\npublic class Caller\n{\n    public int score(Wallet wallet) => wallet.score();\n}\n",
+    );
+    let imported = (
+        "src/App/Caller.sharp",
+        "namespace App;\n\nimport App.Far.FarOne;\nimport App.Far.FarTwo;\nimport Lib.Wallet;\n\npublic class Caller\n{\n    public int score(Wallet wallet) => wallet.score();\n}\n",
+    );
+    let mixed = (
+        "src/App/Caller.sharp",
+        "namespace App;\n\nimport App.Far.FarOne as Scores;\nimport Lib.Wallet;\n\npublic class Caller\n{\n    public int score(Wallet wallet) => wallet.score();\n}\n",
+    );
+    let words = (
+        "src/Sharp/Text/Words.sharp",
+        "namespace Sharp.Text;\n\npublic static class Words\n{\n    extension(string text)\n    {\n        public int shout() => 1;\n    }\n}\n",
+    );
+    let yells = (
+        "src/Sharp/Text/Yells.sharp",
+        "namespace Sharp.Text;\n\npublic static class Yells\n{\n    extension(string text)\n    {\n        public int shout() => 2;\n    }\n}\n",
+    );
+    let standard = (
+        "src/App/Caller.sharp",
+        "namespace App;\n\npublic class Caller\n{\n    public int shout(string name) => name.shout();\n}\n",
+    );
+
+    assert_eq!(
+        refusals(own, &[wallet, own_one, own_two]),
+        [
+            "7:47 ambiguous-object-method-access The extensions `OwnOne` and `OwnTwo` of namespace `App` each add `score` to `Wallet`. | Rename `score` in all but one of them."
+        ]
+    );
+    assert_eq!(
+        refusals(imported, &[wallet, far_one, far_two]),
+        [
+            "9:47 ambiguous-object-method-access The imported extensions `FarOne` and `FarTwo` each add `score` to `Wallet`. | Remove all but one of `import App.Far.FarOne;` and `import App.Far.FarTwo;`."
+        ]
+    );
+    assert_eq!(
+        refusals(mixed, &[wallet, own_one, far_one]),
+        [
+            "8:47 ambiguous-object-method-access The extension `OwnOne` of namespace `App` and the imported extension `Scores` each add `score` to `Wallet`. | Remove `import App.Far.FarOne as Scores;`."
+        ]
+    );
+    assert_eq!(
+        refusals(standard, &[words, yells]),
+        [
+            "5:43 ambiguous-object-method-access The standard library extensions `Words` and `Yells` each add `shout` to `string`. | Import the class of the one to call. An imported extension shadows the standard library's."
+        ]
     );
 }
 
@@ -5051,8 +5113,9 @@ fn a_call_of_a_function_the_standard_library_wraps_names_the_member_that_replace
     );
 }
 
-/// Spec section 26: the receiver's type picks among the imported extensions of one name, and two that fit one
-/// receiver are an error naming both classes. A receiver no extension of the name fits has no such member, and one
+/// Spec section 26: the receiver's type picks among the imported extensions of one name, as in C# and Kotlin: the one
+/// whose receiver fits inside every other's runs, so `Two`'s on an `AuditedWallet` and `One`'s on a `Wallet`. Two that
+/// fit one receiver with neither inside the other are an error naming both classes. A receiver no extension of the name fits has no such member, and one
 /// that is always `null` has no value to fit, so `?.` skips it.
 #[test]
 fn the_receiver_type_picks_among_imported_extensions_of_one_name() {
@@ -5084,18 +5147,36 @@ fn the_receiver_type_picks_among_imported_extensions_of_one_name() {
             "9:55 ambiguous-object-property-access: The imported extensions `PriceTotals` and `Slugs` each add `sum` to `Map<string, int>`.",
         ],
     );
+
+    let wallets = (
+        "src/Lib/Wallets.php",
+        "<?php\n\nnamespace Lib;\n\nclass Wallet\n{\n}\n\nclass AuditedWallet extends Wallet\n{\n}\n",
+    );
+    let one = (
+        "src/App/A/One.sharp",
+        "namespace App.A;\n\nimport Lib.Wallet;\n\npublic static class One\n{\n    extension(Wallet wallet)\n    {\n        public int rank() => 1;\n    }\n}\n",
+    );
+    let two = (
+        "src/App/B/Two.sharp",
+        "namespace App.B;\n\nimport Lib.AuditedWallet;\n\npublic static class Two\n{\n    extension(AuditedWallet wallet)\n    {\n        public string rank() => \"2\";\n    }\n}\n",
+    );
+    let nested = "namespace Demo;\n\nimport App.A.One;\nimport App.B.Two;\nimport Lib.AuditedWallet;\nimport Lib.Wallet;\n\npublic class Report\n{\n    public string specific(AuditedWallet wallet) => wallet.rank();\n    public int general(Wallet wallet) => wallet.rank();\n}\n";
+
+    assert_messages(nested, &[wallets, one, two], &[]);
 }
 
 /// Spec section 26: an extension is chosen from the receiver's type the code shows, as in C# and Kotlin. An extension
 /// member named like a real member, a method or property that type declares or inherits, in code or in a docblock, or a
 /// method a `List`, `Map` or `Set` has, can never run, so it is an error. `__call` declares none. A member only a class derived from the type declares does not
-/// compete: on a value of the type, the extension runs. A receiver with no type, a parse error, hides nothing.
+/// compete: on a value of the type, the extension runs. On a union receiver it is an error only when every part that is
+/// not `null` declares the member, as on `Money|Wallet`, since on `Money|string` the extension runs for a `string`. A
+/// receiver with no type, a parse error, hides nothing.
 #[test]
 fn an_extension_named_like_a_real_member_of_its_type_is_an_error() {
-    let money = "namespace App.Billing;\n\npublic class Money\n{\n    public Money() { }\n\n    public int total() => 0;\n\n    public int net() => 0;\n}\n";
+    let money = "namespace App.Billing;\n\npublic class Money\n{\n    public Money() { }\n\n    public int total() => 0;\n\n    public int net() => 0;\n\n    public int gross() => 0;\n\n    public int tax() => 0;\n\n    public int fee() => 0;\n}\n";
     let coin = "namespace App.Billing;\n\npublic class Coin : Money\n{\n    public Coin() : super() { }\n\n    public int cents => 1;\n}\n";
-    let wallet = "<?php\n\nnamespace App\\Billing;\n\n/**\n * @method int balance()\n * @property int $owner\n */\nclass Wallet\n{\n    public function __call(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n}\n";
-    let sharp = "namespace App.Billing;\n\npublic static class MoneyExtensions\n{\n    extension(Money money)\n    {\n        public int total() => 0;\n        public int cents => 0;\n        public int rounded() => 0;\n    }\n\n    extension(Wallet wallet)\n    {\n        public int balance() => 0;\n        public int owner => 0;\n        public int spent() => 0;\n    }\n\n    extension(List<int> amounts)\n    {\n        public int count() => 0;\n    }\n\n    extension(Map<string, int> prices)\n    {\n        public bool has(string plan) => false;\n    }\n\n    extension(Set<string> plans)\n    {\n        public void add(string plan) { }\n    }\n\n    extension(Coin coin)\n    {\n        public int net() => 0;\n    }\n\n    public static int sum(Money money) => money.cents + money.rounded();\n\n    extension(coin)\n    {\n        public int whole() => 0;\n    }\n}\n";
+    let wallet = "<?php\n\nnamespace App\\Billing;\n\n/**\n * @method int balance()\n * @method int gross()\n * @property int $owner\n */\nclass Wallet\n{\n    public function __call(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n}\n";
+    let sharp = "namespace App.Billing;\n\npublic static class MoneyExtensions\n{\n    extension(Money money)\n    {\n        public int total() => 0;\n        public int cents => 0;\n        public int rounded() => 0;\n    }\n\n    extension(Wallet wallet)\n    {\n        public int balance() => 0;\n        public int owner => 0;\n        public int spent() => 0;\n    }\n\n    extension(List<int> amounts)\n    {\n        public int count() => 0;\n    }\n\n    extension(Map<string, int> prices)\n    {\n        public bool has(string plan) => false;\n    }\n\n    extension(Set<string> plans)\n    {\n        public void add(string plan) { }\n    }\n\n    extension(Coin coin)\n    {\n        public int net() => 0;\n    }\n\n    extension(Money|string loose)\n    {\n        public int tax() => 0;\n    }\n\n    extension(Money|Wallet either)\n    {\n        public int gross() => 0;\n    }\n\n    extension(Money? maybe)\n    {\n        public int fee() => 0;\n    }\n\n    public static int sum(Money money) => money.cents + money.rounded();\n\n    extension(coin)\n    {\n        public int whole() => 0;\n    }\n}\n";
 
     assert_messages(
         sharp,
@@ -5105,7 +5186,7 @@ fn an_extension_named_like_a_real_member_of_its_type_is_an_error() {
             ("src/App/Billing/Wallet.php", wallet),
         ],
         &[
-            "41:15 parse: A PHP# parameter needs a type, as in `int extra`.",
+            "56:15 parse: A PHP# parameter needs a type, as in `int extra`.",
             "7:20 duplicate-definition: `Money` already declares `total()`, so this extension member never runs.",
             "14:20 duplicate-definition: `Wallet` already declares `balance()`, so this extension member never runs.",
             "15:20 duplicate-definition: `Wallet` already declares `owner`, so this extension member never runs.",
@@ -5113,6 +5194,8 @@ fn an_extension_named_like_a_real_member_of_its_type_is_an_error() {
             "26:21 duplicate-definition: `Map<string, int>` already declares `has()`, so this extension member never runs.",
             "31:21 duplicate-definition: `Set<string>` already declares `add()`, so this extension member never runs.",
             "36:20 duplicate-definition: `Coin` already declares `net()`, so this extension member never runs.",
+            "46:20 duplicate-definition: `Money` and `Wallet` already declare `gross()`, so this extension member never runs.",
+            "51:20 duplicate-definition: `Money` already declares `fee()`, so this extension member never runs.",
         ],
     );
 }
