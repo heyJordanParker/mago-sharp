@@ -1058,15 +1058,16 @@ fn compile_refuses_module_sharp_when_its_law_does_not_hold() {
 /// `app/Shop/Module.sharp`, the folder's module, with one law.
 const SHOP_MODULE: &str = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n}\n";
 
-/// Spec section 32: a namespace's module is the one its folder's `Module.sharp` declares. A `module` in another file
-/// of the folder is refused on that file alone, and `Module.sharp` still compiles and proves its law.
+/// Spec section 32: a namespace's module is the one its folder's `Module.sharp` declares, and only it states laws. A
+/// misplaced `module` in another file of the folder is refused on that file alone, and `Module.sharp` still compiles
+/// and proves its law.
 #[test]
 fn compile_refuses_a_module_outside_module_sharp_on_its_own_file_and_proves_module_sharp() {
     for (other, code, refusal) in [
         (
             "app/Shop/CheckoutTest.sharp",
-            "namespace App.Shop;\n\nmodule : App.Shop\n{\n}\n\npublic class CheckoutTest { }\n",
-            "app/Shop/CheckoutTest.sharp:3:8:error - parse: A module that overrides another is not supported yet in PHP#.",
+            "namespace App.Shop;\n\nmodule : App.Shop\n{\n    law same(int a) => a == a;\n}\n\npublic class CheckoutTest { }\n",
+            "app/Shop/CheckoutTest.sharp:5:5:error - semantics: A module that overrides another states no laws: state it in its folder's Module.sharp.",
         ),
         (
             "app/Shop/CheckoutTest.sharp",
@@ -1076,7 +1077,7 @@ fn compile_refuses_a_module_outside_module_sharp_on_its_own_file_and_proves_modu
         (
             "app/Shop/Module.Production.sharp",
             "namespace App.Shop;\n\nmodule\n{\n}\n",
-            "app/Shop/Module.Production.sharp:3:1:error - semantics: An environment module is not supported yet in PHP#.",
+            "app/Shop/Module.Production.sharp:3:1:error - semantics: An environment module overrides its folder's module: write `module : App.Shop`.",
         ),
     ] {
         let directory = lawful_project(&[("app/Shop/Module.sharp", SHOP_MODULE), (other, code)]);

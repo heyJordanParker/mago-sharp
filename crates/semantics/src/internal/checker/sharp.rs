@@ -3519,7 +3519,7 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 }
 
 /// What the slice has at a place, as the note of a refusal there.
-const fn supported(place: Place) -> &'static str {
+fn supported(place: Place) -> &'static str {
     match place {
         Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface`, `enum` and `event`.",
         Place::Class => {
