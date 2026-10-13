@@ -96,9 +96,10 @@ pub enum ParseError {
     /// class-like as a message names it, `A class`, and the type's name, at the whole type. Every type, events and
     /// interfaces included, is declared in its own file.
     NestedTypeInSharp(&'static str, Box<str>, Span),
-    /// Type parameters written on a PHP# named constructor, as in `Plain.of<T>(T value)`, with its class's name, at the
-    /// type parameters. A named constructor takes its class's type arguments, as Dart's does, and declares none.
-    NamedConstructorTypeParametersInSharp(Box<str>, Span),
+    /// Type parameters written on a PHP# named constructor, as in `Plain.of<T>(T value)`, with its class's name and the
+    /// names of the type parameters its class declares, at the type parameters. A named constructor takes its class's
+    /// type arguments, as Dart's does, and declares none.
+    NamedConstructorTypeParametersInSharp(Box<str>, Option<Box<str>>, Span),
     /// A PHP# keyword written in another case, as in `Return 5;`, with the keyword as PHP# writes it, at the keyword.
     /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are.
     MiscasedKeywordInSharp(&'static str, Span),
@@ -141,7 +142,7 @@ impl HasFileId for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
-            | ParseError::NamedConstructorTypeParametersInSharp(_, span)
+            | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span) => span.file_id,
         }
     }
@@ -186,7 +187,7 @@ impl HasSpan for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
-            | ParseError::NamedConstructorTypeParametersInSharp(_, span)
+            | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span) => *span,
         }
     }
@@ -374,12 +375,23 @@ impl From<&ParseError> for Issue {
             | ParseError::MiscasedKeywordInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
-            ParseError::NamedConstructorTypeParametersInSharp(class, span) => Issue::error(error.to_string())
-                .with_code(PARSE_ERROR_CODE)
-                .with_annotation(Annotation::primary(*span).with_message("Written here."))
-                .with_help(format!(
-                    "Declare a generic static method, as in `public static {class} of<T>(T value)`, or make the class generic, as in `class {class}<T>`."
-                )),
+            // A generic class's static method takes the class's type arguments, so its help declares none of its own.
+            ParseError::NamedConstructorTypeParametersInSharp(class, type_parameters, span) => {
+                Issue::error(error.to_string())
+                    .with_code(PARSE_ERROR_CODE)
+                    .with_annotation(Annotation::primary(*span).with_message("Written here."))
+                    .with_help(match type_parameters {
+                        Some(names) => {
+                            let first = names.split(", ").next().unwrap_or(names);
+                            format!(
+                                "Declare a static method, as in `public static {class}<{names}> of({first} value)`: it takes the class's type arguments."
+                            )
+                        }
+                        None => format!(
+                            "Declare a generic static method, as in `public static {class} of<T>(T value)`, or make the class generic, as in `class {class}<T>`."
+                        ),
+                    })
+            }
             ParseError::NotSupportedYetInSharp(_, span) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(*span).with_message("Not supported yet."))

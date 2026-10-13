@@ -108,7 +108,11 @@ where
             if let Some(type_parameters) = type_parameters {
                 let class_name = String::from_utf8_lossy(class.value).into_owned().into_boxed_str();
 
-                return Err(ParseError::NamedConstructorTypeParametersInSharp(class_name, type_parameters.span()));
+                return Err(ParseError::NamedConstructorTypeParametersInSharp(
+                    class_name,
+                    self.state.type_parameters_of.clone(),
+                    type_parameters.span(),
+                ));
             }
 
             return Ok(ClassLikeMember::NamedConstructor(constructor));

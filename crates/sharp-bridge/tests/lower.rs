@@ -13946,6 +13946,41 @@ fn is_as_and_match_without_a_test_are_refused_before_lowering() {
     );
 }
 
+/// A plain PHP class's objects carry no type arguments while the code runs, so `is` and `as` that give one type
+/// arguments are refused before the lowering would test the class alone. The class alone is its `instanceof`.
+#[test]
+fn is_and_as_that_give_a_plain_php_class_type_arguments_are_refused_before_lowering() {
+    let lowered = Lowered::with(
+        indoc! {"
+        namespace App.Tenant;
+
+        import Lib.Collection;
+        import Lib.Order;
+
+        class Report
+        {
+            public void run(Any extra)
+            {
+                const tested = extra is Collection<Order>;
+                const kept = extra as List<Collection<Order>>;
+            }
+        }
+    "},
+        &[(
+            "src/Lib/Collection.php",
+            "<?php namespace Lib; class Order {} /** @template T */ final class Collection { /** @param list<T> $items */ public function __construct(array $items) {} }",
+        )],
+    );
+
+    assert_eq!(
+        lowered.diagnostics(),
+        [
+            "10:33 compile error: `Collection<Order>` can't be tested: `Collection` is a plain PHP class, so its objects carry no type arguments while the code runs.",
+            "11:36 compile error: `Collection<Order>` can't be tested: `Collection` is a plain PHP class, so its objects carry no type arguments while the code runs.",
+        ]
+    );
+}
+
 /// ```php
 /// $present = <is Any>($extra);
 /// $either = <is int|string>($extra) ? $extra : null;

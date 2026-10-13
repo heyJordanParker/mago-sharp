@@ -4301,7 +4301,7 @@ fn a_type_argument_is_read_in_a_body_and_never_in_a_constant() {
             "22:39 `typeof(TItem)` is not a constant: it reads the type argument the code runs with.",
             "24:33 `TItem.LIMIT` is not a constant: it reads the type argument the code runs with.",
             "26:44 `TItem` already carries the type arguments of the type it stands for.",
-            "28:36 `new TItem` is not supported yet in PHP#.",
+            "28:36 A named constructor through a type parameter, as in `new TItem.of(…)`, is not supported yet in PHP#.",
         ]
     );
 }

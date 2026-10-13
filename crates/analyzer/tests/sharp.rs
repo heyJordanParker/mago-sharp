@@ -8286,6 +8286,24 @@ fn a_header_passes_its_type_arguments_to_the_generic_base() {
     );
 }
 
+/// A class implements a generic interface once, as a header that names it twice is refused, so one reached again
+/// through a parent with other type arguments is one error naming each way it is reached. A generic parent passes its
+/// own type arguments on, and the same type arguments through two ways are one implementation.
+#[test]
+fn a_generic_interface_reached_twice_with_other_type_arguments_is_one_error() {
+    let feeder = "namespace Demo;\n\npublic interface Feeder<T>\n{\n    T next();\n}\n\npublic interface Named\n{\n}\n\npublic interface IntFeeder : Feeder<int>\n{\n}\n\npublic interface TextFeeder : Feeder<string>\n{\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Ints : Feeder<int>\n{\n    public int next() => 1;\n}\n\npublic class Strings : Ints, Named, Feeder<string>\n{\n}\n\npublic class Relay<T> : Feeder<T>\n{\n    public Relay(private T value) { }\n\n    public T next() => this.value;\n}\n\npublic class Words : Relay<string>, Feeder<int>\n{\n    public Words() : super(\"a\") { }\n}\n\npublic class Again : Ints, Feeder<int>\n{\n}\n\npublic class Thrice : Relay<bool>, IntFeeder, TextFeeder\n{\n    public Thrice() : super(true) { }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Feeds.sharp", sharp), &[("src/Demo/Feeder.sharp", feeder)]),
+        [
+            "8:14 invalid-implement `Strings` implements `Feeder` twice: `Feeder<int>` through `Ints`, and `Feeder<string>`. Implement `Feeder` once.",
+            "19:14 invalid-implement `Words` implements `Feeder` twice: `Feeder<string>` through `Relay`, and `Feeder<int>`. Implement `Feeder` once.",
+            "28:14 invalid-implement `Thrice` implements `Feeder` 3 times: `Feeder<bool>` through `Relay`, `Feeder<int>` through `IntFeeder`, and `Feeder<string>` through `TextFeeder`. Implement `Feeder` once.",
+        ]
+    );
+}
+
 /// A header with too few or too many type arguments is reported in PHP#'s words, naming the header form, its class by
 /// its short name and a count that agrees with its noun, and its PHP twin keeps Mago's text about the `@extends` tag.
 #[test]
@@ -8878,7 +8896,9 @@ fn out_and_in_are_checked_on_a_class_type() {
 /// Spec section 11.1 lets a private member break the marker, as Scala's object-private members do, and reaches it only
 /// through `this`: another instance's field, written or read, another instance's method, called or read as a value, and
 /// the private `set` of another instance's property are refused where they are reached, for `out` and `in` alike, and a
-/// property whose `get` is public is written only through `this`, as its `get` stays reachable.
+/// property whose `get` is public is written only through `this`, as its `get` stays reachable. A plain PHP class has no
+/// markers, so its private members are reached as master reaches them, a method with no return type and a callable
+/// property with none included.
 #[test]
 fn a_variance_breaking_private_member_is_reachable_only_through_this() {
     let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Cell<out TItem>\n{\n    private TItem? value = null;\n\n    public TItem? get() => this.value;\n\n    public void poison(Cell<Any?> target)\n    {\n        target.value = 1;\n    }\n\n    public Any? peek(Cell<Any?> other) => other.value;\n}\n\npublic class Stack<out TItem>\n{\n    private void push(TItem item)\n    {\n    }\n\n    public void fill(Stack<Any?> other)\n    {\n        other.push(1);\n    }\n\n    public Any? grab(Stack<Any?> other) => other.push;\n}\n\npublic class Sink<in TItem>\n{\n    private TItem? last = null;\n\n    public void take(TItem item)\n    {\n        this.last = item;\n    }\n\n    public Any? leak(Sink<Order> other) => other.last;\n}\n\npublic class Slot<out TItem>\n{\n    public TItem? held { get; private set; } = null;\n\n    public void swap(Slot<Any?> other)\n    {\n        other.held = 1;\n    }\n\n    public Any? read(Slot<Any?> other) => other.held;\n}\n";
@@ -8898,6 +8918,12 @@ fn a_variance_breaking_private_member_is_reachable_only_through_this() {
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Cell.sharp", sharp), &[]).iter().all(|issue| issue.notes
             == ["A private member may break the marker, and is then reachable only through `this`."]),
     );
+
+    let untyped_method = "<?php\ndeclare(strict_types=1);\n\nfinal class Peer\n{\n    private function reset()\n    {\n    }\n\n    public function run(): void\n    {\n        $this->reset();\n    }\n}\n";
+    let untyped_callable = "<?php\ndeclare(strict_types=1);\n\nfinal class Relay\n{\n    /** @var callable(int) */\n    private $handler;\n\n    public function __construct(callable $handler)\n    {\n        $this->handler = $handler;\n    }\n\n    public function run(): void\n    {\n        ($this->handler)(1);\n    }\n}\n";
+
+    assert_eq!(explained(("src/Demo/Peer.php", untyped_method), &[]), Vec::<String>::new());
+    assert_eq!(explained(("src/Demo/Relay.php", untyped_callable), &[]), Vec::<String>::new());
 }
 
 /// A field the parser refuses for its missing type holds no type parameter, so it breaks no marker, public or private,
@@ -10294,6 +10320,34 @@ fn a_type_test_of_a_php_class_with_docblock_templates_passes() {
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
 
+/// Spec section 11: a plain PHP class's objects carry no type arguments while the code runs, so a type test that gives
+/// one type arguments, as `is`, `as`, a `match` arm and a `catch` write it, at any depth, is a compile error. The class
+/// alone is tested as any class.
+#[test]
+fn a_type_test_that_gives_a_plain_php_class_type_arguments_is_refused() {
+    let collection = "<?php\n\nnamespace Legacy;\n\n/** @template T */\nfinal class Collection\n{\n    /** @param list<T> $items */\n    public function __construct(private array $items)\n    {\n    }\n}\n";
+    let failures =
+        "<?php\n\nnamespace Legacy;\n\n/** @template T */\nfinal class Failures extends \\RuntimeException\n{\n}\n";
+    let sharp = "namespace Refuse;\n\nimport Legacy.Collection;\nimport Legacy.Failures;\n\npublic class Order\n{\n}\n\npublic class Erased\n{\n    public static bool tested(Any value) => value is Collection<Order>;\n\n    public static Any? kept(Any value) => value as Collection<Order>;\n\n    public static int matched(Any value) => match (value) { Collection<Order> => 1, default => 0 };\n\n    public static bool nested(Any value) => value is List<Collection<Order>>;\n\n    public static bool bare(Any value) => value is Collection;\n\n    public static int caught()\n    {\n        try {\n            return 1;\n        } catch (Failures<Order> failure) {\n            return 0;\n        }\n    }\n}\n";
+    let files = [("src/Legacy/Collection.php", collection), ("src/Legacy/Failures.php", failures)];
+    let refused = |line: usize, column: usize, class: &str, written: &str| {
+        format!(
+            "{line}:{column} invalid-template-parameter `{written}` can't be tested: `{class}` is a plain PHP class, so its objects carry no type arguments while the code runs. Test `{class}` alone."
+        )
+    };
+
+    assert_eq!(
+        explained(("src/Refuse/Erased.sharp", sharp), &files),
+        [
+            refused(12, 54, "Collection", "Collection<Order>"),
+            refused(14, 52, "Collection", "Collection<Order>"),
+            refused(16, 61, "Collection", "Collection<Order>"),
+            refused(18, 59, "Collection", "Collection<Order>"),
+            refused(26, 18, "Failures", "Failures<Order>"),
+        ]
+    );
+}
+
 /// Plain PHP reads a backed enum key as upstream Mago does: only the enum itself is its backing type, so an
 /// intersection with the enum stays the intersection, and an `iterable<HasLabel&Status, int>` is no
 /// `iterable<string, int>`, as upstream 39a57d08f reports.
@@ -10828,6 +10882,38 @@ fn a_generic_call_nothing_fixes_is_refused() {
             format!("33:16 missing-template-parameter Nothing fixes the type argument `T` of the call to `Report.size`. | `Report.size` is called here | {note} | Write the type argument on the call."),
         ]
     );
+}
+
+/// The help on type parameters written on a named constructor quotes a static method that compiles in that class: a
+/// generic one in a class without type parameters, and one that returns the class with its own type arguments in a
+/// generic class, which takes the class's type arguments, as in `Pair<int>.of(4)`.
+#[test]
+fn the_help_on_named_constructor_type_parameters_quotes_a_method_that_compiles_in_its_class() {
+    for (class, constructor, created) in [
+        ("Report", "public Report(Any? value) { }", "new Report(value)"),
+        ("Pair<T>", "public Pair(public T first { get; }) { }", "new Pair<T>(value)"),
+        (
+            "Twin<TFirst, TSecond>",
+            "public Twin(public TFirst first { get; }, public TSecond? second { get; }) { }",
+            "new Twin<TFirst, TSecond>(value, null)",
+        ),
+    ] {
+        let name = class.split('<').next().unwrap_or(class);
+        let refused = format!(
+            "namespace Demo;\n\npublic class {class}\n{{\n    {constructor}\n\n    public {name}.of<TOther>(TOther other) {{ }}\n}}\n"
+        );
+        let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Refused.sharp", leak(refused)), &[]);
+        let [issue] = issues.as_slice() else {
+            panic!("expected one issue for `{class}`, got {issues:#?}");
+        };
+        let help = issue.help.as_deref().unwrap_or_default();
+        let quoted = help.split('`').nth(1).unwrap_or_default();
+
+        let fixed = format!(
+            "namespace Demo;\n\npublic class {class}\n{{\n    {constructor}\n\n    {quoted} => {created};\n}}\n"
+        );
+        assert_eq!(explained(("src/Demo/Fixed.sharp", leak(fixed)), &[]), Vec::<String>::new(), "{class}: {help}");
+    }
 }
 
 /// A named constructor of a generic class takes the type arguments its `new` names, as the main constructor does:

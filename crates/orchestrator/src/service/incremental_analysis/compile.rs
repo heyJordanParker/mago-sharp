@@ -1688,7 +1688,8 @@ mod tests {
         }
     }
 
-    /// A project whose `Shelf` and `Orders` read the bounds of the type parameters of `Box`, `Source` and `Tools.same`.
+    /// A project whose `Shelf` and `Orders` read the bounds of the type parameters of `Box`, `Source` and `Tools.same`,
+    /// and whose `Reader` reads the variance of `Feed`'s and the count of `Pair`'s.
     fn bounds() -> Vec<(&'static str, String)> {
         vec![
             ("app/Shop/Entity.sharp", "namespace App.Shop;\n\npublic abstract class Entity\n{\n}\n".to_string()),
@@ -1699,17 +1700,22 @@ mod tests {
             ("app/Shop/Tools.sharp", "namespace App.Shop;\n\npublic class Tools\n{\n    public static T same<T : Entity>(T value) => value;\n}\n".to_string()),
             ("app/Shop/Shelf.sharp", "namespace App.Shop;\n\npublic class Shelf\n{\n    public Box<Order> box() => new Box<Order>();\n\n    public Order same(Order order) => Tools.same(order);\n}\n".to_string()),
             ("app/Shop/Orders.sharp", "namespace App.Shop;\n\npublic class Orders : Source<Order>\n{\n    public Order? first() => null;\n}\n".to_string()),
+            ("app/Shop/Feed.sharp", "namespace App.Shop;\n\npublic interface Feed<out TItem : Entity>\n{\n    TItem? next();\n}\n".to_string()),
+            ("app/Shop/Pair.sharp", "namespace App.Shop;\n\npublic class Pair<TFirst>\n{\n    public Pair() { }\n}\n".to_string()),
+            ("app/Shop/Reader.sharp", "namespace App.Shop;\n\npublic class Reader\n{\n    public Entity? read(Feed<Entity> feed) => feed.next();\n\n    public Entity? orders(Feed<Order> feed) => this.read(feed);\n\n    public Pair<Order> pair() => new Pair<Order>();\n}\n".to_string()),
         ]
     }
 
     #[test]
-    fn a_compile_after_an_edit_to_a_type_parameter_bound_matches_a_clean_compile() {
+    fn a_compile_after_an_edit_to_a_type_parameter_list_matches_a_clean_compile() {
         let base = shop_project(&bounds());
 
         for (edited_file, from, to) in [
             ("app/Shop/Box.sharp", "<TItem : Entity>", "<TItem : Customer>"),
             ("app/Shop/Source.sharp", "<TItem : Entity>", "<TItem : Customer>"),
             ("app/Shop/Tools.sharp", "<T : Entity>", "<T : Customer>"),
+            ("app/Shop/Feed.sharp", "<out TItem : Entity>", "<TItem : Entity>"),
+            ("app/Shop/Pair.sharp", "<TFirst>", "<TFirst, TSecond>"),
         ] {
             let mut files = bounds();
             let (_, contents) =

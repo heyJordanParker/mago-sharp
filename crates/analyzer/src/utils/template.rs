@@ -371,7 +371,7 @@ pub(crate) fn check_private_method_reach<A>(
     else {
         return;
     };
-    if !is_private_method(metadata) {
+    if !class.flags.is_sharp() || !is_private_method(metadata) {
         return;
     }
 
@@ -394,7 +394,7 @@ pub(crate) fn check_private_property_reach<A>(
     A: Arena,
 {
     let visibility = if is_write { property.write_visibility } else { property.read_visibility };
-    if !matches!(visibility, Visibility::Private) {
+    if !class.flags.is_sharp() || !matches!(visibility, Visibility::Private) {
         return;
     }
     let Some(property_type) = &property.type_metadata else {
@@ -425,7 +425,7 @@ fn report_private_reach<A>(
 ) where
     A: Arena,
 {
-    if !class.flags.is_sharp() || is_this(object, context.resolved_names) {
+    if is_this(object, context.resolved_names) {
         return;
     }
     let Some((template, marker)) = positions

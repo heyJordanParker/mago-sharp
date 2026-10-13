@@ -62,6 +62,7 @@ use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::override_attribute;
 use crate::statement::get_type_from_hint;
+use crate::statement::report_erased_type_test;
 use crate::statement::report_hint_type_arguments;
 use crate::utils::misc::check_for_paradox;
 use crate::utils::names::display_code_member;
@@ -372,6 +373,7 @@ where
     let mut is_refused = false;
     for hint in hints {
         is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint);
+        is_refused |= report_erased_type_test(context, hint);
 
         // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any` or of a
         // union is `instanceof` a name spanning the whole type, and narrows to the type written, which the analysis

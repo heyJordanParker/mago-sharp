@@ -438,6 +438,44 @@ where
     report_invalid_template_arguments(context, &TypeMetadata::new(written_type, hint.span()))
 }
 
+/// Refuses each type a PHP# type test of `hint` gives a plain PHP class type arguments for, at any depth, as `value is
+/// Collection<Order>` or `value as List<Collection<Order>>` writes it, spec section 11: a plain PHP class's objects
+/// carry no type arguments while the code runs, so no test reads them. Returns whether it refused one.
+pub(crate) fn report_erased_type_test<A>(context: &mut Context<'_, '_, A>, hint: &Hint<'_>) -> bool
+where
+    A: Arena,
+{
+    let generics = Node::Hint(hint).filter_map(|node| match node {
+        Node::GenericHint(generic) => Some(*generic),
+        _ => None,
+    });
+    let mut refused = false;
+    for generic in generics {
+        let is_plain_php = context
+            .resolved_names
+            .resolve(&generic.name)
+            .and_then(|name| context.codebase.get_class_like(name))
+            .is_some_and(|class| !class.flags.is_sharp());
+        if !is_plain_php {
+            continue;
+        }
+
+        let written = String::from_utf8_lossy(&context.source_file.contents[generic.span().to_range_usize()]);
+        let class = String::from_utf8_lossy(generic.name.value);
+        context.collector.report_with_code(
+            IssueCode::InvalidTemplateParameter,
+            Issue::error(format!(
+                "`{written}` can't be tested: `{class}` is a plain PHP class, so its objects carry no type arguments while the code runs."
+            ))
+            .with_annotation(Annotation::primary(generic.span()).with_message("Tested here."))
+            .with_help(format!("Test `{class}` alone.")),
+        );
+        refused = true;
+    }
+
+    refused
+}
+
 /// The type a PHP# `hint` writes inside the scope of `block_context`, where it may name the type parameters of the
 /// enclosing method and class.
 pub(crate) fn get_type_from_hint<A>(

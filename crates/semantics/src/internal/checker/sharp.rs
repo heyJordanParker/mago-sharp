@@ -3056,15 +3056,6 @@ fn report_type_argument_in_constant(span: Span, context: &mut Context<'_, '_, '_
     );
 }
 
-/// Refuses `refused`, an expression that reads a type argument while the code runs and that the engine can't run yet,
-/// named as the code writes it: `new TItem.of(…)`, a named constructor of a type parameter.
-fn report_type_argument_read(span: Span, refused: &str, context: &mut Context<'_, '_, '_>) {
-    context.report(
-        Issue::error(format!("{refused} is not supported yet in PHP#."))
-            .with_annotation(Annotation::primary(span).with_message("Not supported yet.")),
-    );
-}
-
 /// The refusal of `hint` in a constant of its class, when `hint` names one of the class's type parameters or is `Self`,
 /// which carries them all. `None` for any other type.
 fn static_member_use(hint: &Hint<'_>, context: &Context<'_, '_, '_>) -> Option<String> {
@@ -3449,11 +3440,20 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
 
             return Some(Place::Instantiation);
         }
+        // A named constructor through a type parameter reads the type argument while the code runs, which the engine
+        // can't do yet.
         Expression::Identifier(class)
-            if context.names.is_type_parameter(class) && instantiation.constructor.is_some() =>
+            if context.names.is_type_parameter(class)
+                && let Some(constructor) = &instantiation.constructor =>
         {
-            let refused = format!("`new {}`", BytesDisplay(context.get_code_snippet(class)));
-            report_type_argument_read(instantiation.span(), &refused, context);
+            context.report(
+                Issue::error(format!(
+                    "A named constructor through a type parameter, as in `new {}.{}(…)`, is not supported yet in PHP#.",
+                    BytesDisplay(context.get_code_snippet(class)),
+                    BytesDisplay(constructor.name.value)
+                ))
+                .with_annotation(Annotation::primary(instantiation.span()).with_message("Not supported yet.")),
+            );
 
             return None;
         }

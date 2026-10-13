@@ -31,6 +31,7 @@ use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
@@ -1162,6 +1163,9 @@ where
         if is_parent { extended_types.push(type_name) } else { implemented_types.push(type_name) }
     }
 
+    if class_like_metadata.flags.is_sharp() {
+        check_sharp_reached_twice(context, class_like_metadata, inheritance_ast, &mut checked_signatures);
+    }
     check_class_like_extends(context, class_like_metadata, &extended_types);
     check_class_like_implements(context, class_like_metadata, &implemented_types, &mut checked_signatures);
 
@@ -1352,9 +1356,10 @@ where
         check_sharp_template_variance(context, class_like_metadata, inheritance_ast);
         check_sharp_serializable(context, class_like_metadata);
     } else {
+        // A PHP# class that reaches a generic class-like twice is refused whole by `check_sharp_reached_twice`.
         check_template_variance_positions(context, class_like_metadata);
+        check_uninhabitable_diamonds(context, class_like_metadata);
     }
-    check_uninhabitable_diamonds(context, class_like_metadata);
 
     if !class_like_metadata.template_types.is_empty() {
         for (template_name, _) in &class_like_metadata.template_types {
@@ -2543,6 +2548,93 @@ where
         )
         .with_help("Leave `Serializable` out: `serialize()` then uses `__serialize` and `__unserialize`, or its default form, which keep them."),
     );
+}
+
+/// Refuses a PHP# class-like that reaches one generic class-like with other type arguments through two entries of its
+/// header, as `Strings : Ints, Feeder<string>` does when `Ints` is a `Feeder<int>`. It implements it once, as a header
+/// that names it twice is refused, so the refusal names each way it is reached. Each method of the class-like reached
+/// twice is marked checked, since its return type merges to `never` and reports nothing true.
+fn check_sharp_reached_twice<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    inheritance: Option<&Inheritance<'_>>,
+    checked_signatures: &mut HashSet<(Word, Word)>,
+) where
+    A: Arena,
+{
+    let header: Vec<&ClassLikeMetadata> = inheritance
+        .iter()
+        .flat_map(|inheritance| inheritance.names())
+        .filter_map(|name| context.codebase.get_class_like(context.resolved_names.resolve(&name)?))
+        .collect();
+    let class_name = display_class_like_name(context, class_like_metadata.original_name);
+
+    let ancestors = class_like_metadata
+        .template_extended_parameter_paths
+        .iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .filter_map(|(ancestor_name, _)| context.codebase.get_class_like(ancestor_name.as_bytes()));
+    for ancestor in ancestors {
+        let ancestor_display = display_class_like_name(context, ancestor.original_name);
+        // Each type the header reaches the ancestor as, with the header entry it is reached through, or `None` when the
+        // header names the ancestor itself.
+        let mut reached: Vec<(String, Option<&ClassLikeMetadata>)> = Vec::new();
+        for parent in &header {
+            if parent.name != ancestor.name
+                && !context.codebase.is_instance_of(parent.name.as_bytes(), ancestor.name.as_bytes())
+            {
+                continue;
+            }
+
+            let type_arguments = class_like_metadata.template_extended_offsets.get(&parent.name).map(Vec::as_slice);
+            let arguments: Vec<String> = ancestor
+                .template_types
+                .iter()
+                .filter_map(|(template_name, _)| {
+                    get_specialized_template_type(
+                        context.codebase,
+                        *template_name,
+                        ancestor.name,
+                        parent,
+                        type_arguments,
+                    )
+                })
+                .map(|argument| display_type(context, &argument))
+                .collect();
+            let reached_type = format!("`{ancestor_display}<{}>`", arguments.join(", "));
+            if !reached.iter().any(|(known, _)| *known == reached_type) {
+                reached.push((reached_type, (parent.name != ancestor.name).then_some(*parent)));
+            }
+        }
+
+        let ways: Vec<String> = reached
+            .into_iter()
+            .map(|(reached_type, through)| match through {
+                Some(parent) => {
+                    format!("{reached_type} through `{}`", display_class_like_name(context, parent.original_name))
+                }
+                None => reached_type,
+            })
+            .collect();
+        let Some((last, rest)) = ways.split_last().filter(|(_, rest)| !rest.is_empty()) else {
+            continue;
+        };
+
+        let times = if rest.len() == 1 { "twice".to_string() } else { format!("{} times", ways.len()) };
+        context.collector.report_with_code(
+            IssueCode::InvalidImplement,
+            Issue::error(format!(
+                "`{class_name}` implements `{ancestor_display}` {times}: {}, and {last}.",
+                rest.join(", ")
+            ))
+            .with_annotation(
+                Annotation::primary(class_like_metadata.name_span.unwrap_or(class_like_metadata.span))
+                    .with_message(format!("`{class_name}` reaches `{ancestor_display}` with other type arguments")),
+            )
+            .with_help(format!("Implement `{ancestor_display}` once.")),
+        );
+        checked_signatures.extend(ancestor.declaring_method_ids.iter().map(|(name, id)| (id.get_class_name(), *name)));
+    }
 }
 
 /// Rejects an uninhabitable diamond at the declaration site: a class-like
