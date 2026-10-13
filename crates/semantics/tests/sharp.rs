@@ -160,27 +160,21 @@ fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
     );
 }
 
-/// An import of a class named like an effect shadows the effect, spec section 23, so the refusal names the imported
-/// class and the import that frees the name. A class the file declares under that name keeps the plain refusal.
+/// Spec section 29: a standard effect's name in a `uses` is that effect, even where the file imports or declares a
+/// class under the name, as a file that calls Laravel's `Http` facade still writes `uses Http`.
 #[test]
-fn an_effect_name_an_import_shadows_is_refused_with_the_imported_class() {
-    let extern_ = "namespace App.Stubs;\n\nimport Lib.Clock;\n\nextern Clock.now uses Clock;\n";
-    let function_type = "namespace App.Shop;\n\nimport Lib.Http;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http>? charge = null;\n}\n";
-    let declared = "namespace App.Shop;\n\nclass Clock\n{\n    Function<int() uses Clock>? tick = null;\n}\n";
-
-    assert_eq!(
-        issues(extern_),
-        [
-            "5:23 `Clock` here is the imported `Lib.Clock`, not the effect `Clock`. Import it under another name, as in `import Lib.Clock as SystemClock;`."
-        ]
-    );
-    assert_eq!(
-        issues(function_type),
-        [
-            "7:32 `Http` here is the imported `Lib.Http`, not the effect `Http`. Import it under another name, as in `import Lib.Http as SystemHttp;`."
-        ]
-    );
-    assert_eq!(issues(declared), [format!("5:25 `Clock` {NOT_AN_EFFECT}")]);
+fn a_uses_takes_a_standard_effect_where_a_class_has_its_name() {
+    for name in mago_names::STANDARD_EFFECTS.map(mago_names::short_name) {
+        for code in [
+            format!("namespace App.Stubs;\n\nimport Lib.{name};\n\nextern {name}.now uses {name};\n"),
+            format!(
+                "namespace App.Shop;\n\nimport Lib.{name};\n\nclass Checkout\n{{\n    Function<{name}(Cart) uses {name}>? charge = null;\n}}\n"
+            ),
+            format!("namespace App.Shop;\n\nclass {name}\n{{\n    Function<int() uses {name}>? tick = null;\n}}\n"),
+        ] {
+            assert_eq!(issues(leak(code.clone())), Vec::<String>::new(), "{code}");
+        }
+    }
 }
 
 /// Every standard effect passes a `uses`, `Events` too, written bare or through an import of its class.

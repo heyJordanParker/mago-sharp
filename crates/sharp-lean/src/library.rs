@@ -4,10 +4,26 @@
 use std::fmt::Write;
 use std::fs;
 use std::io;
+use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Child;
 use std::process::Command;
+use std::process::ExitStatus;
 use std::process::Output;
+use std::process::Stdio;
+#[cfg(unix)]
+use std::sync::Mutex;
+#[cfg(unix)]
+use std::sync::Once;
+#[cfg(unix)]
+use std::sync::PoisonError;
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use mago_build_id::BUILD_ID;
@@ -21,10 +37,11 @@ pub(crate) const TOOLCHAIN: &str = include_str!("../lean/lean-toolchain");
 pub(crate) const NAMESPACE: &str = "Sharp";
 
 /// The library's Lake package, as `crates/sharp-lean/lean/` holds it.
-const PACKAGE: [(&str, &str); 7] = [
+const PACKAGE: [(&str, &str); 8] = [
     ("lakefile.toml", include_str!("../lean/lakefile.toml")),
     ("lean-toolchain", TOOLCHAIN),
     ("Sharp/Lean/Int.lean", include_str!("../lean/Sharp/Lean/Int.lean")),
+    ("Sharp/Lean/Interface.lean", include_str!("../lean/Sharp/Lean/Interface.lean")),
     ("Sharp/Lean/Law.lean", include_str!("../lean/Sharp/Lean/Law.lean")),
     ("Sharp/Lean/String.lean", include_str!("../lean/Sharp/Lean/String.lean")),
     ("Sharp/Lean/Facts.lean", include_str!("../lean/Sharp/Lean/Facts.lean")),
@@ -36,6 +53,10 @@ const ELAN_VERSION: &str = "4.2.4";
 
 /// The largest elan archive Mago downloads. The pinned ones are about 5 MB.
 const ELAN_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// The processor seconds each Lean process Mago starts may use: far above any real proof or rule, so that ordinary load
+/// never reaches it, and a proof or rule that never ends stops instead of holding the compile.
+const PROCESSOR_SECONDS: u64 = 120;
 
 /// elan's release archive for one platform, and the size of the Lean archive elan then downloads there.
 struct Archive {
@@ -93,15 +114,279 @@ impl Lake {
         Self { program: PathBuf::from("lake"), home: None }
     }
 
-    /// A command that runs this `lake`.
+    /// A command that runs this `lake`. On Unix it may use `processor_seconds()`, as may each Lean process it starts,
+    /// which inherits the limit.
     pub(crate) fn command(&self) -> Command {
+        self.command_within(processor_seconds())
+    }
+
+    /// A command that runs this `lake`, which on Unix may use `seconds`, kept under the hard limit Mago inherits.
+    pub(crate) fn command_within(&self, seconds: u64) -> Command {
         let mut command = Command::new(&self.program);
         if let Some(home) = &self.home {
             command.env("ELAN_HOME", home);
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+
+            // SAFETY: `getrlimit` and `setrlimit` are async-signal-safe, and the closure allocates nothing.
+            unsafe { command.pre_exec(move || limit_processor_time(seconds)) };
+        }
+        #[cfg(not(unix))]
+        let _ = seconds;
 
         command
     }
+}
+
+/// The processor seconds each Lean process may use: `PROCESSOR_SECONDS`, or the lower limit Mago itself runs under, such
+/// as one `ulimit -t` set.
+pub(crate) fn processor_seconds() -> u64 {
+    #[cfg(unix)]
+    {
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: `limit` is a valid `rlimit` for `getrlimit` to fill.
+        if unsafe { libc::getrlimit(libc::RLIMIT_CPU, &raw mut limit) } == 0 {
+            return processor_seconds_within(&limit);
+        }
+    }
+
+    PROCESSOR_SECONDS
+}
+
+/// The processor seconds each Lean process may use under the inherited processor-time `limit`: `PROCESSOR_SECONDS`, or
+/// its soft limit when lower, kept a second under a finite hard limit.
+#[cfg(unix)]
+fn processor_seconds_within(limit: &libc::rlimit) -> u64 {
+    PROCESSOR_SECONDS.min(limit.rlim_cur).min(below_hard(limit))
+}
+
+/// The highest soft limit under `limit` that a process reaches as `SIGXCPU`: a second under a finite hard limit, since
+/// Linux sends `SIGKILL`, which the out-of-memory killer sends too, once the soft limit meets the hard one.
+#[cfg(unix)]
+fn below_hard(limit: &libc::rlimit) -> u64 {
+    if limit.rlim_max == libc::RLIM_INFINITY { u64::MAX } else { limit.rlim_max.saturating_sub(1) }
+}
+
+/// Sets the soft processor-time limit of the process about to start to `seconds`, kept under its hard limit, and its
+/// core-file limit to none, so a Lean stopped that way leaves no core file of gigabytes in the project.
+#[cfg(unix)]
+fn limit_processor_time(seconds: u64) -> io::Result<()> {
+    for (resource, soft) in [(libc::RLIMIT_CPU, seconds), (libc::RLIMIT_CORE, 0)] {
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: `limit` is a valid `rlimit` for `getrlimit` to fill and `setrlimit` to read.
+        if unsafe { libc::getrlimit(resource, &raw mut limit) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        limit.rlim_cur = soft.min(below_hard(&limit));
+        // SAFETY: as above.
+        if unsafe { libc::setrlimit(resource, &raw const limit) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    Ok(())
+}
+
+/// Whether a Lean process stopped at `processor_seconds()`: `SIGXCPU` ended it, or ended the program `lake env` ran,
+/// which `lake env` reports as a `stopped_code`.
+pub(crate) fn stopped(status: ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+
+        status.signal() == Some(libc::SIGXCPU) || status.code().is_some_and(stopped_code)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        false
+    }
+}
+
+/// Whether `code` is the exit status Lean reports for a process `SIGXCPU` ended: 128 plus the signal.
+pub(crate) fn stopped_code(code: i32) -> bool {
+    #[cfg(unix)]
+    {
+        code == 128 + libc::SIGXCPU
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = code;
+        false
+    }
+}
+
+/// How Mago ended Lean work that did not finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stop {
+    /// It ran past `processor_seconds()`.
+    Processor,
+    /// It went `deadline()` without finishing: it waited, since work that computes reaches the processor limit first.
+    Waited,
+}
+
+/// The wall-clock time Lean work may go without finishing: four times `processor_seconds()`.
+pub(crate) fn deadline() -> Duration {
+    Duration::from_secs(processor_seconds().saturating_mul(4))
+}
+
+/// The process group `output_before_deadline` waits on, or 0. It is not Mago's own group, so a terminal's Ctrl-C reaches
+/// it only through `forward`.
+#[cfg(unix)]
+static WAITED_ON: AtomicI32 = AtomicI32::new(0);
+
+/// What `WAITED_ON` holds while `command.spawn()` starts the group.
+#[cfg(unix)]
+const STARTING: libc::pid_t = -1;
+
+/// The signal `forward` received, which `output_before_deadline` passes back to it once the group it started is known:
+/// a signal can reach any of Mago's threads while one of them spawns.
+#[cfg(unix)]
+static PENDING: AtomicI32 = AtomicI32::new(0);
+
+/// Keeps `output_before_deadline` to one group at a time, the one `WAITED_ON` holds.
+#[cfg(unix)]
+static ONE_GROUP: Mutex<()> = Mutex::new(());
+
+/// Runs `command` in a process group of its own and returns how it exited and what it wrote, and whether it wrote
+/// nothing for `deadline()`, so Mago ended the group. The deadline counts from the last thing it wrote, so a
+/// `lake build` that reports each module it builds never reaches it however many modules it builds, while a Lean that
+/// waits does. A signal that ends Mago ends the group too, as it did while the group was Mago's own.
+pub(crate) fn output_before_deadline(command: &mut Command) -> io::Result<(Output, bool)> {
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    let _one = {
+        std::os::unix::process::CommandExt::process_group(command, 0);
+        forward_signals();
+        ONE_GROUP.lock().unwrap_or_else(PoisonError::into_inner)
+    };
+    #[cfg(unix)]
+    WAITED_ON.store(STARTING, Ordering::SeqCst);
+    let spawned = command.spawn();
+    // `forward` writes `PENDING` before it reads `WAITED_ON`, and this thread writes `WAITED_ON` before it reads
+    // `PENDING`, so at least one of them ends the group for a signal that arrived during the spawn.
+    #[cfg(unix)]
+    {
+        let group = spawned.as_ref().ok().and_then(|child| libc::pid_t::try_from(child.id()).ok()).unwrap_or(0);
+        WAITED_ON.store(group, Ordering::SeqCst);
+        let signal = PENDING.load(Ordering::SeqCst);
+        if signal != 0 {
+            forward(signal);
+        }
+    }
+    let mut child = spawned?;
+    let output = wait_before_deadline(&mut child);
+    #[cfg(unix)]
+    WAITED_ON.store(0, Ordering::SeqCst);
+
+    output
+}
+
+/// On each signal that ends Mago from a terminal or `kill`, which Mago does not ignore, ends the group `WAITED_ON`
+/// holds, then ends Mago with it as before.
+#[cfg(unix)]
+fn forward_signals() {
+    static FORWARDING: Once = Once::new();
+    FORWARDING.call_once(|| {
+        for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGHUP, libc::SIGTERM] {
+            // SAFETY: `sigaction` is plain data, which zeroes make valid.
+            let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+            // SAFETY: `sigaction` only reads the handler of `signal` into `previous`.
+            if unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut previous) } != 0
+                || previous.sa_sigaction != libc::SIG_DFL
+            {
+                continue;
+            }
+            // SAFETY: as for `previous`.
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            // `sigaction` takes the handler as its address.
+            #[allow(clippy::fn_to_numeric_cast_any)]
+            let handler = forward as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            action.sa_sigaction = handler;
+            action.sa_flags = libc::SA_RESETHAND;
+            // SAFETY: `action` is a valid `sigaction`, and `forward` is async-signal-safe.
+            unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
+        }
+    });
+}
+
+/// Ends the group `WAITED_ON` holds with `SIGKILL`, as `end_group` does, so no Lean of it dumps a core on `SIGQUIT`,
+/// then raises `signal` again, which `SA_RESETHAND` made end Mago. While the group starts, it only records `signal` in
+/// `PENDING`, for the spawning thread to send on.
+#[cfg(unix)]
+extern "C" fn forward(signal: libc::c_int) {
+    PENDING.store(signal, Ordering::SeqCst);
+    let group = WAITED_ON.load(Ordering::SeqCst);
+    if group == STARTING {
+        return;
+    }
+    if group != 0 {
+        // SAFETY: `kill` is async-signal-safe.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+    }
+    // SAFETY: `raise` is async-signal-safe.
+    unsafe { libc::raise(signal) };
+}
+
+/// What `child` wrote and how it exited, and whether Mago ended its group at `deadline()`.
+fn wait_before_deadline(child: &mut Child) -> io::Result<(Output, bool)> {
+    let missing = || io::Error::other("a Lean process has no output stream");
+    let (stdout, stderr) = (child.stdout.take().ok_or_else(missing)?, child.stderr.take().ok_or_else(missing)?);
+    let (wrote, written) = mpsc::channel();
+    let stdout = read_all(stdout, wrote.clone());
+    let stderr = read_all(stderr, wrote);
+    let waited = loop {
+        match written.recv_timeout(deadline()) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break false,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                #[cfg(unix)]
+                end_group(child)?;
+                #[cfg(not(unix))]
+                child.kill()?;
+                break true;
+            }
+        }
+    };
+    let status = child.wait()?;
+    let joined = |reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
+        reader.join().map_err(|_| io::Error::other("a reader of a Lean process panicked"))?
+    };
+
+    Ok((Output { status, stdout: joined(stdout)?, stderr: joined(stderr)? }, waited))
+}
+
+/// Reads `stream` to its end on a thread of its own, and sends on `wrote` each time it reads something.
+fn read_all(
+    mut stream: impl Read + Send + 'static,
+    wrote: mpsc::Sender<()>,
+) -> thread::JoinHandle<io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 8192];
+        loop {
+            let read = stream.read(&mut chunk)?;
+            if read == 0 {
+                return Ok(bytes);
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            let _ = wrote.send(());
+        }
+    })
+}
+
+/// Ends `child` and every process of its group, such as each `lean` a `lake` started.
+#[cfg(unix)]
+fn end_group(child: &Child) -> io::Result<()> {
+    let group = libc::pid_t::try_from(child.id()).map_err(io::Error::other)?;
+    // SAFETY: `killpg` only sends a signal, to the group `child` leads since it started with `process_group(0)`.
+    if unsafe { libc::killpg(group, libc::SIGKILL) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
 }
 
 /// The runner executable in the library's build.
@@ -191,9 +476,7 @@ pub(crate) fn install() -> io::Result<Option<Lake>> {
 /// never reuses or deletes the download a killed install left there.
 fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> {
     let home = cache.join("elan");
-    fs::create_dir_all(cache)?;
-    let lock = fs::File::options().create(true).truncate(false).write(true).open(cache.join("elan.lock"))?;
-    lock.lock()?;
+    let _lock = install_lock(cache)?;
 
     let lake = Lake { program: home.join("bin/lake"), home: Some(home.clone()) };
     let has_elan = Path::new(elan(&home).get_program()).is_file();
@@ -219,6 +502,28 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
     }
 
     Ok(lake)
+}
+
+/// Runs `command`, the first call to a `lake`, under the lock Mago's own installs take. elan's `lake` installs the
+/// pinned Lean on its first call, with no lock of its own, so compiles that start together on a machine without that
+/// Lean take turns to install it once instead of breaking it. With no such program on the `PATH`, the call installs
+/// nothing and takes no lock, so it fails as not found even where Mago's cache folder can hold no lock.
+pub(crate) fn first_call(command: &mut Command) -> io::Result<Output> {
+    let program = Path::new(command.get_program()).with_extension(std::env::consts::EXE_EXTENSION);
+    let found = std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|folder| folder.join(&program).is_file()));
+    let _lock = if found { Some(install_lock(&cache_root()?)?) } else { None };
+
+    command.output()
+}
+
+/// The exclusive lock on `elan.lock` in `cache`, held across threads and processes alike until it is dropped.
+fn install_lock(cache: &Path) -> io::Result<fs::File> {
+    fs::create_dir_all(cache)?;
+    let lock = fs::File::options().create(true).truncate(false).write(true).open(cache.join("elan.lock"))?;
+    lock.lock()?;
+
+    Ok(lock)
 }
 
 /// The SHA-256 of `bytes` in lowercase hex, as an archive's pinned `sha256` is written.
@@ -338,6 +643,33 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
+
+    /// Each process a `Lake` starts, `lake` itself or anything run in its place, runs under the processor-time limit,
+    /// which the Lean processes it starts inherit.
+    #[test]
+    fn each_process_a_lake_starts_runs_under_the_processor_time_limit() -> io::Result<()> {
+        let lake = Lake { program: PathBuf::from("/bin/sh"), home: None };
+
+        let output = lake.command().args(["-c", "ulimit -t; ulimit -c"]).output()?;
+        let within = lake.command_within(360).args(["-c", "ulimit -t"]).output()?;
+
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "120\n0\n");
+        assert_eq!(String::from_utf8_lossy(&within.stdout), "360\n");
+
+        Ok(())
+    }
+
+    /// Linux ends a process whose soft limit meets its hard limit with `SIGKILL`, which Mago can't tell from the
+    /// out-of-memory killer's, so the soft limit stays a second under a finite hard limit, as a `ulimit -t 60` sets.
+    #[test]
+    fn the_processor_time_limit_stays_a_second_under_a_finite_hard_limit() {
+        let limit = |rlim_cur, rlim_max| libc::rlimit { rlim_cur, rlim_max };
+
+        assert_eq!(processor_seconds_within(&limit(60, 60)), 59);
+        assert_eq!(processor_seconds_within(&limit(10, libc::RLIM_INFINITY)), 10);
+        assert_eq!(processor_seconds_within(&limit(libc::RLIM_INFINITY, 200)), 120);
+        assert_eq!(processor_seconds_within(&limit(libc::RLIM_INFINITY, libc::RLIM_INFINITY)), 120);
+    }
 
     /// An `elan-init` that installs an `elan` whose `toolchain install` appends the toolchain to `$ELAN_HOME/installed`
     /// and whose `toolchain list` prints that file. When the cache holds `broken-init`, it fails after it installed.
