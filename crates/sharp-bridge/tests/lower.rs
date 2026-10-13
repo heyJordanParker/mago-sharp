@@ -13400,17 +13400,19 @@ fn a_standard_library_extension_member_inlines_as_the_call_its_body_makes() {
 /// ```php
 /// $total = ($order === null ? null : \App\Text\Extensions::total($order, 2)) ?? 0;
 /// $blank = ($title === null ? null : \App\Text\Extensions::isBlank($title)) ?? false;
+/// $kind = $order === null ? null : \App\Text\Extensions::kind($order->amount);
 /// return $blank ? ($title === null ? null : \App\Text\Extensions::slug($title, '-')) : (string) $total;
 /// ```
 ///
 /// Spec section 26: `?.` reaches an extension's member only when the receiver is not null, as it does any member, so
-/// the call runs under the conditional that tests the receiver.
+/// the call runs under the conditional that tests the receiver. A member read with `.` later in the chain runs under
+/// it too, since PHP's `?->` would skip only its own link and pass `null` to the static call.
 #[test]
 fn a_null_safe_extension_member_runs_only_on_a_receiver_that_is_not_null() {
     assert_eq!(
         extension_body(
             "string? run(string? title, Order? order)",
-            "        const total = order?.total(2) ?? 0;\n        const blank = title?.isBlank ?? false;\n        return blank ? title?.slug(\"-\") : (string) total;\n"
+            "        const total = order?.total(2) ?? 0;\n        const blank = title?.isBlank ?? false;\n        const kind = order?.amount.kind;\n        return blank ? title?.slug(\"-\") : (string) total;\n"
         ),
         indoc! {r#"
             STMT_LIST
@@ -13449,6 +13451,23 @@ fn a_null_safe_extension_member_runs_only_on_a_receiver_that_is_not_null() {
                         VAR
                           ZVAL "title"
                   ZVAL false
+              ASSIGN
+                VAR
+                  ZVAL "kind"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "order"
+                    ZVAL null
+                  ZVAL null
+                  STATIC_CALL
+                    ZVAL "App\\Text\\Extensions"
+                    ZVAL "kind"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "order"
+                        ZVAL "amount"
               RETURN
                 CONDITIONAL
                   VAR

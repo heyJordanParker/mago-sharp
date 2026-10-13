@@ -371,7 +371,7 @@ where
 
 /// Analyzes a member a PHP# extension adds to its receiver's type, spec section 26, as the call of the static method
 /// `extension` it runs as with `arguments`, whose first argument is the receiver. Through `?.`, a `null` receiver
-/// skips the call, so the result may be `null` too.
+/// skips the call, so the result may be `null` too, as it may below a `?.` earlier in the chain.
 #[allow(clippy::expect_used)]
 pub(crate) fn analyze_extension_access<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -405,6 +405,7 @@ where
         span,
     };
     let skips_null = is_null_safe && artifacts.get_expression_type(receiver).is_some_and(TUnion::is_nullable);
+    let receiver_has_nullsafe_null = artifacts.get_expression_type(receiver).is_some_and(TUnion::has_nullsafe_null);
 
     analyze_invocation_targets(
         context,
@@ -418,7 +419,7 @@ where
         false,
         false,
         skips_null,
-        false,
+        receiver_has_nullsafe_null,
     )
 }
 

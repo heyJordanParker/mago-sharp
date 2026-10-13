@@ -4904,7 +4904,7 @@ fn an_imported_extension_is_a_member_of_its_receiver() {
 /// so the member's type gains `null`. Plain `.` on a receiver that may be `null` is refused.
 #[test]
 fn a_null_safe_extension_access_skips_a_null_receiver() {
-    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\npublic class Catalog\n{\n    public string? handle(string? title) => title?.slug(\"-\");\n    public bool? empty(string? title) => title?.isBlank;\n    public string sure(string? title) => title?.slug(\"-\");\n    public string plain(string? title) => title.slug(\"-\");\n    public bool read(string? title) => title.isBlank;\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\npublic class Catalog\n{\n    public string? handle(string? title) => title?.slug(\"-\");\n    public bool? empty(string? title) => title?.isBlank;\n    public string sure(string? title) => title?.slug(\"-\");\n    public string plain(string? title) => title.slug(\"-\");\n    public bool read(string? title) => title.isBlank;\n    public bool chained(string? title) => title?.slug(\"-\").isBlank;\n}\n";
 
     assert_messages(
         sharp,
@@ -4914,6 +4914,8 @@ fn a_null_safe_extension_access_skips_a_null_receiver() {
             "9:42 invalid-return-statement: Invalid return type for method `Catalog.sure`: expected `string`, but found `string?`.",
             "10:43 possible-method-access-on-null: Attempting to call a method on `null`.",
             "11:40 possibly-null-property-access: Attempting to access a property on a possibly `null` value.",
+            "12:43 nullable-return-statement: Method `Catalog.chained` is declared to return `bool` but possibly returns a nullable value (inferred as `bool?`).",
+            "12:43 invalid-return-statement: Invalid return type for method `Catalog.chained`: expected `bool`, but found `bool?`.",
         ],
     );
 }
