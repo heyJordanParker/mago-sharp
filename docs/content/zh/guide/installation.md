@@ -15,19 +15,19 @@ macOS 和 Linux 上的推荐方式。脚本会检测你的平台、获取匹配�
 使用 `curl`:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash
 ```
 
 使用 `wget`:
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash
 ```
 
 ### 锁定特定版本
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash -s -- --version=0.3.1
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash -s -- --version=0.3.1
 ```
 
 `wget` 也支持同样的语法。
@@ -39,7 +39,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordan
 要让校验成为强制项,请传 `--always-verify`。如果 `gh` 不可用、版本太旧,或证明不匹配,安装脚本会在修改 PATH 之前中止。
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash -s -- --always-verify
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash -s -- --always-verify
 ```
 
 要完全跳过校验,请传 `--no-verify`。这两个参数互斥。
@@ -48,7 +48,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordan
 
 Windows 上的推荐方式,也是任何没有 `bash` 的系统上的不错备选。
 
-1. 打开 [发布页面](https://github.com/heyJordanParker/mago-sharp/releases)。
+1. 打开 [发布页面](https://github.com/heyJordanParker/php-sharp/releases)。
 2. 下载对应你操作系统的归档。命名遵循 `mago-<version>-<target>.tar.gz` (Windows 上是 `.zip`)。
 3. 解压归档,把二进制放到 PATH 上的某个位置。
 
@@ -59,10 +59,10 @@ VERSION=0.3.1
 TARGET=x86_64-unknown-linux-gnu  # 请根据你的平台调整
 ASSET=mago-${VERSION}-${TARGET}.tar.gz
 
-gh release download "$VERSION" --repo heyJordanParker/mago-sharp --pattern "$ASSET"
+gh release download "v$VERSION" --repo heyJordanParker/php-sharp --pattern "$ASSET"
 gh attestation verify "$ASSET" \
-  --repo heyJordanParker/mago-sharp \
-  --signer-workflow heyJordanParker/mago-sharp/.github/workflows/cd.yml
+  --repo heyJordanParker/php-sharp \
+  --signer-workflow heyJordanParker/php-sharp/.github/workflows/release.yml
 
 tar -xzf "$ASSET"
 sudo mv "mago-${VERSION}-${TARGET}/mago" /usr/local/bin/
@@ -94,7 +94,7 @@ Composer 包是一个轻量封装。第一次调用 `vendor/bin/mago` 会从 Git
 
 ## 校验发布的细节
 
-每一份发行归档 (各平台的 tarball、源码 tarball、源码 zip,以及 WASM 包) 都在构建时通过 [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance) 进行签名。签名是一份存储在 GitHub 上的 [in-toto](https://in-toto.io/) 证明,绑定到生成该工件的工作流运行,因此校验通过的下载,可证明与 Mago 发布流水线产出的字节完全一致。
+每一份发行归档 (各平台的 tarball 以及 WASM 包) 都在构建时通过 [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance) 进行签名。签名是一份存储在 GitHub 上的 [in-toto](https://in-toto.io/) 证明,绑定到生成该工件的工作流运行,因此校验通过的下载,可证明与 Mago 发布流水线产出的字节完全一致。
 
 shell 安装脚本会根据你传入的参数,在三种模式之间选择。
 
@@ -108,8 +108,8 @@ shell 安装脚本会根据你传入的参数,在三种模式之间选择。
 
 ```sh
 gh attestation verify <archive> \
-  --repo heyJordanParker/mago-sharp \
-  --signer-workflow heyJordanParker/mago-sharp/.github/workflows/cd.yml
+  --repo heyJordanParker/php-sharp \
+  --signer-workflow heyJordanParker/php-sharp/.github/workflows/release.yml
 ```
 
 `--signer-workflow` 这一项很关键。它把证明绑定到具体的发布工作流文件。即便有人通过泄露的 GitHub Actions token 在同一仓库内触发了另一个工作流,校验也会失败。
@@ -120,14 +120,14 @@ gh attestation verify <archive> \
 
 ### 锁定安装脚本
 
-上面的安装脚本 URL 提供的是 `master` 分支上的 [`scripts/install.sh`](https://github.com/heyJordanParker/mago-sharp/blob/master/scripts/install.sh)。未来的修订会被自动采用,这很方便,但也意味着将来对安装脚本的改动会在没有预警的情况下生效。
+上面的安装脚本 URL 提供的是 `master` 分支上的 [`sharp/mago/scripts/install.sh`](https://github.com/heyJordanParker/php-sharp/blob/master/sharp/mago/scripts/install.sh)。未来的修订会被自动采用,这很方便,但也意味着将来对安装脚本的改动会在没有预警的情况下生效。
 
 为了更严格的供应链安全,可以把脚本锁定到你审阅过的某个提交:
 
 ```sh
 COMMIT=cd4cf4dfdbc72bd028ad26d11bcc815a49e27e9a  # 替换为你已审阅过的提交哈希
 curl --proto '=https' --tlsv1.2 -sSf \
-  "https://raw.githubusercontent.com/heyJordanParker/mago-sharp/${COMMIT}/scripts/install.sh" \
+  "https://raw.githubusercontent.com/heyJordanParker/php-sharp/${COMMIT}/sharp/mago/scripts/install.sh" \
   | bash -s -- --always-verify
 ```
 

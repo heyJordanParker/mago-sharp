@@ -42,10 +42,10 @@ Merci d'envisager une contribution. Les étapes ci-dessous vous mènent d'une co
    git push origin feature/my-awesome-change
    ```
 
-8. Ouvrez une pull request contre le [dépôt principal](https://github.com/heyJordanParker/mago-sharp).
+8. Ouvrez une pull request contre le [dépôt principal](https://github.com/heyJordanParker/php-sharp).
 
 ## Pull requests
 
 Les corrections de bugs doivent inclure un test qui reproduit le bug. Les nouvelles fonctionnalités doivent inclure une couverture complète. En contribuant, vous acceptez que vos contributions soient sous la double licence MIT / Apache-2.0 du projet.
 
-Pour signaler un problème de sécurité, suivez les étapes de la [politique de sécurité](https://github.com/heyJordanParker/mago-sharp/security/policy).
+Pour signaler un problème de sécurité, suivez les étapes de la [politique de sécurité](https://github.com/heyJordanParker/php-sharp/security/policy).

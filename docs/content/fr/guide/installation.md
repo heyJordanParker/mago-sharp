@@ -15,19 +15,19 @@ La voie recommandée sur macOS et Linux. Le script détecte votre plateforme, r�
 Avec `curl` :
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash
 ```
 
 Avec `wget` :
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash
 ```
 
 ### Épingler une version spécifique
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash -s -- --version=0.3.1
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash -s -- --version=0.3.1
 ```
 
 La même syntaxe fonctionne avec `wget`.
@@ -39,7 +39,7 @@ Si la [GitHub CLI](https://cli.github.com/) est dans votre PATH, le script véri
 Pour rendre la vérification obligatoire, passez `--always-verify`. Le script s'interrompt avant de toucher votre PATH si `gh` est indisponible, trop ancien ou si l'attestation ne correspond pas.
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash -s -- --always-verify
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash -s -- --always-verify
 ```
 
 Pour désactiver entièrement, passez `--no-verify`. Les deux drapeaux sont mutuellement exclusifs.
@@ -48,7 +48,7 @@ Pour désactiver entièrement, passez `--no-verify`. Les deux drapeaux sont mutu
 
 La voie recommandée sur Windows et un bon repli sur tout système sans `bash`.
 
-1. Ouvrez la [page des releases](https://github.com/heyJordanParker/mago-sharp/releases).
+1. Ouvrez la [page des releases](https://github.com/heyJordanParker/php-sharp/releases).
 2. Téléchargez l'archive correspondant à votre système d'exploitation. Le nom suit `mago-<version>-<target>.tar.gz` (ou `.zip` sous Windows).
 3. Extrayez l'archive et placez le binaire quelque part dans votre PATH.
 
@@ -59,10 +59,10 @@ VERSION=0.3.1
 TARGET=x86_64-unknown-linux-gnu  # adjust for your platform
 ASSET=mago-${VERSION}-${TARGET}.tar.gz
 
-gh release download "$VERSION" --repo heyJordanParker/mago-sharp --pattern "$ASSET"
+gh release download "v$VERSION" --repo heyJordanParker/php-sharp --pattern "$ASSET"
 gh attestation verify "$ASSET" \
-  --repo heyJordanParker/mago-sharp \
-  --signer-workflow heyJordanParker/mago-sharp/.github/workflows/cd.yml
+  --repo heyJordanParker/php-sharp \
+  --signer-workflow heyJordanParker/php-sharp/.github/workflows/release.yml
 
 tar -xzf "$ASSET"
 sudo mv "mago-${VERSION}-${TARGET}/mago" /usr/local/bin/
@@ -94,7 +94,7 @@ Si la limite de taux anonyme de GitHub bloque le premier téléchargement (fréq
 
 ## Vérification des releases en détail
 
-Chaque archive de release (tarball par plateforme, tarball source, zip source et bundle WASM) est signée au moment du build via [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance). La signature est une attestation [in-toto](https://in-toto.io/) stockée sur GitHub et liée à l'exécution de workflow qui a produit l'artefact, donc un téléchargement vérifié est prouvablement octet-identique à ce qui est sorti du pipeline de release de Mago.
+Chaque archive de release (tarball par plateforme et bundle WASM) est signée au moment du build via [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance). La signature est une attestation [in-toto](https://in-toto.io/) stockée sur GitHub et liée à l'exécution de workflow qui a produit l'artefact, donc un téléchargement vérifié est prouvablement octet-identique à ce qui est sorti du pipeline de release de Mago.
 
 Le script shell choisit l'un de trois modes selon les drapeaux que vous passez.
 
@@ -108,8 +108,8 @@ Quand la vérification s'exécute, le script lance :
 
 ```sh
 gh attestation verify <archive> \
-  --repo heyJordanParker/mago-sharp \
-  --signer-workflow heyJordanParker/mago-sharp/.github/workflows/cd.yml
+  --repo heyJordanParker/php-sharp \
+  --signer-workflow heyJordanParker/php-sharp/.github/workflows/release.yml
 ```
 
 L'épinglage `--signer-workflow` est important. Il lie l'attestation au fichier exact du workflow de release. Un jeton GitHub Actions compromis qui pourrait déclencher un workflow différent dans le même dépôt échouerait quand même à la vérification.
@@ -120,14 +120,14 @@ L'appel de vérification lit depuis l'API publique des attestations, donc aucun 
 
 ### Épingler le script d'installation
 
-L'URL du script ci-dessus sert [`scripts/install.sh`](https://github.com/heyJordanParker/mago-sharp/blob/master/scripts/install.sh) depuis la branche `master`. Les futures révisions sont prises automatiquement, ce qui est pratique mais signifie aussi que les futurs changements du script arrivent sans préavis.
+L'URL du script ci-dessus sert [`sharp/mago/scripts/install.sh`](https://github.com/heyJordanParker/php-sharp/blob/master/sharp/mago/scripts/install.sh) depuis la branche `master`. Les futures révisions sont prises automatiquement, ce qui est pratique mais signifie aussi que les futurs changements du script arrivent sans préavis.
 
 Pour une hygiène de chaîne d'approvisionnement plus stricte, épinglez le script à un commit spécifique que vous avez relu :
 
 ```sh
 COMMIT=cd4cf4dfdbc72bd028ad26d11bcc815a49e27e9a  # replace with a commit you have read
 curl --proto '=https' --tlsv1.2 -sSf \
-  "https://raw.githubusercontent.com/heyJordanParker/mago-sharp/${COMMIT}/scripts/install.sh" \
+  "https://raw.githubusercontent.com/heyJordanParker/php-sharp/${COMMIT}/sharp/mago/scripts/install.sh" \
   | bash -s -- --always-verify
 ```
 

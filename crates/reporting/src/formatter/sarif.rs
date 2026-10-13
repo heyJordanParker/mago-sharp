@@ -56,7 +56,7 @@ fn build_sarif_log(
             ToolComponent::builder()
                 .name("mago")
                 .version(env!("CARGO_PKG_VERSION"))
-                .information_uri("https://github.com/heyJordanParker/mago-sharp")
+                .information_uri("https://github.com/heyJordanParker/php-sharp")
                 .build(),
         )
         .build();

@@ -2,11 +2,11 @@
 
 set -euo pipefail
 
-REPO="heyJordanParker/mago-sharp"
+REPO="heyJordanParker/php-sharp"
 BIN_NAME="mago"
 TMP_DIR=$(mktemp -d)
-NEW_ISSUE="https://github.com/heyJordanParker/mago-sharp/issues/new"
-SIGNER_WORKFLOW=".github/workflows/cd.yml"
+NEW_ISSUE="https://github.com/heyJordanParker/php-sharp/issues/new"
+SIGNER_WORKFLOW=".github/workflows/release.yml"
 INSTALL_DIR=""
 VERSION=""
 VERIFY_MODE="auto"
@@ -295,9 +295,10 @@ fi
 
 separator
 
-# Download the release
-file_name="${BIN_NAME}-${latest_tag}-${target_triple}"
-file_url="https://github.com/${REPO}/releases/download/${latest_tag}/${file_name}.tar.gz"
+# php-sharp tags a release as v0.3.1, and its assets carry the bare version
+version="${latest_tag#v}"
+file_name="${BIN_NAME}-${version}-${target_triple}"
+file_url="https://github.com/${REPO}/releases/download/v${version}/${file_name}.tar.gz"
 destination="${TMP_DIR}/${file_name}"
 
 green "Downloading ${file_name}..."

@@ -10,11 +10,11 @@
 
 <div align="center">
 
-[![CI Status](https://github.com/heyJordanParker/mago-sharp/actions/workflows/ci.yml/badge.svg)](https://github.com/heyJordanParker/mago-sharp/actions/workflows/ci.yml)
-[![CD Status](https://github.com/heyJordanParker/mago-sharp/actions/workflows/cd.yml/badge.svg)](https://github.com/heyJordanParker/mago-sharp/actions/workflows/cd.yml)
+[![CI Status](https://github.com/heyJordanParker/php-sharp/actions/workflows/mago.yml/badge.svg)](https://github.com/heyJordanParker/php-sharp/actions/workflows/mago.yml)
+[![Release Status](https://github.com/heyJordanParker/php-sharp/actions/workflows/release.yml/badge.svg)](https://github.com/heyJordanParker/php-sharp/actions/workflows/release.yml)
 [![Latest Stable Version for PHP](https://poser.pugx.org/heyjordanparker/mago-sharp/v)](https://packagist.org/packages/heyjordanparker/mago-sharp)
 [![Total Composer Downloads](http://poser.pugx.org/heyjordanparker/mago-sharp/downloads)](https://packagist.org/packages/heyjordanparker/mago-sharp)
-[![License](https://img.shields.io/github/license/heyJordanParker/mago-sharp)](https://github.com/heyJordanParker/mago-sharp/blob/master/LICENSE-MIT)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](./LICENSE-MIT)
 
 </div>
 
@@ -34,13 +34,13 @@
 The most common way to install Mago on macOS and Linux is by using our shell script:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash
 ```
 
 To install a specific version:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash -s -- --version=0.3.1
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash -s -- --version=0.3.1
 ```
 
 For all other installation methods, including Composer, please refer to the **[Installation Guide](docs/content/en/guide/installation.md)**.

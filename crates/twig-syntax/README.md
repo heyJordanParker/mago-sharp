@@ -85,4 +85,4 @@ Dual-licensed under the same terms as the rest of the [Mago] workspace.
 [`MutWalker`]: crate::walker::MutWalker
 [`Walker`]: crate::walker::Walker
 [`bumpalo::Bump`]: https://docs.rs/bumpalo
-[Mago]: https://github.com/heyJordanParker/mago-sharp
+[Mago]: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago

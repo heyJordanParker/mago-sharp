@@ -2,8 +2,8 @@ site-name = "Mago"
 site-description = "PHP#'s checker and toolchain: checks PHP and PHP# code, compiles PHP#, and lints and formats PHP."
 default-language = "en"
 accent-color = "#3c8d58"
-base-url = "https://github.com/heyJordanParker/mago-sharp/tree/master/docs"
-source-edit-url = "https://github.com/heyJordanParker/mago-sharp/edit/master/docs"
+base-url = "https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago/docs"
+source-edit-url = "https://github.com/heyJordanParker/php-sharp/edit/master/sharp/mago/docs"
 
 # Top-level sidebar sections, in display order. The list is interleaved across
 # languages: each language's section name takes the slot it appears in, so all

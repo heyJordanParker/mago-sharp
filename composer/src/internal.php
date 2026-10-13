@@ -33,6 +33,7 @@ use function ini_get;
 use function is_dir;
 use function is_resource;
 use function is_string;
+use function ltrim;
 use function mkdir;
 use function number_format;
 use function php_uname;
@@ -98,7 +99,7 @@ function locked(string $lockFile, \Closure $callback): mixed
 }
 
 /**
- * Get the installed mago version from Composer metadata.
+ * Get the installed mago version from Composer metadata, without the `v` of php-sharp's release tags.
  *
  * @throws RuntimeException If the version cannot be determined.
  *
@@ -113,7 +114,7 @@ function get_version(): string
         throw new RuntimeException('Could not determine mago package version.');
     }
 
-    return $version;
+    return ltrim($version, 'v');
 }
 
 /**
@@ -141,7 +142,7 @@ function detect_architecture(): string
         'armv6l', 'armv5tel', 'armv5l' => 'arm',
         default => throw new RuntimeException(
             "Unsupported architecture: {$raw}. Pre-built binaries are available for x86_64, aarch64, armv7, and arm. "
-            . 'For other architectures, compile mago from source: https://github.com/heyJordanParker/mago-sharp',
+            . 'For other architectures, compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago',
         ),
     };
 }
@@ -298,7 +299,7 @@ function detect_platform(string $architecture): array
         },
         default => throw new RuntimeException(
             "Unsupported operating system: {$os}. Pre-built binaries are available for Windows, macOS, Linux, and FreeBSD. "
-            . 'For other platforms, compile mago from source: https://github.com/heyJordanParker/mago-sharp',
+            . 'For other platforms, compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago',
         ),
     };
 }
@@ -351,7 +352,7 @@ function get_archive_extension(string $os, string $suffix): string
  */
 function build_download_url(string $version, string $storageDir, string $archiveExtension): string
 {
-    return "https://github.com/heyJordanParker/mago-sharp/releases/download/{$version}/{$storageDir}{$archiveExtension}";
+    return "https://github.com/heyJordanParker/php-sharp/releases/download/v{$version}/{$storageDir}{$archiveExtension}";
 }
 
 /**

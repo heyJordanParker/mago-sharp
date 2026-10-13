@@ -42,10 +42,10 @@ nav_section = "参考"
    git push origin feature/my-awesome-change
    ```
 
-8. 向 [主仓库](https://github.com/heyJordanParker/mago-sharp) 提交 pull request。
+8. 向 [主仓库](https://github.com/heyJordanParker/php-sharp) 提交 pull request。
 
 ## Pull request
 
 bug 修复应附带一个能复现该 bug 的测试。新功能应附带全面的测试覆盖。提交贡献即表示你同意你的贡献以本项目的 MIT / Apache-2.0 双重许可证发布。
 
-如需报告安全问题,请按照 [安全策略](https://github.com/heyJordanParker/mago-sharp/security/policy) 中的步骤操作。
+如需报告安全问题,请按照 [安全策略](https://github.com/heyJordanParker/php-sharp/security/policy) 中的步骤操作。

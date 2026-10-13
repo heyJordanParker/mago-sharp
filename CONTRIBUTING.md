@@ -77,7 +77,7 @@ Here is a small checklist to get you going:
 
 10. **Submit a Pull Request**:
     Submit a Pull Request to the main repository.
-    - Go to the [main repository](https://github.com/heyJordanParker/mago-sharp)
+    - Go to the [main repository](https://github.com/heyJordanParker/php-sharp)
     - Click on the "New Pull Request" button
     - Select your fork and branch
     - Write a descriptive title and message

@@ -212,7 +212,7 @@ impl HangWatcher {
                         "No file should take this long to analyze. This is almost certainly a bug in mago."
                     );
                     tracing::trace!(
-                        "Please report it at https://github.com/heyJordanParker/mago-sharp/issues/new and attach {} if you can share it.",
+                        "Please report it at https://github.com/heyJordanParker/php-sharp/issues/new and attach {} if you can share it.",
                         file_name,
                     );
                     tracing::trace!(

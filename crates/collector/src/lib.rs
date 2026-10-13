@@ -252,7 +252,7 @@ where
                 .with_code("missing-code")
                 .with_note("This diagnostic was reported without a unique code, which is required by the collector.")
                 .with_help("Please report this issue to the Mago team.")
-                .with_link("https://github.com/heyJordanParker/mago-sharp");
+                .with_link("https://github.com/heyJordanParker/php-sharp");
 
             if let Some(span) = primary_span {
                 missing_code_issue = missing_code_issue.with_annotation(

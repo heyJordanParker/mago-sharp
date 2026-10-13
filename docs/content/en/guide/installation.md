@@ -15,19 +15,19 @@ The recommended path on macOS and Linux. The script detects your platform, fetch
 With `curl`:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash
 ```
 
 With `wget`:
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash
 ```
 
 ### Pin a specific version
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash -s -- --version=0.3.1
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash -s -- --version=0.3.1
 ```
 
 The same syntax works with `wget`.
@@ -39,7 +39,7 @@ If the [GitHub CLI](https://cli.github.com/) is on your PATH, the installer veri
 To make verification mandatory, pass `--always-verify`. The installer aborts before touching your PATH if `gh` is unavailable, too old, or the attestation does not match.
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash -s -- --always-verify
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash -s -- --always-verify
 ```
 
 To opt out entirely, pass `--no-verify`. The two flags are mutually exclusive.
@@ -48,7 +48,7 @@ To opt out entirely, pass `--no-verify`. The two flags are mutually exclusive.
 
 The recommended path on Windows and a fine fallback on any system without `bash`.
 
-1. Open the [releases page](https://github.com/heyJordanParker/mago-sharp/releases).
+1. Open the [releases page](https://github.com/heyJordanParker/php-sharp/releases).
 2. Download the archive for your operating system. The naming follows `mago-<version>-<target>.tar.gz` (or `.zip` on Windows).
 3. Extract the archive and place the binary somewhere on your PATH.
 
@@ -59,10 +59,10 @@ VERSION=0.3.1
 TARGET=x86_64-unknown-linux-gnu  # adjust for your platform
 ASSET=mago-${VERSION}-${TARGET}.tar.gz
 
-gh release download "$VERSION" --repo heyJordanParker/mago-sharp --pattern "$ASSET"
+gh release download "v$VERSION" --repo heyJordanParker/php-sharp --pattern "$ASSET"
 gh attestation verify "$ASSET" \
-  --repo heyJordanParker/mago-sharp \
-  --signer-workflow heyJordanParker/mago-sharp/.github/workflows/cd.yml
+  --repo heyJordanParker/php-sharp \
+  --signer-workflow heyJordanParker/php-sharp/.github/workflows/release.yml
 
 tar -xzf "$ASSET"
 sudo mv "mago-${VERSION}-${TARGET}/mago" /usr/local/bin/
@@ -97,7 +97,7 @@ If GitHub's anonymous rate limit blocks the first download (common on shared CI 
 You can run and build Mago yourself via [Nix flakes](https://nixos.wiki/wiki/flakes):
 
 ```sh
-nix run git+https://github.com/heyJordanParker/mago-sharp -- --version
+nix run 'git+https://github.com/heyJordanParker/php-sharp?dir=sharp/mago' -- --version
 ```
 
 Note: the Mago main repository relies on `.gitattributes` for distribution, so you have to use `git+https`
@@ -105,7 +105,7 @@ in order to get all the files necessary for Mago to compile.
 
 ## Verifying releases in detail
 
-Every release archive (per-platform tarball, source tarball, source zip, and WASM bundle) is signed at build time via [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance). The signature is an [in-toto](https://in-toto.io/) attestation stored on GitHub and tied to the workflow run that produced the artifact, so a verified download is provably byte-identical to what came out of Mago's release pipeline.
+Every release archive (per-platform tarball and WASM bundle) is signed at build time via [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance). The signature is an [in-toto](https://in-toto.io/) attestation stored on GitHub and tied to the workflow run that produced the artifact, so a verified download is provably byte-identical to what came out of Mago's release pipeline.
 
 The shell installer chooses one of three modes based on the flags you pass.
 
@@ -119,8 +119,8 @@ When verification runs, the installer executes:
 
 ```sh
 gh attestation verify <archive> \
-  --repo heyJordanParker/mago-sharp \
-  --signer-workflow heyJordanParker/mago-sharp/.github/workflows/cd.yml
+  --repo heyJordanParker/php-sharp \
+  --signer-workflow heyJordanParker/php-sharp/.github/workflows/release.yml
 ```
 
 The `--signer-workflow` pin matters. It binds the attestation to the exact release workflow file. A leaked GitHub Actions token that could trigger a different workflow inside the same repository would still fail verification.
@@ -131,14 +131,14 @@ The verify call reads from the public attestations API, so no `gh auth` is requi
 
 ### Pinning the install script
 
-The installer URL above serves [`scripts/install.sh`](https://github.com/heyJordanParker/mago-sharp/blob/master/scripts/install.sh) from the `master` branch. Future revisions are picked up automatically, which is convenient but also means future installer changes land without warning.
+The installer URL above serves [`sharp/mago/scripts/install.sh`](https://github.com/heyJordanParker/php-sharp/blob/master/sharp/mago/scripts/install.sh) from the `master` branch. Future revisions are picked up automatically, which is convenient but also means future installer changes land without warning.
 
 For stricter supply-chain hygiene, pin the script to a specific commit you have reviewed:
 
 ```sh
 COMMIT=cd4cf4dfdbc72bd028ad26d11bcc815a49e27e9a  # replace with a commit you have read
 curl --proto '=https' --tlsv1.2 -sSf \
-  "https://raw.githubusercontent.com/heyJordanParker/mago-sharp/${COMMIT}/scripts/install.sh" \
+  "https://raw.githubusercontent.com/heyJordanParker/php-sharp/${COMMIT}/sharp/mago/scripts/install.sh" \
   | bash -s -- --always-verify
 ```
 

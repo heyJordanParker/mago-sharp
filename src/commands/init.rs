@@ -967,7 +967,7 @@ fn generate_config_content(
 }
 
 fn documentation_url() -> String {
-    format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/tree/{VERSION}/docs")
+    format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/tree/v{VERSION}/sharp/mago/docs")
 }
 
 fn quote_format_strings(items: &[String]) -> String {
@@ -1240,7 +1240,7 @@ mod tests {
         let content = generate_default_config_content(project_root.path());
 
         let documentation_line =
-            format!("# For full documentation, see https://github.com/heyJordanParker/mago-sharp/tree/{VERSION}/docs");
+            format!("# For full documentation, see https://github.com/heyJordanParker/php-sharp/tree/v{VERSION}/sharp/mago/docs");
         assert!(
             content.lines().any(|line| line == documentation_line),
             "Expected `{documentation_line}` in:\n{content}"

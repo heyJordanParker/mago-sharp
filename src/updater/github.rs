@@ -43,7 +43,7 @@ pub fn get_latest_release(owner: &str, repo: &str) -> Result<Release, UpdateErro
 }
 
 pub fn get_release_version(owner: &str, repo: &str, tag: &str) -> Result<Release, UpdateError> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}");
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/tags/v{}", tag.trim_start_matches('v'));
 
     let json: Value = github_api_request(&url, "application/vnd.github.v3+json").call()?.body_mut().read_json()?;
 
