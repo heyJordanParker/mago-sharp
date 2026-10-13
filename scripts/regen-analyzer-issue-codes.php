@@ -370,6 +370,10 @@ final class AnalyzerCodeModuleGenerator
         'named-constructor-without-new',
         'named-constructor-clash',
         'invalid-event',
+        'invalid-binding',
+        'missing-service',
+        'service-cycle',
+        'captive-service',
     ];
 
     /**
