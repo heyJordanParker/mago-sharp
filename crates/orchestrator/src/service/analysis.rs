@@ -21,6 +21,7 @@ use mago_database::ReadDatabase;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_names::resolver::NameResolver;
+use mago_names::resolver::NamespaceClasses;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_semantics::SemanticsChecker;
@@ -140,6 +141,7 @@ impl AnalysisService {
             &self.plugin_registry,
             &self.settings,
             self.parser_settings,
+            &NamespaceClasses::default(),
             external_session.as_ref(),
         )?;
 

@@ -77,6 +77,28 @@ pub const STANDARD_EFFECTS: [&str; 11] = [
     "Sharp\\Events",
 ];
 
+/// The class-likes directly in `Sharp` that a bare name in a `.sharp` file names by default, spec section 23, and that
+/// a class-like of the file's namespace can win over: the [`STANDARD_EFFECTS`], then the standard library's types.
+fn shadowable_default_classes() -> impl Iterator<Item = &'static str> {
+    STANDARD_EFFECTS.into_iter().chain(["Sharp\\Position", "Sharp\\Replaces"])
+}
+
+/// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`. PHP
+/// reserves `Int`, `Float`, `Bool` and `List` as class names, so no other class-like has them. A lowercase `int` is the
+/// built-in type, so the name is compared exactly.
+pub(crate) fn default_class(name: &[u8]) -> Option<&'static [u8]> {
+    shadowable_default_classes()
+        .chain(["Sharp\\Int", "Sharp\\Float", "Sharp\\Bool", "Sharp\\List"])
+        .find(|class| class.as_bytes()[b"Sharp\\".len()..] == *name)
+        .map(str::as_bytes)
+}
+
+/// Whether a class-like whose short name is `name` wins over a default class-like in its namespace, compared ignoring
+/// case as PHP compares class names.
+pub(crate) fn shadows_a_default_class(name: &[u8]) -> bool {
+    shadowable_default_classes().any(|class| class.as_bytes()[b"Sharp\\".len()..].eq_ignore_ascii_case(name))
+}
+
 /// The last segment of the full name `name`, as a PHP# import writes it.
 #[must_use]
 pub fn short_name(name: impl AsRef<[u8]>) -> String {
@@ -125,6 +147,11 @@ pub struct ResolvedNames<'arena> {
     /// Declaration start offset of every PHP# local that code writes after its declaration.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "foldhash::HashSet::is_empty"))]
     written_locals: foldhash::HashSet<u32>,
+
+    /// The full name of each class-like of the file's namespace that wins over a default class-like the file names,
+    /// whether the namespace holds it or not. Empty for PHP.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "foldhash::HashSet::is_empty"))]
+    namespace_classes: foldhash::HashSet<&'arena [u8]>,
 }
 
 impl<'arena> ResolvedNames<'arena> {
@@ -296,6 +323,13 @@ impl<'arena> ResolvedNames<'arena> {
         self.written_locals.contains(&local.declaration.start.offset)
     }
 
+    /// Returns the full name of each class-like of the PHP# file's namespace that would win over a default class-like
+    /// the file names, spec section 23, as `App\Cache` for a bare `Cache` in the namespace `App`. A bare name means
+    /// that class-like when the project declares it, so declaring or removing one changes what the file means.
+    pub fn namespace_classes(&self) -> impl Iterator<Item = &'arena [u8]> + '_ {
+        self.namespace_classes.iter().copied()
+    }
+
     pub(crate) fn bind(&mut self, span: Span, binding: Binding) {
         self.bindings.insert(span.start.offset, binding);
     }
@@ -309,6 +343,10 @@ impl<'arena> ResolvedNames<'arena> {
 
     pub(crate) fn write(&mut self, local: Local) {
         self.written_locals.insert(local.declaration.start.offset);
+    }
+
+    pub(crate) fn add_namespace_class(&mut self, name: &'arena [u8]) {
+        self.namespace_classes.insert(name);
     }
 
     pub(crate) fn report_binding_error(&mut self, error: BindingError) {
