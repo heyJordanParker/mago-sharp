@@ -13,7 +13,6 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_sharp_bridge::CheckedProgram;
-use mago_sharp_bridge::Declaration;
 use mago_sharp_bridge::DeclarationKind;
 use mago_span::HasSpan;
 use mago_span::Span;
@@ -622,7 +621,7 @@ impl<'body, 'program> Body<'body, 'program> {
         }
 
         if let Some(extension) = self.checked.types().extension(expression) {
-            if !self.runs_statically(expression, &extension, call.object) {
+            if !self.is_translated_class(expression.span(), extension.class.as_bytes()) {
                 return "default".to_owned();
             }
 
@@ -663,7 +662,7 @@ impl<'body, 'program> Body<'body, 'program> {
     /// `object?.m(…)`, which calls `m` only when `object` is not null.
     fn null_safe_call(&mut self, expression: &Expression, call: &NullSafeMethodCall) -> String {
         if let Some(extension) = self.checked.types().extension(expression) {
-            if !self.runs_statically(expression, &extension, call.object) {
+            if !self.is_translated_class(expression.span(), extension.class.as_bytes()) {
                 return "default".to_owned();
             }
 
@@ -857,7 +856,7 @@ impl<'body, 'program> Body<'body, 'program> {
         }
 
         if let Some(extension) = self.checked.types().extension(expression) {
-            if !self.runs_statically(expression, &extension, access.object) {
+            if !self.is_translated_class(expression.span(), extension.class.as_bytes()) {
                 return "default".to_owned();
             }
 
@@ -914,7 +913,7 @@ impl<'body, 'program> Body<'body, 'program> {
             return self.unmodeled(access.property.span(), "a dynamic member name".to_owned(), issues::NOT_TRANSLATED);
         };
         if let Some(extension) = self.checked.types().extension(expression) {
-            if !self.runs_statically(expression, &extension, access.object) {
+            if !self.is_translated_class(expression.span(), extension.class.as_bytes()) {
                 return "default".to_owned();
             }
 
@@ -972,28 +971,6 @@ impl<'body, 'program> Body<'body, 'program> {
         };
 
         self.is_translated_class(object.span(), class).then_some(*class)
-    }
-
-    /// Whether the extension member `extension`, spec section 26, that `access` reaches on the value of `receiver` runs
-    /// as the call of its static method, as the lowering writes it when no class the checker has not seen can hold the
-    /// value, and that method is PHP# code a law can reach. Records why it does not.
-    fn runs_statically(&mut self, access: &Expression, extension: &Declaration, receiver: &Expression) -> bool {
-        let r#type = self.checked.types().expression_type(receiver);
-        if !self.checked.types().is_closed(r#type) {
-            self.unmodeled(
-                access.span(),
-                format!(
-                    "the extension member {}.{} on a value of the type `{}`",
-                    names::short_name(extension.class.as_bytes()),
-                    extension.name,
-                    r#type.get_id()
-                ),
-                issues::OVERRIDABLE,
-            );
-            return false;
-        }
-
-        self.is_translated_class(access.span(), extension.class.as_bytes())
     }
 
     /// Whether `class` is PHP# code a law can reach. Records why it is not.

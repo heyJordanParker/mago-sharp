@@ -194,20 +194,6 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
-    /// Whether every value of `r#type` is one no class the checker has not seen can hold: `null`, which `?.` skips, a
-    /// scalar, a collection, an enum case or an object of a final class. A real member of that name, which an extension
-    /// never hides, can then appear on no value of the type when the code runs.
-    #[must_use]
-    pub fn is_closed(&self, r#type: &TUnion) -> bool {
-        r#type.types.iter().all(|atomic| match atomic {
-            TAtomic::Null | TAtomic::Scalar(_) | TAtomic::Array(_) | TAtomic::Object(TObject::Enum(_)) => true,
-            TAtomic::Object(TObject::Named(object)) => {
-                self.codebase.get_class_like(object.name.as_bytes()).is_some_and(|class| class.flags.is_final())
-            }
-            _ => false,
-        })
-    }
-
     /// The full name of the constant the read `constant` reaches, as the analysis found it: the constant of that name
     /// in the file's namespace, or else the global one.
     #[must_use]

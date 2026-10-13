@@ -3438,10 +3438,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The member `extension`, which an extension adds, spec section 26, called with `arguments` or read on `receiver`:
     /// the call of the static method it runs as, `\App\TextExtensions::slug($title, '-')`, or the library's inline
-    /// form of it, as `trim($name)` for `name.trim()`. A receiver of a type no unseen class can hold runs it directly.
-    /// Any other object can be of a plain PHP class that declares the member itself, whose member runs instead, so the
-    /// engine picks at the call: `\Sharp\Internal\extension($order, 'App\Billing\Totals', 'total', false, 2)`, where
-    /// `true` would read a computed property.
+    /// form of it, as `trim($name)` for `name.trim()`. The checker chose it from the type the code shows, so it runs
+    /// on any value of that type, an object of a subclass with its own member of that name too.
     fn extension_access(
         &mut self,
         access: &Expression,
@@ -3450,33 +3448,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         arguments: Option<&ArgumentList>,
     ) -> u32 {
         let line = self.line(access);
-        let closed = self.types.is_closed(self.types.expression_type(receiver));
-        if closed && let Some(inlined) = self.inlined(extension, Some(receiver), arguments, line) {
+        if let Some(inlined) = self.inlined(extension, Some(receiver), arguments, line) {
             return inlined;
         }
 
         let mut values = vec![self.expression(receiver)];
-        if !closed {
-            let class = self.string(0, line, extension.class.as_bytes());
-            let member = self.string(0, line, extension.name.as_bytes());
-            let property = if arguments.is_some() { sharp_value::SHARP_FALSE } else { sharp_value::SHARP_TRUE };
-            let property = self.zval(line, property, |_| {});
-            values.extend([class, member, property]);
-        }
         for argument in arguments.into_iter().flat_map(|list| list.arguments.iter()) {
             values.push(match argument {
                 Argument::Positional(positional) => self.positional_argument(positional),
                 Argument::Named(named) => self.named_argument(named, false),
             });
         }
-        if closed {
-            return self.operator_call(line, extension.class, extension.name.as_bytes(), &values);
-        }
 
-        let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\extension");
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &values);
-
-        self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+        self.operator_call(line, extension.class, extension.name.as_bytes(), &values)
     }
 
     /// Spec section 27: `Position.current()` in a body is the position where it is written, a new `Position` of the

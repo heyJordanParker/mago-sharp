@@ -11,7 +11,6 @@ use mago_allocator::LocalArena;
 use mago_analyzer::analysis_result::AnalysisResult;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::Listing;
-use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferences;
@@ -374,9 +373,6 @@ impl IncrementalAnalysisService {
             let Some(origin) = origin else {
                 return;
             };
-            if let Some(hidden) = self.hidden_members(target) {
-                reads.entry(origin).or_default().0.listed.push(hidden);
-            }
             let Some((target, target_file, hash)) = declared(target) else {
                 return;
             };
@@ -419,26 +415,6 @@ impl IncrementalAnalysisService {
         }
 
         reads
-    }
-
-    /// For `member` when it is a member an extension adds, spec section 26, the classes that declare a real member it
-    /// would hide, as [`mago_codex::metadata::CodebaseMetadata::get_classes_hidden_by_extension`] lists them. Each file
-    /// that runs the member reads them, so it compiles again when the receiver's class or a class below it gains or
-    /// loses a member of that name. The file that declares the extension is refused while the list holds a class.
-    fn hidden_members(&self, member: SymbolIdentifier) -> Option<Read> {
-        let extension = MethodIdentifier::new(member.0, member.1);
-        let flags = self.codebase.get_method_by_id(&extension)?.flags;
-        if !flags.is_extension_method() && !flags.is_extension_property() {
-            return None;
-        }
-
-        let classes = self.codebase.get_classes_hidden_by_extension(&extension);
-        let listed: Vec<&[u8]> = classes.iter().map(Word::as_bytes).collect();
-
-        Some(Read {
-            name: [b"classes hidden by ", member.0.as_bytes(), b"::", member.1.as_bytes()].concat(),
-            fingerprint: xxh3_64(&listed.join(&b'\n')),
-        })
     }
 
     /// `name` and, when it names a class-like, every class, interface and trait it inherits from, since an extension
@@ -1821,55 +1797,54 @@ mod tests {
         assert_ne!(compiled_key(reader), compiled_key(accepted(&after, "app/Reader.sharp")));
     }
 
-    /// Spec section 26 refuses an extension member named like a real member of a class its receiver can be, or of a
-    /// class below one, so a member of that name joining or leaving such a class changes whether the unchanged file of
-    /// the extension is refused, and gives the unchanged file that calls the member a new key. Each row edits only a
-    /// PHP file. The refusal matches a clean analysis in a one-off compile and under `mago analyze --watch`, which
-    /// analyzes with `diff` and never compiles.
+    /// Spec section 26 refuses an extension member named like a real member its receiver's class declares or
+    /// inherits, so a member of that name joining or leaving that class, or a class above it, changes whether the
+    /// unchanged file of the extension is refused, and gives the unchanged file that calls the member a new key. A
+    /// class below the receiver's competes with no extension, so its member changes neither. Each row edits only a PHP
+    /// file. The refusals match a clean analysis in a one-off compile and under `mago analyze --watch`, which analyzes
+    /// with `diff` and never compiles, and each compiled file matches a clean compile after its header.
     #[test]
-    fn a_compile_after_a_class_below_an_extension_receiver_gains_or_loses_its_member_matches_a_clean_compile() {
-        let wallets = |wallet: &str, audited: &str| {
+    fn a_compile_after_a_class_an_extension_receiver_is_gains_or_loses_its_member_matches_a_clean_compile() {
+        let wallets = |wallet: &str, family: &str| {
             vec![
                 ("lib/Wallet.php", wallet.to_string()),
-                ("lib/Audited.php", format!("<?php\n\nnamespace Lib;\n\n{audited}")),
+                ("lib/Family.php", format!("<?php\n\nnamespace Lib;\n\n{family}")),
                 ("app/Wallets/WalletExtensions.sharp", WALLET_EXTENSIONS.to_string()),
                 ("app/Report.sharp", WALLET_REPORT.to_string()),
             ]
         };
-        let plain = "class Audited extends Wallet\n{\n}\n";
-        let method = WALLET.replace(
+        let total = "\n{\n    public function total(): int\n    {\n        return 9;\n    }\n}\n";
+        let plain = "class Base\n{\n}\n\nclass Audited extends Wallet\n{\n}\n";
+        let below = format!("class Base\n{{\n}}\n\nclass Audited extends Wallet{total}");
+        let above = format!("class Base{total}\nclass Audited extends Wallet\n{{\n}}\n");
+        let wallet = WALLET.replace("class Wallet", "class Wallet extends Base");
+        let method = wallet.replace(
             "public int $balance = 0;",
             "public int $balance = 0;\n\n    public function total(): int\n    {\n        return 9;\n    }",
         );
+        let docblock = wallet.replace("class Wallet", "/** @method int total() */\nclass Wallet");
 
-        // Each row: the files without the member, the files with it, and the refusal the member brings.
+        // Each row: the files without the member, the files with it, and the refusal the member brings, if any.
         let rows = [
-            (
-                wallets(WALLET, plain),
-                wallets(
-                    WALLET,
-                    "class Audited extends Wallet\n{\n    public function total(): int\n    {\n        return 2;\n    }\n}\n",
-                ),
-                "An extension cannot hide the real member `Audited.total`.",
-            ),
-            (
-                wallets(WALLET, plain),
-                wallets(WALLET, "/** @method int total() */\nclass Audited extends Wallet\n{\n}\n"),
-                "An extension cannot hide the real member `Audited.total`.",
-            ),
-            (
-                wallets(WALLET, plain),
-                wallets(&method, plain),
-                "An extension cannot hide the real member `Wallet.total`.",
-            ),
+            (wallets(&wallet, plain), wallets(&method, plain), Some("`Wallet.total`")),
+            (wallets(&wallet, plain), wallets(&docblock, plain), Some("`Wallet.total`")),
+            (wallets(&wallet, plain), wallets(&wallet, &above), Some("`Base.total`")),
+            (wallets(&wallet, plain), wallets(&wallet, &below), None),
         ];
 
-        for (without, with, refusal) in &rows {
+        for (without, with, member) in &rows {
             for (before, after) in [(without, with), (with, without)] {
                 let (base, edited) = (shop_project(before), shop_project(after));
-                let row = format!("{refusal} {}", if after == with { "added" } else { "removed" });
-                let expected =
-                    if after == with { vec![format!("app/Wallets/WalletExtensions.sharp: {refusal}")] } else { vec![] };
+                let row = format!("{member:?} {}", if after == with { "added" } else { "removed" });
+                let expected: Vec<String> = member
+                    .filter(|_| after == with)
+                    .map(|member| {
+                        format!(
+                            "app/Wallets/WalletExtensions.sharp: An extension cannot hide the real member {member}."
+                        )
+                    })
+                    .into_iter()
+                    .collect();
 
                 for diff in [false, true] {
                     let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
@@ -1887,13 +1862,31 @@ mod tests {
                 let clean_compiled = compile(&mut clean, empty_stamp);
 
                 assert_eq!(hidden_members(&clean), expected, "{row}");
-                assert_ne!(
-                    compiled_key(accepted(&base_compiled, "app/Report.sharp")),
-                    compiled_key(accepted(&clean_compiled, "app/Report.sharp")),
-                    "{row}: the caller compiles again"
+                assert_eq!(
+                    compiled_key(accepted(&base_compiled, "app/Report.sharp"))
+                        != compiled_key(accepted(&clean_compiled, "app/Report.sharp")),
+                    member.is_some(),
+                    "{row}: the caller compiles again only when the member competes"
                 );
-                assert_eq!(outcomes(&warm_compiled), outcomes(&clean_compiled), "{row}");
+                assert_eq!(bodies(&warm_compiled), bodies(&clean_compiled), "{row}");
             }
         }
+    }
+
+    /// The bytes after the header of each accepted file's compiled file, and the messages of each refused file. A warm
+    /// key can differ from a clean one while these match: incremental analysis keeps the references a method it
+    /// analyzes again made before, so a warm compile reads members a clean one does not, and compiles its file again
+    /// once more than it needs to.
+    fn bodies(compiled: &BTreeMap<String, Compilation>) -> BTreeMap<&str, Result<&[u8], Vec<String>>> {
+        compiled
+            .iter()
+            .map(|(name, compilation)| {
+                let outcome = match compilation {
+                    Compilation::Accepted(bytes) => Ok(&bytes[104..]),
+                    Compilation::Refused(issues) => Err(messages(issues)),
+                };
+                (name.as_str(), outcome)
+            })
+            .collect()
     }
 }

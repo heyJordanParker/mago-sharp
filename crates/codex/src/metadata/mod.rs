@@ -837,23 +837,18 @@ impl CodebaseMetadata {
         all_descendants
     }
 
-    /// The classes that declare a real member the PHP# extension member `extension` would hide, spec section 26, sorted:
-    /// the member of its name that a class its receiver can be, or any class below one, declares or inherits, a method
-    /// or property, or one a docblock declares with `@method` or `@property`. `__call` and `__get` declare none. A
-    /// `List`, `Map` or `Set` receiver has the methods of `Sharp\ListMethods`, `Sharp\MapMethods` or `Sharp\SetMethods`.
+    /// The classes that declare a real member a PHP# extension member called `name` would hide on a value of type
+    /// `receiver`, spec section 26, sorted: the member of that name that a class the value can be declares or
+    /// inherits, a method or property, or one a docblock declares with `@method` or `@property`. `__call` and `__get`
+    /// declare none. A `List`, `Map` or `Set` has the methods of `Sharp\ListMethods`, `Sharp\MapMethods` or
+    /// `Sharp\SetMethods`. A class below the type competes with no extension, which is chosen from the type the code
+    /// shows.
     #[must_use]
-    pub fn get_classes_hidden_by_extension(&self, extension: &MethodIdentifier) -> Vec<Word> {
-        let Some(metadata) = self.get_method_by_id(extension) else {
-            return Vec::new();
-        };
-        let Some(receiver) = metadata.parameters.first().and_then(|receiver| receiver.get_type_metadata()) else {
-            return Vec::new();
-        };
-        let method_name = ascii_lowercase_word(metadata.original_name.as_bytes());
-        let property_name = concat_word!(b"$", metadata.original_name.as_bytes());
+    pub fn get_classes_hidden_by_extension(&self, receiver: &TUnion, name: &[u8]) -> Vec<Word> {
+        let method_name = ascii_lowercase_word(name);
+        let property_name = concat_word!(b"$", name);
 
         let mut classes: Vec<Word> = receiver
-            .type_union
             .types
             .iter()
             .filter_map(|atomic| match atomic {
@@ -863,11 +858,7 @@ impl CodebaseMetadata {
                 TAtomic::Array(TArray::Set(_)) => Some(word("Sharp\\SetMethods")),
                 _ => None,
             })
-            .flat_map(|name| {
-                std::iter::once(ascii_lowercase_word(name.as_bytes()))
-                    .chain(self.get_class_descendants(name.as_bytes()))
-            })
-            .filter_map(|name| self.get_class_like_by_word(name))
+            .filter_map(|name| self.get_class_like(name.as_bytes()))
             .filter_map(|class| {
                 class
                     .declaring_method_ids

@@ -13166,10 +13166,10 @@ fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
     );
 }
 
-/// `App\Order`, a PHP class a plain PHP subclass can extend, and `App\Receipt`, a final one.
+/// `App\Order`, a PHP class, `App\RushOrder`, its subclass with its own `total`, and `App\Receipt`, a final class.
 const ORDERS: (&str, &str) = (
     "src/App/Order.php",
-    "<?php namespace App; class Order { public int $amount = 0; } final class Receipt { public int $amount = 0; }",
+    "<?php namespace App; class Order { public int $amount = 0; } class RushOrder extends Order { public function total(int $extra): int { return 9; } } final class Receipt { public int $amount = 0; }",
 );
 
 /// `App\Text\Extensions`, a project's extensions on `string`, on `App\Order`, on `App\Receipt` and on `Any`.
@@ -13190,118 +13190,129 @@ fn extension_body(signature: &str, statements: &str) -> String {
 
 /// ```php
 /// return \App\Text\Extensions::slug($title, '-') . \App\Text\Extensions::isBlank($title)
-///     . \App\Text\Extensions::paid($receipt);
+///     . \App\Text\Extensions::paid($receipt) . \App\Text\Extensions::total($order, 2)
+///     . \App\Text\Extensions::isEmpty($order) . \App\Text\Extensions::kind($value);
 /// ```
 ///
 /// Spec section 26: a member an extension adds runs as the static call of its method with the receiver first, for a
-/// method and a computed property alike, when no class beyond the ones the checker saw can hold the receiver: a
-/// `string`, and an object of a final class.
+/// method and a computed property alike, on any receiver: a `string`, an object of a final class or of a class a
+/// subclass can extend, and a value of `Any`. The checker chose it from the type the code shows.
 #[test]
-fn an_extension_member_on_a_closed_receiver_is_the_static_call_of_its_method() {
+fn an_extension_member_is_the_static_call_of_its_method() {
     assert_eq!(
         extension_body(
-            "string run(string title, Receipt receipt)",
-            "        return title.slug(\"-\") + (title.isBlank ? \"y\" : \"n\") + (string) receipt.paid();\n"
+            "string run(string title, Receipt receipt, Order order, Any value)",
+            "        return title.slug(\"-\") + (title.isBlank ? \"y\" : \"n\") + (string) receipt.paid()\n            + (string) order.total(2) + (order.isEmpty ? \"y\" : \"n\") + value.kind;\n"
         ),
         indoc! {r#"
             STMT_LIST
               RETURN
                 BINARY_OP [8]
                   BINARY_OP [8]
-                    STATIC_CALL
-                      ZVAL "App\\Text\\Extensions"
-                      ZVAL "slug"
-                      ARG_LIST
-                        VAR
-                          ZVAL "title"
-                        ZVAL "-"
+                    BINARY_OP [8]
+                      BINARY_OP [8]
+                        BINARY_OP [8]
+                          STATIC_CALL
+                            ZVAL "App\\Text\\Extensions"
+                            ZVAL "slug"
+                            ARG_LIST
+                              VAR
+                                ZVAL "title"
+                              ZVAL "-"
+                          CONDITIONAL [1]
+                            STATIC_CALL
+                              ZVAL "App\\Text\\Extensions"
+                              ZVAL "isBlank"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "title"
+                            ZVAL "y"
+                            ZVAL "n"
+                        CAST [6]
+                          STATIC_CALL
+                            ZVAL "App\\Text\\Extensions"
+                            ZVAL "paid"
+                            ARG_LIST
+                              VAR
+                                ZVAL "receipt"
+                      CAST [6]
+                        STATIC_CALL
+                          ZVAL "App\\Text\\Extensions"
+                          ZVAL "total"
+                          ARG_LIST
+                            VAR
+                              ZVAL "order"
+                            ZVAL 2
                     CONDITIONAL [1]
                       STATIC_CALL
                         ZVAL "App\\Text\\Extensions"
-                        ZVAL "isBlank"
+                        ZVAL "isEmpty"
                         ARG_LIST
                           VAR
-                            ZVAL "title"
+                            ZVAL "order"
                       ZVAL "y"
                       ZVAL "n"
-                  CAST [6]
-                    STATIC_CALL
-                      ZVAL "App\\Text\\Extensions"
-                      ZVAL "paid"
-                      ARG_LIST
-                        VAR
-                          ZVAL "receipt"
+                  STATIC_CALL
+                    ZVAL "App\\Text\\Extensions"
+                    ZVAL "kind"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
         "#}
     );
 }
 
 /// ```php
-/// return \Sharp\Internal\extension($order, 'App\Text\Extensions', 'total', false, 2)
-///     + (\Sharp\Internal\extension($order, 'App\Text\Extensions', 'isEmpty', true) ? 1 : 0);
+/// $order = new \App\RushOrder();
+/// $rush = new \App\RushOrder();
+/// return \App\Text\Extensions::total($order, 2) + $rush->total(2);
 /// ```
 ///
-/// Spec section 26: a member an extension adds to a class a plain PHP subclass can extend runs through the engine,
-/// which runs the subclass's own public member of that name instead when it declares one.
+/// Spec section 26: the type the code shows chooses the member, as in C# and Kotlin. On a value shown as an `Order`,
+/// the extension runs though the object is a `RushOrder` with its own `total`. On a value shown as a `RushOrder`, its
+/// own `total` runs.
 #[test]
-fn an_extension_member_on_an_open_receiver_is_picked_by_the_engine() {
+fn the_type_the_code_shows_chooses_between_an_extension_and_a_subclass_member() {
+    let code = "namespace App.Tenant;\n\nimport App.Order;\nimport App.RushOrder;\nimport App.Text.Extensions;\n\nclass Report\n{\n    public int run()\n    {\n        Order order = new RushOrder();\n        RushOrder rush = new RushOrder();\n        return order.total(2) + rush.total(2);\n    }\n}\n";
+
     assert_eq!(
-        extension_body("int run(Order order)", "        return order.total(2) + (order.isEmpty ? 1 : 0);\n"),
+        Lowered::with(code, &[ORDERS, EXTENSIONS]).body(),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "order"
+                NEW
+                  ZVAL "App\\RushOrder"
+                  ARG_LIST
+              ASSIGN
+                VAR
+                  ZVAL "rush"
+                NEW
+                  ZVAL "App\\RushOrder"
+                  ARG_LIST
               RETURN
                 BINARY_OP [1]
-                  CALL
-                    ZVAL "Sharp\\Internal\\extension"
+                  STATIC_CALL
+                    ZVAL "App\\Text\\Extensions"
+                    ZVAL "total"
                     ARG_LIST
                       VAR
                         ZVAL "order"
-                      ZVAL "App\\Text\\Extensions"
-                      ZVAL "total"
-                      ZVAL false
                       ZVAL 2
-                  CONDITIONAL [1]
-                    CALL
-                      ZVAL "Sharp\\Internal\\extension"
-                      ARG_LIST
-                        VAR
-                          ZVAL "order"
-                        ZVAL "App\\Text\\Extensions"
-                        ZVAL "isEmpty"
-                        ZVAL true
-                    ZVAL 1
-                    ZVAL 0
-        "#}
-    );
-}
-
-/// ```php
-/// return \Sharp\Internal\extension($value, 'App\Text\Extensions', 'kind', true);
-/// ```
-///
-/// Spec section 26: a value of `Any` can be an object whose class declares the member itself, so the engine picks at
-/// the call, and runs the extension for a value that is no object.
-#[test]
-fn an_extension_member_on_any_value_is_picked_by_the_engine() {
-    assert_eq!(
-        extension_body("string run(Any value)", "        return value.kind;\n"),
-        indoc! {r#"
-            STMT_LIST
-              RETURN
-                CALL
-                  ZVAL "Sharp\\Internal\\extension"
-                  ARG_LIST
+                  METHOD_CALL
                     VAR
-                      ZVAL "value"
-                    ZVAL "App\\Text\\Extensions"
-                    ZVAL "kind"
-                    ZVAL true
+                      ZVAL "rush"
+                    ZVAL "total"
+                    ARG_LIST
+                      ZVAL 2
         "#}
     );
 }
 
 /// ```php
 /// return \App\Text\Extensions::slug($title, separator: '-')
-///     . (string) \Sharp\Internal\extension($order, 'App\Text\Extensions', 'total', false, extra: 2);
+///     . (string) \App\Text\Extensions::total($order, extra: 2);
 /// ```
 ///
 /// Spec section 26: a named argument passes to the extension's method by its name, as it does to any call.
@@ -13326,14 +13337,12 @@ fn an_extension_member_passes_a_named_argument_by_its_name() {
                         ZVAL "separator"
                         ZVAL "-"
                   CAST [6]
-                    CALL
-                      ZVAL "Sharp\\Internal\\extension"
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "total"
                       ARG_LIST
                         VAR
                           ZVAL "order"
-                        ZVAL "App\\Text\\Extensions"
-                        ZVAL "total"
-                        ZVAL false
                         NAMED_ARG
                           ZVAL "extra"
                           ZVAL 2
@@ -13389,7 +13398,7 @@ fn a_standard_library_extension_member_inlines_as_the_call_its_body_makes() {
 }
 
 /// ```php
-/// $total = ($order === null ? null : \Sharp\Internal\extension($order, 'App\Text\Extensions', 'total', false, 2)) ?? 0;
+/// $total = ($order === null ? null : \App\Text\Extensions::total($order, 2)) ?? 0;
 /// $blank = ($title === null ? null : \App\Text\Extensions::isBlank($title)) ?? false;
 /// return $blank ? ($title === null ? null : \App\Text\Extensions::slug($title, '-')) : (string) $total;
 /// ```
@@ -13415,14 +13424,12 @@ fn a_null_safe_extension_member_runs_only_on_a_receiver_that_is_not_null() {
                         ZVAL "order"
                       ZVAL null
                     ZVAL null
-                    CALL
-                      ZVAL "Sharp\\Internal\\extension"
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "total"
                       ARG_LIST
                         VAR
                           ZVAL "order"
-                        ZVAL "App\\Text\\Extensions"
-                        ZVAL "total"
-                        ZVAL false
                         ZVAL 2
                   ZVAL 0
               ASSIGN

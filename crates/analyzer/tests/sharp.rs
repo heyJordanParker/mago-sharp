@@ -5034,16 +5034,16 @@ fn the_receiver_type_picks_among_imported_extensions_of_one_name() {
     );
 }
 
-/// Spec section 26: an extension cannot hide a real member, a method or property its receiver's class or any class
-/// derived from it declares, in code or in a docblock, or a method a `List`, `Map` or `Set` has. `__call` declares
-/// none.
+/// Spec section 26: an extension is chosen from the receiver's type the code shows, as in C# and Kotlin. It cannot
+/// hide a real member, a method or property that type declares or inherits, in code or in a docblock, or a method a
+/// `List`, `Map` or `Set` has. `__call` declares none. A member only a class derived from the type declares does not
+/// compete: on a value of the type, the extension runs. A receiver with no type, a parse error, hides nothing.
 #[test]
-fn an_extension_named_like_a_real_member_of_its_type_or_a_derived_class_is_an_error() {
-    let money =
-        "namespace App.Billing;\n\npublic class Money\n{\n    public Money() { }\n\n    public int total() => 0;\n}\n";
+fn an_extension_named_like_a_real_member_of_its_type_is_an_error() {
+    let money = "namespace App.Billing;\n\npublic class Money\n{\n    public Money() { }\n\n    public int total() => 0;\n\n    public int net() => 0;\n}\n";
     let coin = "namespace App.Billing;\n\npublic class Coin : Money\n{\n    public Coin() : super() { }\n\n    public int cents => 1;\n}\n";
     let wallet = "<?php\n\nnamespace App\\Billing;\n\n/**\n * @method int balance()\n * @property int $owner\n */\nclass Wallet\n{\n    public function __call(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n}\n";
-    let sharp = "namespace App.Billing;\n\npublic static class MoneyExtensions\n{\n    extension(Money money)\n    {\n        public int total() => 0;\n        public int cents => 0;\n        public int rounded() => 0;\n    }\n\n    extension(Wallet wallet)\n    {\n        public int balance() => 0;\n        public int owner => 0;\n        public int spent() => 0;\n    }\n\n    extension(List<int> amounts)\n    {\n        public int count() => 0;\n    }\n\n    extension(Map<string, int> prices)\n    {\n        public bool has(string plan) => false;\n    }\n\n    extension(Set<string> plans)\n    {\n        public void add(string plan) { }\n    }\n}\n";
+    let sharp = "namespace App.Billing;\n\npublic static class MoneyExtensions\n{\n    extension(Money money)\n    {\n        public int total() => 0;\n        public int cents => 0;\n        public int rounded() => 0;\n    }\n\n    extension(Wallet wallet)\n    {\n        public int balance() => 0;\n        public int owner => 0;\n        public int spent() => 0;\n    }\n\n    extension(List<int> amounts)\n    {\n        public int count() => 0;\n    }\n\n    extension(Map<string, int> prices)\n    {\n        public bool has(string plan) => false;\n    }\n\n    extension(Set<string> plans)\n    {\n        public void add(string plan) { }\n    }\n\n    extension(Coin coin)\n    {\n        public int net() => 0;\n    }\n\n    public static int sum(Money money) => money.cents + money.rounded();\n\n    extension(coin)\n    {\n        public int whole() => 0;\n    }\n}\n";
 
     assert_messages(
         sharp,
@@ -5053,13 +5053,14 @@ fn an_extension_named_like_a_real_member_of_its_type_or_a_derived_class_is_an_er
             ("src/App/Billing/Wallet.php", wallet),
         ],
         &[
+            "41:15 parse: A PHP# parameter needs a type, as in `int extra`.",
             "7:20 duplicate-definition: An extension cannot hide the real member `Money.total`.",
-            "8:20 duplicate-definition: An extension cannot hide the real member `Coin.cents`.",
             "14:20 duplicate-definition: An extension cannot hide the real member `Wallet.balance`.",
             "15:20 duplicate-definition: An extension cannot hide the real member `Wallet.owner`.",
             "21:20 duplicate-definition: An extension cannot hide the real member `List.count`.",
             "26:21 duplicate-definition: An extension cannot hide the real member `Map.has`.",
             "31:21 duplicate-definition: An extension cannot hide the real member `Set.add`.",
+            "36:20 duplicate-definition: An extension cannot hide the real member `Money.net`.",
         ],
     );
 }

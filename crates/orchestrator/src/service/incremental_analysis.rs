@@ -1101,9 +1101,6 @@ impl IncrementalAnalysisService {
             .flat_map(|state| state.reads.listings.iter().copied())
             .map(|listing| (listing, listing.answer(&self.codebase)))
             .collect();
-        // The analyzer refuses an extension member named like a real member of a class its receiver can be or of a
-        // class below one (spec section 26), so a file is analyzed again when its extension hides other classes.
-        let hidden_before = hidden_by_extensions(&self.codebase);
         // The analyzer refuses a class-like whose full name is also a namespace (spec section 23), so a file is
         // analyzed again when a class-like it declares names the namespace of a class-like scanned again.
         let scanned_namespaces: WordSet = new_file_scans
@@ -1196,17 +1193,11 @@ impl IncrementalAnalysisService {
             .filter(|(listing, answer)| listing.answer(&merged_codebase) != *answer)
             .map(|(listing, _)| listing)
             .collect();
-        let changed_extensions: HashSet<FileId> = hidden_before
-            .symmetric_difference(&hidden_by_extensions(&merged_codebase))
-            .map(|(file_id, _, _)| *file_id)
-            .collect();
         for file_id in &unchanged_file_ids {
-            if (changed_extensions.contains(file_id)
-                || self.file_states.get(file_id).is_some_and(|state| {
-                    state.reads.listings.iter().any(|listing| changed_listings.contains(listing))
-                        || state.entry_keys.class_like_names.iter().any(|name| scanned_namespaces.contains(name))
-                }))
-                && let Ok(file) = self.database.get(file_id)
+            if self.file_states.get(file_id).is_some_and(|state| {
+                state.reads.listings.iter().any(|listing| changed_listings.contains(listing))
+                    || state.entry_keys.class_like_names.iter().any(|name| scanned_namespaces.contains(name))
+            }) && let Ok(file) = self.database.get(file_id)
             {
                 invalid_files.insert(mago_word::word(file.name.as_ref()));
             }
@@ -1935,18 +1926,6 @@ fn wrappers_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<(Word, Metho
         .collect();
     wrappers.sort_by_key(|(function, _)| *function);
     wrappers
-}
-
-/// Each extension member of `codebase`, spec section 26, with the file that declares it and the classes whose real
-/// member it would hide. The analyzer refuses the member while any class hides it, and a class that joins or leaves
-/// below the receiver's class changes the list though the signature diff sees no change to the extension's file.
-fn hidden_by_extensions(codebase: &CodebaseMetadata) -> HashSet<(FileId, MethodIdentifier, Vec<Word>)> {
-    codebase
-        .extensions
-        .values()
-        .flatten()
-        .map(|(span, member)| (span.file_id, *member, codebase.get_classes_hidden_by_extension(member)))
-        .collect()
 }
 
 /// The symbols the extension hooks and providers of each of `files` read, by file name, for the invalidation cascade.

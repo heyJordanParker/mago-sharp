@@ -163,8 +163,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Extension<'arena> {
     }
 }
 
-/// Reports an extension member named like a real member of its receiver's class or of any class derived from it, or
-/// like a method its `List`, `Map` or `Set` receiver has, spec section 26, as
+/// Reports an extension member named like a real member its receiver's class declares or inherits, or like a method
+/// its `List`, `Map` or `Set` receiver has, spec section 26, as
 /// [`mago_codex::metadata::CodebaseMetadata::get_classes_hidden_by_extension`] finds them. A class's `__call` and
 /// `__get` declare no member, so the extension runs in their place.
 fn check_hidden_member<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, member: &MethodParts<'_, '_>)
@@ -172,7 +172,17 @@ where
     A: Arena,
 {
     let extension = MethodIdentifier::new(class.name, ascii_lowercase_word(member.name));
-    if let Some(&declaring_class) = context.codebase.get_classes_hidden_by_extension(&extension).first() {
+    let Some(receiver) = context
+        .codebase
+        .get_method_by_id(&extension)
+        .and_then(|metadata| metadata.parameters.first())
+        .and_then(|receiver| receiver.get_type_metadata())
+    else {
+        return;
+    };
+    if let Some(&declaring_class) =
+        context.codebase.get_classes_hidden_by_extension(&receiver.type_union, member.name).first()
+    {
         let name = mago_bytes::BytesDisplay(member.name);
         let real_member = match sharp_collection_name(&TObject::Named(TNamedObject::new(declaring_class))) {
             Some(collection) => display_sharp_member(collection, name),

@@ -852,7 +852,7 @@ fn compile_proves_a_law_through_an_extension_member_as_the_static_call_it_runs_a
     let directory = lawful_project(&[
         (
             "app/Shared/Shape.sharp",
-            "namespace App.Shared;\n\nimport App.Shared.ShapeMath;\n\npublic final class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    public static int doubledOr(Shape? s) => s?.doubled() ?? 0;\n    public static bool flatOr(Shape? s) => s?.isFlat ?? true;\n\n    law doubles(Shape s) => s.doubled() == s.sides + s.sides;\n    law flat(Shape s) => s.isFlat == (s.sides < 3);\n    law twice(int n) => n.twice() == n + n;\n    law absent(int unused) => Shape.doubledOr(null) == 0 && Shape.flatOr(null);\n}\n",
+            "namespace App.Shared;\n\nimport App.Shared.ShapeMath;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    public static int doubledOr(Shape? s) => s?.doubled() ?? 0;\n    public static bool flatOr(Shape? s) => s?.isFlat ?? true;\n\n    law doubles(Shape s) => s.doubled() == s.sides + s.sides;\n    law flat(Shape s) => s.isFlat == (s.sides < 3);\n    law twice(int n) => n.twice() == n + n;\n    law absent(int unused) => Shape.doubledOr(null) == 0 && Shape.flatOr(null);\n}\n",
         ),
         (
             "app/Shared/ShapeMath.sharp",
@@ -2154,10 +2154,6 @@ fn a_law_reaching_a_named_constructor_is_refused() {
 
 #[test]
 fn a_law_reaching_an_extension_member_lean_cannot_see_is_refused() {
-    assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    law grows(Shape s) => s.doubled() >= s.sides;\n}\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int doubled() => shape.sides + shape.sides;\n    }\n}\n",
-        "Law grows reaches the extension member ShapeMath.doubled on a value of the type `App\\Shared\\Shape` in Shape.grows. Lean cannot see which implementation runs.",
-    );
     assert_unmodeled(
         "namespace App.Shared;\n\npublic final class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    law summed(Shape s) => s.sum() >= 0;\n}\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int sum()\n        {\n            let total = 0;\n            for (let i = 0; i < shape.sides; i++) {\n                total += i;\n            }\n            return total;\n        }\n    }\n}\n",
         "Law summed reaches a loop in ShapeMath.sum. Mago does not translate loops to Lean.",
