@@ -894,29 +894,41 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Module<'arena> {
             return Ok(());
         }
 
+        // The scanner registers the module of every `Module.sharp`, or the class-like declared first under its name.
         let name = context.resolved_names.get(&self.module);
-        let Some(class_like_metadata) = context.codebase.get_class_like(name) else {
-            tracing::warn!("Module {} not found in codebase", BytesDisplay(name));
 
-            return Ok(());
-        };
-
-        if class_like_metadata.span != self.span() {
-            report_duplicate_definition(context, "Module", "module", name, self.span(), class_like_metadata.span);
-            return Ok(());
-        }
-
-        let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, mago_word::empty_word())));
-        scope.set_class_like(Some(class_like_metadata));
-        scope.set_static(true);
-
-        let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
-        for ModuleMember::Law(law) in &self.members {
-            law.analyze(context, &mut block_context, artifacts)?;
-        }
-
-        Ok(())
+        context
+            .codebase
+            .get_class_like(name)
+            .map_or(Ok(()), |class_like_metadata| analyze_module(self, name, class_like_metadata, context, artifacts))
     }
+}
+
+fn analyze_module<'ctx, 'arena, A>(
+    module: &Module<'arena>,
+    name: &[u8],
+    class_like_metadata: &'ctx ClassLikeMetadata,
+    context: &mut Context<'ctx, 'arena, A>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    if class_like_metadata.span != module.span() {
+        report_duplicate_definition(context, "Module", "module", name, module.span(), class_like_metadata.span);
+        return Ok(());
+    }
+
+    let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, mago_word::empty_word())));
+    scope.set_class_like(Some(class_like_metadata));
+    scope.set_static(true);
+
+    let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
+    for ModuleMember::Law(law) in &module.members {
+        law.analyze(context, &mut block_context, artifacts)?;
+    }
+
+    Ok(())
 }
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
