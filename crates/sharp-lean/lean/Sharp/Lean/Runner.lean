@@ -15,6 +15,7 @@ One runner answers one request because Lean cannot free an imported environment 
 proposal may still hold parts of it. Lean's own server likewise restarts a file's worker to import anew.
 -/
 import Lean
+import Std.Async.Process
 import Sharp.Lean.Law
 import Sharp.Lean.Facts
 
@@ -209,11 +210,6 @@ structure RulesModule where
   /-- Dot separated: "App.Shared". -/
   namespace_ : String
 
-/-- A request: the rules modules, then the facts of every `.sharp` file. -/
-structure Rules where
-  modules : Array RulesModule
-  files : Array (Array Fact)
-
 def location (file : String) : Decode Location :=
   return ⟨file, (← u32).toNat, (← u32).toNat, (← u32).toNat, (← u32).toNat⟩
 
@@ -234,10 +230,6 @@ def file : Decode (Array Fact) := do
   let path ← string
   many (fact path)
 
-def rules : Decode Rules := do
-  let modules ← many do return { module := (← string).toName, namespace_ := ← string }
-  return { modules, files := ← many file }
-
 /-- Why the runner does not run a rule: it trusts more than Lean's kernel checks, or it builds a namespace from a string
 instead of naming one `Code` declares, so a misspelled name would never fire. -/
 inductive Refusal where
@@ -249,6 +241,10 @@ inductive Refusal where
   /-- `Sharp.Namespace.mk` or `Sharp.Rule.breaks`, which only the runtime library and the runner use. -/
   | reserved (name : Name)
   | unevaluable (message : String)
+  /-- The rule ran past its processor-time limit. -/
+  | stopped
+  /-- The rule waited until its deadline. -/
+  | waited
 
 def Refusal.code : Refusal → UInt8
   | .gap => 1
@@ -257,9 +253,37 @@ def Refusal.code : Refusal → UInt8
   | .implementedBy _ => 4
   | .reserved _ => 5
   | .unevaluable _ => 6
+  | .stopped => 7
+  | .waited => 8
+
+/-- A request: the rules modules, the facts of every `.sharp` file, the rules an earlier runner judged, which this runner
+skips, the rules an earlier runner stopped, which this runner refuses as it stopped them without judging them, and the
+processor milliseconds and the milliseconds each rule may use. -/
+structure Rules where
+  modules : Array RulesModule
+  files : Array (Array Fact)
+  judged : Array String
+  stopped : Array (String × Refusal)
+  limit : Nat
+  deadline : Nat
+
+/-- A rule an earlier runner stopped, and the code of how. -/
+def stoppedRule : Decode (String × Refusal) := do
+  let name ← string
+  match ← u8 with
+  | 7 => return (name, .stopped)
+  | 8 => return (name, .waited)
+  | k => throw s!"unknown stop {k}"
+
+def rules : Decode Rules := do
+  let modules ← many do return { module := (← string).toName, namespace_ := ← string }
+  let files ← many file
+  return {
+    modules, files, judged := ← many string, stopped := ← many stoppedRule, limit := (← u32).toNat,
+    deadline := (← u32).toNat }
 
 def Refusal.detail : Refusal → String
-  | .gap => ""
+  | .gap | .stopped | .waited => ""
   | .axiom_ name | .unsafe_ name | .implementedBy name | .reserved name => name.toString
   | .unevaluable message => message
 
@@ -313,51 +337,101 @@ def placeOf (env : Environment) (rule : Name) : IO (Nat × Nat) := do
   let ranges ← runCore env (findDeclarationRanges? rule)
   return ranges.map (fun ranges => (ranges.selectionRange.pos.line, ranges.selectionRange.pos.column)) |>.getD (0, 0)
 
-/-- Each rule of each rules module, in request order: the module's index, the rule's name, then either `0` and every
-fact under its namespace that breaks it, as the file's index and the fact's index in that file, or the code of its
-refusal, its detail, and the line and column of its name. -/
-unsafe def judge (env : Environment) (request : Rules) : IO ByteArray := do
+/-- One judged rule of the answer: its module's index, its name, then either `0` and every fact under its namespace that
+breaks it, as the file's index and the fact's index in that file, or the code of its refusal, its detail, and the line
+and column of its name. -/
+def entry (moduleIndex : UInt32) (name : Name) (judged : Except (Refusal × Nat × Nat) (Array (UInt32 × UInt32))) :
+    ByteArray := Id.run do
+  let mut b := putString (putU32 .empty moduleIndex) name.toString
+  match judged with
+  | .ok broken =>
+    b := putU32 (putU8 b 0) broken.size.toUInt32
+    for (fileIndex, factIndex) in broken do
+      b := putU32 (putU32 b fileIndex) factIndex
+  | .error (refusal, line, column) =>
+    b := putU32 (putU32 (putString (putU8 b refusal.code) refusal.detail) line.toUInt32) column.toUInt32
+  return b
+
+/-- The processor milliseconds this process has used. -/
+def processorTime : IO Int := do
+  let usage ← Std.IO.Process.getResourceUsage
+  return usage.cpuUserTime.toInt + usage.cpuSystemTime.toInt
+
+/-- How the runner exits when a rule runs past its processor-time limit: `PAST_LIMIT` in `src/runner.rs`. It is not 152,
+which only the kernel's `SIGXCPU` gives, once the runner itself runs past its own limit. -/
+def pastLimit : UInt8 := 124
+
+/-- How the runner exits when a rule waits until its deadline: `PAST_DEADLINE` in `src/runner.rs`. -/
+def pastDeadline : UInt8 := 125
+
+/-- Runs `act` on a thread of its own while this thread reads the time every 50 milliseconds, and ends the runner as
+`pastLimit` once `act` has used `limit` processor milliseconds, or as `pastDeadline` once it has waited `deadline`
+milliseconds. It waits while its processor time stands still, so a rule a busy machine starves still computes, and ends
+only at its limit. Lean holds no global lock, so evaluated code never keeps this thread from reading. -/
+def watched {α : Type} (limit deadline : Nat) (act : IO α) : IO α := do
+  let started ← processorTime
+  let mut used := started
+  let mut last ← IO.monoMsNow
+  let mut waited := 0
+  let task ← IO.asTask act (prio := .dedicated)
+  while !(← IO.hasFinished task) do
+    let now ← processorTime
+    let wall ← IO.monoMsNow
+    if now - started ≥ limit then IO.Process.exit pastLimit
+    if now == used then waited := waited + (wall - last)
+    if waited ≥ deadline then IO.Process.exit pastDeadline
+    used := now
+    last := wall
+    IO.sleep 50
+  IO.ofExcept task.get
+
+/-- Writes the answer's header, then the `entry` of each rule of each rules module an earlier runner did not judge, in
+request order, each as soon as it is judged, so the rules it judged survive a stop. Before it judges a rule, it writes
+`judging` and the rule's name on standard error, so Mago knows which rule ran when the runner stopped. Each rule gets
+the request's `limit` and `deadline` of its own, which `watched` keeps. -/
+unsafe def judge (env : Environment) (request : Rules) : IO Unit := do
+  let stdout ← IO.getStdout
+  let stderr ← IO.getStderr
   let edges := request.files.foldl (init := #[]) fun edges facts =>
     facts.foldl (init := edges) fun edges fact =>
       match fact with
       | .import i => match i.edge with | some edge => edges.push edge | none => edges
       | _ => edges
   let graph := Graph.ofEdges edges
-  let mut found := #[]
+  stdout.write (header brokenResponse)
+  stdout.flush
   let mut index : UInt32 := 0
   for rulesModule in request.modules do
     let some moduleIndex := env.getModuleIdx? rulesModule.module
       | throw <| IO.userError s!"module {rulesModule.module} was not imported"
     for name in ruleAttribute.ext.getModuleEntries env moduleIndex do
-      let evaluated : Except Refusal Rule ← match ← refusalOf env name with
-        | some refusal => pure (.error refusal)
-        | none => pure <| (env.evalConst Rule {} name).mapError Refusal.unevaluable
-      let judged : Except (Refusal × Nat × Nat) (Array (UInt32 × UInt32)) ← match evaluated with
-        | .error refusal => pure (.error (refusal, ← placeOf env name))
-        | .ok rule => do
-          let mut broken := #[]
-          let mut fileIndex : UInt32 := 0
-          for facts in request.files do
-            let mut factIndex : UInt32 := 0
-            for fact in facts do
-              if rule.breaks rulesModule.namespace_ graph fact then
-                broken := broken.push (fileIndex, factIndex)
-              factIndex := factIndex + 1
-            fileIndex := fileIndex + 1
-          pure (.ok broken)
-      found := found.push (index, name, judged)
+      if request.judged.contains name.toString then continue
+      let judged : Except (Refusal × Nat × Nat) (Array (UInt32 × UInt32)) ←
+        if let some (_, refusal) := request.stopped.find? (·.1 == name.toString) then
+          pure (.error (refusal, ← placeOf env name))
+        else do
+          stderr.putStrLn s!"judging {name}"
+          stderr.flush
+          watched request.limit request.deadline do
+            let evaluated : Except Refusal Rule ← match ← refusalOf env name with
+              | some refusal => pure (.error refusal)
+              | none => pure <| (env.evalConst Rule {} name).mapError Refusal.unevaluable
+            match evaluated with
+            | .error refusal => pure (.error (refusal, ← placeOf env name))
+            | .ok rule => do
+              let mut broken := #[]
+              let mut fileIndex : UInt32 := 0
+              for facts in request.files do
+                let mut factIndex : UInt32 := 0
+                for fact in facts do
+                  if rule.breaks rulesModule.namespace_ graph fact then
+                    broken := broken.push (fileIndex, factIndex)
+                  factIndex := factIndex + 1
+                fileIndex := fileIndex + 1
+              pure (.ok broken)
+      stdout.write (entry index name judged)
+      stdout.flush
     index := index + 1
-  let mut b := putU32 (header brokenResponse) found.size.toUInt32
-  for (moduleIndex, name, judged) in found do
-    b := putString (putU32 b moduleIndex) name.toString
-    match judged with
-    | .ok broken =>
-      b := putU32 (putU8 b 0) broken.size.toUInt32
-      for (fileIndex, factIndex) in broken do
-        b := putU32 (putU32 b fileIndex) factIndex
-    | .error (refusal, line, column) =>
-      b := putU32 (putU32 (putString (putU8 b refusal.code) refusal.detail) line.toUInt32) column.toUInt32
-  return b
 
 partial def readAll (stream : IO.FS.Stream) (bytes : ByteArray := .empty) : IO ByteArray := do
   let chunk ← stream.read 65536
@@ -370,17 +444,16 @@ unsafe def respond : IO Unit := do
   let decode {α : Type} (body : Decode α) : IO α :=
     IO.ofExcept <| (((do let _ ← kind; body).run' 0).run bytes).mapError IO.userError
   let requested ← decode kind
-  let response ← if requested == checkRequest then
-      let request ← decode check
-      answer (← importModules #[{ module := request.module }] {} (loadExts := true)) request
-    else if requested == rulesRequest then
-      let request ← decode rules
-      judge (← importModules (request.modules.map ({ module := ·.module })) {} (loadExts := true)) request
-    else
-      throw <| IO.userError s!"unknown law request kind {requested}"
-  let stdout ← IO.getStdout
-  stdout.write response
-  stdout.flush
+  if requested == checkRequest then
+    let request ← decode check
+    let stdout ← IO.getStdout
+    stdout.write (← answer (← importModules #[{ module := request.module }] {} (loadExts := true)) request)
+    stdout.flush
+  else if requested == rulesRequest then
+    let request ← decode rules
+    judge (← importModules (request.modules.map ({ module := ·.module })) {} (loadExts := true)) request
+  else
+    throw <| IO.userError s!"unknown law request kind {requested}"
 
 end Sharp.Runner
 
