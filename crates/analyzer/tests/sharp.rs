@@ -6366,16 +6366,16 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
     );
 }
 
-/// A `.sharp` message writes a function type's effects inside its brackets, each named as the file names the class:
-/// a standard effect by its short name, and an imported one by its import's name.
+/// A `.sharp` message writes a function type's effects inside its brackets, as the file writes them: a standard effect
+/// by its short name or its import's name, and any other by the name the file gives its class.
 #[test]
 fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() {
-    let sharp = "namespace Demo;\n\nimport Sharp.Mail as Post;\n\nclass Receipt\n{\n    public string step(Function<int(int) uses Http, Post> step) => `Step: ${step}`;\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Effects.Payments as Billing;\nimport Sharp.Mail as Post;\n\nclass Receipt\n{\n    public string step(Function<int(int) uses Http, Post, Billing> step) => `Step: ${step}`;\n}\n";
 
     assert_eq!(
         worded(("src/Demo/Receipt.sharp", sharp), &[]),
         [
-            "7:75 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Function<int(int) uses Http, Post>` is none of them. | This is `Function<int(int) uses Http, Post>`. | Show a value taken from it instead, such as a property or the result of a method.",
+            "8:84 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Function<int(int) uses Http, Post, Billing>` is none of them. | This is `Function<int(int) uses Http, Post, Billing>`. | Show a value taken from it instead, such as a property or the result of a method.",
         ]
     );
 }
