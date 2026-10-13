@@ -25,9 +25,12 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
+use crate::statement::is_event_class;
+use crate::utils::names::display_class_like_name;
 
 /// `point with { y: 9 }` is a copy of `point` with the values it names set, spec section 16, so it has the type of
-/// `point`, and each value is written to the copy as a property write.
+/// `point`, and each value is written to the copy as a property write. It copies a struct or a class, so an enum or an
+/// event is refused, and its values are only analyzed.
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for With<'arena> {
     fn analyze<'ctx, A>(
         &'ast self,
@@ -41,6 +44,20 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for With<'arena> {
         self.object.analyze(context, block_context, artifacts)?;
 
         let object_type = artifacts.get_expression_type(self.object).cloned().unwrap_or_else(get_mixed);
+        if let Some((name, kind)) = uncopyable(context, &object_type) {
+            context.collector.report_with_code(
+                IssueCode::InvalidOperand,
+                Issue::error(format!("`with` copies a struct or a class, and `{name}` is {kind}."))
+                    .with_annotation(Annotation::primary(self.object.span()).with_message("Copied here.")),
+            );
+            for value in self.initializer.values.iter() {
+                value.value.analyze(context, block_context, artifacts)?;
+            }
+            artifacts.set_expression_type(&self.span(), object_type);
+
+            return Ok(());
+        }
+
         analyze_object_initializer(
             context,
             block_context,
@@ -51,6 +68,28 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for With<'arena> {
             "`with`",
         )
     }
+}
+
+/// The name and the kind, as "an enum" or "an event", of the first class-like of `object_type` that `with` can't copy.
+fn uncopyable<A>(context: &Context<'_, '_, A>, object_type: &TUnion) -> Option<(String, &'static str)>
+where
+    A: Arena,
+{
+    object_type.types.iter().find_map(|atomic| {
+        let TAtomic::Object(object) = atomic else {
+            return None;
+        };
+        let class = context.codebase.get_class_like(object.get_name()?.as_bytes())?;
+        let kind = if class.kind.is_enum() {
+            "an enum"
+        } else if is_event_class(context.codebase, class) {
+            "an event"
+        } else {
+            return None;
+        };
+
+        Some((display_class_like_name(context, class.name).to_string(), kind))
+    })
 }
 
 /// The prefix of the hidden local that holds the object `new` or `with` creates while its initializer is analyzed.

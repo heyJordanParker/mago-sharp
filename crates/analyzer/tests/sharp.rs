@@ -7442,14 +7442,23 @@ fn a_struct_compares_by_value() {
 
 /// Spec section 16: `with` and an object initializer set only a property with `init` or `set`, each once, and the help
 /// of a get-only PHP# property, `{ get; init; }`, compiles. A plain PHP `readonly` property is get-only too, with no
-/// help, since its class isn't PHP#'s.
+/// help, since its class isn't PHP#'s. `with` copies a struct or a class, so an enum and an event are refused.
 #[test]
 fn with_and_an_object_initializer_set_init_and_set_properties() {
-    let sharp = "namespace Demo;\n\nimport Lib.Stamp;\n\nstruct Size\n{\n    public int width { get; init; }\n    public int depth { get; }\n\n    public Size() { this.depth = 1; }\n}\n\nclass Note\n{\n    public string text { get; set; } = \"\";\n}\n\nclass Copies\n{\n    public Size wider(Size size) => size with { width: 2, depth: 3 };\n\n    public Size twice() => new Size { width: 1, width: 2 };\n\n    public Note note(Note note) => note with { text: \"b\" };\n\n    public Stamp stamp(Stamp stamp) => stamp with { at: 2 };\n\n    public Any? loose(Any? value) => value with { width: 2 };\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Stamp;\n\nstruct Size\n{\n    public int width { get; init; }\n    public int depth { get; }\n\n    public Size() { this.depth = 1; }\n}\n\nclass Note\n{\n    public string text { get; set; } = \"\";\n}\n\nclass Copies\n{\n    public Size wider(Size size) => size with { width: 2, depth: 3 };\n\n    public Size twice() => new Size { width: 1, width: 2 };\n\n    public Note note(Note note) => note with { text: \"b\" };\n\n    public Stamp stamp(Stamp stamp) => stamp with { at: 2 };\n\n    public Any? loose(Any? value) => value with { width: 2 };\n\n    public Plan plan(Plan plan) => plan with { label: \"b\" };\n\n    public Moved moved(Moved moved) => moved with { x: 2 };\n}\n";
     let php = "<?php namespace Lib; final class Stamp { public function __construct(public readonly int $at) {} }";
+    let plan = (
+        "src/Demo/Plan.sharp",
+        "namespace Demo;\n\nenum Plan\n{\n    case Basic;\n\n    public string label => \"basic\";\n}\n",
+    );
+    let moved = ("src/Demo/Moved.sharp", "namespace Demo;\n\nevent Moved(int x);\n");
 
-    let analyzed =
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Copies.sharp", sharp), &[("src/Lib/Stamp.php", php)]);
+    let analyzed = analyze(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Demo/Copies.sharp", sharp),
+        &[("src/Lib/Stamp.php", php), plan, moved],
+    );
     assert_eq!(
         analyzed
             .iter()
@@ -7460,6 +7469,8 @@ fn with_and_an_object_initializer_set_init_and_set_properties() {
             "`width` is named twice. | ",
             "`at` is get-only, so `with` can't set it. | ",
             "Attempting to access a property on a non-object type (`Any?`). | ",
+            "`with` copies a struct or a class, and `Plan` is an enum. | ",
+            "`with` copies a struct or a class, and `Moved` is an event. | ",
         ]
     );
 }
