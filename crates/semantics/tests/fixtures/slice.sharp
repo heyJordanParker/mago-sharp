@@ -446,12 +446,12 @@ public class Page<TItem : Record & Sized, TKey : Comparable<Version>> : Listing<
     public TItem next() => this.items[0];
 }
 
-public interface Listing<TItem : Record & Sized> : Sized
+public interface Listing<in TItem : Record & Sized> : Sized
 {
     bool accepts(TItem item);
 }
 
-public interface Source<TItem>
+public interface Source<out TItem>
 {
     TItem next();
 }

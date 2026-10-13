@@ -15,6 +15,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::resolver::static_property::StaticProperty;
+use crate::resolver::static_property::record_statics_type_arguments;
 use crate::resolver::static_property::resolve_static_properties;
 use crate::utils::expression::get_static_property_access_expression_id;
 
@@ -108,7 +109,8 @@ where
     Ok(())
 }
 
-/// Adds symbol reference for a memoized static property access.
+/// Adds symbol reference for a memoized static property access, and records the type arguments it reads a generic PHP#
+/// class's statics with, which the class it names gives, since an access with type arguments is never memoized.
 fn add_memoized_static_property_reference<'ctx, 'arena, A>(
     context: &Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
@@ -143,6 +145,7 @@ where
             declaring_class,
             property_name,
         );
+        record_statics_type_arguments(context, artifacts, access.span, class_name, declaring_class, None);
     }
 
     Ok(())

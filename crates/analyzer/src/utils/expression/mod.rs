@@ -482,6 +482,14 @@ pub fn get_static_property_access_expression_id<'ast, 'arena>(
     resolved_names: &'ast ResolvedNames<'arena>,
     codebase: Option<&CodebaseMetadata>,
 ) -> Option<Word> {
+    // A static read through a PHP# class value, `type.count`, records the type arguments the value carries, as one
+    // through `Counter<Order>` records its own, which a memoized read skips, so neither is memoized.
+    if let Expression::ConstantAccess(local) = unwrap_expression(access.class)
+        && get_bare_name_variable_id(&local.name, resolved_names).is_some()
+    {
+        return None;
+    }
+
     let class = get_extended_expression_id(access.class, this_class_name, resolved_names, codebase, true)?;
     let property = access.name.direct_name()?;
 

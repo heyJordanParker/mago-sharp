@@ -253,7 +253,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Foreach(foreach) => foreach.analyze(context, block_context, artifacts),
                 Statement::For(r#for) => r#for.analyze(context, block_context, artifacts),
                 Statement::ForOf(for_of) => analyze_for_of(for_of, context, block_context, artifacts),
-                Statement::PatternMatch(pattern_match) if is_refused_match(pattern_match, context) => Ok(()),
+                Statement::PatternMatch(pattern_match) if is_refused_match(pattern_match) => Ok(()),
                 Statement::PatternMatch(pattern_match) => analyze_php_shape(
                     Node::Statement(self),
                     match_arm_hints(pattern_match),

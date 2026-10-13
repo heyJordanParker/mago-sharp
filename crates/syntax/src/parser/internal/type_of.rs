@@ -1,5 +1,4 @@
 use mago_allocator::prelude::*;
-use mago_span::HasSpan;
 
 use crate::T;
 use crate::cst::cst::TypeOf;
@@ -17,18 +16,14 @@ where
             && self.stream.peek_kind(1)? == Some(T!["("]))
     }
 
-    /// Parses `typeof(Class)`. `typeof(PaginatedList<Order>)` is a class value with type arguments, spec section 25,
-    /// which the engine does not keep yet. Its type arguments parse whole as one error, and the class value without
-    /// them adds nothing.
+    /// Parses `typeof(Class)`, or `typeof(PaginatedList<Order>)`, the class value with type arguments of spec section 25.
     pub(crate) fn parse_type_of(&mut self) -> Result<TypeOf<'arena>, ParseError> {
-        let r#typeof = self.expect_any_keyword()?;
-        let left_parenthesis = self.stream.eat_span(T!["("])?;
-        let class = self.parse_identifier()?;
-        if self.stream.peek_kind(0)? == Some(T!["<"]) {
-            let span = class.span().join(self.parse_type_argument_list()?.span());
-            self.errors.push(ParseError::NotSupportedYetInSharp("A class value with type arguments", span));
-        }
-
-        Ok(TypeOf { r#typeof, left_parenthesis, class, right_parenthesis: self.stream.eat_span(T![")"])? })
+        Ok(TypeOf {
+            r#typeof: self.expect_any_keyword()?,
+            left_parenthesis: self.stream.eat_span(T!["("])?,
+            class: self.parse_identifier()?,
+            type_arguments: self.parse_optional_type_argument_list()?,
+            right_parenthesis: self.stream.eat_span(T![")"])?,
+        })
     }
 }

@@ -12,6 +12,7 @@ use mago_span::HasSpan;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
+use mago_word::Word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -93,7 +94,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Binary<'arena> {
                     self.rhs.analyze(context, block_context, artifacts)?;
                 }
 
-                if let Expression::Identifier(identifier) = self.rhs {
+                // A PHP# test of a type parameter or of a class with type arguments names no class by itself.
+                if let Expression::Identifier(identifier) = self.rhs
+                    && artifacts.get_tested_type(self.rhs).is_none()
+                {
                     let class_name = context.resolved_names.get(identifier);
                     if !context.codebase.class_like_exists(class_name) {
                         report_non_existent_class_like(context, identifier.span(), word(class_name));
@@ -125,16 +129,15 @@ where
         return get_bool();
     }
 
-    let class_name = match binary.rhs {
-        Expression::Identifier(identifier) => word(context.resolved_names.get(identifier)),
+    let target_type = match binary.rhs {
+        Expression::Identifier(_) if let Some(tested) = artifacts.get_tested_type(binary.rhs) => tested.clone(),
+        Expression::Identifier(identifier) => named_object(word(context.resolved_names.get(identifier))),
         Expression::Self_(_) | Expression::Static(_) => match block_context.scope.get_class_like_name() {
-            Some(name) => name,
+            Some(name) => named_object(name),
             None => return get_bool(),
         },
         _ => return get_bool(),
     };
-
-    let target_type = TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(class_name))));
 
     let mut comparison_result = ComparisonResult::new();
     let is_already_subtype = union_comparator::is_contained_by(
@@ -156,6 +159,10 @@ where
     } else {
         get_bool()
     }
+}
+
+fn named_object(class_name: Word) -> TUnion {
+    TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(class_name))))
 }
 
 #[cfg(test)]

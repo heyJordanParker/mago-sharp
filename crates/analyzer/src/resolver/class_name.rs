@@ -13,6 +13,8 @@ use mago_codex::ttype::atomic::object::r#enum::TEnum;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
+use mago_codex::ttype::builder::get_class_strings_of;
 use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -21,6 +23,7 @@ use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 
 use crate::analyzable::Analyzable;
@@ -29,6 +32,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::statement::get_type_from_hint;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
 
@@ -229,6 +233,73 @@ where
     )
 }
 
+/// Resolves a PHP# type parameter written as a class, in `new TItem(…)` or `TItem.make()`: the class of the type
+/// argument the code runs with, as `typeof(TItem)` gives it, which is any class its bound holds. `new` of it gives a
+/// `TItem`. A type parameter whose bound holds a type that is not a class can't be one.
+fn resolve_type_parameter<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    name: &Identifier<'_>,
+) -> Vec<ResolvedClassname>
+where
+    A: Arena,
+{
+    let parameter = get_type_from_hint(context, block_context, artifacts, &Hint::Identifier(*name));
+    artifacts.record_tested_type(name, parameter.clone());
+
+    let classes: Vec<ResolvedClassname> = get_class_strings_of(TClassLikeStringKind::Class, parameter, name.span())
+        .map(|class_strings| {
+            class_strings
+                .types
+                .iter()
+                .filter_map(|atomic| get_class_name_from_atomic(context.codebase, atomic))
+                .collect()
+        })
+        .unwrap_or_default();
+    if classes.is_empty() || classes.iter().any(|class| class.fqcn.is_none()) {
+        let written = BytesDisplay(name.value());
+        context.collector.report_with_code(
+            IssueCode::InvalidClassStringExpression,
+            Issue::error(format!("`{written}` can stand for a type that is not a class."))
+                .with_annotation(Annotation::primary(name.span()).with_message("Used as a class here."))
+                .with_help(format!("Bound `{written}` by a class, as in `<{written} : Order>`.")),
+        );
+
+        return vec![ResolvedClassname::invalid()];
+    }
+
+    classes
+}
+
+/// The class with type arguments a PHP# class value holds, as `Counter<Order>` for a `Class<Counter<Order>>`, spec
+/// section 25. None for a class value of a class without type arguments, or one that names none, as `Class<Counter>`.
+pub(crate) fn class_value_class(class_value: &TClassLikeString) -> Option<&TNamedObject> {
+    let TClassLikeString::OfType { constraint, .. } = class_value else {
+        return None;
+    };
+    let TAtomic::Object(TObject::Named(class)) = constraint.as_ref() else {
+        return None;
+    };
+
+    class.get_type_parameters()?.iter().all(|argument| !argument.from_unspecified_template()).then_some(class)
+}
+
+/// The class with type arguments a static member is read or called through: `Counter<Order>` written as such, or the
+/// class a class value holds, as `Counter<Order>` for a `Class<Counter<Order>>`, spec sections 11 and 25.
+pub(crate) fn generic_class_type<'artifacts>(
+    artifacts: &'artifacts AnalysisArtifacts,
+    class_expression: &Expression<'_>,
+) -> Option<&'artifacts TNamedObject> {
+    let class_type = artifacts.get_expression_type(class_expression)?;
+
+    match (class_expression, class_type.types.as_ref()) {
+        (Expression::GenericClass(_), _) => class_type.get_single_named_object(),
+        (_, [TAtomic::Scalar(TScalar::ClassLikeString(class_value))]) => class_value_class(class_value),
+        _ => None,
+    }
+}
+
 /// Resolves a CST `Expression` to one or more `ResolvedClassname` instances.
 ///
 /// This function analyzes various forms of expressions that can represent a class name
@@ -250,8 +321,30 @@ where
 {
     let mut possible_types = vec![];
     match class_expression.unparenthesized() {
+        Expression::Identifier(name_node) if context.resolved_names.is_type_parameter(name_node) => {
+            possible_types.extend(resolve_type_parameter(context, block_context, artifacts, name_node));
+        }
+        Expression::ConstantAccess(constant_access)
+            if context.resolved_names.is_type_parameter(&constant_access.name) =>
+        {
+            possible_types.extend(resolve_type_parameter(context, block_context, artifacts, &constant_access.name));
+        }
         Expression::Identifier(name_node) => {
             possible_types.push(resolve_named_class(context, block_context, name_node));
+        }
+        // `Counter<Order>` names the class `Counter`, and its analysis checks the type arguments.
+        Expression::GenericClass(generic_class) => {
+            if !class_is_analyzed {
+                generic_class.analyze(context, block_context, artifacts)?;
+            }
+
+            possible_types.extend(resolve_classnames_from_expression(
+                context,
+                block_context,
+                artifacts,
+                generic_class.class,
+                true,
+            )?);
         }
         Expression::ConstantAccess(constant_access)
             if context.resolved_names.binding(&constant_access.name) == Some(Binding::Class) =>

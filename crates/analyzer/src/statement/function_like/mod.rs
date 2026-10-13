@@ -515,6 +515,7 @@ where
     parent_artifacts.variable_definedness.extend(std::mem::take(&mut artifacts.variable_definedness));
     parent_artifacts.resolved_method_calls.append(&mut artifacts.resolved_method_calls);
     parent_artifacts.call_targets.extend(std::mem::take(&mut artifacts.call_targets));
+    parent_artifacts.tested_types.extend(std::mem::take(&mut artifacts.tested_types));
     parent_artifacts.function_values.append(&mut artifacts.function_values);
     parent_artifacts.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));
     parent_artifacts.pending_readonly_property_writes.append(&mut artifacts.pending_readonly_property_writes);
@@ -2025,9 +2026,19 @@ where
     true
 }
 
-/// Reports each PHP# `Map` written in `type_union` whose key type is a class or an enum without a backing value.
-/// Spec section 12 keys a `Map` by an `int`, a `string` or a type with an `int` or `string` backing value, which
-/// runs as its backing value.
+/// Whether a PHP# `Map` can be keyed by `key_type`. Spec section 12 keys a `Map` by an `int`, a `string` or a type with
+/// an `int` or `string` backing value, which runs as its backing value. A class value is none of them, though it runs as
+/// its plain class name. A `Map` type, a `Map` literal and the `Map` a collection method infers all keep this rule.
+pub(crate) fn is_map_key<A>(context: &Context<'_, '_, A>, key_type: &TUnion) -> bool
+where
+    A: Arena,
+{
+    !key_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
+        && get_backing_key_type(key_type, context.codebase, context.dialect).is_always_array_key(true)
+}
+
+/// Reports each PHP# `Map` written in `type_union` whose key type [`is_map_key`] refuses: a class value, or a class or
+/// an enum without a backing value.
 pub fn report_map_keys_without_backing_value<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
@@ -2043,7 +2054,7 @@ where
         let Some((key_type, _)) = keyed_array.get_generic_parameters() else {
             continue;
         };
-        if get_backing_key_type(key_type, context.codebase, context.dialect).is_always_array_key(true) {
+        if is_map_key(context, key_type) {
             continue;
         }
 
@@ -2078,8 +2089,8 @@ where
     }
 }
 
-/// The error for a PHP# `Map` keyed by `key_id`, a type that is not `int`, not `string` and has no `int` or `string`
-/// backing value, written at `span`. A `Map` type and a `Map` literal state the rule in these words.
+/// The error for a PHP# `Map` keyed by `key_id`, a type [`is_map_key`] refuses, written or inferred at `span`. A `Map`
+/// type, a `Map` literal and the `Map` a collection method infers state the rule in these words.
 pub(crate) fn map_key_error(key_id: &str, span: Span) -> Issue {
     Issue::error(format!(
         "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `{key_id}` has none."

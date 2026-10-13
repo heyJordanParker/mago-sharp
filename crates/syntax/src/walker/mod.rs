@@ -97,6 +97,7 @@ use crate::cst::cst::FunctionLikeParameterDefaultValue;
 use crate::cst::cst::FunctionLikeParameterList;
 use crate::cst::cst::FunctionLikeReturnTypeHint;
 use crate::cst::cst::FunctionPartialApplication;
+use crate::cst::cst::GenericClass;
 use crate::cst::cst::GenericHint;
 use crate::cst::cst::Global;
 use crate::cst::cst::Goto;
@@ -1953,6 +1954,7 @@ generate_ast_walker! {
             Expression::As(r#as) => walker.walk_as(r#as, context),
             Expression::PatternMatch(pattern_match) => walker.walk_pattern_match(pattern_match, context),
             Expression::TypeOf(type_of) => walker.walk_type_of(type_of, context),
+            Expression::GenericClass(generic_class) => walker.walk_generic_class(generic_class, context),
             Expression::Error(_) => {
                 // Nothing to walk for error expressions
             }
@@ -2771,6 +2773,14 @@ generate_ast_walker! {
     'arena TypeOf as type_of => {
         walker.walk_keyword(&type_of.r#typeof, context);
         walker.walk_identifier(&type_of.class, context);
+        if let Some(type_arguments) = &type_of.type_arguments {
+            walker.walk_type_argument_list(type_arguments, context);
+        }
+    }
+
+    'arena GenericClass as generic_class => {
+        walker.walk_expression(generic_class.class, context);
+        walker.walk_type_argument_list(&generic_class.type_arguments, context);
     }
 
     'arena Hint as hint => {

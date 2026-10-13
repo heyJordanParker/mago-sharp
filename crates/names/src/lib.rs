@@ -9,6 +9,7 @@ use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::GenericClass;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::PropertyHookBody;
@@ -234,7 +235,8 @@ impl<'arena> ResolvedNames<'arena> {
     }
 
     /// Returns the class of a PHP# static call, `Class.method()`: the object of `call` when the binder bound it to a
-    /// class. Returns `None` for an instance call and for every call in a PHP file.
+    /// class, or to a type parameter, which stands for the class of the type argument the code runs with. Returns
+    /// `None` for an instance call and for every call in a PHP file.
     ///
     /// The checker and the engine both read this, so they never disagree on a static call.
     #[must_use]
@@ -243,7 +245,8 @@ impl<'arena> ResolvedNames<'arena> {
     }
 
     /// Returns the class of a PHP# static property access, `Class.name`: the object of `access` when the binder bound
-    /// it to a class. Returns `None` for an instance property and for every access in a PHP file.
+    /// it to a class or to a type parameter, as [`Self::static_call_class`] does. Returns `None` for an instance
+    /// property and for every access in a PHP file.
     ///
     /// The checker, the analyzer and the engine all read this, so they never disagree on a static property.
     #[must_use]
@@ -274,9 +277,16 @@ impl<'arena> ResolvedNames<'arena> {
             || self.uses_field(accessors)
     }
 
+    /// The class name of a member's object: a bare name bound to a class or a type parameter, or the class of
+    /// `Counter<Order>`, whose type arguments a caller that reads them takes from the object.
     fn class_object<'ast>(&self, object: &'ast Expression<'ast>) -> Option<&'ast ConstantAccess<'ast>> {
         match object {
-            Expression::ConstantAccess(access) if self.binding(&access.name) == Some(Binding::Class) => Some(access),
+            Expression::ConstantAccess(access)
+                if matches!(self.binding(&access.name), Some(Binding::Class | Binding::TypeParameter { .. })) =>
+            {
+                Some(access)
+            }
+            Expression::GenericClass(GenericClass { class, .. }) => self.class_object(class),
             _ => None,
         }
     }

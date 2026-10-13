@@ -32,6 +32,7 @@ use mago_syntax::cst::Function;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionPartialApplication;
+use mago_syntax::cst::GenericClass;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
@@ -237,11 +238,12 @@ impl<'arena> NameWalker<'arena> {
         }
     }
 
-    /// Marks a bare name written before `.` or `?.`, which binds as a class unless it names a local, `this` or a type
-    /// parameter in scope.
+    /// Marks a bare name written before `.` or `?.`, with or without type arguments, which binds as a class unless it
+    /// names a local, `this` or a type parameter in scope.
     fn mark_member_object(&mut self, object: &Expression<'arena>) {
         if self.sharp
-            && let Expression::ConstantAccess(object) = object
+            && let Expression::ConstantAccess(object)
+            | Expression::GenericClass(GenericClass { class: Expression::ConstantAccess(object), .. }) = object
         {
             self.member_objects.insert(object.name.span().start.offset);
         }

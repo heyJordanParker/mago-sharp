@@ -390,6 +390,42 @@ fn a_static_call_is_a_method_call_whose_object_binds_as_a_class() {
     assert_eq!(classes, [Some(&b"Calc"[..]), None, None, None]);
 }
 
+/// `Counter<Order>.count` names a static member of one type argument's class, spec section 11: `Counter` binds as a
+/// class and resolves like any class name, and each type argument resolves as a type, a type parameter as its type
+/// parameter. The checker and the engine read the class of the member through it, as they read `Counter.count`.
+#[test]
+fn a_class_with_type_arguments_before_a_dot_binds_as_the_class_and_its_type_arguments_as_types() {
+    const CODE: &str = "namespace App.Shop;\n\nimport App.Sales.Order;\n\npublic class Box<TItem>\n{\n    public int run()\n    {\n        Counter<Order>.reset();\n        Counter<TItem>.count++;\n        return Counter<List<Order>>.count + this.size;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
+    let program = parse_file(&arena, &file);
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let names = NameResolver::new(&arena).resolve(program);
+
+    for nth in 0..3 {
+        assert_eq!(binding(&names, CODE, "Counter<", nth), Some(Binding::Class), "`Counter` #{nth}");
+        assert_eq!(resolved(&names, CODE, "Counter<", nth), b"App\\Shop\\Counter", "`Counter` #{nth}");
+    }
+    assert_eq!(resolved(&names, CODE, "Order>.", 0), b"App\\Sales\\Order");
+    assert_eq!(resolved(&names, CODE, "Order>>", 0), b"App\\Sales\\Order");
+    assert_eq!(
+        binding(&names, CODE, "TItem>.", 0),
+        Some(Binding::TypeParameter { declaration: span(CODE, "TItem", 0) })
+    );
+
+    let calls = Node::Program(program).filter_map(|node| match node {
+        Node::MethodCall(call) => Some(names.static_call_class(call).map(|class| class.name.value())),
+        _ => None,
+    });
+    let properties = Node::Program(program).filter_map(|node| match node {
+        Node::PropertyAccess(access) => Some(names.static_property_class(access).map(|class| class.name.value())),
+        _ => None,
+    });
+
+    assert_eq!(calls, [Some(&b"Counter"[..])]);
+    assert_eq!(properties, [Some(&b"Counter"[..]), Some(b"Counter"), None]);
+}
+
 #[test]
 fn a_bare_int_or_float_before_a_dot_is_the_class_in_the_sharp_namespace() {
     const CODE: &str = "namespace App.Tenant.Store;\n\nclass Report\n{\n    public float run(string text)\n    {\n        return Int.parse(text) + Float.tryParse(text) ?? 0.0;\n    }\n}\n";

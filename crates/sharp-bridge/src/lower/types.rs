@@ -12,11 +12,14 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_sole_backed_enum;
+use mago_codex::ttype::is_written_in_sharp;
+use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_span::HasSpan;
@@ -138,6 +141,37 @@ impl<'analysis> Types<'analysis> {
         Some(bounds.join(", "))
     }
 
+    /// How many type parameters the fully qualified class name `class` declares when it is a PHP# generic class, whose
+    /// static members take its type arguments as their leading own ones. None for any other class.
+    pub(crate) fn static_type_parameters(&self, class: &[u8]) -> Option<usize> {
+        let metadata = self.codebase.get_class_like(class)?;
+
+        (metadata.flags.is_sharp() && !metadata.template_types.is_empty()).then_some(metadata.template_types.len())
+    }
+
+    /// The variance of the type parameters of the fully qualified class name `class` when it is a PHP# class-like and
+    /// one of them is `out` or `in`, spec section 11.1: `+` for `out`, `-` for `in` and `=` for neither, in declaration
+    /// order, which the engine reads where it checks a value against a generic type.
+    pub(crate) fn variance(&self, class: &[u8]) -> Option<String> {
+        let metadata = self.codebase.get_class_like(class)?;
+        if !metadata.flags.is_sharp() || metadata.template_variance.iter().all(Variance::is_invariant) {
+            return None;
+        }
+
+        Some(
+            metadata
+                .template_variance
+                .iter()
+                .map(|variance| match variance {
+                    Variance::Covariant => '+',
+                    Variance::Contravariant => '-',
+                    Variance::Invariant => '=',
+                    Variance::Bivariant => unreachable!("a PHP# type parameter is `out`, `in` or neither"),
+                })
+                .collect(),
+        )
+    }
+
     /// The type arguments the header of the fully qualified class name `class` gives each generic parent and
     /// interface, as a type text list of those classes with their type arguments, each type parameter of `class`
     /// written as `$` and its index, and sorted by their text: `App.PaginatedList<App.Order>` for
@@ -202,6 +236,31 @@ impl<'analysis> Types<'analysis> {
         Some(self.argument_texts(arguments))
     }
 
+    /// The type arguments the static property access `access` reads a generic PHP# class's own statics with, spec
+    /// section 11, as the checker found them, written as [`Self::type_arguments`] writes those of a `new`. None for a
+    /// static property of any other class.
+    pub(crate) fn statics_type_arguments(&self, access: &impl HasSpan) -> Option<String> {
+        let span = access.span();
+        let arguments = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?;
+
+        Some(self.argument_texts(arguments))
+    }
+
+    /// The type a PHP# `is`, `as`, `match` arm, catch clause or `typeof` reads while the code runs, a type parameter or a
+    /// class with type arguments, as the analysis records it for the type the code writes, written as
+    /// [`Self::type_arguments`] writes a type. None for a class without type arguments.
+    pub(crate) fn tested_type(&self, name: &impl HasSpan) -> Option<String> {
+        let tested = self.artifacts.get_tested_type(name)?;
+
+        Some(text(tested, self.codebase, Parameter::Index))
+    }
+
+    /// The classes the type argument of the type parameter `name`, written as a class in `TItem.member`, can be: the
+    /// classes of its bound, as [`receiver_classes`] gives them. None for a class.
+    pub(crate) fn type_parameter_classes(&self, name: &impl HasSpan) -> Option<Vec<&'analysis [u8]>> {
+        receiver_classes(self.artifacts.get_tested_type(name)?)
+    }
+
     fn argument_texts(&self, arguments: &[TUnion]) -> String {
         arguments.iter().map(|argument| text(argument, self.codebase, Parameter::Index)).collect::<Vec<_>>().join(", ")
     }
@@ -209,21 +268,31 @@ impl<'analysis> Types<'analysis> {
     /// The metadata of the method `method` of the fully qualified class name `class` that the engine reads on a call:
     /// the bounds of its own type parameters, which a call from plain PHP gives it, and a type text list with one entry
     /// per parameter that a call from plain PHP checks its argument against, [`Self::checked_text`] or `Any?`. Each half
-    /// is None when the method declares no type parameter, or no parameter needs a check.
+    /// is None when the method declares no type parameter, or no parameter needs a check. A static method of a generic
+    /// class, a named constructor among them, has no object to read its class's type arguments from, so its class's
+    /// type parameters lead its own, with the class's bounds.
     pub(crate) fn method_metadata(&self, class: &[u8], method: &[u8]) -> (Option<String>, Option<String>) {
         let Some(metadata) = self.codebase.get_method(class, method) else {
             return (None, None);
         };
 
-        let bounds: Vec<String> = metadata
-            .template_types
-            .values()
-            .map(|template| text(&template.constraint, self.codebase, Parameter::Bound))
+        let is_static = metadata.method_metadata.as_ref().is_some_and(|method| method.is_static);
+        let class_bounds = if is_static { self.bounds(class) } else { None };
+        let bounds: Vec<String> = class_bounds
+            .into_iter()
+            .chain(
+                metadata
+                    .template_types
+                    .values()
+                    .map(|template| text(&template.constraint, self.codebase, Parameter::Bound)),
+            )
             .collect();
         let parameters: Vec<Option<String>> = metadata
             .parameters
             .iter()
-            .map(|parameter| parameter.type_metadata.as_ref().and_then(|r#type| self.checked_text(&r#type.type_union)))
+            .map(|parameter| {
+                parameter.type_metadata.as_ref().and_then(|r#type| self.checked_text(&r#type.type_union, true))
+            })
             .collect();
 
         (
@@ -242,7 +311,8 @@ impl<'analysis> Types<'analysis> {
     /// plain PHP, and the call as the check names it, `the result of Lib\Pager::orders()`: [`Self::checked_text`] of
     /// the call's type, when the checker resolved `call` to a plain PHP function or method. The checker reads a plain
     /// PHP return type that names a PHP# generic class from a docblock it can't prove, so the engine tests the value
-    /// spec section 12 lets in, wherever it goes next.
+    /// spec section 12 lets in, wherever it goes next. A collection's elements are tested only in the result of the
+    /// project's own plain PHP: PHP's internal functions and the prelude's stubs have types the engine guarantees.
     pub(crate) fn call_check(&self, call: &Expression) -> Option<(String, String)> {
         let (callee, metadata) = self.artifacts.get_callees(call).find_map(|target| match target {
             CallTarget::FunctionLike { callee, .. } | CallTarget::MagicMethod { callee, .. } => self
@@ -252,7 +322,7 @@ impl<'analysis> Types<'analysis> {
                 .map(|metadata| (callee, metadata)),
             CallTarget::Property { .. } => None,
         })?;
-        let text = self.checked_text(self.artifacts.get_expression_type(call)?)?;
+        let text = self.checked_text(self.artifacts.get_expression_type(call)?, metadata.flags.is_user_defined())?;
         let name = match callee {
             FunctionLikeIdentifier::Method(class, _) => {
                 let class = self.codebase.get_class_like(class.as_bytes()).map_or(*class, |class| class.original_name);
@@ -265,22 +335,23 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The type text the property `property` of the fully qualified class name `class` checks a value from plain PHP
-    /// against, as a parameter checks an argument: [`Self::checked_text`] of its type, when plain PHP can write it. That
-    /// is a property PHP# writes as public or protected and not read-only.
+    /// against, as a parameter checks an argument: [`Self::checked_text`] of its type, a collection's elements included.
+    /// PHP's typed property check tests it on every write plain PHP makes, through reflection too, whatever the
+    /// property's visibility.
     pub(crate) fn property_check(&self, class: &[u8], property: &[u8]) -> Option<String> {
         let metadata = self.codebase.get_property(class, &[b"$", property].concat())?;
-        if metadata.write_visibility.is_private() || metadata.flags.is_readonly() {
-            return None;
-        }
 
-        self.checked_text(&metadata.type_metadata.as_ref()?.type_union)
+        self.checked_text(&metadata.type_metadata.as_ref()?.type_union, true)
     }
 
     /// `r#type` as the type text an entry check tests a value from plain PHP against, when part of it is a PHP# class
-    /// with a type argument the check can test, or a type parameter of the class. None otherwise: plain PHP's generics
-    /// are erased, since an object of a plain PHP generic class carries no type arguments, and a call from plain PHP
-    /// gives a method's own type parameters none, so they match any value.
-    fn checked_text(&self, r#type: &TUnion) -> Option<String> {
+    /// with a type argument the check can test, or a class value of one, since PHP's own `string` type checks no class
+    /// value, a type parameter of the class, or, with `collections`, a collection whose elements the check can test,
+    /// since PHP's own `array` type checks none. None for a type only a plain PHP docblock writes, such as
+    /// `array<array-key, int>`, since the engine reads the check as PHP#. None otherwise: plain PHP's generics are
+    /// erased, since an object of a plain PHP generic class carries no type arguments, and a call from plain PHP gives a
+    /// method's own type parameters none, so they match any value.
+    fn checked_text(&self, r#type: &TUnion, collections: bool) -> Option<String> {
         let is_method_parameter = |r#type: &TUnion| {
             r#type.types.iter().filter(|atomic| !atomic.is_null()).all(|atomic| {
                 matches!(
@@ -290,18 +361,38 @@ impl<'analysis> Types<'analysis> {
                 )
             })
         };
-        let checked = r#type.types.iter().any(|atomic| match atomic {
-            TAtomic::Object(TObject::Named(object)) => {
-                object
-                    .get_type_parameters()
-                    .is_some_and(|arguments| arguments.iter().any(|argument| !is_method_parameter(argument)))
-                    && self.codebase.get_class_like(object.name.as_bytes()).is_some_and(|class| class.flags.is_sharp())
-            }
-            TAtomic::GenericParameter(parameter) => matches!(parameter.defining_entity, GenericParent::ClassLike(_)),
-            _ => false,
-        });
+        let constrains = |r#type: &TUnion| !r#type.is_mixed() && !is_method_parameter(r#type);
+        let is_sharp_generic = |object: &TNamedObject| {
+            object
+                .get_type_parameters()
+                .is_some_and(|arguments| arguments.iter().any(|argument| !is_method_parameter(argument)))
+                && self.codebase.get_class_like(object.name.as_bytes()).is_some_and(|class| class.flags.is_sharp())
+        };
+        let checked = collections
+            && r#type.types.iter().any(|atomic| match get_sharp_type(atomic) {
+                Some(SharpType::List(element) | SharpType::Set(element) | SharpType::Iterable(element)) => {
+                    constrains(element)
+                }
+                Some(SharpType::Map(key, value)) => constrains(key) || constrains(value),
+                _ => false,
+            })
+            || r#type.types.iter().any(|atomic| match atomic {
+                TAtomic::Object(TObject::Named(object)) => is_sharp_generic(object),
+                // A `Class<PaginatedList>` names no type arguments, so PHP's `string` type is the whole of its check.
+                TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
+                    matches!(constraint.as_ref(), TAtomic::Object(TObject::Named(object))
+                    if is_sharp_generic(object)
+                        && !object.get_type_parameters().is_some_and(|arguments| {
+                            arguments.iter().any(TUnion::from_unspecified_template)
+                        }))
+                }
+                TAtomic::GenericParameter(parameter) => {
+                    matches!(parameter.defining_entity, GenericParent::ClassLike(_))
+                }
+                _ => false,
+            });
 
-        checked.then(|| text(r#type, self.codebase, Parameter::Index))
+        (checked && is_written_in_sharp(r#type)).then(|| text(r#type, self.codebase, Parameter::Index))
     }
 
     /// The fully qualified name of the one backed enum every value of `r#type` but `null` is a case of, as

@@ -103,6 +103,7 @@ use crate::cst::cst::FunctionLikeParameterDefaultValue;
 use crate::cst::cst::FunctionLikeParameterList;
 use crate::cst::cst::FunctionLikeReturnTypeHint;
 use crate::cst::cst::FunctionPartialApplication;
+use crate::cst::cst::GenericClass;
 use crate::cst::cst::GenericHint;
 use crate::cst::cst::Global;
 use crate::cst::cst::Goto;
@@ -442,6 +443,7 @@ pub enum NodeKind {
     Literal,
     Pipe,
     TypeOf,
+    GenericClass,
     LiteralFloat,
     LiteralInteger,
     LiteralString,
@@ -827,6 +829,7 @@ pub enum Node<'ast, 'arena> {
     Variable(&'ast Variable<'arena>),
     Pipe(&'ast Pipe<'arena>),
     TypeOf(&'ast TypeOf<'arena>),
+    GenericClass(&'ast GenericClass<'arena>),
     Error(Span),
     MissingTerminator(Span),
     ClassLikeMemberMissingSelector(Span),
@@ -1193,6 +1196,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Variable(_) => NodeKind::Variable,
             Self::Pipe(_) => NodeKind::Pipe,
             Self::TypeOf(_) => NodeKind::TypeOf,
+            Self::GenericClass(_) => NodeKind::GenericClass,
             Self::Error(_) => NodeKind::Error,
             Self::MissingTerminator(_) => NodeKind::MissingTerminator,
             Self::ClassLikeMemberMissingSelector(_) => NodeKind::ClassLikeMemberMissingSelector,
@@ -2185,6 +2189,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     Expression::As(node) => Node::As(node),
                     Expression::PatternMatch(node) => Node::PatternMatch(node),
                     Expression::TypeOf(node) => Node::TypeOf(node),
+                    Expression::GenericClass(node) => Node::GenericClass(node),
                     Expression::Error(span) => Node::Error(*span),
                 };
                 f(child);
@@ -2911,6 +2916,13 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::TypeOf(type_of) => {
                 f(Node::Keyword(&type_of.r#typeof));
                 f(Node::Identifier(&type_of.class));
+                if let Some(type_arguments) = &type_of.type_arguments {
+                    f(Node::TypeArgumentList(type_arguments));
+                }
+            }
+            Node::GenericClass(generic_class) => {
+                f(Node::Expression(generic_class.class));
+                f(Node::TypeArgumentList(&generic_class.type_arguments));
             }
             Node::Error(_)
             | Node::MissingTerminator(_)
@@ -3200,6 +3212,7 @@ impl HasSpan for Node<'_, '_> {
             Self::Variable(node) => node.span(),
             Self::Pipe(node) => node.span(),
             Self::TypeOf(node) => node.span(),
+            Self::GenericClass(node) => node.span(),
             Self::Error(span)
             | Self::MissingTerminator(span)
             | Self::ClassLikeMemberMissingSelector(span)

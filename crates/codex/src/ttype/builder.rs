@@ -1037,7 +1037,7 @@ fn get_class_string_type(
 /// # Errors
 ///
 /// Returns a [`TypeError`] at `span` when `constraint_union` holds a type that is not an object type.
-pub(crate) fn get_class_strings_of(
+pub fn get_class_strings_of(
     kind: TClassLikeStringKind,
     constraint_union: TUnion,
     span: Span,

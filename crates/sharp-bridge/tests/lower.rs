@@ -681,7 +681,9 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
         indoc! {r#"
             STMT_LIST
               PROP_GROUP [4]
-                TYPE [7]
+                SHARP_TYPE_ARGS
+                  TYPE [7]
+                  ZVAL "Map<string, App.Shop.Plan>"
                 PROP_DECL
                   PROP_ELEM
                     ZVAL "cache"
@@ -1976,6 +1978,355 @@ fn new_with_a_named_constructor_is_a_static_call_of_it() {
 }
 
 /// ```php
+/// public static function of($item, /* type args: bounds "Any?", checks "#0" */): \App\Box {
+///     ${'this#1'} = new \App\Box($item) /* type args "#0" */; …
+/// }
+/// public static function numbers(): \App\Box { return \App\Box::of(1, /* type args "int" */); }
+/// ```
+///
+/// Spec section 9.1: a generic class's named constructor runs as a static method, which has no `this` to read the
+/// class's type arguments from, so it takes them as its own: the class's `TItem` is the method's `#0`, the `new` of
+/// `: this(…)` gives them to the object, and `new Box<int>.of(1)` passes them after the arguments, as a generic call
+/// does. The body runs on the object it created, so it reads `TItem` from `this` as `$0`.
+#[test]
+fn a_named_constructor_of_a_generic_class_takes_the_class_type_arguments_as_its_own() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Box<TItem>\n{\n    public Box(public TItem item { get; }) { }\n\n    public Box.of(TItem item) : this(item)\n    {\n        let held = item is TItem;\n    }\n\n    public static Box<int> numbers() => new Box<int>.of(1);\n}\n",
+    );
+    let of = lowered.method_named("of");
+
+    assert_eq!(
+        lowered.render(lowered.child(of, 0)),
+        indoc! {r##"
+            PARAM_LIST
+              PARAM
+                ZVAL [1] "mixed"
+                ZVAL "item"
+                null
+                null
+                null
+                null
+              SHARP_TYPE_ARGS
+                ZVAL "Any?"
+                ZVAL "#0"
+        "##}
+    );
+    assert_eq!(
+        lowered.render(lowered.child(of, 2)),
+        indoc! {r##"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "this#1"
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "App\\Box"
+                    ARG_LIST
+                      VAR
+                        ZVAL "item"
+                  ZVAL "#0"
+              METHOD_CALL
+                CLOSURE "" @8-10
+                  PARAM_LIST
+                    PARAM
+                      null
+                      ZVAL "item"
+                      null
+                      null
+                      null
+                      null
+                  null
+                  STMT_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "held"
+                      SHARP_IS_TYPE
+                        VAR
+                          ZVAL "item"
+                        ZVAL "$0"
+                  null
+                  null
+                ZVAL "call"
+                ARG_LIST
+                  VAR
+                    ZVAL "this#1"
+                  VAR
+                    ZVAL "item"
+              RETURN
+                VAR
+                  ZVAL "this#1"
+        "##}
+    );
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("numbers"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL "App\\Box"
+                  ZVAL "of"
+                  ARG_LIST
+                    ZVAL 1
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "int"
+        "#}
+    );
+}
+
+/// ```php
+/// public static function track($item, /* type args: bounds "Any?", checks "#0" */): bool {
+///     \Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */)['count']++;
+///     (${'receiver#1'} = &\Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */)['items'])->add($item);
+///     return /* $item is #0 */;
+/// }
+/// \App\Counter::track($order, /* type args "App.Order" */);
+/// \App\Orders::track($order, /* type args "App.Order" */);
+/// (${'receiver#1'} = &\Sharp\Internal\statics(\App\Counter::class, 'App.Order')['items'])->add($order);
+/// \Sharp\Internal\statics(\App\Counter::class, 'App.Order')['count'] = 5;
+/// ```
+///
+/// Spec section 11: a static method of a generic class has no `this` to read the class's type arguments from, so it
+/// takes them as its own, as a named constructor does. `TItem` is the method's `#0`, and `Counter<Order>.track(order)`
+/// passes `App.Order` after the arguments, as `Orders.track(order)` does from the header `Orders : Counter<Order>`. Each
+/// type argument keeps its own statics, which `Sharp\Internal\statics` returns by reference, keyed by the type argument
+/// text, so `Orders.count` is the entry `Counter<Order>.count` is, also where a write before it makes its type known. A
+/// method call binds the field to a reference first, so `items.add(item)` changes the list where it lives.
+#[test]
+fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Order\n{\n}\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n\n    public static bool track(TItem item)\n    {\n        Counter<TItem>.count++;\n        Counter<TItem>.items.add(item);\n\n        return item is TItem;\n    }\n}\n\nclass Orders : Counter<Order>\n{\n}\n\nclass Report\n{\n    public static int run(Order order)\n    {\n        Counter<Order>.track(order);\n        Orders.track(order);\n        Orders.items.add(order);\n        Orders.count = 5;\n\n        return Orders.count;\n    }\n}\n",
+    );
+    let track = lowered.method_named("track");
+
+    assert_eq!(
+        lowered.render(lowered.child(track, 0)),
+        indoc! {r##"
+            PARAM_LIST
+              PARAM
+                ZVAL [1] "mixed"
+                ZVAL "item"
+                null
+                null
+                null
+                null
+              SHARP_TYPE_ARGS
+                ZVAL "Any?"
+                ZVAL "#0"
+        "##}
+    );
+    assert_eq!(
+        lowered.render(lowered.child(track, 2)),
+        indoc! {r##"
+            STMT_LIST
+              POST_INC
+                DIM
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
+                    ARG_LIST
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
+                        ZVAL "#0"
+                  ZVAL "count"
+              METHOD_CALL
+                ASSIGN_REF
+                  VAR
+                    ZVAL "receiver#1"
+                  DIM
+                    CALL
+                      ZVAL "Sharp\\Internal\\statics"
+                      ARG_LIST
+                        CLASS_NAME
+                          ZVAL "App\\Counter"
+                        SHARP_TYPE_OF [1]
+                          ZVAL "#0"
+                    ZVAL "items"
+                ZVAL "add"
+                ARG_LIST
+                  VAR
+                    ZVAL "item"
+              RETURN
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "item"
+                  ZVAL "#0"
+        "##}
+    );
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              STATIC_CALL
+                ZVAL "App\\Counter"
+                ZVAL "track"
+                ARG_LIST
+                  VAR
+                    ZVAL "order"
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "App.Order"
+              STATIC_CALL
+                ZVAL "App\\Orders"
+                ZVAL "track"
+                ARG_LIST
+                  VAR
+                    ZVAL "order"
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "App.Order"
+              METHOD_CALL
+                ASSIGN_REF
+                  VAR
+                    ZVAL "receiver#1"
+                  DIM
+                    CALL
+                      ZVAL "Sharp\\Internal\\statics"
+                      ARG_LIST
+                        CLASS_NAME
+                          ZVAL "App\\Counter"
+                        SHARP_TYPE_OF [1]
+                          ZVAL "App.Order"
+                    ZVAL "items"
+                ZVAL "add"
+                ARG_LIST
+                  VAR
+                    ZVAL "order"
+              ASSIGN
+                DIM
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
+                    ARG_LIST
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
+                        ZVAL "App.Order"
+                  ZVAL "count"
+                ZVAL 5
+              RETURN
+                DIM
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
+                    ARG_LIST
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
+                        ZVAL "App.Order"
+                  ZVAL "count"
+        "#}
+    );
+}
+
+/// ```php
+/// $type = /* the class value of "App.Box<App.Order>" */;
+/// $made = new ($type)();
+/// $page = new ($type)(/* type args "App.Order" */);
+/// $plain = new (\App\Order::class)();
+/// ```
+///
+/// Spec section 25: `typeof(Box<Order>)` is the class value of `Box<Order>`, which plain PHP reads as the class name.
+/// `new (type)()` with no type arguments marks its `new` so the engine creates the class the value names with the type
+/// arguments the value carries. `new (type)<Order>()` names its own, as `new Box<Order>()` does, and a class without
+/// type arguments stays PHP's `Order::class`.
+#[test]
+fn new_through_a_class_value_creates_the_class_with_the_type_arguments_it_carries() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Order\n{\n    public required Order()\n    {\n    }\n}\n\nclass Box<TItem>\n{\n    public required Box()\n    {\n    }\n}\n\nclass Report\n{\n    public static void run()\n    {\n        const type = typeof(Box<Order>);\n        const made = new (type)();\n        const page = new (type)<Order>();\n        const plain = new (typeof(Order))();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "type"
+                SHARP_TYPE_OF
+                  ZVAL "App.Box<App.Order>"
+              ASSIGN
+                VAR
+                  ZVAL "made"
+                NEW [1]
+                  VAR
+                    ZVAL "type"
+                  ARG_LIST
+              ASSIGN
+                VAR
+                  ZVAL "page"
+                SHARP_TYPE_ARGS
+                  NEW
+                    VAR
+                      ZVAL "type"
+                    ARG_LIST
+                  ZVAL "App.Order"
+              ASSIGN
+                VAR
+                  ZVAL "plain"
+                NEW [1]
+                  CLASS_NAME
+                    ZVAL "App\\Order"
+                  ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
+/// $type = /* the class value of "App.Counter<App.Order>" */;
+/// \Sharp\Internal\statics(\App\Counter::class, 'App.Order')['count'] = 5;
+/// (${'receiver#1'} = &\Sharp\Internal\statics(\App\Counter::class, 'App.Order')['items'])->add($order);
+/// ```
+///
+/// Spec section 25: a write through a class value writes the static field of the class it holds, as
+/// `Counter<Order>.count = 5` does, so the field is the entry of the type arguments the value carries. A method call
+/// binds the field to a reference first, so `type.items.add(order)` changes the list where it lives.
+#[test]
+fn a_write_through_a_class_value_writes_the_static_field_of_the_type_arguments_it_carries() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Order\n{\n}\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n}\n\nclass Report\n{\n    public static void run(Order order)\n    {\n        const type = typeof(Counter<Order>);\n        type.count = 5;\n        type.items.add(order);\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "type"
+                SHARP_TYPE_OF
+                  ZVAL "App.Counter<App.Order>"
+              ASSIGN
+                DIM
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
+                    ARG_LIST
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
+                        ZVAL "App.Order"
+                  ZVAL "count"
+                ZVAL 5
+              METHOD_CALL
+                ASSIGN_REF
+                  VAR
+                    ZVAL "receiver#1"
+                  DIM
+                    CALL
+                      ZVAL "Sharp\\Internal\\statics"
+                      ARG_LIST
+                        CLASS_NAME
+                          ZVAL "App\\Counter"
+                        SHARP_TYPE_OF [1]
+                          ZVAL "App.Order"
+                    ZVAL "items"
+                ZVAL "add"
+                ARG_LIST
+                  VAR
+                    ZVAL "order"
+        "#}
+    );
+}
+
+/// ```php
 /// public readonly string $code;
 /// public function __construct()
 /// {
@@ -2236,7 +2587,8 @@ fn a_nullable_type_is_its_type_with_the_nullable_flag() {
 /// ```
 ///
 /// A `List` or `Map` is a PHP array, so its type is `array`: a `TYPE` with `IS_ARRAY`, which is 7, as php-src's
-/// grammar builds it, and `[263]` adds `ZEND_TYPE_NULLABLE`.
+/// grammar builds it, and `[263]` adds `ZEND_TYPE_NULLABLE`. PHP's `array` checks no element, so the parameter list
+/// ends with the type texts a call from plain PHP checks each argument's elements against.
 #[test]
 fn a_list_or_map_type_is_the_array_type() {
     let lowered = Lowered::new(
@@ -2265,6 +2617,9 @@ fn a_list_or_map_type_is_the_array_type() {
                 null
                 null
                 null
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "List<int>, Map<string, int>?"
         "#}
     );
     assert_eq!(
@@ -2314,6 +2669,9 @@ fn a_collection_with_a_nullable_type_argument_is_the_array_type() {
                 null
                 null
                 null
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "List<int?>, Map<string, List<Lib.Calc?>>, List<(int|string)?>"
         "#}
     );
     assert_eq!(
@@ -2727,7 +3085,9 @@ fn a_list_literal_initial_value_of_a_set_property_is_a_set() {
         property_groups(&Lowered::new("class Report\n{\n    private Set<string> tags = [\"a\"];\n}\n")),
         [indoc! {r#"
             PROP_GROUP [4]
-              TYPE [7]
+              SHARP_TYPE_ARGS
+                TYPE [7]
+                ZVAL "Set<string>"
               PROP_DECL
                 PROP_ELEM
                   ZVAL "tags"
@@ -2849,6 +3209,9 @@ fn a_list_literal_default_of_a_set_parameter_is_a_set() {
                 null
                 null
                 null
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "Set<string>"
         "#}
     );
 }
@@ -4046,7 +4409,9 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
         property_groups(&lowered),
         [indoc! {r#"
             PROP_GROUP [129]
-              TYPE [7]
+              SHARP_TYPE_ARGS
+                TYPE [7]
+                ZVAL "Set<string>"
               PROP_DECL
                 PROP_ELEM
                   ZVAL "tags"
@@ -4074,6 +4439,9 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
                 null
                 null
                 null
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "Set<string>, Set<int>"
         "#}
     );
     assert_eq!(body("keep"), "null\n");
@@ -4340,7 +4708,9 @@ fn an_emptied_list_field_takes_add_as_the_list_method() {
         property_groups(&lowered),
         [indoc! {r#"
             PROP_GROUP [1]
-              TYPE [7]
+              SHARP_TYPE_ARGS
+                TYPE [7]
+                ZVAL "List<string>"
               PROP_DECL
                 PROP_ELEM
                   ZVAL "tags"
@@ -4627,7 +4997,14 @@ fn a_map_of_function_types_with_two_effects_is_an_array() {
         "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n}\n",
     );
 
-    assert_eq!(hint, "TYPE [7]\n");
+    assert_eq!(
+        hint,
+        indoc! {r#"
+            SHARP_TYPE_ARGS
+              TYPE [7]
+              ZVAL "Map<string, Function<App.Shop.Charge(App.Shop.Cart)>>"
+        "#}
+    );
     assert_eq!(declaration, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"handlers\"\n    null\n    null\n    null\n");
 }
 
@@ -4663,7 +5040,8 @@ fn a_function_type_taking_a_function_type_with_effects_is_the_closure_class() {
 /// ```
 ///
 /// PHP types are erased, so a type parameter is the type of its bound, its list lowers to nothing, and a `List` of it
-/// is still `array`, as the PHP twin a developer writes with `@template` declares it. The class's last member is the
+/// is still `array`, as the PHP twin a developer writes with `@template` declares it. A call or a write from plain PHP
+/// checks each element of `rows` against the object's own type argument, `List<$0>`. The class's last member is the
 /// `SHARP_TYPE_ARGS` that declares its hidden type-argument slot, whose text is its bounds.
 #[test]
 fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
@@ -4699,7 +5077,9 @@ fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
               null
               STMT_LIST
                 PROP_GROUP [4]
-                  TYPE [7]
+                  SHARP_TYPE_ARGS
+                    TYPE [7]
+                    ZVAL "List<$0>"
                   PROP_DECL
                     PROP_ELEM
                       ZVAL "rows"
@@ -4716,6 +5096,9 @@ fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
                       null
                       null
                       null
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "List<$0>"
                   null
                   STMT_LIST
                     ASSIGN
@@ -4755,9 +5138,10 @@ fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
                       ZVAL null
                   ZVAL [256] "Lib\\DatabaseEntity"
                   null
-                SHARP_TYPE_ARGS
+                SHARP_CLASS_METADATA
                   null
                   ZVAL "Lib.DatabaseEntity"
+                  null
               null
               null
         "#}
@@ -5002,9 +5386,11 @@ fn a_generic_class_type_is_its_class_and_a_class_value_type_is_string() {
 
     assert_eq!(
         lowered.render(lowered.child(lowered.child(members, 0), 0)),
-        indoc! {"
-            TYPE [7]
-        "}
+        indoc! {r#"
+            SHARP_TYPE_ARGS
+              TYPE [7]
+              ZVAL "Map<string, Class<Lib.Element>>"
+        "#}
     );
     assert_eq!(
         lowered.render(lowered.child(load, 0)),
@@ -5523,11 +5909,11 @@ fn a_lambda_takes_union_and_variadic_parameters_and_a_spread_call() {
 }
 
 /// ```php
-/// $all = [...$extra, 1, ...\Lib\Calc::make()];
+/// $all = [...$extra, 1, ...<check List<int>>(\Lib\Calc::make())];
 /// ```
 ///
 /// A spread in a literal is an `UNPACK` of its value among the literal's elements, as php-src's grammar builds
-/// `[...$extra]`.
+/// `[...$extra]`. The list a plain PHP docblock claims is checked element by element first.
 #[test]
 fn a_spread_in_a_literal_is_an_unpack_among_its_elements() {
     assert_eq!(
@@ -5552,10 +5938,13 @@ fn a_spread_in_a_literal_is_an_unpack_among_its_elements() {
                     ZVAL 1
                     null
                   UNPACK
-                    STATIC_CALL
-                      ZVAL "Lib\\Calc"
-                      ZVAL "make"
-                      ARG_LIST
+                    VERIFY_TYPE_ARGS
+                      STATIC_CALL
+                        ZVAL "Lib\\Calc"
+                        ZVAL "make"
+                        ARG_LIST
+                      ZVAL "List<int>"
+                      ZVAL "the result of Lib\\Calc::make()"
               RETURN
                 ZVAL 1
         "#}
@@ -5736,9 +6125,11 @@ fn type_arguments_of_a_plain_php_new_lower_to_nothing_and_of_a_call_to_its_type_
 /// A class-like's metadata holds, first, the type arguments its header gives each generic parent and interface, as a
 /// type text list of those classes sorted by their text, each of its own type parameters written as `$` and its index.
 /// Its second text is its bounds, an interface's as a class's, so the engine knows how many type arguments each takes
-/// and which class a type argument may name.
+/// and which class a type argument may name. Its third is the variance of its type parameters, `+` for `out`, `-` for
+/// `in` and `=` for neither, when one of them has `out` or `in`, which the engine reads where it checks a value against
+/// a generic type.
 #[test]
-fn a_class_like_metadata_holds_its_header_type_arguments_and_its_bounds() {
+fn a_class_like_metadata_holds_its_header_type_arguments_its_bounds_and_its_variance() {
     let lowered = Lowered::with(
         indoc! {"
         namespace App;
@@ -5758,6 +6149,10 @@ fn a_class_like_metadata_holds_its_header_type_arguments_and_its_bounds() {
         public class OrderPage : Base<Order>
         {
         }
+
+        public interface Feed<out TItem, in TKey, TValue>
+        {
+        }
     "},
         &[(
             "src/App/Entities.php",
@@ -5771,27 +6166,37 @@ fn a_class_like_metadata_holds_its_header_type_arguments_and_its_bounds() {
     };
 
     assert_eq!(
-        [metadata(2), metadata(3), metadata(4), metadata(5)],
+        [metadata(2), metadata(3), metadata(4), metadata(5), metadata(6)],
         [
             indoc! {r#"
-                SHARP_TYPE_ARGS
+                SHARP_CLASS_METADATA
                   null
                   ZVAL "App.DatabaseEntity"
+                  null
             "#},
             indoc! {r#"
-                SHARP_TYPE_ARGS
+                SHARP_CLASS_METADATA
                   null
                   ZVAL "Any?"
+                  null
             "#},
             indoc! {r#"
-                SHARP_TYPE_ARGS
+                SHARP_CLASS_METADATA
                   ZVAL "App.Base<List<$0>>, App.Query<App.Order>"
                   ZVAL "Any?"
+                  null
             "#},
             indoc! {r#"
-                SHARP_TYPE_ARGS
+                SHARP_CLASS_METADATA
                   ZVAL "App.Base<App.Order>"
                   null
+                  null
+            "#},
+            indoc! {r#"
+                SHARP_CLASS_METADATA
+                  null
+                  ZVAL "Any?, Any?, Any?"
+                  ZVAL "+-="
             "#},
         ]
     );
@@ -5835,7 +6240,7 @@ fn a_bound_writes_a_type_parameter_of_its_own_class_as_any() {
 /// call. A lambda writes them the same way, and the engine reads them from the method's call the lambda captured them
 /// from: a lambda whose body, or a lambda in it, names a `#` is a `CLOSURE` whose `use` list ends with the method's
 /// hidden local, by value. A method whose call needs its type arguments, or whose parameter names a PHP# class with type
-/// arguments or a type parameter, ends its parameter list with its metadata: a `SHARP_TYPE_ARGS` of the bounds of its
+/// arguments, a class value of one, or a type parameter, ends its parameter list with its metadata: a `SHARP_TYPE_ARGS` of the bounds of its
 /// own type parameters and a type text list with each parameter's type, `Any?` for one the engine never checks. Plain
 /// PHP's generics are erased, so a parameter of a plain PHP class with type arguments is never checked, and a call from
 /// plain PHP gives a method's own type parameters none, so a parameter of one is never checked either.
@@ -5874,6 +6279,8 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
             public void show(PaginatedList<Order> page, int count) { }
 
             public void keep(Holder<Order> holder) { }
+
+            public void kinds(Class<PaginatedList<Order>> pages, Class<PaginatedList> any, Class<Order> order, Class<Holder<Order>> holders) { }
         }
 
         public class PaginatedList<TItem : DatabaseEntity>
@@ -6037,6 +6444,14 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
         "{}",
         lowered.parameters_of("show")
     );
+    // PHP's `string` type checks no class value, so one of a PHP# class with type arguments is checked as its object is.
+    assert!(
+        lowered
+            .parameters_of("kinds")
+            .ends_with(&metadata("null", r#"ZVAL "Class<App.PaginatedList<App.Order>>, Any?, Any?, Any?""#)),
+        "{}",
+        lowered.parameters_of("kinds")
+    );
     assert_eq!(lowered.parameters_of("pairWith"), format!("PARAM_LIST\n{}", metadata(r#"ZVAL "Any?""#, "null")));
     assert!(!lowered.parameters_of("run").contains("SHARP_TYPE_ARGS"));
     assert!(!lowered.parameters_of("__construct").contains("SHARP_TYPE_ARGS"));
@@ -6045,10 +6460,9 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
 
 /// A value that enters PHP# from plain PHP is checked, as a parameter checks an argument from plain PHP: a call the
 /// checker resolved to plain PHP checks its result in a `VERIFY_TYPE_ARGS` that names the call, wherever the value goes,
-/// whether a typed local, a `let`, an argument, a return or a property write takes it. A property plain PHP can write
-/// checks the value in its `set` hook first, a `VERIFY_TYPE_ARGS` marked `1` that a write from PHP# skips: its own `set`
-/// or `init` body, or one over the storage. A PHP# call's return, a call of a function a property holds, a private property,
-/// static or not, a read-only one and a type with nothing to check need none.
+/// whether a typed local, a `let`, an argument, a return or a property write takes it. A property has its PHP# type
+/// around its PHP type, which PHP's typed property check reads on each write plain PHP makes, and a write from PHP#
+/// skips. A PHP# call's return, a call of a function a property holds and a type with nothing to check need none.
 #[test]
 fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
     let lowered = Lowered::with(
@@ -6099,7 +6513,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
                 let untyped = Pager.orders();
                 this.keep(Pager.orders());
                 this.auto = Pager.orders();
-                Box<Order> made = Shelf.make();
+                Box<Order> made = Order.make();
                 Box<Order> held = this.maker();
                 int count = Pager.count();
             }
@@ -6115,13 +6529,13 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
             }
 
             public void keep(Box<Order> box) { }
-
-            public static Box<Order> make() => new Box<Order>();
         }
 
         public class Order
         {
             private static Box<Order>? latest;
+
+            public static Box<Order> make() => new Box<Order>();
         }
         "},
         &[
@@ -6156,7 +6570,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
             VAR
               ZVAL "made"
             STATIC_CALL
-              ZVAL "App\\Shelf"
+              ZVAL "App\\Order"
               ZVAL "make"
               ARG_LIST
           ASSIGN
@@ -6206,44 +6620,55 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
     );
 
     let tree = lowered.tree();
-    let check = |property: &str, text: &str| {
-        let indent = |depth: usize, line: &str| format!("{}{line}\n", "  ".repeat(depth));
-        [
-            indent(8, "STMT_LIST"),
-            indent(9, "ASSIGN"),
-            indent(10, "VAR"),
-            indent(11, "ZVAL \"value\""),
-            indent(10, "VERIFY_TYPE_ARGS [1]"),
-            indent(11, "VAR"),
-            indent(12, "ZVAL \"value\""),
-            indent(11, &format!("ZVAL \"{text}\"")),
-            indent(11, &format!("ZVAL \"property App\\\\Shelf::${property}\"")),
-        ]
-        .concat()
+    // A property's PHP# type stands around its PHP type, whatever the property's visibility and accessors, with a type
+    // parameter of its class as `$0`, and a promoted one's around its parameter's.
+    let typed = |property: &str, text: &str| {
+        format!(
+            "SHARP_TYPE_ARGS\n          ZVAL [256] \"App\\\\Box\"\n          ZVAL \"{text}\"\n        PROP_DECL\n          PROP_ELEM\n            ZVAL \"{property}\"\n"
+        )
     };
-    // An auto-property's check stands before a `set` body over the storage, and a written `set` body keeps its own.
     for (property, text) in [
         ("auto", "App.Box<App.Order>?"),
         ("own", "App.Box<$0>?"),
         ("logged", "App.Box<App.Order>?"),
         ("inherited", "App.Box<App.Order>?"),
+        ("hidden", "App.Box<App.Order>?"),
+        ("fixed", "App.Box<App.Order>?"),
         ("created", "App.Box<App.Order>?"),
+        ("latest", "App.Box<App.Order>?"),
     ] {
-        assert!(tree.contains(&check(property, text)), "{property}: {tree}");
+        assert!(tree.contains(&typed(property, text)), "{property}: {tree}");
     }
-    assert!(tree.contains("ZVAL \"property App\\\\Shelf::$promoted\""), "{tree}");
-    assert_eq!(tree.matches("VERIFY_TYPE_ARGS [1]").count(), 6, "{tree}");
-    // Each check is a `set` hook, an `init` accessor's included. A `get` body runs unchecked, and an auto `get` beside a
-    // check stays PHP's read of the storage.
-    assert_eq!(tree.matches("PROPERTY_HOOK \"set\"").count(), 6, "{tree}");
+    for parameter in ["promoted", "frozen"] {
+        let typed = format!(
+            "SHARP_TYPE_ARGS\n              ZVAL [256] \"App\\\\Box\"\n              ZVAL \"App.Box<App.Order>?\"\n            ZVAL \"{parameter}\"\n"
+        );
+        assert!(tree.contains(&typed), "{parameter}: {tree}");
+    }
+    assert_eq!(tree.matches("SHARP_TYPE_ARGS\n          ZVAL").count(), 8, "{tree}");
+    // PHP's typed property check runs the check, so a property takes no `set` hook for it: only a written `set` or
+    // `init` body is a hook.
+    assert!(!tree.contains("VERIFY_TYPE_ARGS ["), "{tree}");
+    assert_eq!(tree.matches("PROPERTY_HOOK \"set\"").count(), 2, "{tree}");
     assert_eq!(tree.matches("PROPERTY_HOOK \"get\"").count(), 2, "{tree}");
-    // The element's last child is its hook list.
-    for (property, default) in
-        [("hidden", "ZVAL null"), ("fixed", "ZVAL null"), ("count", "null"), ("latest", "ZVAL null")]
-    {
-        let element = format!("ZVAL \"{property}\"\n            {default}\n            null\n            null\n");
-        assert!(tree.contains(&element), "{property}: {tree}");
-    }
+}
+
+/// A collection the project's plain PHP returns is checked element by element where it enters PHP#, since its type is
+/// a docblock nothing checks. A collection PHP's internal functions return is not: the engine guarantees their types.
+/// Neither is one whose elements take any value, nor one PHP# can't write, such as `array<array-key, int>`.
+#[test]
+fn a_collection_the_project_returns_from_plain_php_is_checked_element_by_element() {
+    let body = body_in(
+        "int run()",
+        "        let ints = Calc.ints();\n        let keyed = Calc.keyed();\n        let untyped = Calc.untyped();\n        let anything = Calc.anything();\n        let letters = str_split(\"ab\");\n        return 1;\n",
+        &[(
+            "src/Lib/Calc.php",
+            "<?php namespace Lib; final class Calc { /** @return list<int> */ public static function ints(): array { return []; } /** @return array<array-key, int> */ public static function keyed(): array { return []; } public static function untyped(): array { return []; } /** @return list<mixed> */ public static function anything(): array { return []; } }",
+        )],
+    );
+
+    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 1, "{body}");
+    assert!(body.contains("ZVAL \"List<int>\"\n      ZVAL \"the result of Lib\\\\Calc::ints()\""), "{body}");
 }
 
 /// A type argument a plain PHP value fixes as a refinement PHP# writes as a wider type carries that type's text:
@@ -6286,7 +6711,8 @@ fn a_type_argument_a_plain_php_refinement_fixes_carries_its_php_sharp_text() {
     let body = lowered.body();
     assert_eq!(body.matches("SHARP_TYPE_ARGS").count(), 10, "{body}");
     for (text, calls) in [
-        ("List<int>", 2),
+        // Two type arguments, and the check of the list `Pager.list()` returns.
+        ("List<int>", 3),
         ("string", 1),
         ("int", 1),
         ("Class<Object>", 1),
@@ -6347,11 +6773,12 @@ fn a_generic_call_on_a_value_of_a_type_parameter_carries_its_type_arguments() {
     );
 }
 
-/// The engine reads no type arguments while the code runs until R3, so `is`, `as` and a `match` arm of a type parameter or
-/// of a class with type arguments, and `typeof` of a type parameter, are refused before lowering. None runs as
-/// `instanceof` a class named for the type parameter, which no value is.
+/// A test of a class with type arguments or of a type parameter, in `is`, `as` and a `match` arm, and `typeof` of a type
+/// parameter, read the type arguments while the code runs: a `SHARP_IS_TYPE` of the value and the type text, and a
+/// `SHARP_TYPE_OF` of the type text, written as `new` writes its type arguments. None runs as `instanceof` a class named
+/// for a type parameter, which no value is.
 #[test]
-fn a_test_and_typeof_of_a_type_with_type_arguments_are_refused_before_lowering() {
+fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs() {
     let lowered = Lowered::with(
         indoc! {"
         namespace App;
@@ -6382,16 +6809,72 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_are_refused_before_lowering()
         )],
     );
 
+    let test = |text: &str| {
+        format!("STMT_LIST\n  RETURN\n    SHARP_IS_TYPE\n      VAR\n        ZVAL \"value\"\n      ZVAL \"{text}\"\n")
+    };
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert_eq!(lowered.body_of("holds"), test("$0"));
+    assert_eq!(lowered.body_of("boxed"), test("App.Box<App.Order>"));
+    assert_eq!(lowered.body_of("kept"), test("#0"));
     assert_eq!(
-        lowered.diagnostics(),
-        [
-            "7:46 compile error: This type is not supported yet in PHP#.",
-            "12:46 compile error: This type is not supported yet in PHP#.",
-            "14:48 compile error: This type is not supported yet in PHP#.",
-            "16:46 compile error: This type is not supported yet in PHP#.",
-            "18:53 compile error: This type is not supported yet in PHP#.",
-            "20:34 compile error: `typeof(T)` is not supported yet in PHP#.",
-        ]
+        lowered.body_of("cast"),
+        "STMT_LIST\n  RETURN\n    CONDITIONAL\n      SHARP_IS_TYPE\n        VAR\n          ZVAL \"value\"\n        ZVAL \"#0\"\n      VAR\n        ZVAL \"value\"\n      ZVAL null\n"
+    );
+    assert_eq!(
+        lowered.body_of("arm"),
+        "STMT_LIST\n  RETURN\n    MATCH\n      ZVAL true\n      MATCH_ARM_LIST\n        MATCH_ARM\n          EXPR_LIST\n            SHARP_IS_TYPE\n              VAR\n                ZVAL \"value\"\n              ZVAL \"#0\"\n          ZVAL 1\n        MATCH_ARM\n          null\n          ZVAL 0\n"
+    );
+    assert_eq!(lowered.body_of("kind"), "STMT_LIST\n  RETURN\n    SHARP_TYPE_OF\n      ZVAL \"#0\"\n");
+}
+
+/// `new TItem(…)` is a `NEW` that names no class under the `SHARP_TYPE_ARGS` of `TItem`'s text, so the engine creates
+/// the type argument with its own type arguments. A static member of `TItem` is read on the class `SHARP_TYPE_OF`
+/// gives, as PHP's `$class::member` reads one, and a static method of it is never inlined, since the type argument may
+/// declare its own.
+#[test]
+fn new_and_a_static_member_of_a_type_parameter_read_its_class_while_the_code_runs() {
+    let lowered = Lowered::new(indoc! {"
+        namespace App;
+
+        public abstract class Maker
+        {
+            public const int LIMIT = 3;
+
+            public static int count { get; set; } = 0;
+
+            public required Maker(public int size { get; }) { }
+
+            public static int make() => 1;
+        }
+
+        public class Builder<TItem : Maker>
+        {
+            public Builder() { }
+
+            public TItem create() => new TItem(TItem.LIMIT);
+
+            public int made<TOther : Maker>() => TOther.make();
+
+            public void counted()
+            {
+                TItem.count = 2;
+            }
+        }
+    "});
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert_eq!(
+        lowered.body_of("create"),
+        "STMT_LIST\n  RETURN\n    SHARP_TYPE_ARGS\n      NEW\n        null\n        ARG_LIST\n          CLASS_CONST\n            SHARP_TYPE_OF\n              ZVAL \"$0\"\n            ZVAL \"LIMIT\"\n      ZVAL \"$0\"\n"
+    );
+    assert_eq!(
+        lowered.body_of("made"),
+        "STMT_LIST\n  RETURN\n    STATIC_CALL\n      SHARP_TYPE_OF\n        ZVAL \"#0\"\n      ZVAL \"make\"\n      ARG_LIST\n"
+    );
+    assert_eq!(
+        lowered.body_of("counted"),
+        "STMT_LIST\n  ASSIGN\n    STATIC_PROP\n      SHARP_TYPE_OF\n        ZVAL \"$0\"\n      ZVAL \"count\"\n    ZVAL 2\n"
     );
 }
 
@@ -6460,9 +6943,10 @@ fn new_of_a_generic_php_sharp_class_carries_its_type_arguments() {
     assert_eq!(
         lowered.render(last_member(2)),
         indoc! {r#"
-            SHARP_TYPE_ARGS
+            SHARP_CLASS_METADATA
               null
               ZVAL "App.DatabaseEntity, Any?"
+              null
         "#}
     );
     assert_eq!(lowered.nodes()[last_member(3) as usize].kind, sharp_kind::SHARP_AST_METHOD);
@@ -6828,8 +7312,9 @@ fn a_header_entry_with_type_arguments_is_its_class() {
         members(&generic),
         indoc! {r#"
             STMT_LIST
-              SHARP_TYPE_ARGS
+              SHARP_CLASS_METADATA
                 ZVAL "Lib.PaginatedList<Lib.Order>"
+                null
                 null
         "#}
     );
@@ -6852,8 +7337,9 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
     assert_eq!(
         lowered.render(lowered.child(members, 1)),
         indoc! {r#"
-            SHARP_TYPE_ARGS
+            SHARP_CLASS_METADATA
               ZVAL "App.Holder<int>"
+              null
               null
         "#}
     );
@@ -7683,9 +8169,9 @@ fn a_static_field_or_property_is_a_static_property_group() {
 /// private static ?\App\Box $hidden = null;
 /// ```
 ///
-/// A static property plain PHP can write, whose type has type arguments, has its PHP# type text around its PHP type,
-/// which PHP's own typed property check reads on every write, since PHP gives a static property no hooks. A `private`
-/// one, which plain PHP can't write, has its PHP type alone.
+/// A static property whose type has type arguments has its PHP# type text around its PHP type, which PHP's own typed
+/// property check reads on every write plain PHP makes. A `private` one has it too, since plain PHP writes it through
+/// reflection.
 #[test]
 fn a_static_property_with_type_arguments_has_its_type_text_around_its_type() {
     let lowered = Lowered::new(
@@ -7730,7 +8216,9 @@ fn a_static_property_with_type_arguments_has_its_type_text_around_its_type() {
             "#},
             indoc! {r#"
                 PROP_GROUP [20]
-                  ZVAL [256] "App\\Box"
+                  SHARP_TYPE_ARGS
+                    ZVAL [256] "App\\Box"
+                    ZVAL "App.Box<int>?"
                   PROP_DECL
                     PROP_ELEM
                       ZVAL "hidden"
@@ -10836,14 +11324,15 @@ fn a_typed_for_counter_is_the_assignment_of_its_value() {
 }
 
 /// ```php
-/// foreach (\Lib\Calc::make(2) as $value) {
+/// foreach (<check Map<int, int>>(\Lib\Calc::make(2)) as $value) {
 ///     $extra += $value;
 /// }
-/// foreach (\Lib\Calc::make(3) as $key => $value) {
+/// foreach (<check Map<int, int>>(\Lib\Calc::make(3)) as $key => $value) {
 /// }
 /// ```
 ///
-/// `FOREACH` takes the collection, the value variable, the key variable or null, and the body.
+/// `FOREACH` takes the collection, the value variable, the key variable or null, and the body. The map a plain PHP
+/// docblock claims is checked entry by entry first.
 #[test]
 fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
     assert_eq!(
@@ -10858,11 +11347,14 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
         indoc! {r#"
             STMT_LIST
               FOREACH
-                STATIC_CALL
-                  ZVAL "Lib\\Calc"
-                  ZVAL "make"
-                  ARG_LIST
-                    ZVAL 2
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "Lib\\Calc"
+                    ZVAL "make"
+                    ARG_LIST
+                      ZVAL 2
+                  ZVAL "Map<int, int>"
+                  ZVAL "the result of Lib\\Calc::make()"
                 VAR
                   ZVAL "value"
                 null
@@ -10873,11 +11365,14 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
                     VAR
                       ZVAL "value"
               FOREACH
-                STATIC_CALL
-                  ZVAL "Lib\\Calc"
-                  ZVAL "make"
-                  ARG_LIST
-                    ZVAL 3
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "Lib\\Calc"
+                    ZVAL "make"
+                    ARG_LIST
+                      ZVAL 3
+                  ZVAL "Map<int, int>"
+                  ZVAL "the result of Lib\\Calc::make()"
                 VAR
                   ZVAL "value"
                 VAR
@@ -11178,6 +11673,192 @@ fn try_without_a_catch_has_an_empty_catch_list() {
                 VAR
                   ZVAL "extra"
         "#}
+    );
+}
+
+/// ```php
+/// try {
+///     $extra += 1;
+/// } catch (\Throwable $caught#1) {
+///     if (sharp_is_type($caught#1, 'App.Failure<int>')) {
+///         $numbers = $caught#1;
+///         { $extra = 1; }
+///     } elseif (sharp_is_type($caught#1, 'App.Failure<string>') || $caught#1 instanceof \LogicException) {
+///         $texts = $caught#1;
+///         { throw $texts; }
+///     } elseif ($caught#1 instanceof \Exception) {
+///         $extra = 0;
+///     } else {
+///         throw $caught#1;
+///     }
+/// } finally {
+///     $extra -= 1;
+/// }
+/// ```
+///
+/// A `try` with a catch clause of a generic class catches every `Throwable` into a hidden variable, then tests each
+/// clause in the order the code writes them, with the `SHARP_IS_TYPE` an `is` of a generic class runs. The first that
+/// matches gives its variable the value and runs its block. When none matches, the value is thrown again, so a `try`
+/// around this one still catches it.
+#[test]
+fn a_try_with_a_generic_catch_clause_catches_throwable_and_tests_each_clause_in_order() {
+    let lowered = Lowered::new(indoc! {"
+        namespace App;
+
+        import Exception;
+        import LogicException;
+        import RuntimeException;
+
+        public class Failure<TItem> : RuntimeException
+        {
+        }
+
+        public class Report
+        {
+            public int run(int extra)
+            {
+                try {
+                    extra += 1;
+                } catch (Failure<int> numbers) {
+                    extra = 1;
+                } catch (Failure<string> | LogicException texts) {
+                    throw texts;
+                } catch (Exception) {
+                    extra = 0;
+                } finally {
+                    extra -= 1;
+                }
+                return extra;
+            }
+        }
+    "});
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              TRY
+                STMT_LIST
+                  ASSIGN_OP [1]
+                    VAR
+                      ZVAL "extra"
+                    ZVAL 1
+                CATCH_LIST
+                  CATCH
+                    NAME_LIST
+                      ZVAL "Throwable"
+                    ZVAL "caught#1"
+                    STMT_LIST
+                      IF
+                        IF_ELEM
+                          SHARP_IS_TYPE
+                            VAR
+                              ZVAL "caught#1"
+                            ZVAL "App.Failure<int>"
+                          STMT_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "numbers"
+                              VAR
+                                ZVAL "caught#1"
+                            STMT_LIST
+                              ASSIGN
+                                VAR
+                                  ZVAL "extra"
+                                ZVAL 1
+                        IF_ELEM
+                          OR
+                            SHARP_IS_TYPE
+                              VAR
+                                ZVAL "caught#1"
+                              ZVAL "App.Failure<string>"
+                            INSTANCEOF
+                              VAR
+                                ZVAL "caught#1"
+                              ZVAL "LogicException"
+                          STMT_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "texts"
+                              VAR
+                                ZVAL "caught#1"
+                            STMT_LIST
+                              THROW
+                                VAR
+                                  ZVAL "texts"
+                        IF_ELEM
+                          INSTANCEOF
+                            VAR
+                              ZVAL "caught#1"
+                            ZVAL "Exception"
+                          STMT_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "extra"
+                              ZVAL 0
+                        IF_ELEM
+                          null
+                          STMT_LIST
+                            THROW
+                              VAR
+                                ZVAL "caught#1"
+                STMT_LIST
+                  ASSIGN_OP [2]
+                    VAR
+                      ZVAL "extra"
+                    ZVAL 1
+              RETURN
+                VAR
+                  ZVAL "extra"
+        "#}
+    );
+}
+
+/// A `try` without a catch clause of a generic class lowers as it does in a file that has none, beside a `try` that
+/// has one: the choice is made for each `try`.
+#[test]
+fn a_try_without_a_generic_catch_clause_keeps_its_catch_list_beside_one_with_it() {
+    let source = |guarded: &str| {
+        format!(
+            "namespace App;\n\nimport Exception;\nimport RuntimeException;\n\npublic class Failure<TItem> : RuntimeException\n{{\n}}\n\npublic class Report\n{{\n    public int plain(int extra)\n    {{\n        try {{\n            extra += 1;\n        }} catch (RuntimeException failure) {{\n            throw failure;\n        }} catch (Exception) {{\n        }}\n        return extra;\n    }}\n{guarded}}}\n"
+        )
+    };
+    let guarded = "\n    public int guarded(int extra)\n    {\n        try {\n            extra += 1;\n        } catch (Failure<int>) {\n        }\n        return extra;\n    }\n";
+    let alone = Lowered::new(&source(""));
+
+    assert_eq!(Lowered::new(&source(guarded)).body_of("plain"), alone.body_of("plain"));
+    assert!(alone.body_of("plain").contains("CATCH\n        NAME_LIST\n          ZVAL \"RuntimeException\""));
+}
+
+/// A catch clause of a type parameter tests the type argument the method runs with, as `is` does, written as `new`
+/// writes a method's type argument.
+#[test]
+fn a_catch_clause_of_a_type_parameter_tests_its_type_argument() {
+    let lowered = Lowered::new(indoc! {"
+        namespace App;
+
+        import RuntimeException;
+
+        public class Report
+        {
+            public int run<TError : RuntimeException>(int extra)
+            {
+                try {
+                    extra += 1;
+                } catch (TError) {
+                    extra = 0;
+                }
+                return extra;
+            }
+        }
+    "});
+
+    assert!(
+        lowered.body_of("run").contains(
+            "IF_ELEM\n              SHARP_IS_TYPE\n                VAR\n                  ZVAL \"caught#1\"\n                ZVAL \"#0\"\n"
+        ),
+        "{}",
+        lowered.body_of("run")
     );
 }
 
@@ -11914,26 +12595,107 @@ fn as_is_a_conditional_that_gives_the_value_or_null() {
     );
 }
 
-/// `as` to a collection type checks every element, which the engine has no test for yet, and `Any`, a function type
-/// and a union have none either. The checker refuses each, and a `match` without arms, before the lowering meets a
-/// form it has no PHP for.
+/// A function type has no test, since a function value keeps no type while the code runs. The checker refuses it, and a
+/// `match` without arms, before the lowering meets a form it has no PHP for.
 #[test]
-fn is_as_and_match_without_a_php_test_are_refused_before_lowering() {
+fn is_as_and_match_without_a_test_are_refused_before_lowering() {
     let lowered = Lowered::new(&method_with(
         "void run(Any? extra)",
-        "        const listed = extra as List<string>;\n        const any = extra as Any;\n        const call = extra as Function<int(int)>;\n        const either = extra as int|string;\n        const present = extra is Any;\n        match (extra) {}\n",
+        "        const call = extra as Function<int(int)>;\n        const called = extra is Function<int(int)>;\n        match (extra) {}\n",
     ));
 
     assert_eq!(
         lowered.diagnostics(),
         [
-            "9:33 compile error: This type is not supported yet in PHP#.",
-            "10:30 compile error: This type is not supported yet in PHP#.",
-            "11:31 compile error: This type is not supported yet in PHP#.",
-            "12:33 compile error: This type is not supported yet in PHP#.",
-            "13:34 compile error: This type is not supported yet in PHP#.",
-            "14:9 compile error: A `match` needs a `default` arm.",
+            "9:31 compile error: A function type can't be tested: a function value doesn't keep its type while the code runs.",
+            "10:33 compile error: A function type can't be tested: a function value doesn't keep its type while the code runs.",
+            "11:9 compile error: A `match` needs a `default` arm.",
         ]
+    );
+}
+
+/// ```php
+/// $present = <is Any>($extra);
+/// $either = <is int|string>($extra) ? $extra : null;
+/// ```
+///
+/// `is` and `as` of `Any` and of a union are the engine's test of the type, as a collection's are.
+#[test]
+fn is_and_as_of_any_or_a_union_are_the_engine_test_of_its_type() {
+    assert_eq!(
+        body_in(
+            "void run(Any? extra)",
+            "        const present = extra is Any;\n        const either = extra as int|string;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "present"
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Any"
+              ASSIGN
+                VAR
+                  ZVAL "either"
+                CONDITIONAL
+                  SHARP_IS_TYPE
+                    VAR
+                      ZVAL "extra"
+                    ZVAL "int|string"
+                  VAR
+                    ZVAL "extra"
+                  ZVAL null
+        "#}
+    );
+}
+
+/// ```php
+/// $numbers = <is List<int>>($extra);
+/// $kept = <is Map<string, int>>($extra) ? $extra : null;
+/// $tags = <is Set<string>>($extra);
+/// ```
+///
+/// `is` and `as` of a `List`, a `Map` or a `Set` are the engine's test of the type, as a generic class's are, which
+/// walks every element.
+#[test]
+fn is_and_as_of_a_collection_are_the_engine_test_of_its_type() {
+    assert_eq!(
+        body_in(
+            "void run(Any? extra)",
+            "        const numbers = extra is List<int>;\n        const kept = extra as Map<string, int>;\n        const tags = extra is Set<string>;\n",
+            &[],
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "numbers"
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "List<int>"
+              ASSIGN
+                VAR
+                  ZVAL "kept"
+                CONDITIONAL
+                  SHARP_IS_TYPE
+                    VAR
+                      ZVAL "extra"
+                    ZVAL "Map<string, int>"
+                  VAR
+                    ZVAL "extra"
+                  ZVAL null
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Set<string>"
+        "#}
     );
 }
 

@@ -264,7 +264,7 @@ where
     ) -> Result<Option<TypeArgumentList<'arena>>, ParseError> {
         if self.dialect.is_sharp()
             && self.stream.is_at(T!["<"])?
-            && self.stream.peek_kind_after_type_arguments()? == Some(T!["("])
+            && self.stream.peek_kind_after_type_arguments(0)? == Some(T!["("])
         {
             Ok(Some(self.parse_type_argument_list()?))
         } else {

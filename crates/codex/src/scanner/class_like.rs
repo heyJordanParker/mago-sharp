@@ -1279,8 +1279,8 @@ where
         }
     }
 
-    // A PHP# type parameter is the template a `@template` tag declares and its bound the tag's `of`, spec section 11. It
-    // is invariant, since `out` and `in` are not supported yet.
+    // A PHP# type parameter is the template a `@template` tag declares, its bound the tag's `of`, and `out` and `in`
+    // its `@template-covariant` and `@template-contravariant`, spec sections 11 and 11.1.
     if let Some(type_parameters) = type_parameters {
         let templates = scan_type_parameters(
             type_parameters,
@@ -1291,9 +1291,15 @@ where
             scope,
         );
         let mut template_variance = std::mem::take(&mut class_like_metadata.template_variance);
-        for (template_name, definition) in templates {
+        for ((template_name, definition), parameter) in templates.into_iter().zip(&type_parameters.parameters) {
             class_like_metadata.add_template_type(template_name, definition);
-            template_variance.push(Variance::Invariant);
+
+            let variance = Variance::from(parameter);
+            if variance.is_readonly() {
+                class_like_metadata.template_readonly.insert(template_name);
+            }
+
+            template_variance.push(variance);
         }
 
         class_like_metadata.set_template_variance(template_variance);

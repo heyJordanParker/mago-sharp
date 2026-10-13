@@ -55,6 +55,7 @@ use crate::context::scope::var_has_root;
 use crate::context::scope::var_references_dynamic;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
+use crate::expression::access::written_static_property;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_empty_literal_type;
 use crate::expression::array::get_set_literal_type;
@@ -563,7 +564,7 @@ where
             );
         }
         Expression::Access(Access::Property(property_access)) => {
-            match StaticProperty::from_property_access(property_access, context.resolved_names) {
+            match written_static_property(context, block_context, property_access) {
                 Some(static_property) => static_property_assignment::analyze(
                     context,
                     block_context,

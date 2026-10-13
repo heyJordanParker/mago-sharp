@@ -24,6 +24,8 @@ use crate::error::AnalysisError;
 use crate::expression::binary::comparison::check_sorted_by_key;
 use crate::invocation::Invocation;
 use crate::invocation::resolver::resolve_invocation_type;
+use crate::statement::function_like::is_map_key;
+use crate::statement::function_like::map_key_error;
 use crate::utils::names::display_sharp_type;
 
 pub fn fetch_invocation_return_type<'ctx, 'arena, A>(
@@ -47,8 +49,12 @@ where
         return Ok(fetch_set_filter_return_type(context, invocation, template_result, parameters));
     }
 
+    // `sortedBy` orders by the key its function returns, and `groupBy` and `associateBy` key the `Map` they return by it.
+    let is_sorted_by = is_collection_method(invocation, b"sortedBy");
     if context.dialect.is_sharp()
-        && is_sorted_by(invocation)
+        && (is_sorted_by
+            || is_collection_method(invocation, b"groupBy")
+            || is_collection_method(invocation, b"associateBy"))
         && let Some(selector) = invocation.arguments_source.get_argument(0).filter(|argument| !argument.is_unpacked())
         && let Some(selector) = selector.value()
         && let Some([key_type]) = artifacts
@@ -56,7 +62,12 @@ where
             .get(&(invocation.span.start.offset, invocation.span.end.offset))
             .map(Vec::as_slice)
     {
-        check_sorted_by_key(context, selector, key_type);
+        if is_sorted_by {
+            check_sorted_by_key(context, selector, key_type);
+        } else if !is_map_key(context, key_type) {
+            let key_id = display_sharp_type(context, key_type);
+            context.collector.report_with_code(IssueCode::InvalidArgument, map_key_error(&key_id, selector.span()));
+        }
     }
 
     if let Some(return_type) = fetch_invocation_provider_return_type(context, block_context, artifacts, invocation) {
@@ -161,11 +172,11 @@ where
     TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type))))
 }
 
-/// Whether `invocation` calls `sortedBy` on a PHP# `List`, `Map` or `Set`, which orders by the key its function returns.
-fn is_sorted_by(invocation: &Invocation<'_, '_, '_>) -> bool {
+/// Whether `invocation` calls the method `method` of a PHP# `List`, `Map` or `Set`.
+fn is_collection_method(invocation: &Invocation<'_, '_, '_>, method: &[u8]) -> bool {
     [b"Sharp\\ListMethods".as_slice(), b"Sharp\\MapMethods", b"Sharp\\SetMethods"]
         .into_iter()
-        .any(|class| is_method(invocation, class, b"sortedBy"))
+        .any(|class| is_method(invocation, class, method))
 }
 
 /// Whether `invocation` calls the method `method` of the class `class`.

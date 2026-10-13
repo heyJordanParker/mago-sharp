@@ -260,7 +260,12 @@ impl Lowering<'_, '_> {
         steps: &mut Vec<Step>,
     ) -> bool {
         match self.names.static_call_class(call) {
-            Some(class) if is_current_position(self.names.get(&class.name), call) => return false,
+            Some(class)
+                if self.names.is_type_parameter(&class.name)
+                    || is_current_position(self.names.get(&class.name), call) =>
+            {
+                return false;
+            }
             Some(_) => {}
             None if self.takes_receiver(call.object) && self.steps(call.object, names, steps) => {}
             None => return false,
@@ -297,7 +302,9 @@ impl Lowering<'_, '_> {
     /// each parameter one positional argument. A form that reads its slots out of order, or after a call, takes only
     /// values that do nothing when read, since inlined they run in the form's order instead of the call's.
     pub(super) fn inlined_call(&mut self, expression: &Expression, call: &MethodCall) -> Option<u32> {
+        // A type parameter's class is a subclass of its bound when the code runs, which may declare its own method.
         let receiver = match self.names.static_call_class(call) {
+            Some(class) if self.names.is_type_parameter(&class.name) => return None,
             Some(_) => None,
             None if self.takes_receiver(call.object) => Some(call.object),
             None => return None,

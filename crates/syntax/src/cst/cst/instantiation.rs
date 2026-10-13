@@ -19,6 +19,21 @@ pub struct Instantiation<'arena> {
     pub argument_list: Option<ArgumentList<'arena>>,
 }
 
+/// A PHP# class with its type arguments, read as an expression: the `Counter<Order>` of `Counter<Order>.count`, spec
+/// section 11. PHP never builds one.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct GenericClass<'arena> {
+    pub class: &'arena Expression<'arena>,
+    pub type_arguments: TypeArgumentList<'arena>,
+}
+
+impl HasSpan for GenericClass<'_> {
+    fn span(&self) -> Span {
+        self.class.span().join(self.type_arguments.span())
+    }
+}
+
 impl HasSpan for Instantiation<'_> {
     fn span(&self) -> Span {
         if let Some(argument_list) = &self.argument_list {
