@@ -5902,6 +5902,18 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
     );
 }
 
+/// Spec section 15: an `on` clause adds nothing to its class, because `mago compile` lists each listener in
+/// `.sharp/listeners.php`, so a listener lowers to its method alone.
+#[test]
+fn a_listener_lowers_to_its_method_alone() {
+    let code = "namespace App;\n\npublic interface OrderEvent\n{\n    int orderId { get; }\n}\n\npublic event OrderPaid(int orderId) : OrderEvent;\n\npublic class Notices\n{\n    public void send(OrderEvent e) on OrderPaid { }\n\n    public void refresh() on OrderPaid, OrderEvent => this.send(new OrderPaid(1));\n}\n";
+
+    assert_eq!(
+        Lowered::new(code).tree(),
+        Lowered::new(&code.replace(" on OrderPaid, OrderEvent", "").replace(" on OrderPaid", "")).tree()
+    );
+}
+
 /// ```php
 /// interface OrderEvent
 /// {
@@ -5919,11 +5931,11 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
 ///
 /// Spec section 15: an event is a final class, `[32]` `ZEND_ACC_FINAL`, whose constructor promotes each parameter to a
 /// public get-only property, `[129]` `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, and its header is the `implements` name
-/// list. An interface's get-only property is a public property, `[1]`, with an abstract `get` hook.
+/// list. An interface's get-only property, written bare, is a public property, `[1]`, with an abstract `get` hook.
 #[test]
 fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook() {
     let lowered = Lowered::new(
-        "namespace App;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n\npublic event OrderPaid(int orderId, int amount = 0) : OrderEvent;\n\npublic class Order\n{\n    public OrderPaid pay(int orderId) => new OrderPaid(orderId);\n}\n",
+        "namespace App;\n\npublic interface OrderEvent\n{\n    int orderId { get; }\n}\n\npublic event OrderPaid(int orderId, int amount = 0) : OrderEvent;\n\npublic class Order\n{\n    public OrderPaid pay(int orderId) => new OrderPaid(orderId);\n}\n",
     );
 
     assert_eq!(
@@ -6013,6 +6025,40 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
                     null
                 null
                 null
+        "#}
+    );
+}
+
+/// ```php
+/// \Sharp\Internal\emit(new \App\OrderPaid(1));
+/// \Sharp\Internal\emit($paid);
+/// ```
+///
+/// Spec section 15: `emit` raises the event its expression gives, through the one function the engine adds, which runs
+/// every listener of the event before it returns.
+#[test]
+fn emit_is_a_call_of_the_engine_emit() {
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Order\n{\n    public void run(OrderPaid paid)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n    }\n}\n",
+        &[("src/OrderPaid.sharp", "namespace App;\n\npublic event OrderPaid(int orderId);\n")],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              CALL
+                ZVAL "Sharp\\Internal\\emit"
+                ARG_LIST
+                  NEW
+                    ZVAL "App\\OrderPaid"
+                    ARG_LIST
+                      ZVAL 1
+              CALL
+                ZVAL "Sharp\\Internal\\emit"
+                ARG_LIST
+                  VAR
+                    ZVAL "paid"
         "#}
     );
 }

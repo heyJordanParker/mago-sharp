@@ -60,6 +60,7 @@ use crate::cst::cst::DocumentString;
 use crate::cst::cst::DottedIdentifier;
 use crate::cst::cst::Echo;
 use crate::cst::cst::EchoTag;
+use crate::cst::cst::Emit;
 use crate::cst::cst::EmptyConstruct;
 use crate::cst::cst::Enum;
 use crate::cst::cst::EnumBackingTypeHint;
@@ -166,6 +167,7 @@ use crate::cst::cst::NotPattern;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
+use crate::cst::cst::On;
 use crate::cst::cst::OpeningTag;
 use crate::cst::cst::Operator;
 use crate::cst::cst::Parenthesized;
@@ -466,6 +468,7 @@ generate_ast_walker! {
             Statement::Switch(switch) => walker.walk_switch(switch, context),
             Statement::If(r#if) => walker.walk_if(r#if, context),
             Statement::Return(r#return) => walker.walk_return(r#return, context),
+            Statement::Emit(emit) => walker.walk_emit(emit, context),
             Statement::Expression(expression) => walker.walk_statement_expression(expression, context),
             Statement::EchoTag(echo) => walker.walk_echo_tag(echo, context),
             Statement::Echo(echo) => walker.walk_echo(echo, context),
@@ -1289,11 +1292,22 @@ generate_ast_walker! {
             walker.walk_function_like_parameter_list(&method.parameter_list, context);
         }
 
+        if let Some(on) = &method.on {
+            walker.walk_on(on, context);
+        }
+
         if let Some(initializer) = &method.initializer {
             walker.walk_constructor_initializer(initializer, context);
         }
 
         walker.walk_method_body(&method.body, context);
+    }
+
+    'arena On as on => {
+        walker.walk_keyword(&on.on, context);
+        for event in &on.events {
+            walker.walk_local_identifier(event, context);
+        }
     }
 
     'arena ConstructorInitializer as constructor_initializer => {
@@ -1804,6 +1818,12 @@ generate_ast_walker! {
         }
 
         walker.walk_terminator(&r#return.terminator, context);
+    }
+
+    'arena Emit as emit => {
+        walker.walk_keyword(&emit.emit, context);
+        walker.walk_expression(emit.value, context);
+        walker.walk_terminator(&emit.terminator, context);
     }
 
     'arena ExpressionStatement as statement_expression => {
