@@ -1606,6 +1606,11 @@ impl IncrementalAnalysisService {
         let references_changed = before.references != self.external_symbol_references;
         let external_symbol_references = before.references;
         let effective_skip_files = if references_changed { HashSet::default() } else { skip_files.clone() };
+        // Changed references analyze every file again, the ones the pass meant to skip too, so no class stays safe.
+        if references_changed {
+            codebase.safe_symbols.clear();
+            codebase.safe_symbol_members.clear();
+        }
         let host_files: Vec<_> = self
             .database
             .files()
