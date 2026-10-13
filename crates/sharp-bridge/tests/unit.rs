@@ -331,6 +331,37 @@ fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
     assert_eq!(stamp(directory.path(), b"app/Missing.sharp").unwrap(), None);
 }
 
+/// `SOURCE_LISTING` stamps the names of a folder's `.sharp` files, so a file appearing, going or being renamed changes
+/// the stamp, and an edit, a file of another kind, a folder named like a source, and a file below the folder leave it.
+#[test]
+fn a_source_listing_stamps_the_names_of_the_sharp_files_of_its_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "app/Report.sharp", SOURCE);
+    write(root, "app/Loud.sharp", SOURCE);
+    let listing = |root: &Path| stamp(root, b"app/*.sharp").unwrap().expect("a listing always stamps");
+
+    let stamped = listing(root);
+    assert_eq!(stamped.path, b"app/*.sharp");
+    assert_eq!((stamped.size, stamped.mtime_ns), (b"Loud.sharp\nReport.sharp\n".len() as u64, 0));
+    assert_eq!(stamped.hash, source_hash(b"Loud.sharp\nReport.sharp\n"));
+
+    write(root, "app/Report.sharp", "namespace App;\n");
+    write(root, "app/Model.php", "<?php\n");
+    write(root, "app/Deep/Inner.sharp", SOURCE);
+    fs::create_dir_all(root.join("app/Folder.sharp")).unwrap();
+    assert_eq!(listing(root), stamped, "no name of a .sharp file of the folder changed");
+
+    write(root, "app/Quiet.sharp", SOURCE);
+    assert_ne!(listing(root), stamped, "a file appeared");
+    fs::remove_file(root.join("app/Quiet.sharp")).unwrap();
+    fs::rename(root.join("app/Loud.sharp"), root.join("app/Lout.sharp")).unwrap();
+    assert_ne!(listing(root), stamped, "a file was renamed to a name of the same length");
+
+    assert_eq!(stamp(root, b"*.sharp").unwrap().expect("the root's listing").hash, source_hash(b""));
+    assert_eq!(stamp(root, b"missing/*.sharp").unwrap().expect("a missing folder's listing").hash, source_hash(b""));
+}
+
 #[test]
 fn compiled_path_mirrors_the_real_source_path_under_the_sharp_folder() {
     let directory = tempfile::tempdir().unwrap();

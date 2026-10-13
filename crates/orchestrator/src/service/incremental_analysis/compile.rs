@@ -35,6 +35,7 @@ use mago_sharp_bridge::lower;
 use mago_sharp_bridge::unit::Input;
 use mago_sharp_bridge::unit::Read;
 use mago_sharp_bridge::unit::Reads;
+use mago_sharp_bridge::unit::SOURCE_LISTING;
 use mago_sharp_bridge::unit::encode;
 use mago_sharp_bridge::unit::key;
 use mago_sharp_bridge::unit::source_hash;
@@ -66,9 +67,18 @@ pub enum Compilation {
     Refused(IssueCollection),
 }
 
-/// A `.sharp` file lowered and translated to Lean, with each class-like of its namespace that would win over a default
-/// class-like it names, or the errors that refused it.
-type Lowered = Result<(Unit, Vec<(Vec<u8>, InlineForm)>, Translation, Vec<Word>), IssueCollection>;
+/// A `.sharp` file lowered, its inline forms and its Lean translation, or the errors that refused it.
+type Lowered = Result<(LoweredUnit, Vec<(Vec<u8>, InlineForm)>, Translation), IssueCollection>;
+
+/// A lowered `.sharp` file, with what its inputs depend on.
+#[derive(Debug)]
+struct LoweredUnit {
+    unit: Unit,
+    /// Each class-like of the file's namespace that would win over a default class-like it names.
+    namespace_classes: Vec<Word>,
+    /// Whether the file's code reaches a PHP# extension member, spec section 26.
+    reaches_extension: bool,
+}
 
 /// A PHP# listener, spec section 15: a method with an `on` clause, which the engine runs when an event it lists is
 /// raised.
@@ -186,11 +196,11 @@ impl IncrementalAnalysisService {
         let forms: InlineForms = lowered_library
             .iter()
             .filter_map(|lowered| lowered.as_ref().ok())
-            .flat_map(|(_, forms, _, _)| forms.iter().cloned())
+            .flat_map(|(_, forms, _)| forms.iter().cloned())
             .collect();
         let lowered_rest = self.lower_all(&rest, &forms, &errors, &reach, session.as_ref())?;
         let mut translations = Vec::new();
-        let mut lowered: HashMap<FileId, Result<(Unit, Vec<Word>), IssueCollection>> = library
+        let mut lowered: HashMap<FileId, Result<LoweredUnit, IssueCollection>> = library
             .iter()
             .chain(&rest)
             .map(|file| file.id)
@@ -198,9 +208,9 @@ impl IncrementalAnalysisService {
             .map(|(file_id, lowered)| {
                 (
                     file_id,
-                    lowered.map(|(unit, _, translation, namespace_classes)| {
+                    lowered.map(|(lowered, _, translation)| {
                         translations.push(translation);
-                        (unit, namespace_classes)
+                        lowered
                     }),
                 )
             })
@@ -237,9 +247,13 @@ impl IncrementalAnalysisService {
 
         let inputs_start = std::time::Instant::now();
         let dependencies = Dependencies::new(self);
+        let mut folder_files: HashMap<&[u8], Vec<&[u8]>> = HashMap::default();
+        for file in &files {
+            folder_files.entry(folder_of(&file.name)).or_default().push(&file.name);
+        }
         let mut input_paths: HashMap<FileId, Vec<Vec<u8>>> = HashMap::default();
-        for (file, namespace_classes) in
-            files.iter().filter_map(|file| Some((file, &lowered.get(&file.id)?.as_ref().ok()?.1)))
+        for (file, LoweredUnit { namespace_classes, reaches_extension, .. }) in
+            files.iter().filter_map(|file| Some((file, lowered.get(&file.id)?.as_ref().ok()?)))
         {
             // A method whose return comes from its body can return another such method's return, so the body files
             // close over the body files of each file they hold.
@@ -268,12 +282,27 @@ impl IncrementalAnalysisService {
             };
             // Spec section 27 puts a class-like of the file's namespace in the file's folder, under its own name, so the
             // files that would declare one are inputs, stamped absent while the namespace lacks it.
-            let folder = &file.name[..file.name.iter().rposition(|byte| *byte == b'/').map_or(0, |slash| slash + 1)];
+            let folder = folder_of(&file.name);
             let namespace_class_files = namespace_classes.iter().filter(|_| is_source(file)).flat_map(|class| {
                 let class = short_name(class);
 
                 [".sharp", ".php"].map(|extension| [folder, class.as_bytes(), extension.as_bytes()].concat())
             });
+            // Spec section 26 applies the extensions of the file's namespace with no import, so a file whose code reaches
+            // an extension compiles to other code when a file of its folder gains, changes or loses one. Its inputs are
+            // the folder's listing and each `.sharp` file in it. A call no extension reaches can't change this way: a
+            // member the type declares wins, and a call with no member is a compile error.
+            let namespace_files: Vec<Vec<u8>> = if *reaches_extension && is_source(file) {
+                folder_files
+                    .get(folder)
+                    .into_iter()
+                    .flatten()
+                    .map(|name| name.to_vec())
+                    .chain(std::iter::once([folder, SOURCE_LISTING.as_bytes()].concat()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let mut paths: Vec<Vec<u8>> = sources
                 .into_iter()
                 .filter_map(|source| self.database.get(&source).ok())
@@ -282,6 +311,7 @@ impl IncrementalAnalysisService {
                 .chain(proof)
                 .chain(lean)
                 .chain(namespace_class_files)
+                .chain(namespace_files)
                 .chain(std::iter::once(COMPOSER_LOCK.to_vec()))
                 .collect();
             paths.sort_unstable();
@@ -306,7 +336,7 @@ impl IncrementalAnalysisService {
             };
             let compilation = match (lowered, refused.remove(&file.id)) {
                 (Ok(_), Some(issues)) | (Err(issues), _) => Compilation::Refused(issues),
-                (Ok((unit, _)), None) => {
+                (Ok(LoweredUnit { unit, .. }), None) => {
                     let (mut reads, _) = reads.remove(&file.id).unwrap_or_default();
                     reads.inlined = unit.inlined().to_vec();
                     let key = key(source_hash(&file.contents), &reads);
@@ -465,14 +495,25 @@ impl IncrementalAnalysisService {
                 let program = parse_file_with_settings(&arena, file, self.parser_settings);
                 let names = NameResolver::new(&arena).resolve_in(program, &self.namespace_classes);
                 let namespace_classes = names.namespace_classes().map(mago_word::word).collect();
-                let artifacts = self
-                    .file_analyzer(&arena, file, &names, session)
-                    .analyze_with_artifacts(program, &mut AnalysisResult::new(SymbolReferences::new()))?;
+                let mut result = AnalysisResult::new(SymbolReferences::new());
+                let artifacts =
+                    self.file_analyzer(&arena, file, &names, session).analyze_with_artifacts(program, &mut result)?;
+                // This analysis of the one file records exactly what its code reaches, unlike the references the warm
+                // path keeps from a method it analyzed before.
+                let mut reaches_extension = false;
+                result.symbol_references.for_each_reference(|_, (class, member), _| {
+                    reaches_extension |= !member.is_empty()
+                        && self.codebase.get_method(class.as_bytes(), member.as_bytes()).is_some_and(|method| {
+                            method.flags.is_extension_method() || method.flags.is_extension_property()
+                        });
+                });
 
                 Ok(match check(file, program, names, &artifacts, &self.codebase, forms, &issues) {
-                    Ok(checked) => {
-                        Ok((lower(&checked), inline_forms(&checked), translate(&checked, reach), namespace_classes))
-                    }
+                    Ok(checked) => Ok((
+                        LoweredUnit { unit: lower(&checked), namespace_classes, reaches_extension },
+                        inline_forms(&checked),
+                        translate(&checked, reach),
+                    )),
                     Err(Refusal::Parse(errors)) => Err(errors.iter().map(Issue::from).collect()),
                     Err(Refusal::Compile(errors)) => Err(IssueCollection::from(errors)),
                 })
@@ -498,6 +539,11 @@ fn listing_name(listing: &Listing) -> Vec<u8> {
 /// `composer.lock` stands for, other than the prelude's.
 fn is_source(file: &File) -> bool {
     file.file_type != FileType::Builtin && !file.name.starts_with(VENDOR)
+}
+
+/// The workspace-relative folder of the file `name`, with its trailing `/`, or nothing for a file at the root.
+fn folder_of(name: &[u8]) -> &[u8] {
+    &name[..name.iter().rposition(|byte| *byte == b'/').map_or(0, |slash| slash + 1)]
 }
 
 /// The cascade's edges, indexed to walk backward from a file to the source files whose signature edit makes the warm
@@ -2118,5 +2164,46 @@ mod tests {
         for input in &inputs[1..3] {
             assert_eq!((input.size, input.mtime_ns, input.hash), (0, 0, [0; 16]), "{input:?} is stamped absent");
         }
+    }
+
+    /// Spec section 26 applies an extension of the file's namespace with no import, so a file whose code reaches an
+    /// extension, the standard library's included, lists its folder's listing and each `.sharp` file in its folder as
+    /// inputs, and nothing below it or in another language. A file that reaches no extension lists neither, and a
+    /// package file leaves them to `composer.lock`.
+    #[test]
+    fn a_file_whose_code_reaches_an_extension_lists_the_sharp_files_of_its_folder_as_inputs() {
+        let words = "namespace Sharp.Text;\n\npublic static class Words\n{\n    extension(string text)\n    {\n        public string shout() => text;\n    }\n}\n";
+        let report =
+            "namespace App;\n\npublic class Report\n{\n    public string text(string name) => name.shout();\n}\n";
+        let plain = "namespace App;\n\npublic class Plain\n{\n    public string text(string name) => name;\n}\n";
+        let packaged = "vendor/acme/shapes/src/Report.sharp";
+        let database = project(&[
+            ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Words.sharp", words),
+            ("app/App/Report.sharp", report),
+            ("app/App/Plain.sharp", plain),
+            ("app/App/Model.php", "<?php\n\nnamespace App;\n\nclass Model\n{\n}\n"),
+            ("app/App/Deep/Inner.sharp", "namespace App.Deep;\n\npublic class Inner\n{\n}\n"),
+            (packaged, &report.replace("namespace App;", "namespace Acme;")),
+        ]);
+
+        let compiled = compile(&mut analyzed(&database), database_stamp(&database));
+
+        assert_eq!(
+            input_paths(accepted(&compiled, "app/App/Report.sharp")),
+            [
+                "Module.lean",
+                "app/App/*.sharp",
+                "app/App/Module.lean",
+                "app/App/Plain.sharp",
+                "app/App/Report.sharp",
+                "app/Module.lean",
+                "composer.lock"
+            ]
+        );
+        assert_eq!(
+            input_paths(accepted(&compiled, "app/App/Plain.sharp")),
+            ["Module.lean", "app/App/Module.lean", "app/App/Plain.sharp", "app/Module.lean", "composer.lock"]
+        );
+        assert_eq!(input_paths(accepted(&compiled, packaged)), ["composer.lock", packaged]);
     }
 }
