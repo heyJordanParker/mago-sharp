@@ -255,9 +255,8 @@ impl Lean {
         }
         let failed = package.build(&hosts.iter().map(|host| host.name.clone()).collect::<Vec<_>>())?;
         let mut refused_hosts: HashMap<String, Vec<package::Message>> = HashMap::default();
-        for host in failed {
-            let errors = package.errors(&package::source_of(&host))?;
-            refused_hosts.insert(host, errors);
+        for host in &failed.modules {
+            refused_hosts.insert(host.clone(), package.errors(host, &failed)?);
         }
         work.retain(|item| {
             let name = package::module_name(item.translation);
@@ -283,8 +282,8 @@ impl Lean {
                 for law in &item.translation.laws {
                     report(issues, item.translation, issues::no_proof(law, &file));
                 }
-            } else if failed.contains(&item.module) {
-                let errors = package.errors(&package::source_of(&item.module))?;
+            } else if failed.modules.contains(&item.module) {
+                let errors = package.errors(&item.module, &failed)?;
                 let text = fs::read_to_string(self.path(&item.proof))?;
                 for issue in proof_errors(item.translation, &item.proof, &text, &errors) {
                     report(issues, item.translation, issue);
