@@ -244,9 +244,8 @@ final class ListMethods
 }
 
 /**
- * The methods a PHP# `Map<K, V>` has. The analyzer checks a call on a map against them, and the engine runs them on
- * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which the bridge lowers from
- * the map's type. A method without `@mutation-free` changes the map.
+ * The methods a PHP# `Map<K, V>` has. The analyzer checks a call on a map against them, and the engine runs each on
+ * `Sharp\Collection`, over the `Sharp\Map` object. A method without `@mutation-free` changes the map.
  *
  * @template K of array-key
  * @template V
@@ -380,8 +379,8 @@ final class MapMethods
 }
 
 /**
- * The methods a PHP# `Set<T>` has. The analyzer checks a call on a set against them. A method without
- * `@mutation-free` changes the set.
+ * The methods a PHP# `Set<T>` has. The analyzer checks a call on a set against them, and the engine runs each on
+ * `Sharp\Collection`, over the `Sharp\Set` object. A method without `@mutation-free` changes the set.
  *
  * @template T
  */

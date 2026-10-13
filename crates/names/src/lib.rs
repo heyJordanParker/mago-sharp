@@ -34,31 +34,18 @@ mod internal;
 /// writes its local too, which captures it by reference, as harmless.
 pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "insert", "remove", "clear"];
 
-/// The methods of a PHP# `List`, `Map` or `Set` the bridge lowers from the checker's types, as `(collection, method)`
-/// pairs.
+/// The methods of a PHP# `List` the bridge lowers from the checker's types, as `(collection, method)` pairs.
 ///
-/// Each lowers to PHP functions or operators on the array, or to the `Sharp\Collection` method that runs it for that
-/// collection, as a `Map`'s `filter` runs as `filterValues`. The checker refuses one on a value that can also be an
-/// object, whose own method would not run.
-pub const INLINED_COLLECTION_METHODS: [(&str, &str); 18] = [
+/// Each lowers to PHP functions or operators on the array. A `List` is a PHP array, which has no methods, so the
+/// checker refuses one on a value that can also be an object, whose own method would not run. A `Map` and a `Set` are
+/// engine objects, whose every method runs on `Sharp\Collection`.
+pub const INLINED_COLLECTION_METHODS: [(&str, &str); 6] = [
     ("List", "count"),
     ("List", "contains"),
     ("List", "indexOf"),
     ("List", "last"),
     ("List", "remove"),
     ("List", "clear"),
-    ("Map", "count"),
-    ("Map", "has"),
-    ("Map", "keys"),
-    ("Map", "remove"),
-    ("Map", "filter"),
-    ("Set", "count"),
-    ("Set", "add"),
-    ("Set", "remove"),
-    ("Set", "contains"),
-    ("Set", "clear"),
-    ("Set", "toList"),
-    ("Set", "filter"),
 ];
 
 /// The effects a PHP# `uses` takes, spec section 29, by the full names a bare effect name resolves to in a `.sharp`

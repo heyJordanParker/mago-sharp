@@ -27,7 +27,6 @@ use super::Lowering;
 use super::NULL;
 use super::ZEND_NAME_FQ;
 use super::is_current_position;
-use super::set_parameter;
 use super::types::DeclarationKind;
 use super::types::receiver_classes;
 use crate::lower::checked::CheckedProgram;
@@ -143,9 +142,10 @@ impl Lowering<'_, '_> {
             }
             _ => return None,
         };
-        // A form runs without the method's statements before its body, which make each `Set` parameter a `Set`.
+        // A form runs without the method's statements before its body, which make each `Map` and `Set` a parameter
+        // holds the object.
         let parameters = &method.parameter_list.parameters;
-        if parameters.iter().any(|parameter| parameter.is_variadic() || set_parameter(parameter).is_some()) {
+        if parameters.iter().any(|parameter| parameter.is_variadic() || self.crossing_type(parameter).is_some()) {
             return None;
         }
 

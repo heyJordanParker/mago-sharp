@@ -18,6 +18,7 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_mixed;
@@ -37,6 +38,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::invocation::InvocationTarget;
+use crate::invocation::InvocationTargetParameter;
 use crate::invocation::analyzer::adjust_offset_for_variadic;
 use crate::statement::function_like::closure_parameter_types;
 use crate::utils::expression::is_referenceable;
@@ -48,6 +50,54 @@ use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::report_int_for_float;
+
+/// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
+/// keys are `int` or `string`. A `Map` keyed by a backed enum or a struct, an object, has no such array, so its call
+/// is refused here rather than failing where it runs. Returns whether it refused the call.
+pub(super) fn check_array_crossing<A>(
+    context: &mut Context<'_, '_, A>,
+    input_type: &TUnion,
+    parameter: InvocationTargetParameter<'_>,
+    parameter_type: &TUnion,
+    argument_offset: usize,
+    input_expression: &Expression<'_>,
+    invocation_target: &InvocationTarget<'_>,
+) -> bool
+where
+    A: Arena,
+{
+    if !parameter_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))) {
+        return false;
+    }
+    let Some(key_type) = input_type.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Array(map @ TArray::Keyed(_)) => Some(get_array_parameters(map, context.codebase).0),
+        _ => None,
+    }) else {
+        return false;
+    };
+    if !key_type.types.iter().any(TAtomic::is_object_type) {
+        return false;
+    }
+
+    let parameter = parameter.get_name().map_or_else(
+        || format!("argument #{}", argument_offset + 1),
+        |name| format!("parameter `{}`", display_variable_name(context, name.0.as_bytes())),
+    );
+    let target_kind = invocation_target.guess_kind();
+    let target = invocation_target.guess_name(context);
+    let input = display_type(context, input_type);
+    let key = display_type(context, &key_type);
+    context.collector.report_with_code(
+        IssueCode::InvalidArgument,
+        Issue::error(format!(
+            "`{input}` can't be passed to the {parameter} of {target_kind} `{target}`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `{key}`."
+        ))
+        .with_annotation(Annotation::primary(input_expression.span()).with_message(format!("This `Map` is keyed by `{key}`")))
+        .with_annotation(Annotation::secondary(invocation_target.span()).with_message("Plain PHP declares this call"))
+        .with_help("Pass a `Map` keyed by `int` or `string`, such as one keyed by a field of each key."),
+    );
+    true
+}
 
 /// Checks if an argument can be passed by reference.
 pub(super) fn is_argument_referenceable(

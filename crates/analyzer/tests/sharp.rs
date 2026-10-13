@@ -7004,9 +7004,10 @@ fn every_collection_counts_its_elements() {
     assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["24:23 too-many-arguments"]);
 }
 
-/// A collection method the bridge lowers to PHP on the array, such as `count` or a `Set`'s `contains`, cannot run on a
-/// value that can also be an object, whose own method the PHP would skip. Any other collection method is a method call
-/// the engine sends to the object or the collection the value holds when it runs. A `.php` file has no PHP# collection.
+/// A `List` method the bridge lowers to PHP on the array, such as `count` or `contains`, cannot run on a value that can
+/// also be an object, whose own method the PHP would skip. Any other collection method, and every `Set` and `Map`
+/// method, is a method call the engine sends to the object or the collection the value holds when it runs. A `.php`
+/// file has no PHP# collection.
 #[test]
 fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_yet() {
     let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public int? get(int index) => index > 0 ? index : null;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1) || items.contains(1)) {\n            return items.get(0) ?? 0;\n        }\n        return items.count();\n    }\n}\n";
@@ -7015,9 +7016,9 @@ fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_ye
 
     assert_eq!(
         issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
-        ["16:18 not-supported-yet", "16:39 not-supported-yet", "19:22 not-supported-yet"]
+        ["16:39 not-supported-yet", "19:22 not-supported-yet"]
     );
-    assert_eq!(issues[2].message, "Calling `count` on `List<int>|Box` is not supported by the engine yet.");
+    assert_eq!(issues[1].message, "Calling `count` on `List<int>|Box` is not supported by the engine yet.");
     assert!(!codes(&self::issues(("src/Demo/Shelf.php", php), &[])).contains(&"not-supported-yet"));
 }
 
@@ -7195,10 +7196,10 @@ fn a_set_property_without_a_set_refuses_a_changing_method() {
 }
 
 /// A changing method called on a value that may be one of several collections is refused once, by the first rule it
-/// breaks. `add` on a `Map|Set` is refused by the `Map`, which lacks it, and not again for writing to no place. A method
-/// the bridge lowers as PHP on the array, such as a `Set`'s `add` or `filter` or a `Map`'s `filter` or `remove`, is not
-/// supported on a value that may be another collection or an object, because the engine would run the other
-/// collection's method on it: `List|Set`, `Set|Box`, `List|Map` and `Map|Box`.
+/// breaks. `add` on a `Map|Set` is refused by the `Map`, which lacks it, and not again for writing to no place. A
+/// conditional is no place, so a changing method on it is refused whatever it may hold: `List|Set`, `Set|Box` and
+/// `Map|Box`. A `Map` and a `Set` are objects whose methods run on whichever collection the value holds, so `add` on a
+/// `List|Set` local and `filter` on a `List|Map` or a `List|Set` run.
 #[test]
 fn a_changing_method_of_a_union_of_collections_is_refused_once() {
     let sharp = "namespace Demo;\n\nclass Box\n{\n    public bool add(int value) => true;\n    public bool remove(string key) => true;\n}\n\nclass Shop\n{\n    public int run(bool ready, List<int> lines, Set<int> ids, Map<string, int> counts, Box box)\n    {\n        (ready ? lines : ids).add(1);\n        (ready ? counts : ids).add(1);\n        (ready ? ids : box).add(1);\n        let tags = ready ? lines : ids;\n        tags.add(3);\n        (ready ? lines : counts).filter(n => n > 0);\n        (ready ? counts : box).remove(\"a\");\n        return count(tags.filter(tag => tag > 0));\n    }\n}\n";
@@ -7206,13 +7207,10 @@ fn a_changing_method_of_a_union_of_collections_is_refused_once() {
     assert_eq!(
         issues(("src/Demo/Shop.sharp", sharp), &[]),
         [
-            "13:31 not-supported-yet",
+            "13:9 invalid-pass-by-reference",
             "14:32 non-existent-method",
-            "15:29 not-supported-yet",
-            "17:14 not-supported-yet",
-            "18:34 not-supported-yet",
-            "19:32 not-supported-yet",
-            "20:27 not-supported-yet"
+            "15:9 invalid-pass-by-reference",
+            "19:9 invalid-pass-by-reference"
         ]
     );
 }
@@ -7269,17 +7267,17 @@ const STATUS: &str = "<?php\n\nnamespace Lib;\n\nenum Status: string\n{\n    cas
 /// take from their function.
 #[test]
 fn a_map_keyed_by_a_backed_enum_takes_the_case_in_every_key_position() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    private Map<Status, int> counts = [:];\n    private Map<Status, int> seeded = [Status.Active: 0];\n\n    public int count(Status status, Size size)\n    {\n        this.counts[status] = (this.counts[status] ?? 0) + 1;\n        this.counts[status] ??= 0;\n        List<Map<Size, int>> nested = [[:]];\n        nested[0][size] = 1;\n        Map<Status, int> built = [Status.Active: 1, status: 2];\n        built.remove(Status.Closed);\n        return (this.counts[status] ?? 0) + (built.get(status) ?? 0) + (this.seeded.get(status) ?? 0) + (nested[0][size] ?? 0) + (built.has(status) ? 1 : 0);\n    }\n\n    public int group(List<Size> sizes, Map<string, Size> named)\n    {\n        Map<Size, List<Size>> bySize = sizes.groupBy(size => size);\n        Map<Status, Size> byStatus = named.associateBy(size => Status.Active);\n        return count(bySize) + count(byStatus);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    private Map<Status, int> counts = [:];\n    private Map<Status, int> seeded = [Status.Active: 0];\n\n    public int count(Status status, Size size)\n    {\n        this.counts[status] = (this.counts[status] ?? 0) + 1;\n        this.counts[status] ??= 0;\n        List<Map<Size, int>> nested = [[:]];\n        nested[0][size] = 1;\n        Map<Status, int> built = [Status.Active: 1, status: 2];\n        built.remove(Status.Closed);\n        return (this.counts[status] ?? 0) + (built.get(status) ?? 0) + (this.seeded.get(status) ?? 0) + (nested[0][size] ?? 0) + (built.has(status) ? 1 : 0);\n    }\n\n    public int group(List<Size> sizes, Map<string, Size> named)\n    {\n        Map<Size, List<Size>> bySize = sizes.groupBy(size => size);\n        Map<Status, Size> byStatus = named.associateBy(size => Status.Active);\n        return bySize.count() + byStatus.count();\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
 
 /// Inside PHP# a `Map<Status, int>` is keyed by `Status` alone, so its backing values, another enum and a
-/// `Map<string, int>` are refused where it takes a key. The runtime never meets a key the typed loop cannot read
-/// back as `Status`.
+/// `Map<string, int>` are refused where it takes a key, and it is no `Map<string, int>` itself. The runtime never
+/// meets a key the typed loop cannot read back as `Status`.
 #[test]
 fn a_map_keyed_by_a_backed_enum_takes_exactly_the_enum_as_a_key() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int wrong(Map<Status, int> counts, Map<string, int> named, Size size)\n    {\n        counts[\"active\"] = 1;\n        counts[size] = 2;\n        Map<Status, int> built = [\"active\": 1];\n        Map<Status, int> narrowed = named;\n        return (built.get(Status.Active) ?? 0) + (narrowed.get(Status.Active) ?? 0) + (counts.get(\"active\") ?? 0);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int wrong(Map<Status, int> counts, Map<string, int> named, Size size)\n    {\n        counts[\"active\"] = 1;\n        counts[size] = 2;\n        Map<Status, int> built = [\"active\": 1];\n        Map<Status, int> narrowed = named;\n        Map<string, int> widened = counts;\n        return (built.get(Status.Active) ?? 0) + (narrowed.get(Status.Active) ?? 0) + (counts.get(\"active\") ?? 0) + widened.count();\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
@@ -7288,7 +7286,8 @@ fn a_map_keyed_by_a_backed_enum_takes_exactly_the_enum_as_a_key() {
             "11:16 mismatched-array-index",
             "12:34 invalid-local-assignment-value",
             "13:37 invalid-local-assignment-value",
-            "14:99 invalid-argument"
+            "14:36 invalid-local-assignment-value",
+            "15:99 invalid-argument"
         ]
     );
 }
@@ -7304,16 +7303,35 @@ fn map_get_has_and_remove_take_a_backed_enum_key_in_sharp_and_in_php() {
     assert_eq!(issues(("src/Demo/Tally.php", php), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
 
-/// Plain PHP receives a `Map<Status, int>`'s backing values, so where the `Map` meets a plain PHP array it is an
-/// `array<string, int>`: an `array` parameter, an `iterable`, `count`, and a template such as `array_keys`' `K`.
+/// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
+/// keys are `int` or `string`. A `Map` keyed by a backed enum or a struct has no such array, so the call is refused,
+/// naming the parameter and the key type, whether the parameter's type is native, from a stub as `count`'s, or from a
+/// docblock. A parameter of a plain PHP closure, which has no name, is named by its position. A `Map<string, int>`
+/// crosses, and a parameter typed `iterable`, `mixed` or nothing takes the `Map` itself, whose keys stay `Status`, so
+/// an `iterable<string, int>` takes `Map<string, int>` and refuses `Map<Status, int>`.
 #[test]
-fn a_map_keyed_by_a_backed_enum_meets_plain_php_as_an_array_of_its_backing_values() {
-    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts, Status status)\n    {\n        List<string> keys = array_keys(counts);\n        Map<string, int> named = counts;\n        return count(counts) + Sink.byName(counts) + Sink.plain(counts) + Sink.each(counts) + count(keys) + count(named) + (array_key_exists(status.value, counts) ? 1 : 0);\n    }\n}\n";
-    let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    /** @param array<string, int> $counts */\n    public static function byName(array $counts): int\n    {\n        return count($counts);\n    }\n\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    /** @param iterable<string, int> $counts */\n    public static function each(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n}\n";
+fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts, Map<Spot, int> spots, Map<string, int> named)\n    {\n        return Sink.plain(counts) + Sink.documented(spots) + count(spots) + Sink.plain(named) + Sink.each(counts) + Sink.anything(spots) + Sink.untyped(counts) + Sink.counter()(spots) + Sink.keyed(named) + Sink.keyed(counts);\n    }\n}\n";
+    let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    /** @param array<string, int> $counts */\n    public static function documented($counts): int\n    {\n        return count($counts);\n    }\n\n    public static function each(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    /** @param iterable<string, int> $counts */\n    public static function keyed(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    public static function anything(mixed $counts): int\n    {\n        return 1;\n    }\n\n    public static function untyped($counts): int\n    {\n        return 1;\n    }\n\n    /** @return Closure(array): int */\n    public static function counter(): Closure\n    {\n        return static fn (array $counts): int => count($counts);\n    }\n}\n";
+    let spot = "namespace Lib;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS), ("src/Lib/Sink.php", sink)]),
-        Vec::<String>::new()
+        analyze(
+            &PLUGIN_REGISTRY,
+            settings(),
+            ("src/Demo/Tally.sharp", sharp),
+            &[("src/Lib/Status.php", STATUS), ("src/Lib/Sink.php", sink), ("src/Lib/Spot.sharp", spot)]
+        )
+        .iter()
+        .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+        .collect::<Vec<_>>(),
+        [
+            "11:27 invalid-argument `Map<Status, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Status`.",
+            "11:53 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.documented`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "11:68 invalid-argument `Map<Spot, int>` can't be passed to the parameter `value` of function `count`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "11:178 invalid-argument `Map<Spot, int>` can't be passed to the argument #1 of closure `Closure`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "11:218 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Sink.keyed`: expected `Iterable<int>`, but possibly received `Map<Status, int>`.",
+        ]
     );
 }
 
@@ -7329,15 +7347,6 @@ fn a_plain_php_caller_passes_the_backing_values_where_php_sharp_takes_a_map_keye
         issues(("src/Demo/Caller.php", php), &[("src/Demo/Tally.sharp", sharp), ("src/Lib/Status.php", STATUS)]),
         ["9:63 possibly-invalid-argument"]
     );
-}
-
-/// A plain PHP docblock may write `array<Status, int>`, a type PHP arrays cannot hold. It is the backing values'
-/// array, as a PHP# `Map` keyed by `Status` is where it meets plain PHP, so it agrees with the native `array`.
-#[test]
-fn a_php_docblock_array_keyed_by_a_backed_enum_agrees_with_the_native_array() {
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Status;\n\nfinal class Report\n{\n    /** @return array<Status, int> */\n    public static function counts(): array\n    {\n        return [];\n    }\n}\n";
-
-    assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
 
 /// Spec section 10: any struct keys a `Map` and joins a `Set` by its whole value, unless it holds a class instance at

@@ -57,6 +57,7 @@ use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::invocation::InvocationTargetParameter;
 use crate::invocation::arguments::analyze_and_store_argument_type;
+use crate::invocation::arguments::check_array_crossing;
 use crate::invocation::arguments::get_unpacked_argument_type;
 use crate::invocation::arguments::report_non_list_spread;
 use crate::invocation::arguments::verify_argument_type;
@@ -669,6 +670,7 @@ where
                 // whatever class the call goes through, of a function value whose signature PHP# wrote, or of a
                 // `Sharp\` collection method, which PHP# declares as a plain PHP stub only to carry its templates. A
                 // plain PHP method's or closure's parameter takes either literal, whatever its docblock says.
+                let mut refused_crossing = false;
                 if matches!(&invocation.target, InvocationTarget::Callable { signature, .. } if signature.effects.is_some())
                     || invocation.target.get_function_like_metadata().is_some_and(|function| function.flags.is_sharp())
                     || matches!(
@@ -677,17 +679,29 @@ where
                     )
                 {
                     check_sharp_literal_kind(context, argument_expression, &final_parameter_type);
+                } else if context.dialect.is_sharp() {
+                    refused_crossing = check_array_crossing(
+                        context,
+                        &argument_value_type,
+                        parameter_ref,
+                        &final_parameter_type,
+                        *argument_offset,
+                        argument_expression,
+                        &invocation.target,
+                    );
                 }
 
-                if verify_argument_type(
-                    context,
-                    artifacts,
-                    &argument_value_type,
-                    &final_parameter_type,
-                    *argument_offset,
-                    argument_expression,
-                    &invocation.target,
-                ) {
+                if !refused_crossing
+                    && verify_argument_type(
+                        context,
+                        artifacts,
+                        &argument_value_type,
+                        &final_parameter_type,
+                        *argument_offset,
+                        argument_expression,
+                        &invocation.target,
+                    )
+                {
                     record_function_values(
                         context,
                         artifacts,

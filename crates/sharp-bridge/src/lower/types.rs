@@ -17,10 +17,11 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_span::HasSpan;
-use mago_syntax::cst::Argument;
-use mago_syntax::cst::Call;
+use mago_syntax::cst::Access;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
 use mago_word::word;
 
@@ -55,7 +56,7 @@ pub struct Declaration {
 pub enum DeclarationKind {
     Class,
     Interface,
-    /// `backed` is whether each case has a backing value, which a `Map` keyed by the enum holds for the case.
+    /// `backed` is whether each case has a backing value.
     Enum {
         backed: bool,
     },
@@ -247,11 +248,6 @@ impl<'analysis> Types<'analysis> {
             .collect()
     }
 
-    /// Whether the class-like `class` is a PHP# struct.
-    pub(crate) fn is_struct(&self, class: &[u8]) -> bool {
-        self.codebase.get_class_like(class).is_some_and(|metadata| metadata.flags.is_struct())
-    }
-
     /// The backing type of the backed enum `class`, if it has one.
     pub(crate) fn backing_type(&self, class: &[u8]) -> Option<&'analysis TAtomic> {
         self.codebase.get_class_like(class)?.enum_type.as_ref()
@@ -326,20 +322,6 @@ impl<'analysis> Types<'analysis> {
         get_array_parameters(array, self.codebase)
     }
 
-    /// The type of the keys a value of `r#type` holds, or none when part of it is no `Map` or `List`.
-    pub(crate) fn map_key_type(&self, r#type: &TUnion) -> Option<TUnion> {
-        let mut key_type = None;
-        for atomic in r#type.types.iter() {
-            let TAtomic::Array(array) = atomic else {
-                return None;
-            };
-            let (key, _) = get_array_parameters(array, self.codebase);
-            key_type = Some(add_optional_union_type(key, key_type.as_ref(), self.codebase));
-        }
-
-        key_type
-    }
-
     /// The type of the elements a value of `r#type` holds, the `T` of a `List<T>`, leaving out `null`. The caller asks
     /// only about a value the checker typed as a collection.
     pub(crate) fn element_type(&self, r#type: &TUnion) -> TUnion {
@@ -353,51 +335,6 @@ impl<'analysis> Types<'analysis> {
         }
 
         element_type.unwrap_or_else(|| unreachable!("a collection method's receiver is a collection"))
-    }
-
-    /// The positions of the arguments of the method call `call`, null-safe or not, that go in as its receiver's key.
-    /// The analyzer checks a call on a `Map` against `Sharp\MapMethods<K, V>`, whose `K` the `Map`'s key type fills
-    /// (spec section 12), so an argument goes in as a key when the call runs a `MapMethods` method and its parameter
-    /// is a template parameter bounded by `array-key`, as in `get(K $key)`. The method is the one the analyzer checked
-    /// the call against, which a `List` emptied by `[]` keeps. The caller asks only about a call on a value.
-    pub(crate) fn key_arguments(&self, call: &Expression) -> Vec<usize> {
-        let arguments = match call {
-            Expression::Call(Call::Method(call)) => &call.argument_list,
-            Expression::Call(Call::NullSafeMethod(call)) => &call.argument_list,
-            _ => unreachable!("only a method call has arguments a receiver takes as its key"),
-        };
-        let mut callees = self.artifacts.get_callees(call);
-        let (Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }), None) =
-            (callees.next(), callees.next())
-        else {
-            return Vec::new();
-        };
-        if !class.as_bytes().eq_ignore_ascii_case(b"Sharp\\MapMethods") {
-            return Vec::new();
-        }
-        let metadata = self
-            .codebase
-            .get_method(class.as_bytes(), method.as_bytes())
-            .unwrap_or_else(|| unreachable!("the analyzer resolved `Map.{method}()` from the codebase"));
-
-        arguments
-            .arguments
-            .iter()
-            .enumerate()
-            .filter(|(position, argument)| {
-                let parameter = match argument {
-                    Argument::Positional(argument) if argument.ellipsis.is_none() => metadata.parameters.get(*position),
-                    Argument::Positional(_) => None,
-                    Argument::Named(argument) => metadata
-                        .parameters
-                        .iter()
-                        .find(|parameter| parameter.name.0.as_bytes().strip_prefix(b"$") == Some(argument.name.value)),
-                };
-
-                parameter.is_some_and(takes_key)
-            })
-            .map(|(position, _)| position)
-            .collect()
     }
 
     /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the collection method the analyzer checked
@@ -417,6 +354,71 @@ impl<'analysis> Types<'analysis> {
             .find_map(|(collection, methods)| class.as_bytes().eq_ignore_ascii_case(methods).then_some(collection))?;
 
         Some((collection, method.as_bytes().to_ascii_lowercase()))
+    }
+
+    /// The parameters of the plain PHP function or method the call `call` runs, as the analysis resolved it, which a
+    /// `Map` or a `Set` crosses into as a PHP array where the parameter's declared type names `array`. None for a PHP#
+    /// one, which takes the object.
+    pub(crate) fn call_parameters(&self, call: &Expression) -> Option<&'analysis [FunctionLikeParameterMetadata]> {
+        let mut callees = self.artifacts.get_callees(call);
+        let (Some(CallTarget::FunctionLike { callee, .. }), None) = (callees.next(), callees.next()) else {
+            return None;
+        };
+        let owner = match callee {
+            FunctionLikeIdentifier::Function(name) | FunctionLikeIdentifier::Method(name, _) => name.as_bytes(),
+            FunctionLikeIdentifier::Closure(_) => return None,
+        };
+
+        plain_parameters(owner, self.codebase.get_function_like(callee))
+    }
+
+    /// The parameters of the constructor `new` runs for the fully qualified class name `class`, as
+    /// [`Self::call_parameters`] gives a call's.
+    pub(crate) fn constructor_parameters(&self, class: &[u8]) -> Option<&'analysis [FunctionLikeParameterMetadata]> {
+        plain_parameters(class, self.codebase.get_declaring_method(class, b"__construct"))
+    }
+
+    /// The parameters of the constructor `parent::__construct` reaches from the fully qualified class name `class`, as
+    /// [`Self::call_parameters`] gives a call's.
+    pub(crate) fn parent_constructor_parameters(
+        &self,
+        class: &[u8],
+    ) -> Option<&'analysis [FunctionLikeParameterMetadata]> {
+        plain_parameters(b"", self.codebase.get_parent_constructor(class))
+    }
+
+    /// The declared type of the property `target` writes, `object.property` or `Class.property`, as the class, or the
+    /// first class its object can be, declares it. None for any other target.
+    pub(crate) fn property_type(&self, target: &Expression) -> Option<&'analysis TUnion> {
+        let (class, property) = self.accessed_property(target)?;
+
+        self.codebase.get_property(class, &property)?.type_metadata.as_ref().map(|declared| &declared.type_union)
+    }
+
+    /// Whether `target` reads a property plain PHP declares, which can hold a PHP array where PHP# reads a `Map` or a
+    /// `Set`.
+    pub(crate) fn plain_property(&self, target: &Expression) -> bool {
+        self.accessed_property(target)
+            .and_then(|(class, property)| self.codebase.get_declaring_property_class(class, &property))
+            .and_then(|declaring| self.codebase.get_class_like(declaring.as_bytes()))
+            .is_some_and(|declaring| !declaring.flags.is_sharp())
+    }
+
+    /// The class and the `$`-prefixed name of the property `target` reads, `object.property` or `Class.property`, as
+    /// the class, or the first class its object can be, holds it.
+    fn accessed_property(&self, target: &Expression) -> Option<(&'analysis [u8], Vec<u8>)> {
+        let Expression::Access(Access::Property(
+            access @ PropertyAccess { object, property: ClassLikeMemberSelector::Identifier(name), .. },
+        )) = target.unparenthesized()
+        else {
+            return None;
+        };
+        let class = match self.names.static_property_class(access) {
+            Some(class) => self.names.get(&class.name),
+            None => *receiver_classes(self.artifacts.get_expression_type(object)?)?.first()?,
+        };
+
+        Some((class, [b"$", name.value].concat()))
     }
 
     /// Whether the property `property` of an object of `r#type` has hooks in a class the object can be. PHP gives no
@@ -547,11 +549,17 @@ pub(crate) fn class_value_classes(r#type: &TUnion) -> Option<Vec<&[u8]>> {
     (!classes.is_empty()).then_some(classes)
 }
 
-/// Whether `parameter` takes a collection's key: its type is a template parameter bounded by `array-key`.
-fn takes_key(parameter: &FunctionLikeParameterMetadata) -> bool {
-    parameter.type_metadata.as_ref().is_some_and(|r#type| {
-        matches!(r#type.type_union.types.as_ref(), [TAtomic::GenericParameter(template)] if template.constraint.is_array_key())
-    })
+/// The parameters of `function`, which the function or class `owner` names, when plain PHP declares it. PHP# declares
+/// what the `Sharp\` namespace holds, its collection stubs among them, though their files are plain PHP.
+fn plain_parameters<'function>(
+    owner: &[u8],
+    function: Option<&'function FunctionLikeMetadata>,
+) -> Option<&'function [FunctionLikeParameterMetadata]> {
+    let function = function?;
+    let sharp =
+        function.flags.is_sharp() || owner.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"sharp\\"));
+
+    (!sharp).then_some(function.parameters.as_slice())
 }
 
 /// The kind of member every class a receiver can be declares, which the checker requires to be one kind. Its details,
