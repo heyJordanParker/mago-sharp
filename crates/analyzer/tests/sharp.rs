@@ -8702,6 +8702,19 @@ fn a_plain_php_class_named_like_a_module_keeps_its_name() {
     }
 }
 
+/// Spec section 32: only its folder's `Module.sharp` declares a module, so the analyzer checks the laws of that module
+/// alone. A module in another file, which semantics refuses, adds no issue, and a module whose name a plain PHP class
+/// holds is a duplicate of it.
+#[test]
+fn only_the_module_of_module_sharp_is_analyzed_and_a_class_holding_its_name_makes_it_a_duplicate() {
+    let code = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a;\n}\n";
+    let class = ("app/Shop/Module.php", "<?php\n\nnamespace App\\Shop;\n\nfinal class Module\n{\n}\n");
+
+    assert_eq!(issues(("app/Shop/Module.sharp", code), &[]), ["5:24 invalid-return-statement"]);
+    assert_eq!(issues(("app/Shop/Checkout.sharp", code), &[]), Vec::<String>::new());
+    assert_eq!(messages(("app/Shop/Module.sharp", code), &[class]), ["Module `Module` is already defined elsewhere."]);
+}
+
 /// Outside `uses`, an effect's name is an ordinary class name, spec section 23: a plain PHP class or a PHP# class the
 /// file imports under it is that class, as a type, a `new`, an `is` and a static call, and so is a class a file
 /// declares under it.
@@ -10199,9 +10212,9 @@ fn a_php_caller_keeps_the_element_types_of_a_sharp_methods_collection_parameters
 }
 
 /// A call runs the member the declaring class wrote, so the declaring class decides whether the call is PHP#, whatever
-/// class the call goes through. A plain PHP parent's method keeps its docblock type through a PHP# subclass, a PHP#
-/// method keeps its PHP declaration through a plain PHP subclass, and `new` runs the constructor its declaring class
-/// wrote.
+/// class the call goes through. A plain PHP parent's method keeps its docblock type through a PHP# subclass, also for an
+/// argument spread from a list whose count is known, a PHP# method keeps its PHP declaration through a plain PHP
+/// subclass, and `new` runs the constructor its declaring class wrote.
 #[test]
 fn a_call_is_checked_by_the_class_that_declares_the_member_not_the_class_it_goes_through() {
     let store = (
@@ -10212,6 +10225,7 @@ fn a_call_is_checked_by_the_class_that_declares_the_member_not_the_class_it_goes
     let coin = ("src/App/Coin.php", "<?php\n\nnamespace App;\n\nclass Coin extends Money\n{\n}\n");
     let through_store = "<?php\n\nnamespace App;\n\nuse Lib\\Store;\n\nfinal class Check\n{\n    public function run(Store $store): int\n    {\n        return $store->keep(['a' => 'b']);\n    }\n}\n";
     let through_rows = "<?php\n\nnamespace App;\n\nuse Demo\\Rows;\n\nfinal class Check\n{\n    public function run(Rows $rows): int\n    {\n        return $rows->keep(['a' => 'b']);\n    }\n}\n";
+    let spread_through_rows = "<?php\n\nnamespace App;\n\nuse Demo\\Rows;\n\nfinal class Check\n{\n    /** @param list<array<string, string>> $batches */\n    public function run(Rows $rows, array $batches): int\n    {\n        if (count($batches) === 1) {\n            return $rows->keep(...$batches);\n        }\n\n        return 0;\n    }\n}\n";
     let through_money = "<?php\n\nnamespace App;\n\nfinal class Check\n{\n    public function run(Money $money): bool\n    {\n        return Money::op_Equality($money, null);\n    }\n}\n";
     let through_coin = "<?php\n\nnamespace App;\n\nfinal class Check\n{\n    public function run(Coin $coin): bool\n    {\n        return Coin::op_Equality($coin, null);\n    }\n}\n";
     let shelf = (
@@ -10229,6 +10243,12 @@ fn a_call_is_checked_by_the_class_that_declares_the_member_not_the_class_it_goes
         messages(("src/App/Check.php", through_rows), &[store, rows]),
         [
             "Invalid argument type for argument #1 of `Lib\\Store::keep`: expected `list<int>`, but found `array{'a': string('b')}`."
+        ]
+    );
+    assert_eq!(
+        messages(("src/App/Check.php", spread_through_rows), &[store, rows]),
+        [
+            "Invalid argument type for argument #1 of `Lib\\Store::keep`: expected `list<int>`, but found `array<string, string>`."
         ]
     );
     assert_eq!(issues(("src/App/Check.php", through_money), &[MONEY_OPERATORS, coin]), Vec::<String>::new());
