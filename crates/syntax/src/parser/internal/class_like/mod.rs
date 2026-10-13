@@ -46,6 +46,8 @@ where
             return Ok(Statement::Event(self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?));
         }
 
+        self.read_php_type_declaration()?;
+
         if self.dialect.is_sharp() {
             match self.stream.peek_kind(0)? {
                 Some(T!["interface"]) => {

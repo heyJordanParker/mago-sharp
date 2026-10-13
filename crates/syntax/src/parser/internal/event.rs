@@ -15,12 +15,13 @@ where
 {
     /// Whether a PHP# event starts here: `event`, a name and `(`. The name may be a reserved word, as a class's may, and
     /// the checks refuse it there. Everywhere else `event` is a name, such as a local `event`, a call `event(x)` or an
-    /// operand `event and (x)`.
+    /// operand `event is (Paid)`.
     pub(crate) fn is_at_event(&mut self) -> Result<bool, ParseError> {
         let starts_with_event =
             self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"event");
-        let names_an_event =
-            self.stream.peek_kind(1)?.is_some_and(|kind| kind.is_identifier_maybe_reserved() && !kind.is_infix());
+        let names_an_event = self.stream.lookahead(1)?.is_some_and(|token| {
+            token.kind.is_identifier_maybe_reserved() && !token.kind.is_infix() && !matches!(token.value, b"is" | b"as")
+        });
 
         Ok(self.dialect.is_sharp() && starts_with_event && names_an_event && self.stream.peek_kind(2)? == Some(T!["("]))
     }

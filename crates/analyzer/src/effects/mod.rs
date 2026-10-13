@@ -19,6 +19,7 @@ use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
+use mago_word::word;
 
 use crate::code::IssueCode;
 use crate::graph::strongly_connected_parts;
@@ -37,6 +38,9 @@ pub(crate) enum Effect {
     /// an empty member for a constructor. A call of a plain PHP property holding a function has none, because an
     /// `extern` declares a class's members, not the code a property holds.
     Unknown(Option<(Word, Word)>),
+    /// An `emit`, spec section 15, which has the effect `Sharp\Events` whatever its listeners do. Its cause is the
+    /// event's class and an empty member.
+    Emit,
 }
 
 /// The state a body changes, named by the root of the place it writes. The same roots name the values a call passes.
@@ -145,12 +149,18 @@ impl Impurity {
                 format!("calls `{cause}`, which has the effect `{}`", class_name(effect))
             }
             (None, Some(Effect::Unknown(_))) => format!("calls `{cause}`, which has no `extern` declaration"),
+            (None, Some(Effect::Emit)) => {
+                format!("emits `{cause}`, which has the effect `{}`", class_name(events()))
+            }
             (None, None) => format!("changes `{cause}`"),
             (Some(body), Some(Effect::Foreign(effect))) => {
                 format!("reaches `{body}`, which calls `{cause}` with the effect `{}`", class_name(effect))
             }
             (Some(body), Some(Effect::Unknown(_))) => {
                 format!("reaches `{body}`, which calls `{cause}` with no `extern` declaration")
+            }
+            (Some(body), Some(Effect::Emit)) => {
+                format!("reaches `{body}`, which emits `{cause}` with the effect `{}`", class_name(events()))
             }
             (Some(body), None) => format!("reaches `{body}`, which changes `{cause}`"),
         }
@@ -418,14 +428,21 @@ impl Effects {
     }
 }
 
-/// Whether `allowed` does not list `effect`: a foreign effect it does not name, or an unknown one.
+/// Whether `allowed` does not list `effect`: a foreign effect it does not name, an unknown one, or an `emit` when it
+/// does not name `Sharp\Events`.
 fn is_outside(effect: Effect, allowed: &[Word]) -> bool {
-    match effect {
-        Effect::Foreign(effect) => {
-            !allowed.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes()))
-        }
-        Effect::Unknown(_) => true,
-    }
+    let named = match effect {
+        Effect::Foreign(effect) => effect,
+        Effect::Emit => events(),
+        Effect::Unknown(_) => return true,
+    };
+
+    !allowed.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(named.as_bytes()))
+}
+
+/// The effect an `emit` has, `Sharp\Events`.
+fn events() -> Word {
+    word(b"Sharp\\Events")
 }
 
 /// A body's own effects and changes, in source order, an effect before a change at the same place.

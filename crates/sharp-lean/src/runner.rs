@@ -330,23 +330,28 @@ fn decode_broken(payload: &[u8], modules: usize, files: &[(&str, &Facts)]) -> Re
 }
 
 #[cfg(test)]
+#[allow(clippy::panic_in_result_fn)]
 mod tests {
+    use mago_extension::PayloadError;
+
     use super::*;
 
     /// A refusal this Mago does not know, from a runner of another build, is an error of the Lean step, never a rule
     /// that ran and broke nothing.
     #[test]
-    fn an_answer_with_an_unknown_refusal_is_an_error() {
+    fn an_answer_with_an_unknown_refusal_is_an_error() -> Result<(), PayloadError> {
         let mut writer = header(BROKEN_RESPONSE);
-        writer.write_length(1).unwrap();
+        writer.write_length(1)?;
         writer.write_u32(0);
-        writer.write_string("App.Shared.Module.neverReachesTenant").unwrap();
+        writer.write_string("App.Shared.Module.neverReachesTenant")?;
         writer.write_u8(7);
-        writer.write_string("App.Shared.Ledgr").unwrap();
+        writer.write_string("App.Shared.Ledgr")?;
 
         assert_eq!(
-            decode_broken(&writer.finish(), 1, &[]).unwrap_err(),
-            "the runner answered with the unknown rule refusal 7"
+            decode_broken(&writer.finish(), 1, &[]).err().as_deref(),
+            Some("the runner answered with the unknown rule refusal 7")
         );
+
+        Ok(())
     }
 }

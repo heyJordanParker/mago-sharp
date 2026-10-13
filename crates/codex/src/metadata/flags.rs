@@ -63,6 +63,8 @@ impl MetadataFlags {
     /// A PHP# property declared with `init`, spec section 6.1: it is set only while the object is created, and runs as
     /// PHP's `set` hook or set visibility.
     pub const INIT: MetadataFlags = MetadataFlags(1 << 47);
+    /// A PHP# event, spec section 15: the final class an `event` declaration runs as.
+    pub const EVENT: MetadataFlags = MetadataFlags(1 << 48);
 }
 
 impl MetadataFlags {
@@ -145,6 +147,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_init(self) -> bool {
         self.contains(Self::INIT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_event(self) -> bool {
+        self.contains(Self::EVENT)
     }
 
     #[inline]

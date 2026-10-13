@@ -30,6 +30,7 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::ConstructorInitializer;
+use mago_syntax::cst::Emit;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForOf;
 use mago_syntax::cst::FunctionLikeParameterList;
@@ -808,6 +809,16 @@ where
         }
     }
 
+    /// Records an `emit`, which has the effect `Sharp\Events` for each class its event may be.
+    fn emit(&mut self, emit: &'ast Emit<'arena>) {
+        let span = emit.span();
+        for class in self.object_classes(emit.value) {
+            let class =
+                self.codebase().get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+            self.summary.effects.push((Effect::Emit, span, (class, empty_word())));
+        }
+    }
+
     /// Records a call into plain PHP, of the callee `cause`, with the effects `declaration` gives it.
     fn plain_php(&mut self, declaration: Option<&ExternMetadata>, span: Span, cause: (Word, Word)) {
         for effect in plain_php_effects(declaration, cause) {
@@ -985,6 +996,10 @@ where
         recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
     ) {
         recorder.instantiate(instantiation);
+    }
+
+    fn walk_in_emit(&self, emit: &'ast Emit<'arena>, recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>) {
+        recorder.emit(emit);
     }
 
     fn walk_in_constructor_initializer(

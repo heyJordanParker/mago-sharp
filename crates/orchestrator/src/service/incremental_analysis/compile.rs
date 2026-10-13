@@ -68,7 +68,61 @@ pub enum Compilation {
 /// A `.sharp` file lowered and translated to Lean, or the errors that refused it.
 type Lowered = Result<(Unit, Vec<(Vec<u8>, InlineForm)>, Translation), IssueCollection>;
 
+/// A PHP# listener, spec section 15: a method with an `on` clause, which the engine runs when an event it lists is
+/// raised.
+#[derive(Debug)]
+pub struct Listener {
+    /// The file that declares it.
+    pub file_id: FileId,
+    /// The fully qualified name of its class.
+    pub class: Word,
+    pub method: Word,
+    /// The fully qualified names its `on` clause lists, in their written order.
+    pub events: Vec<Word>,
+    /// Whether it takes the event as its parameter.
+    pub takes_event: bool,
+}
+
 impl IncrementalAnalysisService {
+    /// Every PHP# listener of the last analysis, in the order the engine runs them: by its class's full name, then by
+    /// its place in its class.
+    #[must_use]
+    pub fn listeners(&self) -> Vec<Listener> {
+        let mut listeners: Vec<(Word, u32, Listener)> = self
+            .codebase
+            .function_likes
+            .iter()
+            .filter(|(_, method)| !method.listens.is_empty())
+            .filter_map(|((class, _), method)| {
+                let class = self.codebase.class_likes.get(class)?;
+                let events = method
+                    .listens
+                    .iter()
+                    .map(|event| {
+                        self.codebase.get_class_like(event.as_bytes()).map_or(*event, |event| event.original_name)
+                    })
+                    .collect();
+
+                Some((
+                    class.name,
+                    method.span.start.offset,
+                    Listener {
+                        file_id: method.span.file_id,
+                        class: class.original_name,
+                        method: method.original_name,
+                        events,
+                        takes_event: !method.parameters.is_empty(),
+                    },
+                ))
+            })
+            .collect();
+        listeners.sort_unstable_by(|(a, a_offset, _), (b, b_offset, _)| {
+            a.as_bytes().cmp(b.as_bytes()).then(a_offset.cmp(b_offset))
+        });
+
+        listeners.into_iter().map(|(_, _, listener)| listener).collect()
+    }
+
     /// Compiles each `.sharp` file of the last analysis, in file name order.
     ///
     /// A file is accepted when the analysis reported no error-level issue in it. The standard library's files, those

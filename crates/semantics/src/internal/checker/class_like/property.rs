@@ -304,7 +304,8 @@ pub fn check_property(
             | Modifier::Override(_)
             | Modifier::Required(_)
             | Modifier::Extern(_)
-            | Modifier::Lazy(_) => {}
+            | Modifier::Lazy(_)
+            | Modifier::Internal(_) => {}
         }
     }
 
