@@ -8743,11 +8743,12 @@ fn a_header_passes_its_type_arguments_to_the_generic_base() {
 
 /// A class implements a generic interface once, as a header that names it twice is refused, so one reached again
 /// through a parent with other type arguments is one error naming each way it is reached. A generic parent passes its
-/// own type arguments on, and the same type arguments through two ways are one implementation.
+/// own type arguments on, the same type arguments through two ways are one implementation, and a subclass of a class
+/// refused for it is not refused again.
 #[test]
 fn a_generic_interface_reached_twice_with_other_type_arguments_is_one_error() {
     let feeder = "namespace Demo;\n\npublic interface Feeder<T>\n{\n    T next();\n}\n\npublic interface Named\n{\n}\n\npublic interface IntFeeder : Feeder<int>\n{\n}\n\npublic interface TextFeeder : Feeder<string>\n{\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Ints : Feeder<int>\n{\n    public int next() => 1;\n}\n\npublic class Strings : Ints, Named, Feeder<string>\n{\n}\n\npublic class Relay<T> : Feeder<T>\n{\n    public Relay(private T value) { }\n\n    public T next() => this.value;\n}\n\npublic class Words : Relay<string>, Feeder<int>\n{\n    public Words() : super(\"a\") { }\n}\n\npublic class Again : Ints, Feeder<int>\n{\n}\n\npublic class Thrice : Relay<bool>, IntFeeder, TextFeeder\n{\n    public Thrice() : super(true) { }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Ints : Feeder<int>\n{\n    public int next() => 1;\n}\n\npublic class Strings : Ints, Named, Feeder<string>\n{\n}\n\npublic class Relay<T> : Feeder<T>\n{\n    public Relay(private T value) { }\n\n    public T next() => this.value;\n}\n\npublic class Words : Relay<string>, Feeder<int>\n{\n    public Words() : super(\"a\") { }\n}\n\npublic class Again : Ints, Feeder<int>\n{\n}\n\npublic class Thrice : Relay<bool>, IntFeeder, TextFeeder\n{\n    public Thrice() : super(true) { }\n}\n\npublic class Twice : Ints, IntFeeder, Feeder<string>\n{\n}\n\npublic class Child : Strings\n{\n}\n";
 
     assert_eq!(
         explained(("src/Demo/Feeds.sharp", sharp), &[("src/Demo/Feeder.sharp", feeder)]),
@@ -8755,6 +8756,7 @@ fn a_generic_interface_reached_twice_with_other_type_arguments_is_one_error() {
             "8:14 invalid-implement `Strings` implements `Feeder` twice: `Feeder<int>` through `Ints`, and `Feeder<string>`. Implement `Feeder` once.",
             "19:14 invalid-implement `Words` implements `Feeder` twice: `Feeder<string>` through `Relay`, and `Feeder<int>`. Implement `Feeder` once.",
             "28:14 invalid-implement `Thrice` implements `Feeder` 3 times: `Feeder<bool>` through `Relay`, `Feeder<int>` through `IntFeeder`, and `Feeder<string>` through `TextFeeder`. Implement `Feeder` once.",
+            "33:14 invalid-implement `Twice` implements `Feeder` twice: `Feeder<int>` through `Ints`, and `Feeder<string>`. Implement `Feeder` once.",
         ]
     );
 }
