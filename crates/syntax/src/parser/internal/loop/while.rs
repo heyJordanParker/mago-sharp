@@ -34,7 +34,7 @@ where
             statements: {
                 let mut statements = self.new_vec();
                 loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["endwhile"])) {
+                    if self.is_at_php_keyword(T!["endwhile"])? {
                         break;
                     }
 

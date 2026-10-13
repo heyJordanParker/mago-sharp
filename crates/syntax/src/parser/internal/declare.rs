@@ -66,7 +66,7 @@ where
             statements: {
                 let mut statements = self.new_vec();
                 loop {
-                    if let Some(T!["enddeclare"]) = self.stream.peek_kind(0)? {
+                    if self.is_at_php_keyword(T!["enddeclare"])? {
                         break;
                     }
 

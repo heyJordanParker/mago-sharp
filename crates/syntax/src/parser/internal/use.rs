@@ -47,6 +47,7 @@ where
     }
 
     pub(crate) fn parse_use_items(&mut self) -> Result<UseItems<'arena>, ParseError> {
+        self.read_php_construct()?;
         let next = self.stream.peek_kind(0)?;
 
         Ok(match next {
@@ -163,6 +164,7 @@ where
     }
 
     pub(crate) fn parse_optional_use_type(&mut self) -> Result<Option<UseType<'arena>>, ParseError> {
+        self.read_php_construct()?;
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["function"]) => Some(UseType::Function(self.expect_any_keyword()?)),
             Some(T!["const"]) => Some(UseType::Const(self.expect_any_keyword()?)),

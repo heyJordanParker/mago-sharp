@@ -36,6 +36,7 @@ where
     }
 
     fn parse_statement_inner(&mut self) -> Result<Statement<'arena>, ParseError> {
+        self.read_php_statement()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         // It returns here, not from an arm of the match below: an unoptimized build gives each arm's result its own stack
         // slot, and this frame sits between two `ensure_sufficient_stack` calls, so it must stay inside their red zone.
@@ -72,12 +73,13 @@ where
                 Statement::Event(self.parse_event_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?)
             }
             T![Identifier] if self.is_at_emit()? => Statement::Emit(self.parse_emit()?),
-            T!["const" | Identifier | "list" | "function" | "("] if self.is_at_local_declaration()? => {
+            T!["const" | Identifier | "("] if self.is_at_local_declaration()? => {
                 Statement::LocalDeclaration(self.parse_local_declaration()?)
             }
             T!["return"] => Statement::Return(self.parse_return()?),
             T!["#["] | T!["["] if token.kind == T!["#["] || self.is_at_sharp_attribute_list() => {
                 let attributes = self.parse_attribute_list_sequence()?;
+                self.read_php_construct()?;
                 let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
                 let maybe_after = self.stream.peek_kind(1)?;
 

@@ -76,9 +76,16 @@ where
             hint: if untyped.is_some() { None } else { hint },
             ampersand: if self.stream.is_at(T!["&"])? { Some(self.stream.eat_span(T!["&"])?) } else { None },
             ellipsis: if self.stream.is_at(T!["..."])? { Some(self.stream.eat_span(T!["..."])?) } else { None },
+            // A keyword PHP# reserves reads as the name too, so the checker refuses it with a message that names it.
             variable: match untyped {
                 Some(variable) => variable,
-                None if self.dialect.is_sharp() && self.stream.is_at(T![Identifier])? => self.parse_bare_variable()?,
+                None if self.dialect.is_sharp()
+                    && self.stream.peek_kind(0)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) =>
+                {
+                    let name = self.parse_local_identifier()?;
+
+                    DirectVariable { span: name.span, name: name.value }
+                }
                 None => self.parse_direct_variable()?,
             },
             default_value: self.parse_optional_function_like_parameter_default_value()?,
