@@ -26,6 +26,7 @@ use mago_codex::reference::SymbolReferences;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
 use mago_names::resolver::NameResolver;
+use mago_names::resolver::NamespaceClasses;
 use mago_syntax::parser::parse_file_with_settings;
 use mago_syntax::settings::ParserSettings;
 use mago_word::Word;
@@ -33,7 +34,8 @@ use mago_word::Word;
 use crate::error::OrchestratorError;
 
 /// Installs the returns marked methods take from their bodies, analyzing the host `files`
-/// that declare them against the populated `codebase`.
+/// that declare them against the populated `codebase`, with their names resolved against
+/// `namespace_classes`.
 ///
 /// # Errors
 ///
@@ -44,6 +46,7 @@ pub(crate) fn resolve_body_returns(
     plugin_registry: &PluginRegistry,
     settings: &Settings,
     parser_settings: ParserSettings,
+    namespace_classes: &NamespaceClasses,
     session: Option<&ExternalAnalysisSession>,
 ) -> Result<(), OrchestratorError> {
     let marked = codebase
@@ -68,7 +71,7 @@ pub(crate) fn resolve_body_returns(
             .map_init(LocalArena::new, |arena, file| -> Result<_, OrchestratorError> {
                 let returns = {
                     let program = parse_file_with_settings(arena, file, parser_settings);
-                    let resolved_names = NameResolver::new(arena).resolve(program);
+                    let resolved_names = NameResolver::new(arena).resolve_in(program, namespace_classes);
                     let mut analyzer =
                         Analyzer::new(arena, file, &resolved_names, populated, plugin_registry, settings.clone());
                     if let Some(session) = session {

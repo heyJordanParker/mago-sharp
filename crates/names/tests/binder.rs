@@ -12,6 +12,7 @@ use mago_names::binding::Local;
 use mago_names::binding::LocalKind;
 use mago_names::binding::php_variable_name;
 use mago_names::resolver::NameResolver;
+use mago_names::resolver::NamespaceClasses;
 use mago_span::Position;
 use mago_span::Span;
 use mago_syntax::cst::Node;
@@ -584,6 +585,65 @@ fn a_collection_type_keeps_its_written_name_unresolved() {
 
     for needle in ["List<", "Map<"] {
         assert!(!names.contains(&Position::new(offset(CODE, needle, 0))), "`{needle}` has a resolved name");
+    }
+}
+
+/// Spec section 23: a class-like of the file's namespace wins over the one `Sharp` imports by default, as a class of
+/// the same package does in Kotlin, C# and Java. A default name its namespace holds no class-like of stays the default
+/// one, and the file records each class-like of its namespace that would win, held or not. PHP reserves `Int` as a
+/// class name, so no `App\Int` is recorded.
+#[test]
+fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
+    const CODE: &str = "namespace App;\n\nclass Shape\n{\n    private Cache? cache = null;\n\n    public bool run(Any value, Environment environment)\n    {\n        const made = new Cache();\n        Cache.clear();\n        Int.parse(\"1\");\n        return value is Cache;\n    }\n}\n";
+    let namespace_classes = NamespaceClasses::new(["App\\Cache", "Shop\\Environment", "App\\Order"]);
+    let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
+    let arena = LocalArena::new();
+    let program = parse_file(&arena, &file);
+    let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes);
+
+    for (needle, nth, class) in [
+        ("Cache?", 0, "App\\Cache"),
+        ("Cache()", 0, "App\\Cache"),
+        ("Cache.", 0, "App\\Cache"),
+        ("Cache;", 0, "App\\Cache"),
+        ("Environment environment", 0, "Sharp\\Environment"),
+    ] {
+        assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, nth)), class, "`{needle}` #{nth}");
+    }
+    let mut recorded: Vec<_> = names.namespace_classes().map(String::from_utf8_lossy).collect();
+    recorded.sort_unstable();
+    assert_eq!(recorded, ["App\\Cache", "App\\Environment"]);
+
+    let alone = NameResolver::new(&arena).resolve(program);
+    assert_eq!(resolved(&alone, CODE, "Cache?", 0), b"Sharp\\Cache");
+}
+
+/// A help that names a standard class reads whether the file's bare short name names another class-like: one of its
+/// namespace, one it imports, or one it declares. `Sharp.Replaces` is the class-like of its own namespace, so a file in
+/// `Sharp` records no class-like of its namespace for it.
+#[test]
+fn a_file_records_each_default_class_its_short_name_no_longer_names() {
+    let namespace_classes = NamespaceClasses::new(["App\\Position", "Sharp\\Replaces"]);
+
+    for (code, shadowed) in [
+        ("namespace App;\n\nclass Paths\n{\n}\n", vec!["Sharp\\Position"]),
+        ("namespace App;\n\nimport Lib.Clock;\n\nclass Paths\n{\n}\n", vec!["Sharp\\Clock", "Sharp\\Position"]),
+        ("namespace Shop;\n\nclass Cache\n{\n}\n", vec!["Sharp\\Cache"]),
+        ("namespace Shop;\n\nclass Paths\n{\n}\n", vec![]),
+        ("namespace Sharp;\n\nclass Paths\n{\n    [Replaces(\"x\")]\n    public void run() { }\n}\n", vec![]),
+    ] {
+        let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(code.as_bytes()));
+        let arena = LocalArena::new();
+        let names = NameResolver::new(&arena).resolve_in(parse_file(&arena, &file), &namespace_classes);
+
+        let mut recorded: Vec<&str> = mago_names::STANDARD_EFFECTS
+            .into_iter()
+            .chain(["Sharp\\Position", "Sharp\\Replaces"])
+            .filter(|class| names.shadows_default_class(class.as_bytes()))
+            .collect();
+        recorded.sort_unstable();
+        assert_eq!(recorded, shadowed, "{code}");
+        assert_eq!(names.namespace_classes().count(), 0, "{code}");
     }
 }
 

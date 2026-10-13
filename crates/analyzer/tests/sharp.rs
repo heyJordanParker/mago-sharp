@@ -35,6 +35,7 @@ use mago_database::file::FileId;
 use mago_names::CHANGING_COLLECTION_METHODS;
 use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::resolver::NameResolver;
+use mago_names::resolver::NamespaceClasses;
 use mago_prelude::Prelude;
 use mago_reporting::Issue;
 use mago_reporting::Level;
@@ -122,13 +123,26 @@ fn analyze_with_artifacts(
         .collect();
 
     let arena = LocalArena::new();
-    let mut programs = Vec::new();
+    let mut parsed = Vec::new();
     for (name, file_id) in &file_ids {
         let file = database.get_ref(file_id).expect("file was just added");
         let program = parse_file(&arena, file);
-        assert!(programs.is_empty() || !program.has_errors(), "{name} did not parse: {:?}", program.errors);
+        assert!(parsed.is_empty() || !program.has_errors(), "{name} did not parse: {:?}", program.errors);
+        parsed.push((file, program));
+    }
 
+    // A class-like's name never depends on how names resolve, so a first scan finds each class-like that wins over a
+    // default class-like in its namespace, as `mago analyze` finds them.
+    let namespace_classes = NamespaceClasses::new(parsed.iter().flat_map(|(file, program)| {
         let names = NameResolver::new(&arena).resolve(program);
+        scan_program(&arena, file, program, &names, settings.version)
+            .class_likes
+            .into_values()
+            .map(|class_like| class_like.original_name)
+    }));
+    let mut programs = Vec::new();
+    for (file, program) in parsed {
+        let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes);
         metadata.extend(scan_program(&arena, file, program, &names, settings.version));
         programs.push((file, program, names));
     }
@@ -8376,6 +8390,28 @@ fn an_effect_name_a_file_imports_or_declares_is_that_class() {
         assert_eq!(issues(("src/App/Shop/Store.sharp", store), &[sharp]), Vec::<String>::new(), "PHP# {name}");
         assert_eq!(issues(sharp, &[]), Vec::<String>::new(), "declared {name}");
     }
+}
+
+/// Spec section 23: a class of the file's own namespace wins over the class `Sharp` imports by default, as a class of
+/// the same package does in Kotlin, C# and Java, so another file of `App` names `App.Cache` with a bare `Cache` as a
+/// type, a `new`, an `is` and a static call. A default name its namespace declares no class of stays the `Sharp` one.
+#[test]
+fn a_class_of_the_files_namespace_wins_over_a_default_class() {
+    for name in sharp_effect_names() {
+        let shape = leak(format!(
+            "namespace App;\n\npublic class Shape\n{{\n    public {name}? keep({name}? kept) => kept;\n\n    public {name} make() => new {name}();\n\n    public bool holds(Any value) => value is {name};\n\n    public int size() => {name}.size();\n}}\n"
+        ));
+        let declared = (
+            leak(format!("app/App/{name}.sharp")),
+            leak(format!("namespace App;\n\npublic class {name}\n{{\n    public static int size() => 1;\n}}\n")),
+        );
+
+        assert_eq!(issues(("app/App/Shape.sharp", shape), &[declared]), Vec::<String>::new(), "{name}");
+    }
+
+    let here = "namespace App;\n\npublic class Here\n{\n    public string folder(Environment environment) => environment.currentDirectory;\n}\n";
+    let cache = ("app/App/Cache.sharp", "namespace App;\n\npublic class Cache\n{\n}\n");
+    assert_eq!(issues(("app/App/Here.sharp", here), &[cache]), Vec::<String>::new());
 }
 
 /// The names of the standard effects, short as a file writes them.

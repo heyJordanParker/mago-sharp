@@ -21,6 +21,7 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_names::resolver::NameResolver;
+use mago_names::short_name;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_reporting::Level;
@@ -65,8 +66,9 @@ pub enum Compilation {
     Refused(IssueCollection),
 }
 
-/// A `.sharp` file lowered and translated to Lean, or the errors that refused it.
-type Lowered = Result<(Unit, Vec<(Vec<u8>, InlineForm)>, Translation), IssueCollection>;
+/// A `.sharp` file lowered and translated to Lean, with each class-like of its namespace that would win over a default
+/// class-like it names, or the errors that refused it.
+type Lowered = Result<(Unit, Vec<(Vec<u8>, InlineForm)>, Translation, Vec<Word>), IssueCollection>;
 
 /// A PHP# listener, spec section 15: a method with an `on` clause, which the engine runs when an event it lists is
 /// raised.
@@ -184,11 +186,11 @@ impl IncrementalAnalysisService {
         let forms: InlineForms = lowered_library
             .iter()
             .filter_map(|lowered| lowered.as_ref().ok())
-            .flat_map(|(_, forms, _)| forms.iter().cloned())
+            .flat_map(|(_, forms, _, _)| forms.iter().cloned())
             .collect();
         let lowered_rest = self.lower_all(&rest, &forms, &errors, &reach, session.as_ref())?;
         let mut translations = Vec::new();
-        let mut lowered: HashMap<FileId, Result<Unit, IssueCollection>> = library
+        let mut lowered: HashMap<FileId, Result<(Unit, Vec<Word>), IssueCollection>> = library
             .iter()
             .chain(&rest)
             .map(|file| file.id)
@@ -196,9 +198,9 @@ impl IncrementalAnalysisService {
             .map(|(file_id, lowered)| {
                 (
                     file_id,
-                    lowered.map(|(unit, _, translation)| {
+                    lowered.map(|(unit, _, translation, namespace_classes)| {
                         translations.push(translation);
-                        unit
+                        (unit, namespace_classes)
                     }),
                 )
             })
@@ -236,7 +238,9 @@ impl IncrementalAnalysisService {
         let inputs_start = std::time::Instant::now();
         let dependencies = Dependencies::new(self);
         let mut input_paths: HashMap<FileId, Vec<Vec<u8>>> = HashMap::default();
-        for file in files.iter().filter(|file| lowered.get(&file.id).is_some_and(Result::is_ok)) {
+        for (file, namespace_classes) in
+            files.iter().filter_map(|file| Some((file, &lowered.get(&file.id)?.as_ref().ok()?.1)))
+        {
             // A method whose return comes from its body can return another such method's return, so the body files
             // close over the body files of each file they hold.
             let mut body_files: HashSet<FileId> = HashSet::default();
@@ -262,6 +266,14 @@ impl IncrementalAnalysisService {
             } else {
                 Vec::new()
             };
+            // Spec section 27 puts a class-like of the file's namespace in the file's folder, under its own name, so the
+            // files that would declare one are inputs, stamped absent while the namespace lacks it.
+            let folder = &file.name[..file.name.iter().rposition(|byte| *byte == b'/').map_or(0, |slash| slash + 1)];
+            let namespace_class_files = namespace_classes.iter().filter(|_| is_source(file)).flat_map(|class| {
+                let class = short_name(class);
+
+                [".sharp", ".php"].map(|extension| [folder, class.as_bytes(), extension.as_bytes()].concat())
+            });
             let mut paths: Vec<Vec<u8>> = sources
                 .into_iter()
                 .filter_map(|source| self.database.get(&source).ok())
@@ -269,6 +281,7 @@ impl IncrementalAnalysisService {
                 .map(|source| source.name.to_vec())
                 .chain(proof)
                 .chain(lean)
+                .chain(namespace_class_files)
                 .chain(std::iter::once(COMPOSER_LOCK.to_vec()))
                 .collect();
             paths.sort_unstable();
@@ -293,7 +306,7 @@ impl IncrementalAnalysisService {
             };
             let compilation = match (lowered, refused.remove(&file.id)) {
                 (Ok(_), Some(issues)) | (Err(issues), _) => Compilation::Refused(issues),
-                (Ok(unit), None) => {
+                (Ok((unit, _)), None) => {
                     let (mut reads, _) = reads.remove(&file.id).unwrap_or_default();
                     reads.inlined = unit.inlined().to_vec();
                     let key = key(source_hash(&file.contents), &reads);
@@ -447,13 +460,16 @@ impl IncrementalAnalysisService {
                     errors.get(&file.id).map(|issues| issues.iter().cloned().collect()).unwrap_or_default();
                 let arena = LocalArena::new();
                 let program = parse_file_with_settings(&arena, file, self.parser_settings);
-                let names = NameResolver::new(&arena).resolve(program);
+                let names = NameResolver::new(&arena).resolve_in(program, &self.namespace_classes);
+                let namespace_classes = names.namespace_classes().map(mago_word::word).collect();
                 let artifacts = self
                     .file_analyzer(&arena, file, &names, session)
                     .analyze_with_artifacts(program, &mut AnalysisResult::new(SymbolReferences::new()))?;
 
                 Ok(match check(file, program, names, &artifacts, &self.codebase, forms, &issues) {
-                    Ok(checked) => Ok((lower(&checked), inline_forms(&checked), translate(&checked, reach))),
+                    Ok(checked) => {
+                        Ok((lower(&checked), inline_forms(&checked), translate(&checked, reach), namespace_classes))
+                    }
                     Err(Refusal::Parse(errors)) => Err(errors.iter().map(Issue::from).collect()),
                     Err(Refusal::Compile(errors)) => Err(IssueCollection::from(errors)),
                 })
@@ -1745,6 +1761,156 @@ mod tests {
                 assert_eq!(named_like_a_namespace(&warm), expected, "{row}");
                 assert_eq!(outcomes(&warm_compiled), outcomes(&clean_compiled), "{row}");
             }
+        }
+    }
+
+    const SHAPE: &str =
+        "namespace App;\n\npublic class Shape\n{\n    public int size(Cache cache) => Cache.size();\n}\n";
+    const CACHE: &str = "namespace App;\n\npublic class Cache\n{\n    public static int size() => 1;\n}\n";
+
+    /// Spec section 23: a class of the file's namespace wins over the class `Sharp` imports by default, so the unchanged
+    /// `Shape`, whose bare `Cache` meant the missing `Sharp.Cache`, compiles once `app/App/Cache.sharp` declares
+    /// `App.Cache`, and is refused again once it is removed, in a one-off compile and under `mago analyze --watch`. An
+    /// edit to `Shape` itself keeps its bare `Cache` naming `App.Cache`.
+    #[test]
+    fn a_compile_after_the_namespace_gains_or_loses_a_class_named_like_a_default_class_matches_a_clean_compile() {
+        let alone = vec![("app/App/Shape.sharp", SHAPE.to_string())];
+        let beside = vec![("app/App/Shape.sharp", SHAPE.to_string()), ("app/App/Cache.sharp", CACHE.to_string())];
+        let edited_shape = SHAPE.replace(
+            "Cache.size();\n",
+            "Cache.size();\n\n    public int twice(Cache cache) => this.size(cache) * 2;\n",
+        );
+        let shape_edited = vec![("app/App/Shape.sharp", edited_shape), ("app/App/Cache.sharp", CACHE.to_string())];
+
+        for diff in [false, true] {
+            for (name, before, after, accepted) in [
+                ("Cache added", &alone, &beside, true),
+                ("Cache removed", &beside, &alone, false),
+                ("Shape edited", &beside, &shape_edited, true),
+            ] {
+                let (base, edited) = (shop_project(before), shop_project(after));
+
+                let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
+                compile(&mut warm, empty_stamp);
+                warm.update_database(edited.read_only());
+                warm.analyze_incremental(None).expect("the warm path runs");
+                let warm_compiled = compile(&mut warm, empty_stamp);
+                let clean_compiled = compile(&mut analyzed(&edited), empty_stamp);
+
+                let row = format!("diff {diff}: {name}");
+                assert_eq!(outcomes(&clean_compiled)["app/App/Shape.sharp"].is_ok(), accepted, "{row}");
+                assert_eq!(outcomes(&warm_compiled), outcomes(&clean_compiled), "{row}");
+            }
+        }
+    }
+
+    /// An editor analyzes one file against the classes of its namespace too, so `Shape`'s bare `Cache` is `App.Cache`.
+    #[test]
+    fn one_file_analyzed_alone_names_the_class_of_its_namespace() {
+        let database = project(&[("app/App/Shape.sharp", SHAPE), ("app/App/Cache.sharp", CACHE)]);
+        let service = analyzed(&database);
+        let shape = FileId::new(b"app/App/Shape.sharp");
+
+        assert_eq!(messages(&service.analyze_file(shape)), Vec::<String>::new());
+        assert_eq!(
+            messages(&service.analyze_file_with_artifacts(shape).expect("the file exists").0),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Spec section 23: once `App.Position` and `App.Environment` take the short names, the help of each refused magic
+    /// constant and superglobal names the standard class through an aliased import, and the help's fix compiles.
+    #[test]
+    fn a_help_names_a_standard_class_its_namespace_shadows_through_an_aliased_import() {
+        let position =
+            "namespace App;\n\npublic class Position\n{\n    public Position(public string title { get; }) { }\n}\n";
+        let environment = "namespace App;\n\npublic class Environment\n{\n    public int level() => 1;\n}\n";
+        let paths = "namespace App;\n\npublic class Paths\n{\n    public string here() => __DIR__;\n\n    public string file() => __FILE__;\n\n    public int line() => __LINE__;\n\n    public string caller() => __FUNCTION__;\n\n    public string space() => __NAMESPACE__;\n\n    public string held() => __TRAIT__;\n\n    public string home() => $_SERVER[\"HOME\"];\n}\n";
+        let fixed = "namespace App;\n\nimport Sharp.Environment as SharpEnvironment;\nimport Sharp.Position as SharpPosition;\n\npublic class Fixed\n{\n    public string here() => SharpPosition.current().directory;\n\n    public string file() => SharpPosition.current().file;\n\n    public int line() => SharpPosition.current().line;\n\n    public string caller() => SharpPosition.current().function;\n\n    public string folder(SharpEnvironment environment) => environment.currentDirectory;\n\n    public string title(Position position) => position.title;\n\n    public int level(Environment environment) => environment.level();\n}\n";
+        let database = project(&[
+            ("app/App/Position.sharp", position),
+            ("app/App/Environment.sharp", environment),
+            ("app/App/Paths.sharp", paths),
+            ("app/App/Fixed.sharp", fixed),
+        ]);
+        let mut service = analyzed(&database);
+        let import = "after `import Sharp.Position as SharpPosition;`";
+
+        let issues = service.analyze_file(FileId::new(b"app/App/Paths.sharp"));
+        let removed: Vec<String> =
+            messages(&issues).into_iter().filter(|message| message.starts_with("PHP# has no")).collect();
+        assert_eq!(
+            removed,
+            [
+                format!("PHP# has no `__DIR__`: write `SharpPosition.current().directory` {import}."),
+                format!("PHP# has no `__FILE__`: write `SharpPosition.current().file` {import}."),
+                format!("PHP# has no `__FUNCTION__`: write `SharpPosition.current().function` {import}."),
+                format!("PHP# has no `__LINE__`: write `SharpPosition.current().line` {import}."),
+                format!(
+                    "PHP# has no `__NAMESPACE__`: write `SharpPosition.current().function` {import}, which starts with the namespace."
+                ),
+                format!(
+                    "PHP# has no `__TRAIT__`: `SharpPosition.current()` {import} gives the file, directory, line, column and function."
+                ),
+                "PHP# has no superglobals; take a Request".to_owned(),
+            ]
+        );
+        let superglobal = issues.iter().find(|issue| issue.message.starts_with("PHP# has no superglobals"));
+        assert_eq!(
+            superglobal.expect("the superglobal is refused").notes,
+            [
+                "Request data arrives as an object, such as a framework's `Request`, and the process environment as `SharpEnvironment` after `import Sharp.Environment as SharpEnvironment;`."
+            ]
+        );
+
+        let compiled = compile(&mut service, empty_stamp);
+        let fixed = &outcomes(&compiled)["app/App/Fixed.sharp"];
+        assert!(fixed.is_ok(), "the help's fix compiles: {fixed:?}");
+    }
+
+    /// Only a class named like a default class changes what a bare name means, so adding another class to `App`
+    /// analyzes only its own file under `mago analyze --watch`.
+    #[test]
+    fn a_class_named_like_no_default_class_leaves_the_other_files_of_its_namespace_unanalyzed() {
+        let base = project(&[("app/App/Shape.sharp", SHAPE)]);
+        let edited = project(&[("app/App/Shape.sharp", SHAPE), ("app/App/Order.sharp", ORDER)]);
+
+        let mut warm = analyzed(&base);
+        warm.update_database(edited.read_only());
+        warm.analyze_incremental(None).expect("the warm path runs");
+
+        assert_eq!(warm.analyzed_files, HashSet::from_iter([FileId::new(b"app/App/Order.sharp")]));
+    }
+
+    /// A file whose bare `Environment` means `Sharp.Environment` lists the files that would declare `App.Environment`
+    /// in its folder as inputs, stamped absent, so adding one makes its compiled file stale. A package file leaves them
+    /// to `composer.lock`, as the rest of its package.
+    #[test]
+    fn a_default_class_name_lists_the_files_its_namespace_would_declare_it_in_as_absent_inputs() {
+        let here = "namespace App;\n\npublic class Here\n{\n    public string folder(Environment environment) => environment.currentDirectory;\n}\n";
+        let packaged = "vendor/acme/shapes/src/Here.sharp";
+        let database =
+            project(&[("app/App/Here.sharp", here), (packaged, &here.replace("namespace App;", "namespace Acme;"))]);
+
+        let compiled = compile(&mut analyzed(&database), database_stamp(&database));
+
+        assert_eq!(input_paths(accepted(&compiled, packaged)), ["composer.lock", packaged]);
+
+        let inputs = inputs(accepted(&compiled, "app/App/Here.sharp"));
+        assert_eq!(
+            inputs.iter().map(|input| String::from_utf8_lossy(&input.path)).collect::<Vec<_>>(),
+            [
+                "Module.lean",
+                "app/App/Environment.php",
+                "app/App/Environment.sharp",
+                "app/App/Here.sharp",
+                "app/App/Module.lean",
+                "app/Module.lean",
+                "composer.lock"
+            ]
+        );
+        for input in &inputs[1..3] {
+            assert_eq!((input.size, input.mtime_ns, input.hash), (0, 0, [0; 16]), "{input:?} is stamped absent");
         }
     }
 }
