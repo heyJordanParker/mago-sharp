@@ -542,6 +542,27 @@ fn an_effect_name_binds_as_a_class_name() {
     assert_eq!(resolved(&names, CODE, "Payments;", 1), b"App\\Effects\\Payments");
 }
 
+/// Spec section 29: a standard effect's name in a `uses` is that effect, though the file imports or declares a class
+/// under the name, and outside `uses` the name is that class, spec section 23.
+#[test]
+fn a_standard_effect_name_in_uses_is_the_effect_where_a_class_has_its_name() {
+    const CODE: &str = "namespace App.Stubs;\n\nimport Lib.Http;\n\nextern Http.post uses Http, Clock;\n\nclass Clock\n{\n    private Function<Http(Clock) uses Http, Clock>? send = null;\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    for (needle, nth, class) in [
+        ("Http.post", 0, "Lib\\Http"),
+        ("Http,", 0, "Sharp\\Http"),
+        ("Clock;", 0, "Sharp\\Clock"),
+        ("Http(", 0, "Lib\\Http"),
+        ("Clock)", 0, "App\\Stubs\\Clock"),
+        ("Http,", 1, "Sharp\\Http"),
+        ("Clock>", 0, "Sharp\\Clock"),
+    ] {
+        assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, nth)), class, "`{needle}` #{nth}");
+    }
+}
+
 /// An effect a function type lists binds as a class name, as an `extern`'s does.
 #[test]
 fn an_effect_of_a_function_type_binds_as_a_class_name() {

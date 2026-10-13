@@ -293,11 +293,8 @@ impl<'arena> NameWalker<'arena> {
             return (fqn, imported);
         }
 
-        if let Some(effect) = STANDARD_EFFECTS
-            .iter()
-            .find(|effect| effect.strip_prefix("Sharp\\").is_some_and(|short| short.as_bytes() == name))
-        {
-            return (effect.as_bytes(), false);
+        if let Some(effect) = standard_effect(name) {
+            return (effect, false);
         }
 
         let class: &'static [u8] = match name {
@@ -312,6 +309,14 @@ impl<'arena> NameWalker<'arena> {
 
         (class, false)
     }
+}
+
+/// The full name of the standard effect a bare `name` writes, such as `Sharp\Http` for `Http`.
+fn standard_effect(name: &[u8]) -> Option<&'static [u8]> {
+    STANDARD_EFFECTS
+        .iter()
+        .find(|effect| effect.strip_prefix("Sharp\\").is_some_and(|short| short.as_bytes() == name))
+        .map(|effect| effect.as_bytes())
 }
 
 /// The variables a pattern declares.
@@ -533,9 +538,14 @@ where
         self.resolved_names.bind(target.span(), Binding::Class);
     }
 
+    /// A name in `uses` names an effect, spec section 29. A standard effect's name is that effect even where the file
+    /// imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
     fn walk_in_uses(&mut self, uses: &'ast Uses<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         for name in &uses.names {
-            let (fqn, imported) = self.resolve_class(context, name.value);
+            let (fqn, imported) = match standard_effect(name.value) {
+                Some(effect) => (effect, false),
+                None => self.resolve_class(context, name.value),
+            };
 
             self.resolved_names.insert_at(name.span, fqn, imported);
             self.resolved_names.bind(name.span, Binding::Class);
