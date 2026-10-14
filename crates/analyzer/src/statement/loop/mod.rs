@@ -1308,9 +1308,10 @@ where
         return statements;
     }
 
-    if let Some(loop_scope) = artifacts.get_loop_scope_mut() {
-        loop_scope.condition_never_finishes = true;
-    }
+    let Some(loop_scope) = artifacts.get_loop_scope_mut() else {
+        unreachable!("each pass sets the loop's scope before it reads the loop's body");
+    };
+    loop_scope.condition_never_finishes = true;
 
     &[]
 }

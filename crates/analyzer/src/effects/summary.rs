@@ -827,11 +827,11 @@ where
                 self.method_value(access, span, &Roots::new());
             }
 
-            if let Some(value_type) = self.artifacts.get_expression_type(value) {
-                let cause = (empty_word(), self.text(span));
-                for effect in declared_effects(value_type) {
-                    self.summary.effects.push((Effect::Foreign(effect), span, cause));
-                }
+            // A value the analysis gave no type passes no function type's effects.
+            let effects = self.artifacts.get_expression_type(value).map(declared_effects).unwrap_or_default();
+            let cause = (empty_word(), self.text(span));
+            for effect in effects {
+                self.summary.effects.push((Effect::Foreign(effect), span, cause));
             }
         }
     }

@@ -1865,21 +1865,40 @@ fn a_plain_php_constant_is_read_through_its_namespace() {
     assert_eq!(issues(("src/Demo/Layout.php", php), &others), Vec::<String>::new());
 }
 
-/// A `Name.member` read that reaches no constant is refused for what it names: `global.NOPE` names no constant,
-/// `global.strlen` and `Pdf.render` are functions the code calls, and `Nope` names no class and no namespace. The
-/// checker accepted each before, and the compile panicked on it.
+/// A `Name.member` read that reaches no constant is refused for what it names: `global.NOPE` and `Pdf.NOPE` name no
+/// constant, and the note names the namespace that lacks it. `global.strlen` and `Pdf.render` are functions the code
+/// calls, and `Nope` names no class and no namespace. The checker accepted each before, and the compile panicked on it.
 #[test]
 fn a_read_through_a_name_that_reaches_no_constant_is_refused() {
-    let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Reads\n{\n    public static Any? missing() => global.NOPE;\n    public static Any? length() => global.strlen;\n    public static Any? render() => Pdf.render;\n    public static Any? nope() => Nope.render;\n}\n";
+    let pdf = (
+        "src/Vendor/Pdf/functions.php",
+        "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n",
+    );
+    let sharp = (
+        "src/Demo/Reads.sharp",
+        "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Reads\n{\n    public static Any? missing() => global.NOPE;\n    public static Any? length() => global.strlen;\n    public static Any? render() => Pdf.render;\n    public static Any? nope() => Nope.render;\n    public static Any? dpi() => Pdf.NOPE;\n}\n",
+    );
 
     assert_eq!(
-        refusals(("src/Demo/Reads.sharp", sharp), &[("src/Vendor/Pdf/functions.php", pdf)]),
+        refusals(sharp, &[pdf]),
         [
             "7:37 non-existent-constant Undefined constant: `global.NOPE`. | Check `NOPE` for typos.",
             "8:36 non-existent-constant `global.strlen` is a plain PHP function, not a constant: call it, as in `global.strlen(…)`. | ",
             "9:36 non-existent-constant `Pdf.render` is a plain PHP function, not a constant: call it, as in `Pdf.render(…)`. | ",
             "10:34 non-existent-class-like `Nope` names no class, and no namespace this file imports. | Check the spelling of `Nope`, or import the class or the namespace whose member this reads.",
+            "11:33 non-existent-constant Undefined constant: `Pdf.NOPE`. | Check `NOPE` for typos.",
+        ]
+    );
+    let notes: Vec<Vec<String>> = analyze(&PLUGIN_REGISTRY, settings(), sharp, &[pdf])
+        .iter()
+        .filter(|issue| issue.message.starts_with("Undefined constant"))
+        .map(|issue| issue.notes.clone())
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            vec!["PHP's root namespace declares no constant `NOPE`.".to_owned()],
+            vec!["The namespace `Vendor.Pdf` declares no constant `NOPE`.".to_owned()],
         ]
     );
 }

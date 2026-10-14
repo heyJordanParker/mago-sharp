@@ -734,18 +734,13 @@ where
 }
 
 /// The plain PHP function `member` of the namespace `namespace`, as PHP# calls one: `Pdf.render(html)` after
-/// `import Vendor.Pdf;`, spec section 23. A namespace that is also a class's name holds the class's static methods
-/// instead.
+/// `import Vendor.Pdf;`, spec section 23. The caller reads a name that is also a class's as the class.
 #[must_use]
 pub(crate) fn namespace_function(
     codebase: &CodebaseMetadata,
     namespace: Word,
     member: Word,
 ) -> Option<&FunctionLikeMetadata> {
-    if codebase.get_class_like(namespace.as_bytes()).is_some() {
-        return None;
-    }
-
     codebase.get_function(&[namespace.as_bytes(), b"\\", member.as_bytes()].concat())
 }
 
