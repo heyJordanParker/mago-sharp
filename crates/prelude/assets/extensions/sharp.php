@@ -641,3 +641,11 @@ namespace Sharp\Internal;
  * @param \Closure(T): void $listener
  */
 function listen(string $event, \Closure $listener): \Sharp\Listening {}
+
+/**
+ * The listeners of `$event`, one function per listener that takes the event, as `emit` gives them to the dispatcher.
+ * The standard library's `Sharp\Psr\ListenerProvider` returns them to a PSR-14 dispatcher.
+ *
+ * @return list<\Closure(object): void>
+ */
+function listenersFor(object $event): array {}

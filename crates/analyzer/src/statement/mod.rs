@@ -80,6 +80,7 @@ use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_function_like_id_from_call;
 use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
+use crate::utils::names::display_function_like_identifier;
 use crate::utils::names::display_sharp_type;
 
 pub mod attributes;
@@ -202,6 +203,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Namespace(namespace) => {
                     match &namespace.name {
                         Some(name) => {
+                            report_standard_library_namespace(context, name);
                             context.scope = Arc::new(NamespaceScope::for_namespace(php_name(name)));
                         }
                         None => {
@@ -785,6 +787,33 @@ where
 }
 
 /// Checks statement expressions for unused results or lack of side effects.
+/// Refuses a PHP# file outside the standard library that declares `namespace Sharp` or a namespace under it. The name
+/// would reach the standard library's own classes and `Sharp.Internal` with no import, and only the analyzer knows the
+/// file's package: the engine compiles the library from `vendor/` knowing only the file.
+fn report_standard_library_namespace<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>)
+where
+    A: Arena,
+{
+    let namespace = php_name(name);
+    if !context.dialect.is_sharp()
+        || context.source_file.is_standard_library
+        || !namespace.get(..b"Sharp".len()).is_some_and(|root| root.eq_ignore_ascii_case(b"Sharp"))
+        || !matches!(namespace.get(b"Sharp".len()), None | Some(b'\\'))
+    {
+        return;
+    }
+
+    let written = String::from_utf8_lossy(&namespace).replace('\\', ".");
+    context.collector.report_with_code(
+        IssueCode::ReservedNameOutsideLibrary,
+        Issue::error(format!(
+            "`{written}` is a namespace of the standard library, and only the standard library declares code in it."
+        ))
+        .with_annotation(Annotation::primary(name.span()).with_message("Declared here."))
+        .with_help("Declare the file in a namespace of the app."),
+    );
+}
+
 fn detect_unused_statement_expressions<'ast, 'arena, A>(
     expression: &'ast Expression<'arena>,
     statement: &'ast Statement<'arena>,
@@ -793,14 +822,28 @@ fn detect_unused_statement_expressions<'ast, 'arena, A>(
 ) where
     A: Arena,
 {
-    if let Some((issue_kind, name)) = has_unused_must_use(expression, context, artifacts) {
-        context.collector.report_with_code(
-            issue_kind,
+    if let Some((issue_kind, identifier, no_discard)) = has_unused_must_use(expression, context, artifacts) {
+        let issue = if context.dialect.is_sharp() {
+            let name = display_function_like_identifier(context, &identifier);
+            let marker = if no_discard { "`[NoDiscard]`" } else { "`@must-use`" };
+
+            Issue::error(format!("The value `{name}` returns must be used."))
+                .with_annotation(Annotation::primary(statement.span()).with_message("Its value is dropped here."))
+                .with_note(format!("{marker} on `{name}` says the value it returns matters."))
+                .with_help("Keep the value in a local, pass it on, or return it.")
+        } else {
+            let name = match identifier {
+                FunctionLikeIdentifier::Function(name)
+                | FunctionLikeIdentifier::Closure(name)
+                | FunctionLikeIdentifier::Method(_, name) => name,
+            };
+
             Issue::error(format!("The return value of '{name}' must be used."))
                 .with_annotation(Annotation::primary(statement.span()).with_message("The result of this call is ignored"))
                 .with_note(format!("The function or method '{name}' is marked with @must-use or #[NoDiscard], indicating its return value is important and should not be discarded."))
                 .with_help("Assign the result to a variable, pass it to another function, or use it in an expression.")
-        );
+        };
+        context.collector.report_with_code(issue_kind, issue);
 
         return;
     }
@@ -913,13 +956,13 @@ where
         || metadata.parameters.iter().any(|parameter| parameter.flags.is_by_reference())
 }
 
-/// Checks if an expression is a call to a `@must-use` function/method
-/// and returns the appropriate issue kind and the name identifier if the result is unused.
+/// Checks if an expression is a call to a `@must-use` function/method and returns the appropriate issue kind, the
+/// function it calls, and whether `[NoDiscard]` marks it, if the result is unused.
 fn has_unused_must_use<'arena, A>(
     expression: &Expression<'arena>,
     context: &Context<'_, 'arena, A>,
     artifacts: &AnalysisArtifacts,
-) -> Option<(IssueCode, Word)>
+) -> Option<(IssueCode, FunctionLikeIdentifier, bool)>
 where
     A: Arena,
 {
@@ -928,18 +971,15 @@ where
     };
 
     let check_target = |identifier| {
-        let (code, name) = match identifier {
-            FunctionLikeIdentifier::Function(name) | FunctionLikeIdentifier::Closure(name) => {
-                (IssueCode::UnusedFunctionCall, name)
-            }
-            FunctionLikeIdentifier::Method(_, name) => (IssueCode::UnusedMethodCall, name),
+        let code = match identifier {
+            FunctionLikeIdentifier::Function(_) | FunctionLikeIdentifier::Closure(_) => IssueCode::UnusedFunctionCall,
+            FunctionLikeIdentifier::Method(..) => IssueCode::UnusedMethodCall,
         };
 
         let metadata = context.codebase.get_function_like(&identifier)?;
-        let must_use = metadata.flags.must_use()
-            || metadata.attributes.iter().any(|attr| attr.name.as_bytes().eq_ignore_ascii_case(b"NoDiscard"));
+        let no_discard = metadata.attributes.iter().any(|attr| attr.name.as_bytes().eq_ignore_ascii_case(b"NoDiscard"));
 
-        must_use.then_some((code, name))
+        (no_discard || metadata.flags.must_use()).then_some((code, identifier, no_discard))
     };
 
     if let Some(identifier) =

@@ -20,6 +20,7 @@ use mago_database::error::DatabaseError;
 use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
+use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_prelude::Prelude;
 use mago_reporting::IssueCollection;
@@ -143,12 +144,13 @@ impl CompileCommand {
 
         let compiled_folder = root.join(unit::COMPILED_FOLDER);
         let listeners = server.listeners();
-        let inputs = listener_inputs(&root, database, &listeners)?;
+        let inputs = listener_inputs(&root, database)?;
         if !inputs.is_empty() {
             let accepted: Vec<&Listener> =
                 listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
             let table = compiled_folder.join(LISTENERS);
-            write_by_rename(&table, &listener_table(&inputs, &accepted)).map_err(DatabaseError::from)?;
+            write_by_rename(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref()))
+                .map_err(DatabaseError::from)?;
             written.insert(table);
         }
         if compiled_folder.is_dir() {
@@ -201,21 +203,20 @@ impl CompileCommand {
     }
 }
 
-/// The inputs of the listener table, stamped as the engine reads them: the listing of each folder that holds a PHP#
-/// file, which a file joining or leaving changes, and each file that declares a listener, a refused one included. A
+/// The inputs of the listener table, stamped as the engine reads them, which it checks only while it compiles on
+/// demand: every PHP# file, which an `on` clause or a module binding the dispatcher may join, and the listing of the
+/// folder of each and of each folder above it, which a PHP# file or a namespace folder joining or leaving changes. A
 /// project with no PHP# file has none.
-fn listener_inputs(
-    root: &Path,
-    database: &impl DatabaseReader,
-    listeners: &[Listener],
-) -> Result<Vec<unit::Input>, Error> {
+fn listener_inputs(root: &Path, database: &impl DatabaseReader) -> Result<Vec<unit::Input>, Error> {
     let mut paths = BTreeSet::new();
     for file in database.files().filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp()) {
-        let folder = file.name.iter().rposition(|byte| *byte == b'/').map_or(&b""[..], |slash| &file.name[..=slash]);
-        paths.insert([folder, unit::SOURCE_LISTING.as_bytes()].concat());
-    }
-    for listener in listeners {
-        paths.insert(database.get_ref(&listener.file_id)?.name.to_vec());
+        paths.insert(file.name.to_vec());
+        let mut folder = &file.name[..];
+        while let Some(slash) = folder[..folder.len().saturating_sub(1)].iter().rposition(|byte| *byte == b'/') {
+            folder = &folder[..=slash];
+            paths.insert([folder, unit::SOURCE_LISTING.as_bytes()].concat());
+        }
+        paths.insert(unit::SOURCE_LISTING.as_bytes().to_vec());
     }
 
     let mut inputs = Vec::with_capacity(paths.len());
@@ -229,19 +230,16 @@ fn listener_inputs(
 /// The PHP source of the listener table. Its `inputs` are the files whose change makes the table out of date, each as
 /// its workspace-relative path, size, modification time and hash. Its `listeners` are one row per listener, in the
 /// order the engine runs them, of its class, its method, the events its `on` clause lists, and whether it takes the
-/// event. A full name holds no `'` and never ends in `\`, so each one is a single-quoted string as written.
-fn listener_table(inputs: &[unit::Input], listeners: &[&Listener]) -> Vec<u8> {
+/// event. A full name holds no `'` and never ends in `\`, so each one is a single-quoted string as written. Its
+/// `dispatcher` is the app's module whose binding of the dispatcher serves the whole app, as its path and namespace,
+/// or `null`.
+fn listener_table(inputs: &[unit::Input], listeners: &[&Listener], dispatcher: Option<&DispatcherModule>) -> Vec<u8> {
     let mut table = b"<?php\n\nreturn [\n    'inputs' => [\n".to_vec();
     for input in inputs {
         let hash: String = input.hash.iter().map(|byte| format!("{byte:02x}")).collect();
-        table.extend_from_slice(b"        ['");
-        for byte in &input.path {
-            if matches!(byte, b'\'' | b'\\') {
-                table.push(b'\\');
-            }
-            table.push(*byte);
-        }
-        table.extend_from_slice(format!("', {}, {}, '{hash}'],\n", input.size, input.mtime_ns).as_bytes());
+        table.extend_from_slice(b"        [");
+        quoted(&mut table, &input.path);
+        table.extend_from_slice(format!(", {}, {}, '{hash}'],\n", input.size, input.mtime_ns).as_bytes());
     }
     table.extend_from_slice(b"    ],\n    'listeners' => [\n");
     for listener in listeners {
@@ -257,9 +255,32 @@ fn listener_table(inputs: &[unit::Input], listeners: &[&Listener]) -> Vec<u8> {
             .as_bytes(),
         );
     }
-    table.extend_from_slice(b"    ],\n];\n");
+    table.extend_from_slice(b"    ],\n    'dispatcher' => ");
+    match dispatcher {
+        Some(module) => {
+            table.push(b'[');
+            quoted(&mut table, module.file.as_bytes());
+            table.extend_from_slice(b", ");
+            quoted(&mut table, module.namespace.as_bytes());
+            table.extend_from_slice(b"],\n");
+        }
+        None => table.extend_from_slice(b"null,\n"),
+    }
+    table.extend_from_slice(b"];\n");
 
     table
+}
+
+/// Appends `text` to `table` as a PHP single-quoted string.
+fn quoted(table: &mut Vec<u8>, text: &[u8]) {
+    table.push(b'\'');
+    for byte in text {
+        if matches!(byte, b'\'' | b'\\') {
+            table.push(b'\\');
+        }
+        table.push(*byte);
+    }
+    table.push(b'\'');
 }
 
 /// `count` PHP# files, in words.

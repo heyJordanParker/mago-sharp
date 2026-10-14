@@ -277,11 +277,13 @@ where
         artifacts.inferred_type_arguments.insert(span, class_type_arguments.into_iter().chain(own).collect());
     }
 
+    // A type argument neither written nor inferred is `missing-template-parameter`'s to report.
     if starts_a_listener
         && let Some(listened) = artifacts
             .inferred_type_arguments
             .get(&(call.span.start.offset, call.span.end.offset))
             .and_then(|t| t.first())
+        && (type_arguments.is_some() || !listened.is_mixed())
     {
         let at =
             type_arguments.and_then(|type_arguments| type_arguments.arguments.first()).map_or(call.span, HasSpan::span);

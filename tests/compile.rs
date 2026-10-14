@@ -283,17 +283,20 @@ fn input_row(root: &Path, path: &str) -> String {
     format!("        ['{path}', {}, {}, '{hash}'],\n", input.size, input.mtime_ns)
 }
 
-/// The listener table of `inputs` and `rows`.
-fn listener_table(root: &Path, inputs: &[&str], rows: &str) -> String {
+/// The listener table of `inputs`, `rows` and `dispatcher`, the PHP literal of its dispatcher module.
+fn listener_table(root: &Path, inputs: &[&str], rows: &str, dispatcher: &str) -> String {
     let inputs: String = inputs.iter().map(|path| input_row(root, path)).collect();
 
-    format!("<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n];\n")
+    format!(
+        "<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n    'dispatcher' => {dispatcher},\n];\n"
+    )
 }
 
 /// Spec section 15: `mago compile` lists every listener of an accepted file in `.sharp/listeners.php`, the table the
 /// engine runs them from, by its class's full name, then by its place in its class. A refused file's listeners leave
-/// the table, and the table stays once no listener is left. Its inputs are each folder of a PHP# file, for a file that
-/// joins or leaves it, and each file that declares a listener, so the engine can tell when the table is out of date.
+/// the table, and the table stays once no listener is left. Its inputs are every PHP# file, which an `on` clause may
+/// join, and the listing of the folder of each and of each folder above it, which a file or a namespace folder joining
+/// or leaving changes, so the engine can tell when the table is out of date.
 #[test]
 fn compile_writes_every_listener_of_an_accepted_file_in_order() {
     let directory = lawful_project(&[
@@ -309,12 +312,21 @@ fn compile_writes_every_listener_of_an_accepted_file_in_order() {
 
     let output = compile(root);
     assert!(printed(&output).contains("Compiled 4 PHP# files into .sharp/."), "{}", printed(&output));
+    let every_file = [
+        "*.sharp",
+        "app/*.sharp",
+        "app/OrderEvent.sharp",
+        "app/OrderNotices.sharp",
+        "app/OrderPaid.sharp",
+        "app/Receipts.sharp",
+    ];
     assert_eq!(
         read(root, ".sharp/listeners.php"),
         listener_table(
             root,
-            &["app/*.sharp", "app/OrderNotices.sharp", "app/Receipts.sharp"],
+            &every_file,
             "        ['App\\OrderNotices', 'send', ['App\\OrderPaid'], true],\n        ['App\\OrderNotices', 'refresh', ['App\\OrderPaid', 'App\\OrderEvent'], false],\n        ['App\\Receipts', 'deliver', ['App\\OrderPaid'], true],\n",
+            "null",
         )
     );
 
@@ -323,18 +335,81 @@ fn compile_writes_every_listener_of_an_accepted_file_in_order() {
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert_eq!(
         read(root, ".sharp/listeners.php"),
-        listener_table(
-            root,
-            &["app/*.sharp", "app/OrderNotices.sharp", "app/Receipts.sharp"],
-            "        ['App\\Receipts', 'deliver', ['App\\OrderPaid'], true],\n",
-        )
+        listener_table(root, &every_file, "        ['App\\Receipts', 'deliver', ['App\\OrderPaid'], true],\n", "null")
     );
 
     std::fs::remove_file(root.join("app/OrderNotices.sharp")).unwrap();
     std::fs::remove_file(root.join("app/Receipts.sharp")).unwrap();
     write(root, "app/Shop/Cart.sharp", "namespace App.Shop;\n\npublic class Cart\n{\n}\n");
     compile_succeeds(root);
-    assert_eq!(read(root, ".sharp/listeners.php"), listener_table(root, &["app/*.sharp", "app/Shop/*.sharp"], ""));
+    assert_eq!(
+        read(root, ".sharp/listeners.php"),
+        listener_table(
+            root,
+            &[
+                "*.sharp",
+                "app/*.sharp",
+                "app/OrderEvent.sharp",
+                "app/OrderPaid.sharp",
+                "app/Shop/*.sharp",
+                "app/Shop/Cart.sharp"
+            ],
+            "",
+            "null",
+        )
+    );
+}
+
+/// The standard library's `Dispatcher`, at its place in a project that installs the library.
+const LIBRARY_DISPATCHER: [(&str, &str); 2] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/composer.json",
+        "{\"name\": \"heyjordanparker/php-sharp-composer\", \"autoload\": {\"psr-4\": {\"Sharp\\\\\": \"library/Sharp/\"}}}\n",
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Dispatcher.sharp",
+        include_str!("../../composer/library/Sharp/Dispatcher.sharp"),
+    ),
+];
+
+/// A module of `namespace` that binds the dispatcher to `Recorder`.
+fn dispatcher_module(namespace: &str) -> String {
+    format!(
+        "namespace {namespace};\n\nimport App.Recorder;\nimport Sharp.Dispatcher;\n\nmodule\n{{\n    singleton Dispatcher = Recorder;\n}}\n"
+    )
+}
+
+/// Spec section 15: the dispatcher is one service for the whole app, so the listener table names the app's module
+/// whose binding of it serves every `emit`: the one whose namespace has the fewest parts, and none when no app module
+/// binds it.
+#[test]
+fn compile_names_the_app_module_that_binds_the_dispatcher() {
+    let recorder = "namespace App;\n\nimport Sharp.Dispatcher;\n\npublic class Recorder : Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners) { }\n}\n";
+    let shop = dispatcher_module("App.Shop");
+    let top = dispatcher_module("App");
+    let [composer, dispatcher] = LIBRARY_DISPATCHER;
+    let directory = lawful_project(&[
+        composer,
+        dispatcher,
+        ("app/Recorder.sharp", recorder),
+        ("app/Shop/Module.sharp", &shop),
+        ("app/Module.sharp", &top),
+    ]);
+    let root = directory.path();
+
+    compile_succeeds(root);
+    assert!(read(root, ".sharp/listeners.php").ends_with("    'dispatcher' => ['app/Module.sharp', 'app'],\n];\n"));
+
+    std::fs::remove_file(root.join("app/Module.sharp")).unwrap();
+    compile_succeeds(root);
+    assert!(
+        read(root, ".sharp/listeners.php")
+            .ends_with("    'dispatcher' => ['app/Shop/Module.sharp', 'app\\\\shop'],\n];\n")
+    );
+
+    std::fs::remove_file(root.join("app/Shop/Module.sharp")).unwrap();
+    compile_succeeds(root);
+    assert!(read(root, ".sharp/listeners.php").ends_with("    'dispatcher' => null,\n];\n"));
 }
 
 /// A path the listener table quotes keeps a `'` and a `\` in its name.

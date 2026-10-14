@@ -14,6 +14,7 @@ use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::error::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
+use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
@@ -134,6 +135,12 @@ impl Server {
     #[must_use]
     pub fn listeners(&self) -> Vec<Listener> {
         self.service.listeners()
+    }
+
+    /// The app's module whose binding of `Sharp.Dispatcher` serves the whole app.
+    #[must_use]
+    pub fn dispatcher_module(&self) -> Option<DispatcherModule> {
+        self.service.dispatcher_module()
     }
 
     /// Run one analysis pass with the node-analysis hooks only in the scope's files, and report

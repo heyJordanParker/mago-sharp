@@ -506,27 +506,32 @@ fn analyze_reports_a_class_that_extends_a_static_class() {
     );
 }
 
+/// The error the analyzer gives a project file that declares the namespace `namespace` of the standard library.
+fn library_namespace_error(namespace: &str) -> String {
+    format!(
+        "src/App/Page.sharp:1:11:error - reserved-name-outside-library: `{namespace}` is a namespace of the standard library, and only the standard library declares code in it."
+    )
+}
+
 /// Only the standard library declares native bodies, so a project file declares no `extern` method, whatever its
 /// namespace.
 #[test]
 fn analyze_reports_an_extern_method_in_a_project_file() {
-    for namespace in ["App", "Sharp.Mine"] {
+    let native = "src/App/Page.sharp:5:33:error - native-body-outside-library: Only the standard library declares native bodies: give `slug` a body.";
+    for (namespace, errors) in [
+        ("App", vec![native.to_string()]),
+        ("Sharp.Mine", vec![library_namespace_error("Sharp.Mine"), native.to_string()]),
+    ] {
         let page = format!(
             "namespace {namespace};\n\npublic static class Page\n{{\n    public static extern string slug(string title);\n}}\n"
         );
 
-        assert_eq!(
-            page_errors(&page),
-            [
-                "src/App/Page.sharp:5:33:error - native-body-outside-library: Only the standard library declares native bodies: give `slug` a body."
-            ],
-            "{namespace}"
-        );
+        assert_eq!(page_errors(&page), errors, "{namespace}");
     }
 }
 
 /// A project file under `Sharp` passes the semantic checks, which know only the namespace, and the analyzer refuses
-/// both forms only the standard library may write.
+/// its namespace and both forms only the standard library may write.
 #[test]
 fn analyze_reports_extern_and_silence_in_a_project_file_under_sharp() {
     assert_eq!(
@@ -534,8 +539,9 @@ fn analyze_reports_extern_and_silence_in_a_project_file_under_sharp() {
             "namespace Sharp.Mine;\n\npublic static class Page\n{\n    public static extern string slug(string title);\n\n    public static string quiet(string title) => @global.trim(title);\n}\n"
         ),
         [
-            "src/App/Page.sharp:5:33:error - native-body-outside-library: Only the standard library declares native bodies: give `slug` a body.",
-            "src/App/Page.sharp:7:49:error - silence-outside-library: `@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.",
+            library_namespace_error("Sharp.Mine"),
+            "src/App/Page.sharp:5:33:error - native-body-outside-library: Only the standard library declares native bodies: give `slug` a body.".to_string(),
+            "src/App/Page.sharp:7:49:error - silence-outside-library: `@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.".to_string(),
         ]
     );
 }
@@ -570,16 +576,14 @@ fn analyze_types_the_parse_calls_of_the_standard_library_from_the_vendored_packa
 }
 
 /// The semantic checks let a file under the namespace `Sharp` declare the standard library's reserved type names,
-/// and the analyzer refuses them in a project file.
+/// and the analyzer refuses the namespace in a project file.
 #[test]
 fn analyze_reports_a_type_class_of_the_standard_library_in_a_project_file() {
     assert_eq!(
         page_errors(
             "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => null;\n}\n"
         ),
-        [
-            "src/App/Page.sharp:3:21:error - reserved-name-outside-library: Cannot use `Bool` as a class name: it is reserved."
-        ]
+        [library_namespace_error("Sharp")]
     );
 }
 

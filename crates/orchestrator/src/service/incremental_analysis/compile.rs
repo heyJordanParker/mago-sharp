@@ -13,6 +13,7 @@ use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::Listing;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
+use mago_codex::metadata::module::service_id;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferences;
@@ -97,6 +98,16 @@ pub struct Listener {
     pub takes_event: bool,
 }
 
+/// The app's module whose binding of `Sharp.Dispatcher` serves the whole app, spec section 15, which `emit` reads
+/// wherever the event is emitted.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DispatcherModule {
+    /// The workspace-relative name of its file.
+    pub file: Word,
+    /// The namespace it binds for, in lowercase.
+    pub namespace: Word,
+}
+
 impl IncrementalAnalysisService {
     /// Every PHP# listener of the last analysis, in the order the engine runs them: by its class's full name, then by
     /// its place in its class.
@@ -135,6 +146,26 @@ impl IncrementalAnalysisService {
         });
 
         listeners.into_iter().map(|(_, _, listener)| listener).collect()
+    }
+
+    /// The app's module whose binding of `Sharp.Dispatcher` serves the whole app, spec section 15: of the base and
+    /// environment modules outside `vendor/` that bind it, the one whose namespace has the fewest parts, then the first
+    /// by file name. `None` when none binds it, and the standard library's binding serves.
+    #[must_use]
+    pub fn dispatcher_module(&self) -> Option<DispatcherModule> {
+        self.codebase
+            .modules
+            .iter()
+            .filter(|module| matches!(module.kind, ModuleKind::Base | ModuleKind::Environment(_)))
+            .filter(|module| !module.file.as_bytes().starts_with(VENDOR))
+            .filter(|module| {
+                module
+                    .bindings
+                    .iter()
+                    .any(|binding| service_id(&binding.service.type_union).as_bytes() == b"sharp\\dispatcher")
+            })
+            .min_by_key(|module| (module.namespace.as_bytes().split(|byte| *byte == b'\\').count(), module.file))
+            .map(|module| DispatcherModule { file: module.file, namespace: module.namespace })
     }
 
     /// Compiles each `.sharp` file of the last analysis, in file name order.

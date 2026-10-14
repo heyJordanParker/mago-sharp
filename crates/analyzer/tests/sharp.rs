@@ -2117,7 +2117,10 @@ fn calling_a_function_that_does_not_exist_is_reported_as_in_php() {
 fn a_global_call_named_like_a_method_of_its_class_calls_the_php_function() {
     let sharp = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static float ceil(float x) => global.ceil(x);\n\n    public static int count(List<int> values) => global.count(values);\n}\n";
 
-    assert_eq!(issues(("src/Sharp/Math/Math.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(
+        issues(("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp", sharp), &[]),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -3134,29 +3137,34 @@ const ENVIRONMENT: (&str, &str) = (
 );
 
 /// The semantic checks let any file whose namespace is `Sharp` declare `Int`, `Float` and `Bool`, as the engine does,
-/// and only the analyzer knows the file is not the standard library's. It refuses them with the semantic checks'
-/// reserved-name message, under its own code.
+/// and only the analyzer knows the file is not the standard library's. So it refuses `namespace Sharp` and every
+/// namespace under it outside the standard library, which would also reach `Sharp.Internal` with no import. A
+/// namespace that only starts with the letters is the app's.
 #[test]
-fn a_type_class_of_the_standard_library_in_a_project_file_is_a_reserved_name() {
-    let class =
-        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => null;\n}\n";
-    let r#enum = "namespace Sharp;\n\npublic enum Int\n{\n    case One;\n}\n";
-
-    let class_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Sharp/Bool.sharp", class), &[]);
-    let enum_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Sharp/Int.sharp", r#enum), &[]);
-
-    let messages: Vec<String> = class_issues
-        .iter()
-        .map(|issue| format!("{} {}", located(class, issue), issue.message))
-        .chain(enum_issues.iter().map(|issue| format!("{} {}", located(r#enum, issue), issue.message)))
-        .collect();
-    assert_eq!(
-        messages,
-        [
-            "3:21 reserved-name-outside-library Cannot use `Bool` as a class name: it is reserved.",
-            "3:13 reserved-name-outside-library Cannot use `Int` as a class name: it is reserved.",
-        ]
+fn a_namespace_of_the_standard_library_in_a_project_file_is_a_reserved_name() {
+    let refusal = |namespace: &str| {
+        format!(
+            "1:11 reserved-name-outside-library `{namespace}` is a namespace of the standard library, and only the standard library declares code in it. | Declared here. | Declare the file in a namespace of the app."
+        )
+    };
+    let bool_class = (
+        "src/Sharp/Bool.sharp",
+        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => null;\n}\n",
     );
+    let int_enum = ("src/Sharp/Int.sharp", "namespace Sharp;\n\npublic enum Int\n{\n    case One;\n}\n");
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let inside = (
+        "app/Sneak/Inside.sharp",
+        "namespace Sharp;\n\nimport App.Shop.OrderPaid;\n\npublic class Inside\n{\n    public Listening watch() => Internal.listen(typeof(OrderPaid), (OrderPaid e) => { });\n}\n",
+    );
+    let internal = ("app/Sneak/Listen.sharp", "namespace Sharp.Internal;\n\npublic class Listen\n{\n}\n");
+    let sharpen = ("app/Sharpen/Knife.sharp", "namespace Sharpen;\n\npublic class Knife\n{\n}\n");
+
+    assert_eq!(worded(bool_class, &[]), [refusal("Sharp")]);
+    assert_eq!(worded(int_enum, &[]), [refusal("Sharp")]);
+    assert_eq!(worded(inside, &[EVENTS, order_event, order_paid]), [refusal("Sharp")]);
+    assert_eq!(worded(internal, &[]), [refusal("Sharp.Internal")]);
+    assert_eq!(worded(sharpen, &[]), Vec::<String>::new());
 }
 
 /// Spec section 23: a class cannot share its full name with a namespace, when the class or anything in the namespace
@@ -12318,26 +12326,33 @@ fn leak(code: String) -> &'static str {
 }
 
 /// Semantics takes a well-formed `extern` method in any namespace, because the engine compiles the standard library
-/// from `vendor/` without knowing it is vendored. The analyzer knows a project file, and refuses it there.
+/// from `vendor/` without knowing it is vendored. The analyzer knows a project file, and refuses it there, in a
+/// namespace of the standard library as in any other.
 #[test]
 fn an_extern_method_in_a_project_file_is_an_error_in_any_namespace() {
-    for analyzed in [
+    for (analyzed, reserved) in [
         (
-            "src/Sharp/Mine/Text.sharp",
-            "namespace Sharp.Mine;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            (
+                "src/Sharp/Mine/Text.sharp",
+                "namespace Sharp.Mine;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            ),
+            &["1:11 reserved-name-outside-library"][..],
         ),
         (
-            "src/App/Text.sharp",
-            "namespace App;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            (
+                "src/App/Text.sharp",
+                "namespace App;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            ),
+            &[],
         ),
     ] {
         assert_eq!(
-            messages(analyzed, &[]),
-            ["Only the standard library declares native bodies: give `slug` a body."],
+            messages(analyzed, &[]).last().map(String::as_str),
+            Some("Only the standard library declares native bodies: give `slug` a body."),
             "{}",
             analyzed.0
         );
-        assert_eq!(issues(analyzed, &[]), ["5:33 native-body-outside-library"], "{}", analyzed.0);
+        assert_eq!(issues(analyzed, &[]), [reserved, &["5:33 native-body-outside-library"]].concat(), "{}", analyzed.0);
     }
 }
 
@@ -16469,15 +16484,15 @@ const DISPATCHER: (&str, &str) = (
 fn a_dispatcher_may_reach_any_effect_and_a_call_of_dispatch_has_the_effect_events() {
     let retrying = (
         "app/Shop/Retrying.sharp",
-        "namespace App.Shop;\n\nimport Sharp.Dispatcher;\n\npublic class Retrying : Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void()>> listeners)\n    {\n        global.fetch(listeners.count());\n        for (const listener of listeners)\n        {\n            listener();\n        }\n    }\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Dispatcher;\n\npublic class Retrying : Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners)\n    {\n        global.fetch(listeners.count());\n        for (const listener of listeners)\n        {\n            listener(emitted);\n        }\n    }\n}\n",
     );
     let rates = (
         "app/Shop/Rates.sharp",
-        "namespace App.Shop;\n\npublic interface Rates\n{\n    void dispatch(Any emitted, List<Function<void()>> listeners);\n}\n",
+        "namespace App.Shop;\n\npublic interface Rates\n{\n    void dispatch(Any emitted, List<Function<void(Any)>> listeners);\n}\n",
     );
     let live_rates = (
         "app/Shop/LiveRates.sharp",
-        "namespace App.Shop;\n\npublic class LiveRates : Rates\n{\n    public void dispatch(Any emitted, List<Function<void()>> listeners) { global.fetch(1); }\n}\n",
+        "namespace App.Shop;\n\npublic class LiveRates : Rates\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners) { global.fetch(1); }\n}\n",
     );
     let monitor = (
         "app/Shop/Monitor.sharp",
@@ -16489,7 +16504,7 @@ fn a_dispatcher_may_reach_any_effect_and_a_call_of_dispatch_has_the_effect_event
     assert_eq!(
         effect_issues(&[live_rates, rates, FETCH, FETCH_STUB]),
         [
-            "app/Shop/LiveRates.sharp:5:75 incompatible-effects: `LiveRates.dispatch` calls `global.fetch`, which has the effect `Http`, so the pure `Rates.dispatch` cannot accept it."
+            "app/Shop/LiveRates.sharp:5:78 incompatible-effects: `LiveRates.dispatch` calls `global.fetch`, which has the effect `Http`, so the pure `Rates.dispatch` cannot accept it."
         ]
     );
     assert_eq!(
@@ -16587,7 +16602,7 @@ fn events_on_takes_an_event_or_an_interface_an_event_implements() {
 }
 
 /// Spec section 15: a listener stops when its handle goes, so `Events.on` as a statement, which drops the handle at
-/// once, listens to nothing and is reported.
+/// once, listens to nothing and is reported in PHP# words.
 #[test]
 fn a_dropped_events_on_handle_is_reported() {
     let [order_event, order_paid] = ORDER_EVENTS;
@@ -16599,9 +16614,43 @@ fn a_dropped_events_on_handle_is_reported() {
     assert_eq!(
         worded(dropping, &[EVENTS, order_event, order_paid]),
         [
-            "7:9 unused-method-call The return value of 'on' must be used. | The result of this call is ignored | The function or method 'on' is marked with @must-use or #[NoDiscard], indicating its return value is important and should not be discarded. | Assign the result to a variable, pass it to another function, or use it in an expression."
+            "7:9 unused-method-call The value `Events.on` returns must be used. | Its value is dropped here. | `[NoDiscard]` on `Events.on` says the value it returns matters. | Keep the value in a local, pass it on, or return it."
         ]
     );
+}
+
+/// A `.sharp` file that drops the value of a plain PHP method marked `@must-use` hears it in PHP# words too, with the
+/// marker the method carries.
+#[test]
+fn a_dropped_must_use_value_is_reported_in_php_sharp_words() {
+    let tokens = (
+        "src/Lib/Tokens.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Tokens\n{\n    /** @must-use */\n    public static function issue(): string\n    {\n        return 'token';\n    }\n}\n",
+    );
+    let dropping = (
+        "src/App/Login.sharp",
+        "namespace App;\n\nimport Lib.Tokens;\n\npublic class Login\n{\n    public void start()\n    {\n        Tokens.issue();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        worded(dropping, &[tokens]),
+        [
+            "9:9 unused-method-call The value `Tokens.issue` returns must be used. | Its value is dropped here. | `@must-use` on `Tokens.issue` says the value it returns matters. | Keep the value in a local, pass it on, or return it."
+        ]
+    );
+}
+
+/// `Events.on` with no type argument, and a listener whose parameter has no type, gives no event to listen to. The
+/// missing type argument is reported once, with no second error about the event.
+#[test]
+fn events_on_with_no_type_is_reported_once() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let untyped = (
+        "app/Shop/Screen.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Screen\n{\n    public Listening watch() => Events.on(e => { });\n}\n",
+    );
+
+    assert_eq!(issues(untyped, &[EVENTS, order_event, order_paid]), ["7:33 missing-template-parameter"]);
 }
 
 /// Spec section 15: starting a listener changes what every later `emit` runs, so `Events.on` has the effect `Events`,
