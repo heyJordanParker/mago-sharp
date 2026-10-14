@@ -14,6 +14,7 @@ use crate::cst::ForeachBody;
 use crate::cst::ForeachTarget;
 use crate::cst::FunctionCall;
 use crate::cst::IfBody;
+use crate::cst::Leave;
 use crate::cst::LegacyArray;
 use crate::cst::List;
 use crate::cst::MatchArm;
@@ -412,6 +413,9 @@ where
             Yield::From(yield_from) => find_method_references_in_expression(yield_from.iterator, predicate),
         },
         Expression::Throw(throw) => find_method_references_in_expression(throw.exception, predicate),
+        Expression::Leave(Leave::Return(r#return)) => {
+            r#return.value.map(|value| find_method_references_in_expression(value, predicate)).unwrap_or_default()
+        }
         Expression::Clone(clone) => find_method_references_in_expression(clone.object, predicate),
         Expression::Call(call) => match call {
             Call::Function(FunctionCall { function, argument_list })

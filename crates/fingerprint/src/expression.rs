@@ -2,6 +2,7 @@ use crate::FingerprintOptions;
 use crate::Fingerprintable;
 use mago_names::ResolvedNames;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Leave;
 use mago_syntax::cst::Parenthesized;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
@@ -39,6 +40,9 @@ impl Fingerprintable for Expression<'_> {
             Expression::Yield(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Construct(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Throw(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Leave(Leave::Return(node)) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Leave(Leave::Continue(node)) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Leave(Leave::Break(node)) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Clone(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Call(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Access(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),

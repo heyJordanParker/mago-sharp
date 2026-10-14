@@ -75,7 +75,11 @@ pub(crate) fn get_literal_array_key(expression: &Expression<'_>, artifacts: &Ana
 pub(crate) const fn expression_has_observable_side_effect(expression: &Expression<'_>) -> bool {
     match expression {
         Expression::Parenthesized(p) => expression_has_observable_side_effect(p.expression),
-        Expression::Assignment(_) | Expression::Throw(_) | Expression::Yield(_) | Expression::Clone(_) => true,
+        Expression::Assignment(_)
+        | Expression::Throw(_)
+        | Expression::Leave(_)
+        | Expression::Yield(_)
+        | Expression::Clone(_) => true,
         Expression::UnaryPrefix(u) => {
             matches!(
                 u.operator,

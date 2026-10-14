@@ -11657,6 +11657,76 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
 ///
 /// Spec section 21: a type pattern with properties tests the type, then each property on the value the name holds, or
 /// on the subject's hidden variable when it has no name. Each property is read once, as in a properties pattern.
+/// `a ?? return`, `a ?? continue` and `a ?? break` lower to a RETURN, CONTINUE or BREAK node in the place of the right side
+/// of `??`, which the engine compiles in the middle of the expression. PHP has no spelling for it.
+#[test]
+fn a_leave_after_null_coalesce_is_its_statement_inside_the_expression() {
+    assert_eq!(
+        body_in(
+            "int run(List<int?> values)",
+            "        const a = values[0] ?? return -1;\n        for (int i = 0; i < 2; i++) {\n            const b = values[i] ?? continue;\n            const c = values[i + 1] ?? break;\n        }\n        return a;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                COALESCE
+                  DIM
+                    VAR
+                      ZVAL "values"
+                    ZVAL 0
+                  RETURN
+                    UNARY_MINUS
+                      ZVAL 1
+              FOR
+                EXPR_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "i"
+                    ZVAL 0
+                EXPR_LIST
+                  BINARY_OP [20]
+                    VAR
+                      ZVAL "i"
+                    ZVAL 2
+                EXPR_LIST
+                  POST_INC
+                    VAR
+                      ZVAL "i"
+                STMT_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "b"
+                    COALESCE
+                      DIM
+                        VAR
+                          ZVAL "values"
+                        VAR
+                          ZVAL "i"
+                      CONTINUE
+                        null
+                  ASSIGN
+                    VAR
+                      ZVAL "c"
+                    COALESCE
+                      DIM
+                        VAR
+                          ZVAL "values"
+                        BINARY_OP [1]
+                          VAR
+                            ZVAL "i"
+                          ZVAL 1
+                      BREAK
+                        null
+              RETURN
+                VAR
+                  ZVAL "a"
+            "#}
+    );
+}
+
 /// ```php
 /// $a = \is_array($values) && \count($values) === 0;
 /// $b = \is_array($values) && \count($values) >= 1 && \is_int($first = $values[0])

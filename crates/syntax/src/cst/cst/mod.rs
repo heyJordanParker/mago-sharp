@@ -140,6 +140,7 @@ pub use crate::cst::cst::echo::EchoTag;
 pub use crate::cst::cst::emit::Emit;
 pub use crate::cst::cst::event::Event;
 pub use crate::cst::cst::expression::Expression;
+pub use crate::cst::cst::expression::Leave;
 pub use crate::cst::cst::expression::Parenthesized;
 pub use crate::cst::cst::r#extern::Extern;
 pub use crate::cst::cst::function_like::arrow_function::ArrowFunction;

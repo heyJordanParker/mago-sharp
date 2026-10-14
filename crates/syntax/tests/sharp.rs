@@ -3888,6 +3888,40 @@ fn question_mark_dot_before_arguments_calls_a_function_that_is_there() {
     assert!(!parse(&arena, "src/Report.php", PHP).errors.is_empty());
 }
 
+/// Spec section 14.4: `a ?? return`, `a ?? continue` and `a ?? break` leave when `a` is null, as Kotlin's `a ?: return`.
+/// Each row is the statement the right side of `??` runs, with no `;`: `return` with and without a value, in a call
+/// argument, `continue` and `break`. `return` after anything but `??` stays a statement, and in PHP `?? return` stays
+/// an error.
+#[test]
+fn return_continue_and_break_after_null_coalesce_leave() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        a ?? return;\n        b ?? return price * 2;\n        charge(c ?? return -1, 2);\n        d ?? continue;\n        e ?? break;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let leaves: Vec<&str> = method_body(program)
+        .iter()
+        .map(|statement| {
+            let coalesce = match expression(statement) {
+                Expression::Call(Call::Function(call)) => call.argument_list.arguments.as_slice()[0].value(),
+                expression => expression,
+            };
+            let Expression::Binary(Binary { rhs: rhs @ Expression::Leave(_), .. }) = coalesce else {
+                panic!("expected `?? return`, `?? continue` or `?? break`, got {statement:#?}");
+            };
+
+            source(CODE, rhs)
+        })
+        .collect();
+    assert_eq!(leaves, ["return", "return price * 2", "return -1", "continue", "break"]);
+
+    const ASSIGNED: &str = "class Report\n{\n    void run()\n    {\n        const a = return;\n    }\n}\n";
+    assert!(!parse(&arena, "src/Report.sharp", ASSIGNED).errors.is_empty());
+
+    const PHP: &str = "<?php\n$a ?? return;\n";
+    assert!(!parse(&arena, "src/Report.php", PHP).errors.is_empty());
+}
+
 /// Spec section 21: a properties pattern can test the type at the same time, and bind, as in C#. Each row is the type,
 /// its properties and its name. A pattern creates a variable only through a typed declaration, so a properties pattern
 /// without a type takes no name.

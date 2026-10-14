@@ -140,6 +140,7 @@ use crate::cst::cst::KeyValueArrayElement;
 use crate::cst::cst::Keyword;
 use crate::cst::cst::Label;
 use crate::cst::cst::Law;
+use crate::cst::cst::Leave;
 use crate::cst::cst::LegacyArray;
 use crate::cst::cst::List;
 use crate::cst::cst::ListPattern;
@@ -530,6 +531,7 @@ pub enum NodeKind {
     ShortOpeningTag,
     Terminator,
     Throw,
+    Leave,
     Hint,
     IntersectionHint,
     NullableHint,
@@ -817,6 +819,7 @@ pub enum Node<'ast, 'arena> {
     ShortOpeningTag(&'ast ShortOpeningTag),
     Terminator(&'ast Terminator<'arena>),
     Throw(&'ast Throw<'arena>),
+    Leave(&'ast Leave<'arena>),
     Hint(&'ast Hint<'arena>),
     IntersectionHint(&'ast IntersectionHint<'arena>),
     NullableHint(&'ast NullableHint<'arena>),
@@ -1192,6 +1195,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::ShortOpeningTag(_) => NodeKind::ShortOpeningTag,
             Self::Terminator(_) => NodeKind::Terminator,
             Self::Throw(_) => NodeKind::Throw,
+            Self::Leave(_) => NodeKind::Leave,
             Self::Hint(_) => NodeKind::Hint,
             Self::IntersectionHint(_) => NodeKind::IntersectionHint,
             Self::NullableHint(_) => NodeKind::NullableHint,
@@ -2228,6 +2232,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     Expression::Yield(node) => Node::Yield(node),
                     Expression::Construct(node) => Node::Construct(node),
                     Expression::Throw(node) => Node::Throw(node),
+                    Expression::Leave(node) => Node::Leave(node),
                     Expression::Clone(node) => Node::Clone(node),
                     Expression::Call(node) => Node::Call(node),
                     Expression::PartialApplication(node) => Node::PartialApplication(node),
@@ -2898,6 +2903,11 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Keyword(&node.throw));
                 f(Node::Expression(node.exception));
             }
+            Node::Leave(node) => match node {
+                Leave::Return(r#return) => f(Node::Return(r#return)),
+                Leave::Continue(r#continue) => f(Node::Continue(r#continue)),
+                Leave::Break(r#break) => f(Node::Break(r#break)),
+            },
             Node::Hint(node) => match &node {
                 Hint::Identifier(identifier) => f(Node::Identifier(identifier)),
                 Hint::Parenthesized(parenthesized_hint) => {
@@ -3251,6 +3261,7 @@ impl HasSpan for Node<'_, '_> {
             Self::ShortOpeningTag(node) => node.span(),
             Self::Terminator(node) => node.span(),
             Self::Throw(node) => node.span(),
+            Self::Leave(node) => node.span(),
             Self::Hint(node) => node.span(),
             Self::IntersectionHint(node) => node.span(),
             Self::NullableHint(node) => node.span(),

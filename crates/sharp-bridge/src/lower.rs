@@ -66,6 +66,7 @@ use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::InterpolatedString;
+use mago_syntax::cst::Leave;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LiteralStringPart;
 use mago_syntax::cst::LocalDeclaration;
@@ -94,6 +95,7 @@ use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::PropertyHookConcreteExpressionBody;
 use mago_syntax::cst::PropertyHookList;
+use mago_syntax::cst::Return;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::StringPart;
@@ -1617,11 +1619,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         ensure_sufficient_stack(|| match statement {
             Statement::Block(block) => self.block(block),
             Statement::Expression(statement) => self.expression(statement.expression),
-            Statement::Return(r#return) => {
-                let value = r#return.value.map_or(NULL, |value| self.expression(value));
-
-                self.node(SHARP_AST_RETURN, 0, self.line(r#return), &[value])
-            }
+            Statement::Return(r#return) => self.r#return(r#return),
             // `emit e;` is `\Sharp\Internal\emit($e);`, which runs every listener of the event before it returns.
             Statement::Emit(emit) => {
                 let line = self.line(emit);
@@ -1682,6 +1680,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::Continue(r#continue) => self.node(SHARP_AST_CONTINUE, 0, self.line(r#continue), &[NULL]),
             _ => unreachable!("check_slice refuses the statement `{statement}`"),
         })
+    }
+
+    fn r#return(&mut self, r#return: &Return) -> u32 {
+        let value = r#return.value.map_or(NULL, |value| self.expression(value));
+
+        self.node(SHARP_AST_RETURN, 0, self.line(r#return), &[value])
     }
 
     fn loop_body(&mut self, body: &Statement) -> u32 {
@@ -2146,6 +2150,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_THROW, 0, line, &[exception])
             }
+            // Spec section 14.4: the engine compiles the statement of `a ?? return`, `continue` or `break` in the
+            // middle of the expression, after the ZEND_SHARP_LEAVE that frees what the expression holds.
+            Expression::Leave(Leave::Return(r#return)) => self.r#return(r#return),
+            Expression::Leave(Leave::Continue(_)) => self.node(SHARP_AST_CONTINUE, 0, line, &[NULL]),
+            Expression::Leave(Leave::Break(_)) => self.node(SHARP_AST_BREAK, 0, line, &[NULL]),
             Expression::CompositeString(CompositeString::Interpolated(template)) => self.template(template),
             Expression::ArrowFunction(arrow_function) => self.arrow_function(arrow_function),
             Expression::Closure(closure) => self.closure(closure),

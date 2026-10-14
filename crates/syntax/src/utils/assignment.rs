@@ -8,6 +8,7 @@ use crate::cst::ClassLikeMemberSelector;
 use crate::cst::Construct;
 use crate::cst::Expression;
 use crate::cst::FunctionCall;
+use crate::cst::Leave;
 use crate::cst::MatchArm;
 use crate::cst::NullSafeFunctionCall;
 use crate::cst::PartialApplication;
@@ -122,6 +123,7 @@ pub fn get_assignment_from_expression<'expr, 'arena>(
             }),
         },
         Expression::Throw(throw) => get_assignment_from_expression(throw.exception),
+        Expression::Leave(Leave::Return(r#return)) => r#return.value.and_then(get_assignment_from_expression),
         Expression::Clone(clone) => get_assignment_from_expression(clone.object),
         Expression::Call(call) => match &call {
             Call::Function(FunctionCall { function, argument_list })

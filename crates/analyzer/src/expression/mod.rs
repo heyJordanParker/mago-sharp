@@ -24,6 +24,7 @@ use mago_syntax::cst::As;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Identifier;
+use mago_syntax::cst::Leave;
 use mago_syntax::cst::ListPattern;
 use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::LocalIdentifier;
@@ -206,6 +207,18 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                 Expression::Yield(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Construct(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Throw(expr) => expr.analyze(context, block_context, artifacts),
+                // Spec section 14.4: `a ?? return`, `a ?? continue` and `a ?? break` run their statement, which leaves,
+                // so the expression has no value.
+                Expression::Leave(leave) => {
+                    match leave {
+                        Leave::Return(r#return) => r#return.analyze(context, block_context, artifacts)?,
+                        Leave::Continue(r#continue) => r#continue.analyze(context, block_context, artifacts)?,
+                        Leave::Break(r#break) => r#break.analyze(context, block_context, artifacts)?,
+                    }
+                    artifacts.set_expression_type(&self, get_never());
+
+                    Ok(())
+                }
                 Expression::Clone(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Error(_) | Expression::Is(_) if is_refused(self) => {
                     let refused_type =

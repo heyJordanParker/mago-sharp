@@ -554,7 +554,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         (Node::Keyword(_) | Node::LocalIdentifier(_) | Node::Identifier(Identifier::Local(_)), _) => Some(place),
-        (Node::Terminator(Terminator::Semicolon(_)), _) => Some(place),
+        // A missing terminator ends the statement a leave runs, as in `a ?? return`, and is otherwise a parse error.
+        (Node::Terminator(Terminator::Semicolon(_) | Terminator::Missing(_)) | Node::MissingTerminator(_), _) => {
+            Some(place)
+        }
         (Node::Extern(r#extern), File) if r#extern.event.is_some() => check_extern_event(r#extern, context),
 
         (
@@ -1553,10 +1556,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Expression::Call(Call::Method(_) | Call::NullSafeMethod(_) | Call::NullSafeFunction(_))
                 | Expression::Access(Access::Property(_) | Access::NullSafeProperty(_))
                 | Expression::Throw(_)
+                | Expression::Leave(_)
                 // The parser reads a template, and only a template, into an interpolated string.
                 | Expression::CompositeString(CompositeString::Interpolated(_)),
             )
             | Node::Throw(_)
+            | Node::Leave(_)
             | Node::CompositeString(CompositeString::Interpolated(_))
             | Node::InterpolatedString(_)
             | Node::StringPart(StringPart::Literal(_) | StringPart::BracedExpression(_))

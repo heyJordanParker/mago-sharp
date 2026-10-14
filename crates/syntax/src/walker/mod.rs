@@ -134,6 +134,7 @@ use crate::cst::cst::KeyValueArrayElement;
 use crate::cst::cst::Keyword;
 use crate::cst::cst::Label;
 use crate::cst::cst::Law;
+use crate::cst::cst::Leave;
 use crate::cst::cst::LegacyArray;
 use crate::cst::cst::List;
 use crate::cst::cst::ListPattern;
@@ -2009,6 +2010,7 @@ generate_ast_walker! {
             Expression::Yield(r#yield) => walker.walk_yield(r#yield, context),
             Expression::Construct(construct) => walker.walk_construct(construct, context),
             Expression::Throw(throw) => walker.walk_throw(throw, context),
+            Expression::Leave(leave) => walker.walk_leave(leave, context),
             Expression::Clone(clone) => walker.walk_clone(clone, context),
             Expression::Call(call) => walker.walk_call(call, context),
             Expression::PartialApplication(partial_application) => walker.walk_partial_application(partial_application, context),
@@ -2655,6 +2657,14 @@ generate_ast_walker! {
     'arena Throw as r#throw => {
         walker.walk_keyword(&r#throw.r#throw, context);
         walker.walk_expression(r#throw.exception, context);
+    }
+
+    'arena Leave as leave => {
+        match leave {
+            Leave::Return(r#return) => walker.walk_return(r#return, context),
+            Leave::Continue(r#continue) => walker.walk_continue(r#continue, context),
+            Leave::Break(r#break) => walker.walk_break(r#break, context),
+        }
     }
 
     'arena Clone as clone => {

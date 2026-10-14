@@ -13,6 +13,7 @@ use crate::cst::ForBody;
 use crate::cst::ForeachBody;
 use crate::cst::FunctionCall;
 use crate::cst::IfBody;
+use crate::cst::Leave;
 use crate::cst::MatchArm;
 use crate::cst::NullSafeFunctionCall;
 use crate::cst::PartialApplication;
@@ -310,6 +311,7 @@ pub fn expression_has_yield(expression: &Expression) -> bool {
             }),
         },
         Expression::Throw(throw) => expression_has_yield(throw.exception),
+        Expression::Leave(Leave::Return(r#return)) => r#return.value.is_some_and(expression_has_yield),
         Expression::Clone(clone) => expression_has_yield(clone.object),
         Expression::Call(call) => match call {
             Call::Function(FunctionCall { function, argument_list })

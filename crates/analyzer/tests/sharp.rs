@@ -4160,6 +4160,22 @@ fn a_properties_pattern_on_a_value_that_cannot_be_null_reports_nothing_and_its_p
     assert_eq!(codes(&php_issues), ["redundant-type-comparison", "redundant-logical-operation"]);
 }
 
+/// Spec section 14.4: `a ?? return`, `a ?? continue` and `a ?? break` leave when `a` is null, so the value is `a`'s type
+/// without null. A `return` value meets the method's return type, a `continue` or `break` needs its loop, and a loop
+/// that leaves only through `?? break` still ends.
+#[test]
+fn leave_on_null_leaves_the_method_or_the_loop() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int price(Map<string, int> prices, string plan)\n    {\n        int price = prices[plan] ?? return -1;\n        return price + 1;\n    }\n\n    public static int total(List<int?> values)\n    {\n        let total = 0;\n        for (int i = 0; i < values.count(); i++) {\n            int value = values[i] ?? continue;\n            total = total + value;\n        }\n        return total;\n    }\n\n    public static int first(List<int?> values)\n    {\n        let found = 0;\n        let i = 0;\n        while (true) {\n            found = values[i] ?? break;\n            i = i + 1;\n        }\n        return found + i;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+
+    let wrong = "namespace Demo;\n\nclass Report\n{\n    public static int price(int? price) => price ?? return \"none\";\n\n    public static int outside(int? price) => price ?? continue;\n\n    public static int known(int price) => price ?? return 0;\n}\n";
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", wrong), &[]),
+        ["5:60 invalid-return-statement", "7:55 invalid-continue", "9:43 redundant-null-coalesce"]
+    );
+}
+
 /// Spec section 21: a list pattern tests the count, then each element against its pattern, and its rest takes the
 /// elements after them. Each element and the rest are typed from the list.
 #[test]

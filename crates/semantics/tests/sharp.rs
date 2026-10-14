@@ -4433,6 +4433,21 @@ fn a_pattern_reads_no_local() {
     );
 }
 
+/// Spec section 14.4: `a ?? return`, `a ?? continue` and `a ?? break` are in the slice, and a `return` there takes a value
+/// exactly when its method returns one, as a `return` statement does.
+#[test]
+fn a_leave_after_null_coalesce_is_in_the_slice_and_returns_as_its_method_does() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int run(int? extra)\n    {\n        const a = extra ?? return 0;\n        for (int i = 0; i < 3; i++) {\n            const b = extra ?? continue;\n            const c = extra ?? break;\n        }\n        const d = extra ?? return;\n        return a;\n    }\n\n    public void log(int? extra)\n    {\n        const a = extra ?? return;\n        const b = extra ?? return 5;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "12:28 Method `Report.run` with return type must return a value.",
+            "19:35 Method `Report.log` with return type of `void` must not return a value.",
+        ]
+    );
+}
+
 /// Spec section 21: a list pattern's rest is the `List` of the elements after the others.
 #[test]
 fn a_list_pattern_rest_is_a_list() {
