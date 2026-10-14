@@ -6515,7 +6515,7 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
 #[test]
 fn a_variadic_or_operator_set_parameter_becomes_a_set_before_the_body_runs() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Order\n{\n    public int many(Set<string> ...groups) => global.count(groups);\n\n    public static Order operator +(Order order, Set<string> tags) => order;\n\n    public int maybe(Set<string>? ...groups) => global.count(groups);\n}\n",
+        "namespace App.Tenant;\n\nclass Order\n{\n    public int many(Set<string> ...groups) => global.count(groups);\n\n    public static readonly Order operator +(Order order, Set<string> tags) => order;\n\n    public int maybe(Set<string>? ...groups) => global.count(groups);\n}\n",
     );
     let body = |name: &str| lowered.render(lowered.child(lowered.method_named(name), 2));
 
@@ -8621,7 +8621,7 @@ fn every_function_plain_php_calls_checks_its_parameters_type_arguments() {
 
             public Shelf.of(PaginatedList<Order> page) : this(1) { }
 
-            public static Shelf operator +(Shelf shelf, PaginatedList<Order> page) => shelf;
+            public static Shelf operator +(Shelf shelf, PaginatedList<Order> page) => new Shelf(shelf.count);
 
             public Function<int(PaginatedList<Order>)> counted() => (PaginatedList<Order> page) => 1;
 
@@ -17159,7 +17159,7 @@ fn a_form_fingerprint_follows_its_body_and_not_its_lines() {
 }
 
 /// `Money`, which declares `==`, `+`, unary `-` and `<=>` on lines 7, 9, 11 and 13.
-const MONEY: &str = "namespace App;\n\npublic class Money\n{\n    public int hash() => 1;\n\n    public static bool operator ==(Money a, Money b) => true;\n\n    public static Money operator +(Money a, Money b) => a;\n\n    public static Money operator -(Money a) => a;\n\n    public static int operator <=>(Money a, Money b) => 0;\n}\n";
+const MONEY: &str = "namespace App;\n\npublic class Money\n{\n    public int hash() => 1;\n\n    public static bool operator ==(Money a, Money b) => true;\n\n    public static Money operator +(Money a, Money b) => new Money();\n\n    public static Money operator -(Money a) => new Money();\n\n    public static int operator <=>(Money a, Money b) => 0;\n}\n";
 
 /// ```php
 /// public static function op_Equality(?\App\Money $a, ?\App\Money $b): bool
@@ -17222,8 +17222,8 @@ fn equality_is_op_equality_with_nullable_parameters_and_the_null_prologue() {
 }
 
 /// ```php
-/// public static function op_Addition(\App\Money $a, \App\Money $b): \App\Money { return $a; }
-/// public static function op_UnaryNegation(\App\Money $a): \App\Money { return $a; }
+/// public static function op_Addition(\App\Money $a, \App\Money $b): \App\Money { return new \App\Money(); }
+/// public static function op_UnaryNegation(\App\Money $a): \App\Money { return new \App\Money(); }
 /// ```
 ///
 /// Every other operator is the static method it runs as, with its parameters as declared and no prologue. `-` with one
@@ -17254,8 +17254,9 @@ fn addition_and_negation_are_their_static_methods_without_a_prologue() {
               null
               STMT_LIST
                 RETURN
-                  VAR
-                    ZVAL "a"
+                  NEW
+                    ZVAL "App\\Money"
+                    ARG_LIST
               ZVAL "App\\Money"
               null
         "#}
@@ -17275,8 +17276,9 @@ fn addition_and_negation_are_their_static_methods_without_a_prologue() {
               null
               STMT_LIST
                 RETURN
-                  VAR
-                    ZVAL "a"
+                  NEW
+                    ZVAL "App\\Money"
+                    ARG_LIST
               ZVAL "App\\Money"
               null
         "#}
@@ -21535,4 +21537,27 @@ fn a_null_safe_extension_member_runs_only_on_a_receiver_that_is_not_null() {
                       ZVAL "total"
         "#}
     );
+}
+
+/// Spec section 13: `readonly` is a promise the checker keeps about PHP# code, so the engine runs a readonly type as
+/// the type and a readonly method as the method. A constructor's readonly parameter declares no property, and a
+/// readonly `Set` parameter still makes its `Set` before the body runs.
+#[test]
+fn readonly_lowers_to_the_same_php_as_without_it() {
+    let order = (
+        "src/Order.sharp",
+        "namespace App;\n\npublic class Order\n{\n    public int paid { get; set; } = 0;\n\n    public static bool operator ==(Order a, Order b) => a.paid == b.paid;\n\n    public int hash() => this.paid;\n}\n",
+    );
+    let shop = |readonly: &str, marker: &str| {
+        format!(
+            "namespace App;\n\npublic class Shop\n{{\n    private Order kept = new Order();\n\n    public Shop({readonly}Order order, {readonly}List<Order> orders) {{ }}\n\n    public {readonly}Order customer => this.kept;\n\n    public {readonly}Order? pick({readonly}Order order, {readonly}Set<Order> ids, Function<int({readonly}Order)> paid){marker}\n    {{\n        {readonly}Order held = order;\n        const count = ({readonly}Order o) => o.paid;\n        return ids.contains(held) && count(held) > 0 ? held : null;\n    }}\n}}\n"
+        )
+    };
+
+    let marked = Lowered::with(&shop("readonly ", " readonly"), &[order]);
+    let plain = Lowered::with(&shop("", ""), &[order]);
+
+    // The container fills `orders` with the service its PHP type, `array`, drops, and builds `ids` as a `Set`.
+    assert!(plain.tree().contains(r#"ZVAL "list<app\\order>""#), "{}", plain.tree());
+    assert_eq!(marked.tree(), plain.tree());
 }

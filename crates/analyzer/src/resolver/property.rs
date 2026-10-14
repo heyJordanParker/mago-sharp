@@ -68,6 +68,7 @@ use crate::resolver::class_name::class_value_classes;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
+use crate::resolver::method::check_call_through_readonly;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
 use crate::statement::function_like::closure_parameter_types;
@@ -80,6 +81,7 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_type;
+use crate::utils::names::readonly_writer;
 use crate::utils::quoted_source;
 use crate::utils::template::check_private_method_reach;
 use crate::utils::template::check_private_property_reach;
@@ -440,11 +442,26 @@ where
                 ),
             };
 
-            let Some(resolved_property) = resolved_property else {
+            let Some(mut resolved_property) = resolved_property else {
                 result.has_invalid_path = true;
 
                 continue;
             };
+
+            // Spec section 13: everything read through a readonly value is readonly, and nothing is written through it.
+            if context.dialect.is_sharp()
+                && let TObject::Named(named_object) = object
+                && named_object.is_readonly
+            {
+                if for_assignment {
+                    report_readonly_write(context, block_context, object_expression, property_selector);
+                    result.has_error_path = true;
+
+                    continue;
+                }
+
+                resolved_property.property_type = resolved_property.property_type.to_readonly();
+            }
 
             if resolved_property.is_magic {
                 if magic_method.is_none() {
@@ -487,6 +504,26 @@ where
         !result.properties.is_empty() && result.properties.iter().all(|p| !p.property_type.is_nullable());
 
     Ok(result)
+}
+
+/// Reports a write of `object.property` where `object` is readonly, spec section 13, once for the write.
+fn report_readonly_write<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    object: &Expression<'_>,
+    property: &ClassLikeMemberSelector<'_>,
+) where
+    A: Arena,
+{
+    let receiver = quoted_source(context, object.span());
+    let written = quoted_source(context, object.span().join(property.span()));
+    let writer = readonly_writer(block_context.scope.get_function_like());
+    context.collector.report_with_code(
+        IssueCode::InvalidPropertyWrite,
+        Issue::error(format!("{writer} cannot set {written}: {receiver} is readonly."))
+            .with_annotation(Annotation::primary(property.span()).with_message("Written here."))
+            .with_note("Through a `readonly` value, only `get` accessors and methods marked `readonly` run."),
+    );
 }
 
 enum ExternalPropertyResolution {
@@ -941,12 +978,19 @@ where
                 read_span,
             )
         {
-            check_private_method_reach(
-                context,
-                object_expr,
-                &MethodIdentifier::new(class_id, method_name),
-                selector.span(),
-            );
+            let method = MethodIdentifier::new(class_id, method_name);
+            check_private_method_reach(context, object_expr, &method, selector.span());
+            // Spec section 13: a method value runs its method, so through a readonly value it is a call of it.
+            if context.dialect.is_sharp() && matches!(object, TObject::Named(named) if named.is_readonly) {
+                check_call_through_readonly(
+                    context,
+                    block_context,
+                    &mut artifacts.readonly_calls,
+                    (object_expr, selector),
+                    &method,
+                    class_id,
+                );
+            }
 
             return Some(ResolvedProperty {
                 property_span: None,

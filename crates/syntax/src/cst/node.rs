@@ -216,6 +216,7 @@ use crate::cst::cst::PropertyHookList;
 use crate::cst::cst::PropertyItem;
 use crate::cst::cst::PropertyPattern;
 use crate::cst::cst::QualifiedIdentifier;
+use crate::cst::cst::ReadonlyHint;
 use crate::cst::cst::RequireConstruct;
 use crate::cst::cst::RequireOnceConstruct;
 use crate::cst::cst::Return;
@@ -544,6 +545,7 @@ pub enum NodeKind {
     NullableHint,
     GenericHint,
     FunctionHint,
+    ReadonlyHint,
     TypeArgumentList,
     TypeParameterList,
     TypeParameter,
@@ -832,6 +834,7 @@ pub enum Node<'ast, 'arena> {
     NullableHint(&'ast NullableHint<'arena>),
     GenericHint(&'ast GenericHint<'arena>),
     FunctionHint(&'ast FunctionHint<'arena>),
+    ReadonlyHint(&'ast ReadonlyHint<'arena>),
     TypeArgumentList(&'ast TypeArgumentList<'arena>),
     TypeParameterList(&'ast TypeParameterList<'arena>),
     TypeParameter(&'ast TypeParameter<'arena>),
@@ -1214,6 +1217,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::NullableHint(_) => NodeKind::NullableHint,
             Self::GenericHint(_) => NodeKind::GenericHint,
             Self::FunctionHint(_) => NodeKind::FunctionHint,
+            Self::ReadonlyHint(_) => NodeKind::ReadonlyHint,
             Self::TypeArgumentList(_) => NodeKind::TypeArgumentList,
             Self::TypeParameterList(_) => NodeKind::TypeParameterList,
             Self::TypeParameter(_) => NodeKind::TypeParameter,
@@ -1529,6 +1533,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                         f(Node::TypeParameterList(item));
                     }
                     f(Node::FunctionLikeParameterList(&node.parameter_list));
+                }
+                for item in node.readonly.iter() {
+                    f(Node::Keyword(item));
                 }
                 for item in node.on.iter() {
                     f(Node::On(item));
@@ -2974,6 +2981,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Hint::Iterable(local_identifier) => f(Node::LocalIdentifier(local_identifier)),
                 Hint::Generic(generic_hint) => f(Node::GenericHint(generic_hint)),
                 Hint::Function(function_hint) => f(Node::FunctionHint(function_hint)),
+                Hint::Readonly(readonly_hint) => f(Node::ReadonlyHint(readonly_hint)),
             },
             Node::GenericHint(node) => {
                 f(Node::LocalIdentifier(&node.name));
@@ -3015,6 +3023,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Hint(node.right));
             }
             Node::NullableHint(node) => f(Node::Hint(node.hint)),
+            Node::ReadonlyHint(node) => {
+                f(Node::Keyword(&node.readonly));
+                f(Node::Hint(node.hint));
+            }
             Node::ParenthesizedHint(node) => f(Node::Hint(node.hint)),
             Node::UnionHint(node) => {
                 f(Node::Hint(node.left));
@@ -3341,6 +3353,7 @@ impl HasSpan for Node<'_, '_> {
             Self::NullableHint(node) => node.span(),
             Self::GenericHint(node) => node.span(),
             Self::FunctionHint(node) => node.span(),
+            Self::ReadonlyHint(node) => node.span(),
             Self::TypeArgumentList(node) => node.span(),
             Self::TypeParameterList(node) => node.span(),
             Self::TypeParameter(node) => node.span(),

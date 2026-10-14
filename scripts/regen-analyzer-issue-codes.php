@@ -354,6 +354,7 @@ final class AnalyzerCodeModuleGenerator
         'native-body-outside-library',
         'silence-outside-library',
         'reserved-name-outside-library',
+        'internal-outside-library',
         'wrapped-function',
         'replaced-by-syntax',
         'bare-function-call',
@@ -380,6 +381,7 @@ final class AnalyzerCodeModuleGenerator
         'missing-service',
         'service-cycle',
         'captive-service',
+        'missing-readonly-marker',
     ];
 
     /**

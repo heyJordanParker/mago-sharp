@@ -14,6 +14,7 @@ use mago_codex::metadata::module::Lifetime;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::module::service_id;
+use mago_codex::metadata::module::top_dispatcher_namespaces;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::TType;
@@ -83,6 +84,9 @@ where
             report_duplicate_binding(context, service, binding_metadata, *first);
         } else {
             bound.push((key, binding_metadata.span));
+        }
+        if binding_metadata.binds_dispatcher() {
+            check_app_dispatcher(context, metadata, binding_metadata);
         }
 
         if let (Some(target), Some(written_target)) = (binding_metadata.target, &binding.target)
@@ -656,6 +660,56 @@ fn report_duplicate_binding<A>(
             .with_annotation(Annotation::primary(binding.span).with_message("Bound again here."))
             .with_annotation(Annotation::secondary(first).with_message("First bound here.")),
     );
+}
+
+/// Refuses the app's binding of `Sharp.Dispatcher` in `module` unless its module is the app's one top module that binds
+/// it, spec section 15: "An app replaces the dispatcher once at startup". A module below the top one is refused, and
+/// two top modules of the same depth are each refused. A test module replaces it freely, and a package's or the
+/// standard library's binding is never the app's.
+fn check_app_dispatcher<A>(context: &mut Context<'_, '_, A>, module: &ModuleMetadata, binding: &BindingMetadata)
+where
+    A: Arena,
+{
+    if module.kind == ModuleKind::Test
+        || context.source_file.is_standard_library
+        || module.file.as_bytes().starts_with(b"vendor/")
+    {
+        return;
+    }
+
+    let top = top_dispatcher_namespaces(&context.codebase.modules);
+    if top.as_slice() == [module.namespace] {
+        return;
+    }
+
+    let others: Vec<(Word, Span)> = context
+        .codebase
+        .modules
+        .iter()
+        .filter(|other| other.kind != ModuleKind::Test && other.namespace != module.namespace)
+        .filter(|other| top.contains(&other.namespace) && !other.file.as_bytes().starts_with(b"vendor/"))
+        .filter_map(|other| {
+            other.bindings.iter().find(|bound| bound.binds_dispatcher()).map(|bound| (other.file, bound.span))
+        })
+        .collect();
+    let files = others.iter().map(|(file, _)| format!("`{file}`")).collect::<Vec<_>>().join(" and ");
+    let (message, help) = if top.contains(&module.namespace) {
+        (
+            format!("This module and {files} each bind `Dispatcher`, and an app binds it once, in its top module."),
+            "Bind `Dispatcher` in one module, in the namespace above both.",
+        )
+    } else {
+        (
+            format!("Only {files} binds `Dispatcher`: an app binds it once, in its top module."),
+            "Remove this binding. The app's dispatcher serves every `emit`, and a test module replaces it in tests.",
+        )
+    };
+    let mut issue =
+        Issue::error(message).with_annotation(Annotation::primary(binding.span).with_message("Bound here."));
+    for (_, span) in others {
+        issue = issue.with_annotation(Annotation::secondary(span).with_message("The app's dispatcher is bound here."));
+    }
+    context.collector.report_with_code(IssueCode::InvalidBinding, issue.with_help(help));
 }
 
 /// Reports that `binding` needs itself through the classes of `cycle`, at the binding `at`.

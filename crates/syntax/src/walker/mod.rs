@@ -210,6 +210,7 @@ use crate::cst::cst::PropertyHookList;
 use crate::cst::cst::PropertyItem;
 use crate::cst::cst::PropertyPattern;
 use crate::cst::cst::QualifiedIdentifier;
+use crate::cst::cst::ReadonlyHint;
 use crate::cst::cst::RequireConstruct;
 use crate::cst::cst::RequireOnceConstruct;
 use crate::cst::cst::Return;
@@ -1397,6 +1398,10 @@ generate_ast_walker! {
             }
 
             walker.walk_function_like_parameter_list(&method.parameter_list, context);
+        }
+
+        if let Some(readonly) = &method.readonly {
+            walker.walk_keyword(readonly, context);
         }
 
         if let Some(on) = &method.on {
@@ -2960,6 +2965,9 @@ generate_ast_walker! {
             Hint::Function(function_hint) => {
                 walker.walk_function_hint(function_hint, context);
             }
+            Hint::Readonly(readonly_hint) => {
+                walker.walk_readonly_hint(readonly_hint, context);
+            }
         });
     }
 
@@ -3013,6 +3021,11 @@ generate_ast_walker! {
 
     'arena NullableHint as nullable_hint => {
         walker.walk_hint(nullable_hint.hint, context);
+    }
+
+    'arena ReadonlyHint as readonly_hint => {
+        walker.walk_keyword(&readonly_hint.readonly, context);
+        walker.walk_hint(readonly_hint.hint, context);
     }
 
     'arena UnionHint as union_hint => {

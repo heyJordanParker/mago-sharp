@@ -579,6 +579,12 @@ pub fn get_static_functionlike_id_from_call<'ast, 'arena>(
 
             Some(FunctionLikeIdentifier::Method(class_id, method_id))
         }
+        // PHP# writes the static call `Class::m()` as `Class.m()`.
+        Call::Method(method_call @ MethodCall { method: ClassLikeMemberSelector::Identifier(method), .. }) => {
+            let class = resolved_names.static_call_class(method_call)?;
+
+            Some(FunctionLikeIdentifier::Method(word(resolved_names.get(&class.name)), word(method.value)))
+        }
         _ => None,
     }
 }

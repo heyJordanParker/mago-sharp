@@ -1973,7 +1973,8 @@ fn encode_reference_snapshot<'type_info>(
     depth: usize,
 ) -> Result<(), ExternalAnalyzerError> {
     match reference {
-        TReference::Symbol { name, parameters, variances, intersection_types } => {
+        // A plugin sees plain PHP types, which carry no `readonly`.
+        TReference::Symbol { name, parameters, variances, intersection_types, is_readonly: _ } => {
             writer.write_u8(1);
             writer.write_bytes(name.as_bytes())?;
             encode_optional_unions(writer, parameters.as_deref(), types, depth + 1)?;
@@ -3010,6 +3011,8 @@ fn decode_complete_object(reader: &mut PayloadReader<'_>, depth: usize) -> Resul
                 is_this,
                 intersection_types,
                 remapped_parameters,
+                // An extension's payload carries no spec section 13 readonly flag: only the checker reads it.
+                is_readonly: false,
             })
         }
         3 => {
@@ -3124,6 +3127,7 @@ fn decode_complete_reference(
             parameters: decode_optional_complete_unions(reader, depth + 1)?,
             variances: decode_optional_variances(reader)?,
             intersection_types: decode_optional_complete_atomics(reader, depth + 1)?,
+            is_readonly: false,
         },
         2 => TReference::Member {
             class_like_name: word(reader.read_bytes("reference member class")?),
@@ -3552,6 +3556,40 @@ pub(super) mod testing {
 
         assert_eq!(sent(get_int()), "class-string<int>");
         assert_eq!(sent(either), "class-string");
+    }
+
+    /// An external analyzer's payload has no spec section 13 readonly flag, so a class it names is never readonly.
+    #[test]
+    fn an_external_analyzers_class_is_never_readonly() {
+        let mut writer = PayloadWriter::new();
+        writer.write_u16(0);
+        writer.write_u32(2);
+        writer.write_u8(SNAPSHOT_OBJECT);
+        writer.write_u8(2);
+        writer.write_bytes(b"Order").unwrap();
+        for absent in ["type parameters", "variances", "static", "this", "intersections", "remapped"] {
+            writer.write_bool(absent.is_empty());
+        }
+        writer.write_u8(SNAPSHOT_REFERENCE);
+        writer.write_u8(1);
+        writer.write_bytes(b"Order").unwrap();
+        for absent in ["parameters", "variances", "intersections"] {
+            writer.write_bool(absent.is_empty());
+        }
+        let payload = writer.finish();
+
+        let union = decode_complete_union(&mut PayloadReader::new(&payload), 0).unwrap();
+
+        assert!(
+            matches!(
+                union.types.as_ref(),
+                [
+                    TAtomic::Object(TObject::Named(TNamedObject { is_readonly: false, .. })),
+                    TAtomic::Reference(TReference::Symbol { is_readonly: false, .. }),
+                ]
+            ),
+            "{union:?}"
+        );
     }
 
     /// A codebase that declares the string-backed enum `Status`.

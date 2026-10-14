@@ -5219,3 +5219,135 @@ fn emit_raises_the_expression_after_it() {
     assert!(!php.errors.is_empty(), "`emit new` must stay a parse error in plain PHP");
     assert!(!php.statements.iter().any(|statement| matches!(statement, Statement::Emit(_))), "{:#?}", php.statements);
 }
+
+/// Every readonly type in `node`, as its source, in source order.
+fn readonly_types<'a>(code: &'a str, node: Node<'_, '_>) -> Vec<&'a str> {
+    let mut found = Vec::new();
+    node.visit_children(|child| {
+        if let Node::ReadonlyHint(readonly) = child {
+            assert_eq!(readonly.readonly.value, b"readonly", "a readonly type starts at its keyword");
+            found.push(source(code, readonly));
+        }
+        found.extend(readonly_types(code, child));
+    });
+
+    found
+}
+
+/// Spec section 13: `readonly` before a type is part of the type, wherever a type goes, and covers the whole type
+/// after it.
+#[test]
+fn readonly_before_a_type_is_a_readonly_type() {
+    const CODE: &str = "class Shop\n{\n    public Shop(readonly Order order, public readonly Money due) { }\n    private readonly Money total;\n    public readonly Customer customer => this.owner;\n    public readonly Money? priceIn(readonly List<readonly Line> lines, Function<Money?(readonly Line, string)> priceOf) { readonly Order o = this.order; const free = (readonly Line line) => line.free; return null; }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Shop.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    assert_eq!(
+        readonly_types(CODE, Node::Program(program)),
+        [
+            "readonly Order",
+            "readonly Money",
+            "readonly Money",
+            "readonly Customer",
+            "readonly Money?",
+            "readonly List<readonly Line>",
+            "readonly Line",
+            "readonly Line",
+            "readonly Order",
+            "readonly Line",
+        ]
+    );
+    assert!(
+        class_members(program).iter().all(|member| match member {
+            ClassLikeMember::Method(method) => method.modifiers.iter().all(|modifier| !modifier.is_readonly()),
+            ClassLikeMember::Property(property) => property.modifiers().iter().all(|modifier| !modifier.is_readonly()),
+            _ => true,
+        }),
+        "`readonly` before a type is no modifier: {:#?}",
+        class_members(program)
+    );
+}
+
+/// Spec section 13: `readonly` after a method's parameters marks the method, as its last clause, after `on` and
+/// `uses`, whatever its body.
+#[test]
+fn readonly_after_the_parameters_marks_the_method() {
+    const CODE: &str = "interface Quotes\n{\n    Money quote(Cart cart) uses Http readonly;\n}\n\nclass Order\n{\n    public Money totalIn(string currency) readonly { return this.total; }\n    public int count() readonly => 1;\n    public abstract int size() readonly;\n    public void paid(OrderPaid e) on OrderPaid readonly { }\n    public void markPaid() { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Order.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let marked: Vec<(&str, bool)> = program
+        .statements
+        .iter()
+        .flat_map(|statement| match statement {
+            Statement::Class(class) => class.members.iter().collect::<Vec<_>>(),
+            Statement::Interface(interface) => interface.members.iter().collect(),
+            _ => Vec::new(),
+        })
+        .map(|member| {
+            let ClassLikeMember::Method(method) = member else {
+                panic!("expected a method, got {member:#?}");
+            };
+            if let Some(readonly) = &method.readonly {
+                assert_eq!(source(CODE, readonly), "readonly");
+            }
+
+            (std::str::from_utf8(method.name.value).expect("UTF-8"), method.readonly.is_some())
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        [("quote", true), ("totalIn", true), ("count", true), ("size", true), ("paid", true), ("markPaid", false)]
+    );
+}
+
+/// Spec section 13: `readonly` written before `on` or `uses` is an error at it that says to write it last, and the
+/// method keeps its mark.
+#[test]
+fn readonly_before_another_clause_is_an_error_that_names_the_last_place() {
+    const CODE: &str = "class Order\n{\n    public Money quote(Cart cart) readonly uses Http;\n    public void paid(OrderPaid e) readonly on OrderPaid { }\n    public void sent(OrderPaid e) readonly on OrderPaid uses Mail { }\n    public void kept(OrderPaid e) on OrderPaid readonly uses Mail { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Order.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    let message = "A method's `readonly` is its last clause, after `on` and `uses`, as in `Money quote(Cart cart) uses Http readonly;`.";
+    assert_eq!(
+        errors,
+        [
+            (message.to_string(), "readonly"),
+            (message.to_string(), "readonly"),
+            (message.to_string(), "readonly"),
+            (message.to_string(), "readonly")
+        ]
+    );
+    assert!(
+        class_members(program)
+            .iter()
+            .all(|member| matches!(member, ClassLikeMember::Method(method) if method.readonly.is_some())),
+        "{:#?}",
+        class_members(program)
+    );
+}
+
+/// Before `class` or another modifier, `readonly` stays a modifier, and the checker refuses it there. In plain PHP it
+/// is always PHP's own modifier.
+#[test]
+fn readonly_before_a_declaration_or_in_plain_php_is_a_modifier() {
+    const SHARP: &str = "public readonly class Receipt { }\n";
+    const PHP: &str =
+        "<?php class Bill { public function __construct(public readonly int $due) {} private readonly int $total; }\n";
+    let arena = LocalArena::new();
+    let sharp = parse(&arena, "src/Receipt.sharp", SHARP);
+    let php = parse(&arena, "src/Bill.php", PHP);
+
+    assert!(sharp.errors.is_empty(), "{:#?}", sharp.errors);
+    let Some(Statement::Class(receipt)) = sharp.statements.first() else {
+        panic!("expected a class, got {:#?}", sharp.statements);
+    };
+    assert!(receipt.modifiers.iter().any(Modifier::is_readonly), "{:#?}", receipt.modifiers);
+    assert!(php.errors.is_empty(), "{:#?}", php.errors);
+    assert!(readonly_types(PHP, Node::Program(php)).is_empty());
+}

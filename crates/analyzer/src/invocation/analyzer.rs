@@ -76,8 +76,89 @@ use crate::statement::function_like::is_member_read;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::takes_declared_type;
 use crate::utils::expression::get_block_expression_id;
+use crate::utils::names::display_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::names::is_prelude_stub;
+use crate::utils::quoted_source;
+use crate::utils::report_dropped_readonly;
+
+/// The type `parameter` of a PHP# function declares, when that type names a type parameter of the function itself,
+/// spec section 11. Such a type parameter takes a readonly value only where the parameter writes `readonly`, spec
+/// section 13, so the declared type is what an argument meets. A class's type parameter is filled by the receiver.
+fn own_type_parameter_type<'parameter>(
+    invocation: &Invocation<'_, '_, '_>,
+    parameter: &InvocationTargetParameter<'parameter>,
+) -> Option<&'parameter TUnion> {
+    invocation.target.get_function_like_metadata().filter(|function| function.flags.is_sharp())?;
+
+    parameter.get_type().filter(|declared| {
+        declared.get_all_child_nodes().iter().any(|node| {
+            matches!(node, TypeRef::Atomic(TAtomic::GenericParameter(generic))
+                if matches!(generic.defining_entity, GenericParent::FunctionLike(_)))
+        })
+    })
+}
+
+/// Reports `argument`, a value of `argument_type` that would lose its readonly where `parameter` takes `parameter_type`,
+/// spec section 13, with the `readonly` to declare: on the receiver of an extension member, which the message names as
+/// the call, on the parameter of a PHP# method, on the element type of a collection, or on the type argument a class's
+/// type parameter takes. A plain PHP parameter takes no `readonly`, since PHP# does not check plain PHP.
+fn report_readonly_argument<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    invocation: &Invocation<'_, '_, '_>,
+    parameter: InvocationTargetParameter<'_>,
+    (parameter_type, argument_type): (&TUnion, &TUnion),
+    argument: &Expression<'_>,
+) where
+    A: Arena,
+{
+    let target = invocation.target.guess_name(context);
+    let readonly_type = display_type(context, &parameter_type.clone().to_readonly());
+    let function = invocation.target.get_function_like_metadata();
+    let declared_generic = parameter.get_type().is_some_and(|declared| {
+        declared.get_all_child_nodes().iter().any(|node| matches!(node, TypeRef::Atomic(TAtomic::GenericParameter(_))))
+    });
+    let collection_method = matches!(
+        invocation.target.get_function_like_identifier(),
+        Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
+    );
+    let name = parameter.get_name().map(|name| display_variable_name(context, name.0.as_bytes()));
+    let receiver = function
+        .filter(|function| function.flags.is_extension_method())
+        .filter(|function| function.parameters.first().map(|first| first.get_name()) == parameter.get_name());
+    let (action, fix) = if let Some(function) = receiver {
+        let action = format!("call {}.{}", quoted_source(context, argument.span()), function.original_name);
+        let name = name.unwrap_or_default();
+
+        (action, format!(". Declare its receiver `extension({readonly_type} {name})`."))
+    } else {
+        let fix = if collection_method {
+            format!(". Declare the element type `{readonly_type}`.")
+        } else if function.is_some_and(|function| function.flags.is_sharp())
+            && let Some(name) = name
+            && (!declared_generic || own_type_parameter_type(invocation, &parameter).is_some())
+        {
+            format!(". Declare the parameter `{readonly_type} {name}`.")
+        } else if declared_generic {
+            format!(". Declare the type argument `{readonly_type}`.")
+        } else {
+            format!(", and {target} is plain PHP, which PHP# does not check.")
+        };
+
+        (format!("pass {} to {target}", quoted_source(context, argument.span())), fix)
+    };
+
+    report_dropped_readonly(
+        context,
+        block_context,
+        IssueCode::InvalidArgument,
+        argument,
+        (parameter_type, argument_type),
+        &action,
+        &fix,
+    );
+}
 
 fn narrow_class_related_argument<A>(
     context: &Context<'_, '_, A>,
@@ -740,7 +821,22 @@ where
                     );
                 }
 
-                if !refused_crossing
+                if context.dialect.is_sharp()
+                    && let Some(declared) =
+                        [Some(&final_parameter_type), own_type_parameter_type(invocation, &parameter_ref)]
+                            .into_iter()
+                            .flatten()
+                            .find(|declared| declared.drops_readonly_of(&argument_value_type))
+                {
+                    report_readonly_argument(
+                        context,
+                        block_context,
+                        invocation,
+                        parameter_ref,
+                        (declared, &argument_value_type),
+                        argument_expression,
+                    );
+                } else if !refused_crossing
                     && verify_argument_type(
                         context,
                         artifacts,
@@ -1143,6 +1239,22 @@ where
                         && let Some(unpacked_element_type) =
                             get_unpacked_argument_type(context, &argument_value_type, argument_expression.span())
                     {
+                        // Spec section 13: a spread passes each element, so each keeps its readonly.
+                        if context.dialect.is_sharp()
+                            && final_variadic_parameter_type.drops_readonly_of(&unpacked_element_type)
+                        {
+                            report_readonly_argument(
+                                context,
+                                block_context,
+                                invocation,
+                                last_parameter_ref,
+                                (&final_variadic_parameter_type, &unpacked_element_type),
+                                argument_expression,
+                            );
+
+                            continue;
+                        }
+
                         verify_argument_type(
                             context,
                             artifacts,

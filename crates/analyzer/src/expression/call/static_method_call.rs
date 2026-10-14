@@ -36,6 +36,7 @@ use crate::plugin::hook::StaticCall;
 use crate::resolver::class_name::generic_class_type;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
+use crate::statement::class_like::listener::check_events_on;
 use crate::statement::class_like::r#struct::check_struct_parse;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_member;
@@ -229,6 +230,14 @@ where
     }
 
     let has_resolved_methods = !invocation_targets.is_empty();
+    let starts_a_listener = context.dialect.is_sharp()
+        && invocation_targets.iter().any(|target| {
+            matches!(
+                target,
+                InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, method), .. }
+                    if class.as_bytes().eq_ignore_ascii_case(b"sharp\\events") && method.as_bytes().eq_ignore_ascii_case(b"on")
+            )
+        });
 
     record_external_method_call(context, artifacts, &invocation_targets, call.span);
     if !method_resolution.undocumented_methods.is_empty() {
@@ -275,6 +284,19 @@ where
         let span = (call.span.start.offset, call.span.end.offset);
         let own = artifacts.inferred_type_arguments.remove(&span).unwrap_or_default();
         artifacts.inferred_type_arguments.insert(span, class_type_arguments.into_iter().chain(own).collect());
+    }
+
+    // A type argument neither written nor inferred is `missing-template-parameter`'s to report.
+    if starts_a_listener
+        && let Some(listened) = artifacts
+            .inferred_type_arguments
+            .get(&(call.span.start.offset, call.span.end.offset))
+            .and_then(|t| t.first())
+        && (type_arguments.is_some() || !listened.is_mixed())
+    {
+        let at =
+            type_arguments.and_then(|type_arguments| type_arguments.arguments.first()).map_or(call.span, HasSpan::span);
+        check_events_on(context, &listened.clone(), at);
     }
 
     if !method_resolution.undocumented_methods.is_empty() {

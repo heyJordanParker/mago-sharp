@@ -264,6 +264,7 @@ enum NodeKind: string
     case NullableHint = 'NullableHint';
     case GenericHint = 'GenericHint';
     case FunctionHint = 'FunctionHint';
+    case ReadonlyHint = 'ReadonlyHint';
     case TypeArgumentList = 'TypeArgumentList';
     case TypeParameterList = 'TypeParameterList';
     case TypeParameter = 'TypeParameter';

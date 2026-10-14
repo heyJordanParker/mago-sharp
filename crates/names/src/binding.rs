@@ -14,6 +14,7 @@ use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::MethodExpressionBody;
 use mago_syntax::cst::Modifier;
+use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::On;
@@ -64,6 +65,24 @@ pub fn php_operator_name(symbol: &BinaryOperator<'_>, operands: usize) -> Option
     })
 }
 
+/// Returns the symbol of the PHP# operator the PHP static method `php_name` runs as, the reverse of
+/// [`php_operator_name`]: `+` for `op_Addition`, and `-` for `op_UnaryNegation` and `op_Subtraction`.
+#[inline]
+#[must_use]
+pub fn sharp_operator_symbol(php_name: &[u8]) -> Option<&'static str> {
+    Some(match php_name {
+        b"op_Equality" => "==",
+        b"op_Comparison" => "<=>",
+        b"op_Addition" => "+",
+        b"op_UnaryNegation" | b"op_Subtraction" => "-",
+        b"op_Multiply" => "*",
+        b"op_Division" => "/",
+        b"op_Modulus" => "%",
+        b"op_Exponent" => "**",
+        _ => return None,
+    })
+}
+
 /// The parts a method and a PHP# operator share, as the PHP method they run as: a PHP# operator is a static method.
 pub struct MethodParts<'ast, 'arena> {
     /// The PHP method's name: `__construct` for the PHP# constructor, and `op_Addition` for `operator +`.
@@ -77,6 +96,9 @@ pub struct MethodParts<'ast, 'arena> {
     pub type_parameters: Option<&'ast TypeParameterList<'arena>>,
     pub parameter_list: &'ast FunctionLikeParameterList<'arena>,
     pub return_type_hint: Option<&'ast FunctionLikeReturnTypeHint<'arena>>,
+    /// The `readonly` after a method's parameters, spec section 13. An operator, a named constructor and an extension
+    /// member have none: each runs as a static method, with no `this`.
+    pub readonly: Option<&'ast Keyword<'arena>>,
     /// The events a method listens to. An operator and a named constructor listen to none.
     pub on: Option<&'ast On<'arena>>,
     /// The effects a method without a body allows, spec section 29. An operator and a named constructor have a body.
@@ -98,12 +120,28 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             type_parameters: method.type_parameters,
             parameter_list: &method.parameter_list,
             return_type_hint: method.return_type_hint.as_ref(),
+            readonly: method.readonly.as_ref(),
             on: method.on,
             uses: method.uses,
             body: &method.body,
             returns_value: method.returns_value(),
             returns_by_reference: method.ampersand.is_some(),
         }
+    }
+
+    /// Whether this is `int hash()` or `string toString()`, which the language calls on a readonly value, so they are
+    /// readonly by definition, spec section 13. A method of either name that takes parameters is an ordinary method.
+    #[must_use]
+    pub fn is_hash_or_to_string(&self) -> bool {
+        let returns = |keyword: fn(&Hint<'_>) -> bool| self.return_type_hint.is_some_and(|hint| keyword(&hint.hint));
+
+        !self.modifiers.contains_static()
+            && self.parameter_list.parameters.is_empty()
+            && match self.name {
+                b"hash" => returns(|hint| matches!(hint, Hint::Integer(_))),
+                b"toString" => returns(|hint| matches!(hint, Hint::String(_))),
+                _ => false,
+            }
     }
 
     /// The effects the method's `uses` names, spec section 29: every name but one of its function-typed parameters,
@@ -136,6 +174,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             type_parameters: None,
             parameter_list: &operator.parameter_list,
             return_type_hint: Some(&operator.return_type_hint),
+            readonly: None,
             on: None,
             uses: None,
             body: &operator.body,
@@ -157,6 +196,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             type_parameters: None,
             parameter_list: &named_constructor.parameter_list,
             return_type_hint: None,
+            readonly: None,
             on: None,
             uses: None,
             body: &named_constructor.body,
@@ -187,6 +227,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             type_parameters: block_type_parameters_first(arena, extension, method.type_parameters),
             parameter_list: receiver_first(arena, extension, &method.parameter_list)?,
             return_type_hint: method.return_type_hint.as_ref(),
+            readonly: None,
             on: method.on,
             uses: method.uses,
             body: &method.body,
@@ -226,6 +267,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
                 .hint
                 .as_ref()
                 .map(|hint| &*arena.alloc(FunctionLikeReturnTypeHint { colon: None, hint: hint.clone() })),
+            readonly: None,
             on: None,
             uses: None,
             body: arena.alloc(MethodBody::Expression(MethodExpressionBody {

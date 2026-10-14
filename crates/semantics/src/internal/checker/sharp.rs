@@ -90,6 +90,7 @@ use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::PropertyHookList;
 use mago_syntax::cst::PropertyItem;
+use mago_syntax::cst::ReadonlyHint;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::StringPart;
@@ -372,10 +373,10 @@ const OBJECT: &[u8] = b"Object";
 /// - `new` on a static class, in `analyze_class_instantiation`, and a class that extends one, in
 ///   `check_class_like_extends`, because the static class may be another file's.
 /// - an `extern` method anywhere but a standard library file whose class is under `Sharp`, in `Method`'s `analyze`,
-///   `@` in any file that is not the standard library's, in `UnaryPrefix`'s `analyze`, and a class or enum named
-///   `Sharp.Int`, `Sharp.Float` or `Sharp.Bool` in any file that is not the standard library's, in
-///   `report_sharp_type_class_outside_library`, because only the analyzer knows the file's package. The nearest
-///   `composer.json` above a file names it.
+///   `@` in any file that is not the standard library's, in `UnaryPrefix`'s `analyze`, and `namespace Sharp` or a
+///   namespace under it, which alone declares `Sharp.Int`, `Sharp.Float` and `Sharp.Bool`, in any file that is not the
+///   standard library's, in `report_standard_library_namespace`, because only the analyzer knows the file's package.
+///   The nearest `composer.json` above a file names it.
 /// - a bare call that finds no function while the enclosing class declares a method of that name, in
 ///   `bare_member_call`, because only the codebase knows which functions exist.
 /// - a bare call of a plain PHP function, `exit` included, which spec section 23 makes an error, in
@@ -759,6 +760,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::Hint(Hint::Generic(_)), Place::TypeParameter) => Some(Parameter),
         (Node::Modifier(Modifier::Public(_)), Interface | Enum) => Some(place),
+        // Spec section 13: a class keeps its values with get-only properties.
+        (Node::Modifier(Modifier::Readonly(readonly)), Class | Interface | Enum) => {
+            context.report(
+                Issue::error("A class is never `readonly`: declare each of its properties get-only, with `{ get; }`.")
+                    .with_annotation(Annotation::primary(readonly.span).with_message("Written here.")),
+            );
+
+            None
+        }
         (Node::ClassLikeMember(ClassLikeMember::Method(_)), Interface) => Some(Interface),
         // An interface states a property its classes give, as `OrderEvent` states `orderId`, spec section 15.
         (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
@@ -844,6 +854,22 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(Place::TypeParameter)
         }
         (Node::FunctionLikeParameterList(_), Place::Extension) => Some(Method),
+        (Node::ClassLikeMember(ClassLikeMember::Method(method)), Place::Extension)
+            if let Some(readonly) = &method.readonly
+                && let Some(extension) = enclosing_extension(context.program, method.span()) =>
+        {
+            let receiver = extension.parameter_list.parameters.first().map_or_else(String::new, |receiver| {
+                String::from_utf8_lossy(context.get_code_snippet(receiver)).into_owned()
+            });
+            context.report(
+                Issue::error(format!(
+                    "An extension member has no `this`: write `readonly` before its receiver's type, as in `extension(readonly {receiver})`."
+                ))
+                .with_annotation(Annotation::primary(readonly.span).with_message("Written here.")),
+            );
+
+            enter(node, Class, context)
+        }
         (
             Node::ClassLikeMember(ClassLikeMember::Method(_) | ClassLikeMember::Property(Property::Computed(_))),
             Place::Extension,
@@ -874,6 +900,20 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // operator a method's parts hold.
         (Node::Operator(operator), Class) => {
             check_operator(operator, context);
+            // Spec section 13: the language runs an operator on readonly values, so its operands are readonly already.
+            for parameter in &operator.parameter_list.parameters {
+                if let Some(Hint::Readonly(readonly)) = &parameter.hint {
+                    let written = format!(
+                        "{} {}",
+                        String::from_utf8_lossy(context.get_code_snippet(readonly.hint)),
+                        BytesDisplay(parameter.variable.name)
+                    );
+                    context.report(
+                        Issue::error(format!("An operator's operands are readonly by definition: write `{written}`."))
+                            .with_annotation(Annotation::primary(readonly.readonly.span).with_message("Written here.")),
+                    );
+                }
+            }
 
             Some(Method)
         }
@@ -898,6 +938,24 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Enum,
         ) => Some(Enum),
         (Node::EnumCaseBackedItem(_), Enum) => Some(Constant),
+        // Spec section 13: a field or a property keeps its value with `{ get; }`, and only a computed property's type,
+        // the value each read gives, takes `readonly`.
+        (Node::ClassLikeMember(ClassLikeMember::Property(property)), Class)
+            if !matches!(property, Property::Computed(_))
+                && let Some(readonly) = storage_readonly(property.modifiers(), property.hint()) =>
+        {
+            let visibility = property.modifiers().get_first_visibility();
+            report_readonly_storage(
+                "A field or property",
+                readonly,
+                visibility,
+                property.hint(),
+                property.first_variable().name,
+                context,
+            );
+
+            None
+        }
         (Node::ClassLikeMember(ClassLikeMember::Property(property)), Class) => {
             match is_slice_property(property, &context.version, context.names) {
                 Ok(()) => {
@@ -1003,6 +1061,21 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // Spec section 13: `readonly` before a type a value has. The analyzer refuses it on a type whose class PHP# does
+        // not check, or that never changes, an enum's or a struct's.
+        (Node::Hint(Hint::Readonly(_)), FieldOrProperty | Method | Signature | Parameter | Body) => Some(place),
+        (Node::ReadonlyHint(readonly), FieldOrProperty | Method | Signature | Parameter | Body) => {
+            check_readonly_type(readonly, context).then_some(place)
+        }
+        (Node::Hint(Hint::Readonly(readonly)), Place::Pattern) => {
+            let written = String::from_utf8_lossy(context.get_code_snippet(readonly.hint)).into_owned();
+            context.report(
+                Issue::error(format!("`is` keeps a value readonly: write `is {written}`."))
+                    .with_annotation(Annotation::primary(readonly.readonly.span).with_message("Written here.")),
+            );
+
+            None
+        }
         (Node::GenericHint(generic), FieldOrProperty | Method | Signature | Parameter | Body) => {
             check_generic(generic, place, context)
         }
@@ -1029,6 +1102,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // The effects an `extern`, a function type or a method without a body lists, spec section 29, which the
         // analyzer's `check_uses` decides, because an effect is a `foreign` class any file may declare.
         (Node::Uses(_), File | Parameter | Method | Signature) => Some(place),
+        // Spec section 13: `readonly` after the parameters keeps `this` readonly, so a method with no `this` to keep, and
+        // one the language already keeps readonly, takes none.
+        (Node::Method(method), Class | Enum)
+            if let Some(readonly) = &method.readonly
+                && let Some(message) = needless_readonly_marker(method, place) =>
+        {
+            context.report(
+                Issue::error(message).with_annotation(Annotation::primary(readonly.span).with_message("Written here.")),
+            );
+
+            Some(Method)
+        }
         (Node::Method(method), Enum)
             if method.return_type_hint.is_none()
                 && enclosing_class(context.program, method.span())
@@ -1108,6 +1193,23 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             report_this_in_initializer(initializer, context);
 
             Some(Body)
+        }
+        // Spec section 13: a parameter that declares a member keeps its value with `{ get; }`.
+        (Node::FunctionLikeParameter(parameter), Method)
+            if parameter.modifiers.contains_visibility()
+                && let Some(readonly) = storage_readonly(&parameter.modifiers, parameter.hint.as_ref()) =>
+        {
+            let visibility = parameter.modifiers.get_first_visibility();
+            report_readonly_storage(
+                "A constructor parameter that declares a member",
+                readonly,
+                visibility,
+                parameter.hint.as_ref(),
+                parameter.variable.name,
+                context,
+            );
+
+            None
         }
         // Outside a constructor, PHP's own check reports a parameter with an access modifier.
         (Node::FunctionLikeParameter(parameter), Method)
@@ -1354,6 +1456,16 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(Body)
         }
         (Node::As(r#as), Body) => match r#as.hint {
+            // Spec section 13: a conversion of a readonly value is readonly already, as a narrowing pattern is.
+            Hint::Readonly(readonly) => {
+                let written = String::from_utf8_lossy(context.get_code_snippet(readonly.hint)).into_owned();
+                context.report(
+                    Issue::error(format!("`as` keeps a value readonly: write `as {written}`."))
+                        .with_annotation(Annotation::primary(readonly.readonly.span).with_message("Written here.")),
+                );
+
+                None
+            }
             Hint::Nullable(_) | Hint::Void(_) => {
                 let issue = Issue::error("`as` converts to a type that is not nullable or `void`.")
                     .with_annotation(Annotation::primary(r#as.hint.span()).with_message("Written here."))
@@ -5252,4 +5364,105 @@ fn enclosing_class_like_name<'arena>(program: &Program<'arena>, span: Span) -> O
 fn is_in_interface(program: &Program, span: Span) -> bool {
     file_statements(program)
         .any(|statement| matches!(statement, Statement::Interface(interface) if interface.span().contains(&span.start)))
+}
+
+/// The extension block of a PHP# file's static class whose body holds `span`, in any of the file's namespaces.
+fn enclosing_extension<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> Option<&'ast Extension<'arena>> {
+    file_statements(program).find_map(|statement| match statement {
+        Statement::Class(class) => class.members.iter().find_map(|member| match member {
+            ClassLikeMember::Extension(extension) if extension.span().contains(&span.start) => Some(extension),
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+
+/// The `readonly` written on a field's, a property's or a member-declaring parameter's storage, spec section 13: as
+/// its modifier, or before its type.
+fn storage_readonly(modifiers: &Sequence<'_, Modifier<'_>>, hint: Option<&Hint<'_>>) -> Option<Span> {
+    modifiers.iter().find(|modifier| matches!(modifier, Modifier::Readonly(_))).map(HasSpan::span).or(match hint {
+        Some(Hint::Readonly(readonly)) => Some(readonly.readonly.span),
+        _ => None,
+    })
+}
+
+/// Reports `readonly` on storage, spec section 13, with the get-only property that keeps the value, written with the
+/// member's own access modifier, type and name.
+fn report_readonly_storage(
+    member: &str,
+    readonly: Span,
+    visibility: Option<&Modifier<'_>>,
+    hint: Option<&Hint<'_>>,
+    name: &[u8],
+    context: &mut Context<'_, '_, '_>,
+) {
+    let visibility = visibility.map_or("private", |visibility| match visibility {
+        Modifier::Public(_) => "public",
+        Modifier::Protected(_) => "protected",
+        _ => "private",
+    });
+    let written = match hint {
+        Some(Hint::Readonly(readonly)) => Some(readonly.hint),
+        hint => hint,
+    };
+    let written = written
+        .map_or_else(String::new, |hint| format!("{} ", String::from_utf8_lossy(context.get_code_snippet(hint))));
+    let name = BytesDisplay(name.strip_prefix(b"$").unwrap_or(name));
+    context.report(
+        Issue::error(format!(
+            "{member} is never `readonly`: declare a get-only property, as in `{visibility} {written}{name} {{ get; }}`."
+        ))
+        .with_annotation(Annotation::primary(readonly).with_message("Written here."))
+        .with_note("`readonly` makes a value only read. A get-only property already cannot be written."),
+    );
+}
+
+/// Checks `readonly` before a type, spec section 13: before a type whose value never changes it changes nothing, and
+/// `Any` can hold a plain PHP object, which PHP# does not check. Returns whether the type passes.
+fn check_readonly_type(readonly: &ReadonlyHint<'_>, context: &mut Context<'_, '_, '_>) -> bool {
+    let value = match readonly.hint {
+        Hint::Nullable(nullable) => nullable.hint,
+        hint => hint,
+    };
+    let message = match value {
+        Hint::Readonly(_) => "`readonly` is written once.".to_owned(),
+        Hint::Mixed(_) => {
+            "`readonly` holds only types PHP# checks, and `Any` can hold a plain PHP object: write a PHP# type."
+                .to_owned()
+        }
+        Hint::Integer(_) | Hint::Float(_) | Hint::Bool(_) | Hint::String(_) | Hint::Void(_) | Hint::Never(_) => {
+            let written = String::from_utf8_lossy(context.get_code_snippet(readonly.hint)).into_owned();
+            let article = if matches!(value, Hint::Integer(_)) { "An" } else { "A" };
+
+            format!("{article} `{written}` never changes, so `readonly` changes nothing: write `{written}`.")
+        }
+        _ => return true,
+    };
+    let span = match value {
+        Hint::Readonly(inner) => inner.readonly.span,
+        _ => readonly.readonly.span,
+    };
+    context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message("Written here.")));
+
+    false
+}
+
+/// Why the `readonly` after `method`'s parameters, spec section 13, can't matter in `place`: the method has no `this`
+/// to keep, or the language keeps it readonly already. None when it keeps `this` readonly.
+fn needless_readonly_marker(method: &Method<'_>, place: Place) -> Option<&'static str> {
+    if method.is_static() {
+        return Some("A static method has no `this` to keep readonly: remove `readonly`.");
+    }
+    if php_method_name(method) == b"__construct" {
+        return Some("A constructor sets `this`, so it is never readonly: remove `readonly`.");
+    }
+    if place == Place::Enum {
+        return Some("An enum case never changes, so an enum method needs no `readonly`: remove it.");
+    }
+
+    match method.name.value {
+        _ if !MethodParts::of_method(method).is_hash_or_to_string() => None,
+        b"hash" => Some("`hash()` is readonly by definition: remove `readonly`."),
+        _ => Some("`toString()` is readonly by definition: remove `readonly`."),
+    }
 }

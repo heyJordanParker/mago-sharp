@@ -250,6 +250,7 @@ pub use crate::cst::cst::type_hint::Hint;
 pub use crate::cst::cst::type_hint::IntersectionHint;
 pub use crate::cst::cst::type_hint::NullableHint;
 pub use crate::cst::cst::type_hint::ParenthesizedHint;
+pub use crate::cst::cst::type_hint::ReadonlyHint;
 pub use crate::cst::cst::type_hint::TypeArgumentList;
 pub use crate::cst::cst::type_hint::TypeParameter;
 pub use crate::cst::cst::type_hint::TypeParameterBound;

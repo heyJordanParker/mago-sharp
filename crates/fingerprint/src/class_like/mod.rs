@@ -655,6 +655,9 @@ impl Fingerprintable for Method<'_> {
         self.type_parameters.fingerprint_with_hasher(hasher, resolved_names, options);
         self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
         self.return_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        if self.readonly.is_some() {
+            "readonly".hash(hasher);
+        }
         self.on.fingerprint_with_hasher(hasher, resolved_names, options);
         self.uses.fingerprint_with_hasher(hasher, resolved_names, options);
 

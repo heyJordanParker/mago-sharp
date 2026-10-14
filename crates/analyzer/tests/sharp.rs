@@ -2117,7 +2117,10 @@ fn calling_a_function_that_does_not_exist_is_reported_as_in_php() {
 fn a_global_call_named_like_a_method_of_its_class_calls_the_php_function() {
     let sharp = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static float ceil(float x) => global.ceil(x);\n\n    public static int count(List<int> values) => global.count(values);\n}\n";
 
-    assert_eq!(issues(("src/Sharp/Math/Math.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(
+        issues(("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp", sharp), &[]),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -3134,29 +3137,34 @@ const ENVIRONMENT: (&str, &str) = (
 );
 
 /// The semantic checks let any file whose namespace is `Sharp` declare `Int`, `Float` and `Bool`, as the engine does,
-/// and only the analyzer knows the file is not the standard library's. It refuses them with the semantic checks'
-/// reserved-name message, under its own code.
+/// and only the analyzer knows the file is not the standard library's. So it refuses `namespace Sharp` and every
+/// namespace under it outside the standard library, which would also reach `Sharp.Internal` with no import. A
+/// namespace that only starts with the letters is the app's.
 #[test]
-fn a_type_class_of_the_standard_library_in_a_project_file_is_a_reserved_name() {
-    let class =
-        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => null;\n}\n";
-    let r#enum = "namespace Sharp;\n\npublic enum Int\n{\n    case One;\n}\n";
-
-    let class_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Sharp/Bool.sharp", class), &[]);
-    let enum_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Sharp/Int.sharp", r#enum), &[]);
-
-    let messages: Vec<String> = class_issues
-        .iter()
-        .map(|issue| format!("{} {}", located(class, issue), issue.message))
-        .chain(enum_issues.iter().map(|issue| format!("{} {}", located(r#enum, issue), issue.message)))
-        .collect();
-    assert_eq!(
-        messages,
-        [
-            "3:21 reserved-name-outside-library Cannot use `Bool` as a class name: it is reserved.",
-            "3:13 reserved-name-outside-library Cannot use `Int` as a class name: it is reserved.",
-        ]
+fn a_namespace_of_the_standard_library_in_a_project_file_is_a_reserved_name() {
+    let refusal = |namespace: &str| {
+        format!(
+            "1:11 reserved-name-outside-library `{namespace}` is a namespace of the standard library, and only the standard library declares code in it. | Declared here. | Declare the file in a namespace of the app."
+        )
+    };
+    let bool_class = (
+        "src/Sharp/Bool.sharp",
+        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => null;\n}\n",
     );
+    let int_enum = ("src/Sharp/Int.sharp", "namespace Sharp;\n\npublic enum Int\n{\n    case One;\n}\n");
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let inside = (
+        "app/Sneak/Inside.sharp",
+        "namespace Sharp;\n\nimport App.Shop.OrderPaid;\n\npublic class Inside\n{\n    public Listening watch() => Internal.listen(typeof(OrderPaid), (OrderPaid e) => { });\n}\n",
+    );
+    let internal = ("app/Sneak/Listen.sharp", "namespace Sharp.Internal;\n\npublic class Listen\n{\n}\n");
+    let sharpen = ("app/Sharpen/Knife.sharp", "namespace Sharpen;\n\npublic class Knife\n{\n}\n");
+
+    assert_eq!(worded(bool_class, &[]), [refusal("Sharp")]);
+    assert_eq!(worded(int_enum, &[]), [refusal("Sharp")]);
+    assert_eq!(worded(inside, &[EVENTS, order_event, order_paid]), [refusal("Sharp")]);
+    assert_eq!(worded(internal, &[]), [refusal("Sharp.Internal")]);
+    assert_eq!(worded(sharpen, &[]), Vec::<String>::new());
 }
 
 /// Spec section 23: a class cannot share its full name with a namespace, when the class or anything in the namespace
@@ -12583,26 +12591,33 @@ fn leak(code: String) -> &'static str {
 }
 
 /// Semantics takes a well-formed `extern` method in any namespace, because the engine compiles the standard library
-/// from `vendor/` without knowing it is vendored. The analyzer knows a project file, and refuses it there.
+/// from `vendor/` without knowing it is vendored. The analyzer knows a project file, and refuses it there, in a
+/// namespace of the standard library as in any other.
 #[test]
 fn an_extern_method_in_a_project_file_is_an_error_in_any_namespace() {
-    for analyzed in [
+    for (analyzed, reserved) in [
         (
-            "src/Sharp/Mine/Text.sharp",
-            "namespace Sharp.Mine;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            (
+                "src/Sharp/Mine/Text.sharp",
+                "namespace Sharp.Mine;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            ),
+            &["1:11 reserved-name-outside-library"][..],
         ),
         (
-            "src/App/Text.sharp",
-            "namespace App;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            (
+                "src/App/Text.sharp",
+                "namespace App;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            ),
+            &[],
         ),
     ] {
         assert_eq!(
-            messages(analyzed, &[]),
-            ["Only the standard library declares native bodies: give `slug` a body."],
+            messages(analyzed, &[]).last().map(String::as_str),
+            Some("Only the standard library declares native bodies: give `slug` a body."),
             "{}",
             analyzed.0
         );
-        assert_eq!(issues(analyzed, &[]), ["5:33 native-body-outside-library"], "{}", analyzed.0);
+        assert_eq!(issues(analyzed, &[]), [reserved, &["5:33 native-body-outside-library"]].concat(), "{}", analyzed.0);
     }
 }
 
@@ -13822,7 +13837,7 @@ fn equality_needs_a_public_int_hash_in_the_class_or_a_parent() {
 /// it cannot declare them again, as C# cannot override an operator.
 #[test]
 fn a_subclass_cannot_declare_an_operator_its_parent_declares() {
-    let order = "namespace App;\n\npublic class Order : Money\n{\n    public static Order operator +(Order a, Order b) => a;\n\n    public static Order operator -(Order a) => a;\n}\n";
+    let order = "namespace App;\n\npublic class Order : Money\n{\n    public static Order operator +(Order a, Order b) => new Order(a.cents + b.cents);\n\n    public static Order operator -(Order a) => new Order(-a.cents);\n}\n";
 
     assert_eq!(
         messages(("src/App/Order.sharp", order), &[MONEY_OPERATORS]),
@@ -16721,6 +16736,269 @@ fn a_generic_interface_states_its_property_with_the_type_argument_the_header_giv
     );
 }
 
+/// Spec section 15: "An app replaces the dispatcher once at startup", so the app's top module that binds `Dispatcher`
+/// is the one that binds it. A binding in a module below it is refused, and so is each of two top modules of the same
+/// depth. An environment module of the top namespace, a test module and a package's module bind it freely.
+#[test]
+fn only_the_apps_top_module_binds_the_dispatcher() {
+    let recorder = (
+        "app/Recorder.sharp",
+        "namespace App;\n\nimport Sharp.Dispatcher;\n\npublic class Recorder : Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners) { }\n}\n",
+    );
+    let module = |path: &'static str, namespace: &str, header: &str| {
+        (
+            path,
+            leak(format!(
+                "namespace {namespace};\n\nimport App.Recorder;\nimport Sharp.Dispatcher;\n\nmodule{header}\n{{\n    singleton Dispatcher = Recorder;\n}}\n"
+            )),
+        )
+    };
+    let top = module("app/Module.sharp", "App", "");
+    let shop = module("app/Shop/Module.sharp", "App.Shop", "");
+    let admin = module("admin/Module.sharp", "Admin", "");
+    let production = module("app/Module.Production.sharp", "App", " : App");
+    let test = module("tests/Shop/CartTest.sharp", "App.Shop", " : App.Shop");
+    let package = module("vendor/acme/billing/src/Module.sharp", "Acme", "");
+    let below = "8:5 invalid-binding Only `app/Module.sharp` binds `Dispatcher`: an app binds it once, in its top module. | Remove this binding. The app's dispatcher serves every `emit`, and a test module replaces it in tests.";
+    let tied = |other: &str| {
+        format!(
+            "8:5 invalid-binding This module and `{other}` each bind `Dispatcher`, and an app binds it once, in its top module. | Bind `Dispatcher` in one module, in the namespace above both."
+        )
+    };
+
+    for (analyzed, others, expected) in [
+        (top, vec![shop], vec![]),
+        (shop, vec![top], vec![below.to_string()]),
+        (shop, vec![], vec![]),
+        (production, vec![top, shop], vec![]),
+        (test, vec![top], vec![]),
+        (top, vec![package], vec![]),
+        (top, vec![admin], vec![tied("admin/Module.sharp")]),
+        (admin, vec![top], vec![tied("app/Module.sharp")]),
+    ] {
+        let others: Vec<_> = [DISPATCHER, recorder].into_iter().chain(others).collect();
+        assert_eq!(refusals(analyzed, &others), expected, "{}", analyzed.0);
+    }
+}
+
+/// The standard library's `Dispatcher`, as `sharp/composer/` ships it.
+const DISPATCHER: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Dispatcher.sharp",
+    include_str!("../../../../composer/library/Sharp/Dispatcher.sharp"),
+);
+
+/// Spec section 15: a dispatcher runs the listeners of every event, which may reach any effect, so an implementation
+/// of `Dispatcher.dispatch` may too, while an implementation of any other declaration stays held to it. A call of
+/// `dispatch` has the effect `Events`, as `emit` does.
+#[test]
+fn a_dispatcher_may_reach_any_effect_and_a_call_of_dispatch_has_the_effect_events() {
+    let retrying = (
+        "app/Shop/Retrying.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Dispatcher;\n\npublic class Retrying : Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners)\n    {\n        global.fetch(listeners.count());\n        for (const listener of listeners)\n        {\n            listener(emitted);\n        }\n    }\n}\n",
+    );
+    let rates = (
+        "app/Shop/Rates.sharp",
+        "namespace App.Shop;\n\npublic interface Rates\n{\n    void dispatch(Any emitted, List<Function<void(Any)>> listeners);\n}\n",
+    );
+    let live_rates = (
+        "app/Shop/LiveRates.sharp",
+        "namespace App.Shop;\n\npublic class LiveRates : Rates\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners) { global.fetch(1); }\n}\n",
+    );
+    let monitor = (
+        "app/Shop/Monitor.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Dispatcher;\n\npublic class Monitor\n{\n    public Monitor(private Dispatcher dispatcher) { }\n\n    public int checked\n    {\n        get\n        {\n            this.dispatcher.dispatch(1, []);\n            return 1;\n        }\n    }\n}\n",
+    );
+
+    assert_eq!(issues(retrying, &[DISPATCHER, FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[retrying, DISPATCHER, FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[live_rates, rates, FETCH, FETCH_STUB]),
+        [
+            "app/Shop/LiveRates.sharp:5:78 incompatible-effects: `LiveRates.dispatch` calls `global.fetch`, which has the effect `Http`, so the pure `Rates.dispatch` cannot accept it."
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[monitor, DISPATCHER]),
+        [
+            "app/Shop/Monitor.sharp:13:13 impure-getter: Getter `checked` calls `Dispatcher.dispatch`, which has the effect `Events`. Getters must be pure."
+        ]
+    );
+}
+
+/// Spec section 15: code without a body allows `emit` with `uses Events`, so an implementation that emits fits an
+/// interface or abstract method that lists `Events`, and one that is pure or lists only another effect refuses it.
+#[test]
+fn code_without_a_body_allows_emit_with_uses_events() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let implementation = (
+        "app/Shop/StoreCheckout.sharp",
+        "namespace App.Shop;\n\npublic class StoreCheckout : Checkout\n{\n    public void complete(int orderId) { emit new OrderPaid(orderId); }\n}\n",
+    );
+
+    for (declaration, allowed) in [
+        ("namespace App.Shop;\n\npublic interface Checkout\n{\n    void complete(int orderId) uses Events;\n}\n", true),
+        (
+            "namespace App.Shop;\n\npublic abstract class Checkout\n{\n    public abstract void complete(int orderId) uses Events;\n}\n",
+            true,
+        ),
+        ("namespace App.Shop;\n\npublic interface Checkout\n{\n    void complete(int orderId);\n}\n", false),
+        ("namespace App.Shop;\n\npublic interface Checkout\n{\n    void complete(int orderId) uses Mail;\n}\n", false),
+    ] {
+        let issues =
+            effect_issues(&[implementation, ("app/Shop/Checkout.sharp", declaration), order_event, order_paid]);
+        if allowed {
+            assert_eq!(issues, Vec::<String>::new(), "{declaration}");
+        } else {
+            assert!(
+                issues.len() == 1
+                    && issues[0].starts_with("app/Shop/StoreCheckout.sharp:5:41 incompatible-effects:")
+                    && issues[0].contains("`Events`"),
+                "{declaration}: {issues:?}"
+            );
+        }
+    }
+}
+
+/// The standard library's `Events`, as `sharp/composer/` ships it.
+const EVENTS: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Events.sharp",
+    include_str!("../../../../composer/library/Sharp/Events.sharp"),
+);
+
+/// A class whose `watch` starts a listener with `Events.on<TEvent>` for the type `listened`, and holds its handle.
+fn watching(listened: &str) -> (&'static str, &'static str) {
+    let code = format!(
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Screen\n{{\n    public static List<int> seen {{ get; set; }} = [];\n\n    public Listening watch()\n    {{\n        const listening = Events.on<{listened}>(e => Screen.seen.add(1));\n        return listening;\n    }}\n}}\n"
+    );
+
+    ("app/Shop/Screen.sharp", Box::leak(code.into_boxed_str()) as &'static str)
+}
+
+/// Spec section 15: the standard library's `Events` analyzes clean, and `Events.on<T>` takes an event or an interface
+/// an event implements. Any other type is refused with the messages the `on` clause gives.
+#[test]
+fn events_on_takes_an_event_or_an_interface_an_event_implements() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let money = ("app/Shop/Money.sharp", "namespace App.Shop;\n\npublic class Money\n{\n}\n");
+    let unheard = ("app/Shop/Unheard.sharp", "namespace App.Shop;\n\npublic interface Unheard\n{\n}\n");
+    let others = [EVENTS, order_event, order_paid, money, unheard];
+
+    assert_eq!(worded(EVENTS, &[]), Vec::<String>::new());
+    assert_eq!(worded(watching("OrderPaid"), &others), Vec::<String>::new());
+    assert_eq!(worded(watching("OrderEvent"), &others), Vec::<String>::new());
+    let note =
+        "`Events.on` takes an event, which `event` or `extern event` declares, or an interface an event implements.";
+    assert_eq!(
+        worded(watching("Money"), &others),
+        [format!("11:37 invalid-event `Money` is not an event. | Given here. | {note}")]
+    );
+    assert_eq!(
+        worded(watching("int"), &others),
+        [format!("11:37 invalid-event `int` is not an event. | Given here. | {note}")]
+    );
+    assert_eq!(
+        worded(watching("Unheard"), &others),
+        [format!(
+            "11:37 invalid-event No event implements `Unheard`, so the listener never runs. | Given here. | {note}"
+        )]
+    );
+    // A class that doesn't exist is reported once, where the type is written, and a type parameter is the caller's.
+    assert_eq!(issues(watching("Missing"), &others), ["11:37 non-existent-class-like"]);
+    let forwarding = (
+        "app/Shop/Relay.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Relay\n{\n    public static Listening relay<TEvent>(Function<void(TEvent)> listener) => Events.on<TEvent>(listener);\n}\n",
+    );
+    assert_eq!(worded(forwarding, &others), Vec::<String>::new());
+}
+
+/// Spec section 15: a listener stops when its handle goes, so `Events.on` as a statement, which drops the handle at
+/// once, listens to nothing and is reported in PHP# words.
+#[test]
+fn a_dropped_events_on_handle_is_reported() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let dropping = (
+        "app/Shop/Screen.sharp",
+        "namespace App.Shop;\n\npublic class Screen\n{\n    public void watch()\n    {\n        Events.on<OrderPaid>(e => { });\n    }\n}\n",
+    );
+
+    assert_eq!(
+        worded(dropping, &[EVENTS, order_event, order_paid]),
+        [
+            "7:9 unused-method-call The value `Events.on` returns must be used. | Its value is dropped here. | `[NoDiscard]` on `Events.on` says the value it returns matters. | Keep the value in a local, pass it on, or return it."
+        ]
+    );
+}
+
+/// A `.sharp` file that drops the value of a plain PHP method marked `@must-use` hears it in PHP# words too, with the
+/// marker the method carries.
+#[test]
+fn a_dropped_must_use_value_is_reported_in_php_sharp_words() {
+    let tokens = (
+        "src/Lib/Tokens.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Tokens\n{\n    /** @must-use */\n    public static function issue(): string\n    {\n        return 'token';\n    }\n}\n",
+    );
+    let dropping = (
+        "src/App/Login.sharp",
+        "namespace App;\n\nimport Lib.Tokens;\n\npublic class Login\n{\n    public void start()\n    {\n        Tokens.issue();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        worded(dropping, &[tokens]),
+        [
+            "9:9 unused-method-call The value `Tokens.issue` returns must be used. | Its value is dropped here. | `@must-use` on `Tokens.issue` says the value it returns matters. | Keep the value in a local, pass it on, or return it."
+        ]
+    );
+}
+
+/// `Events.on` with no type argument, and a listener whose parameter has no type, gives no event to listen to. The
+/// missing type argument is reported once, with no second error about the event.
+#[test]
+fn events_on_with_no_type_is_reported_once() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let untyped = (
+        "app/Shop/Screen.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Screen\n{\n    public Listening watch() => Events.on(e => { });\n}\n",
+    );
+
+    assert_eq!(issues(untyped, &[EVENTS, order_event, order_paid]), ["7:33 missing-template-parameter"]);
+}
+
+/// Spec section 15: starting a listener changes what every later `emit` runs, so `Events.on` has the effect `Events`,
+/// which its body gets from `extern Internal.listen uses Events;`.
+#[test]
+fn events_on_has_the_effect_events() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let getter = (
+        "app/Shop/Gauge.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Gauge\n{\n    public Listening watching\n    {\n        get => Events.on<OrderPaid>(e => { });\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[getter, EVENTS, order_event, order_paid]),
+        [
+            "app/Shop/Gauge.sharp:9:16 impure-getter: Getter `watching` reaches `Events.on`, which calls `Internal.listen` with the effect `Events`. Getters must be pure."
+        ]
+    );
+}
+
+/// Spec section 15: PHP# code listens with `Events.on` and raises events with `emit`, so only the standard library
+/// imports `Sharp.Internal`, the namespace of the engine's functions.
+#[test]
+fn only_the_standard_library_imports_sharp_internal() {
+    let importing = (
+        "app/Shop/Shortcut.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Internal;\n\nextern Internal.listen uses Events;\n\npublic class Shortcut\n{\n}\n",
+    );
+
+    assert_eq!(
+        worded(importing, &[]),
+        [
+            "3:8 internal-outside-library `Sharp.Internal` holds the engine's functions, and only the standard library imports it. | Imported here. | Listen with `Events.on`, and raise an event with `emit`."
+        ]
+    );
+    assert_eq!(worded(EVENTS, &[]), Vec::<String>::new());
+}
+
 /// The services spec section 32's examples bind: two interfaces, their classes, a class that takes a `Mailer`, and
 /// classes a binding expression takes.
 const BOUND_SERVICES: [(&str, &str); 11] = [
@@ -17039,6 +17317,23 @@ fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refus
     }
 }
 
+/// Spec sections 13 and 32: `readonly` promises what the constructor does with a service, so a readonly parameter takes
+/// the service of its type.
+#[test]
+fn a_readonly_parameter_takes_the_service_of_its_type() {
+    let reader = (
+        "app/Mail/ReaderMailer.sharp",
+        "namespace App.Mail;\n\nimport App.Flags;\n\npublic class ReaderMailer : Mailer\n{\n    public ReaderMailer(readonly Flags flags) { }\n}\n",
+    );
+    let module = (
+        "app/Module.sharp",
+        "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.ReaderMailer;\nimport App.Flags;\n\nmodule\n{\n    singleton Flags = Flags;\n    singleton Mailer = ReaderMailer;\n}\n",
+    );
+    let others: Vec<_> = BOUND_SERVICES.iter().copied().chain([reader]).collect();
+
+    assert_eq!(refusals(module, &others), Vec::<String>::new());
+}
+
 /// Spec section 32: an environment or test module overrides the base modules' bindings, so the services it changes
 /// are checked with the base bindings that reach them, and a problem it causes is reported at its own binding. Each
 /// row is the overriding file, its bindings from line 10, and the refusals it gets over a base module that binds
@@ -17138,4 +17433,308 @@ fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() 
             assert_eq!(refusals(*analyzed, &others), expected, "{}", analyzed.0);
         }
     }
+}
+
+/// The classes the spec section 13 tests read and write through readonly values.
+const READONLY_CLASSES: [(&str, &str); 4] = [
+    ("src/Customer.sharp", "namespace App;\n\npublic class Customer\n{\n    public int id { get; set; } = 1;\n}\n"),
+    ("src/Line.sharp", "namespace App;\n\npublic class Line\n{\n    public int amount { get; set; } = 1;\n}\n"),
+    ("src/Money.sharp", "namespace App;\n\npublic class Money\n{\n    public int amount { get; set; } = 0;\n}\n"),
+    (
+        "src/Order.sharp",
+        "namespace App;\n\npublic class Order\n{\n    public string number { get; set; } = \"A\";\n    public int paid { get; set; } = 0;\n    public Customer owner { get; set; } = new Customer();\n    public List<Line> lines { get; set; } = [];\n    public Map<string, int> counts { get; set; } = [:];\n\n    public Money totalIn(string currency) readonly => new Money();\n\n    public void markPaid() { this.paid = 1; }\n}\n",
+    ),
+];
+
+/// Spec section 13: readonly reaches everything read through a readonly value, so every write through it is an error,
+/// a `set` that a changing collection method runs included. A copy of a collection belongs to its local, and the
+/// objects in it stay readonly.
+#[test]
+fn a_write_through_a_readonly_value_is_an_error() {
+    let view = "namespace App;\n\npublic class View\n{\n    public int render(readonly Order order, Line line)\n    {\n        order.number = \"A-1\";\n        order.owner.id = 5;\n        order.lines.add(line);\n        order.counts[\"a\"] = 1;\n        order.paid += 1;\n        let copy = order.lines;\n        copy.add(line);\n        copy[0].amount = 1;\n        for (const l of order.lines) {\n            l.amount = 2;\n        }\n        return order.paid + copy.count();\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/View.sharp", view), &READONLY_CLASSES),
+        [
+            "render cannot set order.number: order is readonly.",
+            "render cannot set order.owner.id: order.owner is readonly.",
+            "render cannot set order.lines: order is readonly.",
+            "render cannot set order.counts: order is readonly.",
+            "render cannot set order.paid: order is readonly.",
+            "render cannot set copy[0].amount: copy[0] is readonly.",
+            "render cannot set l.amount: l is readonly.",
+        ]
+    );
+}
+
+/// Spec section 13: a readonly method is checked as if `this` were a readonly value, in a lambda it writes too.
+#[test]
+fn a_readonly_method_cannot_write_this() {
+    let counter = "namespace App;\n\npublic class Counter\n{\n    public int count { get; set; } = 0;\n    public Customer owner { get; set; } = new Customer();\n\n    public int bump() readonly\n    {\n        this.count = 1;\n        this.owner.id = 2;\n        const reset = () => { this.count = 3; };\n        reset();\n        return this.count;\n    }\n\n    public int hash() => this.count++;\n}\n";
+
+    assert_eq!(
+        messages(("src/Counter.sharp", counter), &READONLY_CLASSES),
+        [
+            "bump cannot set this.count: this is readonly.",
+            "bump cannot set this.owner.id: this.owner is readonly.",
+            "This lambda cannot set this.count: this is readonly.",
+            "hash cannot set this.count: this is readonly.",
+        ]
+    );
+}
+
+/// Spec section 13, and team-lead's ruling on question 1: a readonly value never goes where a writable one is
+/// expected, so it stays read only. The error names the `readonly` to write, or why there is none.
+#[test]
+fn a_readonly_value_never_goes_where_a_writable_one_is_expected() {
+    let keeper = "namespace App;\n\nimport Lib.Archive;\n\npublic class Keeper\n{\n    public Order? kept { get; set; } = null;\n\n    public void save(Order order) { }\n\n    public Order give(readonly Order order) { return order; }\n\n    public void keep(readonly Order order, List<Order> orders, List<readonly Order> views, Box<Order> box)\n    {\n        this.save(order);\n        Order o = order;\n        this.kept = order;\n        orders.add(order);\n        views.add(order);\n        box.put(order);\n        Archive.store(order);\n        readonly Order fine = order;\n        this.save(fine);\n    }\n}\n";
+    let boxed = "namespace App;\n\npublic class Box<T>\n{\n    public void put(T item) { }\n}\n";
+    let archive = "<?php\n\nnamespace Lib;\n\nclass Archive\n{\n    public static function store(\\App\\Order $order): void {}\n}\n";
+    let mut others = READONLY_CLASSES.to_vec();
+    others.extend([("src/Box.sharp", boxed), ("src/Lib/Archive.php", archive)]);
+
+    assert_eq!(
+        messages(("src/Keeper.sharp", keeper), &others),
+        [
+            "give cannot return order: order is readonly. Declare the return type `readonly Order`.",
+            "keep cannot pass order to Keeper.save: order is readonly. Declare the parameter `readonly Order order`.",
+            "keep cannot store order in o: order is readonly. Declare it `readonly Order o`.",
+            "keep cannot store order in this.kept: order is readonly, and a field or property keeps only a writable value.",
+            "keep cannot pass order to List<Order>.add: order is readonly. Declare the element type `readonly Order`.",
+            "keep cannot pass order to Box.put: order is readonly. Declare the type argument `readonly Order`.",
+            "keep cannot pass order to Archive.store: order is readonly, and Archive.store is plain PHP, which PHP# does not check.",
+            "keep cannot pass fine to Keeper.save: fine is readonly. Declare the parameter `readonly Order order`.",
+        ]
+    );
+}
+
+/// Spec section 13: through a readonly value only methods marked `readonly` run. A call of an unmarked one is an error
+/// that names the fix: the marker, when the method changes nothing in `this`, or the write that keeps it off.
+#[test]
+fn a_readonly_value_calls_only_readonly_methods() {
+    let order = (
+        "src/Order.sharp",
+        "namespace App;\n\npublic class Order\n{\n    public int paid { get; set; } = 0;\n\n    public int totalIn(string currency) readonly => this.paid;\n\n    public string label(string prefix, int width) => prefix;\n\n    public void markPaid() { this.paid = 1; }\n\n    public void reset() { this.clear(); }\n\n    private void clear() { this.paid = 0; }\n}\n",
+    );
+    let view = (
+        "src/View.sharp",
+        "namespace App;\n\npublic class View\n{\n    public Order order { get; set; } = new Order();\n\n    public int render(readonly Order order)\n    {\n        order.totalIn(\"USD\");\n        order.label(\"#\", 4);\n        order.markPaid();\n        order.reset();\n        return 0;\n    }\n\n    public void show() readonly\n    {\n        this.order.markPaid();\n        const pay = () => this.order.markPaid();\n        pay();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[order, view]),
+        [
+            "src/View.sharp:10:15 missing-readonly-marker: render cannot call order.label: order is readonly. Help: label does not change Order, so declare it `label(string prefix, int width) readonly`.",
+            "src/View.sharp:11:15 missing-readonly-marker: render cannot call order.markPaid: order is readonly. Help: markPaid changes Order: it writes `this.paid`.",
+            "src/View.sharp:12:15 missing-readonly-marker: render cannot call order.reset: order is readonly. Help: reset changes Order: it reaches `Order.clear`, which writes `this.paid`.",
+            "src/View.sharp:18:20 missing-readonly-marker: show cannot call this.order.markPaid: this.order is readonly. Help: markPaid changes Order: it writes `this.paid`.",
+            "src/View.sharp:19:38 missing-readonly-marker: This lambda cannot call this.order.markPaid: this.order is readonly. Help: markPaid changes Order: it writes `this.paid`.",
+        ]
+    );
+}
+
+/// Spec section 13: a readonly value stays readonly through a pattern that narrows it, a union and an operator's
+/// operands, which are readonly by definition.
+#[test]
+fn a_readonly_value_stays_readonly_through_narrowing_and_operators() {
+    let shapes = "namespace App;\n\npublic class Shape\n{\n    public int size { get; set; } = 0;\n}\n\npublic class Circle : Shape\n{\n    public int radius { get; set; } = 0;\n}\n";
+    let view = "namespace App;\n\npublic class Tag\n{\n    public int count { get; set; } = 0;\n\n    public static bool operator ==(Tag a, Tag b)\n    {\n        a.count = 1;\n        return true;\n    }\n\n    public int hash() => this.count;\n\n    public static Tag operator +(Tag a, Tag b) => a;\n\n    public static readonly Tag operator -(Tag a, Tag b) => a;\n\n    public void show(readonly Shape shape, Shape other, bool flag)\n    {\n        if (shape is Circle c) {\n            c.radius = 1;\n        }\n        const either = flag ? shape : other;\n        either.size = 2;\n        Circle? viaAs = shape as Circle;\n    }\n\n    public void put<T : Shape>(readonly T item, readonly List<Shape> shapes)\n    {\n        item.size = 3;\n        const first = shapes.first(s => s.size > 0);\n        first.size = 4;\n        shapes.map(s => s.size = 5);\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Tag.sharp", view), &[("src/Shapes.sharp", shapes)]),
+        [
+            "operator == cannot set a.count: a is readonly.",
+            "operator + cannot return a: a is readonly. Declare the return type `readonly Tag`, or return a new value.",
+            "show cannot set c.radius: c is readonly.",
+            "show cannot set either.size: either is readonly.",
+            "show cannot store shape as Circle in viaAs: shape as Circle is readonly. Declare it `readonly Circle? viaAs`.",
+            "put cannot set item.size: item is readonly.",
+            "put cannot set first.size: first is readonly.",
+            "This lambda cannot set s.size: s is readonly.",
+        ]
+    );
+}
+
+/// Spec section 13: an override or an implementation of a readonly method keeps `readonly`, so a call through a
+/// readonly value never reaches a body that changes `this`.
+#[test]
+fn an_override_of_a_readonly_method_is_readonly() {
+    let shapes = "namespace App;\n\npublic interface Priced\n{\n    int price() readonly;\n}\n\npublic class Shape\n{\n    public int size { get; set; } = 0;\n\n    public virtual int area() readonly => this.size;\n}\n\npublic class Square : Shape, Priced\n{\n    public override int area() => this.size * this.size;\n\n    public int price() => 1;\n}\n\npublic class Circle : Shape, Priced\n{\n    public override int area() readonly => this.size;\n\n    public int price() readonly => 2;\n}\n";
+
+    assert_eq!(
+        messages(("src/Shapes.sharp", shapes), &[]),
+        [
+            "Square.price implements the readonly Priced.price, so it is readonly too: declare it `price() readonly`.",
+            "Square.area overrides the readonly Shape.area, so it is readonly too: declare it `area() readonly`.",
+        ]
+    );
+}
+
+/// Spec section 13 checks only PHP# code: a plain PHP file that calls a PHP# readonly method and changes the value it
+/// returns reports nothing.
+#[test]
+fn plain_php_reads_a_readonly_value_as_any_value() {
+    let order = "namespace App;\n\npublic class Order\n{\n    public int paid { get; set; } = 0;\n    public Order? next { get; set; } = null;\n\n    public readonly Order? following() readonly => this.next;\n}\n";
+    let caller = "<?php\n\nnamespace Lib;\n\nuse App\\Order;\n\nfunction pay(Order $order): void\n{\n    $next = $order->following();\n    if ($next !== null) {\n        $next->paid = 1;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Lib/pay.php", caller), &[("src/Order.sharp", order)]), Vec::<String>::new());
+}
+
+/// Spec section 13: PHP# does not check a plain PHP method, so a call of one through a readonly value is an error: a
+/// declared method, one a `@method` tag declares, and one the class's `__call` runs.
+#[test]
+fn a_readonly_value_calls_no_plain_php_method() {
+    let model = "<?php\n\nnamespace Lib;\n\n/** @method void touch() */\nclass Model\n{\n    public function save(): void {}\n\n    public function __call(string $name, array $arguments): mixed { return null; }\n}\n";
+    let order = "namespace App;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n}\n";
+    let view = "namespace App;\n\npublic class View\n{\n    public void render(readonly Order order)\n    {\n        order.save();\n        order.touch();\n        order.publish();\n    }\n}\n";
+
+    assert_eq!(
+        worded(("src/View.sharp", view), &[("src/Order.sharp", order), ("src/Lib/Model.php", model)]),
+        [
+            "7:15 missing-readonly-marker render cannot call order.save: order is readonly. | save is a plain PHP method of Model, which PHP# does not check.",
+            "8:15 missing-readonly-marker render cannot call order.touch: order is readonly. | touch is a plain PHP method of Model, which PHP# does not check.",
+            "9:15 missing-readonly-marker render cannot call order.publish: order is readonly. | publish is a plain PHP method of Model, which PHP# does not check.",
+            "9:15 non-documented-method Ambiguous method call to `publish` on class `Order`. | This method is not explicitly defined | On an object of type `Order` | While this call might be handled by `__call()` or `__callStatic()`, Mago cannot verify its arguments or return type without a corresponding `@method` docblock tag. | To enable full analysis, add a `@method` tag to the docblock of the `Order` class. For example: `/** @method returnType publish(argType $argName) */`",
+        ]
+    );
+}
+
+/// Spec section 13: `readonly` holds only types PHP# checks, so a plain PHP class under it is an error, in a type
+/// argument too, and a type whose value never changes takes none: an enum, a struct, a function type, and a
+/// collection of values, which is copied as a struct is. A collection of objects keeps it.
+#[test]
+fn readonly_holds_only_types_php_sharp_checks() {
+    let model = "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function save(): void {}\n}\n";
+    let status = "namespace App;\n\npublic enum Status\n{\n    case Paid;\n}\n";
+    let size = "namespace App;\n\npublic struct Size\n{\n    public Size(public int width { get; }) { }\n}\n";
+    let view = "namespace App;\n\nimport Lib.Model;\n\npublic class Shows\n{\n    public void show(readonly Model model) { }\n\n    public void status(readonly Status status) { }\n\n    public void order(readonly Order order) { }\n\n    public void either(readonly Order|Model value) { }\n\n    public readonly Self same() readonly => this;\n\n    public void size(readonly Size? size) { }\n\n    public void models(readonly List<Model> models) { }\n\n    public void numbers(readonly List<int> numbers) { }\n\n    public void statuses(readonly Map<string, Status> statuses) { }\n\n    public void callback(readonly Function<int(Line)> f) { }\n\n    public void orders(readonly List<Order> orders, readonly Map<string, List<Line>> lines) { }\n\n    public void grouped(readonly (Order|Model)? value, readonly (Status|Size)? kind) { }\n}\n";
+    let mut others = READONLY_CLASSES.to_vec();
+    others.extend([("src/Lib/Model.php", model), ("src/Status.sharp", status), ("src/Size.sharp", size)]);
+
+    assert_eq!(
+        messages(("src/Shows.sharp", view), &others),
+        [
+            "`readonly` holds only types PHP# checks, and `Model` is a plain PHP class: write `Model`.",
+            "A `Status` never changes, so `readonly` changes nothing: write `Status`.",
+            "`readonly` holds only types PHP# checks, and `Model` is a plain PHP class: write `Order|Model`.",
+            "A `Size?` never changes, so `readonly` changes nothing: write `Size?`.",
+            "`readonly` holds only types PHP# checks, and `Model` is a plain PHP class: write `List<Model>`.",
+            "A `List<int>` never changes, so `readonly` changes nothing: write `List<int>`.",
+            "A `Map<string, Status>` never changes, so `readonly` changes nothing: write `Map<string, Status>`.",
+            "A `Function<int(Line)>` never changes, so `readonly` changes nothing: write `Function<int(Line)>`.",
+            "`readonly` holds only types PHP# checks, and `Model` is a plain PHP class: write `(Order|Model)?`.",
+            "A `(Status|Size)?` never changes, so `readonly` changes nothing: write `(Status|Size)?`.",
+        ]
+    );
+}
+
+/// The shapes the spec section 13 tests narrow and pass to type parameters.
+const READONLY_SHAPES: (&str, &str) = (
+    "src/Shapes.sharp",
+    "namespace App;\n\npublic class Shape\n{\n    public int size { get; set; } = 0;\n}\n\npublic class Circle : Shape\n{\n    public int radius { get; set; } = 0;\n}\n",
+);
+
+/// Spec section 13: a method value runs its method, so one read through a readonly value is a call of that method.
+#[test]
+fn a_method_value_read_through_a_readonly_value_calls_its_method() {
+    let view = (
+        "src/View.sharp",
+        "namespace App;\n\npublic class View\n{\n    public void render(readonly Order order)\n    {\n        const pay = order.markPaid;\n        const total = order.totalIn;\n    }\n}\n",
+    );
+    let mut files = READONLY_CLASSES.to_vec();
+    files.push(view);
+
+    assert_eq!(
+        effect_issues(&files),
+        [
+            "src/View.sharp:7:27 missing-readonly-marker: render cannot call order.markPaid: order is readonly. Help: markPaid changes Order: it writes `this.paid`.",
+        ]
+    );
+}
+
+/// Spec section 13: a function value fits a function type only when it keeps every readonly value: it takes as
+/// readonly each parameter the type passes readonly, and returns a readonly value only where the type returns one.
+#[test]
+fn a_function_value_keeps_the_readonly_values_its_type_passes() {
+    let funcs = "namespace App;\n\npublic class Funcs\n{\n    public void keep(readonly Order order)\n    {\n        Function<void(readonly Order)> pay = (Order o) => { o.markPaid(); };\n        Function<void(readonly Order)> look = (readonly Order o) => { };\n        Function<void(readonly Order)> guess = (o) => { };\n        order.lines.map((Line l) => l.amount);\n        order.lines.map(l => l.amount);\n        Function<Order()> give = () => order;\n        Function<readonly Order()> lend = () => order;\n        int|Function<void(readonly Order)> either = (Order o) => { };\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Funcs.sharp", funcs), &READONLY_CLASSES),
+        [
+            "keep cannot store (Order o) => { o.markPaid(); } in pay: it takes a writable `Order` where a readonly one is passed. Declare its parameter `readonly Order`.",
+            "keep cannot pass (Line l) => l.amount to List<readonly Line>.map: it takes a writable `Line` where a readonly one is passed. Declare its parameter `readonly Line`.",
+            "keep cannot store () => order in give: it returns a readonly `Order` where a writable one is expected. Declare the return `readonly Order`.",
+            "keep cannot store (Order o) => { } in either: it takes a writable `Order` where a readonly one is passed. Declare its parameter `readonly Order`.",
+        ]
+    );
+}
+
+/// Spec section 13: a method's own type parameter takes a readonly value only where its parameter is written
+/// `readonly`, and `readonly T` stays readonly where it is passed, stored, returned or narrowed.
+#[test]
+fn a_type_parameter_takes_a_readonly_value_only_when_written_readonly() {
+    let probes = "namespace App;\n\npublic class Probes\n{\n    public void touch<TShape : Shape>(TShape x) { x.size = 1; }\n\n    public void look<TShape : Shape>(readonly TShape x) { }\n\n    public void keep(Shape s) { s.size = 1; }\n\n    public TShape give<TShape : Shape>(readonly TShape item) { return item; }\n\n    public void pass(readonly Shape s)\n    {\n        this.touch(s);\n        this.look(s);\n    }\n\n    public void hold<T : Shape>(readonly T item)\n    {\n        this.keep(item);\n        Shape local = item;\n        if (item is Circle c) {\n            c.radius = 1;\n        }\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Probes.sharp", probes), &[READONLY_SHAPES]),
+        [
+            "give cannot return item: item is readonly. Declare the return type `readonly TShape`.",
+            "pass cannot pass s to Probes.touch: s is readonly. Declare the parameter `readonly TShape x`.",
+            "hold cannot pass item to Probes.keep: item is readonly. Declare the parameter `readonly Shape s`.",
+            "hold cannot store item in local: item is readonly. Declare it `readonly Shape local`.",
+            "hold cannot set c.radius: c is readonly.",
+        ]
+    );
+}
+
+/// Spec section 13: a spread passes each element, so a collection of readonly values spreads only into a variadic
+/// parameter that takes them readonly.
+#[test]
+fn a_spread_of_readonly_values_goes_only_where_they_stay_readonly() {
+    let probes = "namespace App;\n\npublic class Probes\n{\n    public void touchAll(Line ...lines) { }\n\n    public void lookAll(readonly Line ...lines) { }\n\n    public void spread(readonly Order order)\n    {\n        this.touchAll(...order.lines);\n        this.lookAll(...order.lines);\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Probes.sharp", probes), &READONLY_CLASSES),
+        [
+            "spread cannot pass order.lines to Probes.touchAll: order.lines is readonly. Declare the parameter `readonly Line lines`."
+        ]
+    );
+}
+
+/// Spec section 13: only `int hash()` and `string toString()` are readonly by definition. A method of either name that
+/// takes parameters is an ordinary method, which may change `this`.
+#[test]
+fn only_hash_and_to_string_without_parameters_are_readonly() {
+    let hasher = "namespace App;\n\npublic class Hasher\n{\n    public int calls { get; set; } = 0;\n\n    public string hash(string text)\n    {\n        this.calls = 1;\n        return text;\n    }\n\n    public string toString(int width)\n    {\n        this.calls = width;\n        return \"hasher\";\n    }\n}\n";
+    let keyed = "namespace App;\n\npublic class Keyed\n{\n    public int calls { get; set; } = 0;\n\n    public int hash() => this.calls++;\n\n    public string toString()\n    {\n        this.calls = 2;\n        return \"keyed\";\n    }\n}\n";
+
+    assert_eq!(messages(("src/Hasher.sharp", hasher), &[]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Keyed.sharp", keyed), &[]),
+        ["hash cannot set this.calls: this is readonly.", "toString cannot set this.calls: this is readonly."]
+    );
+}
+
+/// Spec section 13: an extension member is called through a readonly value only when its receiver is `readonly`, and
+/// the error names the call and that receiver.
+#[test]
+fn an_extension_member_called_through_a_readonly_value_names_its_receiver() {
+    let ops = "namespace App;\n\npublic static class OrderOps\n{\n    extension(Order order)\n    {\n        public void pay() { order.markPaid(); }\n    }\n\n    extension(readonly Order order)\n    {\n        public int owed() => order.paid;\n    }\n}\n\npublic class UsesOps\n{\n    public int settle(readonly Order order)\n    {\n        order.pay();\n        return order.owed();\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/OrderOps.sharp", ops), &READONLY_CLASSES),
+        ["settle cannot call order.pay: order is readonly. Declare its receiver `extension(readonly Order order)`."]
+    );
+}
+
+/// Spec section 13 checks only PHP# code, so a plain PHP file's messages show a PHP# readonly type as its PHP type.
+#[test]
+fn plain_php_messages_show_a_readonly_type_as_its_php_type() {
+    let chain = "namespace App;\n\npublic class Chain\n{\n    public Chain? next { get; set; } = null;\n\n    public readonly Chain? first => this.next;\n\n    public readonly Chain? following() readonly => this.next;\n\n    public void link(readonly Chain chain) { }\n}\n";
+    let walk = "<?php\n\nnamespace Lib;\n\nuse App\\Chain;\n\nfunction walk(Chain $chain): int\n{\n    $chain->link(5);\n\n    return $chain->following();\n}\n\nfunction head(Chain $chain): int\n{\n    return $chain->first;\n}\n";
+
+    let messages = messages(("src/Lib/walk.php", walk), &[("src/Chain.sharp", chain)]);
+
+    assert!(messages.iter().all(|message| !message.contains("readonly")), "{messages:#?}");
+    assert_eq!(messages.len(), 5, "{messages:#?}");
 }

@@ -2781,6 +2781,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// refuses after `?`, or several types end the `TYPE_UNION` list with the name `null` on the line of the `?`, as
     /// php-src builds `int|string|null` and the DNF type `(A&B)|null`.
     fn hint(&mut self, hint: &Hint) -> u32 {
+        // Spec section 13: the checker keeps a readonly value read only, so the engine runs its type.
+        let hint = without_readonly(hint);
         let (union, question_mark) = match hint {
             Hint::Nullable(NullableHint { question_mark, hint: Hint::Parenthesized(parenthesized) }) => {
                 (parenthesized.hint, Some(*question_mark))
@@ -5949,7 +5951,10 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
 /// names a type parameter, as `List<TItem>` does, whose objects are of a type each type argument fixes.
 fn dropped_service(hint: &Hint, service: &FunctionLikeParameterMetadata) -> Option<Word> {
     let r#type = &service.type_metadata.as_ref()?.type_union;
-    let collection = matches!(hint, Hint::Generic(_) | Hint::Nullable(NullableHint { hint: Hint::Generic(_), .. }));
+    let collection = matches!(
+        without_readonly(hint),
+        Hint::Generic(_) | Hint::Nullable(NullableHint { hint: Hint::Generic(_), .. })
+    );
     let nodes = r#type.get_all_child_nodes();
     let of_objects = nodes.iter().any(|node| matches!(node, TypeRef::Atomic(TAtomic::Object(_))));
     let is_open = nodes.iter().any(|node| matches!(node, TypeRef::Atomic(TAtomic::GenericParameter(_))));
@@ -5969,13 +5974,21 @@ fn table_kind(r#type: &TUnion) -> Option<bool> {
 /// Whether `hint`, a parameter's or a property's type, is a `Map` or a `Set`, which plain PHP gives as a PHP array, as
 /// `Some` of whether it is nullable.
 fn collection_hint(hint: Option<&Hint>) -> Option<bool> {
-    let (generic, nullable) = match hint {
+    let (generic, nullable) = match hint.map(without_readonly) {
         Some(Hint::Generic(generic)) => (generic, false),
         Some(Hint::Nullable(NullableHint { hint: Hint::Generic(generic), .. })) => (generic, true),
         _ => return None,
     };
 
     matches!(generic.name.value, b"Map" | b"Set").then_some(nullable)
+}
+
+/// The type `hint` writes after its `readonly`, spec section 13, which the engine runs as the type.
+fn without_readonly<'hint, 'arena>(hint: &'hint Hint<'arena>) -> &'hint Hint<'arena> {
+    match hint {
+        Hint::Readonly(readonly) => readonly.hint,
+        hint => hint,
+    }
 }
 
 /// Whether a member without an initial value starts as null, as in C# and Swift: a field, or a property with storage

@@ -171,6 +171,8 @@ fn union_from_hint(
     match hint {
         Hint::Parenthesized(parenthesized_hint) => convert(parenthesized_hint.hint),
         Hint::Identifier(identifier) => get_union_from_identifier_hint(identifier, resolved_names, type_context),
+        // Spec section 13: `readonly` before a type makes the value readonly, and everything read through it.
+        Hint::Readonly(readonly) => convert(readonly.hint).to_readonly(),
         Hint::Nullable(nullable_hint) => match nullable_hint.hint {
             Hint::Null(_) => get_null(),
             Hint::String(_) => get_nullable_string(),
@@ -276,6 +278,7 @@ fn union_from_hint(
                     parameters: Some(arguments),
                     variances: None,
                     intersection_types: None,
+                    is_readonly: false,
                 }))
             } else {
                 match generic.name.value {
@@ -377,6 +380,7 @@ fn get_union_from_identifier_hint(
         parameters: None,
         variances: None,
         intersection_types: None,
+        is_readonly: false,
     }))
 }
 

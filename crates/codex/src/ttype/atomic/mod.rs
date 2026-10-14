@@ -108,6 +108,18 @@ impl PartialEq for TAtomic {
 }
 
 impl TAtomic {
+    /// Whether this atomic is a PHP# readonly value, spec section 13: a readonly object, or a value of a type
+    /// parameter written `readonly T`, whose bound is readonly.
+    #[must_use]
+    pub fn is_readonly_value(&self) -> bool {
+        match self {
+            TAtomic::Object(TObject::Named(named)) => named.is_readonly,
+            TAtomic::Reference(reference::TReference::Symbol { is_readonly, .. }) => *is_readonly,
+            TAtomic::GenericParameter(parameter) => parameter.constraint.types.iter().any(TAtomic::is_readonly_value),
+            _ => false,
+        }
+    }
+
     /// Returns true if this atomic is a Placeholder or contains Placeholder in type parameters.
     #[must_use]
     pub fn contains_placeholder(&self) -> bool {
@@ -935,7 +947,7 @@ pub fn populate_atomic_type(
             }
         }
         TAtomic::Reference(reference) => match reference {
-            TReference::Symbol { name, parameters, variances, intersection_types } => {
+            TReference::Symbol { name, parameters, variances, intersection_types, is_readonly } => {
                 if let Some(parameters) = parameters {
                     for parameter in parameters {
                         populate!(union parameter);
@@ -964,6 +976,7 @@ pub fn populate_atomic_type(
                         let mut named_object = TNamedObject::new(*name)
                             .with_type_parameters(parameters.clone())
                             .with_variances(variances.clone());
+                        named_object.is_readonly = *is_readonly;
                         if let Some(intersection_types) = intersection_types {
                             for intersection_type in intersection_types {
                                 named_object.add_intersection_type(intersection_type);

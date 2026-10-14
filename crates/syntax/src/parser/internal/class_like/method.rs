@@ -6,6 +6,7 @@ use crate::cst::cst::ConstructorInitializer;
 use crate::cst::cst::FunctionLikeReturnTypeHint;
 use crate::cst::cst::Hint;
 use crate::cst::cst::Identifier;
+use crate::cst::cst::Keyword;
 use crate::cst::cst::Method;
 use crate::cst::cst::MethodAbstractBody;
 use crate::cst::cst::MethodBody;
@@ -40,6 +41,7 @@ where
             type_parameters: None,
             parameter_list: self.parse_function_like_parameter_list()?,
             return_type_hint: self.parse_optional_function_like_return_type_hint()?,
+            readonly: None,
             on: None,
             uses: None,
             initializer: None,
@@ -136,6 +138,7 @@ where
                 type_parameters: None,
                 parameter_list: self.parse_function_like_parameter_list()?,
                 return_type_hint: None,
+                readonly: self.parse_optional_readonly_marker()?,
                 on: None,
                 uses: None,
                 initializer: self.parse_optional_constructor_initializer()?,
@@ -172,20 +175,49 @@ where
         }
 
         self.refuse_required(&modifiers);
+        let name = self.parse_local_identifier()?;
+        let type_parameters = self.parse_optional_type_parameter_list()?.map(|list| &*self.arena.alloc(list));
+        let parameter_list = self.parse_function_like_parameter_list()?;
+        let after_parameters = self.parse_optional_readonly_marker()?;
+        let on = self.parse_optional_on()?.map(|on| &*self.arena.alloc(on));
+        let after_on = self.parse_optional_readonly_marker()?;
+        let uses = self.parse_optional_uses()?.map(|uses| &*self.arena.alloc(uses));
+        let last = self.parse_optional_readonly_marker()?;
+        // Spec section 13: `readonly` is the last clause, so one written before `on` or `uses` names that place.
+        let misplaced = [
+            after_parameters.as_ref().filter(|_| on.is_some() || uses.is_some()),
+            after_on.as_ref().filter(|_| uses.is_some()),
+        ];
+        for early in misplaced.into_iter().flatten() {
+            self.errors.push(ParseError::ReadonlyNotLastInSharp(early.span));
+        }
+        let readonly = last.or(after_on).or(after_parameters);
+
         Ok(ClassLikeMember::Method(Method {
             attribute_lists: attributes,
             modifiers,
             function: None,
             return_type_hint: Some(FunctionLikeReturnTypeHint { colon: None, hint }),
             ampersand: None,
-            name: self.parse_local_identifier()?,
-            type_parameters: self.parse_optional_type_parameter_list()?.map(|list| &*self.arena.alloc(list)),
-            parameter_list: self.parse_function_like_parameter_list()?,
-            on: self.parse_optional_on()?.map(|on| &*self.arena.alloc(on)),
-            uses: self.parse_optional_uses()?.map(|uses| &*self.arena.alloc(uses)),
+            name,
+            type_parameters,
+            parameter_list,
+            readonly,
+            on,
+            uses,
             initializer: None,
             body: self.parse_method_body()?,
         }))
+    }
+
+    /// Parses a PHP# method's `readonly` when one is here, spec section 13: its last clause, after the parameters, `on`
+    /// and `uses`.
+    fn parse_optional_readonly_marker(&mut self) -> Result<Option<Keyword<'arena>>, ParseError> {
+        if !self.dialect.is_sharp() || !self.stream.is_at(T!["readonly"])? {
+            return Ok(None);
+        }
+
+        Ok(Some(self.expect_any_keyword()?))
     }
 
     /// Refuses `required` on a member that is neither the constructor nor a property.
