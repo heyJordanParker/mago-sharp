@@ -2938,6 +2938,13 @@ const LIBRARY_TYPE_CLASSES: [(&str, &str); 2] = [
     ),
 ];
 
+/// The standard library's `Environment`, the `foreign` class of the effect `Environment`, which a project reads from
+/// `vendor/`.
+const ENVIRONMENT: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Environment.sharp",
+    "namespace Sharp;\n\nimport RuntimeException;\nimport ValueError;\n\npublic foreign class Environment\n{\n    public List<string> arguments { get; }\n\n    public Environment()\n    {\n        this.arguments = Environment.commandLine();\n    }\n\n    public string? variable(string name) => getenv(name) is string value ? value : null;\n\n    public string currentDirectory()\n        => getcwd() is string directory ? directory : throw new RuntimeException(\"Environment.currentDirectory: the current directory cannot be read\");\n\n    public void changeDirectory(string path)\n    {\n        if (!@chdir(path)) {\n            throw new RuntimeException(`Environment.changeDirectory: the directory \"${path}\" cannot be entered`);\n        }\n    }\n\n    public string require(string name)\n        => getenv(name) is string value ? value : throw new ValueError(`Environment.require: the environment variable \"${name}\" is not set`);\n\n    private static extern List<string> commandLine();\n}\n",
+);
+
 /// The semantic checks let any file whose namespace is `Sharp` declare `Int`, `Float` and `Bool`, as the engine does,
 /// and only the analyzer knows the file is not the standard library's. It refuses them with the semantic checks'
 /// reserved-name message, under its own code.
@@ -3088,35 +3095,30 @@ fn an_environment_variable_is_a_nullable_string_and_a_required_one_a_string() {
     let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public static Deploy make() => new Deploy(new Environment());\n\n    public string region() => this.environment.variable(\"X\") ?? \"d\";\n\n    public int wrong() => this.environment.variable(\"X\") ?? \"d\";\n\n    public string url() => this.environment.require(\"X\");\n\n    public int port() => this.environment.require(\"X\");\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Deploy.sharp", sharp), &[]),
+        issues(("src/Demo/Deploy.sharp", sharp), &[ENVIRONMENT]),
         ["11:27 invalid-return-statement", "15:26 invalid-return-statement"]
     );
 }
 
-/// `arguments` and `currentDirectory` are `{ get; }` properties, so the process environment is read, never written.
+/// `arguments` is a `{ get; }` property, because a process's arguments never change, so it is read, never written.
+/// The current directory changes, so `currentDirectory()` and `changeDirectory(path)` are methods.
 #[test]
-fn the_environment_arguments_and_current_directory_are_read_only() {
-    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public List<string> arguments() => this.environment.arguments;\n\n    public string folder() => this.environment.currentDirectory;\n\n    public List<int> numbers() => this.environment.arguments;\n\n    public void change()\n    {\n        this.environment.arguments = [\"deploy\"];\n        this.environment.currentDirectory = \"/tmp\";\n    }\n}\n";
+fn the_environment_arguments_are_read_only_and_the_current_directory_is_a_method() {
+    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public List<string> arguments() => this.environment.arguments;\n\n    public string folder() => this.environment.currentDirectory();\n\n    public List<int> numbers() => this.environment.arguments;\n\n    public void change()\n    {\n        this.environment.changeDirectory(\"/tmp\");\n        this.environment.arguments = [\"deploy\"];\n    }\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Deploy.sharp", sharp), &[]),
-        ["11:35 invalid-return-statement", "15:26 invalid-property-write", "16:26 invalid-property-write"]
+        issues(("src/Demo/Deploy.sharp", sharp), &[ENVIRONMENT]),
+        ["11:35 invalid-return-statement", "16:26 invalid-property-write"]
     );
     assert_eq!(
-        messages(("src/Demo/Deploy.sharp", sharp), &[])[1..],
-        [
-            "Cannot initialize readonly property `Environment.arguments` from within `Deploy`.",
-            "Cannot initialize readonly property `Environment.currentDirectory` from within `Deploy`.",
-        ]
+        messages(("src/Demo/Deploy.sharp", sharp), &[ENVIRONMENT])[1..],
+        ["Cannot initialize readonly property `Environment.arguments` from within `Deploy`."]
     );
 
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Environment;\n\nclass Deploy\n{\n    public function __construct(private Environment $environment) { }\n\n    public function change(): void\n    {\n        $this->environment->arguments = ['deploy'];\n        $this->environment->currentDirectory = '/tmp';\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Environment;\n\nclass Deploy\n{\n    public function __construct(private Environment $environment) { }\n\n    public function change(): void\n    {\n        $this->environment->arguments = ['deploy'];\n    }\n}\n";
     assert_eq!(
-        messages(("src/Demo/Deploy.php", php), &[]),
-        [
-            "Cannot initialize readonly property `Sharp\\Environment::$arguments` from within `Demo\\Deploy`.",
-            "Cannot initialize readonly property `Sharp\\Environment::$currentDirectory` from within `Demo\\Deploy`.",
-        ]
+        messages(("src/Demo/Deploy.php", php), &[ENVIRONMENT]),
+        ["Cannot initialize readonly property `Sharp\\Environment::$arguments` from within `Demo\\Deploy`."]
     );
 }
 
@@ -6900,9 +6902,11 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
 #[test]
 fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() {
     let sharp = "namespace Demo;\n\nimport App.Effects.Payments as Billing;\nimport Sharp.Mail as Post;\n\nclass Receipt\n{\n    public string step(Function<int(int) uses Http, Post, Billing> step) => `Step: ${step}`;\n}\n";
+    let payments =
+        ("src/App/Effects/Payments.sharp", "namespace App.Effects;\n\npublic foreign class Payments\n{\n}\n");
 
     assert_eq!(
-        worded(("src/Demo/Receipt.sharp", sharp), &[]),
+        worded(("src/Demo/Receipt.sharp", sharp), &[payments]),
         [
             "8:84 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Function<int(int) uses Http, Post, Billing>` is none of them. | This is `Function<int(int) uses Http, Post, Billing>`. | Show a value taken from it instead, such as a property or the result of a method.",
         ]
@@ -11730,6 +11734,22 @@ fn an_effect_name_a_file_imports_or_declares_is_that_class() {
     }
 }
 
+/// Spec section 29: a standard effect's name in a `uses` is that effect, even in a file that declares a class under the
+/// name, as it is in a file that imports one.
+#[test]
+fn a_uses_takes_a_standard_effect_in_a_file_that_declares_a_class_of_its_name() {
+    for name in sharp_effect_names() {
+        let declared = (
+            leak(format!("src/App/Shop/{name}.sharp")),
+            leak(format!(
+                "namespace App.Shop;\n\npublic class {name}\n{{\n    public int run(Function<int() uses {name}> tick) => tick();\n}}\n"
+            )),
+        );
+
+        assert_eq!(issues(declared, &[ENVIRONMENT]), Vec::<String>::new(), "{name}");
+    }
+}
+
 /// Spec section 23: a class of the file's own namespace wins over the class `Sharp` imports by default, as a class of
 /// the same package does in Kotlin, C# and Java, so another file of `App` names `App.Cache` with a bare `Cache` as a
 /// type, a `new`, an `is` and a static call. A default name its namespace declares no class of stays the `Sharp` one.
@@ -11747,14 +11767,16 @@ fn a_class_of_the_files_namespace_wins_over_a_default_class() {
         assert_eq!(issues(("app/App/Shape.sharp", shape), &[declared]), Vec::<String>::new(), "{name}");
     }
 
-    let here = "namespace App;\n\npublic class Here\n{\n    public string folder(Environment environment) => environment.currentDirectory;\n}\n";
+    let here = "namespace App;\n\npublic class Here\n{\n    public string folder(Environment environment) => environment.currentDirectory();\n}\n";
     let cache = ("app/App/Cache.sharp", "namespace App;\n\npublic class Cache\n{\n}\n");
-    assert_eq!(issues(("app/App/Here.sharp", here), &[cache]), Vec::<String>::new());
+    assert_eq!(issues(("app/App/Here.sharp", here), &[cache, ENVIRONMENT]), Vec::<String>::new());
 }
 
-/// The names of the standard effects, short as a file writes them.
+/// The names of the standard effects, short as a file writes them, spec section 29.
 fn sharp_effect_names() -> Vec<String> {
-    mago_names::STANDARD_EFFECTS.iter().map(mago_names::short_name).collect()
+    ["Database", "Http", "Files", "Console", "Process", "Clock", "Random", "Cache", "Mail", "Environment", "Events"]
+        .map(String::from)
+        .to_vec()
 }
 
 fn leak(code: String) -> &'static str {
@@ -12768,7 +12790,7 @@ fn a_class_that_shares_its_short_name_only_with_a_built_in_class_keeps_its_short
 /// `App.Ops.Environment`, so a message names that class `Environment`, as the import does. The PHP twin keeps
 /// upstream's full names.
 #[test]
-fn a_sharp_prelude_class_that_shares_its_short_name_is_named_by_its_full_name() {
+fn a_standard_library_class_that_shares_its_short_name_is_named_by_its_full_name() {
     let environment = ("src/App/Ops/Environment.php", "<?php\n\nnamespace App\\Ops;\n\nclass Environment\n{\n}\n");
     let shell = (
         "src/Lib/Shell.php",
@@ -12777,7 +12799,7 @@ fn a_sharp_prelude_class_that_shares_its_short_name_is_named_by_its_full_name() 
     let sharp = "namespace App.Jobs;\n\nimport App.Ops.Environment;\nimport Lib.Shell;\n\nclass Job\n{\n    public Environment current(Shell shell) => shell.environment();\n}\n";
     let php = "<?php\n\nnamespace App\\Jobs;\n\nuse App\\Ops\\Environment;\nuse Lib\\Shell;\n\nclass Job\n{\n    public function current(Shell $shell): Environment\n    {\n        return $shell->environment();\n    }\n}\n";
     let returned = |analyzed| -> Vec<String> {
-        worded(analyzed, &[environment, shell])
+        worded(analyzed, &[environment, shell, ENVIRONMENT])
             .into_iter()
             .filter(|line| line.contains(" invalid-return-statement "))
             .collect()
@@ -13304,7 +13326,6 @@ const STRIPE: (&str, &str) = (
 const NOW: (&str, &str) = ("src/helpers.php", "<?php\n\nfunction now(): int\n{\n    return time();\n}\n");
 
 const CLOCK_STUB: (&str, &str) = ("app/Stubs/Clock.sharp", "namespace App.Stubs;\n\nextern now uses Clock;\n");
-
 /// Analyzes every file of `files` against the codebase they declare together, and returns the codebase and the effect
 /// summaries of every body they declare.
 fn summarized(files: &[(&'static str, &'static str)]) -> (CodebaseMetadata, Vec<EffectSummary>) {
@@ -13458,6 +13479,83 @@ fn an_extern_of_a_plain_php_class_is_accepted() {
         ("app/Stubs/Stripe.sharp", "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient;\n");
 
     assert_eq!(issues(stub, &[STRIPE]), Vec::<String>::new());
+}
+
+/// A project declares its own effect as a `foreign` class, spec section 29, and every `uses` takes it: an `extern`'s,
+/// a function type's, written in a file that imports the class, and an interface method's in the class's namespace. A
+/// plain class of that name is no effect.
+#[test]
+fn a_uses_takes_a_foreign_class_and_refuses_any_other_class() {
+    let foreign = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic foreign class Payments\n{\n}\n");
+    let plain = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic class Payments\n{\n}\n");
+    let extern_ = (
+        "app/Stubs/Stripe.sharp",
+        "namespace App.Stubs;\n\nimport App.Billing.Payments;\nimport Stripe.StripeClient;\n\nextern StripeClient uses Payments;\n",
+    );
+    let function_type = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public int pay(Function<int() uses Payments> charge) => charge();\n}\n",
+    );
+
+    let method = (
+        "app/Billing/Gateway.sharp",
+        "namespace App.Billing;\n\npublic interface Gateway\n{\n    int charge(int cents) uses Payments;\n}\n",
+    );
+
+    for (form, refused) in
+        [(extern_, "6:26 invalid-effect"), (function_type, "7:40 invalid-effect"), (method, "5:32 invalid-effect")]
+    {
+        assert_eq!(issues(form, &[foreign, STRIPE]), Vec::<String>::new(), "{}", form.0);
+        assert_eq!(issues(form, &[plain, STRIPE]), [refused], "{}", form.0);
+    }
+}
+
+/// Spec section 29: a method names a function parameter in `uses`, with or without a body, as
+/// `charge(…) uses prepare => …` and `apply(Function<int(int)> f) uses f;` do. That name is no effect, so the effect
+/// check passes it, and a caller has no effect of that name.
+#[test]
+fn a_method_with_a_body_names_a_function_parameter_in_uses() {
+    let checkout = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\npublic class Checkout\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
+    );
+
+    assert_eq!(issues(checkout, &[]), Vec::<String>::new());
+
+    let doubler = (
+        "app/Shop/Doubler.sharp",
+        "namespace App.Shop;\n\npublic class Doubler\n{\n    public Doubler(private Mapper mapper) { }\n\n    public int twice => this.mapper.apply(x => x * 2);\n}\n",
+    );
+    for declaration in [
+        "namespace App.Shop;\n\npublic interface Mapper\n{\n    int apply(Function<int(int)> f) uses f;\n}\n",
+        "namespace App.Shop;\n\npublic abstract class Mapper\n{\n    public abstract int apply(Function<int(int)>? f) uses f;\n}\n",
+    ] {
+        let mapper = ("app/Shop/Mapper.sharp", declaration);
+
+        assert_eq!(issues(mapper, &[doubler]), Vec::<String>::new(), "{declaration}");
+        assert_eq!(effect_issues(&[doubler, mapper]), Vec::<String>::new(), "{declaration}");
+    }
+}
+
+/// A name in `uses` that is no effect is refused with the effects its file can name: the named standard effects in the
+/// spec's order, then each `foreign` class of the standard library, of the file's namespace and of its imports, then
+/// `Events`. A `foreign` class the file cannot name stays out, so the message changes only with what the file reads.
+#[test]
+fn a_uses_that_names_no_effect_lists_the_effects_its_file_can_name() {
+    let payments = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic foreign class Payments\n{\n}\n");
+    let ledger = ("app/Books/Ledger.sharp", "namespace App.Books;\n\npublic foreign class Ledger\n{\n}\n");
+    let audit = ("app/Audit/Trail.sharp", "namespace App.Audit;\n\npublic foreign class Trail\n{\n}\n");
+    let gateway = (
+        "app/Billing/Gateway.sharp",
+        "namespace App.Billing;\n\nimport App.Books.Ledger;\n\npublic interface Gateway\n{\n    int charge(int cents) uses Clok;\n\n    int keep(Ledger ledger);\n}\n",
+    );
+
+    assert_eq!(
+        worded(gateway, &[payments, ledger, audit, ENVIRONMENT]),
+        [
+            "7:32 invalid-effect `Clok` is not an effect: `uses` takes Database, Http, Files, Console, Process, Clock, Random, Cache, Mail, Environment, Ledger, Payments, Events or a `foreign` class. | Written here. | An effect is a standard effect, a `foreign` class, or `Events`, the effect of `emit`."
+        ]
+    );
 }
 
 /// An `extern event` gives the plain PHP class it marks the effects its `uses` lists, spec section 15, as an `extern`
@@ -13794,6 +13892,103 @@ const FETCH: (&str, &str) = ("src/fetch.php", "<?php\n\nfunction fetch(int $id):
 
 const FETCH_STUB: (&str, &str) = ("app/Stubs/Fetch.sharp", "namespace App.Stubs;\n\nextern fetch uses Http;\n");
 
+/// Spec section 29: a method without a body is pure unless it says `uses`, and every implementation is held to what
+/// the declaration allows, an interface's or an abstract class's. The refusal is at the call that has the effect.
+#[test]
+fn an_implementation_has_only_the_effects_its_declaration_allows() {
+    let implementation = (
+        "app/Shop/LiveRates.sharp",
+        "namespace App.Shop;\n\npublic class LiveRates : Rates\n{\n    public int rate(int id) => fetch(id);\n}\n",
+    );
+    let refused = "app/Shop/LiveRates.sharp:5:32 incompatible-effects: `LiveRates.rate` calls `fetch`, which has the effect `Http`, so";
+
+    for (declaration, allowed) in [
+        ("namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id);\n}\n", None),
+        ("namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id) uses Mail;\n}\n", None),
+        ("namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id) uses Mail, Http;\n}\n", Some(())),
+        ("namespace App.Shop;\n\npublic abstract class Rates\n{\n    public abstract int rate(int id);\n}\n", None),
+    ] {
+        let rates = ("app/Shop/Rates.sharp", declaration);
+        let issues = effect_issues(&[implementation, rates, FETCH, FETCH_STUB]);
+
+        match allowed {
+            Some(()) => assert_eq!(issues, Vec::<String>::new(), "{declaration}"),
+            None => assert!(issues.len() == 1 && issues[0].starts_with(refused), "{declaration}: {issues:?}"),
+        }
+    }
+    assert_eq!(
+        effect_issues(&[
+            implementation,
+            (
+                "app/Shop/Rates.sharp",
+                "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id) uses Mail;\n}\n"
+            ),
+            FETCH,
+            FETCH_STUB,
+        ]),
+        [format!("{refused} `uses Mail` on `Rates.rate` cannot accept it.")]
+    );
+    assert_eq!(
+        effect_issues(&[
+            implementation,
+            ("app/Shop/Rates.sharp", "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id);\n}\n"),
+            FETCH,
+            FETCH_STUB,
+        ]),
+        [format!("{refused} the pure `Rates.rate` cannot accept it.")]
+    );
+}
+
+/// An implementation that calls plain PHP with no `extern` is refused like a getter that does: the help names the
+/// `extern` to write, and the import its file lacks.
+#[test]
+fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write() {
+    let gauge = (
+        "app/Shop/Gauge.sharp",
+        "namespace App.Shop;\n\nimport Lib.Meter;\n\npublic class Gauge\n{\n    public Gauge(private Meter source) { }\n\n    public Meter meter() => this.source;\n}\n",
+    );
+    let rates =
+        ("app/Shop/Rates.sharp", "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id);\n}\n");
+    let implementation = (
+        "app/Shop/MeterRates.sharp",
+        "namespace App.Shop;\n\npublic class MeterRates : Rates\n{\n    public MeterRates(private Gauge gauge) { }\n\n    public int rate(int id) => this.gauge.meter().read();\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[implementation, rates, gauge, METER]),
+        [
+            "app/Shop/MeterRates.sharp:7:32 incompatible-effects: `MeterRates.rate` calls `Meter.read`, which has no `extern` declaration, so the pure `Rates.rate` cannot accept it. Help: Declare it in a .sharp file: `extern Meter.read;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
+        ]
+    );
+}
+
+/// A call of a method without a body has the effects its `uses` lists, which every implementation is held to, so a
+/// getter calling it through an interface is refused naming them.
+#[test]
+fn a_call_of_a_method_without_a_body_has_the_effects_its_uses_lists() {
+    let rates = |uses: &'static str| {
+        (
+            "app/Shop/Rates.sharp",
+            Box::leak(
+                format!("namespace App.Shop;\n\npublic interface Rates\n{{\n    int rate(int id){uses};\n}}\n")
+                    .into_boxed_str(),
+            ) as &str,
+        )
+    };
+    let quote = (
+        "app/Shop/Quote.sharp",
+        "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rates rates) { }\n\n    public int price => this.rates.rate(1);\n}\n",
+    );
+
+    assert_eq!(effect_issues(&[quote, rates("")]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[quote, rates(" uses Http")]),
+        [
+            "app/Shop/Quote.sharp:7:25 impure-getter: Getter `price` calls `Rates.rate`, which has the effect `Http`. Getters must be pure."
+        ]
+    );
+}
+
 /// Spec section 29: a call through a function value has the effects its function type lists, whether the value is a
 /// field, a parameter or a local, so a getter calling one that uses `Database` is refused and names `Database`.
 #[test]
@@ -13901,6 +14096,41 @@ fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_i
     );
 }
 
+/// A method value of a method without a body has the effects its `uses` lists, as a call of it does, so a function
+/// type holds it only when it lists them.
+#[test]
+fn a_method_value_of_a_method_without_a_body_is_held_to_its_uses() {
+    let rates = (
+        "app/Shop/Rates.sharp",
+        "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id) uses Http;\n\n    int fixed(int id);\n}\n",
+    );
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Rates rates) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.rates.rate) + Pricing.apply(this.rates.fixed);\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[rates]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, rates]),
+        [
+            "app/Shop/Pricing.sharp:9:39 invalid-argument: `Rates.rate` has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+        ]
+    );
+}
+
+/// A method value of a standard library method the prelude declares, as `List.wrap`, has no effect, so a pure function
+/// type holds it.
+#[test]
+fn a_method_value_of_a_prelude_method_is_pure() {
+    let shelf = (
+        "app/Shop/Shelf.sharp",
+        "namespace App.Shop;\n\npublic class Shelf\n{\n    public static List<Any?> make(Function<List<Any?>(Any?)> wrap) => wrap(1);\n\n    public List<Any?> run() => Shelf.make(List.wrap);\n}\n",
+    );
+
+    assert_eq!(issues(shelf, &[]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[shelf]), Vec::<String>::new());
+}
+
 /// A conditional may give either branch, so each lambda in it is held to the place's function type, whichever branch
 /// holds it and whatever the other branch holds.
 #[test]
@@ -13954,7 +14184,7 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect(
             "app/Stubs/Facade.sharp",
             leak(format!("namespace App.Stubs;\n\nimport Lib.{name};\n\nextern {name} uses {name};\n")),
         );
-        let files = [checkout, services, facade, client_stub, facade_stub];
+        let files = [checkout, services, facade, client_stub, facade_stub, ENVIRONMENT];
 
         assert_eq!(issues(checkout, &files[1..]), Vec::<String>::new(), "{name}");
         assert_eq!(
@@ -13992,7 +14222,7 @@ const SERVICES_STUB: (&str, &str) = (
 
 /// A plain PHP method value runs the method, so a function type holds it only when it lists every effect the method's
 /// `extern` declares, as a call of the method has them. A method with no `extern` has an unknown effect, and a method
-/// of `Sharp\Environment` has the effect `Environment`.
+/// of the `foreign` class `Sharp\Environment` has the effect `Environment`.
 #[test]
 fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
     let pricing = (
@@ -14000,9 +14230,9 @@ fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
         "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\nimport Sharp.Environment;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store, private Environment environment) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static string? read(Function<string?(string)> lookup) => lookup(\"HOME\");\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n\n    public string? home() => Pricing.read(this.environment.variable);\n}\n",
     );
 
-    assert_eq!(issues(pricing, &[SERVICES, SERVICES_STUB]), Vec::<String>::new());
+    assert_eq!(issues(pricing, &[SERVICES, SERVICES_STUB, ENVIRONMENT]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[pricing, SERVICES, SERVICES_STUB]),
+        effect_issues(&[pricing, SERVICES, SERVICES_STUB, ENVIRONMENT]),
         [
             "app/Shop/Pricing.sharp:16:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
             "app/Shop/Pricing.sharp:16:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int)>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`.",
@@ -14310,11 +14540,252 @@ fn a_getter_reading_the_environment_is_refused_with_the_effect_environment() {
     );
 
     assert_eq!(
-        effect_issues(&[deploy]),
+        effect_issues(&[deploy, ENVIRONMENT]),
         [
             "app/Ops/Deploy.sharp:7:29 impure-getter: Getter `region` calls `Environment.variable`, which has the effect `Environment`. Getters must be pure."
         ]
     );
+}
+
+/// Spec section 29 lists `require` among `Environment`'s instance members, so a call reads the environment only
+/// through an `Environment` object, never through the class.
+#[test]
+fn environment_require_is_called_on_an_environment_object() {
+    let deploy = (
+        "app/Ops/Deploy.sharp",
+        "namespace App.Ops;\n\npublic class Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string key() => this.environment.require(\"APP_KEY\");\n\n    public string staticKey() => Environment.require(\"APP_KEY\");\n}\n",
+    );
+
+    assert_eq!(issues(deploy, &[ENVIRONMENT]), ["9:46 invalid-static-method-access", "9:34 mixed-return-statement"]);
+}
+
+/// Spec section 29: code has a `foreign` class's effect by holding one of its objects, so a getter that calls or reads
+/// through a field or a constructor parameter of a project's `foreign` class is refused, naming the class.
+#[test]
+fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
+    let payments = (
+        "app/Billing/Payments.sharp",
+        "namespace App.Billing;\n\npublic foreign class Payments\n{\n    public int fee = 30;\n\n    public int charge(int cents) => cents;\n}\n",
+    );
+    let field = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    private Payments payments;\n\n    public Checkout(Payments payments)\n    {\n        this.payments = payments;\n    }\n\n    public int total => this.payments.charge(100);\n}\n",
+    );
+    let parameter = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.charge(100);\n}\n",
+    );
+    let read = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.fee;\n}\n",
+    );
+    let named_at_run_time = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.{\"fee\"};\n}\n",
+    );
+
+    for (form, refused) in [
+        (
+            field,
+            "app/Shop/Checkout.sharp:14:25 impure-getter: Getter `total` calls `Payments.charge`, which has the effect `Payments`. Getters must be pure.",
+        ),
+        (
+            parameter,
+            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Payments.charge`, which has the effect `Payments`. Getters must be pure.",
+        ),
+        (
+            read,
+            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Payments.fee`, which has the effect `Payments`. Getters must be pure.",
+        ),
+        (
+            named_at_run_time,
+            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Payments`, which has the effect `Payments`. Getters must be pure.",
+        ),
+    ] {
+        assert_eq!(effect_issues(&[form, payments]), [refused], "{}", form.1);
+    }
+
+    // A subclass of a `foreign` class is that class's object, so it has that class's effect.
+    let gateway = (
+        "app/Billing/Gateway.sharp",
+        "namespace App.Billing;\n\npublic abstract foreign class Gateway\n{\n    public virtual int fee() => 1;\n}\n",
+    );
+    let stripe = (
+        "app/Billing/Stripe.sharp",
+        "namespace App.Billing;\n\npublic class Stripe : Gateway\n{\n    public override int fee() => 2;\n}\n",
+    );
+    let subclass = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Stripe;\n\npublic class Checkout\n{\n    public Checkout(private Stripe stripe) { }\n\n    public int total => this.stripe.fee();\n}\n",
+    );
+    assert_eq!(
+        effect_issues(&[subclass, gateway, stripe]),
+        [
+            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Stripe.fee`, which has the effect `Gateway`. Getters must be pure."
+        ]
+    );
+}
+
+/// Spec section 29: code that reaches a `foreign` object has its class's effect, whatever its members do, so each
+/// member of a `foreign` class has that effect too. A pure interface method refuses a `foreign` implementation, and a
+/// call through an interface or a base class has the effect of its `foreign` implementation.
+#[test]
+fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class() {
+    let store = |uses: &'static str| {
+        (
+            "app/Cache/Store.sharp",
+            Box::leak(
+                format!("namespace App.Cache;\n\npublic interface Store\n{{\n    int size(){uses};\n}}\n")
+                    .into_boxed_str(),
+            ) as &str,
+        )
+    };
+    let quiet = (
+        "app/Cache/QuietStore.sharp",
+        "namespace App.Cache;\n\npublic foreign class QuietStore : Store\n{\n    public int size() => 3;\n}\n",
+    );
+    let quiet_reader = (
+        "app/Cache/QuietReader.sharp",
+        "namespace App.Cache;\n\npublic class QuietReader\n{\n    public QuietReader(private Store store) { }\n\n    public int count => this.store.size();\n\n    public Function<int()> counter() => () => this.store.size();\n}\n",
+    );
+    let plain = (
+        "app/Cache/Plain.sharp",
+        "namespace App.Cache;\n\npublic abstract class Plain\n{\n    public virtual int size() => 1;\n}\n",
+    );
+    let sneaky = (
+        "app/Cache/Sneaky.sharp",
+        "namespace App.Cache;\n\npublic foreign class Sneaky : Plain\n{\n    public override int size() => 2;\n}\n",
+    );
+    let plain_reader = (
+        "app/Cache/PlainReader.sharp",
+        "namespace App.Cache;\n\npublic class PlainReader\n{\n    public PlainReader(private Plain plain) { }\n\n    public int count => this.plain.size();\n\n    public Function<int()> counter() => () => this.plain.size();\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[quiet, store(""), quiet_reader]),
+        [
+            "app/Cache/QuietStore.sharp:5:26 incompatible-effects: `QuietStore.size` is a member of the `foreign` class `QuietStore`, so the pure `Store.size` cannot accept it."
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[quiet, store(" uses QuietStore"), quiet_reader]),
+        [
+            "app/Cache/QuietReader.sharp:7:25 impure-getter: Getter `count` calls `Store.size`, which has the effect `QuietStore`. Getters must be pure.",
+            "app/Cache/QuietReader.sharp:9:41 invalid-return-statement: This lambda calls `Store.size`, which has the effect `QuietStore`, so a `Function<int()>` cannot hold it.",
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[sneaky, plain, plain_reader]),
+        [
+            "app/Cache/PlainReader.sharp:7:25 impure-getter: Getter `count` reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`. Getters must be pure.",
+            "app/Cache/PlainReader.sharp:9:41 invalid-return-statement: This lambda reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`, so a `Function<int()>` cannot hold it.",
+        ]
+    );
+}
+
+/// Spec section 29: a `foreign` object reaches code only through constructors, so a static field holds none, alone or
+/// inside a collection. A static field written without its type holds nothing the check can name, so only the parser
+/// reports it.
+#[test]
+fn a_static_field_holding_a_foreign_object_is_refused() {
+    let store = ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore\n{\n}\n");
+    let message = "`Cache.store` is static, so it cannot hold a `RedisStore`.";
+
+    for (field, column) in [
+        ("public static RedisStore store;", 30),
+        ("public static RedisStore? store = null;", 31),
+        ("public static List<RedisStore> store = [];", 36),
+    ] {
+        let cache =
+            Box::leak(format!("namespace App.Cache;\n\npublic class Cache\n{{\n    {field}\n}}\n").into_boxed_str());
+
+        assert_eq!(
+            worded(("app/Cache/Cache.sharp", cache), &[store]),
+            [format!(
+                "5:{column} foreign-in-static {message} | A `foreign` object reaches code only through constructors, so no static holds one. | Take the `RedisStore` as a constructor parameter instead."
+            )],
+            "{field}"
+        );
+    }
+    assert_eq!(
+        worded(
+            ("app/Cache/Cache.sharp", "namespace App.Cache;\n\npublic class Cache\n{\n    public static store;\n}\n"),
+            &[store]
+        ),
+        ["5:19 parse A PHP# field needs a type, as in `private int count = 0;`. | Written here."]
+    );
+
+    let money = ("app/Cache/Money.sharp", "namespace App.Cache;\n\npublic class Money\n{\n}\n");
+    assert_eq!(
+        worded(
+            (
+                "app/Cache/Cache.sharp",
+                "namespace App.Cache;\n\npublic class Cache\n{\n    public static Money? cache = null;\n}\n"
+            ),
+            &[store, money]
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// Spec section 29: no static holds a `foreign` object, so a write of one into a static whose declared type is wider,
+/// such as `Any?`, a `List<Any>` or an interface the class implements, is refused at the value, as a changing
+/// collection method on a static is.
+#[test]
+fn a_foreign_object_written_into_a_static_is_refused() {
+    let store = ("app/Cache/Store.sharp", "namespace App.Cache;\n\npublic interface Store\n{\n}\n");
+    let redis =
+        ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore : Store\n{\n}\n");
+    let message = "foreign-in-static `Cache.loose` is static, so it cannot hold a `RedisStore`. | A `foreign` object reaches code only through constructors, so no static holds one. | Take the `RedisStore` as a constructor parameter instead.";
+
+    for (field, write, column) in [
+        ("public static Any? loose = null;", "Cache.loose = this.store;", 40),
+        ("public static List<Any> loose = [];", "Cache.loose = [this.store];", 40),
+        ("public static Store? loose = null;", "Cache.loose = this.store;", 40),
+        ("public static List<Any> loose = [];", "Cache.loose.add(this.store);", 42),
+    ] {
+        let cache = Box::leak(
+            format!(
+                "namespace App.Cache;\n\npublic class Cache\n{{\n    {field}\n\n    public Cache(private RedisStore store) {{ }}\n\n    public void keep() {{ {write} }}\n}}\n"
+            )
+            .into_boxed_str(),
+        );
+
+        assert_eq!(
+            worded(("app/Cache/Cache.sharp", cache), &[store, redis]),
+            [format!("9:{column} {message}")],
+            "{write}"
+        );
+    }
+}
+
+/// A value whose type parameter has a `foreign` bound is a `foreign` object, and so is a generic class's `foreign`
+/// type argument, so a static holds neither. A bound that is no `foreign` class holds nothing the check can name.
+#[test]
+fn a_foreign_object_behind_a_type_parameter_or_a_type_argument_is_refused_in_a_static() {
+    let store = ("app/Cache/Store.sharp", "namespace App.Cache;\n\npublic interface Store\n{\n}\n");
+    let redis =
+        ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore : Store\n{\n}\n");
+    let shelf = ("app/Cache/Shelf.sharp", "namespace App.Cache;\n\npublic class Shelf<TItem>\n{\n}\n");
+    let refused = |property: &str, column: usize| {
+        vec![format!(
+            "5:{column} foreign-in-static `Cache.{property}` is static, so it cannot hold a `RedisStore`. | A `foreign` object reaches code only through constructors, so no static holds one. | Take the `RedisStore` as a constructor parameter instead."
+        )]
+    };
+
+    for (member, expected) in [
+        ("public static void keep<TStore : RedisStore>(TStore held) { Cache.loose = held; }", refused("loose", 79)),
+        ("public static void keep<TStore : Store>(TStore held) { Cache.loose = held; }", vec![]),
+        ("public static Shelf<RedisStore>? shelf = null;", refused("shelf", 38)),
+        ("public static Shelf<Store>? shelf = null;", vec![]),
+    ] {
+        let cache = Box::leak(
+            format!("namespace App.Cache;\n\npublic class Cache\n{{\n    {member}\n\n    public static Any? loose = null;\n}}\n")
+                .into_boxed_str(),
+        );
+
+        assert_eq!(worded(("app/Cache/Cache.sharp", cache), &[store, redis, shelf]), expected, "{member}");
+    }
 }
 
 /// Two methods that call each other form one strongly connected part, which the solve iterates to a fixpoint instead
@@ -15495,7 +15966,7 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
     ] {
         let shop = module("app/Shop/Module.sharp", "App.Shop", members);
         let files: Vec<_> =
-            BOUND_SERVICES.iter().copied().chain([margin_rule]).chain(modules.iter().copied()).collect();
+            BOUND_SERVICES.iter().copied().chain([margin_rule, ENVIRONMENT]).chain(modules.iter().copied()).collect();
         let refused: Vec<_> =
             refusals(shop, &files).into_iter().filter(|refusal| refusal.contains(" missing-service ")).collect();
         assert_eq!(refused, expected, "{modules:?}: {members}");
@@ -15509,7 +15980,7 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
     ] {
         let shop = module("app/Shop/Module.sharp", "App.Shop", fix);
         let files: Vec<_> =
-            BOUND_SERVICES.iter().copied().chain([margin_rule]).chain(modules.iter().copied()).collect();
+            BOUND_SERVICES.iter().copied().chain([margin_rule, ENVIRONMENT]).chain(modules.iter().copied()).collect();
         assert_eq!(refusals(shop, &files), Vec::<String>::new(), "{fix}");
     }
 

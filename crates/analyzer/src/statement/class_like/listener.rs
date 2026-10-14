@@ -39,7 +39,7 @@ pub fn check_listener<'ctx, 'arena, A>(
     A: Arena,
 {
     let mut listeners = members.iter().filter_map(|member| match member {
-        ClassLikeMember::Method(method) => method.on.as_ref().map(|on| (method, on)),
+        ClassLikeMember::Method(method) => method.on.map(|on| (method, on)),
         _ => None,
     });
     let Some((first, first_on)) = listeners.next() else {

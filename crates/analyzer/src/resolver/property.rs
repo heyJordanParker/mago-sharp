@@ -8,8 +8,8 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
-use mago_codex::metadata::class_like::TemplateTypes;
 use mago_codex::metadata::flags::MetadataFlags;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
@@ -1811,8 +1811,7 @@ fn report_possibly_non_existent_property<A>(
 /// runs both on the read's missing-member path. Reports a method the read cannot reach, as the call would. Returns
 /// the closure's type, as `specialize_member_type` gives a call of the method on `receiver`, or on the intersection
 /// part of it that has the method, with `Self` bound to `self_parameter` when the receiver is typed by that type
-/// parameter. A PHP# generic method's value has the type arguments [`fix_type_arguments`] gives the read at
-/// `read_span`.
+/// parameter. A generic method's value has the type arguments [`fix_type_arguments`] gives the read at `read_span`.
 pub(crate) fn resolve_method_value<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -1896,30 +1895,32 @@ where
             TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature)))
         },
     );
-    if !method_metadata.flags.is_sharp() || method_metadata.template_types.is_empty() {
+    if method_metadata.template_types.is_empty() {
         return Some(value);
     }
 
     let method_name = display_sharp_member(display_class_like_name(context, class_name), method_metadata.original_name);
 
-    Some(fix_type_arguments(context, artifacts, value, &method_metadata.template_types, &method_name, read_span))
+    Some(fix_type_arguments(context, artifacts, value, method_metadata, &method_name, read_span))
 }
 
-/// Spec section 14.3: a PHP# generic method's `value`, one closure signature, takes its type arguments from the
-/// parameter types of the function type the read at `span` goes into, as C#'s method group conversion does, and the
-/// analysis records them at `span` for the lowering. Returns `value` with them. A type argument nothing fixes is refused, as C#'s CS0411, and
-/// one a parameter type fixes outside its bound is left to the bound's own issue.
+/// Spec section 14.3: a generic method's `value`, one closure signature, takes its type arguments from the parameter
+/// types of the function type the read at `span` goes into, as C#'s method group conversion does. Returns `value` with
+/// them. A PHP# method's are recorded at `span` for the lowering, and one nothing fixes is refused, as C#'s CS0411,
+/// while one a parameter type fixes outside its bound is left to the bound's own issue. A plain PHP method's
+/// `@template` types never reach the engine, so its value stays PHP's first-class callable, and none is recorded.
 fn fix_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
     value: TUnion,
-    templates: &TemplateTypes,
+    method: &FunctionLikeMetadata,
     method_name: &str,
     span: Span,
 ) -> TUnion
 where
     A: Arena,
 {
+    let templates = &method.template_types;
     let mut template_result = TemplateResult::new(
         templates.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
         HashMap::default(),
@@ -1945,6 +1946,9 @@ where
                 ));
             }
         }
+    }
+    if !method.flags.is_sharp() {
+        return inferred_type_replacer::replace(&value, &template_result, context.codebase);
     }
 
     let type_arguments: Vec<Option<TUnion>> = templates

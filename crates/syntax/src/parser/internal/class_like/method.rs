@@ -41,6 +41,7 @@ where
             parameter_list: self.parse_function_like_parameter_list()?,
             return_type_hint: self.parse_optional_function_like_return_type_hint()?,
             on: None,
+            uses: None,
             initializer: None,
             body: self.parse_method_body()?,
         })
@@ -134,6 +135,7 @@ where
                 parameter_list: self.parse_function_like_parameter_list()?,
                 return_type_hint: None,
                 on: None,
+                uses: None,
                 initializer: self.parse_optional_constructor_initializer()?,
                 body: self.parse_method_body()?,
             }));
@@ -179,7 +181,8 @@ where
             name: self.parse_local_identifier()?,
             type_parameters: self.parse_optional_type_parameter_list()?.map(|list| &*self.arena.alloc(list)),
             parameter_list: self.parse_function_like_parameter_list()?,
-            on: self.parse_optional_on()?,
+            on: self.parse_optional_on()?.map(|on| &*self.arena.alloc(on)),
+            uses: self.parse_optional_uses()?.map(|uses| &*self.arena.alloc(uses)),
             initializer: None,
             body: self.parse_method_body()?,
         }))

@@ -807,6 +807,13 @@ mod tests {
         (metadata, symbol_references)
     }
 
+    /// The standard library's `Sharp\Environment`, the `foreign` class of the effect `Environment`, at the library's path,
+    /// with its `currentDirectory`.
+    const ENVIRONMENT: (&str, &str) = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Environment.sharp",
+        "namespace Sharp;\n\npublic foreign class Environment\n{\n    public string currentDirectory() => \"/\";\n}\n",
+    );
+
     /// A project of files, each a workspace-relative name and its contents. A PHP file under `vendor/` is vendored, and
     /// every other file is a host file, as `mago compile` loads every `.sharp` file. A file under the standard
     /// library's package is the library's, as the loader marks it from the package's `composer.json`.
@@ -1338,6 +1345,33 @@ mod tests {
         }
     }
 
+    /// Each edit compiles the same after the warm path as after a full analysis, in a one-off compile and under
+    /// `mago analyze --watch`, which analyzes with `diff`. A body edit leaves every other class unanalyzed, and the
+    /// compile still types each of their expressions.
+    #[test]
+    fn a_compile_after_each_edit_matches_a_clean_compile() {
+        let base = shop_project(&shop(MONEY, RATE));
+
+        for diff in [false, true] {
+            for edit in edits() {
+                let mut files = shop(&edit.money, &edit.rate);
+                if edit.deleted {
+                    files.retain(|(name, _)| *name != edit.edited);
+                }
+                let edited = shop_project(&files);
+
+                let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
+                compile(&mut warm, empty_stamp);
+                warm.update_database(edited.read_only());
+                warm.analyze_incremental(None).expect("the warm path runs");
+                let warm_compiled = compile(&mut warm, empty_stamp);
+                let clean_compiled = compile(&mut analyzed(&edited), empty_stamp);
+
+                assert_eq!(bodies(&warm_compiled), bodies(&clean_compiled), "diff {diff}: {}", edit.name);
+            }
+        }
+    }
+
     fn declarations(signature: &FileSignature) -> Vec<SymbolIdentifier> {
         signature
             .ast_nodes
@@ -1847,6 +1881,13 @@ mod tests {
             ("app/Lib/Mailer.php", "<?php\n\nnamespace Mail;\n\nfinal class Mailer\n{\n    public static function subject(string $text): string\n    {\n        return $text;\n    }\n}\n".to_string()),
             ("app/Stubs/Mail.sharp", "namespace App.Stubs;\n\nimport Mail.Mailer;\n\nextern Mailer;\n".to_string()),
             ("app/Shop/Notice.sharp", "namespace App.Shop;\n\nimport Mail.Mailer;\n\npublic class Notice\n{\n    public Notice(private string name) { }\n\n    public string text => Mailer.subject(this.name);\n}\n".to_string()),
+            ("app/Shop/Rates.sharp", "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id);\n}\n".to_string()),
+            ("app/Shop/Quote.sharp", "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rates rates) { }\n\n    public int price => this.rates.rate(1);\n}\n".to_string()),
+            ("app/Shop/Payments.sharp", "namespace App.Shop;\n\npublic class Payments\n{\n    public int charge(int cents) => cents;\n}\n".to_string()),
+            ("app/Shop/Checkout.sharp", "namespace App.Shop;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.charge(100);\n}\n".to_string()),
+            ("app/Shop/Base.sharp", "namespace App.Shop;\n\npublic abstract class Base\n{\n    public int size() => 1;\n}\n".to_string()),
+            ("app/Shop/Kept.sharp", "namespace App.Shop;\n\npublic class Kept : Base\n{\n}\n".to_string()),
+            ("app/Shop/Shelf.sharp", "namespace App.Shop;\n\npublic class Shelf\n{\n    public Shelf(private Kept kept) { }\n\n    public int count => this.kept.size();\n}\n".to_string()),
         ]
     }
 
@@ -1874,6 +1915,9 @@ mod tests {
             ("app/Shop/Taxable.sharp", "Taxable : Payable", "Taxable"),
             ("app/Shop/Status.sharp", "Status : Payable", "Status"),
             ("app/Stubs/Mail.sharp", "extern Mailer;", "extern Mailer uses Http;"),
+            ("app/Shop/Rates.sharp", "int rate(int id);", "int rate(int id) uses Http;"),
+            ("app/Shop/Payments.sharp", "public class Payments", "public foreign class Payments"),
+            ("app/Shop/Base.sharp", "public abstract class Base", "public abstract foreign class Base"),
         ] {
             let mut files = headers();
             let (_, contents) =
@@ -1946,6 +1990,46 @@ mod tests {
                 "`{to}` refuses a file that reads {edited_file}: {:#?}",
                 outcomes(&clean)
             );
+            assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
+        }
+    }
+
+    /// A `uses` that names no effect is refused with the effects its file can name. A class elsewhere that becomes
+    /// `foreign`, in the file's namespace or in another, gives the same message after the edit as a clean compile does.
+    #[test]
+    fn a_uses_refusal_after_another_class_becomes_foreign_matches_a_clean_compile() {
+        let files = || {
+            vec![
+                (
+                    "app/Shop/Gateway.sharp",
+                    "namespace App.Shop;\n\npublic interface Gateway\n{\n    int charge(int cents) uses Payments;\n}\n"
+                        .to_string(),
+                ),
+                ("app/Shop/Payments.sharp", "namespace App.Shop;\n\npublic class Payments\n{\n}\n".to_string()),
+                ("app/Shop/Base.sharp", "namespace App.Shop;\n\npublic abstract class Base\n{\n}\n".to_string()),
+                ("app/Vault/Vault.sharp", "namespace App.Vault;\n\npublic class Vault\n{\n}\n".to_string()),
+            ]
+        };
+        let base = shop_project(&files());
+
+        for (edited_file, from, to) in [
+            ("app/Shop/Base.sharp", "public abstract class Base", "public abstract foreign class Base"),
+            ("app/Vault/Vault.sharp", "public class Vault", "public foreign class Vault"),
+        ] {
+            let mut edited_files = files();
+            let (_, contents) =
+                edited_files.iter_mut().find(|(name, _)| *name == edited_file).expect("the edited file exists");
+            *contents = contents.replace(from, to);
+            let edited = shop_project(&edited_files);
+
+            let mut warm = analyzed(&base);
+            compile(&mut warm, empty_stamp);
+            warm.update_database(edited.read_only());
+            warm.analyze_incremental(None).expect("the warm path runs");
+            let warm = compile(&mut warm, empty_stamp);
+            let clean = compile(&mut analyzed(&edited), empty_stamp);
+
+            assert!(outcomes(&clean)["app/Shop/Gateway.sharp"].is_err(), "{:#?}", outcomes(&clean));
             assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
         }
     }
@@ -2275,8 +2359,9 @@ mod tests {
             "namespace App;\n\npublic class Position\n{\n    public Position(public string title { get; }) { }\n}\n";
         let environment = "namespace App;\n\npublic class Environment\n{\n    public int level() => 1;\n}\n";
         let paths = "namespace App;\n\npublic class Paths\n{\n    public string here() => __DIR__;\n\n    public string file() => __FILE__;\n\n    public int line() => __LINE__;\n\n    public string caller() => __FUNCTION__;\n\n    public string space() => __NAMESPACE__;\n\n    public string held() => __TRAIT__;\n\n    public string home() => $_SERVER[\"HOME\"];\n}\n";
-        let fixed = "namespace App;\n\nimport Sharp.Environment as SharpEnvironment;\nimport Sharp.Position as SharpPosition;\n\npublic class Fixed\n{\n    public string here() => SharpPosition.current().directory;\n\n    public string file() => SharpPosition.current().file;\n\n    public int line() => SharpPosition.current().line;\n\n    public string caller() => SharpPosition.current().function;\n\n    public string folder(SharpEnvironment environment) => environment.currentDirectory;\n\n    public string title(Position position) => position.title;\n\n    public int level(Environment environment) => environment.level();\n}\n";
+        let fixed = "namespace App;\n\nimport Sharp.Environment as SharpEnvironment;\nimport Sharp.Position as SharpPosition;\n\npublic class Fixed\n{\n    public string here() => SharpPosition.current().directory;\n\n    public string file() => SharpPosition.current().file;\n\n    public int line() => SharpPosition.current().line;\n\n    public string caller() => SharpPosition.current().function;\n\n    public string folder(SharpEnvironment environment) => environment.currentDirectory();\n\n    public string title(Position position) => position.title;\n\n    public int level(Environment environment) => environment.level();\n}\n";
         let database = project(&[
+            ENVIRONMENT,
             ("app/App/Position.sharp", position),
             ("app/App/Environment.sharp", environment),
             ("app/App/Paths.sharp", paths),
@@ -2336,10 +2421,13 @@ mod tests {
     /// to `composer.lock`, as the rest of its package.
     #[test]
     fn a_default_class_name_lists_the_files_its_namespace_would_declare_it_in_as_absent_inputs() {
-        let here = "namespace App;\n\npublic class Here\n{\n    public string folder(Environment environment) => environment.currentDirectory;\n}\n";
+        let here = "namespace App;\n\npublic class Here\n{\n    public string folder(Environment environment) => environment.currentDirectory();\n}\n";
         let packaged = "vendor/acme/shapes/src/Here.sharp";
-        let database =
-            project(&[("app/App/Here.sharp", here), (packaged, &here.replace("namespace App;", "namespace Acme;"))]);
+        let database = project(&[
+            ENVIRONMENT,
+            ("app/App/Here.sharp", here),
+            (packaged, &here.replace("namespace App;", "namespace Acme;")),
+        ]);
 
         let compiled = compile(&mut analyzed(&database), database_stamp(&database));
 

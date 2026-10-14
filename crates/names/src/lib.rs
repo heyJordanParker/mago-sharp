@@ -62,26 +62,26 @@ pub const INLINED_COLLECTION_METHODS: [(&str, &str); 18] = [
     ("Set", "filter"),
 ];
 
-/// The effects a PHP# `uses` takes, spec section 29, by the full names a bare effect name resolves to in a `.sharp`
-/// file: the standard library's ten, then `Events`, the effect of `emit`.
-pub const STANDARD_EFFECTS: [&str; 11] = [
-    "Sharp\\Database",
-    "Sharp\\Http",
-    "Sharp\\Files",
-    "Sharp\\Console",
-    "Sharp\\Process",
-    "Sharp\\Clock",
-    "Sharp\\Random",
-    "Sharp\\Cache",
-    "Sharp\\Mail",
-    "Sharp\\Environment",
-    "Sharp\\Events",
-];
-
 /// The class-likes directly in `Sharp` that a bare name in a `.sharp` file names by default, spec section 23, and that
-/// a class-like of the file's namespace can win over: the [`STANDARD_EFFECTS`], then the standard library's types.
+/// a class-like of the file's namespace can win over: the standard library's ten effect classes and `Events`, the
+/// effect of `emit` (spec section 29), then the standard library's types.
 pub(crate) fn shadowable_default_classes() -> impl Iterator<Item = &'static str> {
-    STANDARD_EFFECTS.into_iter().chain(["Sharp\\Position", "Sharp\\Replaces"])
+    [
+        "Sharp\\Database",
+        "Sharp\\Http",
+        "Sharp\\Files",
+        "Sharp\\Console",
+        "Sharp\\Process",
+        "Sharp\\Clock",
+        "Sharp\\Random",
+        "Sharp\\Cache",
+        "Sharp\\Mail",
+        "Sharp\\Environment",
+        "Sharp\\Events",
+        "Sharp\\Position",
+        "Sharp\\Replaces",
+    ]
+    .into_iter()
 }
 
 /// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`. PHP

@@ -41,7 +41,7 @@ where
         // Each path returns its parser's `Result` as it is, never unwrapped with `?` and wrapped again: an unoptimized
         // build gives every unwrapped value its own stack slot, and this frame sits between two `ensure_sufficient_stack`
         // calls, so it must stay inside their red zone.
-        if !self.state.within_block && self.is_internal(token) {
+        if !self.state.within_block && (self.is_internal(token) || self.is_foreign(token)) {
             return self.parse_modified_class_like_with_attributes(Sequence::empty());
         }
 
@@ -105,7 +105,7 @@ where
                             terminator: self.parse_terminator()?,
                         }))
                     }
-                    kind if kind.is_modifier() || self.is_internal(next) => {
+                    kind if kind.is_modifier() || self.is_internal(next) || self.is_foreign(next) => {
                         self.parse_modified_class_like_with_attributes(attributes)
                     }
                     T![Identifier] if self.is_at_event()? => self

@@ -203,7 +203,8 @@ pub fn check_method<'ast, 'arena>(
             | Modifier::Override(_)
             | Modifier::Required(_)
             | Modifier::Lazy(_)
-            | Modifier::Internal(_) => {}
+            | Modifier::Internal(_)
+            | Modifier::Foreign(_) => {}
             Modifier::Extern(_) => is_extern = true,
         }
     }

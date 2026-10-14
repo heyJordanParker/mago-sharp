@@ -20,6 +20,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::check::check_foreign_static_write;
 use crate::error::AnalysisError;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::resolve_static_properties;
@@ -73,6 +74,13 @@ where
         );
 
         let property_name = resolved_property.property_name;
+        if context.dialect.is_sharp()
+            && let Some(class_id) = resolved_property.declaring_class_id
+        {
+            let span = assigned_value.map_or(property_access.span, HasSpan::span);
+            check_foreign_static_write(context, class_id, property_name, assigned_value_type, span);
+        }
+
         // PHP# names the property as it reads, `Order.count`, and PHP keeps the name `php` gives it.
         let display_property =
             |context: &Context<'ctx, 'arena, A>, php: String| match resolved_property.declaring_class_id {
