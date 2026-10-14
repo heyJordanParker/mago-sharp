@@ -39,6 +39,7 @@ use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
+use crate::resolver::extension::is_imported_by_default;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_code_member;
@@ -184,7 +185,7 @@ where
                 }
 
                 if !context.source_file.is_standard_library
-                    && !report_wrapped_function_call(context, metadata, span)
+                    && !report_wrapped_function_call(context, metadata, arguments, span)
                     && let Some(arguments) = arguments
                 {
                     report_replaced_function_call(context, metadata, arguments, span);
@@ -323,10 +324,12 @@ where
 }
 
 /// Decision 040: once the standard library wraps a PHP function, a PHP# call of it outside the library names the
-/// library's methods to write instead, in the order the library declares them. Returns whether it reported the call.
+/// library's methods to write instead, in the order the library declares them, with the imports they need. An
+/// extension's member, spec section 26, is written on the call's first argument. Returns whether it reported the call.
 fn report_wrapped_function_call<A>(
     context: &mut Context<'_, '_, A>,
     function: &FunctionLikeMetadata,
+    arguments: Option<&ArgumentList<'_>>,
     span: Span,
 ) -> bool
 where
@@ -338,19 +341,31 @@ where
         return false;
     };
 
-    let (classes, methods): (Vec<Word>, Vec<String>) = wrappers
+    let receiver = arguments
+        .and_then(|arguments| arguments.arguments.first())
+        .and_then(|argument| argument_text(context, argument))
+        .unwrap_or_else(|| "x".to_owned());
+    let (classes, methods): (Vec<Option<Word>>, Vec<String>) = wrappers
         .iter()
         .filter_map(|(_, _, method)| {
             let class = codebase.get_class_like(method.get_class_name().as_bytes())?;
 
             let method = codebase.get_method_by_id(method)?;
+            let name = method.original_name;
+            let import = (!is_imported_by_default(context, class.name, method)).then_some(class.original_name);
 
-            Some((
-                class.original_name,
-                format!("`{}(…)`", display_code_member(context, class.original_name, method.original_name)),
-            ))
+            Some(if method.flags.is_extension_property() {
+                (import, format!("`{receiver}.{name}`"))
+            } else if method.flags.is_extension_method() {
+                let arguments = if method.parameters.len() > 1 { "…" } else { "" };
+
+                (import, format!("`{receiver}.{name}({arguments})`"))
+            } else {
+                (Some(class.original_name), format!("`{}(…)`", display_code_member(context, class.original_name, name)))
+            })
         })
         .unzip();
+    let classes: Vec<Word> = classes.into_iter().flatten().collect();
     let Some((last, others)) = methods.split_last() else {
         return false;
     };

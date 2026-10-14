@@ -372,6 +372,10 @@ final class AnalyzerCodeModuleGenerator
         'invalid-event',
         'invalid-struct',
         'missing-required-property',
+        'invalid-binding',
+        'missing-service',
+        'service-cycle',
+        'captive-service',
     ];
 
     /**

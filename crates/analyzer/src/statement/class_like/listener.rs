@@ -21,13 +21,16 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::statement::function_like::report_undefined_type;
 use crate::statement::is_event_class;
+use crate::statement::module::check_listener_services;
+use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_variable_name;
 
 /// Checks each PHP# listener of a class-like, spec section 15: a method with an `on` clause. It lists events, or
-/// interfaces an event implements. It runs on an object the container creates, so in a class that is not abstract,
-/// returns nothing, and takes no parameter or one that every event it lists is.
+/// interfaces an event implements. It runs on a new object PHP# creates for every event, so in a class that is not
+/// abstract, whose public constructor takes services the modules of its namespace bind. It returns nothing, and takes
+/// no parameter or one that every event it lists is.
 pub fn check_listener<'ctx, 'arena, A>(
     metadata: &'ctx ClassLikeMetadata,
     members: &[ClassLikeMember<'arena>],
@@ -59,15 +62,12 @@ pub fn check_listener<'ctx, 'arena, A>(
             .with_annotation(Annotation::primary(first_on.span()).with_message(format!("`{first_name}` listens here."))),
         );
     }
-    if constructor.is_some_and(|constructor| !constructor.parameters.is_empty()) {
-        context.collector.report_with_code(
-            IssueCode::InvalidEvent,
-            Issue::error("A listener whose class takes constructor parameters is not supported yet in PHP#.")
-                .with_annotation(
-                    Annotation::primary(first_on.span()).with_message(format!("`{first_name}` listens to events.")),
-                )
-                .with_note(format!("PHP# creates `{class_name}` with no arguments to run its listeners.")),
-        );
+    if let Some(&event) = context
+        .codebase
+        .get_method(metadata.name.as_bytes(), first.name.value)
+        .and_then(|method| method.listens.first())
+    {
+        check_listener_services(context, metadata, event);
     }
 
     for (method, on) in std::iter::once((first, first_on)).chain(listeners) {
@@ -235,7 +235,7 @@ where
     }
 
     let taken = display_sharp_type(context, taken);
-    let article = if taken.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+    let article = article(&taken);
     let help = match shared_interface(codebase, &method_metadata.listens) {
         Some(shared) => format!(
             "Take a type every listed event implements, such as `{}`, or take no parameter.",

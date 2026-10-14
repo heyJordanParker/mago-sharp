@@ -5,6 +5,7 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::add_optional_union_type;
@@ -19,7 +20,9 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::Access;
+use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
@@ -127,6 +130,29 @@ impl<'analysis> Types<'analysis> {
         self.codebase.get_parent_constructor(class)
     }
 
+    /// The parameters of the main constructor the fully qualified class name `class` declares, which the container
+    /// fills, spec section 32.
+    #[must_use]
+    pub fn constructor_parameters(&self, class: &[u8]) -> &'analysis [FunctionLikeParameterMetadata] {
+        self.codebase.get_method(class, b"__construct").map_or(&[], |constructor| constructor.parameters.as_slice())
+    }
+
+    /// The module the scanner recorded at `span`, with its bindings in the order the module declares them.
+    #[must_use]
+    pub fn module(&self, span: Span) -> &'analysis ModuleMetadata {
+        self.codebase
+            .modules
+            .iter()
+            .find(|module| module.span == span)
+            .unwrap_or_else(|| unreachable!("the scanner records every module of a file the checker accepted"))
+    }
+
+    /// The parameters of the lambda a binding's expression runs as, named `lambda` by the scanner.
+    #[must_use]
+    pub fn binding_parameters(&self, lambda: Word) -> &'analysis [FunctionLikeParameterMetadata] {
+        self.codebase.get_closure(&lambda).map_or(&[], |lambda| lambda.parameters.as_slice())
+    }
+
     /// The declaration `member` of the fully qualified class name `class` resolves to when code reads it: an enum case,
     /// a constant, a property, then a method, which the read takes as a first-class callable. Only when the class
     /// declares none of them is it a property its `__get` serves. A call is [`Self::call_target`]'s.
@@ -176,6 +202,34 @@ impl<'analysis> Types<'analysis> {
         agreed_kind(declarations.iter().map(|declaration| declaration.kind));
 
         declaration
+    }
+
+    /// The extension member, spec section 26, that the method call or property read `access` runs, as the analysis
+    /// resolved it: the public static method of its static class, which takes the receiver first. None for any other
+    /// call or read, and for a call through the class, as `WalletExtensions.total(wallet)`, which is that static call
+    /// already, as in C#.
+    #[must_use]
+    pub fn extension(&self, access: &Expression) -> Option<Declaration> {
+        if let Expression::Call(Call::Method(call)) = access
+            && self.names.static_call_class(call).is_some()
+        {
+            return None;
+        }
+
+        let mut callees = self.artifacts.get_callees(access);
+        let (Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }), None) =
+            (callees.next(), callees.next())
+        else {
+            return None;
+        };
+        let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
+
+        (metadata.flags.is_extension_method() || metadata.flags.is_extension_property()).then(|| Declaration {
+            kind: DeclarationKind::StaticMethod,
+            class: self.class_declaration(class.as_bytes()).name,
+            name: metadata.original_name,
+            public: true,
+        })
     }
 
     /// The full name of the constant the read `constant` reaches, as the analysis found it: the constant of that name
@@ -392,7 +446,7 @@ impl<'analysis> Types<'analysis> {
 
     /// The parameters of the constructor `new` runs for the fully qualified class name `class`, as
     /// [`Self::call_parameters`] gives a call's.
-    pub(crate) fn constructor_parameters(&self, class: &[u8]) -> Option<Vec<PlainParameter<'analysis>>> {
+    pub(crate) fn new_parameters(&self, class: &[u8]) -> Option<Vec<PlainParameter<'analysis>>> {
         plain_parameters(class, self.codebase.get_declaring_method(class, b"__construct"))
     }
 

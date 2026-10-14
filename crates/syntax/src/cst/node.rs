@@ -27,6 +27,10 @@ use crate::cst::cst::AttributeList;
 use crate::cst::cst::Binary;
 use crate::cst::cst::BinaryOperator;
 use crate::cst::cst::BinaryPattern;
+use crate::cst::cst::Binding;
+use crate::cst::cst::BindingClasses;
+use crate::cst::cst::BindingTarget;
+use crate::cst::cst::BindingValue;
 use crate::cst::cst::Block;
 use crate::cst::cst::BracedExpressionStringPart;
 use crate::cst::cst::Break;
@@ -80,6 +84,7 @@ use crate::cst::cst::ExitConstruct;
 use crate::cst::cst::Expression;
 use crate::cst::cst::ExpressionStatement;
 use crate::cst::cst::Extends;
+use crate::cst::cst::Extension;
 use crate::cst::cst::Extern;
 use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
@@ -162,6 +167,7 @@ use crate::cst::cst::MixedUseItemList;
 use crate::cst::cst::Modifier;
 use crate::cst::cst::Module;
 use crate::cst::cst::ModuleMember;
+use crate::cst::cst::ModuleParent;
 use crate::cst::cst::NamedArgument;
 use crate::cst::cst::NamedConstructor;
 use crate::cst::cst::NamedPlaceholderArgument;
@@ -341,6 +347,7 @@ pub enum NodeKind {
     On,
     Operator,
     Law,
+    Extension,
     ConstructorInitializer,
     NamedConstructor,
     ConstructorName,
@@ -501,7 +508,12 @@ pub enum NodeKind {
     Extern,
     Uses,
     Module,
+    ModuleParent,
     ModuleMember,
+    Binding,
+    BindingTarget,
+    BindingValue,
+    BindingClasses,
     Yield,
     YieldFrom,
     YieldPair,
@@ -624,6 +636,7 @@ pub enum Node<'ast, 'arena> {
     On(&'ast On<'arena>),
     Operator(&'ast Operator<'arena>),
     Law(&'ast Law<'arena>),
+    Extension(&'ast Extension<'arena>),
     ConstructorInitializer(&'ast ConstructorInitializer<'arena>),
     NamedConstructor(&'ast NamedConstructor<'arena>),
     ConstructorName(&'ast ConstructorName<'arena>),
@@ -779,7 +792,12 @@ pub enum Node<'ast, 'arena> {
     Extern(&'ast Extern<'arena>),
     Uses(&'ast Uses<'arena>),
     Module(&'ast Module<'arena>),
+    ModuleParent(&'ast ModuleParent<'arena>),
     ModuleMember(&'ast ModuleMember<'arena>),
+    Binding(&'ast Binding<'arena>),
+    BindingTarget(&'ast BindingTarget<'arena>),
+    BindingValue(&'ast BindingValue<'arena>),
+    BindingClasses(&'ast BindingClasses<'arena>),
     Yield(&'ast Yield<'arena>),
     YieldFrom(&'ast YieldFrom<'arena>),
     YieldPair(&'ast YieldPair<'arena>),
@@ -995,6 +1013,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::On(_) => NodeKind::On,
             Self::Operator(_) => NodeKind::Operator,
             Self::Law(_) => NodeKind::Law,
+            Self::Extension(_) => NodeKind::Extension,
             Self::ConstructorInitializer(_) => NodeKind::ConstructorInitializer,
             Self::NamedConstructor(_) => NodeKind::NamedConstructor,
             Self::ConstructorName(_) => NodeKind::ConstructorName,
@@ -1149,7 +1168,12 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Extern(_) => NodeKind::Extern,
             Self::Uses(_) => NodeKind::Uses,
             Self::Module(_) => NodeKind::Module,
+            Self::ModuleParent(_) => NodeKind::ModuleParent,
             Self::ModuleMember(_) => NodeKind::ModuleMember,
+            Self::Binding(_) => NodeKind::Binding,
+            Self::BindingTarget(_) => NodeKind::BindingTarget,
+            Self::BindingValue(_) => NodeKind::BindingValue,
+            Self::BindingClasses(_) => NodeKind::BindingClasses,
             Self::Yield(_) => NodeKind::Yield,
             Self::YieldFrom(_) => NodeKind::YieldFrom,
             Self::YieldPair(_) => NodeKind::YieldPair,
@@ -1445,6 +1469,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 ClassLikeMember::Operator(node) => f(Node::Operator(node)),
                 ClassLikeMember::Law(node) => f(Node::Law(node)),
                 ClassLikeMember::NamedConstructor(node) => f(Node::NamedConstructor(node)),
+                ClassLikeMember::Extension(node) => f(Node::Extension(node)),
             },
             Node::ClassLikeMemberExpressionSelector(node) => f(Node::Expression(node.expression)),
             Node::ClassLikeMemberSelector(node) => match node {
@@ -1537,6 +1562,13 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::LocalIdentifier(&node.name));
                 f(Node::FunctionLikeParameterList(&node.parameter_list));
                 f(Node::MethodExpressionBody(&node.body));
+            }
+            Node::Extension(node) => {
+                f(Node::Keyword(&node.extension));
+                f(Node::FunctionLikeParameterList(&node.parameter_list));
+                for item in node.members.iter() {
+                    f(Node::ClassLikeMember(item));
+                }
             }
             Node::Event(node) => {
                 for item in node.attribute_lists.iter() {
@@ -2711,13 +2743,48 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::Module(node) => {
                 f(Node::Keyword(&node.module));
 
+                if let Some(parent) = &node.parent {
+                    f(Node::ModuleParent(parent));
+                }
+
                 for member in &node.members {
                     f(Node::ModuleMember(member));
                 }
             }
+            Node::ModuleParent(node) => f(Node::Identifier(&node.name)),
             Node::ModuleMember(node) => match node {
                 ModuleMember::Law(node) => f(Node::Law(node)),
+                ModuleMember::Binding(node) => f(Node::Binding(node)),
             },
+            Node::Binding(node) => {
+                f(Node::Keyword(&node.lifetime));
+                f(Node::Hint(&node.service));
+
+                if let Some(parameter_list) = &node.parameter_list {
+                    f(Node::FunctionLikeParameterList(parameter_list));
+                }
+
+                if let Some(target) = &node.target {
+                    f(Node::BindingTarget(target));
+                }
+
+                f(Node::BindingValue(&node.value));
+                f(Node::Terminator(&node.terminator));
+            }
+            Node::BindingTarget(node) => {
+                f(Node::Keyword(&node.r#for));
+                f(Node::Identifier(&node.class));
+            }
+            Node::BindingValue(node) => match node {
+                BindingValue::Class(node) => f(Node::Identifier(node)),
+                BindingValue::Classes(node) => f(Node::BindingClasses(node)),
+                BindingValue::Expression(node) => f(Node::Expression(node)),
+            },
+            Node::BindingClasses(node) => {
+                for class in &node.classes {
+                    f(Node::Identifier(class));
+                }
+            }
             Node::Yield(node) => f(match node {
                 Yield::Value(node) => Node::YieldValue(node),
                 Yield::Pair(node) => Node::YieldPair(node),
@@ -3019,6 +3086,7 @@ impl HasSpan for Node<'_, '_> {
             Self::On(node) => node.span(),
             Self::Operator(node) => node.span(),
             Self::Law(node) => node.span(),
+            Self::Extension(node) => node.span(),
             Self::ConstructorInitializer(node) => node.span(),
             Self::NamedConstructor(node) => node.span(),
             Self::ConstructorName(node) => node.span(),
@@ -3173,7 +3241,12 @@ impl HasSpan for Node<'_, '_> {
             Self::Extern(node) => node.span(),
             Self::Uses(node) => node.span(),
             Self::Module(node) => node.span(),
+            Self::ModuleParent(node) => node.span(),
             Self::ModuleMember(node) => node.span(),
+            Self::Binding(node) => node.span(),
+            Self::BindingTarget(node) => node.span(),
+            Self::BindingValue(node) => node.span(),
+            Self::BindingClasses(node) => node.span(),
             Self::Yield(node) => node.span(),
             Self::YieldFrom(node) => node.span(),
             Self::YieldPair(node) => node.span(),

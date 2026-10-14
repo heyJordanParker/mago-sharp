@@ -31,7 +31,7 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         | ParseError::InvalidTemplateEscapeInSharp(..)
         | ParseError::UndeclarableOperatorInSharp(..)
         | ParseError::UsesAfterFunctionTypeInSharp(..)
-        | ParseError::NonLawInSharpModule(..)
+        | ParseError::OtherMemberInSharpModule(..)
         | ParseError::ComputedParameterInSharp(..)
         | ParseError::ConstructorInitializerInSharp(..)
         | ParseError::EventBodyInSharp(..)

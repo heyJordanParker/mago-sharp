@@ -2,7 +2,13 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use mago_allocator::LocalArena;
+use mago_codex::metadata::module::BindingValueMetadata;
+use mago_codex::metadata::module::ModuleKind;
+use mago_codex::metadata::module::service_id;
+use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::scanner::get_union_from_hint;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
@@ -30,6 +36,7 @@ use mago_syntax::cst::AssignmentOperator;
 use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::BindingValue;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Class;
@@ -49,6 +56,7 @@ use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::ExitConstruct;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Extension;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForOfTarget;
@@ -72,6 +80,8 @@ use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::NamedArgument;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::NamespaceBody;
@@ -208,6 +218,7 @@ pub(crate) mod checked;
 pub(crate) mod inline;
 pub(crate) mod types;
 
+use types::Declaration;
 use types::DeclarationKind;
 use types::PlainParameter;
 use types::Types;
@@ -464,6 +475,8 @@ struct Lowering<'lowering, 'arena> {
     /// Whether the constructor being lowered promotes a `Map` or a `Set`, so it declares each property it promotes
     /// beside it, in written order, and sets each one in its first statements.
     promoted_beside: bool,
+    /// Whether the file declares a test module, so each of its classes starts and ends its tests.
+    tested: bool,
 }
 
 impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
@@ -491,6 +504,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             returns: None,
             local_types: HashMap::default(),
             promoted_beside: false,
+            tested: false,
         }
     }
 
@@ -509,9 +523,31 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
         }
 
+        let modules = Node::Program(checked.program()).filter_map(|node| match *node {
+            Node::Module(module) => Some(module),
+            _ => None,
+        });
+        self.tested = modules.first().is_some_and(|first| self.types.module(first.span()).kind == ModuleKind::Test);
         let mut statements = vec![self.strict_types()];
         for statement in &checked.program().statements {
             self.file_statement(statement, &mut statements);
+        }
+        let mut bindings = Vec::new();
+        for module in &modules {
+            self.module_bindings(module, &mut bindings);
+        }
+        // A test module applies with no bindings too, so its tests run without the environment modules.
+        if let Some(first) = modules.first()
+            && (self.tested || !bindings.is_empty())
+        {
+            let line = self.line(*first);
+            let table = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &bindings);
+            let statement = if self.tested {
+                self.test_module(checked, line, table)
+            } else {
+                self.node(SHARP_AST_RETURN, 0, line, &[table])
+            };
+            statements.push(statement);
         }
 
         let root = self.node(SHARP_AST_STMT_LIST, 0, 1, &statements);
@@ -545,7 +581,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             }
             // An `extern` declaration tells only the checker what plain PHP does, and a module's laws are checked and
-            // never run.
+            // never run. A module's bindings are the table the file returns last, in `program`.
             Statement::Use(_) | Statement::Extern(_) | Statement::Module(_) => {}
             Statement::Class(class) => statements.push(self.class(class)),
             Statement::Interface(interface) => statements.push(self.interface(interface)),
@@ -553,6 +589,153 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::Event(event) => statements.push(self.event(event)),
             Statement::Struct(r#struct) => statements.push(self.r#struct(r#struct)),
             _ => unreachable!("check_slice refuses the file statement `{statement}`"),
+        }
+    }
+
+    /// Spec section 32: a test file's module, the call `\Sharp\Internal\testModule([...], table)`, which hands the
+    /// container the module's bindings for each class the file declares, so the container uses them while a test of
+    /// one of those classes runs.
+    fn test_module(&mut self, checked: &CheckedProgram, line: u32, table: u32) -> u32 {
+        let names = Node::Program(checked.program()).filter_map(|node| match *node {
+            Node::Class(class) => Some(self.names.get(&class.name)),
+            _ => None,
+        });
+        let mut classes = Vec::new();
+        for name in names {
+            let class = self.string(0, line, name);
+            classes.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[class, NULL]));
+        }
+        let classes = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &classes);
+        let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\testModule");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[classes, table]);
+
+        self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+    }
+
+    /// Spec section 32: each test of a class a test file declares runs with the file's module, in PHPUnit's own
+    /// process or a child one, because PHPUnit runs the methods `Before` and `After` mark wherever it runs the test.
+    /// The class gets `__sharpStartTest`, which calls `\Sharp\Internal\startTest(static::class)` before every other
+    /// `Before` method and `setUp`, and `__sharpEndTest`, which calls `\Sharp\Internal\endTest()` after every other
+    /// `After` method and `tearDown`, by their priorities. PHP# refuses a member name that starts with `__`, so no
+    /// member of the class can take them.
+    fn test_hooks(&mut self, class: &Class) -> [u32; 2] {
+        let line = self.line(class.class.span);
+        let test_class = self.string(ZEND_NAME_NOT_FQ, line, b"static");
+        let test_class = self.node(SHARP_AST_CLASS_NAME, 0, line, &[test_class]);
+        let start = self.test_hook(
+            class,
+            b"__sharpStartTest",
+            (b"PHPUnit\\Framework\\Attributes\\Before", i64::MAX),
+            b"Sharp\\Internal\\startTest",
+            &[test_class],
+        );
+        let end = self.test_hook(
+            class,
+            b"__sharpEndTest",
+            (b"PHPUnit\\Framework\\Attributes\\After", i64::MIN),
+            b"Sharp\\Internal\\endTest",
+            &[],
+        );
+
+        [start, end]
+    }
+
+    /// A public `void` method of `class` named `name`, which PHPUnit's attribute runs at the priority `marked` gives,
+    /// and which calls the function `function` with `arguments`.
+    fn test_hook(
+        &mut self,
+        class: &Class,
+        name: &[u8],
+        marked: (&[u8], i64),
+        function: &[u8],
+        arguments: &[u32],
+    ) -> u32 {
+        let line = self.line(class.class.span);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, arguments);
+        let function = self.string(ZEND_NAME_FQ, line, function);
+        let call = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[call]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let return_type = self.string(ZEND_NAME_NOT_FQ, line, b"void");
+        let (attribute, priority) = marked;
+        let attribute = self.string(ZEND_NAME_FQ, line, attribute);
+        let priority = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = priority);
+        let priority = self.node(SHARP_AST_ARG_LIST, 0, line, &[priority]);
+        let attribute = self.node(SHARP_AST_ATTRIBUTE, 0, line, &[attribute, priority]);
+        let group = self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, line, &[attribute]);
+        let attributes = self.node(SHARP_AST_ATTRIBUTE_LIST, 0, line, &[group]);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            class.class.span,
+            class.right_brace,
+            name,
+            &[parameters, NULL, body, return_type, attributes],
+        )
+    }
+
+    /// Spec section 32: a file whose base or environment modules bind services returns their bindings, which
+    /// `Sharp\Container` reads. A module of laws alone returns nothing. Each binding is a list of the namespace whose
+    /// classes it serves, its service's id, the class it serves or null, its lifetime, and its value: a class's full
+    /// name, a list of them, or a static `fn` over the binding's parameters that returns its expression.
+    fn module_bindings(&mut self, module: &Module, bindings: &mut Vec<u32>) {
+        let metadata = self.types.module(module.span());
+        let written = module.members.iter().filter_map(|member| match member {
+            ModuleMember::Binding(binding) => Some(*binding),
+            ModuleMember::Law(_) => None,
+        });
+        for (binding, binding_metadata) in written.zip(&metadata.bindings) {
+            let line = self.line(binding);
+            let namespace = self.string(0, line, metadata.namespace.as_bytes());
+            let service = self.string(0, line, service_id(&binding_metadata.service.type_union).as_bytes());
+            let target = match binding_metadata.target {
+                Some(target) => self.string(0, line, target.as_bytes()),
+                None => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
+            };
+            let lifetime = self.string(0, line, binding_metadata.lifetime.as_str().as_bytes());
+            let value = match (&binding.value, &binding_metadata.value) {
+                (_, BindingValueMetadata::Class(class, _)) => self.string(0, line, class.as_bytes()),
+                (_, BindingValueMetadata::Classes(classes)) => {
+                    let mut elements = Vec::new();
+                    for (class, span) in classes {
+                        let line = self.line(*span);
+                        let class = self.string(0, line, class.as_bytes());
+                        elements.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[class, NULL]));
+                    }
+
+                    self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &elements)
+                }
+                (BindingValue::Expression(expression), BindingValueMetadata::Expression(lambda)) => {
+                    let services = self.types.binding_parameters(*lambda);
+                    let mut parameters = Vec::new();
+                    for (index, parameter) in
+                        binding.parameter_list.iter().flat_map(|list| &list.parameters).enumerate()
+                    {
+                        parameters.push(self.parameter(parameter, services.get(index)));
+                    }
+                    let parameter_line = binding.parameter_list.as_ref().map_or(line, |list| self.line(list));
+                    let parameters = self.node(SHARP_AST_PARAM_LIST, 0, parameter_line, &parameters);
+                    let body = self.lambda_body(|lowering| lowering.expression(expression));
+
+                    self.declaration(
+                        SHARP_AST_ARROW_FUNC,
+                        ZEND_ACC_STATIC,
+                        binding,
+                        expression,
+                        b"",
+                        &[parameters, NULL, body, NULL, NULL],
+                    )
+                }
+                _ => unreachable!("the scanner records a binding's expression as the lambda it runs as"),
+            };
+
+            let fields: Vec<u32> = [namespace, service, target, lifetime, value]
+                .into_iter()
+                .map(|field| self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[field, NULL]))
+                .collect();
+            let entry = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &fields);
+            bindings.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[entry, NULL]));
         }
     }
 
@@ -571,6 +754,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut members =
             self.class_members(&class.members, parent_name, class.class.span, class.left_brace, class.right_brace);
         members.extend(self.parse_methods(&class.members, class.name.span));
+        if self.tested {
+            members.extend(self.test_hooks(class));
+        }
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
         let attributes = self.attributes(&class.attribute_lists, None, None);
 
@@ -1297,6 +1483,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 ) => self.named_constructor(constructor, initializer),
                 ClassLikeMember::Property(property) => self.property(property, parent_name),
                 ClassLikeMember::Constant(constant) => self.constant(constant),
+                ClassLikeMember::Extension(extension) => {
+                    for member in &extension.members {
+                        members.push(self.extension_member(extension, member));
+                    }
+
+                    continue;
+                }
                 _ => unreachable!("check_slice refuses the class member `{member}`"),
             };
             members.push(member);
@@ -1420,7 +1613,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.enter(b"__construct");
         let mut parameters = Vec::new();
         for parameter in &event.parameter_list.parameters {
-            let index = self.parameter(parameter);
+            let index = self.parameter(parameter, None);
             self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
             parameters.push(index);
         }
@@ -1508,16 +1701,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         self.enter(method.name.value);
+        // Spec section 32: the container builds a class through its main constructor.
+        let services =
+            if php_method_name(method) == b"__construct" { self.types.constructor_parameters(self.class) } else { &[] };
         let mut parameters = Vec::new();
-        for parameter in &method.parameter_list.parameters {
-            parameters.push(self.parameter(parameter));
+        for (index, parameter) in method.parameter_list.parameters.iter().enumerate() {
+            parameters.push(self.parameter(parameter, services.get(index)));
         }
 
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, self.line(&method.parameter_list), &parameters);
         let mut statements = if matches!(method.body, MethodBody::Abstract(_)) && first_statements.is_empty() {
             Vec::new()
         } else {
-            self.collection_parameters(&method.parameter_list)
+            self.collection_parameters(&method.parameter_list.parameters)
         };
         statements.extend_from_slice(first_statements);
         if let Some(initializer) = &method.initializer
@@ -1605,14 +1801,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Some(hint) if lifted => {
                     let hint = self.nullable_hint(hint);
 
-                    self.parameter_of_type(parameter, hint)
+                    self.parameter_of_type(parameter, hint, None)
                 }
-                _ => self.parameter(parameter),
+                _ => self.parameter(parameter, None),
             });
         }
 
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, self.line(&operator.parameter_list), &parameters);
-        let mut prologue = self.collection_parameters(&operator.parameter_list);
+        let mut prologue = self.collection_parameters(&operator.parameter_list.parameters);
         if lifted {
             prologue.push(self.null_lifting(&operator.parameter_list));
         }
@@ -1630,6 +1826,85 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
+    /// An extension's member is the public static method it runs as, spec section 26, which takes the receiver first:
+    /// `public string slug(string separator)` in `extension(string value)` runs as php-src's grammar builds
+    /// `public static function slug(string $value, string $separator): string`. A computed property is the one that
+    /// takes only the receiver and returns its expression: `public bool isBlank => …;` runs as
+    /// `public static function isBlank(string $value): bool { return …; }`.
+    fn extension_member(&mut self, extension: &Extension, member: &ClassLikeMember) -> u32 {
+        let [receiver] = extension.parameter_list.parameters.as_slice() else {
+            unreachable!("semantics refuses an extension without exactly one receiver");
+        };
+
+        match member {
+            ClassLikeMember::Method(method) => {
+                self.enter(method.name.value);
+                let (parameters, statements) =
+                    self.extension_parameters(std::iter::once(receiver).chain(&method.parameter_list.parameters));
+                let body = self.method_body(&method.body, method.returns_value(), statements);
+                let (start, return_type) = match &method.return_type_hint {
+                    Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
+                    None => unreachable!("semantics refuses an extension method without a return type"),
+                };
+                let attributes = self.attributes(&method.attribute_lists, None, None);
+
+                self.declaration(
+                    SHARP_AST_METHOD,
+                    modifier_flags(&method.modifiers) | ZEND_ACC_STATIC,
+                    start,
+                    method.body.span(),
+                    method.name.value,
+                    &[parameters, NULL, body, return_type, attributes],
+                )
+            }
+            ClassLikeMember::Property(Property::Computed(property)) => {
+                let Some(hint) = &property.hint else {
+                    unreachable!("semantics refuses a computed property without a type");
+                };
+                self.enter(property.variable.name);
+                let (parameters, mut statements) = self.extension_parameters([receiver]);
+                let line = self.line(&property.body);
+                let value = self.expression(property.body.expression);
+                statements.push(self.node(SHARP_AST_RETURN, 0, line, &[value]));
+                let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+                let return_type = self.hint(hint);
+                let attributes = self.attributes(&property.attribute_lists, None, None);
+
+                self.declaration(
+                    SHARP_AST_METHOD,
+                    modifier_flags(&property.modifiers) | ZEND_ACC_STATIC,
+                    hint,
+                    &property.body,
+                    property.variable.name,
+                    &[parameters, NULL, body, return_type, attributes],
+                )
+            }
+            _ => unreachable!("semantics refuses the extension member `{member}`"),
+        }
+    }
+
+    /// The parameter list of an extension's member, the receiver first, with the statements that make each `Map` or
+    /// `Set` a PHP array gives the object, as a method's body starts with.
+    fn extension_parameters<'parameter, 'ast>(
+        &mut self,
+        parameters: impl IntoIterator<Item = &'parameter FunctionLikeParameter<'ast>> + Clone,
+    ) -> (u32, Vec<u32>)
+    where
+        'ast: 'parameter,
+    {
+        let mut lowered = Vec::new();
+        let mut line = None;
+        for parameter in parameters.clone() {
+            line.get_or_insert(self.line(parameter));
+            lowered.push(self.parameter(parameter, None));
+        }
+        let Some(line) = line else {
+            unreachable!("an extension's member takes its receiver");
+        };
+
+        (self.node(SHARP_AST_PARAM_LIST, 0, line, &lowered), self.collection_parameters(parameters))
+    }
+
     /// A named constructor is the static method it runs as, spec section 9.1, as php-src's grammar builds
     /// `public static function fromJson(string $json): \Demo\Artifact { ${'this#1'} = new \Demo\Artifact(…);
     /// (function ($json) { … })->call(${'this#1'}, $json); return ${'this#1'}; }`: its `: this(…)` creates the object
@@ -1639,11 +1914,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.enter(constructor.name.value);
         let mut parameters = Vec::new();
         for parameter in &constructor.parameter_list.parameters {
-            parameters.push(self.parameter(parameter));
+            parameters.push(self.parameter(parameter, None));
         }
 
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, self.line(&constructor.parameter_list), &parameters);
-        let mut statements = self.collection_parameters(&constructor.parameter_list);
+        let mut statements = self.collection_parameters(&constructor.parameter_list.parameters);
         let line = self.line(initializer);
         let object = self.variable(initializer.keyword.span, b"this#1");
         let class = self.string(ZEND_NAME_FQ, line, self.class);
@@ -1712,7 +1987,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn instantiation(&mut self, line: u32, instantiation: &Instantiation) -> u32 {
         let arguments = match (&instantiation.argument_list, instantiation.class, &instantiation.constructor) {
             (Some(arguments), Expression::Identifier(class), None) => {
-                let parameters = self.types.constructor_parameters(self.names.get(class));
+                let parameters = self.types.new_parameters(self.names.get(class));
                 self.call(arguments, parameters, |_, arguments| arguments)
             }
             (Some(arguments), _, _) => self.arguments(arguments),
@@ -1889,26 +2164,30 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
     }
 
-    /// A variadic parameter carries `ZEND_PARAM_VARIADIC`, as php-src's grammar builds `int ...$values`.
-    fn parameter(&mut self, parameter: &FunctionLikeParameter) -> u32 {
+    /// A variadic parameter carries `ZEND_PARAM_VARIADIC`, as php-src's grammar builds `int ...$values`. A parameter
+    /// the container fills, whose type is `service`, carries the service's id when its PHP type drops it.
+    fn parameter(&mut self, parameter: &FunctionLikeParameter, service: Option<&FunctionLikeParameterMetadata>) -> u32 {
         let Some(hint) = &parameter.hint else {
             unreachable!("semantics refuses a method parameter without a type");
         };
-        let hint = self.hint(hint);
+        let hint_index = self.hint(hint);
+        let service = service.and_then(|service| dropped_service(hint, service));
 
-        self.parameter_of_type(parameter, hint)
+        self.parameter_of_type(parameter, hint_index, service)
     }
 
-    /// A parameter with its lowered type, or with a null type, as a lambda's parameter can be. A `Map` or a `Set`
-    /// parameter also takes the PHP array plain PHP passes, `\Sharp\Map|array`, which
-    /// [`Self::collection_parameters`] turns into the object. A promoted one is a plain parameter, beside the property
-    /// [`Self::promoted_property`] declares, when [`Self::promoted_beside`] holds.
-    fn parameter_of_type(&mut self, parameter: &FunctionLikeParameter, hint: u32) -> u32 {
+    /// A parameter with its lowered type, or with a null type, as a lambda's parameter can be, and with the id of the
+    /// service the container gives it when its PHP type drops it. A `Map` or a `Set` parameter also takes the PHP array
+    /// plain PHP passes, `\Sharp\Map|array`, which [`Self::collection_parameters`] turns into the object. A promoted one
+    /// is a plain parameter, beside the property [`Self::promoted_property`] declares, when [`Self::promoted_beside`]
+    /// holds.
+    fn parameter_of_type(&mut self, parameter: &FunctionLikeParameter, hint: u32, service: Option<Word>) -> u32 {
         let hint = match collection_hint(parameter.hint.as_ref()) {
             Some(nullable) if hint != NULL => self.table_or_array(hint, nullable),
             _ => hint,
         };
-        let name = self.string(0, self.line(parameter.variable.span), parameter.variable.name);
+        let line = self.line(parameter.variable.span);
+        let name = self.string(0, line, parameter.variable.name);
         let default = parameter.default_value.as_ref().map_or(NULL, |default| self.expression(default.value));
         let (member_flags, hooks) = if self.promoted_beside && parameter.is_promoted_property() {
             (0, NULL)
@@ -1916,7 +2195,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.member_flags_and_hooks(parameter)
         };
         let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
-        let attributes = self.attributes(&parameter.attribute_lists, None, None);
+        let service = service.map(|service| self.service_attribute(line, service));
+        let attributes = self.attributes(&parameter.attribute_lists, None, service);
 
         self.node(
             SHARP_AST_PARAM,
@@ -1966,7 +2246,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let (flags, hooks) = self.member_flags_and_hooks(parameter);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
-        let attributes = self.attributes(&parameter.attribute_lists, None, parameter.hint.as_ref());
+        let crossing = self.crossing_attribute(parameter.hint.as_ref());
+        let attributes = self.attributes(&parameter.attribute_lists, None, crossing);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(parameter), &[hint, declaration, attributes])
     }
@@ -2026,7 +2307,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
         let access = if property.modifiers().contains_visibility() { 0 } else { ZEND_ACC_PRIVATE };
         let flags = modifier_flags(property.modifiers()) | access | accessor_flags;
-        let attributes = self.attributes(attribute_lists, r#override, property.hint());
+        let crossing = self.crossing_attribute(property.hint());
+        let attributes = self.attributes(attribute_lists, r#override, crossing);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])
     }
@@ -2136,28 +2418,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A declaration's attributes are one `ATTRIBUTE_LIST` with an `ATTRIBUTE_GROUP` per `[...]`, as php-src's grammar
     /// builds `#[...]`, or null without attributes. Each attribute names its class by its full name. A method's or a
-    /// field's `override` adds a group of `#[\Override]`, and a property of a `Map` or a `Set`, whose type `holds`
-    /// names, a last group of the `#[\Sharp\Crossing]` [`Self::crossing_plan`] gives it.
+    /// field's `override` adds a group of `#[\Override]`, and the group the lowering adds, `added`, comes last: a
+    /// property's [`Self::crossing_attribute`] or a parameter's [`Self::service_attribute`].
     fn attributes(
         &mut self,
         lists: &Sequence<AttributeList>,
         r#override: Option<&Modifier>,
-        holds: Option<&Hint>,
+        added: Option<u32>,
     ) -> u32 {
-        let crossing = holds.filter(|hint| collection_hint(Some(hint)).is_some()).map(|hint| {
-            let r#type = self.hint_type(hint);
-            let line = self.line(hint);
-            let plan = self.crossing_plan(line, &r#type);
-            let plan = self.node(SHARP_AST_ARG_LIST, 0, line, &[plan]);
-            let name = self.string(ZEND_NAME_FQ, line, b"Sharp\\Crossing");
-            let attribute = self.node(SHARP_AST_ATTRIBUTE, 0, line, &[name, plan]);
-
-            self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, line, &[attribute])
-        });
-        let line = match (lists.first(), r#override, crossing) {
+        let line = match (lists.first(), r#override, added) {
             (Some(first), _, _) => self.line(first),
             (None, Some(r#override), _) => self.line(r#override),
-            (None, None, Some(crossing)) => self.nodes[crossing as usize].line,
+            (None, None, Some(added)) => self.nodes[added as usize].line,
             (None, None, None) => return NULL,
         };
 
@@ -2181,9 +2453,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let attribute = self.node(SHARP_AST_ATTRIBUTE, 0, line, &[name, NULL]);
             groups.push(self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, line, &[attribute]));
         }
-        groups.extend(crossing);
+        groups.extend(added);
 
         self.node(SHARP_AST_ATTRIBUTE_LIST, 0, line, &groups)
+    }
+
+    /// The `#[\Sharp\Crossing(plan)]` group of a property of a `Map` or a `Set` written `hint`, with the plan
+    /// [`Self::crossing_plan`] gives it, by which the engine crosses a PHP array plain PHP writes there. None for a
+    /// property of any other type.
+    fn crossing_attribute(&mut self, hint: Option<&Hint>) -> Option<u32> {
+        let hint = hint.filter(|hint| collection_hint(Some(hint)).is_some())?;
+        let r#type = self.hint_type(hint);
+        let line = self.line(hint);
+        let plan = self.crossing_plan(line, &r#type);
+
+        Some(self.attribute_group(line, b"Sharp\\Crossing", plan))
+    }
+
+    /// The `#[\Sharp\Internal\Service('…')]` group, on line `line`, of a parameter the container fills whose PHP type
+    /// drops the service `id` it names.
+    fn service_attribute(&mut self, line: u32, id: Word) -> u32 {
+        let id = self.string(0, line, id.as_bytes());
+
+        self.attribute_group(line, b"Sharp\\Internal\\Service", id)
+    }
+
+    /// `#[\Class(argument)]`, a group of one attribute of the class `class` with one argument.
+    fn attribute_group(&mut self, line: u32, class: &[u8], argument: u32) -> u32 {
+        let name = self.string(ZEND_NAME_FQ, line, class);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[argument]);
+        let attribute = self.node(SHARP_AST_ATTRIBUTE, 0, line, &[name, arguments]);
+
+        self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, line, &[attribute])
     }
 
     /// A constant is a class constant group of one constant, as php-src's grammar builds `public const int MAX = 3;`:
@@ -2696,6 +2997,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                     self.static_member(line, class, &[full_name], &access.property)
                 }
+                None if let Some(extension) = self.types.extension(expression) => {
+                    self.extension_access(expression, &extension, access.object, None)
+                }
                 None => match self.class_value(access.object) {
                     Some((class, classes)) => self.static_member(line, class, &classes, &access.property),
                     None => {
@@ -2712,13 +3016,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 },
             },
             // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static call
-            // through a class value, the property call, or the plain method call.
+            // through a class value, the extension's member, the property call, or the plain method call.
             Expression::Call(Call::NullSafeMethod(call)) => {
                 if let Some(lowered) = self.collection_call(expression, call.object, &call.argument_list, true) {
                     return lowered;
                 }
 
                 let tested = self.tested_links.contains(&expression.span());
+                if tested && let Some(extension) = self.types.extension(expression) {
+                    return self.extension_access(expression, &extension, call.object, Some(&call.argument_list));
+                }
                 if tested && let Some((class, _)) = self.class_value(call.object) {
                     let method = self.member(&call.method);
                     let parameters = self.types.call_parameters(expression);
@@ -2752,9 +3059,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 })
             }
             // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static member
-            // read through a class value, the method value, or the plain property read.
+            // read through a class value, the extension's member, the method value, or the plain property read.
             Expression::Access(Access::NullSafeProperty(access)) => {
                 let tested = self.tested_links.contains(&expression.span());
+                if tested && let Some(extension) = self.types.extension(expression) {
+                    return self.extension_access(expression, &extension, access.object, None);
+                }
                 if tested && let Some((class, classes)) = self.class_value(access.object) {
                     return self.static_member(line, class, &classes, &access.property);
                 }
@@ -3257,7 +3567,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// `\Class::name(arguments)`, the static method `class` declares to run an operator.
+    /// `\Class::name(arguments)`, the static method `class` declares to run an operator or an extension's member.
     fn operator_call(&mut self, line: u32, class: Word, name: &[u8], arguments: &[u32]) -> u32 {
         let class = self.string(ZEND_NAME_FQ, line, class.as_bytes());
         let method = self.string(0, line, name);
@@ -3282,8 +3592,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_METHOD_CALL, 0, line, &[object, member, callable])
     }
 
-    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, or any
-    /// link below a collection method call that runs as PHP on the array, with its receiver, when `chain` is a member
+    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, an
+    /// extension's member, or any link below a collection method call that runs as PHP on the array or below an
+    /// extension's member, which runs as a static call, with its receiver, when `chain` is a member
     /// read, a call or an index whose chain holds one no conditional tests yet. A null there would reach the PHP
     /// function, where `?->` skips only the rest of its own chain. The walk stops at a receiver a hidden variable
     /// holds, whose links its own conditional tests.
@@ -3299,9 +3610,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
 
             link = match link {
-                Expression::Access(Access::Property(access)) => access.object,
+                Expression::Access(Access::Property(access)) => {
+                    below_php_call = below_php_call || self.types.extension(link).is_some();
+
+                    access.object
+                }
                 Expression::Call(Call::Method(call)) => {
-                    below_php_call = below_php_call || self.php_collection_method(link).is_some();
+                    below_php_call = below_php_call
+                        || self.php_collection_method(link).is_some()
+                        || self.types.extension(link).is_some();
 
                     call.object
                 }
@@ -3310,6 +3627,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Expression::Access(Access::NullSafeProperty(access)) => {
                     if !self.tested_links.contains(&link.span())
                         && (below_php_call
+                            || self.types.extension(link).is_some()
                             || self.is_class_value(access.object)
                             || self.is_method_value(access.object, &access.property))
                     {
@@ -3321,6 +3639,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Expression::Call(Call::NullSafeMethod(call)) => {
                     if !self.tested_links.contains(&link.span())
                         && (below_php_call
+                            || self.types.extension(link).is_some()
                             || self.is_class_value(call.object)
                             || self.is_property_call(link, call.object))
                     {
@@ -3417,7 +3736,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let uses = self.closure_uses(Node::ArrowFunction(arrow_function));
         let body = self.lambda_body(|lowering| {
             let line = lowering.line(arrow_function.expression);
-            let mut statements = lowering.collection_parameters(&arrow_function.parameter_list);
+            let mut statements = lowering.collection_parameters(&arrow_function.parameter_list.parameters);
             let value = lowering.expression(arrow_function.expression);
             statements.push(lowering.node(SHARP_AST_RETURN, 0, line, &[value]));
 
@@ -3434,7 +3753,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let parameters = self.lambda_parameters(&closure.parameter_list);
         let uses = self.closure_uses(Node::Closure(closure));
         let body = self.lambda_body(|lowering| {
-            let mut statements = lowering.collection_parameters(&closure.parameter_list);
+            let mut statements = lowering.collection_parameters(&closure.parameter_list.parameters);
             for statement in &closure.body.statements {
                 statements.push(lowering.statement(statement));
             }
@@ -3450,7 +3769,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut parameters = Vec::new();
         for parameter in &list.parameters {
             let hint = parameter.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
-            parameters.push(self.parameter_of_type(parameter, hint));
+            parameters.push(self.parameter_of_type(parameter, hint, None));
         }
 
         self.node(SHARP_AST_PARAM_LIST, 0, self.line(list), &parameters)
@@ -3604,9 +3923,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// depth, since plain PHP passes a PHP array where PHP# passes the object, and
     /// `$p = \array_map(fn ($collection#N) => …, $p);` for a variadic one, which keeps each argument's position or name.
     /// A promoted one is the property its constructor declares, `$this->p = …`. Null and the object stay as they are.
-    fn collection_parameters(&mut self, parameters: &FunctionLikeParameterList) -> Vec<u32> {
+    fn collection_parameters<'parameter, 'ast>(
+        &mut self,
+        parameters: impl IntoIterator<Item = &'parameter FunctionLikeParameter<'ast>>,
+    ) -> Vec<u32>
+    where
+        'ast: 'parameter,
+    {
         let mut statements = Vec::new();
-        for parameter in &parameters.parameters {
+        for parameter in parameters {
             let Some(r#type) = self.crossing_type(parameter) else {
                 if self.promoted_beside && parameter.is_promoted_property() {
                     let place = self.parameter_place(parameter);
@@ -4311,6 +4636,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if let Some(lowered) = self.collection_call(expression, call.object, &call.argument_list, false) {
             return lowered;
         }
+        if let Some(extension) = self.types.extension(expression) {
+            return self.extension_access(expression, &extension, call.object, Some(&call.argument_list));
+        }
         if let Some(inlined) = self.inlined_call(expression, call) {
             return inlined;
         }
@@ -4351,6 +4679,33 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             this.node(kind, 0, line, &[object, method, arguments])
         })
+    }
+
+    /// The member `extension`, which an extension adds, spec section 26, called with `arguments` or read on `receiver`:
+    /// the call of the static method it runs as, `\App\TextExtensions::slug($title, '-')`, or the library's inline
+    /// form of it, as `trim($name)` for `name.trim()`. The checker chose it from the type the code shows, so it runs
+    /// on any value of that type, an object of a subclass with its own member of that name too.
+    fn extension_access(
+        &mut self,
+        access: &Expression,
+        extension: &Declaration,
+        receiver: &Expression,
+        arguments: Option<&ArgumentList>,
+    ) -> u32 {
+        let line = self.line(access);
+        if let Some(inlined) = self.inlined(extension, Some(receiver), arguments, line) {
+            return inlined;
+        }
+
+        let mut values = vec![self.expression(receiver)];
+        for argument in arguments.into_iter().flat_map(|list| list.arguments.iter()) {
+            values.push(match argument {
+                Argument::Positional(positional) => self.positional_argument(positional),
+                Argument::Named(named) => self.named_argument(named),
+            });
+        }
+
+        self.operator_call(line, extension.class, extension.name.as_bytes(), &values)
     }
 
     /// Spec section 27: `Position.current()` in a body is the position where it is written, a new `Position` of the
@@ -4881,6 +5236,18 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
     }
 
     flags
+}
+
+/// The id of the service the container gives a parameter written `hint` whose metadata is `service`, when its PHP type
+/// drops the service, spec section 32: a collection of objects, as `List<PriceRule>` runs as `array`. The engine reads
+/// any other parameter's class from its PHP type, and a collection of values is no service.
+fn dropped_service(hint: &Hint, service: &FunctionLikeParameterMetadata) -> Option<Word> {
+    let r#type = &service.type_metadata.as_ref()?.type_union;
+    let collection = matches!(hint, Hint::Generic(_) | Hint::Nullable(NullableHint { hint: Hint::Generic(_), .. }));
+    let of_objects =
+        r#type.get_all_child_nodes().iter().any(|node| matches!(node, TypeRef::Atomic(TAtomic::Object(_))));
+
+    (collection && of_objects).then(|| service_id(r#type))
 }
 
 /// Whether a value of `r#type` is a `Set`, true, or a `Map`, false, where it may be one.

@@ -15,6 +15,7 @@ use mago_word::WordMap;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_constant_name_word;
 use mago_word::ascii_lowercase_word;
+use mago_word::concat_word;
 use mago_word::empty_word;
 use mago_word::word;
 
@@ -31,6 +32,7 @@ use crate::metadata::enum_case::EnumCaseMetadata;
 use crate::metadata::r#extern::ExternMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::metadata::module::ModuleMetadata;
 use crate::metadata::property::PropertyMetadata;
 use crate::metadata::ttype::TypeMetadata;
 use crate::reference::SymbolReferences;
@@ -39,6 +41,7 @@ use crate::symbol::SymbolIdentifier;
 use crate::symbol::SymbolKind;
 use crate::symbol::Symbols;
 use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::array::TArray;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::union::TUnion;
 use crate::visibility::Visibility;
@@ -51,6 +54,7 @@ pub mod enum_case;
 pub mod r#extern;
 pub mod flags;
 pub mod function_like;
+pub mod module;
 pub mod parameter;
 pub mod property;
 pub mod property_hook;
@@ -112,6 +116,13 @@ pub struct CodebaseMetadata {
     /// duplicate.
     #[cfg_attr(feature = "serde", serde(default))]
     pub externs: HashMap<(Word, Word), Vec<ExternMetadata>>,
+    /// Every PHP# module, spec section 32, in the order [`ModuleMetadata`] sorts them.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub modules: Vec<ModuleMetadata>,
+    /// Map from the lowercase name of a PHP# extension member, spec section 26, to every extension member of that name:
+    /// its span and the static method it runs as, in span order.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extensions: WordMap<Vec<(Span, MethodIdentifier)>>,
     /// Map from class/interface FQCN to the set of all its descendants (recursive).
     pub all_class_like_descendants: WordMap<WordSet>,
     /// Map from class/interface FQCN to the set of its direct descendants (children).
@@ -916,6 +927,48 @@ impl CodebaseMetadata {
         all_descendants
     }
 
+    /// The classes that declare a real member a PHP# extension member called `name` would hide on a value of type
+    /// `receiver`, spec section 26, sorted: the member of that name that a class the value can be declares or
+    /// inherits, a method or property, or one a docblock declares with `@method` or `@property`. `__call` and `__get`
+    /// declare none. A `List`, `Map` or `Set` has the methods of `Sharp\ListMethods`, `Sharp\MapMethods` or
+    /// `Sharp\SetMethods`. A class below the type competes with no extension, which is chosen from the type the code
+    /// shows.
+    #[must_use]
+    pub fn get_classes_hidden_by_extension(&self, receiver: &TUnion, name: &[u8]) -> Vec<Word> {
+        let method_name = ascii_lowercase_word(name);
+        let property_name = concat_word!(b"$", name);
+
+        let mut classes: Vec<Word> = receiver
+            .types
+            .iter()
+            .filter_map(|atomic| match atomic {
+                TAtomic::Object(object) => object.get_name(),
+                TAtomic::Array(TArray::List(_)) => Some(word("Sharp\\ListMethods")),
+                TAtomic::Array(TArray::Keyed(_)) => Some(word("Sharp\\MapMethods")),
+                TAtomic::Array(TArray::Set(_)) => Some(word("Sharp\\SetMethods")),
+                _ => None,
+            })
+            .filter_map(|name| self.get_class_like(name.as_bytes()))
+            .filter_map(|class| {
+                class
+                    .declaring_method_ids
+                    .get(&method_name)
+                    .map(MethodIdentifier::get_class_name)
+                    .or_else(|| {
+                        (class.pseudo_methods.contains(&method_name)
+                            || class.static_pseudo_methods.contains(&method_name))
+                        .then_some(class.name)
+                    })
+                    .or_else(|| class.declaring_property_ids.get(&property_name).copied())
+                    .or_else(|| class.magic_property_ids.get(&property_name).copied())
+            })
+            .collect();
+        classes.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        classes.dedup();
+
+        classes
+    }
+
     /// Gets all ancestors of a class (parents + interfaces).
     #[inline]
     #[must_use]
@@ -1269,6 +1322,8 @@ impl CodebaseMetadata {
         self.symbols.extend(other.symbols);
         self.merge_wrapped_functions(other.wrapped_functions);
         self.merge_externs(other.externs);
+        self.merge_modules(other.modules);
+        self.merge_extensions(other.extensions);
 
         for (k, v) in other.all_class_like_descendants {
             self.all_class_like_descendants.entry(k).or_default().extend(v);
@@ -1358,6 +1413,8 @@ impl CodebaseMetadata {
             other.wrapped_functions.iter().map(|(function, wrappers)| (*function, wrappers.clone())),
         );
         self.merge_externs(other.externs.iter().map(|(target, declarations)| (*target, declarations.clone())));
+        self.merge_modules(other.modules.iter().cloned());
+        self.merge_extensions(other.extensions.iter().map(|(name, members)| (*name, members.clone())));
 
         for (k, v) in &other.all_class_like_descendants {
             self.all_class_like_descendants.entry(*k).or_default().extend(v.iter().copied());
@@ -1407,6 +1464,25 @@ impl CodebaseMetadata {
         for (target, declarations) in incoming {
             let merged = self.externs.entry(target).or_default();
             merged.extend(declarations);
+            merged.sort_unstable();
+            merged.dedup();
+        }
+    }
+
+    /// Adds another codebase's modules, keeping them in the order [`ModuleMetadata`] sorts them, whatever order the
+    /// files merge in.
+    fn merge_modules(&mut self, incoming: impl IntoIterator<Item = ModuleMetadata>) {
+        self.modules.extend(incoming);
+        self.modules.sort_by_key(|module| (module.file, module.span.start.offset));
+        self.modules.dedup();
+    }
+
+    /// Adds another codebase's extension members, keeping each name's members in span order, whatever order the files
+    /// merge in.
+    fn merge_extensions(&mut self, incoming: impl IntoIterator<Item = (Word, Vec<(Span, MethodIdentifier)>)>) {
+        for (name, members) in incoming {
+            let merged = self.extensions.entry(name).or_default();
+            merged.extend(members);
             merged.sort_unstable();
             merged.dedup();
         }
@@ -1687,6 +1763,11 @@ impl CodebaseMetadata {
             declarations.retain(|declaration| !removed_files.contains(&declaration.span.file_id));
         }
         self.externs.retain(|_, declarations| !declarations.is_empty());
+        self.modules.retain(|module| !removed_files.contains(&module.span.file_id));
+        for members in self.extensions.values_mut() {
+            members.retain(|(span, _)| !removed_files.contains(&span.file_id));
+        }
+        self.extensions.retain(|_, members| !members.is_empty());
     }
 
     /// Takes all issues from the codebase metadata.

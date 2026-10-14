@@ -18,10 +18,12 @@ use mago_syntax::cst::Call;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Closure;
+use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Constant;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Extension;
 use mago_syntax::cst::Extern;
 use mago_syntax::cst::Function;
 use mago_syntax::cst::FunctionCall;
@@ -151,6 +153,8 @@ struct Context<'ctx, 'arena, A> {
     /// PHP version configured for this scan, used to evaluate `Mago\*`
     /// version-gating attributes inline.
     pub php_version: PHPVersion,
+    /// The PHP# extension whose members the walk is in, spec section 26.
+    pub extension: Option<&'arena Extension<'arena>>,
 }
 
 impl<'ctx, 'arena, A> Context<'ctx, 'arena, A>
@@ -164,7 +168,7 @@ where
         resolved_names: &'arena ResolvedNames<'arena>,
         php_version: PHPVersion,
     ) -> Self {
-        Self { arena, file, program, resolved_names, php_version }
+        Self { arena, file, program, resolved_names, php_version, extension: None }
     }
 
     pub fn get_docblock(&self, node: impl HasSpan) -> Option<&'arena Trivia<'arena>> {
@@ -408,6 +412,36 @@ impl Scanner {
 
         self.codebase.class_likes.entry(current_class).or_insert(class_like_metadata);
         self.codebase.function_likes.entry(method_id).or_insert(function_like_metadata);
+    }
+
+    /// Registers an extension member as the static method it runs as, marked with `flag`, spec section 26. A member of
+    /// an extension without one receiver, which semantics refuses, registers as none.
+    fn register_extension_member<'arena, A>(
+        &mut self,
+        parts: Option<MethodParts<'arena, 'arena>>,
+        flag: MetadataFlags,
+        context: &Context<'_, 'arena, A>,
+    ) where
+        A: Arena,
+    {
+        let Some(parts) = parts else {
+            self.template_constraints.push(vec![]);
+            return;
+        };
+        self.register_method(&parts, context);
+
+        let name = ascii_lowercase_word(parts.name);
+        if let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
+            && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, name))
+            && method.span == parts.span
+        {
+            method.flags |= flag;
+            self.codebase
+                .extensions
+                .entry(name)
+                .or_default()
+                .push((parts.span, MethodIdentifier::new(class.name, name)));
+        }
     }
 }
 
@@ -833,32 +867,77 @@ where
         finalize_class_like(self, context);
     }
 
-    /// A PHP# module registers as its namespace's class-like `Module`, which encloses the lambdas of its laws as a
-    /// class encloses its methods' lambdas.
+    /// A PHP# module registers its bindings, spec section 32. A folder's `Module.sharp` also registers as its
+    /// namespace's class-like `Module`, which encloses the lambdas of its laws as a class encloses its methods' lambdas.
     #[inline]
     fn walk_module(&mut self, module: &'arena Module<'arena>, context: &mut Context<'ctx, 'arena, A>) {
-        if let Some(id) = register_module(&mut self.codebase, module, context, &self.scope) {
+        let class_like = register_module(&mut self.codebase, module, context, &self.scope);
+        if let Some(id) = class_like {
             self.stack.push(id);
-            self.template_constraints.push(vec![]);
-
-            walk_module_mut(self, module, context);
         }
-    }
+        self.template_constraints.push(vec![]);
 
-    #[inline]
-    fn walk_out_module(&mut self, _module: &'arena Module<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
-        self.stack.pop().expect("Expected class stack to be non-empty");
+        walk_module_mut(self, module, context);
+
+        if class_like.is_some() {
+            self.stack.pop().expect("Expected class stack to be non-empty");
+        }
         self.template_constraints.pop().expect("Expected template stack to be non-empty");
     }
 
     #[inline]
     fn walk_in_method(&mut self, method: &'arena Method<'arena>, context: &mut Context<'ctx, 'arena, A>) {
-        self.register_method(&MethodParts::of_method(method), context);
+        match context.extension {
+            Some(extension) => self.register_extension_member(
+                MethodParts::of_extension_method(context.arena, extension, method),
+                MetadataFlags::EXTENSION_METHOD,
+                context,
+            ),
+            None => self.register_method(&MethodParts::of_method(method), context),
+        }
     }
 
     #[inline]
     fn walk_out_method(&mut self, _method: &'arena Method<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
         self.template_constraints.pop().expect("Expected template stack to be non-empty");
+    }
+
+    #[inline]
+    fn walk_in_extension(&mut self, extension: &'arena Extension<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        context.extension = Some(extension);
+    }
+
+    #[inline]
+    fn walk_out_extension(&mut self, _extension: &'arena Extension<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        context.extension = None;
+    }
+
+    /// An extension's computed property registers as the static method it runs as, spec section 26. Every other
+    /// computed property is its class's property, which the class's scan registers.
+    #[inline]
+    fn walk_in_computed_property(
+        &mut self,
+        property: &'arena ComputedProperty<'arena>,
+        context: &mut Context<'ctx, 'arena, A>,
+    ) {
+        if let Some(extension) = context.extension {
+            self.register_extension_member(
+                MethodParts::of_extension_property(context.arena, extension, property),
+                MetadataFlags::EXTENSION_PROPERTY,
+                context,
+            );
+        }
+    }
+
+    #[inline]
+    fn walk_out_computed_property(
+        &mut self,
+        _property: &'arena ComputedProperty<'arena>,
+        context: &mut Context<'ctx, 'arena, A>,
+    ) {
+        if context.extension.is_some() {
+            self.template_constraints.pop().expect("Expected template stack to be non-empty");
+        }
     }
 
     /// A PHP# operator registers as the static method it runs as, such as `op_Addition`, so a subclass inherits it.

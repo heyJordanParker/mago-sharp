@@ -1,5 +1,5 @@
 use mago_allocator::Arena;
-use mago_names::binding::Binding;
+use mago_names::binding;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
 use mago_names::kind::NameKind;
@@ -16,6 +16,8 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrowFunction;
+use mago_syntax::cst::Binding;
+use mago_syntax::cst::BindingValue;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -259,6 +261,43 @@ where
     });
 
     if utils::expression_has_throws(law.body.expression) {
+        metadata.flags |= MetadataFlags::HAS_THROW;
+    }
+
+    metadata
+}
+
+/// Scans a PHP# binding's expression, spec section 32, as the lambda it runs as: it takes the binding's parameters and
+/// returns the binding's service, so its body is analyzed as one and a value that is no service is refused.
+#[inline]
+pub(crate) fn scan_binding_expression<'arena, A>(
+    name: Word,
+    binding: &'arena Binding<'arena>,
+    service: TypeMetadata,
+    context: &Context<'_, 'arena, A>,
+    scope: &NamespaceScope,
+) -> FunctionLikeMetadata
+where
+    A: Arena,
+{
+    let mut metadata = FunctionLikeMetadata::new(
+        FunctionLikeKind::Closure,
+        name,
+        name,
+        binding.span(),
+        MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,
+    );
+    metadata.parameters = binding
+        .parameter_list
+        .iter()
+        .flat_map(|list| list.parameters.iter())
+        .filter_map(|p| scan_function_like_parameter(p, None, context, scope))
+        .collect();
+    metadata.set_return_type_declaration_metadata(Some(service));
+
+    if let BindingValue::Expression(expression) = binding.value
+        && utils::expression_has_throws(expression)
+    {
         metadata.flags |= MetadataFlags::HAS_THROW;
     }
 
@@ -1198,10 +1237,10 @@ where
                 property: ClassLikeMemberSelector::Identifier(name),
                 ..
             })) => matches!(object.unparenthesized(), Expression::ConstantAccess(this)
-                    if self.context.resolved_names.binding(&this.name) == Some(Binding::This))
+                    if self.context.resolved_names.binding(&this.name) == Some(binding::Binding::This))
             .then(|| php_variable_name(name.value)),
             Expression::ConstantAccess(member)
-                if self.context.resolved_names.binding(&member.name) == Some(Binding::Member) =>
+                if self.context.resolved_names.binding(&member.name) == Some(binding::Binding::Member) =>
             {
                 Some(php_variable_name(member.name.value()))
             }

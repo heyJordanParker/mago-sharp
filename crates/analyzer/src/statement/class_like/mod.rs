@@ -10,6 +10,7 @@ use mago_codex::context::ScopeContext;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
@@ -882,8 +883,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
     }
 }
 
-/// Spec sections 28 and 32: a module is its namespace's class-like `Module`, and its laws are analyzed as a class's.
-/// Only its folder's `Module.sharp` declares it, and semantics already refused a module in any other file.
+/// Spec sections 28 and 32: a module's bindings are checked where they are written. A folder's `Module.sharp` is also
+/// its namespace's class-like `Module`, and its laws are analyzed as a class's. Semantics already refused a module its
+/// file can't hold, and the scanner registered none.
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Module<'arena> {
     fn analyze<'ctx, A>(
         &'ast self,
@@ -894,13 +896,18 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Module<'arena> {
     where
         A: Arena,
     {
-        if !Module::is_declared_in(context.source_file) {
+        let span = self.span();
+        let Some(module) = context.codebase.modules.iter().find(|module| module.span == span) else {
+            return Ok(());
+        };
+        crate::statement::module::analyze_bindings(context, artifacts, self, module)?;
+
+        if module.kind != ModuleKind::Base {
             return Ok(());
         }
 
         // The scanner registers the module of every `Module.sharp`, or the class-like declared first under its name.
         let name = context.resolved_names.get(&self.module);
-
         context
             .codebase
             .get_class_like(name)
@@ -928,8 +935,10 @@ where
     scope.set_static(true);
 
     let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
-    for ModuleMember::Law(law) in &module.members {
-        law.analyze(context, &mut block_context, artifacts)?;
+    for member in &module.members {
+        if let ModuleMember::Law(law) = member {
+            law.analyze(context, &mut block_context, artifacts)?;
+        }
     }
 
     Ok(())
@@ -1460,6 +1469,9 @@ where
             }
             ClassLikeMember::NamedConstructor(named_constructor) => {
                 named_constructor.analyze(context, &mut block_context, artifacts)?;
+            }
+            ClassLikeMember::Extension(extension) => {
+                extension.analyze(context, &mut block_context, artifacts)?;
             }
             _ => {}
         }
