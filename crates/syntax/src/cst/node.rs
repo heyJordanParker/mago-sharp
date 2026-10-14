@@ -1855,6 +1855,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 for item in node.modifiers.iter() {
                     f(Node::Modifier(item));
                 }
+                if let Some(sealed) = &node.sealed {
+                    f(Node::Keyword(sealed));
+                }
                 f(Node::Keyword(&node.interface));
                 f(Node::LocalIdentifier(&node.name));
                 for item in node.extends.iter() {

@@ -51,7 +51,7 @@ where
 
         if self.dialect.is_sharp() {
             match self.stream.peek_kind(0)? {
-                Some(T!["interface"]) => {
+                Some(T!["interface"]) | Some(T![Identifier]) if self.is_at_interface()? => {
                     return Ok(Statement::Interface(
                         self.parse_interface_with_attributes_and_modifiers(attributes, modifiers)?,
                     ));
@@ -71,6 +71,17 @@ where
         Ok(Statement::Class(self.parse_class_with_attributes_and_modifiers(attributes, modifiers)?))
     }
 
+    /// Whether an interface starts here: `interface`, or in PHP# `sealed interface`, spec section 20.1. Everywhere else
+    /// `sealed` is a name, and `sealed` before anything but `interface` stays a parse error.
+    pub(crate) fn is_at_interface(&mut self) -> Result<bool, ParseError> {
+        let is_sealed = self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"sealed");
+
+        Ok(match self.stream.peek_kind(0)? {
+            Some(T!["interface"]) => true,
+            _ => self.dialect.is_sharp() && is_sealed && self.stream.peek_kind(1)? == Some(T!["interface"]),
+        })
+    }
+
     fn parse_interface_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -79,6 +90,7 @@ where
         Ok(Interface {
             attribute_lists: attributes,
             modifiers,
+            sealed: if self.stream.is_at(T!["interface"])? { None } else { Some(self.expect_any_keyword()?) },
             interface: self.expect_keyword(T!["interface"])?,
             name: self.parse_local_identifier()?,
             extends: self.parse_optional_extends()?,

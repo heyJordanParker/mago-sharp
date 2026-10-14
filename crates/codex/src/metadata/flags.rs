@@ -74,6 +74,9 @@ impl MetadataFlags {
     /// A PHP# enum case that runs as a class, spec section 20: the final subclass of its enum, named in the enum's
     /// namespace, that a case of an enum with a case that carries data runs as.
     pub const ENUM_CASE_CLASS: MetadataFlags = MetadataFlags(1 << 51);
+    /// A PHP# sealed interface, spec section 20.1: its permitted inheritors are the classes of its namespace that
+    /// implement it, which the populator gathers.
+    pub const SEALED: MetadataFlags = MetadataFlags(1 << 52);
 }
 
 impl MetadataFlags {
@@ -168,6 +171,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_enum_case_class(self) -> bool {
         self.contains(Self::ENUM_CASE_CLASS)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_sealed(self) -> bool {
+        self.contains(Self::SEALED)
     }
 
     #[inline]

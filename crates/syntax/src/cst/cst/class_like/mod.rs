@@ -41,6 +41,9 @@ pub struct Interface<'arena> {
     pub attribute_lists: Sequence<'arena, AttributeList<'arena>>,
     /// PHP#'s `public`, as in `public interface Foo {}`. Always empty in PHP.
     pub modifiers: Sequence<'arena, Modifier<'arena>>,
+    /// PHP#'s `sealed`, spec section 20.1, as in `public sealed interface Interaction {}`: its implementers are the
+    /// classes of its namespace. Always `None` in PHP.
+    pub sealed: Option<Keyword<'arena>>,
     pub interface: Keyword<'arena>,
     pub name: LocalIdentifier<'arena>,
     pub extends: Option<Extends<'arena>>,
@@ -204,7 +207,7 @@ impl HasSpan for Interface<'_> {
             return modifier.span().join(self.right_brace);
         }
 
-        self.interface.span().join(self.right_brace)
+        self.sealed.as_ref().unwrap_or(&self.interface).span().join(self.right_brace)
     }
 }
 

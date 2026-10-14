@@ -868,6 +868,10 @@ generate_ast_walker! {
             walker.walk_modifier(modifier, context);
         }
 
+        if let Some(sealed) = &interface.sealed {
+            walker.walk_keyword(sealed, context);
+        }
+
         walker.walk_keyword(&interface.interface, context);
         walker.walk_local_identifier(&interface.name, context);
 
