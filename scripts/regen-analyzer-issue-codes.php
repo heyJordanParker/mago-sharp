@@ -373,6 +373,10 @@ final class AnalyzerCodeModuleGenerator
         'invalid-effect',
         'foreign-in-static',
         'incompatible-effects',
+        'invalid-binding',
+        'missing-service',
+        'service-cycle',
+        'captive-service',
     ];
 
     /**

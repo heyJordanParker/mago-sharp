@@ -37,6 +37,7 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseEntryKeys;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::r#extern::ExternMetadata;
+use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::populator::populate_codebase_targeted;
 use mago_codex::reference::SymbolReferences;
@@ -927,6 +928,18 @@ impl IncrementalAnalysisService {
                 .any(|file_id| !current_file_ids.contains(file_id) && !externs_in(&self.codebase, *file_id).is_empty());
 
         if externs_changed {
+            return self.analyze();
+        }
+
+        let modules_changed = new_file_scans
+            .iter()
+            .any(|(file_id, metadata)| modules_in(metadata, *file_id) != modules_in(&self.codebase, *file_id))
+            || self
+                .file_states
+                .keys()
+                .any(|file_id| !current_file_ids.contains(file_id) && !modules_in(&self.codebase, *file_id).is_empty());
+
+        if modules_changed {
             return self.analyze();
         }
 
@@ -1992,6 +2005,12 @@ fn externs_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ExternMetada
         codebase.externs.values().flatten().filter(|declaration| declaration.span.file_id == file_id).collect();
     externs.sort();
     externs
+}
+
+/// The modules `file_id` declares, spec section 32. Every class takes its services from the modules of its namespace
+/// and the namespaces above it, so a change to them changes files that the signature diff cannot see.
+fn modules_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ModuleMetadata> {
+    codebase.modules.iter().filter(|module| module.span.file_id == file_id).collect()
 }
 
 /// The functions `file_id`'s `[Replaces]` attributes wrap, each with its wrapping methods in the codebase's order. A
@@ -3395,6 +3414,66 @@ mod tests {
         service.analyze_incremental(Some(&[clock_id])).expect("Incremental analysis failed.");
         assert_eq!(impure_getters(&service), 0);
         assert_matches_full(&service, &db, "now is pure again");
+    }
+
+    /// Spec section 32: a module's check reads the modules of other folders, so an edit, a deletion or an addition of
+    /// a module makes the warm run check every module again. `app/Shop/Module.sharp` binds the singleton `Panel` of
+    /// `App.Shop.Admin`, whose `Mailer` comes from `App.Shop.Admin`'s module when it binds one and else from
+    /// `App.Shop`'s scoped `Mailer`.
+    #[test]
+    fn test_watch_module_edit_deletion_or_addition_checks_every_module_again() {
+        let mailer = "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n";
+        let smtp = "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n";
+        let panel = "namespace App.Shop.Admin;\n\nimport App.Mail.Mailer;\n\npublic class Panel\n{\n    public Panel(private Mailer mailer) { }\n}\n";
+        let shop = "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Shop.Admin.Panel;\n\nmodule\n{\n    scoped Mailer = SmtpMailer;\n    singleton Panel = Panel;\n}\n";
+        let admin = |lifetime: &str| {
+            format!(
+                "namespace App.Shop.Admin;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule\n{{\n    {lifetime} Mailer = SmtpMailer;\n}}\n"
+            )
+        };
+        let admin_id = FileId::new(b"app/Shop/Admin/Module.sharp");
+        let mut db = make_database(vec![
+            ("app/Mail/Mailer.sharp", mailer),
+            ("app/Mail/SmtpMailer.sharp", smtp),
+            ("app/Shop/Admin/Panel.sharp", panel),
+            ("app/Shop/Module.sharp", shop),
+            ("app/Shop/Admin/Module.sharp", admin("singleton").as_str()),
+        ]);
+        let captive = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("captive-service")).count()
+        };
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(captive(&service), 0);
+
+        db.update(admin_id, Cow::Owned(admin("scoped").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[admin_id])).expect("Incremental analysis failed.");
+        assert_eq!(captive(&service), 1, "the edited module binds a scoped Mailer");
+        assert_matches_full(&service, &db, "the Admin module binds a scoped Mailer");
+
+        db.update(admin_id, Cow::Owned(admin("singleton").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[admin_id])).expect("Incremental analysis failed.");
+        assert_eq!(captive(&service), 0, "the edited module binds a singleton Mailer again");
+
+        db.delete(admin_id);
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(captive(&service), 1, "Panel takes App.Shop's scoped Mailer");
+        assert_matches_full(&service, &db, "the Admin module is deleted");
+
+        db.add(File::new(
+            Cow::Owned(b"app/Shop/Admin/Module.sharp".to_vec()),
+            FileType::Host,
+            None,
+            Cow::Owned(admin("singleton").into_bytes()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(captive(&service), 0, "the added module binds a singleton Mailer");
+        assert_matches_full(&service, &db, "the Admin module is added again");
     }
 
     /// A signature edit re-analyzes its file in watch mode, and the methods it did not touch keep what they do.
