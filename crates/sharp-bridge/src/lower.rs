@@ -496,6 +496,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::Use(_) | Statement::Extern(_) | Statement::Module(_) => {}
             Statement::Class(class) => statements.push(self.class(class)),
             Statement::Interface(interface) => statements.push(self.interface(interface)),
+            Statement::Enum(r#enum) if r#enum.has_data_case() => self.data_enum(r#enum, statements),
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
             Statement::Event(event) => statements.push(self.event(event)),
             _ => unreachable!("check_slice refuses the file statement `{statement}`"),
@@ -845,26 +846,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The constructor spans the event's name and parameters.
     fn event(&mut self, event: &Event) -> u32 {
         self.class = self.names.get(&event.name);
-        self.enter(b"__construct");
-        let mut parameters = Vec::new();
-        for parameter in &event.parameter_list.parameters {
-            let index = self.parameter(parameter, None);
-            self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
-            parameters.push(index);
-        }
-
-        let line = self.line(&event.parameter_list);
-        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
-        let constructor = self.declaration(
-            SHARP_AST_METHOD,
-            ZEND_ACC_PUBLIC,
-            event.name.span,
-            &event.parameter_list,
-            b"__construct",
-            &[parameters, NULL, body, NULL, NULL],
-        );
-        let members = self.node(SHARP_AST_STMT_LIST, 0, line, &[constructor]);
+        let constructor = self.promoted_constructor(event.name.span, &event.parameter_list);
+        let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(&event.parameter_list), &[constructor]);
         let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
 
         self.declaration(
@@ -875,6 +858,137 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             event.name.value,
             &[NULL, header, members, NULL, NULL],
         )
+    }
+
+    /// The public constructor of an event or a case that carries data, from `name` to the end of `parameters`, which
+    /// promotes each parameter to a `public readonly` property and has no statement.
+    fn promoted_constructor(&mut self, name: Span, parameter_list: &FunctionLikeParameterList) -> u32 {
+        self.enter(b"__construct");
+        let mut parameters = Vec::new();
+        for parameter in &parameter_list.parameters {
+            let index = self.parameter(parameter, None);
+            self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+            parameters.push(index);
+        }
+
+        let line = self.line(parameter_list);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            name,
+            parameter_list,
+            b"__construct",
+            &[parameters, NULL, body, NULL, NULL],
+        )
+    }
+
+    /// Spec section 20: an enum with a case that carries data is an abstract class, with the enum's header as its
+    /// interface list and the enum's constants and methods, as
+    /// `abstract class PaymentResult implements \App\HasLabel`. Each case is a final subclass named in the enum's
+    /// namespace, declared after it. A case that carries data promotes its fields in its constructor, as
+    /// `final class Paid extends \App\PaymentResult { public function __construct(public readonly string $transactionId) {} }`
+    /// in the namespace `App\PaymentResult`. A plain case is one object, which its `instance()` makes once and gives:
+    /// `final class Open extends \App\CheckoutState { private static $instance; private function __construct() {}
+    /// public static function instance(): self { return self::$instance ??= new self(); } }`.
+    fn data_enum(&mut self, r#enum: &Enum, statements: &mut Vec<u32>) {
+        self.class = self.names.get(&r#enum.name);
+        let enum_name = self.class;
+        let mut members = Vec::new();
+        // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
+        for member in &r#enum.members {
+            members.push(match member {
+                ClassLikeMember::Method(method) => self.method(method, modifier_flags(&method.modifiers), &[]),
+                ClassLikeMember::Constant(constant) => self.constant(constant),
+                ClassLikeMember::EnumCase(_) | ClassLikeMember::Law(_) => continue,
+                _ => unreachable!("check_slice refuses the enum member `{member}`"),
+            });
+        }
+
+        let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
+        let attributes = self.attributes(&r#enum.attribute_lists, None, None);
+        let header = r#enum.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
+        statements.push(self.declaration(
+            SHARP_AST_CLASS,
+            ZEND_ACC_EXPLICIT_ABSTRACT_CLASS,
+            r#enum.r#enum.span,
+            r#enum.right_brace,
+            r#enum.name.value,
+            &[NULL, header, members, attributes, NULL],
+        ));
+
+        for member in &r#enum.members {
+            let ClassLikeMember::EnumCase(case) = member else {
+                continue;
+            };
+            let name = case.item.name();
+            let line = self.line(name.span);
+            let members = match &case.item {
+                EnumCaseItem::Data(item) => vec![self.promoted_constructor(name.span, &item.parameter_list)],
+                EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => self.case_object(name.span),
+            };
+            let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
+            let parent = self.string(ZEND_NAME_FQ, line, enum_name);
+            let attributes = self.attributes(&case.attribute_lists, None, None);
+            let class_name = [r#enum.name.value, b"\\", name.value].concat();
+
+            statements.push(self.declaration(
+                SHARP_AST_CLASS,
+                ZEND_ACC_FINAL,
+                case.case.span,
+                case.terminator.span(),
+                &class_name,
+                &[parent, NULL, members, attributes, NULL],
+            ));
+        }
+    }
+
+    /// The members of the class of a plain case of an enum with a case that carries data, at `name`: the private
+    /// static property `instance`, a private constructor, and the public static `instance()`, which makes the case's
+    /// one object on the first call and gives it.
+    fn case_object(&mut self, name: Span) -> Vec<u32> {
+        self.enter(b"instance");
+        let line = self.line(name);
+        let property_name = self.string(0, line, b"instance");
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[property_name, NULL, NULL, NULL]);
+        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+        let property =
+            self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PRIVATE | ZEND_ACC_STATIC, line, &[NULL, declaration, NULL]);
+
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
+        let constructor = self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PRIVATE,
+            name,
+            name,
+            b"__construct",
+            &[parameters, NULL, body, NULL, NULL],
+        );
+
+        let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+        let property_name = self.string(0, line, b"instance");
+        let instance = self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, property_name]);
+        let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+        let object = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+        let made = self.node(SHARP_AST_ASSIGN_COALESCE, 0, line, &[instance, object]);
+        let returned = self.node(SHARP_AST_RETURN, 0, line, &[made]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[returned]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let return_type = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+        let instance = self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC,
+            name,
+            name,
+            b"instance",
+            &[parameters, NULL, body, return_type, NULL],
+        );
+
+        vec![property, constructor, instance]
     }
 
     /// An enum is a final class with the enum flag, its header as its interface list and its backing type as its last
@@ -917,6 +1031,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let value = match &case.item {
             EnumCaseItem::Unit(_) => NULL,
             EnumCaseItem::Backed(item) => self.expression(item.value),
+            EnumCaseItem::Data(_) => unreachable!("`data_enum` lowers an enum with a case that carries data"),
         };
         let attributes = self.attributes(&case.attribute_lists, None, None);
 
@@ -2178,6 +2293,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             unreachable!("check_slice refuses the member name `{member}`");
         };
         let kind = agreed_kind(classes.iter().map(|class| self.types.member_declaration(class, name.value).kind));
+        if kind == DeclarationKind::CaseObject {
+            let case = self.types.member_declaration(classes[0], name.value);
+            let case_class = self.string(ZEND_NAME_FQ, line, case.class.as_bytes());
+            let instance = self.string(0, line, case.name.as_bytes());
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+
+            return self.node(SHARP_AST_STATIC_CALL, 0, line, &[case_class, instance, arguments]);
+        }
         let member = self.member(member);
 
         match kind {
@@ -3632,6 +3755,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         if let Some(inlined) = self.inlined_call(expression, call) {
             return inlined;
+        }
+        // Spec section 20: `PaymentResult.Paid(…)` creates the case, an object of its class.
+        if let Some(class) = self.names.static_call_class(call)
+            && let ClassLikeMemberSelector::Identifier(method) = &call.method
+            && let Some(case) = self.types.enum_case_class(self.names.get(&class.name), method.value)
+        {
+            let name = self.string(ZEND_NAME_FQ, self.line(method), case.as_bytes());
+            let arguments = self.arguments(&call.argument_list, &[]);
+
+            return self.node(SHARP_AST_NEW, 0, self.line(call), &[name, arguments]);
         }
 
         let line = self.line(call);

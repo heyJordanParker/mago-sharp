@@ -515,10 +515,10 @@ fn a_type_declared_inside_another_is_one_error_and_its_owner_parses_on() {
     assert_eq!(source(MODULE, error), "public event Paid(int orderId);");
 }
 
-/// A case that carries data, spec section 20, is one error from its name to its closing parenthesis. The case stays
-/// in the enum, and the members after it still parse. PHP keeps its own parse error at the parenthesis.
+/// A case that carries data, spec section 20, parses into `EnumCaseItem::Data` with its fields, and the members after
+/// it parse on. PHP keeps its own parse error at the parenthesis.
 #[test]
-fn a_case_that_carries_data_is_one_not_supported_error_and_the_enum_parses_on() {
+fn a_case_that_carries_data_parses_with_its_fields() {
     const CODE: &str = "enum PaymentResult\n{\n    case Open;\n    case Paid(string transactionId, int cents);\n\n    public int run() { return 1; }\n}\n";
     let arena = LocalArena::new();
 
@@ -535,11 +535,7 @@ fn a_case_that_carries_data_is_one_not_supported_error_and_the_enum_parses_on() 
     );
 
     let program = parse(&arena, "src/PaymentResult.sharp", CODE);
-    let [error] = program.errors else {
-        panic!("expected one error, got {:#?}", program.errors);
-    };
-    assert_eq!(error.to_string(), "A case that carries data is not supported yet in PHP#.");
-    assert_eq!(source(CODE, error), "Paid(string transactionId, int cents)");
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
     let Some(Statement::Enum(payment_result)) = program.statements.first() else {
         panic!("expected an enum, got {:#?}", program.statements);
     };
@@ -548,10 +544,34 @@ fn a_case_that_carries_data_is_one_not_supported_error_and_the_enum_parses_on() 
     else {
         panic!("expected the cases `Open` and `Paid` and the method `run`, got {:#?}", payment_result.members);
     };
-    assert_eq!(open.item.name().value, b"Open");
-    assert!(matches!(paid.item, EnumCaseItem::Unit(_)), "{:#?}", paid.item);
-    assert_eq!(paid.item.name().value, b"Paid");
+    assert!(matches!(open.item, EnumCaseItem::Unit(_)), "{:#?}", open.item);
+    let EnumCaseItem::Data(paid) = &paid.item else {
+        panic!("expected `Paid` to carry data, got {:#?}", paid.item);
+    };
+    assert_eq!(paid.name.value, b"Paid");
+    let fields: Vec<&[u8]> = paid.parameter_list.parameters.iter().map(|field| field.variable.name).collect();
+    assert_eq!(fields, [b"transactionId".as_slice(), b"cents"]);
+    assert_eq!(
+        &CODE[paid.span().start.offset as usize..paid.span().end.offset as usize],
+        "Paid(string transactionId, int cents)"
+    );
     assert_eq!(run.name.value, b"run");
+}
+
+/// Spec section 20: a case is a type of its own, written through its enum as `PaymentResult.Paid`, and a named
+/// constructor's name still parses.
+#[test]
+fn a_case_type_is_written_through_its_enum() {
+    const CODE: &str = "class Shop\n{\n    public Shop.of(PaymentResult.Paid paid) : this() { }\n    public void settle(PaymentResult.Paid paid) { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Shop.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let hints: Vec<&[u8]> = Node::Program(program).filter_map(|node| match node {
+        Node::Hint(Hint::Identifier(identifier)) => Some(identifier.value()),
+        _ => None,
+    });
+    assert_eq!(hints, [b"PaymentResult.Paid".as_slice(), b"PaymentResult.Paid"]);
 }
 
 /// A PHP#-only parse error is its own message, so `mago analyze` shows the rule as the issue's title.

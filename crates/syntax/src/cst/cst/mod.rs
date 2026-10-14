@@ -49,6 +49,7 @@ pub use crate::cst::cst::class_like::constructor::ConstructorName;
 pub use crate::cst::cst::class_like::constructor::NamedConstructor;
 pub use crate::cst::cst::class_like::enum_case::EnumCase;
 pub use crate::cst::cst::class_like::enum_case::EnumCaseBackedItem;
+pub use crate::cst::cst::class_like::enum_case::EnumCaseDataItem;
 pub use crate::cst::cst::class_like::enum_case::EnumCaseItem;
 pub use crate::cst::cst::class_like::enum_case::EnumCaseUnitItem;
 pub use crate::cst::cst::class_like::extension::Extension;

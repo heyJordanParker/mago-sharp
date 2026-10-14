@@ -409,6 +409,8 @@ pub enum Place {
     Enum,
     /// An event, spec section 15: its modifiers, parameters and header.
     Event,
+    /// An enum case that carries data, spec section 20: its fields.
+    Case,
     /// A module and its members.
     Module,
     /// An extension block of a static class: its receiver and its members.
@@ -553,7 +555,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        (Node::Keyword(_) | Node::LocalIdentifier(_) | Node::Identifier(Identifier::Local(_)), _) => Some(place),
+        // A dotted name is a namespace's, an import's, or a case type's, as in `PaymentResult.Paid`.
+        (
+            Node::Keyword(_)
+            | Node::LocalIdentifier(_)
+            | Node::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
+            | Node::DottedIdentifier(_),
+            _,
+        ) => Some(place),
         // A missing terminator ends the statement a leave runs, as in `a ?? return`, and is otherwise a parse error.
         (Node::Terminator(Terminator::Semicolon(_) | Terminator::Missing(_)) | Node::MissingTerminator(_), _) => {
             Some(place)
@@ -577,8 +586,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::NamespaceImplicitBody(_)
             // A braced namespace's body, after its namespace was refused.
             | Node::Block(_)
-            | Node::Identifier(Identifier::Dotted(_))
-            | Node::DottedIdentifier(_)
             | Node::Use(_)
             | Node::Extern(_)
             | Node::UseItems(UseItems::Sequence(_))
@@ -602,7 +609,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
         (Node::Interface(_), File) => Some(Interface),
-        (Node::Enum(_), File) => Some(Enum),
+        (Node::Enum(r#enum), File) => {
+            check_case_class_names(r#enum, context);
+
+            Some(Enum)
+        }
         (Node::Event(_), File) => Some(Place::Event),
         (Node::Modifier(Modifier::Public(_)), Place::Event) => Some(Place::Event),
         // Spec section 5's `internal` is not supported yet on any declaration.
@@ -615,7 +626,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        (Node::FunctionLikeParameter(parameter), Place::Event) => check_event_parameter(parameter, context),
+        (Node::FunctionLikeParameter(parameter), Place::Event) => {
+            check_event_parameter(parameter, Place::Event, context)
+        }
         (Node::Module(module), File) => check_module_file_name(module, context),
         (Node::ModuleMember(_), Place::Module) => Some(Place::Module),
         // The header names the module it overrides, which `check_module_file_name` checked.
@@ -625,7 +638,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Binding(_), Place::Module) => Some(Method),
         (Node::BindingValue(BindingValue::Expression(_)), Method) => Some(Body),
         (Node::BindingTarget(_) | Node::BindingValue(_) | Node::BindingClasses(_), Method) => Some(Method),
-        (Node::FunctionLikeParameterList(parameters), Method | Signature | Place::Event) => {
+        (Node::FunctionLikeParameterList(parameters), Method | Signature | Place::Event | Place::Case) => {
             report_optional_before_required(parameters, context);
 
             Some(place)
@@ -801,6 +814,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Node::ClassLikeMember(ClassLikeMember::EnumCase(_)) | Node::EnumCaseItem(_) | Node::EnumCaseUnitItem(_),
             Enum,
         ) => Some(Enum),
+        // A case's data are its fields, which run as the public get-only properties of the case's class, as an
+        // event's parameters do.
+        (Node::EnumCaseDataItem(_), Enum) => Some(Place::Case),
+        (Node::FunctionLikeParameter(parameter), Place::Case) => check_event_parameter(parameter, Place::Case, context),
         (Node::EnumCaseBackedItem(_), Enum) => Some(Constant),
         (Node::ClassLikeMember(ClassLikeMember::Property(property)), Class) => {
             match is_slice_property(property, &context.version, context.names) {
@@ -2010,11 +2027,21 @@ fn check_extern_event(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> O
     report_refusal(issue, r#extern.span(), Place::File, context)
 }
 
-/// Decides an event's parameter, which runs as a public get-only property of the event, spec section 15: a type, a
-/// name and an optional default. PHP refuses a variadic promoted property, and the event decides the property's
-/// access, so a modifier, accessors and `...` are refused. The rest is checked as a method's parameter.
-fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Context<'_, '_, '_>) -> Option<Place> {
-    let remove = |span: Span, message: &str| {
+/// Decides a parameter of an event, spec section 15, or a field of a case that carries data, spec section 20, at
+/// `place`, which runs as a public get-only property of the class the event or the case runs as: a type, a name and
+/// an optional default. PHP refuses a variadic promoted property, and the declaration decides the property's access,
+/// so a modifier, accessors and `...` are refused. The rest is checked as a method's parameter.
+fn check_event_parameter(
+    parameter: &FunctionLikeParameter,
+    place: Place,
+    context: &mut Context<'_, '_, '_>,
+) -> Option<Place> {
+    let (part, word, owner, an_owner) = if place == Place::Case {
+        ("A case's field", "field", "case", "a case")
+    } else {
+        ("An event's parameter", "parameter", "event", "an event")
+    };
+    let remove = |span: Span, message: String| {
         Issue::error(message).with_annotation(Annotation::primary(span).with_message("Remove this."))
     };
     let issue = if let Some(modifier) = parameter.modifiers.first() {
@@ -2022,21 +2049,21 @@ fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Contex
         // `internal` again as not supported yet.
         context.report(remove(
             modifier.span(),
-            "An event's parameter takes no modifier: it is a public get-only property of the event.",
+            format!("{part} takes no modifier: it is a public get-only property of the {owner}."),
         ));
 
         return None;
     } else if let Some(accessors) = &parameter.hooks {
-        remove(accessors.span(), "An event's parameter takes no accessors: it is a get-only property of the event.")
+        remove(accessors.span(), format!("{part} takes no accessors: it is a get-only property of the {owner}."))
     } else if let Some(ellipsis) = parameter.ellipsis {
-        remove(ellipsis, "An event's parameter cannot be variadic: it is one property of the event.")
+        remove(ellipsis, format!("{part} cannot be variadic: it is one property of the {owner}."))
     } else if let Some(Hint::Generic(set) | Hint::Nullable(NullableHint { hint: Hint::Generic(set), .. })) =
         &parameter.hint
         && set.name.value == b"Set"
     {
-        Issue::error("A `Set` parameter of an event is not supported yet in PHP#.")
+        Issue::error(format!("A `Set` {word} of {an_owner} is not supported yet in PHP#."))
             .with_annotation(Annotation::primary(set.span()).with_message("Not supported yet."))
-            .with_note("An event's parameter is its property, and an event cannot yet make its argument a `Set`.")
+            .with_note(format!("{part} is its property, and {an_owner} cannot yet make its argument a `Set`."))
     } else {
         return enter(Node::FunctionLikeParameter(parameter), Place::Method, context);
     };
@@ -3104,10 +3131,12 @@ fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
     }
 }
 
-/// Whether the slice has a type: the built-in types of spec section 24, or a class written by its short name, or a
-/// nullable type, or `List<T>`, `Map<TKey, TValue>` or `Set<T>` of spec section 12, or a function type of spec section
-/// 14.1 without a `void` parameter, whose inner types the walk checks next. A `Set` holds an `int`, a `string` or a
-/// named type, which the analyzer accepts only as a backed enum, because its elements run as the keys of a PHP array.
+/// Whether the slice has a type: the built-in types of spec section 24, or a class written by its short name, or a case
+/// of an enum written through the enum, as `PaymentResult.Paid` of spec section 20, or a nullable type, or `List<T>`,
+/// `Map<TKey, TValue>` or `Set<T>` of spec section 12, or a function type of spec section 14.1 without a `void`
+/// parameter, whose inner types the walk checks next. A `Set` holds an `int`, a `string` or a named type, which the
+/// analyzer accepts only as a backed enum, because its elements run as the keys of a PHP array. The analyzer refuses a
+/// dotted type that names no case.
 fn is_slice_type(hint: &Hint) -> bool {
     match hint {
         Hint::Integer(_)
@@ -3115,7 +3144,7 @@ fn is_slice_type(hint: &Hint) -> bool {
         | Hint::Bool(_)
         | Hint::String(_)
         | Hint::Void(_)
-        | Hint::Identifier(Identifier::Local(_))
+        | Hint::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
         | Hint::Nullable(_) => true,
         Hint::Mixed(any) => any.value == ANY,
         Hint::Generic(generic) => match (generic.name.value, generic.arguments.as_slice()) {
@@ -3794,7 +3823,10 @@ fn supported(place: Place) -> &'static str {
             "A PHP# interface method has no modifier, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body."
         }
         Place::Enum => {
-            "A PHP# enum has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, methods and laws, with no other modifiers or `implements`."
+            "A PHP# enum has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."
+        }
+        Place::Case => {
+            "A PHP# case that carries data has fields, each a type and a name with an optional default, as in `case Paid(string transactionId);`."
         }
         Place::Event => {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
@@ -4431,6 +4463,51 @@ fn check_local_name(name: &[u8], span: Span, kind: &str, context: &mut Context<'
         );
     } else {
         check_declared_name(name, span, context);
+    }
+}
+
+/// Refuses, in an enum with a case that carries data, spec section 20, a case named as a type PHP# reserves, since each
+/// case runs as a class of its name, and a method named as a case that carries data, ignoring case as PHP does, since
+/// `PaymentResult.Paid(…)` creates that case.
+fn check_case_class_names(r#enum: &mago_syntax::cst::Enum, context: &mut Context<'_, '_, '_>) {
+    if !r#enum.has_data_case() {
+        return;
+    }
+
+    for member in &r#enum.members {
+        let ClassLikeMember::EnumCase(case) = member else {
+            continue;
+        };
+        let name = case.item.name();
+        if is_reserved_class_name(name.value) {
+            context.report(
+                Issue::error(format!(
+                    "A case of an enum whose cases carry data is a class, so it can't be named `{}`.",
+                    BytesDisplay(name.value)
+                ))
+                .with_annotation(Annotation::primary(name.span).with_message("Case declared here."))
+                .with_note("PHP# reserves this name for a type."),
+            );
+        }
+
+        let method = r#enum.members.iter().find_map(|member| match member {
+            ClassLikeMember::Method(method) if method.name.value.eq_ignore_ascii_case(name.value) => Some(method),
+            _ => None,
+        });
+        if let (mago_syntax::cst::EnumCaseItem::Data(_), Some(method)) = (&case.item, method) {
+            context.report(
+                Issue::error(format!(
+                    "The method `{}` shares its name with the case `{}`, which `{}.{}(…)` creates.",
+                    BytesDisplay(method.name.value),
+                    BytesDisplay(name.value),
+                    BytesDisplay(r#enum.name.value),
+                    BytesDisplay(name.value),
+                ))
+                .with_annotation(Annotation::primary(method.name.span).with_message("Method declared here."))
+                .with_annotation(Annotation::secondary(name.span).with_message("Case declared here."))
+                .with_help("Rename the method."),
+            );
+        }
     }
 }
 

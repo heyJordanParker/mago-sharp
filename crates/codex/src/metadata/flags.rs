@@ -71,6 +71,9 @@ impl MetadataFlags {
     /// A PHP# extension's computed property, spec section 26: the public static method of a static class it runs as,
     /// which takes only the extension's receiver and is read as a property of the receiver.
     pub const EXTENSION_PROPERTY: MetadataFlags = MetadataFlags(1 << 50);
+    /// A PHP# enum case that runs as a class, spec section 20: the final subclass of its enum, named in the enum's
+    /// namespace, that a case of an enum with a case that carries data runs as.
+    pub const ENUM_CASE_CLASS: MetadataFlags = MetadataFlags(1 << 51);
 }
 
 impl MetadataFlags {
@@ -159,6 +162,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_event(self) -> bool {
         self.contains(Self::EVENT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_enum_case_class(self) -> bool {
+        self.contains(Self::ENUM_CASE_CLASS)
     }
 
     #[inline]

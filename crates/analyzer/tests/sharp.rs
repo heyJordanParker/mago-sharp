@@ -4160,6 +4160,73 @@ fn a_properties_pattern_on_a_value_that_cannot_be_null_reports_nothing_and_its_p
     assert_eq!(codes(&php_issues), ["redundant-type-comparison", "redundant-logical-operation"]);
 }
 
+const PAYMENT_RESULT: (&str, &str) = (
+    "src/App/PaymentResult.sharp",
+    "namespace App;\n\npublic enum PaymentResult\n{\n    case Paid(string transactionId);\n    case Declined(string reason);\n    case RequiresAction(string redirect);\n\n    public string label() => \"payment\";\n}\n",
+);
+
+const CHECKOUT_STATE: (&str, &str) = (
+    "src/App/CheckoutState.sharp",
+    "namespace App;\n\npublic enum CheckoutState\n{\n    case Open;\n    case Paying(string gateway);\n}\n",
+);
+
+/// Spec section 20: each case of an enum with a case that carries data is a type of its own. `PaymentResult.Declined(…)`
+/// creates one, its fields are its properties, a method can take one case alone, and a plain case is one object of its
+/// own type.
+#[test]
+fn a_data_case_is_a_type_of_its_own() {
+    let code = "namespace App;\n\nclass Shop\n{\n    public PaymentResult decline() => PaymentResult.Declined(reason: \"card expired\");\n    public string reason(PaymentResult.Declined d) => d.reason;\n    public int wrong(PaymentResult.Declined d) => d.reason;\n    public string settle(PaymentResult.Paid paid) => paid.transactionId;\n    public string refuse() => this.settle(PaymentResult.Declined(reason: \"x\"));\n    public CheckoutState open() => CheckoutState.Open;\n    public CheckoutState.Open same() => CheckoutState.Open;\n    public PaymentResult missing() => PaymentResult.Paid(42);\n    public string label(PaymentResult result) => result.label();\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Shop.sharp", code), &[PAYMENT_RESULT, CHECKOUT_STATE]),
+        ["7:51 invalid-return-statement", "9:43 invalid-argument", "12:58 invalid-argument"]
+    );
+
+    // A dotted type names a case, and never a class of another namespace.
+    let order = ("src/App/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order { }\n");
+    let dotted = "namespace App;\n\nclass Till\n{\n    public bool open(Shop.Order order) => true;\n}\n";
+    let messages: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Till.sharp", dotted), &[order])
+        .into_iter()
+        .map(|issue| format!("{} {}", located(dotted, &issue), issue.message))
+        .collect();
+    assert_eq!(messages, ["5:22 non-existent-class-like `Shop.Order` is no case of an enum."]);
+
+    // A plain case is an object, which a parameter's default cannot hold yet.
+    let default =
+        "namespace App;\n\nclass Till\n{\n    public bool open(CheckoutState state = CheckoutState.Open) => true;\n}\n";
+    let messages: Vec<String> =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Till.sharp", default), &[CHECKOUT_STATE])
+            .into_iter()
+            .map(|issue| format!("{} {}", located(default, &issue), issue.message))
+            .collect();
+    assert_eq!(
+        messages,
+        [
+            "5:44 not-supported-yet Reading a case of an enum whose cases carry data, as `CheckoutState.Open`, in a constant expression is not supported yet in PHP#."
+        ]
+    );
+}
+
+/// A file that declares the class a case runs as clashes with the case, whichever is read first.
+#[test]
+fn a_class_named_as_a_case_is_an_error_that_names_the_case() {
+    let messages = |analyzed, others: &[(&'static str, &'static str)]| -> Vec<String> {
+        analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().map(|issue| issue.message).collect()
+    };
+
+    let case = "The case `PaymentResult.Paid` runs as a class of that name, which another file declares.";
+    let class = "Class `Paid` clashes with the case `PaymentResult.Paid`, which runs as a class of that name.";
+    // The codebase keeps one declaration of a name, chosen by where each is written, and the other one is reported.
+    for (path, in_class, in_enum) in
+        [("src/App/PaymentResult/Paid.sharp", None, Some(case)), ("app/Paid.sharp", Some(class), None)]
+    {
+        let declared = (path, "namespace App.PaymentResult;\n\nclass Paid { }\n");
+
+        assert_eq!(messages(declared, &[PAYMENT_RESULT]), Vec::from_iter(in_class), "{path}");
+        assert_eq!(messages(PAYMENT_RESULT, &[declared]), Vec::from_iter(in_enum), "{path}");
+    }
+}
+
 /// Spec section 14.4: `a ?? return`, `a ?? continue` and `a ?? break` leave when `a` is null, so the value is `a`'s type
 /// without null. A `return` value meets the method's return type, a `continue` or `break` needs its loop, and a loop
 /// that leaves only through `?? break` still ends.

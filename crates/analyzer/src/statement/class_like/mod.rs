@@ -109,6 +109,26 @@ fn report_duplicate_definition<A>(
 ) where
     A: Arena,
 {
+    // Spec section 20: a case of an enum with a case that carries data runs as the class of its name.
+    if let Some(case) = context.codebase.get_class_like(name).filter(|original| original.flags.is_enum_case_class()) {
+        let full_name = case.original_name.as_bytes();
+        let separator = full_name.iter().rposition(|&byte| byte == b'\\').unwrap_or_default();
+        let (enum_name, case_name) = (&full_name[..separator], &full_name[separator + 1..]);
+        context.collector.report_with_code(
+            IssueCode::DuplicateDefinition,
+            Issue::error(format!(
+                "{title} `{}` clashes with the case `{}`, which runs as a class of that name.",
+                display_class_like_name(context, case.original_name),
+                display_member(context, word(enum_name), BytesDisplay(case_name)),
+            ))
+            .with_annotation(Annotation::primary(duplicate_span).with_message(format!("{title} declared here.")))
+            .with_annotation(Annotation::secondary(original_span).with_message("Case declared here."))
+            .with_help("Rename the case or the class."),
+        );
+
+        return;
+    }
+
     let name = if context.dialect.is_sharp() {
         display_class_like_name(context, word(name)).to_string()
     } else {
@@ -175,7 +195,13 @@ fn report_class_like_named_as_a_namespace<A>(
         .class_likes
         .values()
         .filter(|other| {
+            // Spec section 20: each case of an enum that carries data runs as a class in the enum's namespace, and a
+            // class another file declares under a case's name clashes with the case instead.
+            let is_own_case =
+                class_like_metadata.permitted_inheritors.as_ref().is_some_and(|cases| cases.contains(&other.name));
+
             (sharp || other.flags.is_sharp())
+                && !is_own_case
                 && other.name.as_bytes().strip_prefix(name).is_some_and(|rest| rest.starts_with(b"\\"))
         })
         .min_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()))

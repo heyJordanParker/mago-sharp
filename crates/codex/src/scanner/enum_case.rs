@@ -57,5 +57,8 @@ where
 
             meta
         }
+        EnumCaseItem::Data(_) => {
+            unreachable!("an enum with a case that carries data registers each case as a class, spec section 20")
+        }
     }
 }

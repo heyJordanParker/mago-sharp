@@ -597,6 +597,11 @@ impl Fingerprintable for EnumCaseItem<'_> {
                 item.name.fingerprint_with_hasher(hasher, resolved_names, options);
                 item.value.fingerprint_with_hasher(hasher, resolved_names, options);
             }
+            EnumCaseItem::Data(item) => {
+                "enum_case_data".hash(hasher);
+                item.name.fingerprint_with_hasher(hasher, resolved_names, options);
+                item.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
         }
     }
 }

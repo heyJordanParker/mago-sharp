@@ -76,6 +76,7 @@ use crate::cst::cst::Enum;
 use crate::cst::cst::EnumBackingTypeHint;
 use crate::cst::cst::EnumCase;
 use crate::cst::cst::EnumCaseBackedItem;
+use crate::cst::cst::EnumCaseDataItem;
 use crate::cst::cst::EnumCaseItem;
 use crate::cst::cst::EnumCaseUnitItem;
 use crate::cst::cst::EvalConstruct;
@@ -335,6 +336,7 @@ pub enum NodeKind {
     EnumCaseBackedItem,
     EnumCaseItem,
     EnumCaseUnitItem,
+    EnumCaseDataItem,
     Extends,
     Implements,
     Inheritance,
@@ -625,6 +627,7 @@ pub enum Node<'ast, 'arena> {
     EnumCaseBackedItem(&'ast EnumCaseBackedItem<'arena>),
     EnumCaseItem(&'ast EnumCaseItem<'arena>),
     EnumCaseUnitItem(&'ast EnumCaseUnitItem<'arena>),
+    EnumCaseDataItem(&'ast EnumCaseDataItem<'arena>),
     Extends(&'ast Extends<'arena>),
     Implements(&'ast Implements<'arena>),
     Inheritance(&'ast Inheritance<'arena>),
@@ -1001,6 +1004,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::EnumCaseBackedItem(_) => NodeKind::EnumCaseBackedItem,
             Self::EnumCaseItem(_) => NodeKind::EnumCaseItem,
             Self::EnumCaseUnitItem(_) => NodeKind::EnumCaseUnitItem,
+            Self::EnumCaseDataItem(_) => NodeKind::EnumCaseDataItem,
             Self::Extends(_) => NodeKind::Extends,
             Self::Implements(_) => NodeKind::Implements,
             Self::Inheritance(_) => NodeKind::Inheritance,
@@ -1441,8 +1445,13 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::EnumCaseItem(node) => match &node {
                 EnumCaseItem::Backed(node) => f(Node::EnumCaseBackedItem(node)),
                 EnumCaseItem::Unit(node) => f(Node::EnumCaseUnitItem(node)),
+                EnumCaseItem::Data(node) => f(Node::EnumCaseDataItem(node)),
             },
             Node::EnumCaseUnitItem(node) => f(Node::LocalIdentifier(&node.name)),
+            Node::EnumCaseDataItem(node) => {
+                f(Node::LocalIdentifier(&node.name));
+                f(Node::FunctionLikeParameterList(&node.parameter_list));
+            }
             Node::Extends(node) => {
                 f(Node::Keyword(&node.extends));
                 for item in node.types.iter() {
@@ -3067,6 +3076,7 @@ impl HasSpan for Node<'_, '_> {
             Self::EnumCaseBackedItem(node) => node.span(),
             Self::EnumCaseItem(node) => node.span(),
             Self::EnumCaseUnitItem(node) => node.span(),
+            Self::EnumCaseDataItem(node) => node.span(),
             Self::Extends(node) => node.span(),
             Self::Implements(node) => node.span(),
             Self::Inheritance(node) => node.span(),

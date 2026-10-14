@@ -963,6 +963,28 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
                             );
                         }
                     }
+                    // Spec section 20: an enum is backed, every case with a value, or not, its cases plain or
+                    // carrying data.
+                    EnumCaseItem::Data(item) => {
+                        if enum_is_backed {
+                            context.report(
+                                Issue::error(format!(
+                                    "Case `{item_name}` of backed enum `{enum_name}` must not carry data."
+                                ))
+                                .with_annotation(
+                                    Annotation::primary(item.parameter_list.span())
+                                        .with_message("Data the case carries."),
+                                )
+                                .with_annotation(
+                                    Annotation::secondary(r#enum.span())
+                                        .with_message(format!("Enum `{enum_fqcn}` defined here.")),
+                                )
+                                .with_help(format!(
+                                    "Remove the data from case `{item_name}` or remove the backing from the enum `{enum_name}`."
+                                )),
+                            );
+                        }
+                    }
                 }
             }
             ClassLikeMember::Method(method) => {

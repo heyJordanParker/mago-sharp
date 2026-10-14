@@ -3,6 +3,7 @@ use mago_span::Span;
 
 use crate::cst::cst::argument::PartialArgumentList;
 use crate::cst::cst::attribute::AttributeList;
+use crate::cst::cst::class_like::enum_case::EnumCaseItem;
 use crate::cst::cst::class_like::inheritance::Extends;
 use crate::cst::cst::class_like::inheritance::Implements;
 use crate::cst::cst::class_like::inheritance::Inheritance;
@@ -252,6 +253,17 @@ impl HasSpan for Enum<'_> {
         }
 
         self.r#enum.span().join(self.right_brace)
+    }
+}
+
+impl Enum<'_> {
+    /// Whether a case of this PHP# enum carries data, spec section 20, so the enum runs as an abstract class and each
+    /// case as a class of its own.
+    #[must_use]
+    pub fn has_data_case(&self) -> bool {
+        self.members.iter().any(
+            |member| matches!(member, ClassLikeMember::EnumCase(case) if matches!(case.item, EnumCaseItem::Data(_))),
+        )
     }
 }
 

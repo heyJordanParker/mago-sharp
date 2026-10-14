@@ -4311,6 +4311,29 @@ fn a_backing_type_other_than_int_or_string_reports_only_the_php_error() {
     assert_eq!(issues(code), ["3:15 Enum `Status` backing type must be either `string` or `int`, but found `float`."]);
 }
 
+/// Spec section 20: an enum is backed, every case with a value and none carrying data, or not, any mix of plain cases
+/// and cases that carry data. A case's fields are its class's public get-only properties, as an event's parameters are.
+#[test]
+fn enum_shapes_are_backed_or_not() {
+    let code = "namespace App.Shop;\n\nenum Plan : string\n{\n    case Free = \"free\";\n    case Custom(int seats);\n}\n\nenum PaymentResult\n{\n    case Paid(public string transactionId);\n    case Declined(string ...reasons);\n    case Tagged(Set<string> tags);\n    case Held(string reason { get; });\n}\n\nenum Timing\n{\n    case Later(int seconds);\n    case Never;\n    case Void;\n\n    public int later() => 1;\n    public int void() => 2;\n}\n";
+    let fixed = "namespace App.Shop;\n\nenum PaymentResult\n{\n    case Paid(string transactionId);\n    case Declined(string reason);\n    case RequiresAction(string redirect);\n}\n\nenum CheckoutState\n{\n    case Open;\n    case Paying(string gateway, int attempt = 1);\n    case Done(Order order);\n}\n\nclass Order { }\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "6:16 Case `Custom` of backed enum `Plan` must not carry data.",
+            "11:15 A case's field takes no modifier: it is a public get-only property of the case.",
+            "12:26 A case's field cannot be variadic: it is one property of the case.",
+            "13:17 A `Set` field of a case is not supported yet in PHP#.",
+            "14:29 A case's field takes no accessors: it is a get-only property of the case.",
+            "23:16 The method `later` shares its name with the case `Later`, which `Timing.Later(…)` creates.",
+            "20:10 A case of an enum whose cases carry data is a class, so it can't be named `Never`.",
+            "21:10 A case of an enum whose cases carry data is a class, so it can't be named `Void`.",
+        ]
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
+}
+
 #[test]
 fn an_enum_method_without_a_return_type_is_an_error() {
     let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    public status() {}\n    public label() {}\n}\n";

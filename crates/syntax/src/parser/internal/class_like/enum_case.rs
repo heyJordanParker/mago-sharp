@@ -2,6 +2,7 @@ use crate::T;
 use crate::cst::cst::AttributeList;
 use crate::cst::cst::EnumCase;
 use crate::cst::cst::EnumCaseBackedItem;
+use crate::cst::cst::EnumCaseDataItem;
 use crate::cst::cst::EnumCaseItem;
 use crate::cst::cst::EnumCaseUnitItem;
 use crate::cst::sequence::Sequence;
@@ -28,8 +29,9 @@ where
     fn parse_enum_case_item(&mut self) -> Result<EnumCaseItem<'arena>, ParseError> {
         let name = self.parse_local_identifier()?;
         if self.dialect.is_sharp() && self.stream.is_at(T!["("])? {
-            let data_case = name.span.join(self.parse_function_like_parameter_list()?.right_parenthesis);
-            self.errors.push(ParseError::NotSupportedYetInSharp("A case that carries data", data_case));
+            let parameter_list = self.parse_function_like_parameter_list()?;
+
+            return Ok(EnumCaseItem::Data(EnumCaseDataItem { name, parameter_list }));
         }
 
         Ok(match self.stream.peek_kind(0)? {

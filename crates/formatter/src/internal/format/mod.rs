@@ -25,6 +25,7 @@ use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::EnumCaseBackedItem;
+use mago_syntax::cst::EnumCaseDataItem;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::EnumCaseUnitItem;
 use mago_syntax::cst::Expression;
@@ -987,6 +988,7 @@ where
             match self {
                 EnumCaseItem::Unit(c) => c.format(f),
                 EnumCaseItem::Backed(c) => c.format(f),
+                EnumCaseItem::Data(c) => c.format(f),
             }
         })
     }
@@ -998,6 +1000,17 @@ where
 {
     fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
         wrap!(f, self, EnumCaseUnitItem, { self.name.format(f) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for EnumCaseDataItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, EnumCaseDataItem, {
+            Document::Array(vec_in![f.arena; self.name.format(f), self.parameter_list.format(f)])
+        })
     }
 }
 

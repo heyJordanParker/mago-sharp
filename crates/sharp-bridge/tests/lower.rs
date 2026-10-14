@@ -6708,6 +6708,153 @@ fn a_listener_lowers_to_its_method_alone() {
 /// }
 /// ```
 ///
+/// ```php
+/// abstract class CheckoutState
+/// {
+///     public function label(): string { return 'checkout'; }
+/// }
+/// final class CheckoutState\Open extends \App\CheckoutState
+/// {
+///     private static $instance;
+///     private function __construct() {}
+///     public static function instance(): self { return self::$instance ??= new self(); }
+/// }
+/// final class CheckoutState\Paying extends \App\CheckoutState
+/// {
+///     public function __construct(public readonly string $gateway) {}
+/// }
+/// class Shop
+/// {
+///     public function open(): \App\CheckoutState { return \App\CheckoutState\Open::instance(); }
+///     public function pay(): \App\CheckoutState { return new \App\CheckoutState\Paying(gateway: 'stripe'); }
+/// }
+/// ```
+///
+/// Spec section 20: an enum with a case that carries data is an abstract class, `[64]`
+/// `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS`, and each case a final subclass named in the enum's namespace. A plain case is the
+/// one object its class's `instance()` gives, and `CheckoutState.Paying(…)` creates its case.
+#[test]
+fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic enum CheckoutState\n{\n    case Open;\n    case Paying(string gateway);\n\n    public string label() => \"checkout\";\n}\n\npublic class Shop\n{\n    public CheckoutState open() => CheckoutState.Open;\n    public CheckoutState pay() => CheckoutState.Paying(gateway: \"stripe\");\n}\n",
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App"
+                null
+              CLASS [64] "CheckoutState" @3-9
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "label" @8-8
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ZVAL "checkout"
+                    ZVAL [1] "string"
+                    null
+                null
+                null
+              CLASS [32] "CheckoutState\\Open" @5-5
+                ZVAL "App\\CheckoutState"
+                null
+                STMT_LIST
+                  PROP_GROUP [20]
+                    null
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "instance"
+                        null
+                        null
+                        null
+                    null
+                  METHOD [4] "__construct" @5-5
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                    null
+                    null
+                  METHOD [17] "instance" @5-5
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ASSIGN_COALESCE
+                          STATIC_PROP
+                            ZVAL [1] "self"
+                            ZVAL "instance"
+                          NEW
+                            ZVAL [1] "self"
+                            ARG_LIST
+                    ZVAL [1] "self"
+                    null
+                null
+                null
+              CLASS [32] "CheckoutState\\Paying" @6-6
+                ZVAL "App\\CheckoutState"
+                null
+                STMT_LIST
+                  METHOD [1] "__construct" @6-6
+                    PARAM_LIST
+                      PARAM [129]
+                        ZVAL [1] "string"
+                        ZVAL "gateway"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    null
+                    null
+                null
+                null
+              CLASS "Shop" @11-15
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "open" @13-13
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_CALL
+                          ZVAL "App\\CheckoutState\\Open"
+                          ZVAL "instance"
+                          ARG_LIST
+                    ZVAL "App\\CheckoutState"
+                    null
+                  METHOD [1] "pay" @14-14
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        NEW
+                          ZVAL "App\\CheckoutState\\Paying"
+                          ARG_LIST
+                            NAMED_ARG
+                              ZVAL "gateway"
+                              ZVAL "stripe"
+                    ZVAL "App\\CheckoutState"
+                    null
+                null
+                null
+        "#}
+    );
+}
+
 /// Spec section 15: an event is a final class, `[32]` `ZEND_ACC_FINAL`, whose constructor promotes each parameter to a
 /// public get-only property, `[129]` `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, and its header is the `implements` name
 /// list. An interface's get-only property, written bare, is a public property, `[1]`, with an abstract `get` hook.

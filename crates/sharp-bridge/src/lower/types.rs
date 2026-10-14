@@ -61,6 +61,9 @@ pub enum DeclarationKind {
     },
     Constant,
     EnumCase,
+    /// The one object of a plain case of an enum with a case that carries data, spec section 20, which the static
+    /// `instance()` of the case's class gives. The declaration's class is the case's class.
+    CaseObject,
     StaticProperty,
     /// `typed` is whether the property's root declaration, the one at the bottom of its chain of overrides, has a type.
     /// PHP refuses a type on an override of an untyped property, so every override above an untyped root runs untyped.
@@ -154,7 +157,9 @@ impl<'analysis> Types<'analysis> {
     pub fn member_declaration(&self, class: &[u8], member: &[u8]) -> Declaration {
         let declared = |kind, public| Declaration { kind, class: word(class), name: word(member), public };
 
-        if self.codebase.get_enum_case(class, member).is_some() {
+        if let Some(case) = self.enum_case_class(class, member) {
+            Declaration { kind: DeclarationKind::CaseObject, class: case, name: word(b"instance"), public: true }
+        } else if self.codebase.get_enum_case(class, member).is_some() {
             declared(DeclarationKind::EnumCase, true)
         } else if let Some(constant) = self.codebase.get_class_constant(class, member) {
             declared(DeclarationKind::Constant, constant.visibility.is_public())
@@ -171,6 +176,17 @@ impl<'analysis> Types<'analysis> {
                 String::from_utf8_lossy(member)
             )
         }
+    }
+
+    /// The full name of the class the case `case` of the enum whose full name is `class` runs as, when a case of the
+    /// enum carries data, spec section 20: `App\PaymentResult\Paid` for `App\PaymentResult` and `Paid`.
+    #[must_use]
+    pub fn enum_case_class(&self, class: &[u8], case: &[u8]) -> Option<Word> {
+        let metadata = self.codebase.get_class_like(&[class, b"\\", case].concat())?;
+
+        (metadata.flags.is_enum_case_class()
+            && metadata.direct_parent_class.is_some_and(|parent| parent.as_bytes().eq_ignore_ascii_case(class)))
+        .then_some(metadata.original_name)
     }
 
     /// The declaration the method call `call`, null-safe or not, runs, as the analysis resolved it when it checked the

@@ -1344,7 +1344,8 @@ where
 
     fn walk_in_hint(&mut self, hint: &'ast Hint<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         if let Hint::Identifier(identifier) = hint {
-            let (name, imported) = self.resolve_class(context, identifier.value());
+            // A PHP# case type, `PaymentResult.Paid`, names the class `PaymentResult\Paid` the case runs as.
+            let (name, imported) = self.resolve_class(context, arena_name(context, identifier));
 
             self.resolved_names.insert_at(identifier.span(), name, imported);
         }

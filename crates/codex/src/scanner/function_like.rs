@@ -18,10 +18,10 @@ use mago_syntax::cst::BindingValue;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::Closure;
-use mago_syntax::cst::Event;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::Function;
+use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::MethodBody;
@@ -48,6 +48,7 @@ use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::function_like::MethodMetadata;
+use crate::metadata::property::PropertyMetadata;
 use crate::metadata::ttype::TypeMetadata;
 use crate::misc::GenericParent;
 use crate::scanner::Context;
@@ -292,12 +293,15 @@ where
     metadata
 }
 
-/// Scans a PHP# event's constructor, spec section 15: it takes the event's parameters, and each sets the get-only
-/// property of its name.
+/// Scans the constructor of the class a PHP# event, spec section 15, or a case that carries data, spec section 20, runs
+/// as, which spans `span` and is named at `name_span`: it takes `parameters`, and each sets the public get-only property
+/// of its name, which this adds to the class.
 #[inline]
-pub(crate) fn scan_event_constructor<'arena, A>(
-    event: &'arena Event<'arena>,
-    class_like_metadata: &ClassLikeMetadata,
+pub(crate) fn scan_promoted_constructor<'arena, A>(
+    span: Span,
+    name_span: Span,
+    parameters: &'arena FunctionLikeParameterList<'arena>,
+    class_like_metadata: &mut ClassLikeMetadata,
     context: &Context<'_, 'arena, A>,
     scope: &NamespaceScope,
 ) -> FunctionLikeMetadata
@@ -309,18 +313,32 @@ where
         FunctionLikeKind::Method,
         name,
         name,
-        event.span(),
+        span,
         MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,
     );
-    metadata.name_span = Some(event.name.span);
-    metadata.parameters = event
-        .parameter_list
+    metadata.name_span = Some(name_span);
+    metadata.parameters = parameters
         .parameters
         .iter()
         .filter_map(|p| scan_function_like_parameter(p, Some(class_like_metadata.original_name), context, scope))
         .collect();
     metadata.method_metadata =
         Some(MethodMetadata { is_constructor: true, visibility: Visibility::Public, ..MethodMetadata::default() });
+
+    for parameter in &metadata.parameters {
+        let mut flags = MetadataFlags::PROMOTED_PROPERTY | MetadataFlags::READONLY;
+        flags |= MetadataFlags::origin_flags(context.file.file_type);
+        if parameter.flags.has_default() {
+            flags |= MetadataFlags::HAS_DEFAULT;
+        }
+
+        let mut property = PropertyMetadata::new(*parameter.get_name(), flags);
+        property.set_name_span(Some(parameter.get_name_span()));
+        property.set_span(Some(parameter.get_span()));
+        property.set_visibility(Visibility::Public, Visibility::Protected);
+        property.set_type_declaration_metadata(parameter.get_type_declaration_metadata().cloned());
+        class_like_metadata.add_property_metadata(property);
+    }
 
     metadata
 }
