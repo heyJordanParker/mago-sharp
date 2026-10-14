@@ -650,12 +650,14 @@ where
         .collect();
     let mut left_classes: Vec<&ClassLikeMetadata> = Vec::new();
     for class in atomics().filter_map(|atomic| closed_class(atomic, context.codebase)) {
+        // A member of the set inherits the set's `permitted_inheritors` from its parent, so only a class outside its
+        // own set, the enum or the sealed interface, stands for the whole set.
         let members: Vec<&ClassLikeMetadata> = match &class.permitted_inheritors {
-            Some(inheritors) => inheritors
+            Some(inheritors) if !inheritors.contains(&class.name) => inheritors
                 .iter()
                 .filter_map(|inheritor| context.codebase.get_class_like(inheritor.as_bytes()))
                 .collect(),
-            None => vec![class],
+            _ => vec![class],
         };
         for member in members {
             let is_tested = tested.iter().any(|tested| tested.eq_ignore_ascii_case(member.name.as_bytes()));
