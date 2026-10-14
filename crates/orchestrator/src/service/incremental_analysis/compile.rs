@@ -222,7 +222,9 @@ impl IncrementalAnalysisService {
             .codebase
             .class_likes
             .values()
-            .filter(|class_like| !class_like.flags.is_built_in())
+            // A case of an enum whose cases carry data runs as a class in the namespace named as its enum, which Lean
+            // declares as the enum's inductive type, spec section 20.
+            .filter(|class_like| !class_like.flags.is_built_in() && !class_like.flags.is_enum_case_class())
             .filter_map(|class_like| {
                 let name = class_like.original_name.as_str_lossy();
                 let (namespace, _) = name.rsplit_once('\\')?;
