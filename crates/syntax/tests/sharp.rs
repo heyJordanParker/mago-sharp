@@ -2954,6 +2954,55 @@ fn static_starts_a_static_class_and_extern_a_method_without_a_body() {
     assert_eq!(source(CODE, &methods[1].modifiers.as_slice()[0]), "extern");
 }
 
+/// `foreign` is among a class's modifiers, spec section 29, after an attribute too, and stays a name elsewhere, here
+/// a field's class type.
+#[test]
+fn foreign_is_a_class_modifier_and_stays_a_name_elsewhere() {
+    for code in [
+        "public foreign class Payments\n{\n    foreign gateway;\n}\n",
+        "[Audited]\nforeign class Payments\n{\n    foreign gateway;\n}\n",
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "app/Billing/Payments.sharp", code);
+
+        assert!(program.errors.is_empty(), "{code}: {:#?}", program.errors);
+        let Some(Statement::Class(class)) = program.statements.first() else {
+            panic!("expected a class, got {:#?}", program.statements);
+        };
+        let modifiers: Vec<String> = class.modifiers.iter().map(ToString::to_string).collect();
+        assert_eq!(modifiers.last().map(String::as_str), Some("Foreign"), "{code}");
+        let Some(ClassLikeMember::Property(field)) = class.members.first() else {
+            panic!("expected a field, got {:#?}", class.members);
+        };
+        assert_eq!(field.hint().map(|hint| source(code, hint)), Some("foreign"), "{code}");
+    }
+}
+
+/// A method without a body states the effects its implementations may have after `uses`, spec section 29: an
+/// interface's and an abstract class's.
+#[test]
+fn a_method_without_a_body_takes_uses() {
+    for code in [
+        "public interface Gateway\n{\n    int charge(int cents) uses Payments, Http;\n}\n",
+        "public abstract class Gateway\n{\n    public abstract int charge(int cents) uses Payments, Http;\n}\n",
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "app/Billing/Gateway.sharp", code);
+
+        assert!(program.errors.is_empty(), "{code}: {:#?}", program.errors);
+        let members = match program.statements.first() {
+            Some(Statement::Interface(interface)) => &interface.members,
+            Some(Statement::Class(class)) => &class.members,
+            _ => panic!("expected an interface or a class, got {:#?}", program.statements),
+        };
+        let Some(ClassLikeMember::Method(method)) = members.first() else {
+            panic!("expected a method, got {members:#?}");
+        };
+        let uses: Vec<&[u8]> = method.uses.iter().flat_map(|uses| uses.names.iter()).map(|name| name.value).collect();
+        assert_eq!(uses, [b"Payments".as_slice(), b"Http"], "{code}");
+    }
+}
+
 /// PHP has no `extern`, so a `.php` file keeps reading it as a name, here a property's class type.
 #[test]
 fn extern_in_a_php_file_is_a_name() {

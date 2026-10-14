@@ -16,7 +16,6 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
-use mago_names::STANDARD_EFFECTS;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
@@ -67,21 +66,20 @@ pub(crate) fn sharp_class_like_name(
 }
 
 /// Returns the effect `effect` as a `uses` in a `.sharp` file with the `imported_names` of its imports writes it. A
-/// standard effect is the name the file's import of it gives it, as in `Post` for `import Sharp.Mail as Post;`, or
-/// else its own name, which is that effect in every `uses` whatever class the file imports or declares under it, spec
-/// section 29. Any other effect is named as [`sharp_class_like_name`] names a class.
+/// standard effect, one of the `Sharp` namespace, is the name the file's import of it gives it, as in `Post` for
+/// `import Sharp.Mail as Post;`, or else its own name, which is that effect in every `uses` whatever class the file
+/// imports or declares under it, spec section 29. Any other effect is named as [`sharp_class_like_name`] names a class.
 pub(crate) fn sharp_effect_name(
     codebase: &CodebaseMetadata,
     imported_names: &WordMap<Word>,
     short_name_counts: &OnceCell<HashMap<String, u32>>,
     effect: Word,
 ) -> String {
-    match STANDARD_EFFECTS.iter().find(|standard| standard.as_bytes().eq_ignore_ascii_case(effect.as_bytes())) {
-        Some(standard) => imported_names
-            .get(&ascii_lowercase_word(standard.as_bytes()))
-            .map_or_else(|| short_name(standard), ToString::to_string),
-        None => sharp_class_like_name(codebase, imported_names, short_name_counts, effect),
+    if !effect.as_bytes().get(..6).is_some_and(|namespace| namespace.eq_ignore_ascii_case(b"Sharp\\")) {
+        return sharp_class_like_name(codebase, imported_names, short_name_counts, effect);
     }
+
+    imported_names.get(&ascii_lowercase_word(effect.as_bytes())).map_or_else(|| short_name(effect), ToString::to_string)
 }
 
 /// Whether another class-like of the project or its vendors has the short name of the class-like `name`, compared

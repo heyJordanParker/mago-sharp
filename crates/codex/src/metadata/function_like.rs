@@ -136,6 +136,10 @@ pub struct FunctionLikeMetadata {
     /// for every method that listens to nothing.
     pub listens: Vec<Word>,
 
+    /// The fully qualified names a PHP# method without a body lists after `uses`, spec section 29: the effects its
+    /// implementations may have. Empty for a pure declaration and for every method with a body.
+    pub uses: Vec<Word>,
+
     /// Contains context information needed for resolving types within this function's scope
     /// (e.g., `use` statements, current namespace, class context). Often populated during analysis.
     pub type_resolution_context: Option<TypeResolutionContext>,
@@ -241,6 +245,7 @@ impl FunctionLikeMetadata {
             attributes: vec![],
             method_metadata,
             listens: vec![],
+            uses: vec![],
             type_resolution_context: None,
             thrown_types: vec![],
             assertions: BTreeMap::new(),

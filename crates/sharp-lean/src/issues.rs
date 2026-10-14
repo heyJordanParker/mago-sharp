@@ -32,7 +32,7 @@ pub(crate) const RECURSION: &str = "Mago does not translate recursion to Lean.";
 pub(crate) const LAMBDA: &str = "Mago does not translate lambdas to Lean.";
 pub(crate) const INHERITANCE: &str = "Mago does not translate inheritance to Lean.";
 pub(crate) const INTERFACE_METHOD: &str =
-    "Mago does not translate interface methods to Lean, because an implementation can have effects.";
+    "Mago does not translate interface methods to Lean, because the implementation that runs is chosen at run time.";
 pub(crate) const ACCESSOR: &str = "Mago does not translate accessor bodies to Lean.";
 pub(crate) const CONSTRUCTOR_BODY: &str = "Mago does not translate constructor bodies to Lean.";
 pub(crate) const NOT_TRANSLATED: &str = "Mago does not translate it to Lean.";

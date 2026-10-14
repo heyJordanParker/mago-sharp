@@ -94,7 +94,6 @@ use mago_syntax::walker::walk_while_mut;
 
 use crate::CHANGING_COLLECTION_METHODS;
 use crate::ResolvedNames;
-use crate::STANDARD_EFFECTS;
 use crate::binding::Binding;
 use crate::binding::BindingError;
 use crate::binding::Local;
@@ -377,14 +376,6 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
     }
 }
 
-/// The full name of the standard effect a bare `name` writes, such as `Sharp\Http` for `Http`.
-fn standard_effect(name: &[u8]) -> Option<&'static [u8]> {
-    STANDARD_EFFECTS
-        .iter()
-        .find(|effect| effect.strip_prefix("Sharp\\").is_some_and(|short| short.as_bytes() == name))
-        .map(|effect| effect.as_bytes())
-}
-
 /// The variables a pattern declares.
 fn pattern_variables<'ast, 'arena>(
     pattern: &'ast Pattern<'arena>,
@@ -604,12 +595,12 @@ where
         self.resolved_names.bind(target.span(), Binding::Class);
     }
 
-    /// A name in `uses` names an effect, spec section 29. A standard effect's name is that effect even where the file
-    /// imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
+    /// A name in `uses` names an effect, spec section 29. A class name of the `Sharp` namespace is that class even where
+    /// the file imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
     fn walk_in_uses(&mut self, uses: &'ast Uses<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         for name in &uses.names {
-            let (fqn, imported) = match standard_effect(name.value) {
-                Some(effect) => (effect, false),
+            let (fqn, imported) = match default_class(name.value) {
+                Some(class) => (class, false),
                 None => self.resolve_class(context, name.value),
             };
 
