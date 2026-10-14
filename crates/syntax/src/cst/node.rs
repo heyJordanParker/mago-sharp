@@ -172,6 +172,7 @@ use crate::cst::cst::ModuleParent;
 use crate::cst::cst::NamedArgument;
 use crate::cst::cst::NamedConstructor;
 use crate::cst::cst::NamedPlaceholderArgument;
+use crate::cst::cst::NamedValue;
 use crate::cst::cst::Namespace;
 use crate::cst::cst::NamespaceBody;
 use crate::cst::cst::NamespaceImplicitBody;
@@ -180,6 +181,7 @@ use crate::cst::cst::NotPattern;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
+use crate::cst::cst::ObjectInitializer;
 use crate::cst::cst::On;
 use crate::cst::cst::OpeningTag;
 use crate::cst::cst::Operator;
@@ -228,6 +230,7 @@ use crate::cst::cst::StaticMethodCall;
 use crate::cst::cst::StaticMethodPartialApplication;
 use crate::cst::cst::StaticPropertyAccess;
 use crate::cst::cst::StringPart;
+use crate::cst::cst::Struct;
 use crate::cst::cst::Switch;
 use crate::cst::cst::SwitchBody;
 use crate::cst::cst::SwitchBraceDelimitedBody;
@@ -279,6 +282,7 @@ use crate::cst::cst::VariadicPlaceholderArgument;
 use crate::cst::cst::While;
 use crate::cst::cst::WhileBody;
 use crate::cst::cst::WhileColonDelimitedBody;
+use crate::cst::cst::With;
 use crate::cst::cst::Yield;
 use crate::cst::cst::YieldFrom;
 use crate::cst::cst::YieldPair;
@@ -353,6 +357,7 @@ pub enum NodeKind {
     NamedConstructor,
     ConstructorName,
     Event,
+    Struct,
     ComputedProperty,
     HookedProperty,
     PlainProperty,
@@ -453,6 +458,9 @@ pub enum NodeKind {
     Literal,
     Pipe,
     TypeOf,
+    With,
+    ObjectInitializer,
+    NamedValue,
     GenericClass,
     LiteralFloat,
     LiteralInteger,
@@ -643,6 +651,7 @@ pub enum Node<'ast, 'arena> {
     NamedConstructor(&'ast NamedConstructor<'arena>),
     ConstructorName(&'ast ConstructorName<'arena>),
     Event(&'ast Event<'arena>),
+    Struct(&'ast Struct<'arena>),
     ComputedProperty(&'ast ComputedProperty<'arena>),
     HookedProperty(&'ast HookedProperty<'arena>),
     PlainProperty(&'ast PlainProperty<'arena>),
@@ -853,6 +862,9 @@ pub enum Node<'ast, 'arena> {
     Variable(&'ast Variable<'arena>),
     Pipe(&'ast Pipe<'arena>),
     TypeOf(&'ast TypeOf<'arena>),
+    With(&'ast With<'arena>),
+    ObjectInitializer(&'ast ObjectInitializer<'arena>),
+    NamedValue(&'ast NamedValue<'arena>),
     GenericClass(&'ast GenericClass<'arena>),
     Error(Span),
     MissingTerminator(Span),
@@ -895,6 +907,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Self::Trait(_)
                 | Self::Enum(_)
                 | Self::Event(_)
+                | Self::Struct(_)
                 | Self::Function(_)
                 | Self::Method(_)
                 | Self::Operator(_)
@@ -922,6 +935,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Self::Trait(_)
                 | Self::Enum(_)
                 | Self::Event(_)
+                | Self::Struct(_)
                 | Self::Block(_)
                 | Self::Constant(_)
                 | Self::Function(_)
@@ -1019,6 +1033,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::NamedConstructor(_) => NodeKind::NamedConstructor,
             Self::ConstructorName(_) => NodeKind::ConstructorName,
             Self::Event(_) => NodeKind::Event,
+            Self::Struct(_) => NodeKind::Struct,
             Self::ComputedProperty(_) => NodeKind::ComputedProperty,
             Self::HookedProperty(_) => NodeKind::HookedProperty,
             Self::PlainProperty(_) => NodeKind::PlainProperty,
@@ -1229,6 +1244,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Variable(_) => NodeKind::Variable,
             Self::Pipe(_) => NodeKind::Pipe,
             Self::TypeOf(_) => NodeKind::TypeOf,
+            Self::With(_) => NodeKind::With,
+            Self::ObjectInitializer(_) => NodeKind::ObjectInitializer,
+            Self::NamedValue(_) => NodeKind::NamedValue,
             Self::GenericClass(_) => NodeKind::GenericClass,
             Self::Error(_) => NodeKind::Error,
             Self::MissingTerminator(_) => NodeKind::MissingTerminator,
@@ -1845,6 +1863,22 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     f(Node::ClassLikeMember(item));
                 }
             }
+            Node::Struct(node) => {
+                for item in node.attribute_lists.iter() {
+                    f(Node::AttributeList(item));
+                }
+                for item in node.modifiers.iter() {
+                    f(Node::Modifier(item));
+                }
+                f(Node::Keyword(&node.r#struct));
+                f(Node::LocalIdentifier(&node.name));
+                for item in node.inheritance.iter() {
+                    f(Node::Inheritance(item));
+                }
+                for item in node.members.iter() {
+                    f(Node::ClassLikeMember(item));
+                }
+            }
             Node::EnumBackingTypeHint(node) => {
                 f(Node::Hint(&node.hint));
             }
@@ -2245,6 +2279,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     Expression::As(node) => Node::As(node),
                     Expression::PatternMatch(node) => Node::PatternMatch(node),
                     Expression::TypeOf(node) => Node::TypeOf(node),
+                    Expression::With(node) => Node::With(node),
                     Expression::GenericClass(node) => Node::GenericClass(node),
                     Expression::Error(span) => Node::Error(*span),
                 };
@@ -2413,6 +2448,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
 
                 if let Some(argument_list) = &node.argument_list {
                     f(Node::ArgumentList(argument_list));
+                }
+
+                if let Some(initializer) = &node.initializer {
+                    f(Node::ObjectInitializer(initializer));
                 }
             }
             Node::Keyword(_) => {}
@@ -2827,6 +2866,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Statement::Trait(node) => f(Node::Trait(node)),
                 Statement::Enum(node) => f(Node::Enum(node)),
                 Statement::Event(node) => f(Node::Event(node)),
+                Statement::Struct(node) => f(Node::Struct(node)),
                 Statement::Block(node) => f(Node::Block(node)),
                 Statement::Constant(node) => f(Node::Constant(node)),
                 Statement::Function(node) => f(Node::Function(node)),
@@ -3023,6 +3063,20 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Expression(generic_class.class));
                 f(Node::TypeArgumentList(&generic_class.type_arguments));
             }
+            Node::With(with) => {
+                f(Node::Expression(with.object));
+                f(Node::Keyword(&with.with));
+                f(Node::ObjectInitializer(&with.initializer));
+            }
+            Node::ObjectInitializer(initializer) => {
+                for value in initializer.values.iter() {
+                    f(Node::NamedValue(value));
+                }
+            }
+            Node::NamedValue(value) => {
+                f(Node::LocalIdentifier(&value.name));
+                f(Node::Expression(value.value));
+            }
             Node::Error(_)
             | Node::MissingTerminator(_)
             | Node::ClassLikeMemberMissingSelector(_)
@@ -3109,6 +3163,7 @@ impl HasSpan for Node<'_, '_> {
             Self::NamedConstructor(node) => node.span(),
             Self::ConstructorName(node) => node.span(),
             Self::Event(node) => node.span(),
+            Self::Struct(node) => node.span(),
             Self::ComputedProperty(node) => node.span(),
             Self::HookedProperty(node) => node.span(),
             Self::PlainProperty(node) => node.span(),
@@ -3319,6 +3374,9 @@ impl HasSpan for Node<'_, '_> {
             Self::Variable(node) => node.span(),
             Self::Pipe(node) => node.span(),
             Self::TypeOf(node) => node.span(),
+            Self::With(node) => node.span(),
+            Self::ObjectInitializer(node) => node.span(),
+            Self::NamedValue(node) => node.span(),
             Self::GenericClass(node) => node.span(),
             Self::Error(span)
             | Self::MissingTerminator(span)

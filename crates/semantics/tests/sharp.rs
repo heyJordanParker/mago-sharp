@@ -1308,21 +1308,22 @@ fn a_member_of_self_read_or_written_is_not_supported_yet() {
 /// PHP's `self` is removed, spec section 25: a class writes its own name, or `Self` where `Self` goes.
 #[test]
 fn self_names_the_class_and_self_where_it_goes() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n\ninterface Copyable\n{\n    self copy();\n}\n";
+    let code = "namespace App.Tenant;\n\nstruct Spot\n{\n    public self moved() => this;\n}\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n\ninterface Copyable\n{\n    self copy();\n}\n";
     let without_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class.";
     let with_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class, or `Self` for the class a static method is called on.";
 
     assert_eq!(
         issues(code),
         [
-            format!("6:13 {without_self}"),
-            format!("8:28 {without_self}"),
-            format!("12:19 {with_self}"),
-            format!("14:9 {without_self}"),
-            format!("15:20 {with_self}"),
-            format!("16:20 {with_self}"),
-            format!("16:25 {without_self}"),
-            "22:5 PHP# has no `self`: write the class's own name, `Copyable`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
+            "5:12 PHP# has no `self`: write the class's own name, `Spot`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
+            format!("11:13 {without_self}"),
+            format!("13:28 {without_self}"),
+            format!("17:19 {with_self}"),
+            format!("19:9 {without_self}"),
+            format!("20:20 {with_self}"),
+            format!("21:20 {with_self}"),
+            format!("21:25 {without_self}"),
+            "27:5 PHP# has no `self`: write the class's own name, `Copyable`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
         ]
     );
 }
@@ -1350,6 +1351,82 @@ fn required_is_a_modifier_of_the_constructor_only() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public required const int MAX = 1;\n\n    public required Report(int count)\n    {\n    }\n}\n";
 
     assert_eq!(issues(code), ["5:12 This modifier is not supported yet in PHP#."]);
+}
+
+/// Spec section 6.1: a `required` property is set where its object is created, so it has an `init` or a `set` for the
+/// object initializer to call.
+#[test]
+fn a_required_property_has_init_or_set() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public required int count { get; }\n    public required int total { get; init; }\n    public required int size { get; set; }\n    private required int pages;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:12 `count` is required, so it is set when its object is created: give it `init` or `set`.",
+            "8:13 `pages` is required, so it is set when its object is created: give it `init` or `set`.",
+        ]
+    );
+}
+
+/// Spec section 10: every struct is already read-only, and a struct is a value with no subclasses, so `public` is its
+/// only modifier. Each refusal's fix, a plain `public struct`, compiles, and so does a struct's attribute.
+#[test]
+fn a_struct_takes_only_public() {
+    let code = "namespace App.Tenant;\n\npublic readonly struct Size { }\n\nabstract struct Area { }\n\nfinal struct Shape { }\n\npublic struct Width { }\n\n[Stable]\npublic struct Height { }\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:8 Every struct is already read-only: write `struct`.",
+            "5:1 A struct takes only `public`: remove `abstract`.",
+            "7:1 A struct takes only `public`: remove `final`.",
+        ]
+    );
+}
+
+/// Spec section 10: a struct never changes, so its property takes `init`, not `set`, as a declared property or a main
+/// constructor parameter. The fix, `{ get; init; }`, compiles.
+#[test]
+fn a_struct_property_takes_init_not_set() {
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    public int width { get; set; }\n    public int height { get; init; }\n\n    public Size(public int depth { get; set; }, public int weight { get; init; }) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:29 A struct never changes, so `width` takes `init`, not `set`.",
+            "8:41 A struct never changes, so `depth` takes `init`, not `set`.",
+        ]
+    );
+}
+
+/// Spec section 10: a struct can't be inherited, so a member modifier only a subclass reads is refused, on a property,
+/// a method, a constant, a named constructor and a main constructor parameter. The fix, `private`, and a law, which
+/// takes no modifier, compile. An operator is `public static`, so its own rule refuses any other modifier.
+#[test]
+fn a_struct_member_is_private_where_a_class_would_be_protected() {
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    protected int width { get; init; }\n    public virtual int area() => 1;\n    public override string toString() => \"\";\n    private int depth { get; init; }\n    protected const int LIMIT = 1;\n    protected static Size operator +(Size a, Size b) => a;\n\n    public Size(protected int height { get; }) { }\n\n    protected Size.tall() : this(10) { }\n\n    law positive(int a) => a == a;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:5 A struct has no subclasses, so write `private`.",
+            "6:12 A struct has no subclasses, so write `private`.",
+            "7:12 A struct has no subclasses, so write `private`.",
+            "9:5 A struct has no subclasses, so write `private`.",
+            "14:5 A struct has no subclasses, so write `private`.",
+            "12:17 A struct has no subclasses, so write `private`.",
+            "10:27 An operator is `public static`, as in `public static Size operator +(Size a, Size b)`.",
+        ]
+    );
+}
+
+/// Spec section 10: a struct may declare `operator ==`, as a class may, which replaces the `==` that compares each
+/// property with its own `==`. Another operator compiles too.
+#[test]
+fn a_struct_declares_operators_as_a_class_does() {
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    public Size(public int width { get; }) { }\n\n    public static bool operator ==(Size a, Size b) => a.width == b.width;\n\n    public static Size operator +(Size a, Size b) => new Size(a.width + b.width);\n\n    public int hash() => this.width;\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
@@ -2212,7 +2289,7 @@ fn a_method_refused_at_its_name_has_its_body_checked() {
 /// A member refused at its name, a modifier or a type keeps its parameters, initial values and body checked.
 #[test]
 fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    void __get(string name = _SERVER[\"x\"]);\n}\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n        echo \"a\";\n    }\n}\n\nclass Report\n{\n    int count = __LINE__;\n    const int MAX = __LINE__;\n\n    public Report(public int id = __LINE__, &total = __LINE__)\n    {\n    }\n\n    int run()\n    {\n        Map<float, callable> rows = [:];\n        echo \"b\";\n        return 1;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    void __get(string name = _SERVER[\"x\"]);\n}\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n        echo \"a\";\n    }\n}\n\nclass Report\n{\n    int count = __LINE__;\n    const int MAX = __LINE__;\n\n    public Report(public int id = __LINE__, &total = __LINE__)\n    {\n    }\n\n    int run()\n    {\n        Map<Any, callable> rows = [:];\n        echo \"b\";\n        return 1;\n    }\n}\n";
     let line = "write `Position.current().line`.";
 
     assert_eq!(
@@ -2230,8 +2307,8 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "23:45 A by-reference parameter is not supported yet in PHP#.".to_owned(),
             format!("23:54 PHP# has no `__LINE__`: {line}"),
             "27:9 A method without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
-            "29:13 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.".to_owned(),
-            "29:20 This type is not supported yet in PHP#.".to_owned(),
+            "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.".to_owned(),
+            "29:18 This type is not supported yet in PHP#.".to_owned(),
             "30:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
         ]
     );
@@ -2314,9 +2391,9 @@ fn a_constructor_in_a_refused_namespace_is_a_constructor() {
 #[test]
 fn a_map_key_is_refused_once() {
     let code = leak(method(
-        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<float, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<int?, int> counts = [:];\n        return 1;\n",
+        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        return 1;\n",
     ));
-    let key = "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.";
+    let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.";
 
     assert_eq!(
         issues(code),
@@ -3868,11 +3945,13 @@ fn a_type_argument_takes_a_question_mark_in_a_signature_and_a_local() {
 
 #[test]
 fn an_interface_method_takes_and_returns_list_and_map_types() {
-    let code = "interface Grouped\n{\n    List<int> sizes(Map<string, List<int>> groups);\n\n    Map<float, int> rounded();\n}\n";
+    let code = "interface Grouped\n{\n    List<int> sizes(Map<string, List<int>> groups);\n\n    Map<Any, int> rounded();\n}\n";
 
     assert_eq!(
         issues(code),
-        ["5:9 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value."]
+        [
+            "5:9 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
+        ]
     );
 }
 
@@ -3930,33 +4009,30 @@ fn a_list_map_set_or_class_with_the_wrong_count_of_type_arguments_names_the_coun
     );
 }
 
-/// The first `Set` slice holds `int`, `string` and backed enums, which run as the keys of a PHP array. A named type
-/// may be a backed enum, which only the analyzer knows, so it passes here.
+/// A `Set`'s element takes exactly what a `Map`'s key takes. A named type may be an enum, a struct or a class that
+/// declares `operator ==`, which only the analyzer knows, so it passes here.
 #[test]
-fn a_set_of_an_element_other_than_int_string_or_a_named_type_is_not_supported_yet() {
+fn a_set_element_takes_what_a_map_key_takes() {
     let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e)\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:55 This type is not supported yet in PHP#.",
-            "3:69 This type is not supported yet in PHP#.",
-            "3:82 This type is not supported yet in PHP#.",
+            "3:86 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
         ]
     );
 }
 
-/// A named key type may have a backing value, which only the analyzer knows, so it passes here.
+/// A key of a built-in type with `==` and `hash()`, nullable or not, keys a `Map`. A named key type may be an enum, a
+/// struct or a class that declares `operator ==`, which only the analyzer knows, so it passes here.
 #[test]
-fn a_map_key_that_is_not_int_string_or_a_named_type_is_an_error() {
-    let code = "class Report\n{\n    public Map<float, int> run(Map<Line, int> a, Map<int?, int> b, Map<string, Map<bool, int>> c)\n    {\n        return [:];\n    }\n}\n";
+fn a_map_key_without_equality_by_its_kind_is_an_error() {
+    let code = "class Report\n{\n    public Map<float, int> run(Map<Line, int> a, Map<int?, int> b, Map<string, Map<bool, int>> c, Map<List<int>, int> d)\n    {\n        return [:];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:16 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
-            "3:54 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
-            "3:84 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+            "3:103 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
         ]
     );
 }
@@ -4499,12 +4575,12 @@ fn a_type_argument_of_a_bound_is_never_void() {
 /// literal.
 #[test]
 fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_takes() {
-    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<Order?, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<List<int>, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "6:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+            "6:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
             "7:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
             "8:31 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
             "9:27 A type argument cannot be `void`: `void` is only a return type.",
@@ -4615,15 +4691,15 @@ fn a_static_member_of_a_generic_class_returns_self() {
 /// follows the same type written alone.
 #[test]
 fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union() {
-    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<Order?, int> c = [:];\n    private Map<Order?, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<int> g;\n    private Class<int>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<List<int>, int> c = [:];\n    private Map<List<int>, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<int> g;\n    private Class<int>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "5:13 A type parameter takes no type arguments: write `TItem`.",
             "6:13 A type parameter takes no type arguments: write `TItem`.",
-            "7:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
-            "8:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+            "7:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
+            "8:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
             "9:23 A type argument cannot be `void`: `void` is only a return type.",
             "10:23 A type argument cannot be `void`: `void` is only a return type.",
             "11:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
@@ -5104,8 +5180,8 @@ fn worded(path: &'static str, code: &'static str) -> Vec<String> {
         .collect()
 }
 
-/// A member defined twice is named as PHP# names a member, `Order.total`, and its class by the name the file writes,
-/// `Order`. The PHP twin keeps Mago's `Order::total`, `Order::$count` and `Demo\Order`.
+/// A member defined twice is named as PHP# names a member, `Order.total`, and its class or struct by the name the file
+/// writes, `Order`. The PHP twin keeps Mago's `Order::total`, `Order::$count` and `Demo\Order`.
 #[test]
 fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
     let code = "namespace Demo;\n\npublic class Order\n{\n    private int count = 0;\n\n    private int count = 1;\n\n    public int total() => 1;\n\n    public int total() => 2;\n}\n";
@@ -5124,6 +5200,13 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
             "property `Order.count` has already been defined | property `Order.count` previously defined here. | class `Order` defined here.",
             "class method `Order.total` has already been defined | previous definition | class `Order` defined here.",
         ]
+    );
+    assert_eq!(
+        worded(
+            "src/Demo/Spot.sharp",
+            "namespace Demo;\n\npublic struct Spot\n{\n    public int x() => 1;\n\n    public int x() => 2;\n}\n"
+        ),
+        ["struct method `Spot.x` has already been defined | previous definition | struct `Spot` defined here."]
     );
 }
 

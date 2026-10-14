@@ -30,6 +30,7 @@ use crate::ttype::comparator::object_comparator;
 use crate::ttype::comparator::resource_comparator;
 use crate::ttype::comparator::scalar_comparator;
 use crate::ttype::comparator::union_comparator;
+use crate::ttype::get_collection_object;
 use crate::ttype::union::TUnion;
 
 use super::iterable_comparator;
@@ -182,6 +183,15 @@ pub fn is_contained_by(
         }
 
         return true;
+    }
+
+    // A PHP# `Map` or `Set` runs as a `Sharp\Map` or `Sharp\Set` object, so an object type takes it as that object.
+    if atomic_comparison_result.sharp_rules
+        && matches!(container_type_part, TAtomic::Object(TObject::Any | TObject::Named(_)))
+        && let TAtomic::Array(array) = input_type_part
+        && let Some(object) = get_collection_object(array, codebase)
+    {
+        return is_contained_by(codebase, &object, container_type_part, inside_assertion, atomic_comparison_result);
     }
 
     if input_type_part.is_derived() || container_type_part.is_derived() {

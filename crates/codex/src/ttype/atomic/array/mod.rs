@@ -26,8 +26,8 @@ pub enum TArray {
     List(TList),
     /// Represents an array used as a map (string keys or non-standard integer keys). `array<Tk, Tv>`.
     Keyed(TKeyedArray),
-    /// Represents a PHP# `Set<T>`, holding its element type: an array keyed by each element, or by a backed enum's
-    /// backing value, with the element as the value. Iteration follows insertion order.
+    /// Represents a PHP# `Set<T>`, holding its element type: the engine's `Sharp\Set`, which holds each element once
+    /// by its `==` and `hash()`. Iteration follows insertion order.
     Set(Arc<TUnion>),
 }
 

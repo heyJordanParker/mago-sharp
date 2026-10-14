@@ -27,7 +27,7 @@ final class List
 {
     /**
      * The list itself, or a list holding the one value. PHP# writes this instead of PHP's `(array)` cast. The analyzer
-     * refuses a `.sharp` call when `T` could itself be a list, because a `List` and a `Map` both run as PHP arrays.
+     * refuses a `.sharp` call when `T` could itself be a list, because a `List` is returned as it is.
      *
      * @template T
      *
@@ -51,6 +51,154 @@ final class Class
      * @return class-string<T>
      */
     public static function of(object $value): string {}
+}
+
+/**
+ * A PHP# `Map<K, V>`, as plain PHP receives one: a value with each key kept as itself, an object included, and found by
+ * its `==` and `hash()`, in insertion order. Plain PHP reads it, writes it and removes from it through its index, which
+ * copies a shared `Map` first, and loops over its entries.
+ *
+ * @template K
+ * @template V
+ *
+ * @implements \ArrayAccess<K, V>
+ * @implements \IteratorAggregate<K, V>
+ */
+final class Map implements \ArrayAccess, \IteratorAggregate, \Countable, \JsonSerializable
+{
+    /**
+     * @param list<mixed> $keysAndValues each key, then its value.
+     */
+    public function __construct(array $keysAndValues = []) {}
+
+    /**
+     * @template TKey of array-key
+     * @template TValue
+     *
+     * @param array<TKey, TValue> $entries
+     *
+     * @return Map<TKey, TValue>
+     */
+    public static function from(array $entries): Map {}
+
+    /**
+     * @param K $offset
+     */
+    public function offsetExists(mixed $offset): bool {}
+
+    /**
+     * @param K $offset
+     *
+     * @return V|null the value, or null when the key is missing.
+     */
+    public function offsetGet(mixed $offset): mixed {}
+
+    /**
+     * Throws: write through the index, `$map[$key] = $value`, which copies a shared `Map` first.
+     *
+     * @param K $offset
+     * @param V $value
+     */
+    public function offsetSet(mixed $offset, mixed $value): void {}
+
+    /**
+     * Throws: remove through the index, `unset($map[$key])`, which copies a shared `Map` first.
+     *
+     * @param K $offset
+     */
+    public function offsetUnset(mixed $offset): void {}
+
+    /**
+     * @return \Iterator<K, V>
+     */
+    public function getIterator(): \Iterator {}
+
+    public function count(): int {}
+
+    public function jsonSerialize(): mixed {}
+
+    /**
+     * Throws `ValueError` when a key is no `int` or `string`.
+     *
+     * @return array<K, V>
+     */
+    public function toArray(): array {}
+
+    /**
+     * @return list<K>
+     */
+    public function keys(): array {}
+
+    /**
+     * @return list<V>
+     */
+    public function values(): array {}
+}
+
+/**
+ * A PHP# `Set<T>`, as plain PHP receives one: a value with each element once, found by its `==` and `hash()`, in
+ * insertion order. Plain PHP tests for an element with `isset($set[$element])`, adds one with `$set[] = $element`,
+ * removes one with `unset($set[$element])`, each of which copies a shared `Set` first, and loops over its elements.
+ *
+ * @template T
+ *
+ * @implements \ArrayAccess<T, T>
+ * @implements \IteratorAggregate<int, T>
+ */
+final class Set implements \ArrayAccess, \IteratorAggregate, \Countable, \JsonSerializable
+{
+    /**
+     * @param list<T> $values
+     */
+    public function __construct(array $values = []) {}
+
+    /**
+     * @param T $offset
+     */
+    public function offsetExists(mixed $offset): bool {}
+
+    /**
+     * Throws: a `Set` has no index.
+     *
+     * @param T $offset
+     *
+     * @return never
+     */
+    public function offsetGet(mixed $offset): mixed {}
+
+    /**
+     * Throws: add through the index, `$set[] = $element`, which copies a shared `Set` first.
+     *
+     * @param T|null $offset
+     * @param T $value
+     */
+    public function offsetSet(mixed $offset, mixed $value): void {}
+
+    /**
+     * Throws: remove through the index, `unset($set[$element])`, which copies a shared `Set` first.
+     *
+     * @param T $offset
+     */
+    public function offsetUnset(mixed $offset): void {}
+
+    /**
+     * @return \Iterator<int, T>
+     */
+    public function getIterator(): \Iterator {}
+
+    public function count(): int {}
+
+    public function jsonSerialize(): mixed {}
+
+    /**
+     * @return list<T>
+     */
+    public function toArray(): array {}
+
+    /**
+     * @return list<T>
+     */
+    public function toList(): array {}
 }
 
 /**
@@ -235,9 +383,8 @@ final class ListMethods
 }
 
 /**
- * The methods a PHP# `Map<K, V>` has. The analyzer checks a call on a map against them, and the engine runs them on
- * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which the bridge lowers from
- * the map's type. A method without `@mutation-free` changes the map.
+ * The methods a PHP# `Map<K, V>` has. The analyzer checks a call on a map against them, and the engine runs each on
+ * `Sharp\Collection`, over the `Sharp\Map` object. A method without `@mutation-free` changes the map.
  *
  * @template K of array-key
  * @template V
@@ -371,8 +518,8 @@ final class MapMethods
 }
 
 /**
- * The methods a PHP# `Set<T>` has. The analyzer checks a call on a set against them. A method without
- * `@mutation-free` changes the set.
+ * The methods a PHP# `Set<T>` has. The analyzer checks a call on a set against them, and the engine runs each on
+ * `Sharp\Collection`, over the `Sharp\Set` object. A method without `@mutation-free` changes the set.
  *
  * @template T
  */

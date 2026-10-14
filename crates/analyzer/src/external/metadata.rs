@@ -29,6 +29,7 @@ use mago_database::file::File;
 use mago_extension::PayloadReader;
 use mago_extension::PayloadWriter;
 use mago_span::Span;
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
@@ -390,8 +391,9 @@ fn write_method_projection(
         write_optional_type_metadata(writer, metadata.return_type_declaration_metadata.as_ref(), codebase, session)?;
         write_optional_type_metadata(writer, metadata.return_type_metadata.as_ref(), codebase, session)?;
     }
+    let dialect = session.dialect(metadata.span);
     if fields & METHOD_FIELDS_TEMPLATES != 0 {
-        write_templates(writer, &metadata.template_types, None, None, codebase)?;
+        write_templates(writer, &metadata.template_types, None, None, codebase, dialect)?;
     }
     if fields & METHOD_FIELDS_ATTRIBUTES != 0 {
         write_attributes(writer, &metadata.attributes, codebase, session)?;
@@ -403,9 +405,9 @@ fn write_method_projection(
         }
     }
     if fields & METHOD_FIELDS_ASSERTIONS != 0 {
-        write_assertions(writer, &metadata.assertions, codebase)?;
-        write_assertions(writer, &metadata.if_true_assertions, codebase)?;
-        write_assertions(writer, &metadata.if_false_assertions, codebase)?;
+        write_assertions(writer, &metadata.assertions, codebase, dialect)?;
+        write_assertions(writer, &metadata.if_true_assertions, codebase, dialect)?;
+        write_assertions(writer, &metadata.if_false_assertions, codebase, dialect)?;
         writer.write_bool(metadata.assertions_inferred);
     }
     if fields & METHOD_FIELDS_GLOBALS != 0 {
@@ -714,17 +716,19 @@ pub(super) fn write_class_like(
     write_words(writer, metadata.enum_cases.keys().copied())?;
     write_optional_words(writer, metadata.child_class_likes.as_ref().map(|words| words.iter().copied()))?;
     write_optional_words(writer, metadata.permitted_inheritors.as_ref().map(|words| words.iter().copied()))?;
+    let dialect = session.dialect(metadata.span);
     write_templates(
         writer,
         &metadata.template_types,
         Some(&metadata.template_variance),
         Some(&metadata.template_readonly),
         codebase,
+        dialect,
     )?;
     write_attributes(writer, &metadata.attributes, codebase, session)?;
     write_type_aliases(writer, &metadata.type_aliases, codebase, session)?;
-    write_mixins(writer, &metadata.mixins, codebase)?;
-    write_optional_atomic(writer, metadata.enum_type.as_ref(), codebase)?;
+    write_mixins(writer, &metadata.mixins, codebase, dialect)?;
+    write_optional_atomic(writer, metadata.enum_type.as_ref(), codebase, dialect)?;
     write_optional_bool(writer, metadata.has_sealed_methods);
     write_optional_bool(writer, metadata.has_sealed_properties);
     write_version_constraint(writer, &metadata.version_constraint);
@@ -796,7 +800,8 @@ fn write_function_like(
 
     write_optional_type_metadata(writer, metadata.return_type_declaration_metadata.as_ref(), codebase, session)?;
     write_optional_type_metadata(writer, metadata.return_type_metadata.as_ref(), codebase, session)?;
-    write_templates(writer, &metadata.template_types, None, None, codebase)?;
+    let dialect = session.dialect(metadata.span);
+    write_templates(writer, &metadata.template_types, None, None, codebase, dialect)?;
     write_attributes(writer, &metadata.attributes, codebase, session)?;
     writer.write_u32(metadata.thrown_types.len() as u32);
     for thrown in &metadata.thrown_types {
@@ -804,9 +809,9 @@ fn write_function_like(
     }
 
     write_words(writer, metadata.globals_accessed.iter().copied())?;
-    write_assertions(writer, &metadata.assertions, codebase)?;
-    write_assertions(writer, &metadata.if_true_assertions, codebase)?;
-    write_assertions(writer, &metadata.if_false_assertions, codebase)?;
+    write_assertions(writer, &metadata.assertions, codebase, dialect)?;
+    write_assertions(writer, &metadata.if_true_assertions, codebase, dialect)?;
+    write_assertions(writer, &metadata.if_false_assertions, codebase, dialect)?;
     writer.write_bool(metadata.assertions_inferred);
     writer.write_bool(metadata.has_docblock);
     writer.write_u64(metadata.flags.bits());
@@ -862,13 +867,14 @@ fn write_assertions(
     writer: &mut PayloadWriter,
     assertions: &BTreeMap<Word, Vec<Assertion>>,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_u32(assertions.len() as u32);
     for (variable, values) in assertions {
         writer.write_bytes(variable.as_bytes())?;
         writer.write_u32(values.len() as u32);
         for assertion in values {
-            write_assertion(writer, assertion, codebase)?;
+            write_assertion(writer, assertion, codebase, dialect)?;
         }
     }
     Ok(())
@@ -879,6 +885,7 @@ fn write_assertion(
     writer: &mut PayloadWriter,
     assertion: &Assertion,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError> {
     let kind = match assertion {
         Assertion::Any => 1,
@@ -936,8 +943,8 @@ fn write_assertion(
         | Assertion::IsIdentical(atomic)
         | Assertion::IsNotIdentical(atomic)
         | Assertion::IsEqual(atomic)
-        | Assertion::IsNotEqual(atomic) => write_atomic(writer, atomic, codebase)?,
-        Assertion::InArray(union) | Assertion::NotInArray(union) => write_union(writer, union, codebase)?,
+        | Assertion::IsNotEqual(atomic) => write_atomic(writer, atomic, codebase, dialect)?,
+        Assertion::InArray(union) | Assertion::NotInArray(union) => write_union(writer, union, codebase, dialect)?,
         Assertion::HasArrayKey(key)
         | Assertion::DoesNotHaveArrayKey(key)
         | Assertion::HasNonnullEntryForKey(key)
@@ -973,8 +980,9 @@ fn write_atomic(
     writer: &mut PayloadWriter,
     atomic: &TAtomic,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError> {
-    write_union(writer, &TUnion::from_atomic(atomic.clone()), codebase)
+    write_union(writer, &TUnion::from_atomic(atomic.clone()), codebase, dialect)
 }
 
 fn write_array_key(writer: &mut PayloadWriter, key: &ArrayKey) -> Result<(), ExternalAnalyzerError> {
@@ -1076,7 +1084,7 @@ fn write_class_constant(
     write_visibility(writer, metadata.visibility);
     write_optional_type_metadata(writer, metadata.type_declaration.as_ref(), codebase, session)?;
     write_optional_type_metadata(writer, metadata.type_metadata.as_ref(), codebase, session)?;
-    write_optional_atomic(writer, metadata.inferred_type.as_ref(), codebase)?;
+    write_optional_atomic(writer, metadata.inferred_type.as_ref(), codebase, session.dialect(metadata.span))?;
     write_attributes(writer, &metadata.attributes, codebase, session)?;
     writer.write_u64(metadata.flags.bits());
     write_version_constraint(writer, &metadata.version_constraint);
@@ -1092,7 +1100,7 @@ fn write_enum_case(
     writer.write_bytes(metadata.name.as_bytes())?;
     write_location(writer, metadata.span, session)?;
     write_location(writer, metadata.name_span, session)?;
-    write_optional_atomic(writer, metadata.value_type.as_ref(), codebase)?;
+    write_optional_atomic(writer, metadata.value_type.as_ref(), codebase, session.dialect(metadata.span))?;
     write_attributes(writer, &metadata.attributes, codebase, session)?;
     writer.write_u64(metadata.flags.bits());
     write_version_constraint(writer, &metadata.version_constraint);
@@ -1108,7 +1116,7 @@ fn write_constant(
     writer.write_bytes(metadata.name.as_bytes())?;
     write_location(writer, metadata.span, session)?;
     write_optional_type_metadata(writer, metadata.type_metadata.as_ref(), codebase, session)?;
-    write_optional_union(writer, metadata.inferred_type.as_ref(), codebase)?;
+    write_optional_union(writer, metadata.inferred_type.as_ref(), codebase, session.dialect(metadata.span))?;
     write_attributes(writer, &metadata.attributes, codebase, session)?;
     writer.write_u64(metadata.flags.bits());
     write_version_constraint(writer, &metadata.version_constraint);
@@ -1146,7 +1154,7 @@ fn write_type_metadata(
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     write_location(writer, metadata.span, session)?;
-    write_union(writer, &metadata.type_union, codebase)?;
+    write_union(writer, &metadata.type_union, codebase, session.dialect(metadata.span))?;
     writer.write_bool(metadata.from_docblock);
     writer.write_bool(metadata.inferred);
     Ok(())
@@ -1161,12 +1169,14 @@ fn write_optional_type_metadata(
     write_optional(writer, metadata, |writer, metadata| write_type_metadata(writer, metadata, codebase, session))
 }
 
+/// Writes `union` as the code of `dialect`, the dialect of the file it is written in, sees it.
 fn write_union(
     writer: &mut PayloadWriter,
     union: &TUnion,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError> {
-    encode_union_snapshot(writer, union, &mut Vec::new(), codebase, 0)
+    encode_union_snapshot(writer, union, &mut Vec::new(), codebase, dialect, 0)
 }
 
 trait MixinType {
@@ -1191,13 +1201,14 @@ fn write_mixins<T>(
     writer: &mut PayloadWriter,
     mixins: &[T],
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError>
 where
     T: MixinType,
 {
     writer.write_u32(mixins.len() as u32);
     for mixin in mixins {
-        write_union(writer, mixin.type_union(), codebase)?;
+        write_union(writer, mixin.type_union(), codebase, dialect)?;
     }
 
     Ok(())
@@ -1207,16 +1218,18 @@ fn write_optional_union(
     writer: &mut PayloadWriter,
     union: Option<&TUnion>,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError> {
-    write_optional(writer, union, |writer, union| write_union(writer, union, codebase))
+    write_optional(writer, union, |writer, union| write_union(writer, union, codebase, dialect))
 }
 
 fn write_optional_atomic(
     writer: &mut PayloadWriter,
     atomic: Option<&TAtomic>,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError> {
-    write_optional(writer, atomic, |writer, atomic| write_atomic(writer, atomic, codebase))
+    write_optional(writer, atomic, |writer, atomic| write_atomic(writer, atomic, codebase, dialect))
 }
 
 fn write_attributes(
@@ -1235,7 +1248,7 @@ fn write_attributes(
             write_location(writer, argument.span, session)?;
             write_optional_location(writer, argument.name_span, session)?;
             write_optional_location(writer, argument.value_span, session)?;
-            write_optional_union(writer, argument.value_type.as_ref(), codebase)?;
+            write_optional_union(writer, argument.value_type.as_ref(), codebase, session.dialect(argument.span))?;
             write_optional(writer, argument.value.as_ref(), |writer, value| {
                 write_constant_expression(writer, value, session)
             })?;
@@ -1313,13 +1326,14 @@ fn write_templates(
     variances: Option<&[Variance]>,
     readonly: Option<&mago_word::WordSet>,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_u32(templates.len() as u32);
     for (index, (name, template)) in templates.iter().enumerate() {
         writer.write_bytes(name.as_bytes())?;
         encode_generic_parent(writer, template.defining_entity)?;
-        write_union(writer, &template.constraint, codebase)?;
-        write_optional_union(writer, template.default.as_ref(), codebase)?;
+        write_union(writer, &template.constraint, codebase, dialect)?;
+        write_optional_union(writer, template.default.as_ref(), codebase, dialect)?;
         writer
             .write_u8(variance(variances.and_then(|values| values.get(index)).copied().unwrap_or(Variance::Invariant)));
         writer.write_bool(readonly.is_some_and(|names| names.contains(name)));
@@ -1435,9 +1449,107 @@ fn variance(value: Variance) -> u8 {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use mago_codex::ttype::atomic::array::TArray;
+    use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+    use mago_codex::ttype::get_int;
+    use mago_codex::ttype::get_string;
+
     use super::*;
     use crate::external::protocol;
     use crate::external::protocol::NestedRequestKind;
+    use crate::external::protocol::testing::SHELF;
+    use crate::external::protocol::testing::SINK;
+    use crate::external::protocol::testing::analyzed;
+    use crate::external::protocol::testing::names;
+
+    /// A codebase query sends each declaration's types as the code of the file it is declared in sees them: a `Map`
+    /// and a `Set` a PHP# file declares go as the `Sharp\Map` and `Sharp\Set` objects they run as, and plain PHP's
+    /// keyed arrays as arrays. Each row is a query, a name its answer holds, and whether the answer names
+    /// `Sharp\Map` and `Sharp\Set`.
+    #[test]
+    fn a_declaration_goes_as_the_code_of_its_file_sees_it() {
+        analyzed(&[SHELF, SINK], |analysis| {
+            let session = ExternalAnalysisSession::from_files(analysis.files.iter().cloned());
+            let request = |operation: u8| {
+                let mut writer = protocol::message_writer(CODEBASE_QUERY_REQUEST);
+                writer.write_u64(session.generation());
+                writer.write_u8(operation);
+                writer
+            };
+            let member = |operation: u8, class: &[u8], member: &[u8]| {
+                let mut writer = request(operation);
+                writer.write_u32(1);
+                writer.write_bytes(class).expect("the class should fit in a frame");
+                writer.write_bytes(member).expect("the member should fit in a frame");
+                writer.finish()
+            };
+            let named = |operation: u8, name: &[u8]| {
+                let mut writer = request(operation);
+                if operation == GET_CLASS_LIKES {
+                    writer.write_u8(ANY_CLASS_LIKE);
+                }
+                writer.write_u32(1);
+                writer.write_bytes(name).expect("the name should fit in a frame");
+                writer.finish()
+            };
+            let found = |class: &[u8], pattern: &[u8]| {
+                let mut writer = request(FIND_METHODS);
+                writer.write_u8(METHOD_SEARCH_EXACT_CLASS);
+                writer.write_bytes(class).expect("the class should fit in a frame");
+                writer.write_bytes(pattern).expect("the pattern should fit in a frame");
+                writer.write_bool(false);
+                writer.write_u32(0);
+                writer.write_u32(METHOD_FIELDS_ALL);
+                writer.finish()
+            };
+            let rows: [(Vec<u8>, &[u8], bool, bool); 10] = [
+                (member(GET_METHODS, b"App\\Shelf", b"counts"), b"counts", true, true),
+                (member(GET_METHODS, b"Lib\\Sink", b"take"), b"take", false, false),
+                (found(b"App\\Shelf", b"counts"), b"counts", true, true),
+                (found(b"Lib\\Sink", b"take"), b"take", false, false),
+                (member(GET_PROPERTIES, b"App\\Shelf", b"$stock"), b"$stock", true, false),
+                (named(GET_CLASS_LIKES, b"Lib\\Sink"), b"Lib\\Sink", false, false),
+                (named(GET_CLASS_LIKES, b"App\\Level"), b"App\\Level", false, false),
+                (member(GET_ENUM_CASES, b"App\\Level", b"Low"), b"Low", false, false),
+                (member(GET_CLASS_CONSTANTS, b"Lib\\Sink", b"LIMITS"), b"LIMITS", false, false),
+                (named(GET_CONSTANTS, b"Lib\\LIMIT"), b"\\LIMIT", false, false),
+            ];
+
+            for (query, name, sends_map, sends_set) in rows {
+                let (_, answer) = protocol::handle_nested_request(&query, analysis.codebase, &session, |_| None)
+                    .expect("the codebase query should succeed");
+                let label = String::from_utf8_lossy(name);
+
+                assert!(names(&answer, name), "the answer holds `{label}`");
+                assert_eq!(names(&answer, b"Sharp\\Map"), sends_map, "`{label}` names `Sharp\\Map`");
+                assert_eq!(names(&answer, b"Sharp\\Set"), sends_set, "`{label}` names `Sharp\\Set`");
+            }
+        });
+    }
+
+    /// An assertion's type goes as the code of the file the assertion is written in sees it, as every other
+    /// declared type does.
+    #[test]
+    fn an_assertion_sends_its_type_as_its_file_sees_it() {
+        let codebase = CodebaseMetadata::new();
+        let map = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+            Arc::new(get_string()),
+            Arc::new(get_int()),
+        ))));
+        let rows = [
+            (Assertion::InArray(map.clone()), Dialect::Sharp, true),
+            (Assertion::InArray(map.clone()), Dialect::Php, false),
+            (Assertion::IsType(map.get_single().clone()), Dialect::Sharp, true),
+            (Assertion::IsType(map.get_single().clone()), Dialect::Php, false),
+        ];
+
+        for (assertion, dialect, sends_map) in rows {
+            let mut writer = PayloadWriter::new();
+            write_assertion(&mut writer, &assertion, &codebase, dialect).expect("the assertion should encode");
+
+            assert_eq!(names(&writer.finish(), b"Sharp\\Map"), sends_map, "{assertion:?} in {dialect:?}");
+        }
+    }
 
     fn session(generation: u64) -> ExternalAnalysisSession {
         ExternalAnalysisSession {

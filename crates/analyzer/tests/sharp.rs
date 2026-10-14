@@ -733,6 +733,22 @@ fn a_by_reference_write_that_can_never_fit_the_written_type_of_a_local_is_report
     assert_eq!(issues(("src/Demo/Response.php", php), &[]), ["13:16 invalid-return-statement"]);
 }
 
+/// A local plain PHP holds by reference keeps the type the first reference parameter gives it, so a later write that
+/// may not fit that type is reported in PHP#'s words: each type as PHP# writes it, `Any?` for plain PHP's `mixed`.
+#[test]
+fn a_write_that_may_break_a_by_reference_constraint_is_reported_in_php_sharp_words() {
+    let sorter = "<?php\n\nnamespace Lib;\n\nfinal class Sorter\n{\n    /** @param array<int, string> $items */\n    public static function sort(array &$items): void\n    {\n    }\n\n    public static function keep(&$value): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Sorter;\n\nclass Report\n{\n    public static void run()\n    {\n        let names = [1: \"a\"];\n        Sorter.sort(names);\n        Sorter.keep(names);\n    }\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[("src/Lib/Sorter.php", sorter)]),
+        [
+            "11:21 reference-constraint-violation Potentially invalid assignment to referenced variable `names`. | This assignment to type `Any?` may violate a reference constraint. | Variable was passed as a by-reference argument here, constraining it to type `Map<int, string>`. | An object may still hold a reference to this variable. Changing its type can lead to a `TypeError` at runtime. | Ensure this variable's type remains compatible, or refactor to avoid holding onto the external reference.",
+            "11:21 invalid-local-assignment-value Invalid assignment to `names`: it is declared as `Map<int, string>`. | This value has type `Any?`. | `names` is declared as `Map<int, string>` here. | Assign a `Map<int, string>` value, or change the type `names` is declared with.",
+        ]
+    );
+}
+
 #[test]
 fn the_nullable_return_help_writes_the_nullable_type_as_the_file_does() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int total(int? extra)\n    {\n        return extra;\n    }\n}\n";
@@ -2752,25 +2768,26 @@ fn a_literal_keyed_by_a_value_that_cannot_key_a_map_names_the_map_key_rule() {
     assert_eq!(
         keys(("src/Demo/Report.sharp", sharp)),
         [
-            "7:44 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Object` has none. | `Object` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+            "7:44 invalid-array-element-key A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Object` is none of them. | `Object` keys this `Map`. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
         ]
     );
 }
 
-/// A literal keyed by a `float`, a `bool` or `null` names the `Map` key rule, where PHP turns the key into an `int` or
-/// a `string` without a word. PHP keeps its cast.
+/// A `float`, a `bool`, `null` and an all-digit string each key a literal as itself, where PHP turns the key into an
+/// `int` or a `string` without a word. So the literal is the `Map` of that key type, and no other, and a `null` index
+/// fits a `Map` whose key type holds `null` alone. PHP keeps its cast.
 #[test]
-fn a_literal_keyed_by_a_float_a_bool_or_null_names_the_map_key_rule() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static Map<int, int> floats() => [1.5: 1];\n\n    public static Map<int, int> flags() => [true: 1];\n\n    public static Map<string, int> nulls() => [null: 1];\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @return array<int, int> */\n    public static function floats(): array { return [1.5 => 1]; }\n\n    /** @return array<int, int> */\n    public static function flags(): array { return [true => 1]; }\n\n    /** @return array<string, int> */\n    public static function nulls(): array { return [null => 1]; }\n}\n";
+fn a_literal_keeps_a_float_a_bool_null_or_an_all_digit_string_as_its_key() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static Map<float, int> floats() => [1.5: 1];\n\n    public static Map<bool, int> flags() => [true: 1];\n\n    public static Map<string?, int> nulls() => [null: 1];\n\n    public static Map<string, int> digits() => [\"5\": 1, \"sku-2\": 2];\n\n    public static Map<int, int> cast() => [1.5: 1];\n\n    public static Map<float, int> spread(Map<float, int> prices) => [...prices, 2.5: 1];\n\n    public static Map<float, int> copied(Map<float, int> prices) => [...prices];\n\n    public static int nullIndex()\n    {\n        Map<string?, int> maybe = [null: 1];\n        maybe[null] = 2;\n        Map<string, int> named = [:];\n        named[null] = 3;\n        return (maybe[null] ?? 0) + (named[null] ?? 0);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @return array<int, int> */\n    public static function floats(): array { return [1.5 => 1]; }\n\n    /** @return array<int, int> */\n    public static function flags(): array { return [true => 1]; }\n\n    /** @return array<string, int> */\n    public static function nulls(): array { return [null => 1]; }\n\n    /** @return array<int, int> */\n    public static function digits(): array { return [\"5\" => 1]; }\n}\n";
 
     assert_eq!(worded(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "5:46 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `float` has none. | `float` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "7:45 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `bool` has none. | `bool` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "9:48 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `null` has none. | `null` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+            "13:43 invalid-return-statement Invalid return type for method `Report.cast`: expected `Map<int, int>`, but found `Map<float, int>`. | This has type `Map<float, int>` | The type `Map<float, int>` returned here is not compatible with the declared return type `Map<int, int>`. | Change the return value to match `Map<int, int>`, or update the method's return type declaration.",
+            "24:15 mismatched-array-index `Map<string, int>` is keyed by `string`, but this key is `null`. | This key may not be of type `string`. | Check the key with `is string` first, as in `if (name is string) { … }`.",
+            "25:44 mismatched-array-index `Map<string, int>` is keyed by `string`, but this key is `null`. | This key may not be of type `string`. | Check the key with `is string` first, as in `if (name is string) { … }`.",
         ]
     );
 }
@@ -3367,22 +3384,19 @@ fn the_php_sharp_stub_states_its_reasons_without_a_spec_section() {
     assert_eq!(contents.lines().filter(|line| line.contains("section")).collect::<Vec<_>>(), Vec::<&str>::new());
 }
 
-/// A `Map` runs as a PHP array too, so `wrap` would return it as the list it was asked to build.
+/// A `Map` and a `Set` are one object each, so `wrap` holds one in a one-element `List`, as any other value: `T` is the
+/// `Map` or the `Set`. Only a `List` is returned as it is, so a list of lists and a value that can be a list are refused.
 #[test]
-fn list_wrap_of_a_map_or_a_list_of_lists_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Rows\n{\n    public void read(Map<string, int> counts, List<List<int>> rows, string|Map<string, int> either)\n    {\n        List.wrap(counts);\n        List.wrap(rows);\n        List.wrap(either);\n    }\n}\n";
+fn list_wrap_holds_a_map_or_a_set_and_refuses_a_value_that_can_be_a_list() {
+    let sharp = "namespace Demo;\n\nclass Rows\n{\n    public List<Map<string, int>> counts(Map<string, int> counts) => List.wrap(counts);\n\n    public List<Set<string>> tags(Set<string> tags) => List.wrap(tags);\n\n    public List<string|Map<string, int>> either(string|Map<string, int> either) => List.wrap(either);\n\n    public List<int> wrong(Map<string, int> counts) => List.wrap(counts);\n\n    public void read(List<List<int>> rows, string|List<int> one)\n    {\n        List.wrap(rows);\n        List.wrap(one);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Rows.sharp", sharp), &[]),
-        ["7:19 invalid-argument", "8:19 invalid-argument", "9:19 invalid-argument"]
+        ["11:56 invalid-return-statement", "15:19 invalid-argument"]
     );
     assert_eq!(
-        messages(("src/Demo/Rows.sharp", sharp), &[]),
-        [
-            "T is Map<string, int>, itself a map; write `counts is Map<string, int> one ? [one] : counts`",
-            "T is List<List<int>>, itself a list; write `rows is List<List<int>> one ? [one] : rows`",
-            "T is string|Map<string, int>, which can be a map; write `either is Map<string, int> one ? [one] : either`",
-        ]
+        messages(("src/Demo/Rows.sharp", sharp), &[])[1],
+        "T is List<List<int>>, itself a list; write `rows is List<List<int>> one ? [one] : rows`"
     );
 }
 
@@ -3603,18 +3617,25 @@ fn equality_of_a_class_instance_is_refused_until_the_class_declares_operator_equ
     );
 }
 
-/// A `List`, `Map` or `Set` is a PHP array at runtime, which `==` cannot compare strictly yet, also against an `Any?`.
+/// Spec section 19: two lists compare element by element and two maps entry by entry, each element with its own `==`,
+/// so a list of a class compares only where the class declares `operator ==`, a list never equals a map, and `Any?`
+/// against a collection is not supported yet. The refusal names why the elements can't compare, through nested lists:
+/// a class with no `operator ==`, a `Set`, or element types that never match.
 #[test]
-fn equality_of_a_collection_is_not_supported_yet() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool a(List<int> items, List<int> others) => items == others;\n\n    public static bool b(Any? value, List<int> items) => value != items;\n}\n";
+fn collections_compare_by_value() {
+    let sharp = "namespace Demo;\n\nimport App.Money;\n\nclass Report\n{\n    public static bool a(List<int> items, List<int> others) => items == others;\n\n    public static bool b(Any? value, List<int> items) => value != items;\n\n    public static bool c(Map<string, int> a, Map<string, int> b, List<Money> m, List<Money> n, List<List<int>> d, List<List<int>> e) => a == b && m != n && d == e && d.contains(Report.items(1));\n\n    public static bool f(List<Cart> carts, List<Cart> others, List<int> items, Map<string, int> counts) => carts == others || items == counts;\n\n    public static bool g(List<List<Cart>> nested, List<List<Cart>> again, List<Set<int>> sets, List<Set<int>> others, List<int> numbers, List<string> words) => nested == again || sets == others || numbers == words;\n\n    public static List<int> items(int count) => [count];\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @param list<int> $items @param list<int> $others */\n    public static function a(array $items, array $others): bool { return $items == $others; }\n\n    /** @param list<int> $items */\n    public static function b(mixed $value, array $items): bool { return $value != $items; }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["11:73 mixed-operand"]);
     assert_eq!(
-        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        refusals(("src/Demo/Report.sharp", sharp), &[("src/Demo/Cart.php", CART), MONEY_OPERATORS]),
         [
-            "5:64 not-supported-yet `==` on a collection is not supported yet, so it cannot compare `List<int>` with `List<int>`. | Compare the elements one by one.",
-            "7:58 not-supported-yet `!=` on a collection is not supported yet, so it cannot compare `Any?` with `List<int>`. | Compare the elements one by one.",
+            "9:58 not-supported-yet `!=` on a collection is not supported yet, so it cannot compare `Any?` with `List<int>`. | Compare the elements one by one.",
+            "13:108 invalid-operand `==` compares `List<Cart>` with `List<Cart>` element by element, and `Cart` declares no `operator ==`. | ",
+            "13:127 invalid-operand `==` cannot compare `List<int>` with `Map<string, int>`. | Convert one side so both sides have the same type.",
+            "15:161 invalid-operand `==` compares `List<List<Cart>>` with `List<List<Cart>>` element by element, and `Cart` declares no `operator ==`. | ",
+            "15:180 invalid-operand `==` compares `List<Set<int>>` with `List<Set<int>>` element by element, and `==` on `Set<int>` is not supported yet. | ",
+            "15:198 invalid-operand `==` compares `List<int>` with `List<string>` element by element, and `int` never equals `string`. | ",
         ]
     );
 }
@@ -5672,6 +5693,53 @@ fn a_named_constructor_body_runs_on_this() {
     );
 }
 
+/// Spec sections 6.1 and 10: a property written `required`, and a struct's public `init` property with no initial
+/// value, is set where its object is created. The constructor that runs sets the properties it assigns on every path:
+/// both arms of an `if`, every arm of a `match`, or a path that throws. A named constructor runs the main constructor
+/// first, and a helper method it calls counts for nothing. The object initializer sets the rest. A `new` of a class
+/// that doesn't exist is reported once, as a class that cannot be found. A struct's private field, private `init`
+/// property or get-only property, which no initializer outside it sets, is reported once where it is declared, and
+/// never at the `new`.
+#[test]
+fn every_required_property_is_set_where_its_object_is_created() {
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Label\n{\n    public required string text { get; init; }\n    public required string tone { get; init; }\n    public required int size { get; set; }\n\n    public Label() { }\n\n    public Label.titled(string title) : this()\n    {\n        this.text = title;\n        this.tone = \"plain\";\n        this.size = 1;\n    }\n}\n\nclass Ticket\n{\n    public required string kind { get; init; }\n    public required int price { get; init; }\n    public required int seats { get; init; }\n    public required string note { get; set; }\n\n    public Ticket(int code)\n    {\n        match (code) {\n            1 => { this.kind = \"adult\"; },\n            default => { this.kind = \"child\"; },\n        }\n        match (code) {\n            1 => { this.price = 10; },\n            default => {},\n        }\n        if (code < 0) {\n            throw new RuntimeException(\"negative\");\n        } else {\n            this.seats = code;\n        }\n        this.annotate();\n    }\n\n    public void annotate()\n    {\n        this.note = \"\";\n    }\n}\n\nstruct Point\n{\n    public int x { get; init; }\n    public int? y { get; init; }\n    public string? label { get; init; }\n    public int z { get; init; } = 0;\n}\n\nstruct Hidden\n{\n    private int secret;\n    public int serial { get; private init; }\n    public int shown { get; init; }\n\n    public int peek() => this.secret + this.serial;\n}\n\nstruct Fixed\n{\n    public int value { get; }\n}\n\nclass Shop\n{\n    public Label bare() => new Label();\n\n    public Label part() => new Label { text: \"a\" };\n\n    public Label whole() => new Label { text: \"a\", tone: \"b\", size: 1 };\n\n    public Label titled() => new Label.titled(\"t\");\n\n    public Ticket ticket() => new Ticket(1);\n\n    public Ticket priced() => new Ticket(1) { price: 5, note: \"n\" };\n\n    public Point point() => new Point { x: 1 };\n\n    public Point placed() => new Point { x: 1, y: null, label: null };\n\n    public Hidden hidden() => new Hidden { shown: 1 };\n\n    public Fixed fixed() => new Fixed { };\n\n    public void unknown()\n    {\n        new Missing();\n    }\n}\n";
+
+    let note = "A property written `required`, and a struct's public `init` property with no initial value, is set where its object is created: by the constructor that runs, or by the object initializer.";
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shop.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {} | {}", located(sharp, issue), issue.message, issue.notes.join(" ")))
+            .collect::<Vec<_>>(),
+        [
+            "62:17 uninitialized-property `secret` is never set: set it in the main constructor, or give it an initial value. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
+            "63:16 uninitialized-property `serial` is never set: set it in the main constructor, or give it an initial value. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
+            "71:16 uninitialized-property `value` is get-only and never set: set it in the main constructor, or give it an initial value. | A get-only property is set only while its object is created, and no constructor sets it on every path.".to_owned(),
+            format!("76:28 missing-required-property `new Label` must set `text`, `tone` and `size`. | {note}"),
+            format!("78:28 missing-required-property `new Label` must set `tone` and `size`. | {note}"),
+            format!("84:31 missing-required-property `new Ticket` must set `price` and `note`. | {note}"),
+            format!("88:29 missing-required-property `new Point` must set `y` and `label`. | {note}"),
+            "98:13 non-existent-class Class `Missing` not found. | ".to_owned(),
+        ]
+    );
+}
+
+/// Spec section 6.1: a get-only property is set only while its object is created, so one without an initial value
+/// that no constructor sets on every path is an error. A main constructor parameter that declares it sets it, and an
+/// abstract class leaves its get-only properties to its subclasses. An `init` property is set where its object is
+/// created, also in a struct written `readonly`, which semantics refuses on its own.
+#[test]
+fn a_get_only_property_no_constructor_sets_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Total\n{\n    public int amount { get; }\n    public int count { get; }\n    public int size { get; }\n    public int rows { get; } = 0;\n\n    public Total(bool big, public int pages { get; })\n    {\n        if (big) {\n            this.amount = 10;\n        } else {\n            this.amount = 1;\n        }\n        if (big) {\n            this.count = 1;\n        }\n    }\n\n    public Total.sized() : this(true, 1)\n    {\n        this.size = 4;\n    }\n}\n\nstruct Point\n{\n    public int x { get; }\n    public int y { get; }\n\n    public Point(int x)\n    {\n        this.x = x;\n    }\n}\n\nabstract class Shape\n{\n    public int sides { get; }\n}\n\nreadonly struct Ro\n{\n    public int x { get; init; }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Total.sharp", sharp), &[]),
+        [
+            "6:16 uninitialized-property `count` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
+            "31:16 uninitialized-property `y` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
+        ]
+    );
+}
+
 /// Spec section 9.1: the main constructor sets a get-only property once, so a named constructor that sets it again is
 /// an error. One the main constructor leaves unset is the named constructor's to set, once.
 #[test]
@@ -6535,6 +6603,19 @@ fn an_emptied_static_list_property_stays_a_list() {
     let sharp = "namespace Demo;\n\nclass Tags\n{\n    public static List<string> names = [\"a\"];\n\n    public int count()\n    {\n        Tags.names = [];\n        let total = 0;\n        for (const [i, n] of Tags.names) {\n            total += i + global.strlen(n);\n        }\n        return total + global.strlen(Tags.names[0]);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["11:30 invalid-iterator"]);
+}
+
+/// An index write to a static `Map` property is typed by the property, public or private, as an index write to an
+/// instance property is, and a `List` or a `Set` static property changes through its methods. A value of the wrong
+/// type is refused for both.
+#[test]
+fn an_index_write_to_a_static_collection_is_typed_by_its_property() {
+    let sharp = "namespace Demo;\n\nclass Statics\n{\n    private static Map<string, int> shared = [:];\n    public static Map<string, int> open = [:];\n    private static List<int> sizes = [0];\n    private static Set<string> seen = [];\n    private Map<string, int> own = [:];\n\n    public static int write()\n    {\n        Statics.shared[\"a\"] = 1;\n        Statics.open[\"b\"] = 2;\n        Statics.sizes.set(0, 3);\n        Statics.seen.add(\"c\");\n        Statics.shared[\"d\"] = \"wrong\";\n        return Statics.shared.count() + Statics.open.count() + Statics.sizes.count() + Statics.seen.count();\n    }\n\n    public int writeOwn()\n    {\n        this.own[\"d\"] = \"wrong\";\n        return this.own.count();\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Statics.sharp", sharp), &[]),
+        ["17:9 invalid-property-assignment-value", "23:9 invalid-property-assignment-value"]
+    );
 }
 
 /// A parameter's default `[]` and a returned `[]` narrow nothing: the parameter and the call are the `List`s they are
@@ -7451,22 +7532,13 @@ fn a_map_literal_set_into_a_list_of_lists_is_an_error() {
     );
 }
 
-/// `List.wrap`'s value is `T|List<T>`, so `[:]` may be the `T` it wraps, and `wrap` itself refuses every value that can
-/// be a collection. A `Map` literal passed to it is refused once, by `wrap`, and not again as a literal of the wrong
-/// collection.
+/// `List.wrap`'s value is `T|List<T>`, so `[:]` is the `T` it wraps, a `Map` held in a one-element `List`, and not a
+/// literal of the wrong collection.
 #[test]
-fn list_wrap_of_a_map_literal_is_refused_once() {
-    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public List<List<int>> rows() => List.wrap([:]);\n}\n";
+fn list_wrap_of_a_map_literal_holds_the_map() {
+    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public List<Map<string, int>> rows() => List.wrap([:]);\n}\n";
 
-    assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Grid.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
-        [
-            "5:48 invalid-argument T is Map<never, never>, itself a map; write `[:] is Map<never, never> one ? [one] : [:]`"
-        ]
-    );
+    assert_eq!(issues(("src/Demo/Grid.sharp", sharp), &[]), Vec::<String>::new());
 }
 
 /// A return or a parameter that declares both a `List` and a `Map` takes a literal of either collection.
@@ -7692,17 +7764,18 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
 /// `==` on a collection is. An element `==` compares, a class that declares `operator ==`, nullable or not, a string,
 /// an `int|float` given an int and an `Any?` given a string, searches with no issue, as does the help's `any` with
 /// `===`, whose lambda names an element by its class's initial unless the call already uses that name, and which keeps
-/// a null-safe call's `?.`.
+/// a null-safe call's `?.`. A struct element compares by value, so one with a property `==` can't compare is refused
+/// with that property, and so is a list element whose own elements `==` can't compare. A struct equals only the same
+/// struct, so a search of a struct beside another type, a number or a struct, is refused as `==` refuses it.
 #[test]
 fn a_search_needs_equality_on_the_element_type() {
-    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> lines, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held, List<Money|Line> goods, List<Money|int> tallies, List<Money|Ticket> tickets, List<Coin|Line> pocket, List<Money?> wallet)\n    {\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(l => l === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value) || loose.any(x => x == value);\n        bool maybe = held?.contains(line) ?? false;\n        bool fixed = held?.any(l => l === line) ?? false;\n        bool dropped = lines.remove(line);\n        bool vip = loose.contains(\"vip\") && loose.any(x => x == \"vip\");\n        bool equal = lines.any(x => x == line);\n        bool either = goods.contains(price) || goods.any(x => x == price);\n        bool paid = loose.contains(price);\n        int? counted = tallies.indexOf(price);\n        bool spent = tickets.remove(price);\n        bool pocketed = pocket.contains(coin);\n        bool saved = wallet.contains(price) && wallet.any(x => x == price);\n        return (kept || row || found || same || minted || named || any || maybe || fixed || dropped || vip || equal || either || paid || spent || pocketed || saved ? 1 : 0) + (at ?? 0) + (priced ?? 0) + (counted ?? 0);\n    }\n}\n\nclass Line\n{\n}\n\nclass Ticket\n{\n    public Ticket(public int serial { get; })\n    {\n    }\n\n    public static bool operator ==(Ticket a, Ticket b) => a.serial == b.serial;\n\n    public int hash() => this.serial;\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n\nclass Coin\n{\n    public Coin(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Coin a, int cents) => a.cents == cents;\n\n    public int hash() => this.cents;\n}\n";
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> lines, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held, List<Money|Line> goods, List<Money|int> tallies, List<Money|Ticket> tickets, List<Coin|Line> pocket, List<Money?> wallet, List<Order> orders, Order order, List<List<Line>> shelves, List<Spot|int> spots, List<Address|Spot> places, Spot spot)\n    {\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(l => l === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value) || loose.any(x => x == value);\n        bool maybe = held?.contains(line) ?? false;\n        bool fixed = held?.any(l => l === line) ?? false;\n        bool dropped = lines.remove(line);\n        bool vip = loose.contains(\"vip\") && loose.any(x => x == \"vip\");\n        bool equal = lines.any(x => x == line);\n        bool either = goods.contains(price) || goods.any(x => x == price);\n        bool paid = loose.contains(price);\n        int? counted = tallies.indexOf(price);\n        bool spent = tickets.remove(price);\n        bool pocketed = pocket.contains(coin);\n        bool saved = wallet.contains(price) && wallet.any(x => x == price);\n        bool ordered = orders.contains(order);\n        bool shelved = shelves.contains(lines);\n        bool spotted = spots.contains(spot) || places.contains(spot);\n        return (kept || row || found || same || minted || named || any || maybe || fixed || dropped || vip || equal || either || paid || spent || pocketed || saved || ordered || shelved || spotted ? 1 : 0) + (at ?? 0) + (priced ?? 0) + (counted ?? 0);\n    }\n}\n\nclass Line\n{\n}\n\nclass Ticket\n{\n    public Ticket(public int serial { get; })\n    {\n    }\n\n    public static bool operator ==(Ticket a, Ticket b) => a.serial == b.serial;\n\n    public int hash() => this.serial;\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n\nclass Coin\n{\n    public Coin(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Coin a, int cents) => a.cents == cents;\n\n    public int hash() => this.cents;\n}\n\nstruct Order\n{\n    public Order(public Line line { get; }) { }\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Shelf.sharp", sharp), &[]),
         [
             "7:36 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
             "8:33 invalid-argument `indexOf` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
-            "9:34 not-supported-yet `contains` on `List<List<int>>` is not supported yet: `==` on a collection is not supported yet. | Compare the elements one by one.",
             "13:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Coin` and `Coin`.",
             "14:34 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `ls.any(element => element === l)`.",
             "15:35 mixed-operand Each element of `List<Any?>` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
@@ -7717,6 +7790,10 @@ fn a_search_needs_equality_on_the_element_type() {
             "23:40 invalid-argument `indexOf` compares elements with `==`, and the `operator ==` of `Money` does not take `int|Money` and `Money`. | Make the `operator ==` of `Money` take `int|Money` and `Money`.",
             "24:37 invalid-argument `remove` compares elements with `==`, and the `operator ==` of `Money` does not take `Ticket|Money` and `Money`. | Make the `operator ==` of `Money` take `Ticket|Money` and `Money`.",
             "25:41 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Line|Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Line|Coin` and `Coin`.",
+            "27:40 invalid-argument `contains` compares elements with `==`, and `Order` can't compare by value: `line` is a `Line`, which declares no `operator ==`. | ",
+            "28:41 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | ",
+            "29:39 invalid-argument `contains` compares elements with `==`, which cannot compare `int|Spot` with `Spot`. | Search a list of one struct type.",
+            "29:64 invalid-argument `contains` compares elements with `==`, which cannot compare `Address|Spot` with `Spot`. | Search a list of one struct type.",
         ]
     );
 }
@@ -7732,9 +7809,10 @@ fn every_collection_counts_its_elements() {
     assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["24:23 too-many-arguments"]);
 }
 
-/// A collection method the bridge lowers to PHP on the array, such as `count` or a `Set`'s `contains`, cannot run on a
-/// value that can also be an object, whose own method the PHP would skip. Any other collection method is a method call
-/// the engine sends to the object or the collection the value holds when it runs. A `.php` file has no PHP# collection.
+/// A `List` method the bridge lowers to PHP on the array, such as `count` or `contains`, cannot run on a value that can
+/// also be an object, whose own method the PHP would skip. Any other collection method, and every `Set` and `Map`
+/// method, is a method call the engine sends to the object or the collection the value holds when it runs. A `.php`
+/// file has no PHP# collection.
 #[test]
 fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_yet() {
     let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public int? get(int index) => index > 0 ? index : null;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1) || items.contains(1)) {\n            return items.get(0) ?? 0;\n        }\n        return items.count();\n    }\n}\n";
@@ -7743,9 +7821,9 @@ fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_ye
 
     assert_eq!(
         issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
-        ["16:18 not-supported-yet", "16:39 not-supported-yet", "19:22 not-supported-yet"]
+        ["16:39 not-supported-yet", "19:22 not-supported-yet"]
     );
-    assert_eq!(issues[2].message, "Calling `count` on `List<int>|Box` is not supported by the engine yet.");
+    assert_eq!(issues[1].message, "Calling `count` on `List<int>|Box` is not supported by the engine yet.");
     assert!(!codes(&self::issues(("src/Demo/Shelf.php", php), &[])).contains(&"not-supported-yet"));
 }
 
@@ -7923,10 +8001,10 @@ fn a_set_property_without_a_set_refuses_a_changing_method() {
 }
 
 /// A changing method called on a value that may be one of several collections is refused once, by the first rule it
-/// breaks. `add` on a `Map|Set` is refused by the `Map`, which lacks it, and not again for writing to no place. A method
-/// the bridge lowers as PHP on the array, such as a `Set`'s `add` or `filter` or a `Map`'s `filter` or `remove`, is not
-/// supported on a value that may be another collection or an object, because the engine would run the other
-/// collection's method on it: `List|Set`, `Set|Box`, `List|Map` and `Map|Box`.
+/// breaks. `add` on a `Map|Set` is refused by the `Map`, which lacks it, and not again for writing to no place. A
+/// conditional is no place, so a changing method on it is refused whatever it may hold: `List|Set`, `Set|Box` and
+/// `Map|Box`. A `Map` and a `Set` are objects whose methods run on whichever collection the value holds, so `add` on a
+/// `List|Set` local and `filter` on a `List|Map` or a `List|Set` run.
 #[test]
 fn a_changing_method_of_a_union_of_collections_is_refused_once() {
     let sharp = "namespace Demo;\n\nclass Box\n{\n    public bool add(int value) => true;\n    public bool remove(string key) => true;\n}\n\nclass Shop\n{\n    public int run(bool ready, List<int> lines, Set<int> ids, Map<string, int> counts, Box box)\n    {\n        (ready ? lines : ids).add(1);\n        (ready ? counts : ids).add(1);\n        (ready ? ids : box).add(1);\n        let tags = ready ? lines : ids;\n        tags.add(3);\n        (ready ? lines : counts).filter(n => n > 0);\n        (ready ? counts : box).remove(\"a\");\n        return global.count(tags.filter(tag => tag > 0));\n    }\n}\n";
@@ -7934,13 +8012,10 @@ fn a_changing_method_of_a_union_of_collections_is_refused_once() {
     assert_eq!(
         issues(("src/Demo/Shop.sharp", sharp), &[]),
         [
-            "13:31 not-supported-yet",
+            "13:9 invalid-pass-by-reference",
             "14:32 non-existent-method",
-            "15:29 not-supported-yet",
-            "17:14 not-supported-yet",
-            "18:34 not-supported-yet",
-            "19:32 not-supported-yet",
-            "20:34 not-supported-yet"
+            "15:9 invalid-pass-by-reference",
+            "19:9 invalid-pass-by-reference"
         ]
     );
 }
@@ -8003,11 +8078,11 @@ fn a_map_keyed_by_a_backed_enum_takes_the_case_in_every_key_position() {
 }
 
 /// Inside PHP# a `Map<Status, int>` is keyed by `Status` alone, so its backing values, another enum and a
-/// `Map<string, int>` are refused where it takes a key. The runtime never meets a key the typed loop cannot read
-/// back as `Status`.
+/// `Map<string, int>` are refused where it takes a key, and it is no `Map<string, int>` itself. The runtime never
+/// meets a key the typed loop cannot read back as `Status`.
 #[test]
 fn a_map_keyed_by_a_backed_enum_takes_exactly_the_enum_as_a_key() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int wrong(Map<Status, int> counts, Map<string, int> named, Size size)\n    {\n        counts[\"active\"] = 1;\n        counts[size] = 2;\n        Map<Status, int> built = [\"active\": 1];\n        Map<Status, int> narrowed = named;\n        return (built.get(Status.Active) ?? 0) + (narrowed.get(Status.Active) ?? 0) + (counts.get(\"active\") ?? 0);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int wrong(Map<Status, int> counts, Map<string, int> named, Size size)\n    {\n        counts[\"active\"] = 1;\n        counts[size] = 2;\n        Map<Status, int> built = [\"active\": 1];\n        Map<Status, int> narrowed = named;\n        Map<string, int> widened = counts;\n        return (built.get(Status.Active) ?? 0) + (narrowed.get(Status.Active) ?? 0) + (counts.get(\"active\") ?? 0) + widened.count();\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
@@ -8016,7 +8091,8 @@ fn a_map_keyed_by_a_backed_enum_takes_exactly_the_enum_as_a_key() {
             "11:16 mismatched-array-index",
             "12:34 invalid-local-assignment-value",
             "13:37 invalid-local-assignment-value",
-            "14:99 invalid-argument"
+            "14:36 invalid-local-assignment-value",
+            "15:99 invalid-argument"
         ]
     );
 }
@@ -8032,63 +8108,380 @@ fn map_get_has_and_remove_take_a_backed_enum_key_in_sharp_and_in_php() {
     assert_eq!(issues(("src/Demo/Tally.php", php), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
 
-/// Plain PHP receives a `Map<Status, int>`'s backing values, so where the `Map` meets a plain PHP array it is an
-/// `array<string, int>`: an `array` parameter, an `iterable`, `count`, and a template such as `array_keys`' `K`.
+/// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
+/// keys are `int` or `string`. A `Map` keyed by a backed enum, a struct or a `float` has no such array, so the call is
+/// refused, naming the parameter and the key type, whether the parameter's type is native, from a stub as `count`'s,
+/// or from a docblock. A parameter of a plain PHP closure a local holds, which has no name, is named by its position.
+/// A `Map<string, int>` crosses, and a parameter typed `iterable`, `mixed` or nothing takes the `Map` itself, whose
+/// keys stay `Status`, so an `iterable<string, int>` takes `Map<string, int>` and refuses `Map<Status, int>`.
 #[test]
-fn a_map_keyed_by_a_backed_enum_meets_plain_php_as_an_array_of_its_backing_values() {
-    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts, Status status)\n    {\n        List<string> keys = global.array_keys(counts);\n        Map<string, int> named = counts;\n        return global.count(counts) + Sink.byName(counts) + Sink.plain(counts) + Sink.each(counts) + global.count(keys) + global.count(named) + (global.array_key_exists(status.value, counts) ? 1 : 0);\n    }\n}\n";
-    let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    /** @param array<string, int> $counts */\n    public static function byName(array $counts): int\n    {\n        return count($counts);\n    }\n\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    /** @param iterable<string, int> $counts */\n    public static function each(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n}\n";
+fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts, Map<Spot, int> spots, Map<string, int> named, Map<float, int> prices)\n    {\n        const counter = Sink.counter();\n        return Sink.plain(counts) + Sink.documented(spots) + global.count(spots) + Sink.plain(named) + Sink.each(counts) + Sink.anything(spots) + Sink.untyped(counts) + counter(spots) + Sink.keyed(named) + Sink.keyed(counts) + Sink.plain(prices);\n    }\n}\n";
+    let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    /** @param array<string, int> $counts */\n    public static function documented($counts): int\n    {\n        return count($counts);\n    }\n\n    public static function each(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    /** @param iterable<string, int> $counts */\n    public static function keyed(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    public static function anything(mixed $counts): int\n    {\n        return 1;\n    }\n\n    public static function untyped($counts): int\n    {\n        return 1;\n    }\n\n    /** @return Closure(array): int */\n    public static function counter(): Closure\n    {\n        return static fn (array $counts): int => count($counts);\n    }\n}\n";
+    let spot = "namespace Lib;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS), ("src/Lib/Sink.php", sink)]),
+        analyze(
+            &PLUGIN_REGISTRY,
+            settings(),
+            ("src/Demo/Tally.sharp", sharp),
+            &[("src/Lib/Status.php", STATUS), ("src/Lib/Sink.php", sink), ("src/Lib/Spot.sharp", spot)]
+        )
+        .iter()
+        .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+        .collect::<Vec<_>>(),
+        [
+            "12:27 invalid-argument `Map<Status, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Status`.",
+            "12:53 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.documented`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "12:75 invalid-argument `Map<Spot, int>` can't be passed to the parameter `value` of function `global.count`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "12:178 invalid-argument `Map<Spot, int>` can't be passed to the argument #1 of closure `Closure`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "12:218 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Sink.keyed`: expected `iterable<string, int>`, but possibly received `Map<Status, int>`.",
+            "12:239 invalid-argument `Map<float, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `float`.",
+        ]
+    );
+}
+
+/// Spec sections 11 and 12 check a value from plain PHP where it enters PHP#. So where PHP# takes a `Map`, as a
+/// parameter or a property, instance or static, plain PHP passes or writes the keys a PHP array holds there: a
+/// backed enum's backing values, and an `int` beside a `string`, as PHP holds the key `'5'` as `5`, which PHP# turns
+/// back into the `string`. An index write through the property keeps it such an array. A `Map<Size, int>` of an
+/// `int`-backed enum refuses a `string` key. That border check does not look inside a collection yet, so a key that is
+/// no case fails when PHP# reads it back as `Status`.
+#[test]
+fn a_plain_php_caller_passes_and_writes_the_keys_a_php_array_holds_where_php_sharp_takes_a_map() {
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\npublic class Tally\n{\n    public Map<string, int> named { get; set; } = [:];\n    public static Map<string, int> shared { get; set; } = [:];\n    public Map<Status, int> counts { get; set; } = [:];\n    public Map<Size, int> sizes { get; set; } = [:];\n\n    public int total(Map<Status, int> counts) => counts.count();\n\n    public int name(Map<string, int> named) => named.count();\n\n    public int size(Map<Size, int> sizes) => sizes.count();\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function run(Tally $tally): int\n    {\n        $tally->named = ['5' => 1, 'a' => 2];\n        $tally->named['6'] = 3;\n        Tally::$shared = ['5' => 1];\n        Tally::$shared['6'] = 2;\n        $tally->counts = ['active' => 1, '5' => 2];\n        $tally->sizes = [1 => 1];\n        $tally->sizes = ['small' => 1];\n        return $tally->total(['active' => 1]) + $tally->total([1 => 1]) + $tally->name(['5' => 1]) + $tally->size([1 => 1]) + $tally->size(['small' => 1]);\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Caller.php", php), &[("src/Demo/Tally.sharp", sharp), ("src/Lib/Status.php", STATUS)]),
+        ["15:25 invalid-property-assignment-value", "16:140 possibly-invalid-argument"]
+    );
+}
+
+/// Spec section 10: any struct keys a `Map` and joins a `Set` by its whole value, unless it holds a class instance at
+/// any depth, through a class, an interface, a function or `Any`, also inside a collection or another struct. The
+/// refusal is where a `Map` or `Set` type is written, where a literal's key infers one, and where `groupBy` keys one by
+/// what its function returns. An enum case is a value, also in a list, a struct that holds itself keys by the rest, and
+/// a computed property holds nothing.
+#[test]
+fn a_struct_keys_a_map_unless_it_holds_a_class_instance() {
+    let sharp = "namespace Demo;\n\ninterface Labeled\n{\n    string label();\n}\n\nclass Plan\n{\n    public Plan() { }\n}\n\nenum Size\n{\n    case Small;\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }, public Size size { get; }) { }\n\n    public Plan owner { get => new Plan(); }\n}\n\nstruct Route\n{\n    public Route(public List<Spot> stops { get; }, public Map<string, Spot?> named { get; }) { }\n}\n\nstruct Order\n{\n    public Order(public int id { get; }, public Plan plan { get; }) { }\n}\n\nstruct Leg\n{\n    public Leg(public List<Order> orders { get; }) { }\n}\n\nstruct Tagged\n{\n    public Tagged(public Labeled label { get; }) { }\n}\n\nstruct Bag\n{\n    public Bag(public Any data { get; }) { }\n}\n\nstruct Hook\n{\n    public Hook(public Function<int(int)> run { get; }) { }\n}\n\nstruct Mood\n{\n    public Mood(public List<Size> sizes { get; }, public Mood? before { get; }) { }\n}\n\nclass Shop\n{\n    public Map<Spot, int> spots = [:];\n    public Map<Route, int> routes = [:];\n    public Set<Spot> seen = [];\n    public Map<Order, int> orders = [:];\n    public Map<Leg, int> legs = [:];\n    public Map<Tagged, int> tags = [:];\n    public Map<Bag, int> bags = [:];\n    public Map<Hook, int> hooks = [:];\n    public Set<Order> pending = [];\n    public Map<Mood, int> moods = [:];\n\n    public int count(Spot spot)\n    {\n        this.spots[spot] = 1;\n        const placed = [new Spot(1, Size.Small): 2];\n        const ordered = [new Order(1, new Plan()): 3];\n\n        return (this.spots[spot] ?? 0) + (placed[spot] ?? 0);\n    }\n\n    public void group(List<Order> all, List<Spot> spots)\n    {\n        const byOrder = all.groupBy(order => order);\n        const bySpot = spots.groupBy(spot => spot);\n    }\n}\n";
+
+    let note = "A struct key is found by a hash of its fields and their `==`, and a class instance has neither unless its class declares `operator ==` with `hash()`.";
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shop.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {} | {}", located(sharp, issue), issue.message, issue.notes.join(" ")))
+            .collect::<Vec<_>>(),
+        [
+            format!(
+                "65:12 template-constraint-violation `Order` can't key a `Map`: `plan` is a `Plan`, a class, and a key holds only values. | {note}"
+            ),
+            format!(
+                "66:12 template-constraint-violation `Leg` can't key a `Map`: `orders` holds a `Plan`, a class, and a key holds only values. | {note}"
+            ),
+            format!(
+                "67:12 template-constraint-violation `Tagged` can't key a `Map`: `label` is a `Labeled`, an interface, and a key holds only values. | {note}"
+            ),
+            format!(
+                "68:12 template-constraint-violation `Bag` can't key a `Map`: `data` is `Any`, which can be a class instance, and a key holds only values. | {note}"
+            ),
+            format!(
+                "69:12 template-constraint-violation `Hook` can't key a `Map`: `run` is a `Function<int(int)>`, a function, and a key holds only values. | {note}"
+            ),
+            format!(
+                "70:12 template-constraint-violation `Order` can't be in a `Set`: `plan` is a `Plan`, a class, and a `Set` holds only values. | {note}"
+            ),
+            format!(
+                "77:26 template-constraint-violation `Order` can't key a `Map`: `plan` is a `Plan`, a class, and a key holds only values. | {note}"
+            ),
+            format!(
+                "84:37 template-constraint-violation `Order` can't key a `Map`: `plan` is a `Plan`, a class, and a key holds only values. | {note}"
+            ),
+        ]
+    );
+}
+
+/// Every issue of `code`, as `line:column code message`.
+fn written(code: &str, issues: &[Issue]) -> Vec<String> {
+    issues.iter().map(|issue| format!("{} {}", located(code, issue), issue.message)).collect()
+}
+
+/// Spec section 10: a struct never changes, so a write to its property after it is created is refused, in its own
+/// method too. For an `init` property the help names the struct's first method that returns a changed copy, or `with`
+/// when it has none. `with` can't set a get-only property, so its help names the main constructor, or `init` with
+/// `with`, and never a method, which may be a `with` on it. Each fix compiles.
+#[test]
+fn a_struct_never_changes() {
+    let sharp = "namespace Demo;\n\nstruct Spot\n{\n    public Spot(public int x { get; }, public int y { get; }) { }\n\n    public Spot moved(int dx) => new Spot(this.x + dx, this.y);\n\n    public void shift()\n    {\n        this.x = 1;\n    }\n}\n\nstruct Size\n{\n    public int width { get; init; }\n}\n\nclass Mover\n{\n    public Spot move(Spot spot)\n    {\n        spot.x = 5;\n        return spot.moved(1);\n    }\n\n    public Size widen(Size size)\n    {\n        size.width = 2;\n        return size with { width: 3 };\n    }\n}\n\nstruct Tag\n{\n    public string label { get; init; }\n\n    public Tag renamed(string label) => this with { label: label };\n\n    public void rename()\n    {\n        this.label = \"x\";\n    }\n}\n\nstruct Basket\n{\n    public Basket(public Map<string, int> counts { get; }) { }\n\n    public Basket emptied() => this with { counts: [:] };\n\n    public void drop()\n    {\n        this.counts.remove(\"x\");\n    }\n}\n";
+    let fixed = "namespace Demo;\n\nstruct Basket\n{\n    public Basket(public Map<string, int> counts { get; }) { }\n\n    public Basket emptied() => new Basket([:]);\n}\n\nstruct Crate\n{\n    public Crate(public Map<string, int> counts { get; init; }) { }\n\n    public Crate emptied() => this with { counts: [:] };\n}\n";
+
+    let get_only = |name: &str, property: &str| {
+        format!(
+            "invalid-property-write A struct never changes; return a changed copy built with its main constructor, `new {name}(…)`, or declare `{property}` `{{ get; init; }}` and return a changed copy built with `with`."
+        )
+    };
+
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Mover.sharp", sharp), &[])),
+        [
+            format!("11:14 {}", get_only("Spot", "x")),
+            format!("24:14 {}", get_only("Spot", "x")),
+            "30:14 invalid-property-write A struct never changes; return a changed copy built with `with`.".to_owned(),
+            "43:14 invalid-property-write A struct never changes; return a changed copy from a method, such as `renamed`."
+                .to_owned(),
+            "51:44 invalid-property-write `counts` is get-only, so `with` can't set it.".to_owned(),
+            format!("55:14 {}", get_only("Basket", "counts")),
+        ]
+    );
+    assert_eq!(
+        written(fixed, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Fixed.sharp", fixed), &[])),
         Vec::<String>::new()
     );
 }
 
-/// Spec section 11 checks a value from plain PHP where it enters PHP#, so a plain PHP caller passes the backing
-/// values where PHP# takes a `Map<Status, int>`, and only those. That border check does not look inside a
-/// collection yet, so a key that is no case fails when PHP# reads it back as `Status`.
+/// Spec section 10: a struct can't inherit or be inherited, and implements interfaces. A class in a struct's header
+/// and a class that extends a struct are each refused, an interface in the header compiles, and a name that names no
+/// type is refused once, as a type that cannot be found. A class declared first under a struct's name keeps it.
 #[test]
-fn a_plain_php_caller_passes_the_backing_values_where_php_sharp_takes_a_map_keyed_by_a_backed_enum() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts)\n    {\n        return counts.count();\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function run(Tally $tally): int\n    {\n        return $tally->total(['active' => 1]) + $tally->total([1 => 1]);\n    }\n}\n";
+fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
+    let sharp = "namespace Demo;\n\ninterface Labeled\n{\n    string label();\n}\n\nclass Base\n{\n    public Base() { }\n}\n\nstruct Tag : Base\n{\n    public Tag() { }\n}\n\nstruct Name : Labeled\n{\n    public Name() { }\n\n    public string label() => \"name\";\n}\n\nclass Child : Name\n{\n    public Child() { }\n}\n\nstruct Odd : Missing\n{\n    public Odd() { }\n}\n";
+    let twice = ("src/Demo/Dup.sharp", "namespace Demo;\n\nclass Dup\n{\n}\n\nstruct Dup\n{\n}\n");
 
     assert_eq!(
-        issues(("src/Demo/Caller.php", php), &[("src/Demo/Tally.sharp", sharp), ("src/Lib/Status.php", STATUS)]),
-        ["9:63 possibly-invalid-argument"]
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shapes.sharp", sharp), &[])),
+        [
+            "13:14 invalid-struct A struct can't inherit: `Base` is a class.",
+            "25:15 invalid-struct `Name` is a struct, which can't be inherited.",
+            "30:14 non-existent-class-like Struct `Odd` cannot implement unknown type `Missing`",
+        ]
+    );
+    assert_eq!(messages(twice, &[]), ["Struct `Dup` is already defined elsewhere."]);
+}
+
+/// Spec section 10: `==` on a struct compares each property with its own `==`, so a struct with a property `==` can't
+/// compare is refused at the `==`, naming the property and why: a class with no `operator ==` or one that takes no two
+/// of it, `Any`, a `Set`, a `List` of such, or a struct that can't compare, also as a list's element or beside `Any?`.
+/// A struct equals only the same struct, and `===` is refused with its fix. A struct that holds itself, also in a
+/// `List`, compares by the rest, a struct compares with an `Any?`, and `!=` and the fix compile. A function has no
+/// equality, so a struct that holds one has none. A struct that declares no `operator <=>` has no order, for `<`, `<=>`
+/// and `sortedBy`. An event is a class, not a struct, so it has no `==` of its own.
+#[test]
+fn a_struct_compares_by_value() {
+    let sharp = "namespace Demo;\n\nclass Plan\n{\n    public Plan() { }\n}\n\nclass Coin\n{\n    public Coin(public int cents { get; }) { }\n\n    public static bool operator ==(Coin a, int cents) => a.cents == cents;\n\n    public int hash() => this.cents;\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }, public List<int> path { get; }) { }\n}\n\nstruct Order\n{\n    public Order(public Plan plan { get; }) { }\n}\n\nstruct Node\n{\n    public Node(public int value { get; }, public Node? next { get; }) { }\n}\n\nstruct Bag\n{\n    public Bag(public Any? data { get; }) { }\n}\n\nstruct Pair\n{\n    public Pair(public Order order { get; }) { }\n}\n\nstruct Tagged\n{\n    public Tagged(public Set<int> tags { get; }) { }\n}\n\nstruct Basket\n{\n    public Basket(public List<Plan> plans { get; }) { }\n}\n\nstruct Purse\n{\n    public Purse(public Coin coin { get; }) { }\n}\n\nstruct Tree\n{\n    public Tree(public List<Tree> branches { get; }) { }\n}\n\nstruct Moving\n{\n    public Moving(public int x { get; }, public Function<void()> onMove { get; }) { }\n}\n\nclass Compare\n{\n    public bool same(Spot a, Spot b) => a === b;\n\n    public bool equal(Spot a, Spot b) => a == b;\n\n    public bool different(Spot a, Any? b) => a != b;\n\n    public bool orders(Order a, Order b) => a == b;\n\n    public bool loose(Any? a, Order b) => a == b;\n\n    public bool number(Spot a, int b) => a == b;\n\n    public bool lists(List<Order> a, List<Order> b) => a == b;\n\n    public bool chain(Node a, Node b) => a == b;\n\n    public bool bags(Bag a, Bag b) => a == b;\n\n    public bool pairs(Pair a, Pair b) => a == b;\n\n    public bool tagged(Tagged a, Tagged b) => a == b;\n\n    public bool baskets(Basket a, Basket b) => a == b;\n\n    public bool purses(Purse a, Purse b) => a == b;\n\n    public bool trees(Tree a, Tree b) => a == b;\n\n    public bool moving(Moving a, Moving b) => a == b;\n\n    public bool before(Spot a, Spot b) => a < b;\n\n    public int order(Spot a, Spot b) => a <=> b;\n\n    public List<Spot> sorted(List<Spot> spots) => spots.sortedBy(s => s);\n\n    public bool events(Moved a, Moved b) => a == b;\n}\n";
+    let moved = ("src/Demo/Moved.sharp", "namespace Demo;\n\nevent Moved(int x);\n");
+
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Compare.sharp", sharp), &[moved])),
+        [
+            "69:41 invalid-operand `===` tests for the same object, and `Spot` is a struct: write `==`.",
+            "75:45 invalid-operand `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
+            "77:43 invalid-operand `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
+            "79:42 invalid-operand `==` cannot compare `Spot` with `int`.",
+            "81:56 invalid-operand `==` compares `List<Order>` with `List<Order>` element by element, and `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
+            "85:39 invalid-operand `Bag` can't compare by value: `data` is an `Any`, which compares by value only with a string, a number or an enum case.",
+            "87:42 invalid-operand `Pair` can't compare by value: `order` is an `Order`, which can't compare by value.",
+            "89:47 invalid-operand `Tagged` can't compare by value: `tags` is a `Set<int>`, and `==` on a collection is not supported yet.",
+            "91:48 invalid-operand `Basket` can't compare by value: `plans` is a `List<Plan>`, whose elements `==` cannot compare.",
+            "93:45 invalid-operand `Purse` can't compare by value: `coin` is a `Coin`, which `==` cannot compare with another of its type.",
+            "97:47 invalid-operand `Moving` can't be compared: `onMove` is a function.",
+            "99:43 invalid-operand `<` cannot compare `Spot` with `Spot`: `Spot` declares no `operator <=>`.",
+            "101:41 invalid-operand `<=>` cannot compare `Spot` with `Spot`: `Spot` declares no `operator <=>`.",
+            "103:66 invalid-argument `sortedBy` orders numbers, strings and classes that declare `operator <=>`, and `Spot` is none of them.",
+            "105:45 invalid-operand `==` cannot compare `Moved` with `Moved`: `Moved` declares no `operator ==`.",
+        ]
     );
 }
 
-/// A plain PHP docblock may write `array<Status, int>`, a type PHP arrays cannot hold. It is the backing values'
-/// array, as a PHP# `Map` keyed by `Status` is where it meets plain PHP, so it agrees with the native `array`.
+/// Spec section 10: a struct may declare `operator ==` with `hash()`, as a class may, and the pair replaces the `==`
+/// that compares property by property: `==`, `!=`, `contains`, a `Set`, a `Map` key and `groupBy` run it, whatever the
+/// struct holds, also as a field of another struct key, and with the operand type the operator takes. The same struct
+/// without the pair holds a function, which has
+/// no `==`, so each of those is refused, naming the field. A struct is still a value, so `===` is refused, and `parse`
+/// still can't read a function.
 #[test]
-fn a_php_docblock_array_keyed_by_a_backed_enum_agrees_with_the_native_array() {
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Status;\n\nfinal class Report\n{\n    /** @return array<Status, int> */\n    public static function counts(): array\n    {\n        return [];\n    }\n}\n";
+fn a_struct_that_declares_equality_compares_and_keys_by_it() {
+    let sharp = "namespace Demo;\n\nstruct Rule\n{\n    public Rule(public string name { get; }, public Function<bool(int)> check { get; }) { }\n\n    public static bool operator ==(Rule a, Rule b) => a.name == b.name;\n\n    public int hash() => 7;\n}\n\nstruct Hook\n{\n    public Hook(public string name { get; }, public Function<bool(int)> check { get; }) { }\n}\n\nstruct Step\n{\n    public Step(public int at { get; }, public Rule rule { get; }) { }\n}\n\nclass Rules\n{\n    public Set<Rule> seen = [];\n    public Map<Rule, int> counts = [:];\n    public Map<Step, int> steps = [:];\n    public Set<Hook> hooks = [];\n    public Map<Hook, int> hooked = [:];\n\n    public bool same(Rule a, Rule b) => a == b;\n\n    public bool other(Rule a, Rule b) => a != b;\n\n    public bool hookSame(Hook a, Hook b) => a == b;\n\n    public bool identical(Rule a, Rule b) => a === b;\n\n    public int count(Rule rule)\n    {\n        this.counts[rule] = 1;\n        return this.counts[rule] ?? 0;\n    }\n\n    public bool has(List<Rule> rules, Rule rule) => rules.contains(rule);\n\n    public bool hasHook(List<Hook> hooks, Hook hook) => hooks.contains(hook);\n\n    public void group(List<Rule> rules)\n    {\n        const byRule = rules.groupBy(rule => rule);\n    }\n\n    public Rule read(Map<string, Any?> input) => Rule.parse(input);\n}\n\nstruct Cents\n{\n    public Cents(public int amount { get; }) { }\n\n    public static bool operator ==(Cents a, int amount) => a.amount == amount;\n\n    public int hash() => this.amount;\n\n    public bool costs(int amount) => this == amount;\n}\n";
 
-    assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Rules.sharp", sharp), &[])),
+        [
+            "27:12 template-constraint-violation `Hook` can't be in a `Set`: `check` is a `Function<bool(int)>`, a function, and a `Set` holds only values.",
+            "28:12 template-constraint-violation `Hook` can't key a `Map`: `check` is a `Function<bool(int)>`, a function, and a key holds only values.",
+            "34:45 invalid-operand `Hook` can't be compared: `check` is a function.",
+            "36:46 invalid-operand `===` tests for the same object, and `Rule` is a struct: write `==`.",
+            "46:72 invalid-argument `contains` compares elements with `==`, and `Hook` can't be compared: `check` is a function.",
+            "53:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
+        ]
+    );
 }
 
-/// Spec section 12 keys a `Map` by an `int`, a `string` or a type with an `int` or `string` backing value, so a
-/// class, a pure enum or a `float` is refused where a `Map` type is written, and where `groupBy` or `associateBy` keys
-/// one by what its function returns. A key that may be null is refused for its `null`, and a key type that names no
-/// type is refused once, as a type that cannot be found.
+/// Spec section 16: `with` and an object initializer set only a property with `init` or `set`, each once, and the help
+/// of a get-only PHP# property, `{ get; init; }`, compiles. A plain PHP `readonly` property is get-only too, with no
+/// help, since its class isn't PHP#'s. `with` copies a struct or a class, so an enum and an event are refused.
 #[test]
-fn a_map_key_type_without_a_backing_value_is_an_error() {
-    let sharp = "namespace Demo;\n\nimport Lib.Line;\nimport Lib.Pure;\nimport Lib.Status;\n\nclass Tally\n{\n    public Map<Line, int> lines = [:];\n\n    public Map<Pure, int> count(Map<Line, int> counts, Map<Username, int> names)\n    {\n        Map<Pure, int> local = [:];\n        Map<Username, int> named = [:];\n        return local;\n    }\n\n    public int group(List<Line> all, List<float> prices)\n    {\n        const byLine = all.groupBy(line => line);\n        const byPrice = prices.associateBy(price => price);\n        const byPure = all.groupBy(line => Pure.One);\n        const byMaybe = prices.groupBy(price => price > 1.0 ? Status.Active : null);\n        return global.count(byLine) + global.count(byPrice) + global.count(byPure) + global.count(byMaybe);\n    }\n}\n";
+fn with_and_an_object_initializer_set_init_and_set_properties() {
+    let sharp = "namespace Demo;\n\nimport Lib.Stamp;\n\nstruct Size\n{\n    public int width { get; init; }\n    public int depth { get; }\n\n    public Size() { this.depth = 1; }\n}\n\nclass Note\n{\n    public string text { get; set; } = \"\";\n}\n\nclass Copies\n{\n    public Size wider(Size size) => size with { width: 2, depth: 3 };\n\n    public Size twice() => new Size { width: 1, width: 2 };\n\n    public Note note(Note note) => note with { text: \"b\" };\n\n    public Stamp stamp(Stamp stamp) => stamp with { at: 2 };\n\n    public Any? loose(Any? value) => value with { width: 2 };\n\n    public Plan plan(Plan plan) => plan with { label: \"b\" };\n\n    public Moved moved(Moved moved) => moved with { x: 2 };\n}\n";
+    let php = "<?php namespace Lib; final class Stamp { public function __construct(public readonly int $at) {} }";
+    let plan = (
+        "src/Demo/Plan.sharp",
+        "namespace Demo;\n\nenum Plan\n{\n    case Basic;\n\n    public string label => \"basic\";\n}\n",
+    );
+    let moved = ("src/Demo/Moved.sharp", "namespace Demo;\n\nevent Moved(int x);\n");
+
+    let analyzed = analyze(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Demo/Copies.sharp", sharp),
+        &[("src/Lib/Stamp.php", php), plan, moved],
+    );
+    assert_eq!(
+        analyzed
+            .iter()
+            .map(|issue| format!("{} | {}", issue.message, issue.help.as_deref().unwrap_or("")))
+            .collect::<Vec<_>>(),
+        [
+            "`depth` is get-only, so `with` can't set it. | Declare it `{ get; init; }`.",
+            "`width` is named twice. | ",
+            "`at` is get-only, so `with` can't set it. | ",
+            "Attempting to access a property on a non-object type (`Any?`). | ",
+            "`with` copies a struct or a class, and `Plan` is an enum. | ",
+            "`with` copies a struct or a class, and `Moved` is an event. | ",
+        ]
+    );
+}
+
+/// Spec section 10: every struct has a static `parse` and `tryParse`. `[Key]` renames the key a struct's main
+/// constructor parameter reads, and two parameters may not read one key. A bare `Key` is the standard attribute, spec
+/// section 23. A property the main constructor sets is read once, by
+/// the parameter of its name, or not at all. Any other property a parameter's key names is read twice, whether `[Key]`
+/// or the parameter's own name gives that key, and the help renames the parameter's key, which then compiles.
+/// A struct with a field no value can give, a pure enum or a function, also in a list or a nested struct, compiles, and
+/// its `parse` and `tryParse` are refused where they are called, while its other static methods are not. A struct that
+/// holds itself parses. A struct that declares its own `parse` reads no key, so none is read twice.
+#[test]
+fn every_struct_parses() {
+    let sharp = "namespace Demo;\n\nenum Mood\n{\n    case Calm;\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n\n    public static Feeling calm() => new Feeling([]);\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Mind\n{\n    public Mind(public Feeling feeling { get; }) { }\n}\n\nstruct Chain\n{\n    public Chain(public int link { get; }, public Chain? next { get; }) { }\n}\n\nstruct Temp\n{\n    public Temp(int celsius) { this.celsius = celsius; }\n\n    public int celsius { get; init; }\n}\n\nstruct Gauge\n{\n    public Gauge(int c) { this.celsius = c; }\n\n    public int celsius { get; init; }\n}\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input);\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input);\n\n    public Feeling calm() => Feeling.calm();\n\n    public Temp temp(Map<string, Any?> input) => Temp.parse(input);\n\n    public Gauge gauge(Map<string, Any?> input) => Gauge.parse(input);\n}\n\nstruct Clash\n{\n    public Clash([Key(\"y\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n\nstruct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n\nstruct Renamed\n{\n    public Renamed([Key(\"x_key\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n\nstruct Mended\n{\n    public Mended([Key(\"temp\")] int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n\nstruct Reading\n{\n    public Reading(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Reading? parse(string text) => null;\n}\n";
+    let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
+
+    let issues =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reads.sharp", sharp), &[("src/Sharp/Key.sharp", key)]);
+    assert_eq!(
+        written(sharp, &issues),
+        [
+            "20:75 invalid-struct `code` is read twice: by the main constructor parameter `plan` and the main constructor parameter `code`.",
+            "65:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
+            "67:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
+            "69:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
+            "71:50 invalid-struct `Mind.parse` can't read `feeling`: `Mood` has no backing value.",
+            "86:16 invalid-struct `y` is read twice: by the main constructor parameter `x` and the property `y`.",
+            "93:16 invalid-struct `celsius` is read twice: by the main constructor parameter `celsius` and the property `celsius`.",
+        ]
+    );
+    assert_eq!(
+        issues.iter().filter_map(|issue| issue.help.as_deref()).collect::<Vec<_>>(),
+        [
+            "Give `plan` another key with `[Key(\"…\")]`.",
+            "Give `x` another key with `[Key(\"…\")]`.",
+            "Give `celsius` another key with `[Key(\"…\")]`.",
+        ]
+    );
+}
+
+/// Spec section 10: a PHP# class that can be created parses the same way a struct does, as C#'s `System.Text.Json`
+/// reads a class. It reads the main constructor's parameters, a parameter that declares its property once, then each
+/// property an initializer may set, with the same `[Key]`, the same refusal of a key read twice and the same
+/// `tryParse`, and builds a nested class through that class's own `parse`. A class that declares its own `parse` keeps
+/// it, a class whose parent declares one inherits it, as a subclass of a plain PHP class does, and an abstract class
+/// has none, so `[Key]` on its constructor is refused as on any other parameter, and no key of it is read twice. A
+/// field `parse` can't build is refused where `parse` is called, with why: a function, an abstract class, an interface, a
+/// plain PHP class, a class whose `parse` reads no value, or a type such as `Object` that names no type to build.
+#[test]
+fn a_class_parses_as_a_struct_does() {
+    let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Stamp;\n\nabstract class Shape\n{\n    public Shape([Key(\"corners\")] public int sides { get; }) { }\n\n    public int corners { get; set; } = 0;\n}\n\ninterface Named\n{\n}\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n\n    public string author { get; set; } = \"\";\n}\n\nclass Letter\n{\n    public Letter(public Note note { get; init; }, public List<Note> copies { get; }) { }\n}\n\nclass Bill\n{\n    public Bill([Key(\"total\")] public int amount { get; }) { }\n\n    public int total { get; set; } = 0;\n}\n\nclass Money\n{\n    public Money(public int cents { get; }) { }\n\n    public static Money parse(string text) => new Money(1);\n}\n\nclass Hook\n{\n    public Hook(public Function<bool(int)> check { get; }) { }\n}\n\nclass Drawing\n{\n    public Drawing(public Shape shape { get; }) { }\n}\n\nclass Badge\n{\n    public Badge(public Named owner { get; }) { }\n}\n\nclass Receipt\n{\n    public Receipt(public Stamp stamp { get; }) { }\n}\n\nclass Wallet\n{\n    public Wallet(public Money money { get; }) { }\n}\n\nclass Reads\n{\n    public Note note(Map<string, Any?> input) => Note.parse(input);\n\n    public Note? maybe(Map<string, Any?> input) => Note.tryParse(input);\n\n    public Letter letter(Map<string, Any?> input) => Letter.parse(input);\n\n    public Money money() => Money.parse(\"1\");\n\n    public Hook hook(Map<string, Any?> input) => Hook.parse(input);\n\n    public Drawing drawing(Map<string, Any?> input) => Drawing.parse(input);\n\n    public Badge badge(Map<string, Any?> input) => Badge.parse(input);\n\n    public Receipt receipt(Map<string, Any?> input) => Receipt.parse(input);\n\n    public Wallet wallet(Map<string, Any?> input) => Wallet.parse(input);\n\n    public void shape(Map<string, Any?> input)\n    {\n        Shape.parse(input);\n    }\n\n    public void keyed([Key(\"other\")] Map<string, Any?> input) { }\n}\n\nclass Deadline : Clock\n{\n    public Deadline(public int at { get; }) { }\n\n    public static Deadline due() => Deadline.parse(\"soon\");\n}\n\nclass Holder\n{\n    public Holder(public Object thing { get; }) { }\n\n    public static Holder held(Map<string, Any?> input) => Holder.parse(input);\n}\n";
+    let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
+    let php = "<?php namespace Lib; final class Stamp { public function __construct(public readonly int $at) {} }";
+
+    let issues = analyze(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Demo/Reads.sharp", sharp),
+        &[
+            ("src/Sharp/Key.sharp", key),
+            ("src/Lib/Stamp.php", php),
+            (
+                "src/Lib/Clock.php",
+                "<?php namespace Lib; class Clock { public static function parse(string $text): static { return new static(); } }",
+            ),
+        ],
+    );
+    assert_eq!(
+        written(sharp, &issues),
+        [
+            "8:19 invalid-struct `Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
+            "33:16 invalid-struct `total` is read twice: by the main constructor parameter `amount` and the property `total`.",
+            "78:50 invalid-struct `Hook.parse` can't read `check`: `Function<bool(int)>` is a function.",
+            "80:56 invalid-struct `Drawing.parse` can't read `shape`: `Shape` is abstract.",
+            "82:52 invalid-struct `Badge.parse` can't read `owner`: `Named` is an interface.",
+            "84:56 invalid-struct `Receipt.parse` can't read `stamp`: `Stamp` is a plain PHP class.",
+            "86:54 invalid-struct `Wallet.parse` can't read `money`: `Money` has no `parse` that reads a value.",
+            "90:15 non-existent-method Method `Shape.parse` does not exist.",
+            "93:24 invalid-struct `Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
+            "107:59 invalid-struct `Holder.parse` can't read `thing`: `Object` is no type `parse` reads.",
+        ]
+    );
+}
+
+/// `\Sharp\Struct` is the engine interface the bridge gives each struct, spec section 10, and no PHP# type, so a
+/// `.sharp` class can't implement it: such a class could hold a class instance and key a `Map`.
+#[test]
+fn a_sharp_class_cannot_implement_the_struct_marker() {
+    let sharp = "namespace Demo;\n\nimport Sharp.Struct;\n\nclass Fake : Struct\n{\n    public Fake() { }\n}\n";
+
+    assert_eq!(messages(("src/Demo/Fake.sharp", sharp), &[]), ["Class `Fake` cannot implement unknown type `Struct`"]);
+}
+
+/// Spec section 12 keys a `Map` by anything with `==` and `hash()`, so a class that declares `operator ==` with
+/// `hash()`, or inherits them, keys a `Map`, joins a `Set`, keys a literal and keys a `groupBy`, whatever it holds, and
+/// a struct that holds one keys a `Map` too. A class without the pair stays refused once, with the rule's words.
+#[test]
+fn a_class_that_declares_equality_and_hash_keys_a_map() {
+    let ticket = "namespace App;\n\npublic class Ticket\n{\n    public Ticket(public int id { get; }, public Seat? seat { get; }) { }\n\n    public int hash() => this.id;\n\n    public static bool operator ==(Ticket a, Ticket b) => a.id == b.id;\n}\n";
+    let late = "namespace App;\n\npublic class LateTicket : Ticket\n{\n    public Seat? gate { get; set; }\n}\n";
+    let entry = "namespace App;\n\npublic struct Entry\n{\n    public Entry(public Ticket ticket { get; }) { }\n}\n";
+    let seat = "namespace App;\n\npublic class Seat\n{\n    public Seat(public Seat? next { get; }) { }\n}\n";
+    let desk = "namespace App;\n\nclass Desk\n{\n    public int count(Map<Seat, int> seats, Map<Ticket, int> sold, Set<Ticket> seen, List<Ticket> all, Map<LateTicket, int> late, Set<Entry> entries)\n    {\n        Map<Ticket, int> local = [new Ticket(1, null): 1];\n        const byTicket = all.groupBy(t => t);\n        return sold.count() + seen.count() + local.count() + byTicket.count() + late.count() + entries.count() + seats.count();\n    }\n}\n";
+    let others = [
+        ("src/App/Ticket.sharp", ticket),
+        ("src/App/LateTicket.sharp", late),
+        ("src/App/Entry.sharp", entry),
+        ("src/App/Seat.sharp", seat),
+    ];
+
+    assert_eq!(
+        refusals(("src/App/Desk.sharp", desk), &others),
+        [
+            "5:22 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Seat` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`."
+        ]
+    );
+}
+
+/// Spec section 12 keys a `Map` by anything with `==` and `hash()`, so a class without them is refused where a `Map`
+/// type is written, and where `groupBy` or `associateBy` keys one by what its function returns. A pure enum, a `float`
+/// and a key that may be null each key a `Map`. A key type that names no type is refused once, as a type that cannot
+/// be found.
+#[test]
+fn a_map_key_type_that_is_no_value_is_an_error() {
+    let sharp = "namespace Demo;\n\nimport Lib.Line;\nimport Lib.Pure;\nimport Lib.Status;\n\nclass Tally\n{\n    public Map<Line, int> lines = [:];\n\n    public Map<Pure, int> count(Map<Line, int> counts, Map<Username, int> names)\n    {\n        Map<Pure, int> local = [:];\n        Map<Username, int> named = [:];\n        return local;\n    }\n\n    public int group(List<Line> all, List<float> prices)\n    {\n        const byLine = all.groupBy(line => line);\n        const byPrice = prices.associateBy(price => price);\n        const byPure = all.groupBy(line => Pure.One);\n        const byMaybe = prices.groupBy(price => price > 1.0 ? Status.Active : null);\n        return byLine.count() + byPrice.count() + byPure.count() + byMaybe.count();\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
         [
-            "9:12 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Line` has none. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "11:12 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Pure` has none. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "11:33 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Line` has none. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+            "9:12 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "11:33 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
             "11:56 non-existent-class-like Cannot find type `Username`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
-            "13:9 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Pure` has none. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
             "14:9 non-existent-class-like Cannot find type `Username`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
-            "20:36 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Line` has none. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "21:44 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `float` has none. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "22:36 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Pure` has none. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "23:40 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Status?` may be null. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+            "20:36 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
         ]
     );
 }
@@ -8097,7 +8490,7 @@ fn a_map_key_type_without_a_backing_value_is_an_error() {
 /// call whose argument is refused, as `groupBy(5)` or `groupBy(selector: …)`, gives that one issue, as on master.
 #[test]
 fn a_group_key_is_checked_only_where_a_function_fills_the_key_parameter() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int group(List<int> items)\n    {\n        const byFive = items.groupBy(5);\n        const bySelector = items.groupBy(selector: n => n);\n        const byHalf = items.associateBy(key: n => 0.5);\n        return global.count(byFive) + global.count(bySelector) + global.count(byHalf);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int group(List<int> items)\n    {\n        const byFive = items.groupBy(5);\n        const bySelector = items.groupBy(selector: n => n);\n        const byHalf = items.associateBy(key: n => [n]);\n        return global.count(byFive) + global.count(bySelector) + global.count(byHalf);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[]),
@@ -8284,65 +8677,23 @@ fn a_loop_over_a_map_keyed_by_a_backed_enum_reads_each_key_as_its_case() {
     );
 }
 
-/// The engine holds a backed enum key as its backing value, and reads it back as a case only through one enum. So the
-/// keys of a `Map` that mix a backed enum with other types are refused where they are read back, by a loop and by
-/// `keys()`. They are refused where a key goes in or is looked up too, even a key of one enum, because the case
-/// `Size.Small` and the `int` key `1` share one entry: by `get`, `has` and `remove`, by an index read, write and `??=`,
-/// by a literal whose written or spread keys mix, and by a `groupBy` or `associateBy` function whose keys mix. Each
-/// position is refused once. The keys of a `Map` keyed by one enum read back and go in.
+/// Spec section 12 refuses no mixed key type: a `Map` keeps each key as itself and finds it by its `==` and `hash()`,
+/// so the case `Status.Active` and the `string` key `"active"` are two entries of a `Map<string|Status, int>`. Keys
+/// that mix a backed enum or a struct with other types go in and read back everywhere: a loop, `keys()`, `get`, `has`
+/// and `remove`, an index read, write and `??=`, a literal whose written or spread keys mix, and a `groupBy` or
+/// `associateBy` function whose keys mix.
 #[test]
-fn a_map_key_type_that_mixes_a_backed_enum_with_other_types_is_refused_where_a_key_goes_in_or_out() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses, Map<Size, int> sizes, bool first, Status|int key)\n    {\n        for (const [k, n] of counts) {\n        }\n        for (const [k, n] of totals) {\n        }\n        for (const [k, n] of statuses) {\n        }\n        const both = (first ? statuses : sizes).keys();\n        const keys = totals.keys();\n        const held = totals.has(key);\n        const value = totals.get(key);\n        const removed = totals.remove(key);\n        const active = totals.has(Status.Active) && totals.remove(Status.Active);\n        const cases = statuses.keys();\n    }\n\n    public void write(Map<int|Size, int> ranks, Map<Size, int> sizes, Map<int, int> ids, List<int> amounts)\n    {\n        const literal = [1: 5, Size.Small: 6];\n        const read = ranks[Size.Small] ?? 0;\n        ranks[Size.Small] = 1;\n        ranks[Size.Small] ??= 1;\n        const spread = [...sizes, ...ids];\n        const grouped = amounts.groupBy(n => n > 5 ? Size.Small : n);\n        const associated = amounts.associateBy(n => n > 5 ? Size.Small : n);\n        const kept = [Size.Small: 1];\n        sizes[Size.Small] = 2;\n    }\n}\n";
+fn a_map_key_type_that_mixes_a_backed_enum_or_a_struct_with_other_types_takes_every_key() {
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int named(Map<string|Status, int> tally)\n    {\n        tally[\"active\"] = 1;\n        tally[Status.Active] = 2;\n        return (tally[\"active\"] ?? 0) + (tally.get(Status.Active) ?? 0) + tally.keys().count();\n    }\n\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses, Map<Size, int> sizes, bool first, Status|int key, Map<Spot|string, int> spots, Map<Spot, int> placed, Spot spot)\n    {\n        for (const [k, n] of spots) {\n        }\n        for (const [k, n] of placed) {\n        }\n        const stops = placed.keys();\n        const here = placed.has(spot);\n        const mixed = spots.keys();\n        const found = spots.has(spot);\n        const at = spots[spot] ?? 0;\n        const listed = [spot: 1, \"a\": 2];\n        const grouped = [spot].groupBy(s => s.x > 0 ? s : \"none\");\n        for (const [k, n] of counts) {\n        }\n        for (const [k, n] of totals) {\n        }\n        for (const [k, n] of statuses) {\n        }\n        const both = (first ? statuses : sizes).keys();\n        const keys = totals.keys();\n        const held = totals.has(key);\n        const value = totals.get(key);\n        const removed = totals.remove(key);\n        const active = totals.has(Status.Active) && totals.remove(Status.Active);\n        const cases = statuses.keys();\n    }\n\n    public void write(Map<int|Size, int> ranks, Map<Size, int> sizes, Map<int, int> ids, List<int> amounts)\n    {\n        const literal = [1: 5, Size.Small: 6];\n        const read = ranks[Size.Small] ?? 0;\n        ranks[Size.Small] = 1;\n        ranks[Size.Small] ??= 1;\n        const spread = [...sizes, ...ids];\n        const grouped = amounts.groupBy(n => n > 5 ? Size.Small : n);\n        const associated = amounts.associateBy(n => n > 5 ? Size.Small : n);\n        const kept = [Size.Small: 1];\n        sizes[Size.Small] = 2;\n    }\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n";
 
-    assert_eq!(
-        messages(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
-        [
-            "The keys of `counts` mix a backed enum with other types, so the loop cannot read them back.",
-            "The keys of `totals` mix a backed enum with other types, so the loop cannot read them back.",
-            "The keys of `(first ? statuses : sizes)` mix a backed enum with other types, so `keys()` cannot read them back.",
-            "The keys of `totals` mix a backed enum with other types, so `keys()` cannot read them back.",
-            "The keys of `totals` mix a backed enum with other types, so `has` cannot tell them apart.",
-            "The keys of `totals` mix a backed enum with other types, so `get` cannot tell them apart.",
-            "The keys of `totals` mix a backed enum with other types, so `remove` cannot tell them apart.",
-            "The keys of `totals` mix a backed enum with other types, so `has` cannot tell them apart.",
-            "The keys of `totals` mix a backed enum with other types, so `remove` cannot tell them apart.",
-            "The keys of `[1: 5, Size.Small: 6]` mix a backed enum with other types, so the literal cannot tell them apart.",
-            "The keys of `ranks` mix a backed enum with other types, so the index cannot tell them apart.",
-            "The keys of `ranks` mix a backed enum with other types, so the index cannot tell them apart.",
-            "The keys of `ranks` mix a backed enum with other types, so the index cannot tell them apart.",
-            "The keys of `[...sizes, ...ids]` mix a backed enum with other types, so the literal cannot tell them apart.",
-            "The keys of `amounts.groupBy(n => n > 5 ? Size.Small : n)` mix a backed enum with other types, so `groupBy` cannot tell them apart.",
-            "The keys of `amounts.associateBy(n => n > 5 ? Size.Small : n)` mix a backed enum with other types, so `associateBy` cannot tell them apart.",
-        ]
-    );
-    assert_eq!(
-        issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
-        [
-            "10:21 invalid-foreach-key",
-            "12:21 invalid-foreach-key",
-            "16:49 invalid-array-access",
-            "17:29 invalid-array-access",
-            "18:29 invalid-argument",
-            "19:30 invalid-argument",
-            "20:32 invalid-argument",
-            "21:31 invalid-argument",
-            "21:60 invalid-argument",
-            "27:25 invalid-array-element",
-            "28:28 invalid-array-access",
-            "29:15 invalid-array-access",
-            "30:15 invalid-array-access",
-            "31:24 invalid-array-element",
-            "32:41 template-constraint-violation",
-            "33:48 template-constraint-violation",
-        ]
-    );
+    assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
 
 /// `Lib\Status`, a backed enum that implements `Lib\HasLabel`, beside the interface `Lib\Other`.
 const LABELS: &str = "<?php\n\nnamespace Lib;\n\ninterface HasLabel\n{\n}\n\ninterface Other\n{\n}\n\nenum Status: string implements HasLabel\n{\n    case Active = 'active';\n}\n";
 
-/// A `Map` keyed by a type parameter is keyed by its bound, so a bound that is a backed enum, alone or as either
-/// member of an intersection, keys the `Map` by the enum's backing values, and a loop reads each key back as its case.
+/// A `Map` keyed by a type parameter takes the keys its bound takes, so a bound that is a backed enum, alone or as
+/// either member of an intersection, keys the `Map`, and a loop gives each key as the case it is.
 #[test]
 fn a_map_keyed_by_a_type_parameter_is_keyed_by_the_backed_enum_in_its_bound() {
     for sharp in [
@@ -8354,8 +8705,8 @@ fn a_map_keyed_by_a_type_parameter_is_keyed_by_the_backed_enum_in_its_bound() {
     }
 }
 
-/// A type parameter without a bound, or bounded by interfaces alone, holds objects, which a PHP array cannot take as
-/// keys, so a `Map` keyed by it is refused, as a `Map` keyed by those interfaces is.
+/// A type parameter without a bound, or bounded by interfaces alone, holds values without `==` and `hash()`, so a
+/// `Map` keyed by it is refused, as a `Map` keyed by those interfaces is.
 #[test]
 fn a_map_keyed_by_a_type_parameter_without_a_backed_enum_in_its_bound_is_an_error() {
     let unbounded =
@@ -8370,7 +8721,7 @@ fn a_map_keyed_by_a_type_parameter_without_a_backed_enum_in_its_bound_is_an_erro
 
     let refusal = |key: &str| {
         format!(
-            "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `{key}` has none."
+            "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `{key}` is none of them."
         )
     };
     assert_eq!(messages(("src/Demo/Tally.sharp", unbounded), &others), [refusal("TKey")]);
@@ -8379,8 +8730,8 @@ fn a_map_keyed_by_a_type_parameter_without_a_backed_enum_in_its_bound_is_an_erro
 }
 
 /// A written key or value type checks as a typed local's does. Spec section 12 reads a `Map<string, V>` key back as a
-/// `string`, even the key `"5"` PHP stores as an int, because the lowering casts every key of a `Map<string, V>` loop
-/// back to `string`, written or not.
+/// `string`, even the key `"5"` a PHP array stores as an int, because a `Map` keeps each key as it was stored, written
+/// or not.
 #[test]
 fn a_written_loop_variable_type_checks_as_a_typed_local_does() {
     let sharp = "namespace Demo;\n\nimport Lib.Line;\n\nclass Tally\n{\n    public void read(Map<string, int> stock, List<Line> lines)\n    {\n        for (const [int|string sku, int n] of stock) {\n        }\n        for (const [string sku, int n] of stock) {\n            this.reserve(sku);\n        }\n        for (const [sku, n] of stock) {\n            this.reserve(sku);\n        }\n        for (const [string? sku, int n] of stock) {\n        }\n        for (const Line line of lines) {\n        }\n        for (const int line of lines) {\n        }\n    }\n\n    private void reserve(string sku)\n    {\n    }\n}\n";
@@ -8391,20 +8742,18 @@ fn a_written_loop_variable_type_checks_as_a_typed_local_does() {
     );
 }
 
-/// A `Set` runs as a PHP array keyed by each element, or by a backed enum's backing value, so the first `Set` slice
-/// holds `int`, `string` and backed enums. A `Set` of a class or a pure enum is a type that is not supported yet, as
-/// the semantic checks refuse any other element type. PHP writes no `Set`.
+/// Spec section 12: a `Set`'s element takes exactly what a `Map`'s key takes, so a pure enum, a backed enum, a union, a
+/// nullable enum and a `float` each fill a `Set`, and a class without `operator ==` is refused by the key rule worded
+/// for a `Set`. PHP writes no `Set`.
 #[test]
-fn a_set_of_a_class_or_a_pure_enum_is_not_supported_yet() {
-    let sharp = "namespace Demo;\n\nimport Lib.Line;\nimport Lib.Pure;\nimport Lib.Status;\n\nclass Tally\n{\n    public Set<Line> lines = [];\n\n    public Set<Pure> count(Set<Status> statuses, Set<Line> others)\n    {\n        Set<Pure> local = [];\n        return local;\n    }\n}\n";
+fn a_set_element_takes_what_a_map_key_takes() {
+    let sharp = "namespace Demo;\n\nimport Lib.Line;\nimport Lib.Pure;\nimport Lib.Status;\n\nclass Tally\n{\n    public Set<Line> lines = [];\n\n    public Set<Pure> count(Set<Status> statuses, Set<Line> others, Set<string|Status> named, Set<Status?> maybe, Set<float> prices)\n    {\n        Set<Pure> local = [];\n        return local;\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
         [
-            "9:12 not-supported-yet This type is not supported yet in PHP#. | ",
-            "11:12 not-supported-yet This type is not supported yet in PHP#. | ",
-            "11:50 not-supported-yet This type is not supported yet in PHP#. | ",
-            "13:9 not-supported-yet This type is not supported yet in PHP#. | ",
+            "9:12 template-constraint-violation A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Fill the `Set` with an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "11:50 template-constraint-violation A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Fill the `Set` with an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
         ]
     );
 }
@@ -8642,8 +8991,7 @@ fn the_engines_set_class_is_not_a_class_sharp_code_calls() {
     let sharp = "namespace Demo;\n\nimport Sharp.Set;\n\nclass Tags\n{\n    public int count(List<string> tags)\n    {\n        const made = Set.from(tags);\n        return global.count(made);\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /** @param list<string> $tags */\n    public function count(array $tags): int\n    {\n        $made = \\Sharp\\Set::from($tags);\n        return count($made);\n    }\n}\n";
 
-    // `import Sharp.Set;` names no class, so `Set` is a namespace and `Set.from` a missing function of it.
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["9:26 non-existent-function", "10:29 mixed-argument"]);
+    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["9:26 non-existent-method", "10:29 mixed-argument"]);
     assert_eq!(
         issues(("src/Demo/Tags.php", php), &[]),
         ["10:29 non-existent-method", "10:9 mixed-assignment", "11:22 mixed-argument"]
@@ -8755,19 +9103,15 @@ fn a_map_literal_written_by_index_into_a_list_of_lists_is_refused_once_by_the_li
     );
 }
 
-/// Plain PHP receives a `Set` as the array it runs as, keyed by each element or its backing value, so a `Set` passes
-/// where plain PHP takes an `array`, and to `count` and `in_array`. A key plain PHP's `array_key_exists` finds in a
-/// `Set` a PHP# method returns is of the backing type.
+/// A `Set` crosses into a plain PHP `array` parameter as the list of its elements, so it passes where plain PHP takes
+/// an `array`, and to `count` and `in_array`.
 #[test]
 fn a_set_passes_where_plain_php_takes_an_array() {
-    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Set<string> tags, Set<Status> statuses)\n    {\n        return global.count(tags) + Sink.plain(tags) + Sink.plain(statuses) + (global.in_array(\"vip\", tags, true) ? 1 : 0);\n    }\n\n    public Set<Status> kept(Set<Status> statuses) => statuses;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Set<string> tags, Set<Status> statuses)\n    {\n        return global.count(tags) + Sink.plain(tags) + Sink.plain(statuses) + (global.in_array(\"vip\", tags, true) ? 1 : 0);\n    }\n}\n";
     let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $values): int\n    {\n        return count($values);\n    }\n}\n";
-    let caller = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function found(Tally $tally, int|string $key): string\n    {\n        return array_key_exists($key, $tally->kept([])) ? $key : '';\n    }\n}\n";
-    let library = [("src/Lib/Status.php", STATUS), ("src/Lib/Sink.php", sink)];
 
-    assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &library), Vec::<String>::new());
     assert_eq!(
-        issues(("src/Demo/Caller.php", caller), &[library[0], library[1], ("src/Demo/Tally.sharp", sharp)]),
+        issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS), ("src/Lib/Sink.php", sink)]),
         Vec::<String>::new()
     );
 }
@@ -8802,15 +9146,18 @@ fn a_list_literal_where_a_set_is_declared_is_a_set() {
 }
 
 /// A spread copies a `List`'s values or a `Map`'s entries, and a `Set` is neither, so a `.sharp` literal refuses its
-/// spread. PHP keeps spreading the array a `Set` runs as.
+/// spread. Plain PHP spreads the `Sharp\Set` object, which gives its elements at positions 0 to n, so the result is a
+/// list.
 #[test]
 fn a_spread_of_a_set_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public List<string> all(Set<string> tags)\n    {\n        return [...tags];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public List<string> all(Set<string> tags)\n    {\n        return [...tags];\n    }\n\n    public static Set<string> of() => [\"a\"];\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Report\n{\n    /** @return list<string> */\n    public static function tags(): array\n    {\n        return [...Tags::of(), 'b'];\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Tags.sharp", sharp), &[])[0],
         "7:17 invalid-array-element Cannot spread a value of type `Set<string>`: PHP# spreads a `List` or a `Map`. | Spread a `List`, such as a `list<int>` from plain PHP."
     );
+    assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Demo/Tags.sharp", sharp)]), Vec::<String>::new());
 }
 
 /// A `List` spread appends, so a literal of values and `List` spreads is a `List`, a plain PHP `list<int>` included.
@@ -8875,7 +9222,7 @@ fn a_spread_of_a_value_that_is_neither_a_list_nor_a_map_is_an_error() {
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &[("src/Lib/Prices.php", PRICES)]),
         [
-            "Cannot spread a value of type `Iterable<int>`: PHP# spreads a `List` or a `Map`.",
+            "Cannot spread a value of type `iterable<int, int>`: PHP# spreads a `List` or a `Map`.",
             "Cannot use spread operator on non-iterable type `int`.",
         ]
     );
@@ -10861,7 +11208,8 @@ fn a_class_type_names_a_generic_class_without_its_type_arguments() {
 
 /// A plain PHP caller passes the backing values where a generic PHP# method takes a `Map<TKey, int>` with `TKey`
 /// bound by a backed enum, as it does where the method takes a `Map<Status, int>`: the method's key is read as PHP#
-/// writes it. A plain PHP template bounded by the enum keeps upstream Mago's issues.
+/// writes it, and an `int` key passes for a `string` backing value, as PHP holds the key `"1"`. A plain PHP template
+/// bounded by the enum keeps upstream Mago's issues.
 #[test]
 fn a_plain_php_caller_passes_the_backing_values_where_a_generic_method_takes_a_map_keyed_by_its_type_parameter() {
     let keys = "namespace Demo;\n\nimport Lib.Status;\n\npublic class Keys\n{\n    public static int count<TKey : Status>(Map<TKey, int> counts) => 0;\n}\n";
@@ -10879,7 +11227,7 @@ fn a_plain_php_caller_passes_the_backing_values_where_a_generic_method_takes_a_m
     );
     assert_eq!(
         issues(("src/Demo/Caller.php", php), &[("src/Demo/Keys.sharp", keys), ("src/Lib/Status.php", STATUS)]),
-        ["9:59 possibly-invalid-argument"]
+        Vec::<String>::new()
     );
 }
 
@@ -11033,32 +11381,32 @@ fn a_class_value_with_type_arguments_carries_them_to_its_static_members() {
 fn a_class_value_keys_no_map_written_as_a_type_a_literal_or_inferred() {
     let classes = "namespace Demo;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n\n    public Class<Order> kind() => typeof(Order);\n}\n\npublic class Box<TItem>\n{\n}\n";
     let sharp = "namespace Demo;\n\npublic class Keys\n{\n    public Map<Class<Order>, int> typed() => [:];\n\n    public Map<Class<Box<Order>>, int> typedGeneric() => [:];\n\n    public Any literal() => [typeof(Order): 1];\n\n    public Any literalGeneric() => [typeof(Box<Order>): 1];\n\n    public Any grouped(List<Order> orders) => orders.groupBy((Order order) => order.kind());\n\n    public Any associated(List<Order> orders) => orders.associateBy((Order order) => order.kind());\n\n    public Any made() => new Box<Map<Class<Order>, int>>();\n\n    public Map<string, Class<Order>> values() => [\"order\": typeof(Order)];\n\n    public Map<int, List<Order>> byId(List<Order> orders) => orders.groupBy((Order order) => order.id);\n}\n";
-    let rule = "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value";
-    let help = "Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.";
+    let rule = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`";
+    let help = "Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.";
 
     assert_eq!(
         worded(("src/Demo/Keys.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
         [
             format!(
-                "5:12 template-constraint-violation {rule}, and `Class<Order>` has none. | `Class<Order>` keys this `Map`. | {help}"
+                "5:12 template-constraint-violation {rule}, and `Class<Order>` is none of them. | `Class<Order>` keys this `Map`. | {help}"
             ),
             format!(
-                "7:12 template-constraint-violation {rule}, and `Class<Box<Order>>` has none. | `Class<Box<Order>>` keys this `Map`. | {help}"
+                "7:12 template-constraint-violation {rule}, and `Class<Box<Order>>` is none of them. | `Class<Box<Order>>` keys this `Map`. | {help}"
             ),
             format!(
-                "9:30 invalid-array-element-key {rule}, and `Class<Order>` has none. | `Class<Order>` keys this `Map`. | {help}"
+                "9:30 invalid-array-element-key {rule}, and `Class<Order>` is none of them. | `Class<Order>` keys this `Map`. | {help}"
             ),
             format!(
-                "11:37 invalid-array-element-key {rule}, and `Class<Box<Order>>` has none. | `Class<Box<Order>>` keys this `Map`. | {help}"
+                "11:37 invalid-array-element-key {rule}, and `Class<Box<Order>>` is none of them. | `Class<Box<Order>>` keys this `Map`. | {help}"
             ),
             format!(
-                "13:62 template-constraint-violation {rule}, and `Class<Order>` has none. | `Class<Order>` keys this `Map`. | {help}"
+                "13:62 template-constraint-violation {rule}, and `Class<Order>` is none of them. | `Class<Order>` keys this `Map`. | {help}"
             ),
             format!(
-                "15:69 template-constraint-violation {rule}, and `Class<Order>` has none. | `Class<Order>` keys this `Map`. | {help}"
+                "15:69 template-constraint-violation {rule}, and `Class<Order>` is none of them. | `Class<Order>` keys this `Map`. | {help}"
             ),
             format!(
-                "17:34 template-constraint-violation {rule}, and `Class<Order>` has none. | `Class<Order>` keys this `Map`. | {help}"
+                "17:34 template-constraint-violation {rule}, and `Class<Order>` is none of them. | `Class<Order>` keys this `Map`. | {help}"
             ),
         ]
     );
@@ -11181,10 +11529,10 @@ fn an_erased_parameter_type_is_named_as_sharp_writes_it() {
         worded(("src/Demo/Box.sharp", sharp), &others),
         [
             format!(
-                "30:38 incompatible-parameter-type Parameter `item` of `OrderBox.fill` must take at least `Entity?`, the type `Box.fill` erases it to. | Erases to `Order?`. | `Box.fill` takes `Entity?` once its type parameters are erased. | {note} | Write `item` with a type that erases to `Entity?`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound."
+                "26:36 incompatible-parameter-type Parameter `item` of `OrderBox.put` must take at least `Entity`, the type `Box.put` erases it to. | Erases to `Order`. | `Box.put` takes `Entity` once its type parameters are erased. | {note} | Write `item` with a type that erases to `Entity`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound."
             ),
             format!(
-                "26:36 incompatible-parameter-type Parameter `item` of `OrderBox.put` must take at least `Entity`, the type `Box.put` erases it to. | Erases to `Order`. | `Box.put` takes `Entity` once its type parameters are erased. | {note} | Write `item` with a type that erases to `Entity`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound."
+                "30:38 incompatible-parameter-type Parameter `item` of `OrderBox.fill` must take at least `Entity?`, the type `Box.fill` erases it to. | Erases to `Order?`. | `Box.fill` takes `Entity?` once its type parameters are erased. | {note} | Write `item` with a type that erases to `Entity?`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound."
             ),
             format!(
                 "44:42 incompatible-parameter-type Parameter `value` of `ListSlot.keep` must take at least `Any?`, the type `Slot.keep` erases it to. | Erases to PHP's `array|null`. | `Slot.keep` takes `Any?` once its type parameters are erased. | {note} | Write `value` with a type that erases to `Any?`."
@@ -13328,7 +13676,8 @@ fn an_operator_body_is_checked_as_its_static_method_body() {
     assert_eq!(issues(("src/App/Money.sharp", wrong), &[]), ["12:57 invalid-return-statement"]);
 }
 
-/// Equal values hash alike, so a class that declares `operator ==` declares `public int hash()` or inherits it.
+/// Equal values hash alike, so a class that declares `operator ==` declares `public int hash()` or inherits it, and a
+/// struct, which has no parent, declares it.
 #[test]
 fn equality_needs_a_public_int_hash_in_the_class_or_a_parent() {
     let missing =
@@ -13348,6 +13697,13 @@ fn equality_needs_a_public_int_hash_in_the_class_or_a_parent() {
     assert_eq!(issues(("src/App/Money.sharp", protected), &[]), ["7:24 unimplemented-abstract-method"]);
     assert_eq!(issues(("src/App/Money.sharp", string), &[]), ["7:24 unimplemented-abstract-method"]);
     assert_eq!(issues(("src/App/Order.sharp", inherited), &[entity]), Vec::<String>::new());
+    let r#struct = "namespace App;\n\npublic struct Coin\n{\n    public Coin(public int cents { get; }) { }\n\n    public static bool operator ==(Coin a, Coin b) => true;\n}\n";
+    assert_eq!(
+        messages(("src/App/Coin.sharp", r#struct), &[]),
+        [
+            "`Coin` declares `operator ==` without `public int hash()`: declare it in `Coin`, so equal values hash alike."
+        ]
+    );
 }
 
 /// A subclass inherits its parent's operators, which are static, and PHP# has no overloading by parameter types, so
@@ -13573,8 +13929,59 @@ fn a_php_caller_passes_null_as_the_left_operand_of_op_equality() {
     assert_eq!(issues(("src/App/Check.php", php), &[MONEY_OPERATORS]), Vec::<String>::new());
 }
 
+/// Plain PHP receives a PHP# `Map` or `Set` as the object it runs as, spec section 12: a `Sharp\Map<K, V>` or a
+/// `Sharp\Set<T>` from a return, a property, a static property, and a callback's argument, at any depth. So
+/// `is_array` on one is never true, and an index read and a loop resolve through the object's `ArrayAccess` and
+/// `IteratorAggregate`. A PHP# parameter or property takes the object back, or the PHP array PHP# turns into one, and a
+/// property read after such a write is the object again. A plain PHP parameter that names an object type the object
+/// has, as `Countable`, `Traversable`, `JsonSerializable`, `object` or `Sharp\Map`, takes a PHP# `Map` or `Set` passed
+/// to it, and one the object lacks refuses it.
+#[test]
+fn plain_php_receives_a_map_or_a_set_as_the_object_it_runs_as() {
+    let sink = (
+        "src/Lib/Sink.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function countable(\\Countable $values): int { return count($values); }\n\n    public static function traversable(\\Traversable $values): int { return iterator_count($values); }\n\n    public static function json(\\JsonSerializable $values): int { return strlen((string) json_encode($values)); }\n\n    public static function object(object $values): int { return strlen(get_debug_type($values)); }\n\n    public static function map(\\Sharp\\Map $values): int { return count($values); }\n\n    public static function set(\\Sharp\\Set $values): int { return count($values); }\n\n    public static function date(\\DateTimeInterface $values): int { return 0; }\n}\n",
+    );
+    let feeder = "namespace Demo;\n\nimport Lib.Sink;\n\npublic class Feeder\n{\n    public static int feed(Map<string, int> m, Set<string> s)\n    {\n        return Sink.countable(m) + Sink.traversable(s) + Sink.json(m) + Sink.object(s) + Sink.map(m) + Sink.set(s) + Sink.map(s) + Sink.date(m);\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Feeder.sharp", feeder), &[sink]),
+        [
+            "Invalid argument type for argument #1 of `Sink.map`: expected `Map<Any?, Any?>`, but found `Set<string>`.",
+            "Invalid argument type for argument #1 of `Sink.date`: expected `DateTimeInterface`, but found `Map<string, int>`.",
+        ]
+    );
+
+    let tally = (
+        "src/Demo/Tally.sharp",
+        "namespace Demo;\n\npublic class Tally\n{\n    public Set<string> seen = [];\n    public static Map<string, List<Set<int>>> nested = [:];\n    public Map<string, int> kept { get; set => field = value; } = [:];\n\n    public Map<string, int> counts() => [\"a\": 1];\n\n    public int total(Map<string, int> counts) => counts.count();\n\n    public void each(Function<void(Map<string, int>)> visit)\n    {\n        visit(this.counts());\n    }\n\n    public int build(Function<Set<int>()> make) => make().count();\n}\n",
+    );
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function counts(Tally $tally): int\n    {\n        return $tally->counts();\n    }\n\n    public function seen(Tally $tally): int\n    {\n        return $tally->seen;\n    }\n\n    public function nested(): int\n    {\n        return Tally::$nested;\n    }\n\n    public function isArray(Tally $tally): int\n    {\n        $counts = $tally->counts();\n        if (is_array($counts)) {\n            return 1;\n        }\n        if (is_array($tally->seen)) {\n            return 2;\n        }\n        return 0;\n    }\n\n    public function read(Tally $tally): string\n    {\n        return $tally->counts()['a'];\n    }\n\n    public function loop(Tally $tally): int\n    {\n        foreach ($tally->counts() as $key => $count) {\n            return $key;\n        }\n        foreach ($tally->seen as $position => $tag) {\n            return $tag;\n        }\n        return 0;\n    }\n\n    public function back(Tally $tally): int\n    {\n        $tally->seen = ['x'];\n        $tally->seen = $tally->seen;\n        $tally->kept = ['k' => 1];\n        Tally::$nested = ['n' => []];\n        if (is_array($tally->kept)) {\n            return 3;\n        }\n        $tally->each(function (\\Sharp\\Map $counts): void {});\n        $tally->each(function (array $counts): void {});\n        $tally->build(fn (): \\Sharp\\Set => new \\Sharp\\Set([1]));\n        $tally->build(fn (): array => [1]);\n        return $tally->total($tally->counts()) + $tally->total(['b' => 2]);\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Caller.php", php), &[tally]),
+        [
+            "Invalid return type for function `Demo\\Caller::counts`: expected `int`, but found `Sharp\\Map<string, int>`.",
+            "Invalid return type for function `Demo\\Caller::seen`: expected `int`, but found `Sharp\\Set<string>`.",
+            "Invalid return type for function `Demo\\Caller::nested`: expected `int`, but found `Sharp\\Map<string, list<Sharp\\Set<int>>>`.",
+            "Impossible type assertion: `$counts` of type `Sharp\\Map<string, int>` can never be `array<array-key, mixed>`.",
+            "This condition (type `false`) will always evaluate to false.",
+            "Impossible type assertion: `$tally->seen` of type `Sharp\\Set<string>` can never be `array<array-key, mixed>`.",
+            "This condition (type `false`) will always evaluate to false.",
+            "Invalid return type for function `Demo\\Caller::read`: expected `string`, but found `int`.",
+            "Invalid return type for function `Demo\\Caller::loop`: expected `int`, but found `string`.",
+            "Invalid return type for function `Demo\\Caller::loop`: expected `int`, but found `string`.",
+            "Impossible type assertion: `$tally->kept` of type `Sharp\\Map<string, int>` can never be `array<array-key, mixed>`.",
+            "This condition (type `false`) will always evaluate to false.",
+            "Invalid argument type for argument #1 of `Demo\\Tally::each`: expected `(closure(Sharp\\Map<string, int>): void)`, but found `(closure(array<array-key, mixed>): void)`.",
+            "Invalid argument type for argument #1 of `Demo\\Tally::build`: expected `(closure(): Sharp\\Set<int>)`, but found `(closure(): list{int(1)})`.",
+        ]
+    );
+}
+
 /// A PHP caller checks its arguments against the PHP method a PHP# method runs as, whose `List<int>` and
-/// `Map<string, int>` parameters keep their element types, so a wrongly typed list or map is still reported.
+/// `Map<string, int>` parameters keep their element types, so a wrongly typed list or map is still reported. The `Map`
+/// takes a `Sharp\Map` or the PHP array PHP# turns into one.
 #[test]
 fn a_php_caller_keeps_the_element_types_of_a_sharp_methods_collection_parameters() {
     let tally = (
@@ -13587,7 +13994,7 @@ fn a_php_caller_keeps_the_element_types_of_a_sharp_methods_collection_parameters
         messages(("src/Demo/Report.php", php), &[tally]),
         [
             "Possible argument type mismatch for argument #1 of `Demo\\Tally::total`: expected `list<int>`, but possibly received `list{string('a')}`.",
-            "Possible argument type mismatch for argument #2 of `Demo\\Tally::total`: expected `array<string, int>`, but possibly received `array{1: string('x')}`.",
+            "Possible argument type mismatch for argument #2 of `Demo\\Tally::total`: expected `Sharp\\Map<string, int>|array<int|string, int>`, but possibly received `array{1: string('x')}`.",
         ]
     );
 }
@@ -15831,7 +16238,8 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
 /// property with `set` takes its type exactly. A class that names the interface answers for the property it inherits
 /// too, from a PHP# or a plain PHP base class, a base's `private` field included. A property stated with `set` needs
 /// one the class can set, reported once, naming what the class gives instead: get-only, `private set`, `protected set`
-/// or `init`. A class gives it with `{ get; set; }`, and an event, whose properties `new` sets once, cannot give it.
+/// or `init`. A class gives it with `{ get; set; }`, and an event, whose properties `new` sets once, or a struct, which
+/// never changes, cannot give it.
 #[test]
 fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : OrderEvent;\n");
@@ -16045,6 +16453,26 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
             "5:16 incompatible-property-access `Guarded` gives `total` with `init`, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
         ]
     );
+    let init_struct = (
+        "app/Shop/Stocked.sharp",
+        "namespace App.Shop;\n\npublic struct Stocked : Settable\n{\n    public int total { get; init; } = 0;\n}\n",
+    );
+    let get_only_struct = (
+        "app/Shop/Stock.sharp",
+        "namespace App.Shop;\n\npublic struct Stock : Settable\n{\n    public Stock(public int total { get; }) { }\n}\n",
+    );
+    assert_eq!(
+        worded(init_struct, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Stocked` cannot give `total`, which `Settable` states with `set`: a struct never changes. | Given here. | Stated here."
+        ]
+    );
+    assert_eq!(
+        worded(get_only_struct, &[settable_interface]),
+        [
+            "5:29 incompatible-property-access `Stock` cannot give `total`, which `Settable` states with `set`: a struct never changes. | Given here. | Stated here."
+        ]
+    );
 }
 
 /// An interface member is public, written bare: a class gives a bare property and a bare method as public ones, an
@@ -16071,7 +16499,8 @@ fn a_bare_interface_member_is_public() {
 }
 
 /// Spec section 15: `emit` raises an event, one an `event` declares or a plain PHP class an `extern event` marks. Any
-/// other value is refused, an interface its events share included, and so is a union with a part that is not an event.
+/// other value is refused, an interface its events share or a struct included, and so is a union with a part that is not
+/// an event.
 /// `extern event` marks only a class. A refused value or a type that names no class reports only its own error.
 #[test]
 fn emit_takes_an_event() {
@@ -16083,7 +16512,11 @@ fn emit_takes_an_event() {
     let money = ("app/Shop/Money.sharp", "namespace App.Shop;\n\npublic class Money\n{\n}\n");
     let raiser = (
         "app/Shop/Raiser.sharp",
-        "namespace App.Shop;\n\nimport Queue.JobFailed;\nimport Queue.Ledger;\n\nextern event JobFailed;\nextern Ledger;\n\npublic class Raiser\n{\n    public void raise(OrderPaid paid, JobFailed failed, OrderEvent family, Money amount, Ledger ledger, int count, Missing missing)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit failed;\n        emit family;\n        emit amount;\n        emit ledger;\n        emit count;\n        emit null;\n        emit new Missing(3);\n        emit missing;\n    }\n\n    public void choose(OrderPaid? maybe, OrderPaid|Money mixed, OrderPaid|OrderRefunded either)\n    {\n        emit maybe;\n        emit mixed;\n        emit either;\n    }\n}\n",
+        "namespace App.Shop;\n\nimport Queue.JobFailed;\nimport Queue.Ledger;\n\nextern event JobFailed;\nextern Ledger;\n\npublic class Raiser\n{\n    public void raise(OrderPaid paid, JobFailed failed, OrderEvent family, Money amount, Ledger ledger, int count, Missing missing)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit failed;\n        emit family;\n        emit amount;\n        emit ledger;\n        emit count;\n        emit null;\n        emit new Missing(3);\n        emit missing;\n    }\n\n    public void choose(OrderPaid? maybe, OrderPaid|Money mixed, OrderPaid|OrderRefunded either, Spot spot)\n    {\n        emit maybe;\n        emit mixed;\n        emit either;\n        emit spot;\n    }\n}\n",
+    );
+    let spot = (
+        "app/Shop/Spot.sharp",
+        "namespace App.Shop;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n",
     );
     let refunded = (
         "app/Shop/OrderRefunded.sharp",
@@ -16112,7 +16545,7 @@ fn emit_takes_an_event() {
         [format!("9:14 invalid-event `emit` takes an event, and `Notice` is not one. | Emitted here. | {note}")]
     );
     assert_eq!(
-        worded(raiser, &[order_event, order_paid, refunded, failed, money]),
+        worded(raiser, &[order_event, order_paid, refunded, failed, money, spot]),
         [
             "11:116 non-existent-class-like Cannot find type `Missing`. | `Missing` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.".to_owned(),
             format!("16:14 invalid-event `emit` takes an event, and `OrderEvent` is not one. | Emitted here. | {note}"),
@@ -16123,6 +16556,7 @@ fn emit_takes_an_event() {
             "21:18 non-existent-class Class `Missing` not found. | `Missing` is not defined or cannot be autoloaded | Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.".to_owned(),
             format!("27:14 invalid-event `emit` takes an event, and `OrderPaid?` is not one. | Emitted here. | {note}"),
             format!("28:14 invalid-event `emit` takes an event, and `Money|OrderPaid` is not one. | Emitted here. | {note}"),
+            format!("30:14 invalid-event `emit` takes an event, and `Spot` is not one. | Emitted here. | {note}"),
         ]
     );
 }

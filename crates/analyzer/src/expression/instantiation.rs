@@ -1,6 +1,7 @@
 use foldhash::HashMap;
 use foldhash::fast::RandomState;
 use indexmap::IndexMap;
+use itertools::Itertools;
 
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
@@ -25,6 +26,7 @@ use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_names::binding::Binding;
+use mago_names::binding::php_variable_name;
 use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -35,8 +37,10 @@ use mago_syntax::cst::ConstructorName;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::GenericClass;
 use mago_syntax::cst::Instantiation;
+use mago_syntax::cst::ObjectInitializer;
 use mago_syntax::cst::PartialArgumentList;
 use mago_syntax::cst::TypeArgumentList;
+use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
@@ -48,6 +52,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
+use crate::expression::with::analyze_object_initializer;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -172,6 +177,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
             );
         }
 
+        let created_class = match classnames.as_slice() {
+            [classname] => classname.fqcn,
+            _ => None,
+        };
         let mut resulting_type = None;
         for classname in classnames {
             let instantiation_span = self.span();
@@ -194,14 +203,97 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
             resulting_type = Some(add_optional_union_type(type_candidate, resulting_type.as_ref(), context.codebase));
         }
 
-        if let Some(resulting_type) = resulting_type {
-            artifacts.set_expression_type(self, resulting_type);
-        } else {
-            artifacts.set_expression_type(self, get_object()); // Fallback to object if no valid instantiation was found
+        let resulting_type = resulting_type.unwrap_or_else(get_object); // Fallback to object if no valid instantiation was found
+        match &self.initializer {
+            // The initializer sets properties of the object `new` creates, spec section 16.
+            Some(initializer) => analyze_object_initializer(
+                context,
+                block_context,
+                artifacts,
+                self.span(),
+                &resulting_type,
+                initializer,
+                "an object initializer",
+            )?,
+            None => artifacts.set_expression_type(self, resulting_type),
+        }
+
+        if context.dialect.is_sharp()
+            && let Some(class) = created_class
+        {
+            check_required_properties(
+                context,
+                class,
+                self.constructor.as_ref(),
+                self.initializer.as_ref(),
+                self.span(),
+            );
         }
 
         Ok(())
     }
+}
+
+/// Reports a PHP# `new` that leaves a required property unset, spec sections 6.1 and 10. The object initializer names
+/// every required property the constructor that runs does not assign: the main constructor, or a named constructor
+/// together with the main constructor it runs first.
+fn check_required_properties<A>(
+    context: &mut Context<'_, '_, A>,
+    class: Word,
+    constructor: Option<&ConstructorName<'_>>,
+    initializer: Option<&ObjectInitializer<'_>>,
+    span: Span,
+) where
+    A: Arena,
+{
+    let Some(metadata) = context.codebase.get_class_like(class.as_bytes()) else {
+        return;
+    };
+    let assigned_by = |method: &[u8]| {
+        context
+            .codebase
+            .get_declaring_method(metadata.name.as_bytes(), method)
+            .and_then(|method| method.method_metadata.as_ref())
+            .map(|method| method.assigned_properties.clone())
+            .unwrap_or_default()
+    };
+    let mut assigned = assigned_by(b"__construct");
+    if let Some(constructor) = constructor {
+        assigned.extend(assigned_by(constructor.name.value));
+    }
+    for value in initializer.iter().flat_map(|initializer| initializer.values.iter()) {
+        assigned.insert(php_variable_name(value.name.value));
+    }
+
+    let missing: Vec<String> = metadata
+        .declaring_property_ids
+        .iter()
+        .filter(|(name, _)| !assigned.contains(*name))
+        .filter_map(|(name, declaring)| {
+            let property = context.codebase.get_class_like(declaring.as_bytes())?.properties.get(name)?;
+            (property.flags.is_required() && !property.flags.is_static()).then(|| {
+                (
+                    property.name_span.map(|span| span.start.offset),
+                    String::from_utf8_lossy(name.as_bytes().strip_prefix(b"$").unwrap_or(name.as_bytes())),
+                )
+            })
+        })
+        .sorted()
+        .map(|(_, name)| format!("`{name}`"))
+        .collect();
+    let Some((last, others)) = missing.split_last() else {
+        return;
+    };
+    let names = if others.is_empty() { last.clone() } else { format!("{} and {last}", others.join(", ")) };
+
+    context.collector.report_with_code(
+        IssueCode::MissingRequiredProperty,
+        Issue::error(format!("`new {}` must set {names}.", display_class_like_name(context, metadata.original_name)))
+            .with_annotation(Annotation::primary(span).with_message("Created here."))
+            .with_note(
+                "A property written `required`, and a struct's public `init` property with no initial value, is set where its object is created: by the constructor that runs, or by the object initializer.",
+            ),
+    );
 }
 
 /// `Counter<Order>` read as an expression, before `.count` or `.reset()`, spec section 11: its type is the class with
