@@ -1569,6 +1569,15 @@ fn an_interface_property_is_get_only_or_settable() {
             "9:19 An interface member is always public, so it takes no access modifier."
         ]
     );
+    let helps: Vec<Option<String>> =
+        check("src/Report.sharp", code).into_iter().skip(2).map(|issue| issue.help).collect();
+    assert_eq!(
+        helps,
+        [
+            Some("Declare `{ get; }` in the interface, and `{ get; private set; }` in the class.".to_owned()),
+            Some("Remove `protected`.".to_owned()),
+        ]
+    );
 
     let php = "<?php\n\nnamespace App\\Tenant;\n\ninterface Named\n{\n    public string $name { get; }\n    public string $label { get => \"label\"; }\n}\n";
     assert_eq!(issues_in("src/Report.php", php), ["8:32 Interface virtual property `Named::$label` must be abstract."]);

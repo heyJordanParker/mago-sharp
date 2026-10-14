@@ -863,10 +863,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         // `check_accessors` reported each accessor outside the slice. An accessor body is a method body.
         (Node::PropertyHookList(_), FieldOrProperty | Parameter) => Some(place),
-        // `is_interface_property` took an interface property's accessors, and the walk reports an access modifier on
-        // one as an interface member's.
+        // `is_interface_property` took an interface property's accessors. An access modifier on one is an interface
+        // member's, and the class gives the narrower `set`.
         (Node::PropertyHook(accessor), FieldOrProperty) if is_in_interface(context.program, accessor.span()) => {
-            Some(place)
+            for modifier in &accessor.modifiers {
+                report_interface_accessor_access(accessor, modifier, context);
+            }
+
+            accessor.modifiers.is_empty().then_some(place)
         }
         (Node::PropertyHook(accessor), FieldOrProperty | Parameter) => is_slice_accessor(accessor).then_some(place),
         (
@@ -2007,6 +2011,23 @@ fn is_interface_property(property: &HookedProperty) -> bool {
             [get, set] => is_stated(get, b"get") && is_stated(set, b"set"),
             _ => false,
         }
+}
+
+/// Reports an access modifier on an interface property's accessor, as on any interface member. A narrower `set` is
+/// the class's: the interface states the property `{ get; }`, and the class gives it with the narrower `set`.
+fn report_interface_accessor_access(accessor: &PropertyHook, modifier: &Modifier, context: &mut Context<'_, '_, '_>) {
+    let keyword = BytesDisplay(modifier.get_keyword().value);
+    let help = if accessor.is_setter() {
+        format!("Declare `{{ get; }}` in the interface, and `{{ get; {keyword} set; }}` in the class.")
+    } else {
+        format!("Remove `{keyword}`.")
+    };
+
+    context.report(
+        Issue::error("An interface member is always public, so it takes no access modifier.")
+            .with_annotation(Annotation::primary(modifier.span()).with_message("Written here."))
+            .with_help(help),
+    );
 }
 
 /// Reports an access modifier on an interface member. A member is public, written bare, as TypeScript and Swift
