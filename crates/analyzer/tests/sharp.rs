@@ -3316,7 +3316,7 @@ fn list_wrap_of_a_list_is_refused_once() {
 
 /// `Class.of(value)` is the class of the object a value holds, spec section 25, so it is a class value of the value's
 /// type: it reaches the static of the class it holds, and goes where plain PHP takes a class name. It takes an object
-/// only, since a class is what it gives.
+/// only, since a class is what it gives, and the refusal names that bound once.
 #[test]
 fn class_of_a_value_is_a_class_value_of_its_type() {
     let factory = "<?php\n\nnamespace Lib;\n\nfinal class Factory\n{\n    /**\n     * @template T of object\n     * @param class-string<T> $class\n     * @return T\n     */\n    public static function make(string $class): object\n    {\n        return new $class();\n    }\n}\n";
@@ -3325,11 +3325,14 @@ fn class_of_a_value_is_a_class_value_of_its_type() {
 
     assert_eq!(
         issues(("src/Demo/Badge.sharp", sharp), &others),
-        ["19:38 invalid-return-statement", "21:36 template-constraint-violation", "21:36 invalid-argument"]
+        ["19:38 invalid-return-statement", "21:36 template-constraint-violation"]
     );
     assert_eq!(
-        messages(("src/Demo/Badge.sharp", sharp), &others)[0],
-        "Invalid return type for method `Badge.wrong`: expected `int`, but found `Class<Badge>`."
+        messages(("src/Demo/Badge.sharp", sharp), &others),
+        [
+            "Invalid return type for method `Badge.wrong`: expected `int`, but found `Class<Badge>`.",
+            "`5` does not satisfy the bound `Object` of type parameter `T`."
+        ]
     );
 }
 
