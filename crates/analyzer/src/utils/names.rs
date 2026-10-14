@@ -568,7 +568,7 @@ where
                 sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *value)
             ),
             TClassLikeString::OfType { constraint, .. } => {
-                format!("Class<{}>", display_sharp_atomic(context, constraint))
+                format!("Class<{}>", display_sharp_type(context, constraint))
             }
             TClassLikeString::Generic { parameter_name, .. } => format!("Class<{parameter_name}>"),
             TClassLikeString::Any { .. } => "Class<Object>".to_owned(),

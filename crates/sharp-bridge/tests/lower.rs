@@ -8854,8 +8854,8 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs
 }
 
 /// `typeof` of a type that is no class is a `SHARP_TYPE_OF` of its type text, as `typeof(T)` is when `T` runs as that
-/// type, so the engine gives its class value. `typeof(Self)` is PHP's `static::class`, and a static call through it is
-/// PHP's `static::method()`.
+/// type, so the engine gives its class value. A nullable or union type is one type, spelled whole. `typeof(Self)` is
+/// PHP's `static::class`, and a static call through it is PHP's `static::method()`.
 #[test]
 fn typeof_of_a_type_that_is_no_class_spells_its_type() {
     let lowered = Lowered::new(indoc! {"
@@ -8866,6 +8866,12 @@ fn typeof_of_a_type_that_is_no_class_spells_its_type() {
             public static string defaultTag() => \"div\";
 
             public static Any whole() => typeof(int);
+
+            public static Any nullable() => typeof(int?);
+
+            public static Any either() => typeof(string|int);
+
+            public static Any held() => typeof((Order|int)?);
 
             public static Any orders() => typeof(List<Order>);
 
@@ -8882,6 +8888,9 @@ fn typeof_of_a_type_that_is_no_class_spells_its_type() {
 
     assert_eq!(lowered.diagnostics(), Vec::<String>::new());
     assert_eq!(lowered.body_of("whole"), type_of("int"));
+    assert_eq!(lowered.body_of("nullable"), type_of("int?"));
+    assert_eq!(lowered.body_of("either"), type_of("int|string"));
+    assert_eq!(lowered.body_of("held"), type_of("(App.Order|int)?"));
     assert_eq!(lowered.body_of("orders"), type_of("List<App.Order>"));
     assert_eq!(lowered.body_of("counts"), type_of("Map<string, int>"));
     assert_eq!(lowered.body_of("numbers"), type_of("Set<int>"));
@@ -11501,6 +11510,47 @@ fn a_member_read_through_a_class_value_is_the_fetch_of_its_kind_on_that_class() 
                           ZVAL "type"
                         ZVAL "defaultTag"
                         ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
+/// $type = \Sharp\Class::of($calc);
+/// return \strlen($type::label());
+/// ```
+///
+/// A class value of an enum, as `Class.of` gives for an enum case, calls the enum's static as a class's is called.
+#[test]
+fn a_static_call_through_a_class_value_of_an_enum_is_a_static_call_on_it() {
+    assert_eq!(
+        body_in(
+            "int run(Calc calc)",
+            "        const type = Class.of(calc);\n        return global.strlen(type.label());\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib; enum Calc { case One; public static function label(): string { return 'calc'; } }",
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "type"
+                STATIC_CALL
+                  ZVAL "Sharp\\Class"
+                  ZVAL "of"
+                  ARG_LIST
+                    VAR
+                      ZVAL "calc"
+              RETURN
+                CALL
+                  ZVAL "strlen"
+                  ARG_LIST
+                    STATIC_CALL
+                      VAR
+                        ZVAL "type"
+                      ZVAL "label"
+                      ARG_LIST
         "#}
     );
 }

@@ -4147,12 +4147,11 @@ fn new_through_a_class_value_calls_the_constructor_with_its_arguments() {
     );
 }
 
-/// `typeof` takes any one type in a method body, spec section 25: a class, a built-in type, a collection, and `Self`,
-/// the class a static method is called on. A class value holds one type, so a nullable or union type is not supported
-/// yet, and PHP's `self` is refused as it is everywhere.
+/// `typeof` takes any one type in a method body, spec section 25: a class, a built-in type, a collection, `Self`, the
+/// class a static method is called on, and a nullable or union type, as C#'s `typeof(int?)` takes one. PHP's `self`,
+/// and a union in parentheses without `?`, are refused as they are in every type.
 #[test]
 fn typeof_takes_one_type_in_a_method_body() {
-    let refusal = "This type is not supported yet in PHP#.";
     for (r#type, expected) in [
         ("Order", vec![]),
         ("int", vec![]),
@@ -4160,9 +4159,11 @@ fn typeof_takes_one_type_in_a_method_body() {
         ("Map<string, int>", vec![]),
         ("Set<int>", vec![]),
         ("Self", vec![]),
-        ("int?", vec![format!("7:27 {refusal}")]),
-        ("int|string", vec![format!("7:27 {refusal}")]),
-        ("(Order|Line)", vec![format!("7:27 {refusal}")]),
+        ("int?", vec![]),
+        ("int|string", vec![]),
+        ("Order|Line", vec![]),
+        ("(int|string)?", vec![]),
+        ("(Order|Line)", vec!["7:27 This type is not supported yet in PHP#.".to_owned()]),
         (
             "self",
             vec!["7:27 PHP# has no `self`: write the class's own name, `Report`, for the declaring class.".to_owned()],
@@ -4623,11 +4624,10 @@ fn a_type_argument_of_a_bound_is_never_void() {
     );
 }
 
-/// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes a class, an
-/// interface or a type parameter, a class value may carry its type arguments, a type argument is never `void`, and a
-/// type parameter takes no type arguments, nor does a local before `.`: only a class takes them there. The analyzer
-/// checks a generic class's arity and bounds, and refuses a class value as a `Map` key as it refuses one in a `Map`
-/// literal.
+/// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes any one type, a
+/// class value may carry its type arguments, a type argument is never `void`, and a type parameter takes no type
+/// arguments, nor does a local before `.`: only a class takes them there. The analyzer checks a generic class's arity
+/// and bounds, and refuses a class value as a `Map` key as it refuses one in a `Map` literal.
 #[test]
 fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_takes() {
     let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<List<int>, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
@@ -4636,8 +4636,6 @@ fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_tak
         issues(code),
         [
             "6:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
-            "7:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
-            "8:31 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
             "9:27 A type argument cannot be `void`: `void` is only a return type.",
             "18:43 A type argument cannot be `void`: `void` is only a return type.",
             "19:28 A type parameter takes no type arguments: write `TItem`.",
@@ -4646,6 +4644,15 @@ fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_tak
             "25:29 A type parameter takes no type arguments: write `TItem`.",
         ]
     );
+}
+
+/// `Class<T>` takes any one type in a field, a parameter and a local, spec section 25: a built-in type, a nullable type
+/// and a union, as `typeof` gives them.
+#[test]
+fn class_takes_any_one_type_in_a_field_a_parameter_and_a_local() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Class<int> kind;\n    private Class<int?> maybe;\n\n    public int run(Class<int|string> either, Class<(Order|Line)?> held)\n    {\n        Class<int> t = typeof(int);\n        Class<int|string> u = typeof(int|string);\n        return 0;\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// The type arguments of `new` and of a method call, `super.` and `Self.` calls included, are a method body's types,
@@ -4746,7 +4753,7 @@ fn a_static_member_of_a_generic_class_returns_self() {
 /// follows the same type written alone.
 #[test]
 fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union() {
-    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<List<int>, int> c = [:];\n    private Map<List<int>, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<int> g;\n    private Class<int>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<List<int>, int> c = [:];\n    private Map<List<int>, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<List<void>> g;\n    private Class<List<void>>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
 
     assert_eq!(
         issues(code),
@@ -4757,8 +4764,8 @@ fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union()
             "8:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
             "9:23 A type argument cannot be `void`: `void` is only a return type.",
             "10:23 A type argument cannot be `void`: `void` is only a return type.",
-            "11:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
-            "12:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
+            "11:24 A type argument cannot be `void`: `void` is only a return type.",
+            "12:24 A type argument cannot be `void`: `void` is only a return type.",
             "13:27 A type argument cannot be `void`: `void` is only a return type.",
             "14:27 A type argument cannot be `void`: `void` is only a return type.",
         ]

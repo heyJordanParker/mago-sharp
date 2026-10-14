@@ -85,7 +85,43 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     where
         A: Arena,
     {
-        let classnames = resolve_classnames_from_expression(context, block_context, artifacts, self.class, false)?;
+        // PHP#'s `new (type)(…)` creates an object from a class value, spec section 25, and only a class's `Class`
+        // creates one: a `Class<int>` or a `Class<int|string>` holds a type that is no class.
+        let is_class_value = context.dialect.is_sharp() && matches!(self.class, Expression::Parenthesized(_));
+        if is_class_value {
+            let was_inside_call = block_context.flags.inside_call();
+            block_context.flags.set_inside_call(true);
+            self.class.analyze(context, block_context, artifacts)?;
+            block_context.flags.set_inside_call(was_inside_call);
+
+            if let Some(value_type) = artifacts.get_expression_type(self.class.unparenthesized())
+                && value_type.types.iter().any(|atomic| {
+                    matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(class_value @ TClassLikeString::OfType { .. }))
+                        if !matches!(class_value.constraint(), Some(TAtomic::Object(_) | TAtomic::GenericParameter(_))))
+                })
+            {
+                let written =
+                    String::from_utf8_lossy(&context.source_file.contents[self.class.unparenthesized().span().to_range_usize()]);
+                context.collector.report_with_code(
+                    IssueCode::InvalidClassStringExpression,
+                    Issue::error(format!(
+                        "`{written}` is a `{}`, and only a class's `Class` creates objects.",
+                        display_type(context, value_type)
+                    ))
+                    .with_annotation(
+                        Annotation::primary(self.class.unparenthesized().span()).with_message("Used as a class value here."),
+                    )
+                    .with_help("Create an object from the class value of a class, as in `new (typeof(Order))()`."),
+                );
+                self.argument_list.analyze(context, block_context, artifacts)?;
+                artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+                return Ok(());
+            }
+        }
+
+        let classnames =
+            resolve_classnames_from_expression(context, block_context, artifacts, self.class, is_class_value)?;
         if classnames.is_empty() {
             return Ok(());
         }

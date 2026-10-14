@@ -250,8 +250,9 @@ const OBJECT: &[u8] = b"Object";
 /// - Types: `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter in scope written by its short name,
 ///   generic types of these, function types `Function<R(P1, P2)>` of these, and `void` as a return type, a function
 ///   type's too. A generic type is `List<T>` and `Map<TKey, TValue>` of spec section 12, `Class<T>` of section 25,
-///   whose type argument is a class, an interface or a type parameter, and a class with one or more type arguments of
-///   section 11, as in `PaginatedList<Order>`, whose arity and bounds the analyzer checks. A type argument is any of
+///   whose type argument is any one type, a nullable or union type included, as `typeof` takes it, and a class with
+///   one or more type arguments of section 11, as in `PaginatedList<Order>`, whose arity and bounds the analyzer
+///   checks. A type argument is any of
 ///   these types but `void`, and a type parameter takes none. A `Map`'s key is `int` or `string`, or a type the
 ///   analyzer finds an `int` or `string` backing value for. PHP's own check reports a `void` parameter and a `void`
 ///   field. Each of them is nullable when written with `?` after it, as in `int?` or `Map<string, Any?>`, and PHP's
@@ -1508,17 +1509,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ConstantAccess(_), Body) => Some(Body),
         // `typeof(Self)` is the class a static method is called on, as `Self` is in `new Self(…)`.
         (Node::TypeOf(TypeOf { r#type: Hint::Self_(keyword), .. }), Body) if is_sharp_self(keyword) => None,
-        // A class value's type holds one type, so a nullable or union type has none.
-        (Node::TypeOf(TypeOf { r#type: r#type @ (Hint::Nullable(_) | Hint::Union(_) | Hint::Parenthesized(_)), .. }), _) => {
-            report_not_supported(
-                r#type.span(),
-                "type",
-                "`typeof` takes one type, as in `typeof(Order)`, `typeof(int)`, `typeof(List<Order>)` or `typeof(Self)`, and no nullable or union type.",
-                context,
-            );
-
-            None
-        }
         (Node::TypeOf(TypeOf { r#type: Hint::Identifier(name), .. }), Constant)
             if context.names.is_type_parameter(name) =>
         {
@@ -3532,20 +3522,6 @@ fn check_generic(generic: &GenericHint, place: Place, context: &mut Context<'_, 
                 place,
                 context,
             )
-        }
-        // A class value of a generic class may carry its type arguments, as `Class<PaginatedList<Order>>`.
-        (b"Class", [class])
-            if !matches!(class, Hint::Identifier(Identifier::Local(_)))
-                && !matches!(class, Hint::Generic(generic) if built_in_generic_arity(generic.name.value).is_none()) =>
-        {
-            context.report(
-                Issue::error(
-                    "`Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
-                )
-                .with_annotation(Annotation::primary(class.span()).with_message("Written here.")),
-            );
-
-            None
         }
         _ => Some(place),
     }

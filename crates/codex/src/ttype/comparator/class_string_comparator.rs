@@ -12,10 +12,13 @@ use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use crate::ttype::atomic::scalar::string::TString;
 use crate::ttype::atomic::scalar::string::TStringLiteral;
 use crate::ttype::comparator::ComparisonResult;
-use crate::ttype::comparator::atomic_comparator;
+use crate::ttype::comparator::union_comparator;
+use crate::ttype::union::TUnion;
 
-/// Whether `container_class_string` holds the class string `input_scalar`. Under PHP#'s rules, a `Class<TItem>` names
-/// the opaque type parameter `TItem`, so it holds only `Class<TItem>`, and passes as a class type its bound reaches.
+/// Whether `container_class_string` holds the class string `input_scalar`: the type the input names is contained by the
+/// type the container names, so PHP#'s `Class<int>` fits `Class<int|string>`, spec section 25. Under PHP#'s rules, a
+/// `Class<TItem>` names the opaque type parameter `TItem`, so it holds only `Class<TItem>`, and passes as a class type
+/// its bound reaches.
 #[inline]
 pub fn is_contained_by(
     codebase: &CodebaseMetadata,
@@ -25,7 +28,7 @@ pub fn is_contained_by(
     atomic_comparison_result: &mut ComparisonResult,
 ) -> bool {
     let fake_container_type = match container_class_string {
-        TClassLikeString::Any { .. } => Cow::Owned(TAtomic::Object(TObject::Any)),
+        TClassLikeString::Any { .. } => Cow::Owned(TUnion::from_atomic(TAtomic::Object(TObject::Any))),
         TClassLikeString::Literal { value } => {
             if let Some(str_value) = input_scalar.get_known_literal_string_value()
                 && is_valid_class_string(str_value)
@@ -40,14 +43,13 @@ pub fn is_contained_by(
                 return true;
             }
 
-            Cow::Owned(class_name_object(codebase, *value))
+            Cow::Owned(TUnion::from_atomic(class_name_object(codebase, *value)))
         }
         TClassLikeString::Generic { .. } if atomic_comparison_result.sharp_rules => {
-            Cow::Owned(container_class_string.get_object_type(codebase))
+            Cow::Owned(TUnion::from_atomic(container_class_string.get_object_type(codebase)))
         }
-        TClassLikeString::Generic { constraint, .. } | TClassLikeString::OfType { constraint, .. } => {
-            Cow::Borrowed(constraint.as_ref())
-        }
+        TClassLikeString::Generic { constraint, .. } => Cow::Owned(TUnion::from_atomic(constraint.as_ref().clone())),
+        TClassLikeString::OfType { constraint, .. } => Cow::Borrowed(constraint.as_ref()),
     };
 
     let fake_input_type = match input_scalar {
@@ -56,29 +58,33 @@ pub fn is_contained_by(
                 return false;
             }
 
-            Cow::Owned(class_name_object(codebase, *string_value))
+            Cow::Owned(TUnion::from_atomic(class_name_object(codebase, *string_value)))
         }
         TScalar::ClassLikeString(input_class_string) => match input_class_string {
             TClassLikeString::Any { .. } => {
-                return matches!(fake_container_type.as_ref(), TAtomic::Object(TObject::Any));
+                return fake_container_type.is_single()
+                    && matches!(fake_container_type.get_single(), TAtomic::Object(TObject::Any));
             }
-            TClassLikeString::Literal { value } => Cow::Owned(class_name_object(codebase, *value)),
+            TClassLikeString::Literal { value } => Cow::Owned(TUnion::from_atomic(class_name_object(codebase, *value))),
             TClassLikeString::Generic { .. } if atomic_comparison_result.sharp_rules => {
-                Cow::Owned(input_class_string.get_object_type(codebase))
+                Cow::Owned(TUnion::from_atomic(input_class_string.get_object_type(codebase)))
             }
-            TClassLikeString::Generic { constraint, .. } | TClassLikeString::OfType { constraint, .. } => {
-                Cow::Borrowed(constraint.as_ref())
+            TClassLikeString::Generic { constraint, .. } => {
+                Cow::Owned(TUnion::from_atomic(constraint.as_ref().clone()))
             }
+            TClassLikeString::OfType { constraint, .. } => Cow::Borrowed(constraint.as_ref()),
         },
         _ => {
             return false;
         }
     };
 
-    atomic_comparator::is_contained_by(
+    union_comparator::is_contained_by(
         codebase,
         fake_input_type.as_ref(),
         fake_container_type.as_ref(),
+        false,
+        false,
         inside_assertion,
         atomic_comparison_result,
     )

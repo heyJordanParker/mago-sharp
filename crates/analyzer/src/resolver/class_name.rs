@@ -297,10 +297,9 @@ pub(crate) fn class_value_classes(class_value_type: &TUnion) -> Option<Vec<Word>
 /// The class with type arguments a PHP# class value holds, as `Counter<Order>` for a `Class<Counter<Order>>`, spec
 /// section 25. None for a class value of a class without type arguments, or one that names none, as `Class<Counter>`.
 pub(crate) fn class_value_class(class_value: &TClassLikeString) -> Option<&TNamedObject> {
-    let TClassLikeString::OfType { constraint, .. } = class_value else {
-        return None;
-    };
-    let TAtomic::Object(TObject::Named(class)) = constraint.as_ref() else {
+    let (TClassLikeString::OfType { .. }, Some(TAtomic::Object(TObject::Named(class)))) =
+        (class_value, class_value.constraint())
+    else {
         return None;
     };
 
@@ -630,9 +629,10 @@ pub fn get_class_name_from_atomic(codebase: &CodebaseMetadata, atomic: &TAtomic)
                     TClassLikeString::Any { .. } => {
                         ResolvedClassname::new(None, ResolutionOrigin::AnyClassString, false)
                     }
-                    TClassLikeString::OfType { constraint, .. } | TClassLikeString::Generic { constraint, .. } => {
-                        // This is a `class-string<T>`. We resolve `T` to get the class name.
-                        get_class_name_from_atomic_impl(codebase, constraint.as_ref(), Some(class_string))?
+                    TClassLikeString::OfType { .. } | TClassLikeString::Generic { .. } => {
+                        // This is a `class-string<T>`. We resolve `T` to get the class name. A PHP# class value of
+                        // several types, as `Class<int|string>`, names no one class.
+                        get_class_name_from_atomic_impl(codebase, class_string.constraint()?, Some(class_string))?
                     }
                     TClassLikeString::Literal { value } => ResolvedClassname::new(
                         Some(*value),

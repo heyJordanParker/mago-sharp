@@ -1769,10 +1769,16 @@ fn encode_scalar_snapshot<'type_info>(
                     writer.write_u8(3);
                     writer.write_bytes(value.as_bytes())?;
                 }
-                TClassLikeString::OfType { kind, constraint } => {
+                // The SDK's class-like string holds one type, so a PHP# class value of several, as `Class<int|string>`,
+                // goes as the `class-string` of its kind.
+                TClassLikeString::OfType { kind, constraint } if constraint.is_single() => {
                     writer.write_u8(4);
                     encode_class_like_string_kind(writer, *kind);
-                    encode_atomic_snapshot(writer, constraint, types, depth + 1)?;
+                    encode_atomic_snapshot(writer, constraint.get_single(), types, depth + 1)?;
+                }
+                TClassLikeString::OfType { kind, .. } => {
+                    writer.write_u8(1);
+                    encode_class_like_string_kind(writer, *kind);
                 }
             }
         }
@@ -2860,10 +2866,10 @@ fn decode_complete_class_like_string(
             constraint: Arc::new(decode_complete_atomic(reader, depth + 1)?),
         },
         3 => TClassLikeString::Literal { value: word(reader.read_bytes("literal class-like string")?) },
-        4 => TClassLikeString::OfType {
-            kind: decode_class_like_string_kind(reader)?,
-            constraint: Arc::new(decode_complete_atomic(reader, depth + 1)?),
-        },
+        4 => TClassLikeString::of_type(
+            decode_class_like_string_kind(reader)?,
+            decode_complete_atomic(reader, depth + 1)?,
+        ),
         unknown => return Err(protocol(format!("unknown class-like string variant {unknown}"))),
     })
 }
@@ -3522,6 +3528,30 @@ pub(super) mod testing {
 
         assert_eq!(types.len(), 73);
         assert!(!writer.finish().is_empty(), "expected an encoded payload");
+    }
+
+    /// A class-like string of one type goes as that type and comes back so. The SDK's class-like string holds one
+    /// type, so a PHP# class value of several, as `Class<int|string>`, goes as the `class-string` it is while the
+    /// code runs.
+    #[test]
+    fn a_class_value_of_one_type_goes_as_it_and_one_of_several_as_a_class_string() {
+        let sent = |held: TUnion| {
+            let class_value =
+                TClassLikeString::OfType { kind: TClassLikeStringKind::Class, constraint: Arc::new(held) };
+            let union = TUnion::from_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_value)));
+            let mut writer = PayloadWriter::new();
+            encode_union_snapshot(&mut writer, &union, &mut Vec::new(), &CodebaseMetadata::new(), Dialect::Sharp, 0)
+                .unwrap();
+            let payload = writer.finish();
+            let mut reader = PayloadReader::new(&payload);
+            reader.read_u32("union handle").unwrap();
+
+            decode_complete_union(&mut reader, 0).unwrap().get_id().to_string()
+        };
+        let either = TUnion::from_vec(vec![TAtomic::Scalar(TScalar::int()), TAtomic::Scalar(TScalar::string())]);
+
+        assert_eq!(sent(get_int()), "class-string<int>");
+        assert_eq!(sent(either), "class-string");
     }
 
     /// A codebase that declares the string-backed enum `Status`.

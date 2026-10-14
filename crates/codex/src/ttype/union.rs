@@ -1336,22 +1336,7 @@ pub fn populate_union_type(
     unpopulated_union.flags.insert(UnionFlags::POPULATED);
     let unpopulated_atomics = unpopulated_union.types.to_mut();
     for unpopulated_atomic in unpopulated_atomics {
-        match unpopulated_atomic {
-            TAtomic::Scalar(TScalar::ClassLikeString(
-                TClassLikeString::Generic { constraint, .. } | TClassLikeString::OfType { constraint, .. },
-            )) => {
-                populate_atomic_type(
-                    Arc::make_mut(constraint),
-                    codebase_symbols,
-                    reference_source,
-                    symbol_references,
-                    force,
-                );
-            }
-            _ => {
-                populate_atomic_type(unpopulated_atomic, codebase_symbols, reference_source, symbol_references, force);
-            }
-        }
+        populate_atomic_type(unpopulated_atomic, codebase_symbols, reference_source, symbol_references, force);
     }
 }
 

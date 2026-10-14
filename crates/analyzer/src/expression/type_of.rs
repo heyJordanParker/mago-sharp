@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use foldhash::HashMap;
 use foldhash::fast::RandomState;
 use indexmap::IndexMap;
@@ -72,19 +74,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for TypeOf<'arena> {
     }
 }
 
-/// The class value type of the one type `held`.
+/// The class value type of the one type `held`, a union or a nullable type included: `typeof(int|string)` is a
+/// `Class<int|string>`.
 fn class_of(held: &TUnion) -> TUnion {
-    TUnion::from_vec(
-        held.types
-            .iter()
-            .map(|atomic| {
-                TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::of_type(
-                    TClassLikeStringKind::Class,
-                    atomic.clone(),
-                )))
-            })
-            .collect(),
-    )
+    wrap_atomic(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType {
+        kind: TClassLikeStringKind::Class,
+        constraint: Arc::new(held.clone()),
+    })))
 }
 
 /// The class value of the class `name` names, with the type arguments of `generic`, its generic type, when written:
