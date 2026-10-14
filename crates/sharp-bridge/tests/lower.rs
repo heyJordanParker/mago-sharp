@@ -6696,6 +6696,191 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
     );
 }
 
+/// ```php
+/// namespace App;
+/// interface HasDesign {
+///     public string $designColumn { get; }
+///     public function designKey(): string;
+///     public function title(): string;
+/// }
+/// trait HasDesign\Defaults {
+///     public function designKey(): string { return $this->designColumn; }
+/// }
+/// interface Labeled { public function label(): string; }
+/// trait Labeled\Defaults { public function label(): string { return 'labeled'; } }
+/// abstract class Page extends \Lib\Model { use \Lib\HasSlug, \App\HasDesign\Defaults; }
+/// class Child extends \App\Page { }
+/// enum Shade implements \App\Labeled { use \App\Labeled\Defaults; case Light; }
+/// final class Painted implements \App\Labeled { use \App\Labeled\Defaults; public function __construct(…) {} }
+/// ```
+///
+/// Spec section 22: a PHP# interface with default bodies is a PHP interface whose methods are all abstract, `[1]`
+/// `ZEND_ACC_INTERFACE`, then the trait `[2]` `ZEND_ACC_TRAIT` named `HasDesign\Defaults`, which the engine declares in
+/// the file's namespace and which holds each default body as a public method. A class's header traits and the traits of
+/// the default bodies of the interfaces it implements first are one `use`, its first member, and a subclass of a class
+/// that already uses them uses none. An enum and an event use them too.
+#[test]
+fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interface_and_its_trait() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.HasSlug;\nimport Lib.Model;\n\npublic interface HasDesign\n{\n    string designColumn { get; }\n    string designKey() => this.designColumn;\n    string title();\n}\n\npublic interface Labeled\n{\n    string label() => \"labeled\";\n}\n\npublic abstract class Page : Model, HasSlug, HasDesign\n{\n}\n\npublic abstract class Child : Page\n{\n}\n\npublic enum Shade : Labeled\n{\n    case Light;\n}\n\npublic event Painted(int id) : Labeled;\n",
+        &[(
+            "src/Lib/Model.php",
+            "<?php namespace Lib; abstract class Model {} trait HasSlug { public function slug(): string { return 'slug'; } }",
+        )],
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App"
+                null
+              CLASS [1] "HasDesign" @6-11
+                null
+                null
+                STMT_LIST
+                  PROP_GROUP [1]
+                    ZVAL [1] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "designColumn"
+                        null
+                        null
+                        STMT_LIST
+                          PROPERTY_HOOK "get" @8-8
+                            null
+                            null
+                            null
+                            null
+                            null
+                    null
+                  METHOD [1] "designKey" @9-9
+                    PARAM_LIST
+                    null
+                    null
+                    ZVAL [1] "string"
+                    null
+                  METHOD [1] "title" @10-10
+                    PARAM_LIST
+                    null
+                    null
+                    ZVAL [1] "string"
+                    null
+                null
+                null
+              CLASS [2] "HasDesign\\Defaults" @6-11
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "designKey" @9-9
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "designColumn"
+                    ZVAL [1] "string"
+                    null
+                null
+                null
+              CLASS [1] "Labeled" @13-16
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "label" @15-15
+                    PARAM_LIST
+                    null
+                    null
+                    ZVAL [1] "string"
+                    null
+                null
+                null
+              CLASS [2] "Labeled\\Defaults" @13-16
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "label" @15-15
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ZVAL "labeled"
+                    ZVAL [1] "string"
+                    null
+                null
+                null
+              CLASS [64] "Page" @18-20
+                ZVAL "Lib\\Model"
+                NAME_LIST
+                  ZVAL "App\\HasDesign"
+                STMT_LIST
+                  USE_TRAIT
+                    NAME_LIST
+                      ZVAL "Lib\\HasSlug"
+                      ZVAL "App\\HasDesign\\Defaults"
+                    null
+                null
+                null
+              CLASS [64] "Child" @22-24
+                ZVAL "App\\Page"
+                null
+                STMT_LIST
+                null
+                null
+              CLASS [268435488] "Shade" @26-29
+                null
+                NAME_LIST
+                  ZVAL "App\\Labeled"
+                STMT_LIST
+                  USE_TRAIT
+                    NAME_LIST
+                      ZVAL "App\\Labeled\\Defaults"
+                    null
+                  ENUM_CASE
+                    ZVAL "Light"
+                    null
+                    null
+                    null
+                null
+                null
+              CLASS [32] "Painted" @31-31
+                null
+                NAME_LIST
+                  ZVAL "App\\Labeled"
+                STMT_LIST
+                  USE_TRAIT
+                    NAME_LIST
+                      ZVAL "App\\Labeled\\Defaults"
+                    null
+                  METHOD [1] "__construct" @31-31
+                    PARAM_LIST
+                      PARAM [129]
+                        ZVAL [1] "int"
+                        ZVAL "id"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    null
+                    null
+                null
+                null
+        "#}
+    );
+}
+
 /// Spec section 15: an `on` clause adds nothing to its class, because `mago compile` lists each listener in
 /// `.sharp/listeners.php`, so a listener lowers to its method alone.
 #[test]

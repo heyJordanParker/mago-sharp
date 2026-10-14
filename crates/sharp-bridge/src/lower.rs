@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use mago_allocator::LocalArena;
+use mago_codex::defaults_trait_name;
 use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::service_id;
@@ -196,6 +197,7 @@ use crate::sharp_kind::SHARP_AST_UNARY_OP;
 use crate::sharp_kind::SHARP_AST_UNARY_PLUS;
 use crate::sharp_kind::SHARP_AST_UNPACK;
 use crate::sharp_kind::SHARP_AST_UNSET;
+use crate::sharp_kind::SHARP_AST_USE_TRAIT;
 use crate::sharp_kind::SHARP_AST_VAR;
 use crate::sharp_kind::SHARP_AST_WHILE;
 use crate::sharp_kind::SHARP_AST_ZVAL;
@@ -228,6 +230,7 @@ const ZEND_ACC_FINAL: u32 = 1 << 5;
 const ZEND_ACC_ABSTRACT: u32 = 1 << 6;
 const ZEND_ACC_EXPLICIT_ABSTRACT_CLASS: u32 = 1 << 6;
 const ZEND_ACC_INTERFACE: u32 = 1 << 0;
+const ZEND_ACC_TRAIT: u32 = 1 << 1;
 const ZEND_ACC_READONLY: u32 = 1 << 7;
 const ZEND_ACC_PROTECTED_SET: u32 = 1 << 11;
 const ZEND_ACC_PRIVATE_SET: u32 = 1 << 12;
@@ -492,7 +495,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // never run. A module's bindings are the table the file returns last, in `program`.
             Statement::Use(_) | Statement::Extern(_) | Statement::Module(_) => {}
             Statement::Class(class) => statements.push(self.class(class)),
-            Statement::Interface(interface) => statements.push(self.interface(interface)),
+            Statement::Interface(interface) => {
+                statements.push(self.interface(interface));
+                statements.extend(self.defaults(interface));
+            }
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
             Statement::Event(event) => statements.push(self.event(event)),
             _ => unreachable!("check_slice refuses the file statement `{statement}`"),
@@ -669,6 +675,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             None => (NULL, NULL, None),
         };
         let mut members = Vec::new();
+        members.extend(self.trait_use(class.inheritance.as_ref(), self.line(class.left_brace)));
         let mut has_constructor = false;
         // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
         for member in class.members.iter().filter(|member| !matches!(member, ClassLikeMember::Law(_))) {
@@ -750,44 +757,45 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A class header's names as PHP's `extends` name and `implements` name list, with the parent's full name: the name
-    /// the checker found to be a class is the parent, and the rest are interfaces. Either is null when the header names
-    /// none.
+    /// the checker found to be a class is the parent, the interfaces are the list, and a trait is in the class's `use`.
+    /// Either is null when the header names none.
     fn class_header(&mut self, inheritance: &Inheritance) -> (u32, u32, Option<&'lowering [u8]>) {
         let mut parent = NULL;
         let mut parent_name = None;
-        let mut interfaces = Vec::new();
         for name in &inheritance.types {
             let full_name = self.names.get(name);
-            let index = self.string(ZEND_NAME_FQ, self.line(name), full_name);
-            match self.types.class_declaration(full_name).kind {
-                DeclarationKind::Class => (parent, parent_name) = (index, Some(full_name)),
-                DeclarationKind::Interface => interfaces.push(index),
-                kind => unreachable!("the checker refuses a {kind:?} in a class header"),
+            if self.types.class_declaration(full_name).kind == DeclarationKind::Class {
+                parent = self.string(ZEND_NAME_FQ, self.line(name), full_name);
+                parent_name = Some(full_name);
             }
         }
 
-        let interfaces = if interfaces.is_empty() {
-            NULL
-        } else {
-            self.node(SHARP_AST_NAME_LIST, 0, self.line(inheritance), &interfaces)
-        };
-
-        (parent, interfaces, parent_name)
+        (parent, self.name_list(inheritance), parent_name)
     }
 
-    /// A header's names, which PHP compiles as the interface list.
+    /// A header's interfaces, which PHP compiles as the interface list, or null when it names none. A class's base
+    /// class is its parent, and a trait is in its `use`.
     fn name_list(&mut self, inheritance: &Inheritance) -> u32 {
-        let names: Vec<u32> = inheritance
-            .types
-            .iter()
-            .map(|name| self.string(ZEND_NAME_FQ, self.line(name), self.names.get(name)))
-            .collect();
+        let mut names = Vec::new();
+        for name in &inheritance.types {
+            let full_name = self.names.get(name);
+            match self.types.class_declaration(full_name).kind {
+                DeclarationKind::Interface => names.push(self.string(ZEND_NAME_FQ, self.line(name), full_name)),
+                DeclarationKind::Class | DeclarationKind::Trait => {}
+                kind => unreachable!("the checker refuses a {kind:?} in a header"),
+            }
+        }
+
+        if names.is_empty() {
+            return NULL;
+        }
 
         self.node(SHARP_AST_NAME_LIST, 0, self.line(inheritance), &names)
     }
 
-    /// An interface is a class declaration with `ZEND_ACC_INTERFACE`, and its methods are `public`, as php-src's
-    /// grammar builds `interface Measured { public function area(): float; }`.
+    /// An interface is a class declaration with `ZEND_ACC_INTERFACE` whose methods are `public` and abstract, as
+    /// php-src's grammar builds `interface Measured { public function area(): float; }`. Its default bodies are in the
+    /// trait `defaults` lowers.
     fn interface(&mut self, interface: &Interface) -> u32 {
         self.class = self.names.get(&interface.name);
         let mut members = Vec::new();
@@ -800,7 +808,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 unreachable!("check_slice refuses the interface member `{member}`");
             };
 
-            members.push(self.method(method, ZEND_ACC_PUBLIC, &[]));
+            members.push(self.signature(method));
         }
 
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);
@@ -814,6 +822,52 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             interface.name.value,
             &[NULL, header, members, NULL, NULL],
         )
+    }
+
+    /// The trait that holds an interface's default bodies, spec section 22, on the interface's lines, as php-src's
+    /// grammar builds `trait Defaults { … }`. It is named `HasDesign\Defaults` for the interface `HasDesign`, and the
+    /// engine declares it in the file's namespace, so every name in a body resolves as it does in the interface. Each
+    /// default body is a `public` method, in source order. An interface without a default body has no trait.
+    fn defaults(&mut self, interface: &Interface) -> Option<u32> {
+        self.class = self.names.get(&interface.name);
+        let mut members = Vec::new();
+        for member in &interface.members {
+            if let ClassLikeMember::Method(method) = member
+                && !matches!(method.body, MethodBody::Abstract(_))
+            {
+                members.push(self.method(method, ZEND_ACC_PUBLIC, &[]));
+            }
+        }
+
+        if members.is_empty() {
+            return None;
+        }
+
+        let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);
+        let name = defaults_trait_name(interface.name.value);
+
+        Some(self.declaration(
+            SHARP_AST_CLASS,
+            ZEND_ACC_TRAIT,
+            interface.interface.span,
+            interface.right_brace,
+            name.as_bytes(),
+            &[NULL, NULL, members, NULL, NULL],
+        ))
+    }
+
+    /// The `use` a class, an enum or an event starts with, as php-src's grammar builds
+    /// `use \Lib\HasSlug, \App\HasDesign\Defaults;`: the traits [`Types::used_traits`] lists, or null when it lists none.
+    fn trait_use(&mut self, header: Option<&Inheritance>, line: u32) -> Option<u32> {
+        let traits = self.types.used_traits(self.class, header);
+        if traits.is_empty() {
+            return None;
+        }
+
+        let names: Vec<u32> = traits.iter().map(|name| self.string(ZEND_NAME_FQ, line, name.as_bytes())).collect();
+        let names = self.node(SHARP_AST_NAME_LIST, 0, line, &names);
+
+        Some(self.node(SHARP_AST_USE_TRAIT, 0, line, &[names, NULL]))
     }
 
     /// An interface property is `public` with the abstract hook `get`, as php-src's grammar builds
@@ -861,7 +915,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             b"__construct",
             &[parameters, NULL, body, NULL, NULL],
         );
-        let members = self.node(SHARP_AST_STMT_LIST, 0, line, &[constructor]);
+        let mut members: Vec<u32> = self.trait_use(event.inheritance.as_ref(), line).into_iter().collect();
+        members.push(constructor);
+        let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
         let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
 
         self.declaration(
@@ -880,6 +936,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn r#enum(&mut self, r#enum: &Enum) -> u32 {
         self.class = self.names.get(&r#enum.name);
         let mut members = Vec::new();
+        members.extend(self.trait_use(r#enum.inheritance.as_ref(), self.line(r#enum.left_brace)));
         // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
         for member in r#enum.members.iter().filter(|member| !matches!(member, ClassLikeMember::Law(_))) {
             members.push(match member {
@@ -928,6 +985,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// them. A constructor's `: super(…)` runs after them as `parent::__construct(…)`, and does nothing when no
     /// constructor exists above the class.
     fn method(&mut self, method: &Method, flags: u32, first_statements: &[u32]) -> u32 {
+        self.method_declaration(method, flags, Some(first_statements))
+    }
+
+    /// An interface's method is `public` with no statement list, as php-src's grammar builds
+    /// `public function designKey(): string;`, spec section 22. Its default body is in the trait `defaults` lowers.
+    fn signature(&mut self, method: &Method) -> u32 {
+        self.method_declaration(method, ZEND_ACC_PUBLIC, None)
+    }
+
+    /// A method with `flags`, whose body starts with `first_statements`, or which has no body when they are `None`.
+    fn method_declaration(&mut self, method: &Method, flags: u32, first_statements: Option<&[u32]>) -> u32 {
         if flags & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE) == 0 {
             unreachable!("check_slice refuses a method without an access modifier");
         }
@@ -942,19 +1010,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, self.line(&method.parameter_list), &parameters);
-        let mut statements = if matches!(method.body, MethodBody::Abstract(_)) && first_statements.is_empty() {
-            Vec::new()
-        } else {
-            self.set_parameters(&method.parameter_list.parameters)
+        let body = match first_statements {
+            None => NULL,
+            Some(first_statements) => {
+                let mut statements = if matches!(method.body, MethodBody::Abstract(_)) && first_statements.is_empty() {
+                    Vec::new()
+                } else {
+                    self.set_parameters(&method.parameter_list.parameters)
+                };
+                statements.extend_from_slice(first_statements);
+                if let Some(initializer) = &method.initializer
+                    && self.types.parent_constructor(self.class).is_some()
+                {
+                    let arguments = self.arguments(&initializer.argument_list, &[]);
+                    statements.push(self.parent_construct(self.line(initializer), arguments));
+                }
+
+                self.method_body(&method.body, method.returns_value(), statements)
+            }
         };
-        statements.extend_from_slice(first_statements);
-        if let Some(initializer) = &method.initializer
-            && self.types.parent_constructor(self.class).is_some()
-        {
-            let arguments = self.arguments(&initializer.argument_list, &[]);
-            statements.push(self.parent_construct(self.line(initializer), arguments));
-        }
-        let body = self.method_body(&method.body, method.returns_value(), statements);
         let (start, return_type) = match &method.return_type_hint {
             Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
             None => (method.name.span, NULL),

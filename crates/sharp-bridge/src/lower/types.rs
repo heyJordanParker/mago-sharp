@@ -20,6 +20,7 @@ use mago_span::Span;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Inheritance;
 use mago_word::Word;
 use mago_word::word;
 
@@ -54,6 +55,7 @@ pub struct Declaration {
 pub enum DeclarationKind {
     Class,
     Interface,
+    Trait,
     /// `backed` is whether each case has a backing value, which a `Map` keyed by the enum holds for the case.
     Enum {
         backed: bool,
@@ -107,6 +109,8 @@ impl<'analysis> Types<'analysis> {
 
         let kind = if metadata.kind.is_interface() {
             DeclarationKind::Interface
+        } else if metadata.kind.is_trait() {
+            DeclarationKind::Trait
         } else if metadata.kind.is_enum() {
             DeclarationKind::Enum { backed: metadata.enum_type.is_some() }
         } else {
@@ -114,6 +118,24 @@ impl<'analysis> Types<'analysis> {
         };
 
         Declaration { kind, class: metadata.original_name, name: metadata.original_name, public: true }
+    }
+
+    /// The traits the fully qualified class-like name `class` uses itself, spec section 22: the traits its `header`
+    /// names, then the traits of default bodies [`CodebaseMetadata::get_defaults_traits`] gives it. A subclass does not
+    /// use its parent's traits again, as `ClassLikeMetadata::used_traits` lists them.
+    #[must_use]
+    pub fn used_traits(&self, class: &[u8], header: Option<&Inheritance>) -> Vec<Word> {
+        let mut traits: Vec<Word> = header
+            .into_iter()
+            .flat_map(|header| header.types.iter())
+            .filter_map(|name| self.codebase.get_trait(self.names.get(name)))
+            .map(|header_trait| header_trait.original_name)
+            .collect();
+        if let Some(metadata) = self.codebase.get_class_like(class) {
+            traits.extend(self.codebase.get_defaults_traits(metadata).iter().map(|defaults| defaults.original_name));
+        }
+
+        traits
     }
 
     /// The constructor `parent::__construct` reaches from the fully qualified class name `class`, as
