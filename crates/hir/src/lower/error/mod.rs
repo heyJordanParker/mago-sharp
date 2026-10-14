@@ -17,7 +17,8 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         // loop, PHP# syntax not supported yet, an escape a PHP# template refuses, an operator symbol a class cannot
         // declare, effects after a function type's `>`, a module member that is no law, a computed property's body after
         // a parameter, anything but `super(…)` or `this(…)` after a constructor's `:`, a body after an event, a type
-        // declared inside another, or a keyword in another case, is a token the PHP# grammar does not expect there.
+        // declared inside another, a keyword in another case, or a name after a pattern without a type, is a token the
+        // PHP# grammar does not expect there.
         ParseError::UnexpectedToken(..)
         | ParseError::PhpSyntaxInSharp(..)
         | ParseError::PhpLambdaInSharp(..)
@@ -36,7 +37,8 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         | ParseError::ConstructorInitializerInSharp(..)
         | ParseError::EventBodyInSharp(..)
         | ParseError::NestedTypeInSharp(..)
-        | ParseError::MiscasedKeywordInSharp(..) => ErrorKind::UnexpectedToken,
+        | ParseError::MiscasedKeywordInSharp(..)
+        | ParseError::UntypedPatternVariableInSharp(..) => ErrorKind::UnexpectedToken,
         ParseError::UnclosedLiteralString(..) => ErrorKind::UnclosedLiteralString,
         ParseError::RecursionLimitExceeded(..) | ParseError::NestingTooDeepInSharp(..) => {
             ErrorKind::RecursionLimitExceeded

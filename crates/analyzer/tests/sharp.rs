@@ -4158,6 +4158,24 @@ fn a_properties_pattern_on_a_value_that_cannot_be_null_reports_nothing_and_its_p
     assert_eq!(codes(&php_issues), ["redundant-type-comparison", "redundant-logical-operation"]);
 }
 
+/// Spec section 21: `shape is Circle { radius: > 1.0 } big` tests the type, then each property on it, and binds `big`.
+/// It is checked as its PHP twin, `($big = $shape) instanceof Circle && $big->radius > 1.0`: the property reads the
+/// tested type's, and `big` is that type where the test holds.
+#[test]
+fn a_type_with_properties_tests_both_and_binds() {
+    let sharp = "namespace Demo;\n\nimport Lib.Shape;\nimport Lib.Circle;\nimport Lib.Square;\n\nclass Report\n{\n    public static float big(Shape shape)\n    {\n        if (shape is Circle { radius: > 1.0 } big) {\n            return big.radius;\n        }\n        return 0.0;\n    }\n\n    public static bool unnamed(Shape shape) => shape is Square { side: >= 2.0 };\n\n    public static string arm(Shape shape) => match (shape) {\n        Circle { radius: > 5.0 } c when c.radius < 9.0 => \"mid\",\n        Square { side: 0.0 } => \"point\",\n        default => \"other\",\n    };\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Shape;\nuse Lib\\Circle;\nuse Lib\\Square;\n\nclass Report\n{\n    public static function big(Shape $shape): float\n    {\n        if (($big = $shape) instanceof Circle && $big->radius > 1.0) {\n            return $big->radius;\n        }\n        return 0.0;\n    }\n\n    public static function unnamed(Shape $shape): bool { return $shape instanceof Square && $shape->side >= 2.0; }\n\n    public static function arm(Shape $shape): string { return match (true) {\n        ($c = $shape) instanceof Circle && $c->radius > 5.0 and $c->radius < 9.0 => \"mid\",\n        $shape instanceof Square && $shape->side === 0.0 => \"point\",\n        default => \"other\",\n    }; }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
+
+    let missing = "namespace Demo;\n\nimport Lib.Shape;\nimport Lib.Circle;\n\nclass Report\n{\n    public static bool missing(Shape shape) => shape is Circle { side: 1.0 };\n}\n";
+    assert!(
+        issues(("src/Demo/Report.sharp", missing), &[("src/Lib/Shapes.php", SHAPES)])
+            .contains(&"8:66 non-existent-property".to_owned())
+    );
+}
+
 #[test]
 fn a_pattern_that_can_never_match_is_an_error_at_the_pattern() {
     let sharp = "namespace Demo;\n\nimport Lib.Circle;\nimport Lib.Square;\n\nclass Report\n{\n    public static bool square(Circle circle) => circle is Square;\n\n    public static bool text(int count) => count is string;\n\n    public static bool named(int count) => count is \"none\";\n\n    public static Square? converted(Circle circle) => circle as Square;\n\n    public static int arm(Circle circle) => match (circle) {\n        Square => 1,\n        default => 0,\n    };\n\n    public static int value(int count) => match (count) {\n        1 => 1,\n        \"none\" => 0,\n        default => 2,\n    };\n\n    public static bool possible(int? count) => count is int and > 0;\n}\n";

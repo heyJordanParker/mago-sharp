@@ -391,19 +391,30 @@ fn pattern_variables<'ast, 'arena>(
     variables: &mut std::vec::Vec<&'ast LocalIdentifier<'arena>>,
 ) {
     match pattern {
-        Pattern::Type(TypePattern { variable: Some(variable), .. }) => variables.push(variable),
-        Pattern::Type(_) | Pattern::Value(_) | Pattern::Comparison(_) => {}
+        Pattern::Type(TypePattern { properties, variable, .. }) => {
+            variables.extend(variable);
+            if let Some(properties) = properties {
+                property_variables(properties, variables);
+            }
+        }
+        Pattern::Value(_) | Pattern::Comparison(_) => {}
         Pattern::Not(not) => pattern_variables(not.pattern, variables),
         Pattern::Binary(binary) => {
             pattern_variables(binary.left, variables);
             pattern_variables(binary.right, variables);
         }
         Pattern::Parenthesized(parenthesized) => pattern_variables(parenthesized.pattern, variables),
-        Pattern::Properties(properties) => {
-            for property in &properties.properties {
-                pattern_variables(property.pattern, variables);
-            }
-        }
+        Pattern::Properties(properties) => property_variables(properties, variables),
+    }
+}
+
+/// The variables the patterns of a properties pattern declare.
+fn property_variables<'ast, 'arena>(
+    properties: &'ast PropertiesPattern<'arena>,
+    variables: &mut std::vec::Vec<&'ast LocalIdentifier<'arena>>,
+) {
+    for property in &properties.properties {
+        pattern_variables(property.pattern, variables);
     }
 }
 
@@ -991,7 +1002,7 @@ where
         self.record_called_function(Node::TypePattern(type_pattern));
 
         let Some(variable) = &type_pattern.variable else {
-            if let Hint::Identifier(Identifier::Local(name)) = &type_pattern.hint
+            if let TypePattern { hint: Hint::Identifier(Identifier::Local(name)), properties: None, .. } = type_pattern
                 && let Some(local) = self.locals.lookup(name.value)
             {
                 self.resolved_names.bind(name.span, Binding::Local(local));

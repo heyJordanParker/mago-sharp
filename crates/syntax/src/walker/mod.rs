@@ -2424,6 +2424,9 @@ generate_ast_walker! {
 
     'arena TypePattern as type_pattern => {
         walker.walk_hint(&type_pattern.hint, context);
+        if let Some(properties) = &type_pattern.properties {
+            walker.walk_properties_pattern(properties, context);
+        }
         if let Some(variable) = &type_pattern.variable {
             walker.walk_local_identifier(variable, context);
         }

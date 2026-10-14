@@ -99,6 +99,9 @@ pub enum ParseError {
     /// A PHP# keyword written in another case, as in `Return 5;`, with the keyword as PHP# writes it, at the keyword.
     /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are.
     MiscasedKeywordInSharp(&'static str, Span),
+    /// A name after a PHP# properties pattern without a type, as in `{ status: 200 } r`, at the name. Spec section
+    /// 21: a pattern creates a variable only through a typed declaration.
+    UntypedPatternVariableInSharp(Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -138,7 +141,8 @@ impl HasFileId for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
-            | ParseError::MiscasedKeywordInSharp(_, span) => span.file_id,
+            | ParseError::MiscasedKeywordInSharp(_, span)
+            | ParseError::UntypedPatternVariableInSharp(span) => span.file_id,
         }
     }
 }
@@ -182,7 +186,8 @@ impl HasSpan for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
-            | ParseError::MiscasedKeywordInSharp(_, span) => *span,
+            | ParseError::MiscasedKeywordInSharp(_, span)
+            | ParseError::UntypedPatternVariableInSharp(span) => *span,
         }
     }
 }
@@ -310,6 +315,10 @@ impl std::fmt::Display for ParseError {
                 format!("{owner} can't declare a type inside it: declare `{name}` in its own file.")
             }
             ParseError::MiscasedKeywordInSharp(keyword, _) => format!("Write the keyword `{keyword}` in lowercase."),
+            ParseError::UntypedPatternVariableInSharp(_) => {
+                "A pattern creates a variable only through a typed declaration: write the type, as in `Response { status: 200 } r`."
+                    .to_string()
+            }
         };
 
         write!(f, "{message}")
@@ -365,7 +374,8 @@ impl From<&ParseError> for Issue {
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)
             | ParseError::NestedTypeInSharp(..)
-            | ParseError::MiscasedKeywordInSharp(..) => Issue::error(error.to_string())
+            | ParseError::MiscasedKeywordInSharp(..)
+            | ParseError::UntypedPatternVariableInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             ParseError::NotSupportedYetInSharp(_, span) => Issue::error(error.to_string())

@@ -2018,6 +2018,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             },
             Node::TypePattern(node) => {
                 f(Node::Hint(&node.hint));
+                if let Some(properties) = &node.properties {
+                    f(Node::PropertiesPattern(properties));
+                }
                 if let Some(variable) = &node.variable {
                     f(Node::LocalIdentifier(variable));
                 }

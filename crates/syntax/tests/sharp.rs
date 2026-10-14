@@ -3747,7 +3747,7 @@ fn a_question_mark_before_the_name_an_is_pattern_declares_makes_the_type_nullabl
     };
     for is in [r#if.condition, expression(statement)] {
         let Expression::Is(Is {
-            pattern: Pattern::Type(TypePattern { hint: hint @ Hint::Nullable(_), variable }), ..
+            pattern: Pattern::Type(TypePattern { hint: hint @ Hint::Nullable(_), properties: None, variable }), ..
         }) = is
         else {
             panic!("expected `is` and a nullable type, got {is:#?}");
@@ -3769,7 +3769,7 @@ fn a_question_mark_that_ends_an_is_pattern_makes_the_type_nullable() {
     };
     for is in [r#if.condition, expression(returned)] {
         let Expression::Is(Is {
-            pattern: Pattern::Type(TypePattern { hint: Hint::Nullable(_), variable: None }), ..
+            pattern: Pattern::Type(TypePattern { hint: Hint::Nullable(_), properties: None, variable: None }), ..
         }) = is
         else {
             panic!("expected `is` and a nullable type, got {is:#?}");
@@ -3859,6 +3859,74 @@ fn a_properties_pattern_tests_each_property_against_a_pattern() {
     };
     let written: Vec<&str> = properties.properties.iter().map(|property| source(CODE, property)).collect();
     assert_eq!(written, ["status: 200", "body: string body"]);
+}
+
+/// Spec section 21: a properties pattern can test the type at the same time, and bind, as in C#. Each row is the type,
+/// its properties and its name. A pattern creates a variable only through a typed declaration, so a properties pattern
+/// without a type takes no name.
+#[test]
+fn a_type_with_properties_is_one_pattern_that_may_bind() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        payment is Paid { amount: > 1000 } big;\n        payment is Paid { amount: > 1000 };\n        response is Response { body: ResponseBody { type: \"json\" } } json;\n        match (payment) {\n            Paid { amount: 0 } free when free.ready => {},\n            default => {},\n        }\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let patterns: Vec<&Pattern> = method_body(program)
+        .iter()
+        .flat_map(|statement| match statement {
+            Statement::PatternMatch(r#match) => r#match
+                .arms
+                .iter()
+                .filter_map(|arm| match arm {
+                    PatternMatchArm::Pattern(arm) => Some(arm.pattern),
+                    PatternMatchArm::Default(_) => None,
+                })
+                .collect(),
+            statement => match expression(statement) {
+                Expression::Is(is) => vec![is.pattern],
+                expression => panic!("expected `is`, got {expression:#?}"),
+            },
+        })
+        .collect();
+    let written: Vec<(&str, Option<&str>, Option<&str>)> = patterns
+        .iter()
+        .map(|pattern| {
+            let Pattern::Type(TypePattern { hint, properties, variable }) = pattern else {
+                panic!("expected a type pattern, got {pattern:#?}");
+            };
+
+            (
+                source(CODE, hint),
+                properties.as_ref().map(|properties| source(CODE, properties)),
+                variable.as_ref().map(|variable| source(CODE, variable)),
+            )
+        })
+        .collect();
+    assert_eq!(
+        written,
+        [
+            ("Paid", Some("{ amount: > 1000 }"), Some("big")),
+            ("Paid", Some("{ amount: > 1000 }"), None),
+            ("Response", Some("{ body: ResponseBody { type: \"json\" } }"), Some("json")),
+            ("Paid", Some("{ amount: 0 }"), Some("free")),
+        ]
+    );
+
+    const UNTYPED: &str =
+        "class Report\n{\n    void run()\n    {\n        response is { status: 200 } ok;\n        lines->count();\n    }\n}\n";
+    let untyped = parse(&arena, "src/Report.sharp", UNTYPED);
+    let errors: Vec<(String, &str)> =
+        untyped.errors.iter().map(|error| (error.to_string(), source(UNTYPED, error))).collect();
+    assert_eq!(
+        errors,
+        [
+            (
+                "A pattern creates a variable only through a typed declaration: write the type, as in `Response { status: 200 } r`.".to_owned(),
+                "ok"
+            ),
+            ("`->` is PHP syntax: PHP# writes member access with `.`".to_owned(), "->"),
+        ]
+    );
 }
 
 #[test]

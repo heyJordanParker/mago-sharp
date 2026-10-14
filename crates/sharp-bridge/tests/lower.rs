@@ -11595,6 +11595,76 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
 }
 
 /// ```php
+/// $a = ($big = $extra) instanceof \Lib\Calc && (${'match#1'} = $big->count) > 1000;
+/// $b = (${'match#1'} = $this->calc()) instanceof \Lib\Calc && (${'match#2'} = ${'match#1'}->count) > 0;
+/// ```
+///
+/// Spec section 21: a type pattern with properties tests the type, then each property on the value the name holds, or
+/// on the subject's hidden variable when it has no name. Each property is read once, as in a properties pattern.
+#[test]
+fn a_type_with_properties_tests_the_type_then_each_property() {
+    assert_eq!(
+        body_in(
+            "Calc|int run(Calc|int extra)",
+            "        const a = extra is Calc { count: > 1000 } big;\n        const b = this.calc() is Calc { count: > 0 };\n        return extra;\n    }\n\n    public Calc calc()\n    {\n        return new Calc();\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib; final class Calc { public int $count = 0; public ?string $name = null; }",
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                AND
+                  INSTANCEOF
+                    ASSIGN
+                      VAR
+                        ZVAL "big"
+                      VAR
+                        ZVAL "extra"
+                    ZVAL "Lib\\Calc"
+                  GREATER
+                    ASSIGN
+                      VAR
+                        ZVAL "match#1"
+                      PROP
+                        VAR
+                          ZVAL "big"
+                        ZVAL "count"
+                    ZVAL 1000
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                AND
+                  INSTANCEOF
+                    ASSIGN
+                      VAR
+                        ZVAL "match#1"
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "calc"
+                        ARG_LIST
+                    ZVAL "Lib\\Calc"
+                  GREATER
+                    ASSIGN
+                      VAR
+                        ZVAL "match#2"
+                      PROP
+                        VAR
+                          ZVAL "match#1"
+                        ZVAL "count"
+                    ZVAL 0
+              RETURN
+                VAR
+                  ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
 /// return match (true) {
 ///     (${'match#1'} = $this->total()) === 0 => 1,
 ///     \is_int($n = ${'match#1'}) && $n > 9 => $n,

@@ -9,7 +9,8 @@
 //! - `x is 200` is `x === 200`, and `x is < 10` is `x < 10`. A pattern's value is a constant, and a local's value is
 //!   compared in `when`.
 //! - `not`, `and` and `or` are `!`, `&&` and `||`.
-//! - `x is { total: > 0 }` is `is_object(x) && x->total > 0`.
+//! - `x is { total: > 0 }` is `is_object(x) && x->total > 0`, and `x is Paid { total: > 0 } p` is
+//!   `($p = x) instanceof Paid && $p->total > 0`.
 //! - `x as Calc` is `x instanceof Calc ? x : null`.
 //! - A `match` that gives a value is `match (true)` with one condition per arm, its pattern's test `and` its `when`
 //!   condition. A `match` that starts a statement is `if`, then `else if` per arm, and `else` for `default`.
@@ -66,6 +67,7 @@ use crate::cst::PatternMatchArm;
 use crate::cst::PatternMatchArmBody;
 use crate::cst::PatternMatchPatternArm;
 use crate::cst::PositionalArgument;
+use crate::cst::PropertiesPattern;
 use crate::cst::PropertyAccess;
 use crate::cst::Statement;
 use crate::cst::Terminator;
@@ -385,23 +387,29 @@ where
         subject: &mut Subject<'arena>,
     ) -> Option<&'arena Expression<'arena>> {
         Some(match pattern {
-            Pattern::Type(TypePattern { hint, variable }) => {
+            // The properties read the name when there is one, and the subject otherwise.
+            Pattern::Type(TypePattern { hint, properties, variable }) => {
                 let read = self.read(subject, pattern.span());
-                let operand = match variable {
+                let (operand, mut named) = match variable {
                     Some(variable) => {
                         let name = self.php_variable(variable.value);
                         let target = self.variable(name, start_of(read.span()));
-
-                        self.alloc(Expression::Assignment(Assignment {
+                        let assignment = self.alloc(Expression::Assignment(Assignment {
                             lhs: target,
                             operator: AssignmentOperator::Assign(start_of(read.span())),
                             rhs: read,
-                        }))
-                    }
-                    None => read,
-                };
+                        }));
 
-                self.type_test(hint, operand)?
+                        (assignment, Some(Subject { first: None, variable: Some(name) }))
+                    }
+                    None => (read, None),
+                };
+                let test = self.type_test(hint, operand)?;
+
+                match properties {
+                    Some(properties) => self.property_tests(test, properties, named.as_mut().unwrap_or(subject))?,
+                    None => test,
+                }
             }
             // A list or enum case pattern, which the parser refuses as not supported yet.
             Pattern::Value(Expression::Error(_)) => return None,
@@ -440,28 +448,36 @@ where
             Pattern::Properties(properties) => {
                 let function = called_function(Node::PropertiesPattern(properties))?;
                 let read = self.read(subject, pattern.span());
-                let mut test = self.call(function, read);
-                for property in properties.properties.iter() {
-                    let at = start_of(property.name.span);
-                    let object = self.read(subject, property.name.span);
-                    let value = self.alloc(Expression::Access(Access::Property(PropertyAccess {
-                        object,
-                        arrow: at,
-                        property: ClassLikeMemberSelector::Identifier(property.name),
-                    })));
-                    let mut property_subject = if is_named(property.pattern) {
-                        Subject { first: Some(value), variable: None }
-                    } else {
-                        self.subject(value)
-                    };
-                    let property_test = self.test(property.pattern, property.colon, &mut property_subject)?;
+                let test = self.call(function, read);
 
-                    test = self.binary(test, BinaryOperator::And(at), property_test);
-                }
-
-                test
+                self.property_tests(test, properties, subject)?
             }
         })
+    }
+
+    /// `test`, then `&&` each property's test on the object `subject` holds, each property read once.
+    fn property_tests(
+        &mut self,
+        mut test: &'arena Expression<'arena>,
+        properties: &'arena PropertiesPattern<'arena>,
+        subject: &mut Subject<'arena>,
+    ) -> Option<&'arena Expression<'arena>> {
+        for property in properties.properties.iter() {
+            let at = start_of(property.name.span);
+            let object = self.read(subject, property.name.span);
+            let value = self.alloc(Expression::Access(Access::Property(PropertyAccess {
+                object,
+                arrow: at,
+                property: ClassLikeMemberSelector::Identifier(property.name),
+            })));
+            let mut property_subject =
+                if is_named(property.pattern) { Subject { first: Some(value), variable: None } } else { self.subject(value) };
+            let property_test = self.test(property.pattern, property.colon, &mut property_subject)?;
+
+            test = self.binary(test, BinaryOperator::And(at), property_test);
+        }
+
+        Some(test)
     }
 
     /// `instanceof` for a class, and the scalar test for a scalar type.

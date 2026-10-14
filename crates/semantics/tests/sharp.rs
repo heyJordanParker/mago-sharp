@@ -4400,7 +4400,7 @@ fn an_enum_method_takes_collection_and_function_types_and_holds_lambdas_as_a_cla
 #[test]
 fn is_as_and_match_with_their_patterns_are_in_the_slice() {
     let code = leak(method(
-        "        if (extra is int count && count > 0) {\n            return count;\n        }\n        const small = extra is >= 1 and < 10 or 100 ? 1 : 0;\n        const report = this as Report;\n        const counted = this is { count: int total } && total > 0;\n        match (extra) {\n            0 => {\n                return 0;\n            },\n            int n when n < 0 => this.run(n),\n            default => {},\n        }\n        return match (extra) {\n            < 0 => -1,\n            not (0 or 1) => 2,\n            default => small,\n        };\n",
+        "        if (extra is int count && count > 0) {\n            return count;\n        }\n        const small = extra is >= 1 and < 10 or 100 ? 1 : 0;\n        const report = this as Report;\n        const counted = this is { count: int total } && total > 0;\n        const big = this is Report { count: > 1000 } large && large.count > 0;\n        const plain = this is Report { count: 0 };\n        match (extra) {\n            0 => {\n                return 0;\n            },\n            int n when n < 0 => this.run(n),\n            default => {},\n        }\n        return match (extra) {\n            < 0 => -1,\n            not (0 or 1) => 2,\n            default => small,\n        };\n",
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
@@ -4481,7 +4481,7 @@ fn a_nullable_type_pattern_names_the_null_check_to_write() {
 #[test]
 fn a_pattern_variable_under_or_or_not_is_an_error_but_under_the_not_that_starts_is() {
     let code = leak(method(
-        "        const a = extra is int x or string y;\n        const b = extra is not (int z and > 0);\n        const c = match (extra) {\n            not int w => 1,\n            default => 0,\n        };\n        return extra;\n",
+        "        const a = extra is int x or string y;\n        const b = extra is not (int z and > 0);\n        const c = match (extra) {\n            not int w => 1,\n            default => 0,\n        };\n        const d = this is Report { count: int v } or null;\n        return extra;\n",
     ));
 
     assert_eq!(
@@ -4490,6 +4490,7 @@ fn a_pattern_variable_under_or_or_not_is_an_error_but_under_the_not_that_starts_
             "7:32 `x` is declared under `or` or `not`, where the pattern can match without a value for it.",
             "7:44 `y` is declared under `or` or `not`, where the pattern can match without a value for it.",
             "10:21 `w` is declared under `or` or `not`, where the pattern can match without a value for it.",
+            "13:47 `v` is declared under `or` or `not`, where the pattern can match without a value for it.",
         ]
     );
 }

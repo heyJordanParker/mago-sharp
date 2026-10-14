@@ -52,15 +52,17 @@ pub enum Pattern<'arena> {
     Properties(PropertiesPattern<'arena>),
 }
 
-/// Represents a type pattern: a type, and the name of a variable the matched value is assigned to.
+/// Represents a type pattern: a type, the properties the matched object's must match, and the name of a variable the
+/// matched value is assigned to.
 ///
 /// A bare name without a variable is a type, never a local's value: a pattern takes types and constants only.
 ///
-/// Example: `int`, `Paid paid`
+/// Example: `int`, `Paid paid`, `Paid { amount: > 1000 } big`
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TypePattern<'arena> {
     pub hint: Hint<'arena>,
+    pub properties: Option<PropertiesPattern<'arena>>,
     pub variable: Option<LocalIdentifier<'arena>>,
 }
 
@@ -156,9 +158,10 @@ impl HasSpan for Pattern<'_> {
 
 impl HasSpan for TypePattern<'_> {
     fn span(&self) -> Span {
-        match &self.variable {
-            Some(variable) => self.hint.span().join(variable.span),
-            None => self.hint.span(),
+        match (&self.properties, &self.variable) {
+            (_, Some(variable)) => self.hint.span().join(variable.span),
+            (Some(properties), None) => self.hint.span().join(properties.span()),
+            (None, None) => self.hint.span(),
         }
     }
 }

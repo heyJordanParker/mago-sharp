@@ -83,6 +83,7 @@ use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Program;
+use mago_syntax::cst::PropertiesPattern;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyHook;
 use mago_syntax::cst::PropertyHookBody;
@@ -1312,8 +1313,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         ) => Some(Body),
         // Spec section 21: a pattern takes types and constants only, and a local's value is compared in `when`. The
         // binder binds a bare name of a type pattern to the local of that name, so the name reports here.
-        (Node::Pattern(pattern @ Pattern::Type(TypePattern { hint: Hint::Identifier(name), variable: None })), Body | Place::Pattern)
-            if report_pattern_reads(Node::Identifier(name), pattern.span(), b"==", context) =>
+        (
+            Node::Pattern(
+                pattern @ Pattern::Type(TypePattern { hint: Hint::Identifier(name), properties: None, variable: None }),
+            ),
+            Body | Place::Pattern,
+        ) if report_pattern_reads(Node::Identifier(name), pattern.span(), b"==", context) =>
         {
             None
         }
@@ -3001,16 +3006,31 @@ fn names_class_values(arm: &PatternMatchArm, context: &Context<'_, '_, '_>) -> b
 /// Reports each variable a pattern declares under `or` or `not`, which C# refuses as error CS8780: the variable would
 /// have no value where the pattern matches. `hidden` is whether an enclosing pattern already hides it.
 fn report_hidden_pattern_variables(pattern: &Pattern, hidden: bool, context: &mut Context<'_, '_, '_>) {
+    let report_properties = |properties: &PropertiesPattern, context: &mut Context<'_, '_, '_>| {
+        for property in &properties.properties {
+            report_hidden_pattern_variables(property.pattern, hidden, context);
+        }
+    };
+
     match pattern {
-        Pattern::Type(TypePattern { variable: Some(variable), .. }) if hidden => context.report(
-            Issue::error(format!(
-                "`{}` is declared under `or` or `not`, where the pattern can match without a value for it.",
-                BytesDisplay(variable.value)
-            ))
-            .with_annotation(Annotation::primary(variable.span).with_message("Declared here."))
-            .with_help("Declare the variable outside `or` and `not`, or test the value again where you use it."),
-        ),
-        Pattern::Type(_) | Pattern::Value(_) | Pattern::Comparison(_) => {}
+        Pattern::Type(TypePattern { properties, variable, .. }) => {
+            if let Some(variable) = variable
+                && hidden
+            {
+                context.report(
+                    Issue::error(format!(
+                        "`{}` is declared under `or` or `not`, where the pattern can match without a value for it.",
+                        BytesDisplay(variable.value)
+                    ))
+                    .with_annotation(Annotation::primary(variable.span).with_message("Declared here."))
+                    .with_help("Declare the variable outside `or` and `not`, or test the value again where you use it."),
+                );
+            }
+            if let Some(properties) = properties {
+                report_properties(properties, context);
+            }
+        }
+        Pattern::Value(_) | Pattern::Comparison(_) => {}
         Pattern::Not(not) => report_hidden_pattern_variables(not.pattern, true, context),
         Pattern::Binary(binary) => {
             let hidden = hidden || !binary.is_and();
@@ -3020,11 +3040,7 @@ fn report_hidden_pattern_variables(pattern: &Pattern, hidden: bool, context: &mu
         Pattern::Parenthesized(parenthesized) => {
             report_hidden_pattern_variables(parenthesized.pattern, hidden, context)
         }
-        Pattern::Properties(properties) => {
-            for property in &properties.properties {
-                report_hidden_pattern_variables(property.pattern, hidden, context);
-            }
-        }
+        Pattern::Properties(properties) => report_properties(properties, context),
     }
 }
 
@@ -3770,7 +3786,7 @@ fn supported(place: Place) -> &'static str {
             "A parameter default, an attribute argument, a constant's value, an enum case's value or a pattern's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
         }
         Place::Pattern => {
-            "A PHP# pattern is a type of `int`, `float`, `string`, `bool` or a class with an optional name, as in `int count`, a value, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`."
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool` or a class with an optional name, as in `int count`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`."
         }
     }
 }

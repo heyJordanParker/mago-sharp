@@ -101,19 +101,13 @@ where
                 right_parenthesis: self.stream.eat_span(T![")"])?,
             }),
             T!["{"] => {
-                let properties = self.parse_comma_separated_sequence(T!["{"], T!["}"], |parser| {
-                    Ok(PropertyPattern {
-                        name: parser.parse_local_identifier()?,
-                        colon: parser.stream.eat_span(T![":"])?,
-                        pattern: parser.parse_pattern()?,
-                    })
-                })?;
+                let properties = self.parse_properties_pattern()?;
+                // Spec section 21: a pattern creates a variable only through a typed declaration.
+                if let Some(variable) = self.parse_pattern_variable()? {
+                    self.errors.push(ParseError::UntypedPatternVariableInSharp(variable.span));
+                }
 
-                Pattern::Properties(PropertiesPattern {
-                    left_brace: properties.open,
-                    properties: properties.sequence,
-                    right_brace: properties.close,
-                })
+                Pattern::Properties(properties)
             }
             T!["==" | "<" | "<=" | ">" | ">="] => {
                 let span = self.stream.consume_span()?;
@@ -153,11 +147,25 @@ where
             }
             _ => Pattern::Type(TypePattern {
                 hint: self.parse_type_hint_in_expression()?,
+                properties: if self.stream.is_at(T!["{"])? { Some(self.parse_properties_pattern()?) } else { None },
                 variable: self.parse_pattern_variable()?,
             }),
         };
 
         Ok(self.arena.alloc(pattern))
+    }
+
+    /// Parses `{ name: pattern, … }`, the properties a matched object's must match.
+    fn parse_properties_pattern(&mut self) -> Result<PropertiesPattern<'arena>, ParseError> {
+        let properties = self.parse_comma_separated_sequence(T!["{"], T!["}"], |parser| {
+            Ok(PropertyPattern {
+                name: parser.parse_local_identifier()?,
+                colon: parser.stream.eat_span(T![":"])?,
+                pattern: parser.parse_pattern()?,
+            })
+        })?;
+
+        Ok(PropertiesPattern { left_brace: properties.open, properties: properties.sequence, right_brace: properties.close })
     }
 
     /// The name a type pattern declares, as in `int count`. `when`, which starts an arm's condition, and `and` and
