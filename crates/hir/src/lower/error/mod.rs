@@ -26,6 +26,7 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         | ParseError::QualifiedNameInSharp(..)
         | ParseError::UntypedParameterInSharp(..)
         | ParseError::UntypedFieldInSharp(..)
+        | ParseError::UntypedPropertyInSharp(..)
         | ParseError::ForInInSharp(..)
         | ParseError::NotSupportedYetInSharp(..)
         | ParseError::InvalidTemplateEscapeInSharp(..)
