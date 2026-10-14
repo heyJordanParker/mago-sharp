@@ -4,6 +4,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Try;
+use mago_syntax::cst::built_in_generic_arity;
 
 use crate::internal::context::Context;
 
@@ -44,6 +45,7 @@ pub fn check_try<'arena>(r#try: &Try<'arena>, context: &mut Context<'_, '_, 'are
 fn check_try_catch_hint(hint: &Hint, union_supported: bool, context: &mut Context) {
     match hint {
         Hint::Identifier(_) => {}
+        Hint::Generic(generic) if built_in_generic_arity(generic.name.value).is_none() => {}
         Hint::Union(union) => {
             if !union_supported {
                 context.report(

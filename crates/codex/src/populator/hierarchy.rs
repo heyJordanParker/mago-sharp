@@ -133,8 +133,9 @@ pub fn populate_class_like_metadata_iterative(
     }
 
     // A PHP# header lists a class's base class and an enum's or a class's traits among the interfaces. PHP links the one
-    // class there as the parent and uses every trait there, as `extends` and `use` do. A PHP# class-like also uses the
-    // trait of default bodies of each interface it implements before its parent class does, spec section 22.
+    // class there as the parent, with its type arguments as `@extends` gives them, and uses every trait there, as
+    // `extends` and `use` do. A PHP# class-like also uses the trait of default bodies of each interface it implements
+    // before its parent class does, spec section 22.
     if metadata.flags.is_sharp() && (metadata.kind.is_class() || metadata.kind.is_enum()) {
         for name in sorted_atoms(metadata.direct_parent_interfaces.iter().copied()) {
             let Some(kind) = codebase.get_class_like_by_word(name).map(|header_type| header_type.kind) else {
@@ -148,6 +149,9 @@ pub fn populate_class_like_metadata_iterative(
             } else if kind.is_class() && metadata.kind.is_class() && metadata.direct_parent_class.is_none() {
                 metadata.direct_parent_interfaces.remove(&name);
                 metadata.all_parent_interfaces.remove(&name);
+                if let Some(count) = metadata.template_type_implements_count.remove(&name) {
+                    metadata.template_type_extends_count.insert(name, count);
+                }
                 metadata.direct_parent_class = Some(name);
                 metadata.all_parent_classes.insert(name);
             }

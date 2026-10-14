@@ -9,8 +9,10 @@ use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
 use mago_word::word;
 
+use mago_codex::context::ScopeContext;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::class_like::TemplateTypes;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
@@ -44,9 +46,12 @@ use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_void;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_codex::visibility::Visibility;
+use mago_names::ResolvedNames;
 use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
 use mago_php_version::feature::Feature;
@@ -54,10 +59,16 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
+use mago_syntax::cst::Binary;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Statement;
+use mago_syntax::dialect::Dialect;
+use mago_syntax::walker::Walker;
 use mago_text_edit::Safety;
 use mago_text_edit::TextEdit;
 
@@ -71,6 +82,7 @@ use crate::context::block::ReferenceConstraintSource;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
+use crate::expression::instantiation::report_missing_type_arguments;
 use crate::resolver::property::localize_property_type;
 use crate::resolver::property::resolve_declared_property;
 use crate::statement::analyze_statements;
@@ -235,10 +247,12 @@ where
     parameter_types
 }
 
-/// Spec section 14.2: a PHP# lambda's parameter types are optional where its function type is known. Before a
-/// lambda written for `expected`, such as the value of a typed local or property, or a returned value, this gives
-/// the lambda the parameter types of `expected`, as a call does for a lambda passed to a function type.
-pub fn expect_function_type<A>(
+/// Gives `expression` the declared type `expected` its value goes into, such as a typed local's or property's, or a
+/// return type, as a call gives an argument its parameter's type. Spec section 14.2: a PHP# lambda takes its parameter
+/// types from it. A member read takes them too, because a method value of a generic method infers its type arguments
+/// from them (section 14.3), and a generic call infers the type arguments nothing else fixes from it (section 11).
+/// `??` and `?:` give it to the sides their value comes from.
+pub fn expect_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
     expression: &Expression<'_>,
@@ -247,11 +261,30 @@ pub fn expect_function_type<A>(
     A: Arena,
 {
     if context.dialect.is_sharp()
-        && matches!(expression.unparenthesized(), Expression::ArrowFunction(_) | Expression::Closure(_))
+        && takes_declared_type(expression)
         && let Some(expected) = expected
     {
-        artifacts.inferred_parameter_types = Some(closure_parameter_types(context, expected));
+        artifacts.expected_type = Some((expression.unparenthesized().span(), expected.clone()));
     }
+}
+
+/// Whether `expression` takes the declared type its value goes into: a lambda, a call, a member read, or `??` and `?:`,
+/// which give it to their sides.
+pub fn takes_declared_type(expression: &Expression<'_>) -> bool {
+    matches!(
+        expression.unparenthesized(),
+        Expression::ArrowFunction(_)
+            | Expression::Closure(_)
+            | Expression::Call(_)
+            | Expression::Conditional(_)
+            | Expression::Binary(Binary { operator: BinaryOperator::NullCoalesce(_), .. })
+    ) || is_member_read(expression)
+}
+
+/// Whether `expression` reads a member, `x.m` or `Class.m`, which in PHP# is a method value when the class declares
+/// no property `m` (spec section 14.3).
+pub fn is_member_read(expression: &Expression<'_>) -> bool {
+    matches!(expression.unparenthesized(), Expression::Access(Access::Property(_)))
 }
 
 /// Joins the type each variable a closure captured by reference has at the end of the closure into its type in the
@@ -420,12 +453,7 @@ where
             }
             FunctionLikeBody::Expression(value) => {
                 let return_type = function_like_metadata.return_type_metadata.as_ref();
-                expect_function_type(
-                    context,
-                    &mut artifacts,
-                    value,
-                    return_type.map(|return_type| &return_type.type_union),
-                );
+                expect_type(context, &mut artifacts, value, return_type.map(|return_type| &return_type.type_union));
                 if let Some(return_type) = return_type {
                     check_sharp_literal_kind(context, value, &return_type.type_union);
                 }
@@ -487,6 +515,7 @@ where
     parent_artifacts.variable_definedness.extend(std::mem::take(&mut artifacts.variable_definedness));
     parent_artifacts.resolved_method_calls.append(&mut artifacts.resolved_method_calls);
     parent_artifacts.call_targets.extend(std::mem::take(&mut artifacts.call_targets));
+    parent_artifacts.tested_types.extend(std::mem::take(&mut artifacts.tested_types));
     parent_artifacts.namespace_constants.extend(std::mem::take(&mut artifacts.namespace_constants));
     parent_artifacts.function_values.append(&mut artifacts.function_values);
     parent_artifacts.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));
@@ -833,18 +862,12 @@ where
 
     let mut signature_union = type_metadata.type_union.clone();
 
-    let calling_class = block_context.scope.get_class_like_name();
-
     expander::expand_union(
         context.codebase,
         &mut signature_union,
         &TypeExpansionOptions {
-            self_class: calling_class,
-            static_class_type: if let Some(calling_class) = calling_class {
-                StaticClassType::Name(calling_class)
-            } else {
-                StaticClassType::None
-            },
+            self_class: block_context.scope.get_class_like_name(),
+            static_class_type: get_scope_static_class_type(context, &block_context.scope),
             function_is_final: if let Some(method_metadata) = &function_like_metadata.method_metadata {
                 method_metadata.is_final
             } else {
@@ -1066,6 +1089,21 @@ where
         intersection_types: if intersections.is_empty() { None } else { Some(intersections) },
         remapped_parameters: false,
     })
+}
+
+/// The class `static` names in the body `scope` holds. PHP#'s `Self` is that class with its own type parameters, as
+/// `this` is, spec section 11, so a body checks what it returns as `Self` against `Box<TItem>`, not a bare `Box`.
+pub fn get_scope_static_class_type<A>(context: &Context<'_, '_, A>, scope: &ScopeContext<'_>) -> StaticClassType
+where
+    A: Arena,
+{
+    match scope.get_class_like() {
+        Some(class) if context.dialect.is_sharp() => {
+            StaticClassType::Object(get_this_type(context, class, scope.get_function_like()))
+        }
+        Some(class) => StaticClassType::Name(class.name),
+        None => StaticClassType::None,
+    }
 }
 
 fn add_symbol_references(
@@ -1597,12 +1635,14 @@ fn type_contains_function_template_param(
 /// A template parameter is considered "used" if it appears in:
 /// - A parameter type
 /// - The return type
+/// - The PHP# `body`, as `catch (TError error)` names it, since a call can write its type argument
 pub fn check_unused_function_template_parameters<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     function_like_metadata: &'ctx FunctionLikeMetadata,
     name_span: Span,
     kind_str: &str,
     display_name: Word,
+    body: Option<FunctionLikeBody<'_, '_>>,
 ) where
     A: Arena,
 {
@@ -1622,8 +1662,22 @@ pub fn check_unused_function_template_parameters<'ctx, A>(
         return;
     };
 
+    let mut named_in_body = Vec::new();
+    let walker = TypeParametersNamed(context.resolved_names);
+    match body.filter(|_| context.dialect.is_sharp()) {
+        Some(FunctionLikeBody::Statements(statements, _)) => {
+            for statement in statements {
+                walker.walk_statement(statement, &mut named_in_body);
+            }
+        }
+        Some(FunctionLikeBody::Expression(expression) | FunctionLikeBody::ExpressionStatement(expression)) => {
+            walker.walk_expression(expression, &mut named_in_body);
+        }
+        None => {}
+    }
+
     'templates: for (template_name, _) in &function_like_metadata.template_types {
-        if template_name.as_bytes().starts_with(b"_") {
+        if template_name.as_bytes().starts_with(b"_") || named_in_body.contains(&template_name.as_bytes()) {
             continue;
         }
 
@@ -1645,19 +1699,38 @@ pub fn check_unused_function_template_parameters<'ctx, A>(
             continue;
         }
 
+        let (message, label, help) = if context.dialect.is_sharp() {
+            let declared_name = function_like_metadata.original_name;
+            (
+                format!("Type parameter `{template_name}` is never used in {kind_str} `{declared_name}`."),
+                format!("Type parameter `{template_name}` is defined on this {kind_str} but never referenced"),
+                format!("Remove `{template_name}` from `{declared_name}<…>`."),
+            )
+        } else {
+            (
+                format!("Template parameter `{template_name}` is never used in {kind_str} `{display_name}`."),
+                format!("Template `{template_name}` is defined on this {kind_str} but never referenced"),
+                format!(
+                    "Remove the unused `@template {template_name}` from the docblock, or use it in a parameter or return type."
+                ),
+            )
+        };
+
         context.collector.report_with_code(
             IssueCode::UnusedTemplateParameter,
-            Issue::warning(format!(
-                "Template parameter `{template_name}` is never used in {kind_str} `{display_name}`."
-            ))
-            .with_annotation(
-                Annotation::primary(name_span)
-                    .with_message(format!("Template `{template_name}` is defined on this {kind_str} but never referenced")),
-            )
-            .with_help(format!(
-                "Remove the unused `@template {template_name}` from the docblock, or use it in a parameter or return type."
-            )),
+            Issue::warning(message).with_annotation(Annotation::primary(name_span).with_message(label)).with_help(help),
         );
+    }
+}
+
+/// Collects each name of a PHP# type parameter a body writes, as the binder bound it.
+struct TypeParametersNamed<'names, 'arena>(&'names ResolvedNames<'arena>);
+
+impl<'ast, 'arena> Walker<'ast, 'arena, Vec<&'arena [u8]>> for TypeParametersNamed<'_, '_> {
+    fn walk_in_local_identifier(&self, identifier: &'ast LocalIdentifier<'arena>, names: &mut Vec<&'arena [u8]>) {
+        if self.0.is_type_parameter(identifier) {
+            names.push(identifier.value);
+        }
     }
 }
 
@@ -1673,14 +1746,11 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
 {
     check_sharp_literal_kind(context, default_expression, declared_type);
 
-    // A PHP# type holds null only when it is written with `?`, so its `Any` is checked and it has no implicitly
-    // nullable parameter.
+    // A PHP# type holds null only when it is written with `?`, so its `Any` and its type parameters are checked and it
+    // has no implicitly nullable parameter.
     let is_sharp = context.dialect.is_sharp();
 
-    if (declared_type.is_mixed() && !is_sharp)
-        || declared_type.has_template_types()
-        || declared_type.is_generic_parameter()
-    {
+    if !is_sharp && (declared_type.is_mixed() || declared_type.has_template_types()) {
         return;
     }
 
@@ -1699,7 +1769,7 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
         && default_type.is_null()
         && context.settings.version.is_supported(Feature::ImplicitlyNullableParameterTypes);
 
-    let mut comparison_result = ComparisonResult::with_sharp_rules(is_sharp);
+    let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
     if union_comparator::is_contained_by(
         context.codebase,
         default_type,
@@ -1806,116 +1876,197 @@ pub(crate) fn known_type_or_error(declared: TUnion) -> TUnion {
 }
 
 /// Reports generic classes a declared type applies with the wrong number of arguments, or with an
-/// argument outside its type parameter's bound.
+/// argument outside its type parameter's bound, and a generic PHP# class a `.sharp` type writes
+/// without type arguments. `Self` names its class's own type parameters, so it needs none, and a
+/// PHP# class type names the class itself, as `Class<PaginatedList>` does, so its class needs none.
 ///
 /// A declaration is checked where it is written, so the mistake is reported at the declaration
-/// rather than at whichever call first happens to reach it.
-pub fn report_invalid_template_arguments<A>(context: &mut Context<'_, '_, A>, type_metadata: &TypeMetadata)
+/// rather than at whichever call first happens to reach it. Returns whether a class in it has the
+/// wrong number of type arguments or none, so a type in a body gives what it tests no type the
+/// next check would report again.
+pub fn report_invalid_template_arguments<A>(context: &mut Context<'_, '_, A>, type_metadata: &TypeMetadata) -> bool
 where
     A: Arena,
 {
     if type_metadata.inferred {
-        return;
+        return false;
     }
 
     report_map_keys_without_backing_value(context, &type_metadata.type_union, type_metadata.span);
     report_unsupported_set_elements(context, &type_metadata.type_union, type_metadata.span);
 
     let codebase = context.codebase;
-    for type_ref in type_metadata.type_union.get_all_child_nodes() {
+    let mut is_refused = false;
+    let mut type_refs = type_metadata.type_union.get_child_nodes();
+    while let Some(type_ref) = type_refs.pop() {
+        match type_ref {
+            TypeRef::Atomic(TAtomic::Scalar(TScalar::ClassLikeString(_))) if context.dialect.is_sharp() => continue,
+            TypeRef::Union(union) => type_refs.extend(union.get_child_nodes()),
+            TypeRef::Atomic(atomic) => type_refs.extend(atomic.get_child_nodes()),
+        }
+
         let TypeRef::Atomic(TAtomic::Object(TObject::Named(named))) = type_ref else {
             continue;
         };
-        let (Some(arguments), Some(class)) = (&named.type_parameters, codebase.get_class_like(named.name.as_bytes()))
-        else {
+        let Some(class) = codebase.get_class_like(named.name.as_bytes()) else {
             continue;
         };
 
-        let class_name = display_class_like_name(context, class.original_name);
-        let expected = class.template_types.len();
-        let required = class.template_types.values().take_while(|template| template.default.is_none()).count();
-        if arguments.len() < required || arguments.len() > expected {
-            let (code, message) = if arguments.len() < required {
-                (
-                    IssueCode::MissingTemplateParameter,
-                    format!(
-                        "Too few template arguments for `{class_name}`: expected at least {required}, but found {}.",
-                        arguments.len()
-                    ),
-                )
-            } else {
-                (
-                    IssueCode::ExcessTemplateParameter,
-                    format!(
-                        "Too many template arguments for `{class_name}`: expected {expected}, but found {}.",
-                        arguments.len()
-                    ),
-                )
-            };
+        is_refused |= match &named.type_parameters {
+            Some(arguments) => !check_template_arguments(
+                context,
+                class.original_name,
+                class.name_span.unwrap_or(class.span),
+                &class.template_types,
+                arguments,
+                type_metadata.span,
+                &TemplateResult::default(),
+            ),
+            None if !named.is_static => report_missing_type_arguments(context, class, type_metadata.span),
+            None => false,
+        };
+    }
 
-            context.collector.report_with_code(
-                code,
-                Issue::error(message)
-                    .with_annotation(
-                        Annotation::primary(type_metadata.span)
-                            .with_message(format!("`{class_name}` is applied here.")),
-                    )
-                    .with_annotation(
-                        Annotation::secondary(class.name_span.unwrap_or(class.span))
-                            .with_message(format!("`{class_name}` declares {expected} template parameters.")),
-                    ),
-            );
+    is_refused
+}
+
+/// Reports `arguments`, applied at `span` to the templates `owner` declares at `owner_span`, when their number differs
+/// from the templates' or an argument falls outside its template's bound. A bound reads the other templates it names
+/// from `bounds`, such as a call's receiver type arguments, and from `arguments`. Returns whether their number fits. In
+/// a `.sharp` file the report speaks of type arguments, names classes by their short names, as PHP# writes them, and
+/// names a method with its type parameters where it names one of them, as in `Repository.count<TQuery>`'s `TQuery`.
+pub fn check_template_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    owner: impl std::fmt::Display,
+    owner_span: Span,
+    templates: &TemplateTypes,
+    arguments: &[TUnion],
+    span: Span,
+    bounds: &TemplateResult,
+) -> bool
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let is_sharp = context.dialect.is_sharp();
+    let owner = if is_sharp { mago_names::short_name(owner.to_string()) } else { owner.to_string() };
+    let (kind, sentence_kind) = if is_sharp { ("type", "Type") } else { ("template", "Template") };
+
+    let expected = templates.len();
+    let parameters = match (is_sharp, expected) {
+        (true, 1) => "type parameter",
+        (true, _) => "type parameters",
+        (false, _) => "template parameters",
+    };
+    let required = templates.values().take_while(|template| template.default.is_none()).count();
+    if arguments.len() < required || arguments.len() > expected {
+        let (code, message) = if arguments.len() < required {
+            (
+                IssueCode::MissingTemplateParameter,
+                format!(
+                    "Too few {kind} arguments for `{owner}`: expected at least {required}, but found {}.",
+                    arguments.len()
+                ),
+            )
+        } else {
+            (
+                IssueCode::ExcessTemplateParameter,
+                format!("Too many {kind} arguments for `{owner}`: expected {expected}, but found {}.", arguments.len()),
+            )
+        };
+
+        context.collector.report_with_code(
+            code,
+            Issue::error(message)
+                .with_annotation(Annotation::primary(span).with_message(format!("`{owner}` is applied here.")))
+                .with_annotation(
+                    Annotation::secondary(owner_span)
+                        .with_message(format!("`{owner}` declares {expected} {parameters}.")),
+                ),
+        );
+
+        return false;
+    }
+
+    let generic_owner = match templates.values().next().map(|template| template.defining_entity) {
+        Some(GenericParent::FunctionLike(_)) => {
+            let names: Vec<String> = templates.keys().map(ToString::to_string).collect();
+
+            format!("{owner}<{}>", names.join(", "))
+        }
+        _ => owner,
+    };
+
+    // A PHP# bound may name the owner's type parameters, as `TItem : Comparable<TItem>` does, so each holds its argument
+    // there. Upstream Mago leaves such a bound unchecked in PHP.
+    let mut template_result = bounds.clone();
+    for (argument, (template_name, template)) in arguments.iter().zip(templates.iter()) {
+        template_result.add_lower_bound(*template_name, template.defining_entity, argument.clone());
+    }
+    for (argument, (template_name, template)) in arguments.iter().zip(templates.iter()) {
+        let names_a_template = template.constraint.has_template_types();
+        // An explicit `mixed` argument is the written form of "any argument", which Mago accepts for every bound in
+        // PHP. A written PHP# `Any` or `Any?` is a type like any other, so its bound checks it.
+        if template.constraint.is_mixed() || (!is_sharp && (argument.is_mixed() || names_a_template)) {
             continue;
         }
 
-        for (argument, (template_name, template)) in arguments.iter().zip(class.template_types.iter()) {
-            // An explicit `mixed` argument is the written form of "any argument", which Mago accepts
-            // for every bound.
-            if argument.is_mixed() || template.constraint.is_mixed() || template.constraint.has_template_types() {
-                continue;
-            }
-
-            let options = TypeExpansionOptions::default();
-            let mut expanded_argument = argument.clone();
-            expander::expand_union(codebase, &mut expanded_argument, &options);
-            let mut constraint = template.constraint.clone();
-            expander::expand_union(codebase, &mut constraint, &options);
-            if union_comparator::is_contained_by(
-                codebase,
-                &expanded_argument,
-                &constraint,
-                false,
-                false,
-                false,
-                &mut ComparisonResult::default(),
-            ) {
-                continue;
-            }
-
-            let argument_id = display_type(context, &expanded_argument);
-            let constraint_id = display_type(context, &constraint);
-            context.collector.report_with_code(
-                IssueCode::TemplateConstraintViolation,
-                Issue::error(format!(
-                    "Template argument `{argument_id}` does not satisfy `{class_name}`'s `{template_name}`."
-                ))
-                .with_annotation(
-                    Annotation::primary(type_metadata.span)
-                        .with_message(format!("`{argument_id}` is supplied for `{template_name}` here...")),
-                )
-                .with_annotation(
-                    Annotation::secondary(class.name_span.unwrap_or(class.span))
-                        .with_message(format!("...but `{template_name}` is bounded by `{constraint_id}`.")),
-                )
-                .with_help(format!("Supply a type contained by `{constraint_id}`.")),
-            );
+        let options = TypeExpansionOptions::default();
+        let mut expanded_argument = argument.clone();
+        expander::expand_union(codebase, &mut expanded_argument, &options);
+        let mut constraint = if names_a_template {
+            inferred_type_replacer::replace(&template.constraint, &template_result, codebase)
+        } else {
+            template.constraint.clone()
+        };
+        expander::expand_union(codebase, &mut constraint, &options);
+        if union_comparator::is_contained_by(
+            codebase,
+            &expanded_argument,
+            &constraint,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::for_dialect(context.dialect),
+        ) {
+            continue;
         }
+
+        let argument_id = display_type(context, &expanded_argument);
+        let constraint_id = display_type(context, &constraint);
+        context.collector.report_with_code(
+            IssueCode::TemplateConstraintViolation,
+            Issue::error(format!(
+                "{sentence_kind} argument `{argument_id}` does not satisfy `{generic_owner}`'s `{template_name}`."
+            ))
+            .with_annotation(
+                Annotation::primary(span)
+                    .with_message(format!("`{argument_id}` is supplied for `{template_name}` here...")),
+            )
+            .with_annotation(
+                Annotation::secondary(owner_span)
+                    .with_message(format!("...but `{template_name}` is bounded by `{constraint_id}`.")),
+            )
+            .with_help(format!("Supply a type contained by `{constraint_id}`.")),
+        );
     }
+
+    true
 }
 
-/// Reports each PHP# `Map` written in `type_union` whose key type is a class or an enum without a backing value.
-/// Spec section 12 keys a `Map` by an `int`, a `string` or a type with an `int` or `string` backing value, which
-/// runs as its backing value. A key type that names no type is reported as a type that cannot be found.
+/// Whether a PHP# `Map` can be keyed by `key_type`. Spec section 12 keys a `Map` by an `int`, a `string` or a type with
+/// an `int` or `string` backing value, which runs as its backing value. A class value is none of them, though it runs as
+/// its plain class name. A `Map` type, a `Map` literal and the `Map` a collection method infers all keep this rule.
+pub(crate) fn is_map_key<A>(context: &Context<'_, '_, A>, key_type: &TUnion) -> bool
+where
+    A: Arena,
+{
+    !key_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
+        && get_backing_key_type(key_type, context.codebase, context.dialect).is_always_array_key(true)
+}
+
+/// Reports each PHP# `Map` written in `type_union` whose key type [`is_map_key`] refuses: a class value, or a class or
+/// an enum without a backing value. A key type that names no type is reported as a type that cannot be found.
 pub fn report_map_keys_without_backing_value<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
@@ -1931,7 +2082,7 @@ where
         let Some((key_type, _)) = keyed_array.get_generic_parameters() else {
             continue;
         };
-        if get_backing_key_type(key_type, context.codebase).is_always_array_key(true)
+        if is_map_key(context, key_type)
             || key_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Reference(TReference::Symbol { .. })))
         {
             continue;
@@ -1958,7 +2109,7 @@ where
         let TypeRef::Atomic(TAtomic::Array(TArray::Set(element_type))) = type_ref else {
             continue;
         };
-        if get_backing_key_type(element_type, context.codebase).is_always_array_key(true) {
+        if get_backing_key_type(element_type, context.codebase, Dialect::Sharp).is_always_array_key(true) {
             continue;
         }
 
@@ -1969,16 +2120,14 @@ where
     }
 }
 
-/// The error for a PHP# `Map` keyed by `key_type`, written `key_id`, a type that is not `int`, not `string` and has no
-/// `int` or `string` backing value, at `span`. A `Map` type and a `Map` literal state the rule in these words. A key
-/// type whose other parts key a `Map`, as `Status?`, is refused for its `null` alone.
+/// The error for a PHP# `Map` keyed by `key_type`, written `key_id`, a type [`is_map_key`] refuses, written or inferred
+/// at `span`. A `Map` type, a `Map` literal and the `Map` a collection method infers state the rule in these words. A
+/// key type whose other parts key a `Map`, as `Status?`, is refused for its `null` alone.
 pub(crate) fn map_key_error<A>(context: &Context<'_, '_, A>, key_type: &TUnion, key_id: &str, span: Span) -> Issue
 where
     A: Arena,
 {
-    let reason = if key_type.is_nullable()
-        && get_backing_key_type(&key_type.to_non_nullable(), context.codebase).is_always_array_key(true)
-    {
+    let reason = if key_type.is_nullable() && is_map_key(context, &key_type.to_non_nullable()) {
         "may be null"
     } else {
         "has none"

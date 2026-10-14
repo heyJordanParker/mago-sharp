@@ -655,6 +655,18 @@ where
     }
 }
 
+/// The names `names` as an English list, each in backticks: "`A`", "`A` and `B`", "`A`, `B` and `C`".
+#[must_use]
+pub(crate) fn and_list(names: &[Word]) -> String {
+    let names: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+
+    match names.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 /// The class-like `name` as code in a `.sharp` file, with the `imported_names` and `scope` of its imports and
 /// namespace, writes it: by the name the file's import gives it, by the [alias](sharp_import_alias) that
 /// [`sharp_missing_imports`] imports it under when the file binds its short name to another class-like, or else by its

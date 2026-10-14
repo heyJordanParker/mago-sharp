@@ -6,6 +6,7 @@ use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::scanner::get_union_from_hint;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
@@ -13,7 +14,6 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
-use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner;
@@ -22,8 +22,10 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_backing_key_type;
+use mago_codex::ttype::get_sole_backed_enum;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::union::populate_union_type;
+use mago_codex::ttype::wrap_atomic;
 use mago_names::binding::php_variable_name;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
@@ -68,12 +70,13 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::analyze_php_shape;
 use crate::expression::assignment::analyze_assignment;
+use crate::expression::is_refused_match;
+use crate::expression::match_arm_hints;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
 use crate::statement::function_like::known_type_or_error;
-use crate::statement::function_like::report_map_keys_without_backing_value;
+use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_types;
-use crate::statement::function_like::report_unsupported_set_elements;
 use crate::utils::docblock::populate_docblock_variables;
 use crate::utils::docblock::populate_docblock_variables_excluding;
 use crate::utils::expression::expression_has_observable_side_effect;
@@ -274,9 +277,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Foreach(foreach) => foreach.analyze(context, block_context, artifacts),
                 Statement::For(r#for) => r#for.analyze(context, block_context, artifacts),
                 Statement::ForOf(for_of) => analyze_for_of(for_of, context, block_context, artifacts),
-                Statement::PatternMatch(_) => {
-                    analyze_php_shape(Node::Statement(self), context, block_context, artifacts)
-                }
+                Statement::PatternMatch(pattern_match) if is_refused_match(pattern_match) => Ok(()),
+                Statement::PatternMatch(pattern_match) => analyze_php_shape(
+                    Node::Statement(self),
+                    match_arm_hints(pattern_match),
+                    context,
+                    block_context,
+                    artifacts,
+                ),
                 Statement::While(r#while) => r#while.analyze(context, block_context, artifacts),
                 Statement::DoWhile(do_while) => do_while.analyze(context, block_context, artifacts),
                 Statement::Continue(r#continue) => r#continue.analyze(context, block_context, artifacts),
@@ -399,20 +407,12 @@ where
         return None;
     };
 
-    let mut local_type = get_union_from_hint(hint, block_context.scope.get_class_like_name(), context.resolved_names);
-    populate_union_type(
-        &mut local_type,
-        &context.codebase.symbols,
-        block_context.scope.get_reference_source().as_ref(),
-        &mut artifacts.symbol_references,
-        true,
-    );
-    expander::expand_union(
-        context.codebase,
-        &mut local_type,
-        &TypeExpansionOptions { self_class: block_context.scope.get_class_like_name(), ..Default::default() },
-    );
-
+    // A refused type gives the local no type, so its later uses report nothing again.
+    let local_type = if report_hint_type_arguments(context, block_context, artifacts, hint) {
+        wrap_atomic(TAtomic::Error)
+    } else {
+        get_type_from_hint(context, block_context, artifacts, hint)
+    };
     match miscased_local_keyword(hint, &local_type) {
         // The parser reads `CONST total = 1;` as a local typed `CONST`, so the keyword's parse error is reported here.
         Some(keyword) => {
@@ -420,12 +420,110 @@ where
         }
         None => report_undefined_types(context, &local_type, hint.span()),
     }
-    report_map_keys_without_backing_value(context, &local_type, hint.span());
-    report_unsupported_set_elements(context, &local_type, hint.span());
     let local_type = (Rc::new(known_type_or_error(local_type)), hint.span());
     block_context.local_types.insert(variable_id, local_type.clone());
 
     Some(local_type)
+}
+
+/// Reports the type arguments a PHP# `hint` in a body leaves out or gets wrong, as a local's type, a type test or a
+/// `catch` writes it, spec section 11: a type names the type arguments of a generic class. Returns whether it refused a
+/// class's type arguments, as [`report_invalid_template_arguments`] does.
+pub(crate) fn report_hint_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    hint: &Hint<'_>,
+) -> bool
+where
+    A: Arena,
+{
+    let written_type = get_written_type_from_hint(context, block_context, artifacts, hint);
+
+    report_invalid_template_arguments(context, &TypeMetadata::new(written_type, hint.span()))
+}
+
+/// Refuses each type a PHP# type test of `hint` gives a plain PHP class type arguments for, at any depth, as `value is
+/// Collection<Order>` or `value as List<Collection<Order>>` writes it, spec section 11: a plain PHP class's objects
+/// carry no type arguments while the code runs, so no test reads them. Returns whether it refused one.
+pub(crate) fn report_erased_type_test<A>(context: &mut Context<'_, '_, A>, hint: &Hint<'_>) -> bool
+where
+    A: Arena,
+{
+    let generics = Node::Hint(hint).filter_map(|node| match node {
+        Node::GenericHint(generic) => Some(*generic),
+        _ => None,
+    });
+    let mut refused = false;
+    for generic in generics {
+        let is_plain_php = context
+            .resolved_names
+            .resolve(&generic.name)
+            .and_then(|name| context.codebase.get_class_like(name))
+            .is_some_and(|class| !class.flags.is_sharp());
+        if !is_plain_php {
+            continue;
+        }
+
+        let written = String::from_utf8_lossy(&context.source_file.contents[generic.span().to_range_usize()]);
+        let class = String::from_utf8_lossy(generic.name.value);
+        context.collector.report_with_code(
+            IssueCode::InvalidTemplateParameter,
+            Issue::error(format!(
+                "`{written}` can't be tested: `{class}` is a plain PHP class, so its objects carry no type arguments while the code runs."
+            ))
+            .with_annotation(Annotation::primary(generic.span()).with_message("Tested here."))
+            .with_help(format!("Test `{class}` alone.")),
+        );
+        refused = true;
+    }
+
+    refused
+}
+
+/// The type a PHP# `hint` writes inside the scope of `block_context`, where it may name the type parameters of the
+/// enclosing method and class.
+pub(crate) fn get_type_from_hint<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    hint: &Hint<'_>,
+) -> TUnion
+where
+    A: Arena,
+{
+    let mut hint_type = get_written_type_from_hint(context, block_context, artifacts, hint);
+    expander::expand_union(context.codebase, &mut hint_type, &TypeExpansionOptions::default());
+
+    hint_type
+}
+
+/// The type a PHP# `hint` writes, before expansion fills the type arguments it leaves out, as the scanner keeps the
+/// type of a parameter or a property.
+fn get_written_type_from_hint<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    hint: &Hint<'_>,
+) -> TUnion
+where
+    A: Arena,
+{
+    let mut hint_type = get_union_from_hint(
+        hint,
+        block_context.scope.get_class_like_name(),
+        context.resolved_names,
+        &context.type_resolution_context,
+    );
+    populate_union_type(
+        &mut hint_type,
+        &context.codebase.symbols,
+        block_context.scope.get_reference_source().as_ref(),
+        &mut artifacts.symbol_references,
+        true,
+    );
+
+    hint_type
 }
 
 /// The keyword `const` or `let` a local's written type spells in another case, as in `CONST total = 1;`, when that
@@ -508,20 +606,14 @@ where
     key_type.is_some_and(|key_type| key_type_mixes_a_backed_enum(context, &key_type))
 }
 
-/// Whether `key_type` mixes a backed enum with other types, as `Status|int` or `Status|Rank` do.
+/// Whether `key_type` mixes a backed enum with other types, as `Status|int` or `Status|Rank` do: its keys need their
+/// backing values, and no one backed enum, the one [`get_sole_backed_enum`] finds, reads them all back.
 pub(crate) fn key_type_mixes_a_backed_enum<A>(context: &Context<'_, '_, A>, key_type: &TUnion) -> bool
 where
     A: Arena,
 {
-    let mut keys = key_type.types.iter().filter(|atomic| !atomic.is_null());
-    let is_one_enum = match keys.next() {
-        Some(TAtomic::Object(TObject::Enum(first))) => {
-            keys.all(|atomic| matches!(atomic, TAtomic::Object(TObject::Enum(other)) if other.name == first.name))
-        }
-        _ => false,
-    };
-
-    matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(_)) && !is_one_enum
+    matches!(get_backing_key_type(key_type, context.codebase, context.dialect), Cow::Owned(_))
+        && get_sole_backed_enum(key_type, context.codebase, context.dialect).is_none()
 }
 
 /// Reports the `Map` `collection`, whose keys mix a backed enum with other types, where `reader`, the loop or `keys()`,

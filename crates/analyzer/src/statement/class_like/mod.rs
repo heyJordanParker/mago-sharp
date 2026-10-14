@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use foldhash::HashMap;
 use foldhash::HashSet;
 use foldhash::fast::RandomState;
@@ -31,18 +33,21 @@ use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::definition_type_replacer;
 use mago_codex::ttype::template::definition_type_replacer::DefinitionReplacementOptions;
 use mago_codex::ttype::template::inferred_type_replacer;
+use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::visibility::Visibility;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
+use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::Level;
@@ -55,6 +60,7 @@ use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
@@ -64,6 +70,7 @@ use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Trait;
 use mago_word::Word;
+use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
@@ -82,12 +89,15 @@ use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::utils::missing_type_hints;
+use crate::utils::names::and_list;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_sharp_accessor;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
+use crate::utils::template::find_broken_marker;
+use crate::utils::template::find_template_uses;
 
 pub mod constant;
 pub mod enum_case;
@@ -406,6 +416,7 @@ fn check_unused_template_parameters<'ctx, A>(
     let class_original_name = display_class_like_name(context, class_like_metadata.original_name);
     let class_kind_str = class_like_metadata.kind.as_str();
     let class_name_span = class_like_metadata.name_span.unwrap_or(class_like_metadata.span);
+    let sharp_class = context.dialect.is_sharp().then(|| short_name(class_original_name));
 
     'templates: for (template_name, _) in &class_like_metadata.template_types {
         if template_name.as_bytes().starts_with(b"_") {
@@ -459,19 +470,28 @@ fn check_unused_template_parameters<'ctx, A>(
             }
         }
 
-        // Report warning if template parameter is unused
+        let (message, label, help) = match &sharp_class {
+            Some(class) => (
+                format!("Type parameter `{template_name}` is never used in {class_kind_str} `{class}`."),
+                format!("Type parameter `{template_name}` is defined on this {class_kind_str} but never referenced"),
+                format!("Remove `{template_name}` from `{class}<…>`."),
+            ),
+            None => (
+                format!(
+                    "Template parameter `{template_name}` is never used in {class_kind_str} `{class_original_name}`."
+                ),
+                format!("Template `{template_name}` is defined on this {class_kind_str} but never referenced"),
+                format!(
+                    "Remove the unused `@template {template_name}` from the docblock, or use it in a property, method signature, or inherited type."
+                ),
+            ),
+        };
+
         context.collector.report_with_code(
             IssueCode::UnusedTemplateParameter,
-            Issue::warning(format!(
-                "Template parameter `{template_name}` is never used in {class_kind_str} `{class_original_name}`."
-            ))
-            .with_annotation(
-                Annotation::primary(class_name_span)
-                    .with_message(format!("Template `{template_name}` is defined on this {class_kind_str} but never referenced")),
-            )
-            .with_help(format!(
-                "Remove the unused `@template {template_name}` from the docblock, or use it in a property, method signature, or inherited type."
-            )),
+            Issue::warning(message)
+                .with_annotation(Annotation::primary(class_name_span).with_message(label))
+                .with_help(help),
         );
     }
 }
@@ -1135,21 +1155,28 @@ where
 
     let mut checked_signatures: HashSet<(Word, Word)> = HashSet::default();
 
-    let mut extended_types: Vec<&Identifier<'arena>> = extends_ast.iter().flat_map(|e| e.types.iter()).collect();
-    let mut implemented_types: Vec<&Identifier<'arena>> = implements_ast.iter().flat_map(|i| i.types.iter()).collect();
-    let mut header_traits: Vec<&Identifier<'arena>> = Vec::new();
+    let mut extended_types: Vec<Identifier<'arena>> =
+        extends_ast.iter().flat_map(|e| e.types.iter()).copied().collect();
+    let mut implemented_types: Vec<Identifier<'arena>> =
+        implements_ast.iter().flat_map(|i| i.types.iter()).copied().collect();
+    let mut header_traits: Vec<Identifier<'arena>> = Vec::new();
 
     // A PHP# header, `: Base, IFace, Trait`, names an interface's parents, or a class's or an enum's parent and traits
-    // among its interfaces: the one class the populator linked as the parent, and every trait, which it uses.
-    for type_name in inheritance_ast.iter().flat_map(|inheritance| inheritance.types.iter()) {
-        let header_name = context.resolved_names.get(type_name);
-        if class_like_metadata.kind.is_interface()
+    // among its interfaces: the one class the populator linked as the parent, and every trait, which it uses. A generic
+    // type there, as in `: PaginatedList<Order>`, names its class before its type arguments, and the checker refuses
+    // any other type there. `List`, `Map` and `Class` have no resolved name, because no class is one.
+    for type_name in inheritance_ast.iter().flat_map(|inheritance| inheritance.names()) {
+        let Some(resolved) = context.resolved_names.resolve(&type_name) else {
+            continue;
+        };
+        let is_parent = class_like_metadata.kind.is_interface()
             || class_like_metadata
                 .direct_parent_class
-                .is_some_and(|parent| parent.as_bytes().eq_ignore_ascii_case(header_name))
-        {
+                .is_some_and(|parent| parent.as_bytes().eq_ignore_ascii_case(resolved));
+
+        if is_parent {
             extended_types.push(type_name);
-        } else if !class_like_metadata.kind.is_interface() && context.codebase.get_trait(header_name).is_some() {
+        } else if context.codebase.get_trait(resolved).is_some() {
             header_traits.push(type_name);
         } else {
             implemented_types.push(type_name);
@@ -1159,7 +1186,7 @@ where
     // The traits of a PHP# header compose as one `use` statement does, before the class's own `use` statements.
     let trait_uses: Vec<(Span, Vec<&Identifier<'arena>>)> = inheritance_ast
         .filter(|_| !header_traits.is_empty())
-        .map(|inheritance| (inheritance.span(), header_traits.clone()))
+        .map(|inheritance| (inheritance.span(), header_traits.iter().collect()))
         .into_iter()
         .chain(members.iter().filter_map(|member| match member {
             ClassLikeMember::TraitUse(trait_use) => Some((trait_use.span(), trait_use.trait_names.iter().collect())),
@@ -1167,6 +1194,9 @@ where
         }))
         .collect();
 
+    if class_like_metadata.flags.is_sharp() {
+        check_sharp_reached_twice(context, class_like_metadata, inheritance_ast, &mut checked_signatures);
+    }
     check_class_like_extends(context, class_like_metadata, &extended_types);
     check_class_like_implements(context, class_like_metadata, &implemented_types, &mut checked_signatures);
 
@@ -1176,7 +1206,7 @@ where
 
     if context.dialect.is_sharp() && (class_like_metadata.kind.is_class() || class_like_metadata.kind.is_enum()) {
         let header_traits: Vec<Word> =
-            header_traits.iter().map(|header_trait| word(context.resolved_names.get(*header_trait))).collect();
+            header_traits.iter().map(|header_trait| word(context.resolved_names.get(header_trait))).collect();
         check_methods_given_twice(context, class_like_metadata, &header_traits, name_span.unwrap_or(declaration_span));
     }
 
@@ -1361,8 +1391,14 @@ where
 
     check_trait_property_conflicts(context, class_like_metadata, &trait_uses, members);
     check_readonly_class_trait_properties(context, class_like_metadata, &trait_uses);
-    check_template_variance_positions(context, class_like_metadata);
-    check_uninhabitable_diamonds(context, class_like_metadata);
+    if class_like_metadata.flags.is_sharp() {
+        check_sharp_template_variance(context, class_like_metadata, inheritance_ast);
+        check_sharp_serializable(context, class_like_metadata);
+    } else {
+        // A PHP# class that reaches a generic class-like twice is refused whole by `check_sharp_reached_twice`.
+        check_template_variance_positions(context, class_like_metadata);
+        check_uninhabitable_diamonds(context, class_like_metadata);
+    }
 
     if !class_like_metadata.template_types.is_empty() {
         for (template_name, _) in &class_like_metadata.template_types {
@@ -1572,7 +1608,7 @@ fn report_unstated_property<A>(
 fn check_class_like_extends<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    extended_types: &[&Identifier<'arena>],
+    extended_types: &[Identifier<'arena>],
 ) where
     A: Arena,
 {
@@ -1786,7 +1822,7 @@ fn check_class_like_extends<'ctx, 'arena, A>(
 fn check_class_like_implements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    implemented_types: &[&Identifier<'arena>],
+    implemented_types: &[Identifier<'arena>],
     checked_signatures: &mut HashSet<(Word, Word)>,
 ) where
     A: Arena,
@@ -2112,44 +2148,61 @@ fn check_template_parameters<'ctx, A>(
         InheritanceKind::Use(_) => ("uses", "@use"),
     };
 
-    if min_required_parameters_count > actual_parameters_count {
-        let issue = Issue::error(format!(
-            "Too few template arguments for `{parent_name}`: expected at least {min_required_parameters_count}, but found {actual_parameters_count}."
-        ))
-        .with_annotation(
-            Annotation::primary(primary_annotation_span)
-                .with_message(format!("Too few template arguments provided here when `{class_name}` {inheritance_keyword} `{parent_name}`")),
-        )
-        .with_annotation(
-            Annotation::secondary(class_name_span)
-                .with_message(format!("Declaration of `{class_name}` is here")),
-        )
-        .with_annotation(
-            Annotation::secondary(parent_definition_span)
-                .with_message(format!("`{parent_name}` is defined with {expected_parameters_count} template parameters")),
-        )
-        .with_help(format!("Provide all {expected_parameters_count} required template arguments in the `{inheritance_tag}` docblock tag for `{class_name}`."));
+    // A PHP# class writes its type arguments in its header, `: PaginatedList<…>`, where PHP writes a docblock tag, and
+    // names each class by its short name.
+    let sharp_parent = context.dialect.is_sharp().then(|| short_name(parent_name));
+    let written_class_name =
+        if context.dialect.is_sharp() { short_name(class_name) } else { class_name.as_str_lossy().into_owned() };
+    let type_parameters = and_list(&parent_metadata.template_types.keys().copied().collect::<Vec<_>>());
+    let is_missing = min_required_parameters_count > actual_parameters_count;
+    if is_missing || expected_parameters_count < actual_parameters_count {
+        let (code, amount, expected) = if is_missing {
+            (IssueCode::MissingTemplateParameter, "few", format!("at least {min_required_parameters_count}"))
+        } else {
+            (IssueCode::ExcessTemplateParameter, "many", expected_parameters_count.to_string())
+        };
+        let (message, label, parent_label, help) = match &sharp_parent {
+            Some(parent) => (
+                format!(
+                    "Too {amount} type arguments for `{parent}`: expected {expected}, but found {actual_parameters_count}."
+                ),
+                format!("Too {amount} type arguments here"),
+                format!(
+                    "`{parent}` declares {expected_parameters_count} type parameter{}",
+                    if expected_parameters_count == 1 { "" } else { "s" }
+                ),
+                format!(
+                    "Write {}a type for {type_parameters} in the header, as in `: {parent}<…>`.",
+                    if is_missing { "" } else { "only " }
+                ),
+            ),
+            None => (
+                format!(
+                    "Too {amount} template arguments for `{parent_name}`: expected {expected}, but found {actual_parameters_count}."
+                ),
+                format!(
+                    "Too {amount} template arguments provided here when `{class_name}` {inheritance_keyword} `{parent_name}`"
+                ),
+                format!("`{parent_name}` is defined with {expected_parameters_count} template parameters"),
+                if is_missing {
+                    format!(
+                        "Provide all {expected_parameters_count} required template arguments in the `{inheritance_tag}` docblock tag for `{class_name}`."
+                    )
+                } else {
+                    format!("Remove the extra arguments from the `{inheritance_tag}` tag for `{class_name}`.")
+                },
+            ),
+        };
+        let issue = Issue::error(message)
+            .with_annotation(Annotation::primary(primary_annotation_span).with_message(label))
+            .with_annotation(
+                Annotation::secondary(class_name_span)
+                    .with_message(format!("Declaration of `{written_class_name}` is here")),
+            )
+            .with_annotation(Annotation::secondary(parent_definition_span).with_message(parent_label))
+            .with_help(help);
 
-        context.collector.report_with_code(IssueCode::MissingTemplateParameter, issue);
-    } else if expected_parameters_count < actual_parameters_count {
-        let issue = Issue::error(format!(
-            "Too many template arguments for `{parent_name}`: expected {expected_parameters_count}, but found {actual_parameters_count}."
-        ))
-        .with_annotation(
-            Annotation::primary(primary_annotation_span)
-                .with_message(format!("Too many template arguments provided here when `{class_name}` {inheritance_keyword} `{parent_name}`")),
-        )
-        .with_annotation(
-            Annotation::secondary(class_name_span)
-                .with_message(format!("Declaration of `{class_name}` is here")),
-        )
-        .with_annotation(
-            Annotation::secondary(parent_definition_span)
-                .with_message(format!("`{parent_name}` is defined with {expected_parameters_count} template parameters")),
-        )
-        .with_help(format!("Remove the extra arguments from the `{inheritance_tag}` tag for `{class_name}`."));
-
-        context.collector.report_with_code(IssueCode::ExcessTemplateParameter, issue);
+        context.collector.report_with_code(code, issue);
     }
 
     let own_template_parameters_len = class_like_metadata.template_types.len();
@@ -2202,10 +2255,12 @@ fn check_template_parameters<'ctx, A>(
 
             let extended_type_str = display_type(context, &extended_type);
 
-            if parent_metadata
-                .template_variance
-                .get(i)
-                .is_some_and(mago_codex::ttype::template::variance::Variance::is_invariant)
+            // `check_sharp_template_variance` checks a PHP# header's type arguments against spec section 11.1.
+            if !class_like_metadata.flags.is_sharp()
+                && parent_metadata
+                    .template_variance
+                    .get(i)
+                    .is_some_and(mago_codex::ttype::template::variance::Variance::is_invariant)
             {
                 for extended_type_atomic in extended_type.types.as_ref() {
                     let TAtomic::GenericParameter(generic_parameter) = extended_type_atomic else {
@@ -2298,21 +2353,33 @@ fn check_template_parameters<'ctx, A>(
                         .push(GenericTemplate::new(GenericParent::ClassLike(parent_metadata.name), extended_type));
                 } else {
                     let replaced_type_str = display_type(context, &replaced_template_type);
+                    let (message, provided, bound, help) = match &sharp_parent {
+                        Some(parent) => (
+                            format!("Type argument for `{parent}` is not compatible with its bound."),
+                            format!("The type `{extended_type_str}` provided for type parameter `{template_name}`..."),
+                            format!("...does not satisfy the bound `{replaced_type_str}` from `{parent}`."),
+                            format!("Supply a type contained by `{replaced_type_str}`."),
+                        ),
+                        None => (
+                            format!("Template argument for `{parent_name}` is not compatible with its constraint."),
+                            format!("The type `{extended_type_str}` provided for template `{template_name}`..."),
+                            format!(
+                                "...does not satisfy the required constraint of `{replaced_type_str}` from `{parent_name}`."
+                            ),
+                            "Change the provided type to be compatible with the template constraint.".to_owned(),
+                        ),
+                    };
 
                     context.collector.report_with_code(
                         IssueCode::InvalidTemplateParameter,
-                        Issue::error(format!(
-                            "Template argument for `{parent_name}` is not compatible with its constraint."
-                        ))
-                        .with_annotation(
-                            Annotation::primary(class_name_span)
-                                .with_message(format!("In the definition of `{class_name}`")),
-                        )
-                        .with_note(format!("The type `{extended_type_str}` provided for template `{template_name}`..."))
-                        .with_note(format!(
-                            "...does not satisfy the required constraint of `{replaced_type_str}` from `{parent_name}`."
-                        ))
-                        .with_help("Change the provided type to be compatible with the template constraint."),
+                        Issue::error(message)
+                            .with_annotation(
+                                Annotation::primary(class_name_span)
+                                    .with_message(format!("In the definition of `{written_class_name}`")),
+                            )
+                            .with_note(provided)
+                            .with_note(bound)
+                            .with_help(help),
                     );
                 }
             }
@@ -2380,8 +2447,6 @@ fn check_template_variance_positions<'ctx, A>(
 ) where
     A: Arena,
 {
-    use mago_codex::ttype::template::variance::Variance;
-
     if class_like_metadata.template_variance.is_empty() {
         return;
     }
@@ -2472,6 +2537,165 @@ fn check_template_variance_positions<'ctx, A>(
                 );
             }
         }
+    }
+}
+
+/// Checks spec section 11.1 on every member of a PHP# class or interface another class reaches, and on the generic
+/// types of its header: an `out` type parameter is only handed out, and an `in` type parameter is only taken in.
+fn check_sharp_template_variance<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    inheritance: Option<&Inheritance<'_>>,
+) where
+    A: Arena,
+{
+    if !class_like_metadata.template_variance.iter().any(|variance| !variance.is_invariant()) {
+        return;
+    }
+
+    let header_spans: WordMap<Span> = inheritance
+        .iter()
+        .flat_map(|inheritance| inheritance.types.iter())
+        .filter_map(|hint| match hint {
+            Hint::Generic(generic) => {
+                Some((ascii_lowercase_word(context.resolved_names.resolve(&generic.name)?), generic.span()))
+            }
+            _ => None,
+        })
+        .collect();
+    for template_use in find_template_uses(context, class_like_metadata, &header_spans) {
+        let Some(marker) = find_broken_marker(class_like_metadata, template_use.template, template_use.position) else {
+            continue;
+        };
+        let refused = if marker == "out" { "take it in" } else { "hand it out" };
+
+        let template_name = template_use.template;
+        context.collector.report_with_code(
+            IssueCode::InvalidTemplateParameter,
+            Issue::error(format!(
+                "`{template_name}` is declared `{marker}`, so {} cannot {refused}.",
+                template_use.member
+            ))
+            .with_annotation(
+                Annotation::primary(template_use.span)
+                    .with_message(format!("{} uses `{template_name}` here", template_use.member)),
+            )
+            .with_note("An `out` type parameter is only handed out, and an `in` type parameter is only taken in."),
+        );
+    }
+}
+
+/// Refuses a generic PHP# class that is a `Serializable`, through its header or a parent's. Its objects carry their
+/// type arguments through serialization, and `Serializable::serialize` writes a string the engine cannot add them to.
+fn check_sharp_serializable<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    if !class_like_metadata.kind.is_class()
+        || class_like_metadata.template_types.is_empty()
+        || !context.codebase.class_implements(class_like_metadata.name.as_bytes(), b"Serializable")
+    {
+        return;
+    }
+
+    let class_name = short_name(class_like_metadata.original_name);
+    context.collector.report_with_code(
+        IssueCode::InvalidImplement,
+        Issue::error(format!(
+            "`{class_name}` has type parameters, so it cannot be a `Serializable`: `serialize` drops the type arguments its objects carry."
+        ))
+        .with_annotation(
+            Annotation::primary(class_like_metadata.name_span.unwrap_or(class_like_metadata.span))
+                .with_message(format!("`{class_name}` has type parameters")),
+        )
+        .with_help("Leave `Serializable` out: `serialize()` then uses `__serialize` and `__unserialize`, or its default form, which keep them."),
+    );
+}
+
+/// Refuses a PHP# class-like that reaches one generic class-like with other type arguments through two entries of its
+/// header, as `Strings : Ints, Feeder<string>` does when `Ints` is a `Feeder<int>`. It implements it once, as a header
+/// that names it twice is refused, so the refusal names each way it is reached. Each method of the class-like reached
+/// twice is marked checked, since its return type merges to `never` and reports nothing true.
+fn check_sharp_reached_twice<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    inheritance: Option<&Inheritance<'_>>,
+    checked_signatures: &mut HashSet<(Word, Word)>,
+) where
+    A: Arena,
+{
+    let header: Vec<&ClassLikeMetadata> = inheritance
+        .iter()
+        .flat_map(|inheritance| inheritance.names())
+        .filter_map(|name| context.codebase.get_class_like(context.resolved_names.resolve(&name)?))
+        .collect();
+    let class_name = display_class_like_name(context, class_like_metadata.original_name);
+
+    let ancestors = class_like_metadata
+        .template_extended_parameter_paths
+        .iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .filter_map(|(ancestor_name, _)| context.codebase.get_class_like(ancestor_name.as_bytes()));
+    for ancestor in ancestors {
+        let ancestor_display = display_class_like_name(context, ancestor.original_name);
+        // Each type the header reaches the ancestor as, with the header entry it is reached through, or `None` when the
+        // header names the ancestor itself.
+        let mut reached: Vec<(String, Option<&ClassLikeMetadata>)> = Vec::new();
+        for parent in &header {
+            if parent.name != ancestor.name
+                && !context.codebase.is_instance_of(parent.name.as_bytes(), ancestor.name.as_bytes())
+            {
+                continue;
+            }
+
+            let type_arguments = class_like_metadata.template_extended_offsets.get(&parent.name).map(Vec::as_slice);
+            let arguments: Vec<String> = ancestor
+                .template_types
+                .iter()
+                .filter_map(|(template_name, _)| {
+                    get_specialized_template_type(
+                        context.codebase,
+                        *template_name,
+                        ancestor.name,
+                        parent,
+                        type_arguments,
+                    )
+                })
+                .map(|argument| display_type(context, &argument))
+                .collect();
+            let reached_type = format!("`{ancestor_display}<{}>`", arguments.join(", "));
+            if !reached.iter().any(|(known, _)| *known == reached_type) {
+                reached.push((reached_type, (parent.name != ancestor.name).then_some(*parent)));
+            }
+        }
+
+        let ways: Vec<String> = reached
+            .into_iter()
+            .map(|(reached_type, through)| match through {
+                Some(parent) => {
+                    format!("{reached_type} through `{}`", display_class_like_name(context, parent.original_name))
+                }
+                None => reached_type,
+            })
+            .collect();
+        let Some((last, rest)) = ways.split_last().filter(|(_, rest)| !rest.is_empty()) else {
+            continue;
+        };
+
+        let times = if rest.len() == 1 { "twice".to_string() } else { format!("{} times", ways.len()) };
+        context.collector.report_with_code(
+            IssueCode::InvalidImplement,
+            Issue::error(format!(
+                "`{class_name}` implements `{ancestor_display}` {times}: {}, and {last}.",
+                rest.join(", ")
+            ))
+            .with_annotation(
+                Annotation::primary(class_like_metadata.name_span.unwrap_or(class_like_metadata.span))
+                    .with_message(format!("`{class_name}` reaches `{ancestor_display}` with other type arguments")),
+            )
+            .with_help(format!("Implement `{ancestor_display}` once.")),
+        );
+        checked_signatures.extend(ancestor.declaring_method_ids.iter().map(|(name, id)| (id.get_class_name(), *name)));
     }
 }
 
@@ -2710,12 +2934,20 @@ fn check_abstract_method_signatures<'ctx, A>(
             let substituted_appearing_method =
                 get_substituted_method(appearing_method, class_like_metadata, method_fqcn, context.codebase);
 
-            let issues = method_signature::validate_method_signature_compatibility(
+            let mut issues = method_signature::validate_method_signature_compatibility(
                 context.codebase,
                 class_like_metadata.name,
                 &substituted_appearing_method,
                 &substituted_overridden_method,
                 context.dialect,
+            );
+            method_signature::validate_erased_signature_compatibility(
+                context.codebase,
+                class_like_metadata,
+                overridden_class,
+                appearing_method,
+                overridden_method,
+                &mut issues,
             );
 
             for incompatibility in issues {
@@ -3218,6 +3450,10 @@ fn apply_template_substitution_to_method(
 ) -> FunctionLikeMetadata {
     let mut substituted_method = method.clone();
 
+    for template in substituted_method.template_types.values_mut() {
+        template.constraint = inferred_type_replacer::replace(&template.constraint, template_result, codebase);
+    }
+
     for param in &mut substituted_method.parameters {
         if let Some(type_metadata) = &mut param.type_metadata {
             type_metadata.type_union =
@@ -3303,12 +3539,20 @@ fn check_interface_method_signatures<'ctx, A>(
             context.codebase,
         );
 
-        let issues = method_signature::validate_method_signature_compatibility(
+        let mut issues = method_signature::validate_method_signature_compatibility(
             context.codebase,
             class_like_metadata.name,
             &substituted_class_method,
             &substituted_interface_method,
             context.dialect,
+        );
+        method_signature::validate_erased_signature_compatibility(
+            context.codebase,
+            class_like_metadata,
+            declaring_class,
+            class_method,
+            interface_method,
+            &mut issues,
         );
 
         for incompatibility in issues {
@@ -3549,6 +3793,86 @@ fn report_signature_compatibility_issue<'ctx, A>(
                 )
                 .with_note("Parameter types must be contravariant: child must accept equal or wider types than parent.")
                 .with_help("Change the parameter type to be compatible with the parent method."),
+            );
+        }
+        SignatureCompatibilityIssue::ErasedParameterNarrowed { parameter_index, child_type, parent_type, bound } => {
+            let parameter = parent_method.parameters.get(parameter_index);
+            let param_name = parameter
+                .map_or_else(|| word("unknown"), |p| word(mago_bytes::trim_start_byte(p.name.0.as_bytes(), b'$')));
+            let span = parameter
+                .map(|p| p.name_span)
+                .filter(|span| span.file_id == primary_span.file_id)
+                .unwrap_or(primary_span);
+            let child_type = method_signature::display_erased(&child_type, context);
+            let parent_type = method_signature::display_erased(&parent_type, context);
+            let (child_method, parent_method) = if context.dialect.is_sharp() {
+                let method_name = parent_method.original_name;
+
+                (display_sharp_member(child_name, method_name), display_sharp_member(parent_name, method_name))
+            } else {
+                (format!("{child_name}::{method_name}()"), format!("{parent_name}::{method_name}()"))
+            };
+
+            context.collector.report_with_code(
+                IssueCode::IncompatibleParameterType,
+                Issue::error(format!(
+                    "Parameter `{param_name}` of `{child_method}` must take at least {parent_type}, the type `{parent_method}` erases it to."
+                ))
+                .with_annotation(Annotation::primary(span).with_message(format!("Erases to {child_type}.")))
+                .with_annotation(Annotation::secondary(parent_class_span).with_message(format!(
+                    "`{parent_method}` takes {parent_type} once its type parameters are erased."
+                )))
+                .with_note("PHP# erases type parameters when it compiles, and PHP refuses a parameter narrower than the one it overrides when it links the class.")
+                .with_help(method_signature::erased_type_help(param_name, &parent_type, bound)),
+            );
+        }
+        SignatureCompatibilityIssue::ChangedTemplateBound { template, child_method, parent_method, bound } => {
+            let child_method = display_sharp_member(child_name, child_method);
+            let parent_method = display_sharp_member(parent_name, parent_method);
+            let (message, help) = match bound.map(|bound| display_type(context, &bound)) {
+                Some(bound) => (
+                    format!("`{child_method}` must keep the bound `{bound}` of `{parent_method}`."),
+                    format!("Bound `{template}` by `{bound}`, as `{parent_method}` does."),
+                ),
+                None => (
+                    format!("`{child_method}` must keep `{template}` of `{parent_method}` without a bound."),
+                    format!("Remove the bound of `{template}`, as `{parent_method}` has none."),
+                ),
+            };
+
+            context.collector.report_with_code(
+                IssueCode::IncompatibleParameterType,
+                Issue::error(message)
+                    .with_annotation(
+                        Annotation::primary(primary_span).with_message(format!("Changes the bound of `{template}`")),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(parent_class_span)
+                            .with_message(format!("`{parent_method}` declares the bound here")),
+                    )
+                    .with_note("An override keeps the bound of each type parameter it overrides, as in C#.")
+                    .with_help(help),
+            );
+        }
+        SignatureCompatibilityIssue::ChangedTemplateCount { child_method, parent_method, parent_count } => {
+            let child_method = display_sharp_member(child_name, child_method);
+            let parent_method = display_sharp_member(parent_name, parent_method);
+            let declared = match parent_count {
+                0 => "no type parameter".to_owned(),
+                1 => "1 type parameter".to_owned(),
+                count => format!("{count} type parameters"),
+            };
+
+            context.collector.report_with_code(
+                IssueCode::IncompatibleParameterType,
+                Issue::error(format!("`{child_method}` must declare {declared}, as `{parent_method}` does."))
+                    .with_annotation(Annotation::primary(primary_span).with_message("Overrides it here"))
+                    .with_annotation(
+                        Annotation::secondary(parent_class_span)
+                            .with_message(format!("`{parent_method}` is declared here")),
+                    )
+                    .with_note("An override declares one type parameter for each of the method it overrides, as in C#.")
+                    .with_help(format!("Declare {declared}, as `{parent_method}` does.")),
             );
         }
         SignatureCompatibilityIssue::IncompatibleReturnType { child_type, parent_type } => {
@@ -4111,17 +4435,30 @@ fn check_class_like_properties<'ctx, A>(
                 parent_property.type_declaration_metadata.as_ref(),
             ) {
                 (Some(declaring_type), Some(parent_type)) => {
+                    // A PHP# declaration may name a type parameter, which the child's header or `@extends` fills.
+                    let is_sharp = parent_metadata.flags.is_sharp() || class_like_metadata.flags.is_sharp();
+                    let parent_type_union = if is_sharp {
+                        Cow::Owned(localize_parent_type(
+                            context.codebase,
+                            class_like_metadata,
+                            parent_metadata.name,
+                            &parent_type.type_union,
+                        ))
+                    } else {
+                        Cow::Borrowed(&parent_type.type_union)
+                    };
+
                     if is_property_type_variance_invalid(
                         context.codebase,
                         &declaring_type.type_union,
-                        &parent_type.type_union,
+                        &parent_type_union,
                         parent_only_get,
                         parent_only_set,
                     ) {
                         has_type_incompatibility = true;
 
                         let declaring_type_id = display_type(context, &declaring_type.type_union);
-                        let parent_type_id = display_type(context, &parent_type.type_union);
+                        let parent_type_id = display_type(context, &parent_type_union);
 
                         context.collector.report_with_code(
                                 IssueCode::IncompatiblePropertyType,
@@ -4139,6 +4476,55 @@ fn check_class_like_properties<'ctx, A>(
                                 .with_note("PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class.")
                                 .with_help(format!("Change the type of `{property}` to `{parent_type_id}` to match the parent property."))
                             );
+                    } else if is_sharp {
+                        let erased_type = method_signature::erase(&declaring_type.type_union, context.codebase);
+                        let erased_parent_type = method_signature::erase(&parent_type.type_union, context.codebase);
+
+                        if is_property_type_variance_invalid(
+                            context.codebase,
+                            &erased_type,
+                            &erased_parent_type,
+                            parent_only_get,
+                            parent_only_set,
+                        ) {
+                            has_type_incompatibility = true;
+
+                            let erased_type_id = method_signature::display_erased(&erased_type, context);
+                            let erased_parent_type_id = method_signature::display_erased(&erased_parent_type, context);
+                            let property_name = mago_bytes::trim_start_byte(property_metadata.name.0.as_bytes(), b'$');
+                            let property_name = String::from_utf8_lossy(property_name);
+                            let class_name = class_like_metadata.original_name;
+                            let help = method_signature::erased_type_help(
+                                &property_name,
+                                &erased_parent_type_id,
+                                method_signature::bound_example(context.codebase, Some(parent_type), &erased_type),
+                            );
+                            let message = if context.dialect.is_sharp() {
+                                format!(
+                                    "Property `{}` must have {erased_parent_type_id}, the type `{}` erases to.",
+                                    display_sharp_member(class_name, &property_name),
+                                    display_sharp_member(parent_class_name, &property_name)
+                                )
+                            } else {
+                                format!(
+                                    "Property `{class_name}::${property_name}` must have the type {erased_parent_type_id}, the type `{parent_class_name}::${property_name}` erases to."
+                                )
+                            };
+
+                            context.collector.report_with_code(
+                                IssueCode::IncompatiblePropertyType,
+                                Issue::error(message)
+                                .with_annotation(
+                                    Annotation::primary(declaring_type.span)
+                                        .with_message(format!("Erases to {erased_type_id}.")),
+                                )
+                                .with_annotation(Annotation::secondary(parent_type.span).with_message(format!(
+                                    "Erases to {erased_parent_type_id}."
+                                )))
+                                .with_note("PHP# erases type parameters when it compiles, and PHP requires a property to keep the type of the property it overrides.")
+                                .with_help(help),
+                            );
+                        }
                     }
                 }
                 (Some(declaring_type), None) => {
@@ -4377,8 +4763,10 @@ where
 
 /// Reports a PHP# class's or event's property, declared by `owner`, that does not fit the property `interface` states,
 /// as the engine refuses the class: it is public, on each object, and of the stated type or a narrower one for a
-/// get-only property. Every interface property is virtual, so its hooks alone say whether it is get-only. A property
-/// the class inherits is reported on the class's name, naming the base class to change.
+/// get-only property. Every interface property is virtual, so its hooks alone say whether it is get-only. The stated
+/// type reads a generic interface's type parameters as the type arguments the class's header gives it, as `TItem` is
+/// `int` under `: Holder<int>`. A property the class inherits is reported on the class's name, naming the base class to
+/// change.
 fn report_unfit_interface_property<A>(
     context: &mut Context<'_, '_, A>,
     class_like_metadata: &ClassLikeMetadata,
@@ -4463,15 +4851,17 @@ fn report_unfit_interface_property<A>(
 
     if let Some((given, stated_type)) =
         property.type_declaration_metadata.as_ref().zip(stated.type_declaration_metadata.as_ref())
+        && let stated_type =
+            localize_parent_type(context.codebase, class_like_metadata, interface.name, &stated_type.type_union)
         && is_property_type_variance_invalid(
             context.codebase,
             &given.type_union,
-            &stated_type.type_union,
+            &stated_type,
             !stated.hooks.contains_key(&word("set")),
             false,
         )
     {
-        let stated_type = display_type(context, &stated_type.type_union);
+        let stated_type = display_type(context, &stated_type);
         let given = format!("as `{}`", display_type(context, &given.type_union));
         let help = format!("Give `{property_name}` the type `{stated_type}`{place}.");
         report(context, IssueCode::IncompatiblePropertyType, given, format!("as `{stated_type}`"), help);

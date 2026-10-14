@@ -45,6 +45,7 @@ use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::VariadicArrayElement;
+use mago_syntax::dialect::Dialect;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
@@ -56,6 +57,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::statement::function_like::is_map_key;
 use crate::statement::function_like::map_key_error;
 use crate::statement::keys_mix_a_backed_enum;
 use crate::statement::report_keys_sharing_entries;
@@ -322,7 +324,7 @@ where
                             // PHP# casts only between numbers, so a key PHP would cast, such as `1.5`, `true` or
                             // `null`, names the rule a `Map` type keeps, and its error is its only report. A backed
                             // enum key runs as its backing value.
-                            if get_backing_key_type(item_key_type, context.codebase).is_always_array_key(true) {
+                            if is_map_key(context, item_key_type) {
                                 item_key_type.clone()
                             } else {
                                 let item_key_type_id = display_value_type(context, item_key_type, &get_arraykey());
@@ -981,7 +983,9 @@ fn handle_variadic_array_element<'arena, A>(
                     array_creation_info.can_create_objectlike = false;
 
                     (
-                        Some(Cow::Owned(get_backing_key_type(element_type, context.codebase).into_owned())),
+                        Some(Cow::Owned(
+                            get_backing_key_type(element_type, context.codebase, Dialect::Sharp).into_owned(),
+                        )),
                         Cow::Borrowed(element_type.as_ref()),
                     )
                 }
@@ -1033,7 +1037,7 @@ fn handle_variadic_array_element<'arena, A>(
 
             // A PHP# `Map` keyed by a backed enum holds each key as its backing value.
             let stored_key_type = if context.dialect.is_sharp() {
-                get_backing_key_type(&key_type, context.codebase)
+                get_backing_key_type(&key_type, context.codebase, context.dialect)
             } else {
                 Cow::Borrowed(&*key_type)
             };

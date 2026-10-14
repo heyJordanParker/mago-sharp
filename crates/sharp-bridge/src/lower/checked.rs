@@ -46,7 +46,7 @@ use super::types::Types;
 ///     codebase: &'program CodebaseMetadata,
 ///     forms: &'program inline::InlineForms,
 /// ) -> Option<checked::CheckedProgram<'program>> {
-///     Some(checked::CheckedProgram { file, program, types: types::Types::new(names, artifacts, codebase, forms) })
+///     Some(checked::CheckedProgram { file, program, types: types::Types::new(file, names, artifacts, codebase, forms) })
 /// }
 /// # fn main() {}
 /// ```
@@ -102,7 +102,7 @@ impl<'program> CheckedProgram<'program> {
         codebase: &'program CodebaseMetadata,
         inline_forms: &'program InlineForms,
     ) -> Self {
-        Self { file, program, types: Types::new(names, artifacts, codebase, inline_forms) }
+        Self { file, program, types: Types::new(file, names, artifacts, codebase, inline_forms) }
     }
 
     #[must_use]
@@ -164,7 +164,7 @@ pub fn check<'program>(
         return Err(Refusal::Compile(errors));
     }
 
-    Ok(CheckedProgram { file, program, types: Types::new(names, artifacts, codebase, inline_forms) })
+    Ok(CheckedProgram { file, program, types: Types::new(file, names, artifacts, codebase, inline_forms) })
 }
 
 #[cfg(test)]

@@ -852,6 +852,23 @@ fn compile_accepts_each_form_that_replaces_a_php_function() {
     assert!(refused.is_empty(), "{}", refused.join("\n"));
 }
 
+/// A `.php` file keeps Mago's default: code after a `throw` is reported unreachable and not analyzed, so its error is
+/// not reported.
+#[test]
+fn analyze_skips_the_code_after_a_throw_in_a_php_file() {
+    let directory = library_workspace("namespace App;\n\npublic class Page\n{\n}\n");
+    write(
+        directory.path(),
+        "src/App/Clock.php",
+        "<?php\n\ndeclare(strict_types=1);\n\nnamespace App;\n\nfinal class Clock\n{\n    public static function never(): int\n    {\n        throw new \\LogicException('never');\n        return 'text';\n    }\n}\n",
+    );
+
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(issues_in(&stdout, "src/App/Clock.php"), ["12:9 unevaluated-code"], "{stdout}");
+}
+
 /// A project page that calls every PHP function PHP# replaces with its own syntax.
 const REPLACED_CALLS: &str = "namespace App;\n\npublic class Page\n{\n    public bool text(Any? value) => is_string(value);\n    public bool whole(Any? value) => is_int(value);\n    public bool real(Any? value) => is_float(value);\n    public bool flag(Any? value) => is_bool(value);\n    public string label(int number) => strval(number);\n    public int half(int total, int count) => intdiv(total, count);\n    public List<int> join(List<int> first, List<int> second) => array_merge(first, second);\n    public Map<string, int> merge(Map<string, int> defaults, Map<string, int> overrides) => array_replace(defaults, overrides);\n    public bool walk(List<int> numbers) => array_walk_recursive(numbers, n => n);\n}\n";
 

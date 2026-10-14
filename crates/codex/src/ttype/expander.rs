@@ -162,6 +162,11 @@ pub struct TypeExpansionOptions {
     /// to the receiver. Elsewhere the mixin relationship between two class names
     /// says nothing about how a value was obtained, so no rebinding happens.
     pub allow_mixin_static_rebind: bool,
+    /// True when expanding a type before its type parameters are replaced: a
+    /// derived type (`key-of<T>`, `value-of<T>`, ...) that still holds a type
+    /// parameter keeps its form, with only its target expanded, so a later
+    /// expansion evaluates it against the replaced type instead of `T`'s bound.
+    pub keep_generic_derived_types: bool,
 }
 
 /// Expands a type union, resolving special types like `self`, `static`, `parent`,
@@ -320,6 +325,17 @@ pub(crate) fn expand_atomic(
         TAtomic::Alias(alias) => {
             *skip_key = true;
             new_return_type_parts.extend(expand_alias(alias, codebase, options));
+        }
+        TAtomic::Derived(derived)
+            if options.keep_generic_derived_types
+                && derived
+                    .get_all_child_nodes()
+                    .into_iter()
+                    .any(|node| matches!(node, TypeRef::Atomic(TAtomic::GenericParameter(_)))) =>
+        {
+            if let Some(target_type) = derived.get_target_type_mut() {
+                expand_union(codebase, target_type, options);
+            }
         }
         TAtomic::Derived(derived) => {
             *skip_key = true;
@@ -629,9 +645,9 @@ fn generic_parameter_can_resolve_static(
     codebase: &CodebaseMetadata,
 ) -> bool {
     parameter.constraint.types.iter().any(|atomic| match atomic {
-        TAtomic::Object(TObject::Named(object)) => {
-            codebase.is_instance_of(object.name.as_bytes(), expected_class.as_bytes())
-        }
+        TAtomic::Object(TObject::Named(object)) => std::iter::once(object.name)
+            .chain(object.intersection_types.iter().flatten().filter_map(TAtomic::get_object_or_enum_name))
+            .any(|name| codebase.is_instance_of(name.as_bytes(), expected_class.as_bytes())),
         TAtomic::Object(TObject::Enum(object)) => {
             codebase.is_instance_of(object.name.as_bytes(), expected_class.as_bytes())
         }
@@ -793,6 +809,13 @@ fn resolve_static_type(
                 || (static_obj.type_parameters.is_some() && should_use_static_type_params(named, static_obj, codebase))
             {
                 named.type_parameters.clone_from(&static_obj.type_parameters);
+            } else if codebase
+                .get_class_like(static_obj.name.as_bytes())
+                .is_some_and(|class| class.template_types.is_empty())
+            {
+                // The type arguments `named` holds are the declaring class's, and a receiver class that declares no
+                // templates takes none.
+                named.type_parameters = None;
             }
 
             named.name = static_obj.name;
@@ -2669,6 +2692,34 @@ mod tests {
     }
 
     #[test]
+    fn test_expand_keeps_a_derived_type_over_a_type_parameter_only_when_asked() {
+        let codebase = CodebaseMetadata::new();
+
+        let mut keyed = TKeyedArray::new();
+        keyed.parameters = Some((Arc::new(get_string()), Arc::new(get_int())));
+        let constraint = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed)));
+        let generic = TGenericParameter::new(
+            word("T"),
+            Arc::new(constraint),
+            GenericParent::FunctionLike((ascii_lowercase_word(b"keys"), ascii_lowercase_word(b"nested"))),
+        );
+        let key_of = TKeyOf::new(Arc::new(TUnion::from_atomic(TAtomic::GenericParameter(generic))));
+        let input = TUnion::from_atomic(TAtomic::Derived(TDerived::KeyOf(key_of)));
+
+        let mut evaluated = input.clone();
+        expand_union(&codebase, &mut evaluated, &TypeExpansionOptions::default());
+        assert_eq!(evaluated.get_id(), word("string"));
+
+        let mut kept = input.clone();
+        expand_union(
+            &codebase,
+            &mut kept,
+            &TypeExpansionOptions { keep_generic_derived_types: true, ..Default::default() },
+        );
+        assert_eq!(kept, input);
+    }
+
+    #[test]
     fn test_expand_value_of_array() {
         let codebase = CodebaseMetadata::new();
 
@@ -2969,6 +3020,7 @@ mod tests {
             static_class_type: StaticClassType::None,
             function_is_final: false,
             allow_mixin_static_rebind: false,
+            keep_generic_derived_types: false,
         };
 
         let mut actual = input;

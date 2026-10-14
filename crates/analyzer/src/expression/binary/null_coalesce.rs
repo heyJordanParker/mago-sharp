@@ -30,6 +30,7 @@ use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
 use crate::formula::get_formula;
 use crate::reconciler::reconcile_keyed_types;
+use crate::statement::function_like::expect_type;
 use crate::utils::conditional;
 use crate::utils::expression::get_direct_variable_id;
 use crate::utils::expression::is_variable;
@@ -56,13 +57,18 @@ pub fn analyze_null_coalesce_operation<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    // Spec section 11: either side's value is the value of `??`, so either side goes into its declared type, the left
+    // one nullable, as Swift's `??` takes a `T?` and a `T`.
+    let expected = artifacts.get_expected_type(binary).cloned();
     let was_inside_isset = block_context.flags.inside_isset();
     block_context.flags.set_inside_isset(
         is_variable(binary.lhs, context.resolved_names)
             || matches!(binary.lhs, Expression::Access(_) | Expression::ArrayAccess(_)),
     );
+    expect_type(context, artifacts, binary.lhs, expected.clone().map(TUnion::as_nullable).as_ref());
     binary.lhs.analyze(context, block_context, artifacts)?;
     block_context.flags.set_inside_isset(was_inside_isset);
+    expect_type(context, artifacts, binary.rhs, expected.as_ref());
 
     let lhs_type_option = artifacts.get_rc_expression_type(&binary.lhs);
 
