@@ -31,6 +31,7 @@ pub(crate) mod r#loop;
 pub(crate) mod magic_constant;
 pub(crate) mod modifier;
 pub(crate) mod module;
+pub(crate) mod name_of;
 pub(crate) mod namespace;
 pub(crate) mod operation;
 pub(crate) mod pattern;

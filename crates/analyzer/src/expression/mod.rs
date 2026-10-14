@@ -77,6 +77,7 @@ pub mod instantiation;
 pub mod literal;
 pub mod magic_constant;
 pub mod r#match;
+pub mod name_of;
 pub mod partial_application;
 pub mod throw;
 pub mod type_of;
@@ -216,6 +217,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                     analyze_php_shape(Node::Expression(self), context, block_context, artifacts)
                 }
                 Expression::TypeOf(expr) => expr.analyze(context, block_context, artifacts),
+                Expression::NameOf(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::List(list_expr) => {
                     context.collector.report_with_code(
                     IssueCode::ListUsedInReadContext,

@@ -1523,6 +1523,27 @@ fn an_override_of_a_plain_php_property_keeps_its_set_and_its_level() {
     );
 }
 
+/// `nameof(X.y)` is the string `'y'`, spec section 6.3, and the checker proves `X` declares or inherits `y`, a
+/// property or a field, instance or static, readable where `nameof` is written, as C#'s `nameof` does. A method is not
+/// a property, and a misspelled name is an error wherever it is written.
+#[test]
+fn nameof_names_a_property_the_class_has_and_is_a_string() {
+    let order = "namespace Demo;\n\npublic class Entity\n{\n    public int id { get; set; } = 0;\n}\n\npublic class Order : Entity\n{\n    public int total { get; set; } = 0;\n    public static int count { get; private set; } = 0;\n    private int secret = 0;\n    public int sum() => 1;\n\n    public string own() => nameof(Order.secret);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string column() => nameof(Order.total);\n    public string parent() => nameof(Order.id);\n    public string shared() => nameof(Order.count);\n    public string misspelled() => nameof(Order.totl);\n    public string hidden() => nameof(Order.secret);\n    public string method() => nameof(Order.sum);\n    public string missing() => nameof(Ordr.total);\n    public int number() => nameof(Order.total);\n}\n";
+
+    assert_eq!(issues(("src/Demo/Order.sharp", order), &[]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Order.sharp", order)]),
+        [
+            "Property `Order.totl` does not exist.",
+            "`Order.secret` is `private`, so `nameof` can't name it here.",
+            "Property `Order.sum` does not exist.",
+            "Class, Interface, or Trait `Ordr` does not exist.",
+            "Invalid return type for method `Report.number`: expected `int`, but found `string`.",
+        ]
+    );
+}
+
 /// A PHP class that implements a class reports it, and keeps the metadata upstream Mago builds: only a PHP# header
 /// links its class as the parent.
 #[test]

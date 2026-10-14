@@ -2642,6 +2642,36 @@ fn typeof_names_a_class_by_its_short_name() {
     assert_eq!(source(CODE, type_of), "typeof(Order)");
 }
 
+/// `nameof(Order.total)` names a class by its short name and one of its properties, spec section 6.3. In PHP it stays
+/// a function call.
+#[test]
+fn nameof_names_a_class_and_a_property() {
+    const CODE: &str =
+        "class Report\n{\n    void run()\n    {\n        query.orderBy(nameof(Order.total));\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [statement] = method_body(program) else {
+        panic!("expected one statement, got {:#?}", method_body(program));
+    };
+    let Expression::Call(Call::Method(order_by)) = expression(statement) else {
+        panic!("expected a method call, got {statement:#?}");
+    };
+    let Some(Expression::NameOf(name_of)) = order_by.argument_list.arguments.first().map(Argument::value) else {
+        panic!("expected `nameof(Order.total)`, got {:#?}", order_by.argument_list.arguments);
+    };
+    assert_eq!(name_of.class.value(), b"Order");
+    assert_eq!(name_of.property.value, b"total");
+    assert_eq!(source(CODE, name_of), "nameof(Order.total)");
+
+    let php = parse(&arena, "src/Report.php", "<?php nameof(Order);");
+    let Some(Statement::Expression(statement)) = php.statements.get(1) else {
+        panic!("expected an expression statement, got {:#?}", php.statements);
+    };
+    assert!(matches!(statement.expression, Expression::Call(Call::Function(_))), "{statement:#?}");
+}
+
 #[test]
 fn a_class_or_an_interface_names_its_base_class_and_interfaces_after_a_colon() {
     const CODE: &str = "public class Page : Entity, Linkable\n{\n}\n\npublic interface Linkable : Named\n{\n}\n";

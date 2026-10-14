@@ -943,7 +943,7 @@ fn the_keyword_names_example_reserves_only_the_keywords_php_sharp_uses() {
 /// name the help suggests compiles.
 #[test]
 fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
-    const RESERVED: [&str; 52] = [
+    const RESERVED: [&str; 53] = [
         "let",
         "const",
         "emit",
@@ -964,6 +964,7 @@ fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
         "yield",
         "exit",
         "typeof",
+        "nameof",
         "is",
         "as",
         "import",
@@ -4001,6 +4002,15 @@ fn typeof_names_a_class_in_a_method_body() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// `nameof(X.y)` is a constant string, spec section 6.3, so it is written in a method body, an initial value and an
+/// attribute argument.
+#[test]
+fn nameof_names_a_property_in_a_body_an_initial_value_and_an_attribute() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Index;\n\nclass Report\n{\n    protected string column = nameof(Order.total);\n\n    [Index(nameof(Order.total))]\n    public int run(int extra)\n    {\n        Store.keep(nameof(Order.total));\n        return extra;\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
 /// A member of `typeof(X)` or of a local holding a class value is a static member of the class it holds, as `X.y` is,
 /// so the analyzer checks that the class has it. `Class`'s own members, such as `attributes`, come with the library.
 #[test]
@@ -4768,7 +4778,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         ),
         (
             body,
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`.",
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`.",
         ),
     ] {
         assert_eq!(

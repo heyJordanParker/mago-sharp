@@ -37,6 +37,7 @@ use crate::cst::cst::instantiation::Instantiation;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::literal::Literal;
 use crate::cst::cst::magic_constant::MagicConstant;
+use crate::cst::cst::name_of::NameOf;
 use crate::cst::cst::partial_application::PartialApplication;
 use crate::cst::cst::pattern::As;
 use crate::cst::cst::pattern::Is;
@@ -101,6 +102,7 @@ pub enum Expression<'arena> {
     As(As<'arena>),
     PatternMatch(PatternMatch<'arena>),
     TypeOf(TypeOf<'arena>),
+    NameOf(NameOf<'arena>),
     Error(Span),
 }
 
@@ -122,7 +124,7 @@ impl<'arena> Expression<'arena> {
             Self::Literal(_) => true,
             Self::Identifier(_) => true,
             Self::MagicConstant(_) => true,
-            Self::TypeOf(_) => true,
+            Self::TypeOf(_) | Self::NameOf(_) => true,
             Self::ConstantAccess(_) => true,
             Self::Self_(_) => true,
             Self::Parent(_) => true,
@@ -463,6 +465,7 @@ impl<'arena> Expression<'arena> {
             Expression::As(_) => NodeKind::As,
             Expression::PatternMatch(_) => NodeKind::PatternMatch,
             Expression::TypeOf(_) => NodeKind::TypeOf,
+            Expression::NameOf(_) => NodeKind::NameOf,
             Expression::Error(_) => NodeKind::Error,
         }
     }
@@ -514,6 +517,7 @@ impl HasSpan for Expression<'_> {
             Expression::As(expression) => expression.span(),
             Expression::PatternMatch(expression) => expression.span(),
             Expression::TypeOf(expression) => expression.span(),
+            Expression::NameOf(expression) => expression.span(),
             Expression::Error(span) => *span,
         })
     }

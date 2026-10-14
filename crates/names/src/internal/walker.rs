@@ -53,6 +53,7 @@ use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::MethodPartialApplication;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleParent;
+use mago_syntax::cst::NameOf;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
@@ -1362,6 +1363,12 @@ where
         let (name, imported) = self.resolve_class(context, type_of.class.value());
 
         self.resolved_names.insert_at(type_of.class.span(), name, imported);
+    }
+
+    fn walk_in_name_of(&mut self, name_of: &'ast NameOf<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let (name, imported) = self.resolve_class(context, name_of.class.value());
+
+        self.resolved_names.insert_at(name_of.class.span(), name, imported);
     }
 
     fn walk_in_static_method_call(

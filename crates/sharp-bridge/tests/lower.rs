@@ -7274,6 +7274,28 @@ fn typeof_is_the_class_name_of_the_imported_class() {
 }
 
 /// ```php
+/// return 'total';
+/// ```
+///
+/// `nameof(X.y)` is the string `'y'`: the checker proved `X` has the property, so the running program needs its name
+/// alone.
+#[test]
+fn nameof_is_the_name_of_the_property() {
+    assert_eq!(
+        body_in(
+            "string run(int extra)",
+            "        return nameof(Calc.total);\n",
+            &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc { public int $total = 0; }")]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                ZVAL "total"
+        "#}
+    );
+}
+
+/// ```php
 /// #[\Lib\Access(\Lib\Calc::class, role: \App\Tenant\Report::class)]
 /// class Report
 /// ```
