@@ -1351,11 +1351,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::As(r#as), Body) => match r#as.hint {
             Hint::Nullable(_) | Hint::Void(_) => {
-                context.report(
-                    Issue::error("`as` converts to a type that is not nullable or `void`.")
-                        .with_annotation(Annotation::primary(r#as.hint.span()).with_message("Written here."))
-                        .with_note("`as T` already gives `T?`: the value as a `T`, or null when it is not one."),
-                );
+                let issue = Issue::error("`as` converts to a type that is not nullable or `void`.")
+                    .with_annotation(Annotation::primary(r#as.hint.span()).with_message("Written here."))
+                    .with_note("`as T` already gives `T?`: the value as a `T`, or null when it is not one.");
+                // Spec section 14.4: a `?` that cannot matter is an error, and the help names the type without it.
+                let issue = match r#as.hint {
+                    Hint::Nullable(nullable) => issue.with_help(format!(
+                        "Write `as {}`.",
+                        BytesDisplay(context.get_code_snippet(nullable.hint.span()))
+                    )),
+                    _ => issue,
+                };
+                context.report(issue);
 
                 None
             }
