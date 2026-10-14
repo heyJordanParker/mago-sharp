@@ -16,6 +16,8 @@ use mago_analyzer::effects::EffectSummary;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::plugin::context::HookContext;
+use mago_analyzer::plugin::context::InvocationInfo;
+use mago_analyzer::plugin::context::ProviderContext;
 use mago_analyzer::plugin::hook::ExpressionHook;
 use mago_analyzer::plugin::hook::ExpressionHookResult;
 use mago_analyzer::plugin::hook::HookResult;
@@ -23,18 +25,22 @@ use mago_analyzer::plugin::hook::StaticCall;
 use mago_analyzer::plugin::hook::StaticMethodCallHook;
 use mago_analyzer::plugin::provider::Provider;
 use mago_analyzer::plugin::provider::ProviderMeta;
+use mago_analyzer::plugin::provider::method::MethodReturnTypeProvider;
+use mago_analyzer::plugin::provider::method::MethodTarget;
 use mago_analyzer::settings::Settings;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::scanner::scan_program;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::union::TUnion;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_names::CHANGING_COLLECTION_METHODS;
 use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::resolver::NameResolver;
+use mago_names::resolver::NamespaceClasses;
 use mago_prelude::Prelude;
 use mago_reporting::Issue;
 use mago_reporting::Level;
@@ -52,6 +58,10 @@ mod sharp_words;
 
 static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
+
+/// The standard library's package in `vendor/`. A file under it is the standard library's, as the loader marks a file
+/// whose nearest `composer.json` names the package.
+const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";
 
 const CALC: &str = "<?php\n\nnamespace Lib;\n\nfinal class Calc\n{\n    public static function make(): self\n    {\n        return new self();\n    }\n\n    public function add(int $a, int $b): int\n    {\n        return $a + $b;\n    }\n}\n";
 
@@ -117,18 +127,34 @@ fn analyze_with_artifacts(
     let file_ids: Vec<_> = std::iter::once(&analyzed)
         .chain(others)
         .map(|(name, code)| {
-            (*name, database.add(File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()))))
+            let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
+            file.is_standard_library = name.starts_with(STANDARD_LIBRARY);
+
+            (*name, database.add(file))
         })
         .collect();
 
     let arena = LocalArena::new();
-    let mut programs = Vec::new();
+    let mut parsed = Vec::new();
     for (name, file_id) in &file_ids {
         let file = database.get_ref(file_id).expect("file was just added");
         let program = parse_file(&arena, file);
-        assert!(programs.is_empty() || !program.has_errors(), "{name} did not parse: {:?}", program.errors);
+        assert!(parsed.is_empty() || !program.has_errors(), "{name} did not parse: {:?}", program.errors);
+        parsed.push((file, program));
+    }
 
+    // A class-like's name never depends on how names resolve, so a first scan finds each class-like that wins over a
+    // default class-like in its namespace, as `mago analyze` finds them.
+    let namespace_classes = NamespaceClasses::new(parsed.iter().flat_map(|(file, program)| {
         let names = NameResolver::new(&arena).resolve(program);
+        scan_program(&arena, file, program, &names, settings.version)
+            .class_likes
+            .into_values()
+            .map(|class_like| class_like.original_name)
+    }));
+    let mut programs = Vec::new();
+    for (file, program) in parsed {
+        let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes);
         metadata.extend(scan_program(&arena, file, program, &names, settings.version));
         programs.push((file, program, names));
     }
@@ -3033,6 +3059,13 @@ const LIBRARY_TYPE_CLASSES: [(&str, &str); 2] = [
     ),
 ];
 
+/// The standard library's `Environment`, the `foreign` class of the effect `Environment`, which a project reads from
+/// `vendor/`.
+const ENVIRONMENT: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Environment.sharp",
+    "namespace Sharp;\n\nimport RuntimeException;\nimport ValueError;\n\npublic foreign class Environment\n{\n    public List<string> arguments { get; }\n\n    public Environment()\n    {\n        this.arguments = Environment.commandLine();\n    }\n\n    public string? variable(string name) => global.getenv(name) is string value ? value : null;\n\n    public string currentDirectory()\n        => global.getcwd() is string directory ? directory : throw new RuntimeException(\"Environment.currentDirectory: the current directory cannot be read\");\n\n    public void changeDirectory(string path)\n    {\n        if (!@global.chdir(path)) {\n            throw new RuntimeException(`Environment.changeDirectory: the directory \"${path}\" cannot be entered`);\n        }\n    }\n\n    public string require(string name)\n        => global.getenv(name) is string value ? value : throw new ValueError(`Environment.require: the environment variable \"${name}\" is not set`);\n\n    private static extern List<string> commandLine();\n}\n",
+);
+
 /// The semantic checks let any file whose namespace is `Sharp` declare `Int`, `Float` and `Bool`, as the engine does,
 /// and only the analyzer knows the file is not the standard library's. It refuses them with the semantic checks'
 /// reserved-name message, under its own code.
@@ -3176,38 +3209,37 @@ fn position_current_has_the_types_of_the_sharp_library_class() {
     assert_eq!(issues(("src/Demo/Reports.sharp", sharp), &[]), ["13:27 invalid-return-statement"]);
 }
 
-/// `Environment` replaces `$_ENV` and `getenv()`, spec section 29.
+/// `Environment` replaces `$_ENV` and `getenv()`, spec section 29: `variable` gives null for a variable that is not
+/// set, and `require`, which a module binding calls, throws instead.
 #[test]
-fn an_environment_variable_is_a_nullable_string() {
-    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public static Deploy make() => new Deploy(new Environment());\n\n    public string region() => this.environment.variable(\"X\") ?? \"d\";\n\n    public int wrong() => this.environment.variable(\"X\") ?? \"d\";\n}\n";
+fn an_environment_variable_is_a_nullable_string_and_a_required_one_a_string() {
+    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public static Deploy make() => new Deploy(new Environment());\n\n    public string region() => this.environment.variable(\"X\") ?? \"d\";\n\n    public int wrong() => this.environment.variable(\"X\") ?? \"d\";\n\n    public string url() => this.environment.require(\"X\");\n\n    public int port() => this.environment.require(\"X\");\n}\n";
 
-    assert_eq!(issues(("src/Demo/Deploy.sharp", sharp), &[]), ["11:27 invalid-return-statement"]);
+    assert_eq!(
+        issues(("src/Demo/Deploy.sharp", sharp), &[ENVIRONMENT]),
+        ["11:27 invalid-return-statement", "15:26 invalid-return-statement"]
+    );
 }
 
-/// `arguments` and `currentDirectory` are `{ get; }` properties, so the process environment is read, never written.
+/// `arguments` is a `{ get; }` property, because a process's arguments never change, so it is read, never written.
+/// The current directory changes, so `currentDirectory()` and `changeDirectory(path)` are methods.
 #[test]
-fn the_environment_arguments_and_current_directory_are_read_only() {
-    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public List<string> arguments() => this.environment.arguments;\n\n    public string folder() => this.environment.currentDirectory;\n\n    public List<int> numbers() => this.environment.arguments;\n\n    public void change()\n    {\n        this.environment.arguments = [\"deploy\"];\n        this.environment.currentDirectory = \"/tmp\";\n    }\n}\n";
+fn the_environment_arguments_are_read_only_and_the_current_directory_is_a_method() {
+    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public List<string> arguments() => this.environment.arguments;\n\n    public string folder() => this.environment.currentDirectory();\n\n    public List<int> numbers() => this.environment.arguments;\n\n    public void change()\n    {\n        this.environment.changeDirectory(\"/tmp\");\n        this.environment.arguments = [\"deploy\"];\n    }\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Deploy.sharp", sharp), &[]),
-        ["11:35 invalid-return-statement", "15:26 invalid-property-write", "16:26 invalid-property-write"]
+        issues(("src/Demo/Deploy.sharp", sharp), &[ENVIRONMENT]),
+        ["11:35 invalid-return-statement", "16:26 invalid-property-write"]
     );
     assert_eq!(
-        messages(("src/Demo/Deploy.sharp", sharp), &[])[1..],
-        [
-            "Cannot initialize readonly property `Environment.arguments` from within `Deploy`.",
-            "Cannot initialize readonly property `Environment.currentDirectory` from within `Deploy`.",
-        ]
+        messages(("src/Demo/Deploy.sharp", sharp), &[ENVIRONMENT])[1..],
+        ["Cannot initialize readonly property `Environment.arguments` from within `Deploy`."]
     );
 
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Environment;\n\nclass Deploy\n{\n    public function __construct(private Environment $environment) { }\n\n    public function change(): void\n    {\n        $this->environment->arguments = ['deploy'];\n        $this->environment->currentDirectory = '/tmp';\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Environment;\n\nclass Deploy\n{\n    public function __construct(private Environment $environment) { }\n\n    public function change(): void\n    {\n        $this->environment->arguments = ['deploy'];\n    }\n}\n";
     assert_eq!(
-        messages(("src/Demo/Deploy.php", php), &[]),
-        [
-            "Cannot initialize readonly property `Sharp\\Environment::$arguments` from within `Demo\\Deploy`.",
-            "Cannot initialize readonly property `Sharp\\Environment::$currentDirectory` from within `Demo\\Deploy`.",
-        ]
+        messages(("src/Demo/Deploy.php", php), &[ENVIRONMENT]),
+        ["Cannot initialize readonly property `Sharp\\Environment::$arguments` from within `Demo\\Deploy`."]
     );
 }
 
@@ -5004,6 +5036,445 @@ fn php_calls_a_named_constructor_as_the_static_method_it_runs_as() {
     assert_eq!(issues(("src/App/run.php", caller), &[("src/Demo/Artifact.sharp", sharp)]), ["7:67 invalid-argument"]);
 }
 
+/// The extensions of spec section 26, as `TextExtensions` declares them.
+const TEXT_EXTENSIONS: &str = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug(string separator) => value + separator;\n        public bool isBlank => value == \"\";\n    }\n}\n";
+
+/// Spec section 26: an extension member runs as a public static method of its static class that takes the receiver
+/// first, a computed property as one that takes only the receiver, so PHP calls each as that method.
+#[test]
+fn php_calls_an_extension_member_as_the_static_method_it_runs_as() {
+    let caller = "<?php\n\nnamespace App;\n\nuse App\\Shared\\Text\\TextExtensions;\n\nfunction run(): string\n{\n    return TextExtensions::slug('Spring Sale', '-') . TextExtensions::slug('Sale') . (TextExtensions::isBlank('') ? 'blank' : '');\n}\n";
+
+    assert_eq!(
+        issues(("src/App/run.php", caller), &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS)]),
+        ["9:75 too-few-arguments"]
+    );
+}
+
+/// Spec section 26: a file that imports an extension's class calls its methods and reads its computed properties as
+/// members of the receiver, checked against the static methods they run as. A method is called and a computed
+/// property is read, never written.
+#[test]
+fn an_imported_extension_is_a_member_of_its_receiver() {
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\npublic class Catalog\n{\n    public string handle(string title) => title.slug(\"-\");\n    public bool empty(string title) => title.isBlank;\n    public int count(string title) => title.slug(\"-\");\n    public string wrong(string title) => title.slug(1);\n    public bool none(string title) => title.isBlank(\"-\");\n    public string bare(string title) => title.slug;\n    public void write(string title)\n    {\n        title.isBlank = true;\n    }\n    public string few(string title) => title.slug();\n}\n";
+
+    assert_messages(
+        sharp,
+        &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS)],
+        &[
+            "9:39 invalid-return-statement: Invalid return type for method `Catalog.count`: expected `int`, but found `string`.",
+            "10:53 invalid-argument: Invalid argument type for argument #2 of `TextExtensions.slug`: expected `string`, but found `int`.",
+            "11:45 non-existent-method: `isBlank` is a computed property of `string`, not a method: read it without `(…)`.",
+            "11:39 mixed-return-statement: Could not infer a precise return type for method `Catalog.none`. Saw type `Any?`.",
+            "12:47 non-existent-property: `slug` is a method of `string`, not a computed property: call it as `slug(…)`.",
+            "15:15 invalid-property-write: `isBlank` is a computed property an extension adds: it is read, never written.",
+            "17:40 too-few-arguments: Too few arguments provided for method `TextExtensions.slug`.",
+        ],
+    );
+}
+
+/// Spec section 26: `?.` runs an extension member only on a receiver that is not `null`, and gives `null` for `null`,
+/// so the member's type gains `null`. Plain `.` on a receiver that may be `null` is refused.
+#[test]
+fn a_null_safe_extension_access_skips_a_null_receiver() {
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\npublic class Catalog\n{\n    public string? handle(string? title) => title?.slug(\"-\");\n    public bool? empty(string? title) => title?.isBlank;\n    public string sure(string? title) => title?.slug(\"-\");\n    public string plain(string? title) => title.slug(\"-\");\n    public bool read(string? title) => title.isBlank;\n    public bool chained(string? title) => title?.slug(\"-\").isBlank;\n}\n";
+
+    assert_messages(
+        sharp,
+        &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS)],
+        &[
+            "9:42 nullable-return-statement: Method `Catalog.sure` is declared to return `string` but possibly returns a nullable value (inferred as `string?`).",
+            "9:42 invalid-return-statement: Invalid return type for method `Catalog.sure`: expected `string`, but found `string?`.",
+            "10:43 possible-method-access-on-null: Attempting to call a method on `null`.",
+            "11:40 possibly-null-property-access: Attempting to access a property on a possibly `null` value.",
+            "12:43 nullable-return-statement: Method `Catalog.chained` is declared to return `bool` but possibly returns a nullable value (inferred as `bool?`).",
+            "12:43 invalid-return-statement: Invalid return type for method `Catalog.chained`: expected `bool`, but found `bool?`.",
+        ],
+    );
+}
+
+/// Spec section 26: an extension applies in the files that import its class and, as a class does, in the files of
+/// its class's own namespace, the declaring file among them. A file of another namespace without the import is told
+/// which import line to add.
+#[test]
+fn an_extension_applies_where_its_class_is_imported_or_in_its_namespace() {
+    let sharp = "namespace Demo;\n\npublic class Catalog\n{\n    public string handle(string title) => title.slug(\"-\");\n    public bool empty(string title) => title.isBlank;\n}\n";
+    let neighbor = "namespace App.Shared.Text;\n\npublic class Catalog\n{\n    public string handle(string title) => title.slug(\"-\");\n}\n";
+    let own = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug(string separator) => value + separator;\n        public string dashed() => value.slug(\"-\");\n    }\n}\n";
+
+    assert_messages(own, &[], &[]);
+
+    assert_messages(
+        sharp,
+        &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS)],
+        &[
+            "5:49 non-existent-method: `slug` is an extension this file does not import. Add `import App.Shared.Text.TextExtensions;` to the file.",
+            "6:46 non-existent-property: `isBlank` is an extension this file does not import. Add `import App.Shared.Text.TextExtensions;` to the file.",
+        ],
+    );
+    assert_messages(neighbor, &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS)], &[]);
+}
+
+/// Spec section 23: every file has the standard library's extensions on `string`, `int`, `float`, `List`, `Map` and
+/// `Set` with no import, and the extensions of a class directly in `Sharp`, which every file imports unless it imports
+/// another class of that short name. The standard library's other extensions apply only where their class is
+/// imported, as every other extension does.
+#[test]
+fn the_standard_library_extensions_on_the_default_types_need_no_import() {
+    let flags = "namespace Sharp;\n\npublic static class Flags\n{\n    extension(bool flag)\n    {\n        public string word() => \"\";\n    }\n}\n";
+    let other = "namespace App;\n\npublic class Flags\n{\n}\n";
+    let shadowed = "namespace Demo;\n\nimport App.Flags;\n\npublic class Report\n{\n    public string word(bool flag) => flag.word();\n}\n";
+    let words = "namespace Sharp.Text;\n\npublic static class Words\n{\n    extension(string text)\n    {\n        public string shout() => text;\n    }\n\n    extension(int count)\n    {\n        public int doubled() => count;\n    }\n\n    extension(float amount)\n    {\n        public float halved() => amount;\n    }\n\n    extension(List<int> numbers)\n    {\n        public int head() => 0;\n    }\n\n    extension(Map<string, int> counts)\n    {\n        public int total() => 0;\n    }\n\n    extension(Set<string> tags)\n    {\n        public int size() => 0;\n    }\n\n    extension(bool flag)\n    {\n        public string label() => \"\";\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string text(string name) => name.shout();\n    public int count(int count) => count.doubled();\n    public float amount(float amount) => amount.halved();\n    public int list(List<int> numbers) => numbers.head();\n    public int map(Map<string, int> counts) => counts.total();\n    public int set(Set<string> tags) => tags.size();\n    public string flag(bool flag) => flag.label();\n    public string word(bool flag) => flag.word();\n}\n";
+
+    assert_messages(
+        sharp,
+        &[("src/Sharp/Text/Words.sharp", words), ("src/Sharp/Flags.sharp", flags)],
+        &[
+            "11:43 non-existent-method: `label` is an extension this file does not import. Add `import Sharp.Text.Words;` to the file.",
+        ],
+    );
+    assert_messages(
+        shadowed,
+        &[("src/Sharp/Flags.sharp", flags), ("src/App/Flags.sharp", other)],
+        &[
+            "7:43 non-existent-method: `word` is an extension this file does not import. Add `import Sharp.Flags as SharpFlags;` to the file.",
+        ],
+    );
+}
+
+/// Spec sections 23 and 26: an extension of the file's own namespace, or of a class the file imports, shadows a
+/// standard library extension of the same name that every file has, as a class does. Two of the file's own still
+/// compete.
+#[test]
+fn an_extension_the_file_imports_or_its_namespace_declares_shadows_a_default_one() {
+    let words = (
+        "src/Sharp/Text/Words.sharp",
+        "namespace Sharp.Text;\n\npublic static class Words\n{\n    extension(string text)\n    {\n        public string shout() => text;\n    }\n}\n",
+    );
+    let own = (
+        "src/Demo/Loud.sharp",
+        "namespace Demo;\n\npublic static class Loud\n{\n    extension(string text)\n    {\n        public int shout() => 1;\n    }\n}\n",
+    );
+    let imported = (
+        "src/App/Text/Loud.sharp",
+        "namespace App.Text;\n\npublic static class Loud\n{\n    extension(string text)\n    {\n        public int shout() => 1;\n    }\n}\n",
+    );
+    let report = "namespace Demo;\n\npublic class Report\n{\n    public int text(string name) => name.shout();\n}\n";
+    let importing = "namespace Demo;\n\nimport App.Text.Loud;\n\npublic class Report\n{\n    public int text(string name) => name.shout();\n}\n";
+
+    assert_messages(report, &[words, own], &[]);
+    assert_messages(importing, &[words, imported], &[]);
+}
+
+/// Spec section 26: two extensions the file has, each fitting the receiver as well as the other, are an error that
+/// names where each comes from, the file's namespace, an import or the standard library, and a help whose fix removes
+/// the competition: removing an import where that leaves one, importing one of the standard library's, and renaming
+/// the member otherwise.
+#[test]
+fn an_ambiguous_extension_names_where_each_competitor_comes_from() {
+    let wallet = ("src/Lib/Wallet.php", "<?php\n\nnamespace Lib;\n\nclass Wallet\n{\n}\n");
+    let own_one = (
+        "src/App/OwnOne.sharp",
+        "namespace App;\n\nimport Lib.Wallet;\n\npublic static class OwnOne\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 1;\n    }\n}\n",
+    );
+    let own_two = (
+        "src/App/OwnTwo.sharp",
+        "namespace App;\n\nimport Lib.Wallet;\n\npublic static class OwnTwo\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 2;\n    }\n}\n",
+    );
+    let far_one = (
+        "src/App/Far/FarOne.sharp",
+        "namespace App.Far;\n\nimport Lib.Wallet;\n\npublic static class FarOne\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 3;\n    }\n}\n",
+    );
+    let far_two = (
+        "src/App/Far/FarTwo.sharp",
+        "namespace App.Far;\n\nimport Lib.Wallet;\n\npublic static class FarTwo\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 4;\n    }\n}\n",
+    );
+    let own = (
+        "src/App/Caller.sharp",
+        "namespace App;\n\nimport Lib.Wallet;\n\npublic class Caller\n{\n    public int score(Wallet wallet) => wallet.score();\n}\n",
+    );
+    let imported = (
+        "src/App/Caller.sharp",
+        "namespace App;\n\nimport App.Far.FarOne;\nimport App.Far.FarTwo;\nimport Lib.Wallet;\n\npublic class Caller\n{\n    public int score(Wallet wallet) => wallet.score();\n}\n",
+    );
+    let mixed = (
+        "src/App/Caller.sharp",
+        "namespace App;\n\nimport App.Far.FarOne as Scores;\nimport Lib.Wallet;\n\npublic class Caller\n{\n    public int score(Wallet wallet) => wallet.score();\n}\n",
+    );
+    let words = (
+        "src/Sharp/Text/Words.sharp",
+        "namespace Sharp.Text;\n\npublic static class Words\n{\n    extension(string text)\n    {\n        public int shout() => 1;\n    }\n}\n",
+    );
+    let yells = (
+        "src/Sharp/Text/Yells.sharp",
+        "namespace Sharp.Text;\n\npublic static class Yells\n{\n    extension(string text)\n    {\n        public int shout() => 2;\n    }\n}\n",
+    );
+    let standard = (
+        "src/App/Caller.sharp",
+        "namespace App;\n\npublic class Caller\n{\n    public int shout(string name) => name.shout();\n}\n",
+    );
+
+    assert_eq!(
+        refusals(own, &[wallet, own_one, own_two]),
+        [
+            "7:47 ambiguous-object-method-access The extensions `OwnOne` and `OwnTwo` of namespace `App` each add `score` to `Wallet`. | Rename `score` in all but one of them."
+        ]
+    );
+    assert_eq!(
+        refusals(imported, &[wallet, far_one, far_two]),
+        [
+            "9:47 ambiguous-object-method-access The imported extensions `FarOne` and `FarTwo` each add `score` to `Wallet`. | Remove all but one of `import App.Far.FarOne;` and `import App.Far.FarTwo;`."
+        ]
+    );
+    assert_eq!(
+        refusals(mixed, &[wallet, own_one, far_one]),
+        [
+            "8:47 ambiguous-object-method-access The extension `OwnOne` of namespace `App` and the imported extension `Scores` each add `score` to `Wallet`. | Remove `import App.Far.FarOne as Scores;`."
+        ]
+    );
+    assert_eq!(
+        refusals(standard, &[words, yells]),
+        [
+            "5:43 ambiguous-object-method-access The standard library extensions `Words` and `Yells` each add `shout` to `string`. | Import the class of the one to call. An imported extension shadows the standard library's."
+        ]
+    );
+
+    let global_one = (
+        "src/GlobalOne.sharp",
+        "import Lib.Wallet;\n\npublic static class GlobalOne\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 5;\n    }\n}\n",
+    );
+    let global_two = (
+        "src/GlobalTwo.sharp",
+        "import Lib.Wallet;\n\npublic static class GlobalTwo\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 6;\n    }\n}\n",
+    );
+    let global = (
+        "src/Caller.sharp",
+        "import Lib.Wallet;\n\npublic class Caller\n{\n    public int score(Wallet wallet) => wallet.score();\n}\n",
+    );
+
+    assert_eq!(
+        refusals(global, &[wallet, global_one, global_two]),
+        [
+            "5:47 ambiguous-object-method-access The extensions `GlobalOne` and `GlobalTwo` of the global namespace each add `score` to `Wallet`. | Rename `score` in all but one of them."
+        ]
+    );
+}
+
+/// Spec sections 8 and 26: a call of a PHP function that the standard library replaces with an extension's member
+/// names that member on the call's first argument: a method with `(…)` when it takes more than the receiver, and a
+/// computed property bare. An extension on `string` needs no import, and one on another type names its class's
+/// import. Each row is the member `Sharp.Text.Text` declares for `trim`, the call, and the form the message names.
+#[test]
+fn a_call_of_a_function_an_extension_replaces_names_the_member_on_its_first_argument() {
+    for (member, call, form) in [
+        (
+            "extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }",
+            "trim(name)",
+            "`name.trim()`.",
+        ),
+        (
+            "extension(string text)\n    {\n        public string trim(string characters) => global.trim(text, characters);\n    }",
+            "trim(name, \"x\")",
+            "`name.trim(…)`.",
+        ),
+        (
+            "extension(string text)\n    {\n        public string trim => global.trim(text);\n    }",
+            "trim(name)",
+            "`name.trim`.",
+        ),
+        (
+            "extension(bool flag)\n    {\n        public string trim() => flag ? \"1\" : \"\";\n    }",
+            "trim(name)",
+            "`name.trim()`. Add `import Sharp.Text.Text;` to the file.",
+        ),
+    ] {
+        let text = leak(format!("namespace Sharp.Text;\n\npublic static class Text\n{{\n    {member}\n}}\n"));
+        let sharp = leak(format!(
+            "namespace Demo;\n\npublic class Entity\n{{\n    public string label(string name) => {call};\n}}\n"
+        ));
+
+        assert_messages(
+            sharp,
+            &[("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text)],
+            &[&format!("5:41 wrapped-function: `trim` is wrapped by the standard library: write {form}")],
+        );
+    }
+}
+
+/// Spec section 26: the receiver's type picks among the imported extensions of one name, as in C# and Kotlin: the one
+/// whose receiver fits inside every other's runs, so `Two`'s on an `AuditedWallet` and `One`'s on a `Wallet`. Two that
+/// fit one receiver with neither inside the other are an error naming both classes. A receiver no extension of the name fits has no such member, and one
+/// that is always `null` has no value to fit, so `?.` skips it.
+#[test]
+fn the_receiver_type_picks_among_imported_extensions_of_one_name() {
+    let lines = "namespace App.Billing;\n\npublic static class LineTotals\n{\n    extension(List<int> lines)\n    {\n        public int total() => 0;\n    }\n}\n";
+    let prices = "namespace App.Billing;\n\npublic static class PriceTotals\n{\n    extension(Map<string, int> prices)\n    {\n        public string total() => \"\";\n        public int sum => 0;\n    }\n}\n";
+    let slugs = "namespace App.Billing;\n\npublic static class Slugs\n{\n    extension(Map<string, int> prices)\n    {\n        public string total() => \"\";\n        public int sum => 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Billing.LineTotals;\nimport App.Billing.PriceTotals;\n\npublic class Report\n{\n    public int lines(List<int> lines) => lines.total();\n    public string prices(Map<string, int> prices) => prices.total();\n    public string wrong(List<int> lines) => lines.total();\n    public string title(string title) => title.total();\n    public bool gone(Map<string, int>? prices)\n    {\n        if (prices == null) {\n            return prices?.total() == null;\n        }\n\n        return false;\n    }\n}\n";
+    let ambiguous = "namespace Demo;\n\nimport App.Billing.PriceTotals;\nimport App.Billing.Slugs;\n\npublic class Report\n{\n    public string prices(Map<string, int> prices) => prices.total();\n    public int sum(Map<string, int> prices) => prices.sum;\n}\n";
+    let others = [
+        ("src/App/Billing/LineTotals.sharp", lines),
+        ("src/App/Billing/PriceTotals.sharp", prices),
+        ("src/App/Billing/Slugs.sharp", slugs),
+    ];
+
+    assert_messages(
+        sharp,
+        &others,
+        &[
+            "10:45 invalid-return-statement: Invalid return type for method `Report.wrong`: expected `string`, but found `int`.",
+            "11:48 invalid-method-access: Attempting to access a method on a non-object type (`string`).",
+            "11:42 mixed-return-statement: Could not infer a precise return type for method `Report.title`. Saw type `Any?`.",
+        ],
+    );
+    assert_messages(
+        ambiguous,
+        &others,
+        &[
+            "8:61 ambiguous-object-method-access: The imported extensions `PriceTotals` and `Slugs` each add `total` to `Map<string, int>`.",
+            "9:55 ambiguous-object-property-access: The imported extensions `PriceTotals` and `Slugs` each add `sum` to `Map<string, int>`.",
+        ],
+    );
+
+    let wallets = (
+        "src/Lib/Wallets.php",
+        "<?php\n\nnamespace Lib;\n\nclass Wallet\n{\n}\n\nclass AuditedWallet extends Wallet\n{\n}\n",
+    );
+    let one = (
+        "src/App/A/One.sharp",
+        "namespace App.A;\n\nimport Lib.Wallet;\n\npublic static class One\n{\n    extension(Wallet wallet)\n    {\n        public int rank() => 1;\n    }\n}\n",
+    );
+    let two = (
+        "src/App/B/Two.sharp",
+        "namespace App.B;\n\nimport Lib.AuditedWallet;\n\npublic static class Two\n{\n    extension(AuditedWallet wallet)\n    {\n        public string rank() => \"2\";\n    }\n}\n",
+    );
+    let nested = "namespace Demo;\n\nimport App.A.One;\nimport App.B.Two;\nimport Lib.AuditedWallet;\nimport Lib.Wallet;\n\npublic class Report\n{\n    public string specific(AuditedWallet wallet) => wallet.rank();\n    public int general(Wallet wallet) => wallet.rank();\n}\n";
+
+    assert_messages(nested, &[wallets, one, two], &[]);
+}
+
+/// Spec section 26: an extension is chosen from the receiver's type the code shows, as in C# and Kotlin. An extension
+/// member named like a real member, a method or property that type declares or inherits, in code or in a docblock, or a
+/// method a `List`, `Map` or `Set` has, can never run, so it is an error. `__call` declares none. A member only a class derived from the type declares does not
+/// compete: on a value of the type, the extension runs. On a union receiver it is an error only when every part that is
+/// not `null` declares the member, as on `Money|Wallet`, since on `Money|string` the extension runs for a `string`. A
+/// receiver with no type, a parse error, hides nothing.
+#[test]
+fn an_extension_named_like_a_real_member_of_its_type_is_an_error() {
+    let money = "namespace App.Billing;\n\npublic class Money\n{\n    public Money() { }\n\n    public int total() => 0;\n\n    public int net() => 0;\n\n    public int gross() => 0;\n\n    public int tax() => 0;\n\n    public int fee() => 0;\n}\n";
+    let coin = "namespace App.Billing;\n\npublic class Coin : Money\n{\n    public Coin() : super() { }\n\n    public int cents => 1;\n}\n";
+    let wallet = "<?php\n\nnamespace App\\Billing;\n\n/**\n * @method int balance()\n * @method int gross()\n * @property int $owner\n */\nclass Wallet\n{\n    public function __call(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n}\n";
+    let sharp = "namespace App.Billing;\n\npublic static class MoneyExtensions\n{\n    extension(Money money)\n    {\n        public int total() => 0;\n        public int cents => 0;\n        public int rounded() => 0;\n    }\n\n    extension(Wallet wallet)\n    {\n        public int balance() => 0;\n        public int owner => 0;\n        public int spent() => 0;\n    }\n\n    extension(List<int> amounts)\n    {\n        public int count() => 0;\n    }\n\n    extension(Map<string, int> prices)\n    {\n        public bool has(string plan) => false;\n    }\n\n    extension(Set<string> plans)\n    {\n        public void add(string plan) { }\n    }\n\n    extension(Coin coin)\n    {\n        public int net() => 0;\n    }\n\n    extension(Money|string loose)\n    {\n        public int tax() => 0;\n    }\n\n    extension(Money|Wallet either)\n    {\n        public int gross() => 0;\n    }\n\n    extension(Money? maybe)\n    {\n        public int fee() => 0;\n    }\n\n    public static int sum(Money money) => money.cents + money.rounded();\n\n    extension(coin)\n    {\n        public int whole() => 0;\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[
+            ("src/App/Billing/Money.sharp", money),
+            ("src/App/Billing/Coin.sharp", coin),
+            ("src/App/Billing/Wallet.php", wallet),
+        ],
+        &[
+            "56:15 parse: A PHP# parameter needs a type, as in `int extra`.",
+            "7:20 duplicate-definition: `Money` already declares `total()`, so this extension member never runs.",
+            "14:20 duplicate-definition: `Wallet` already declares `balance()`, so this extension member never runs.",
+            "15:20 duplicate-definition: `Wallet` already declares `owner`, so this extension member never runs.",
+            "21:20 duplicate-definition: `List<int>` already declares `count()`, so this extension member never runs.",
+            "26:21 duplicate-definition: `Map<string, int>` already declares `has()`, so this extension member never runs.",
+            "31:21 duplicate-definition: `Set<string>` already declares `add()`, so this extension member never runs.",
+            "36:20 duplicate-definition: `Coin` already declares `net()`, so this extension member never runs.",
+            "46:20 duplicate-definition: `Money` and `Wallet` already declare `gross()`, so this extension member never runs.",
+            "51:20 duplicate-definition: `Money` already declares `fee()`, so this extension member never runs.",
+        ],
+    );
+}
+
+/// Spec section 26: an extension member's body reads its receiver as a parameter of the receiver's type.
+#[test]
+fn an_extension_member_reads_its_receiver_as_a_parameter_of_its_type() {
+    let sharp = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public int length() => value;\n        public int size => value;\n        public string same(int count) => value;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Shared/Text/TextExtensions.sharp", sharp), &[]),
+        ["7:32 invalid-return-statement", "8:28 invalid-return-statement"]
+    );
+}
+
+/// Spec section 26: an extension holds methods and computed properties. Semantics refuses any other member and a
+/// member declared twice, so the analyzer checks neither: only the first `label` runs.
+#[test]
+fn the_analyzer_checks_only_the_members_an_extension_holds_once() {
+    let sharp = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public const int LIMIT = 1;\n        public string label() => value;\n        public int label() => value;\n    }\n}\n";
+
+    assert_eq!(issues(("src/App/Shared/Text/TextExtensions.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// The arguments each call of a member of `TextExtensions` passes its method, by the method's name.
+type ExtensionArguments = Vec<(String, [Option<Span>; 2])>;
+
+/// Records the first two arguments of each call of a method of `TextExtensions` a return type provider sees.
+#[derive(Clone, Default)]
+struct ExtensionArgumentRecorder(Arc<Mutex<ExtensionArguments>>);
+
+impl Provider for ExtensionArgumentRecorder {
+    fn meta() -> &'static ProviderMeta {
+        static META: ProviderMeta =
+            ProviderMeta::new("test::extension-arguments", "extension arguments", "Records extension arguments.");
+
+        &META
+    }
+}
+
+impl MethodReturnTypeProvider for ExtensionArgumentRecorder {
+    fn targets() -> &'static [MethodTarget] {
+        static TARGETS: [MethodTarget; 1] = [MethodTarget::all_methods(b"App\\Shared\\Text\\TextExtensions")];
+
+        &TARGETS
+    }
+
+    fn get_return_type(
+        &self,
+        _context: &ProviderContext<'_, '_, '_>,
+        _class_name: &[u8],
+        method_name: &[u8],
+        invocation: &InvocationInfo<'_, '_, '_>,
+    ) -> Option<TUnion> {
+        let argument = |index| invocation.get_argument(index, &[]).map(HasSpan::span);
+        self.0.lock().unwrap().push((String::from_utf8_lossy(method_name).into_owned(), [argument(0), argument(1)]));
+
+        None
+    }
+}
+
+/// Spec section 26: a plugin reads an extension member's receiver as the first argument of the static method it runs
+/// as, as PHP passes it, and the arguments in `(…)` after it. A computed property passes only the receiver.
+#[test]
+fn a_plugin_reads_an_extension_members_receiver_as_its_first_argument() {
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\npublic class Catalog\n{\n    public string handle(string title) => title.slug(\"-\");\n    public bool empty(string title) => title.isBlank;\n}\n";
+    let recorder = ExtensionArgumentRecorder::default();
+    let mut registry = PluginRegistry::default();
+    registry.register_method_provider(recorder.clone());
+
+    let issues = issues_in(
+        &registry,
+        settings(),
+        ("src/Demo/Catalog.sharp", sharp),
+        &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS)],
+    );
+
+    assert_eq!(issues, Vec::<String>::new());
+    let text =
+        |span: Option<Span>| span.map_or("none", |span| &sharp[span.start.offset as usize..span.end.offset as usize]);
+    let seen: Vec<String> = recorder
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(method, [receiver, argument])| format!("{method} {} {}", text(*receiver), text(*argument)))
+        .collect();
+    assert_eq!(seen, ["slug title \"-\"", "isblank title none"]);
+}
+
 /// Spec section 9.1: a named constructor's `: this(…)` creates its object with the main constructor, so its arguments
 /// are checked against that constructor with PHP's codes. A class without a constructor takes `: this()` and no
 /// arguments.
@@ -6543,9 +7014,11 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
 #[test]
 fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() {
     let sharp = "namespace Demo;\n\nimport App.Effects.Payments as Billing;\nimport Sharp.Mail as Post;\n\nclass Receipt\n{\n    public string step(Function<int(int) uses Http, Post, Billing> step) => `Step: ${step}`;\n}\n";
+    let payments =
+        ("src/App/Effects/Payments.sharp", "namespace App.Effects;\n\npublic foreign class Payments\n{\n}\n");
 
     assert_eq!(
-        worded(("src/Demo/Receipt.sharp", sharp), &[]),
+        worded(("src/Demo/Receipt.sharp", sharp), &[payments]),
         [
             "8:84 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Function<int(int) uses Http, Post, Billing>` is none of them. | This is `Function<int(int) uses Http, Post, Billing>`. | Show a value taken from it instead, such as a property or the result of a method.",
         ]
@@ -8545,9 +9018,49 @@ fn an_effect_name_a_file_imports_or_declares_is_that_class() {
     }
 }
 
-/// The names of the standard effects, short as a file writes them.
+/// Spec section 29: a standard effect's name in a `uses` is that effect, even in a file that declares a class under the
+/// name, as it is in a file that imports one.
+#[test]
+fn a_uses_takes_a_standard_effect_in_a_file_that_declares_a_class_of_its_name() {
+    for name in sharp_effect_names() {
+        let declared = (
+            leak(format!("src/App/Shop/{name}.sharp")),
+            leak(format!(
+                "namespace App.Shop;\n\npublic class {name}\n{{\n    public int run(Function<int() uses {name}> tick) => tick();\n}}\n"
+            )),
+        );
+
+        assert_eq!(issues(declared, &[ENVIRONMENT]), Vec::<String>::new(), "{name}");
+    }
+}
+
+/// Spec section 23: a class of the file's own namespace wins over the class `Sharp` imports by default, as a class of
+/// the same package does in Kotlin, C# and Java, so another file of `App` names `App.Cache` with a bare `Cache` as a
+/// type, a `new`, an `is` and a static call. A default name its namespace declares no class of stays the `Sharp` one.
+#[test]
+fn a_class_of_the_files_namespace_wins_over_a_default_class() {
+    for name in sharp_effect_names() {
+        let shape = leak(format!(
+            "namespace App;\n\npublic class Shape\n{{\n    public {name}? keep({name}? kept) => kept;\n\n    public {name} make() => new {name}();\n\n    public bool holds(Any value) => value is {name};\n\n    public int size() => {name}.size();\n}}\n"
+        ));
+        let declared = (
+            leak(format!("app/App/{name}.sharp")),
+            leak(format!("namespace App;\n\npublic class {name}\n{{\n    public static int size() => 1;\n}}\n")),
+        );
+
+        assert_eq!(issues(("app/App/Shape.sharp", shape), &[declared]), Vec::<String>::new(), "{name}");
+    }
+
+    let here = "namespace App;\n\npublic class Here\n{\n    public string folder(Environment environment) => environment.currentDirectory();\n}\n";
+    let cache = ("app/App/Cache.sharp", "namespace App;\n\npublic class Cache\n{\n}\n");
+    assert_eq!(issues(("app/App/Here.sharp", here), &[cache, ENVIRONMENT]), Vec::<String>::new());
+}
+
+/// The names of the standard effects, short as a file writes them, spec section 29.
 fn sharp_effect_names() -> Vec<String> {
-    mago_names::STANDARD_EFFECTS.iter().map(mago_names::short_name).collect()
+    ["Database", "Http", "Files", "Console", "Process", "Clock", "Random", "Cache", "Mail", "Environment", "Events"]
+        .map(String::from)
+        .to_vec()
 }
 
 fn leak(code: String) -> &'static str {
@@ -9536,7 +10049,7 @@ fn a_class_that_shares_its_short_name_only_with_a_built_in_class_keeps_its_short
 /// `App.Ops.Environment`, so a message names that class `Environment`, as the import does. The PHP twin keeps
 /// upstream's full names.
 #[test]
-fn a_sharp_prelude_class_that_shares_its_short_name_is_named_by_its_full_name() {
+fn a_standard_library_class_that_shares_its_short_name_is_named_by_its_full_name() {
     let environment = ("src/App/Ops/Environment.php", "<?php\n\nnamespace App\\Ops;\n\nclass Environment\n{\n}\n");
     let shell = (
         "src/Lib/Shell.php",
@@ -9545,7 +10058,7 @@ fn a_sharp_prelude_class_that_shares_its_short_name_is_named_by_its_full_name() 
     let sharp = "namespace App.Jobs;\n\nimport App.Ops.Environment;\nimport Lib.Shell;\n\nclass Job\n{\n    public Environment current(Shell shell) => shell.environment();\n}\n";
     let php = "<?php\n\nnamespace App\\Jobs;\n\nuse App\\Ops\\Environment;\nuse Lib\\Shell;\n\nclass Job\n{\n    public function current(Shell $shell): Environment\n    {\n        return $shell->environment();\n    }\n}\n";
     let returned = |analyzed| -> Vec<String> {
-        worded(analyzed, &[environment, shell])
+        worded(analyzed, &[environment, shell, ENVIRONMENT])
             .into_iter()
             .filter(|line| line.contains(" invalid-return-statement "))
             .collect()
@@ -10236,6 +10749,83 @@ fn an_extern_of_a_plain_php_class_is_accepted() {
     assert_eq!(issues(stub, &[STRIPE]), Vec::<String>::new());
 }
 
+/// A project declares its own effect as a `foreign` class, spec section 29, and every `uses` takes it: an `extern`'s,
+/// a function type's, written in a file that imports the class, and an interface method's in the class's namespace. A
+/// plain class of that name is no effect.
+#[test]
+fn a_uses_takes_a_foreign_class_and_refuses_any_other_class() {
+    let foreign = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic foreign class Payments\n{\n}\n");
+    let plain = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic class Payments\n{\n}\n");
+    let extern_ = (
+        "app/Stubs/Stripe.sharp",
+        "namespace App.Stubs;\n\nimport App.Billing.Payments;\nimport Stripe.StripeClient;\n\nextern StripeClient uses Payments;\n",
+    );
+    let function_type = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public int pay(Function<int() uses Payments> charge) => charge();\n}\n",
+    );
+
+    let method = (
+        "app/Billing/Gateway.sharp",
+        "namespace App.Billing;\n\npublic interface Gateway\n{\n    int charge(int cents) uses Payments;\n}\n",
+    );
+
+    for (form, refused) in
+        [(extern_, "6:26 invalid-effect"), (function_type, "7:40 invalid-effect"), (method, "5:32 invalid-effect")]
+    {
+        assert_eq!(issues(form, &[foreign, STRIPE]), Vec::<String>::new(), "{}", form.0);
+        assert_eq!(issues(form, &[plain, STRIPE]), [refused], "{}", form.0);
+    }
+}
+
+/// Spec section 29: a method names a function parameter in `uses`, with or without a body, as
+/// `charge(…) uses prepare => …` and `apply(Function<int(int)> f) uses f;` do. That name is no effect, so the effect
+/// check passes it, and a caller has no effect of that name.
+#[test]
+fn a_method_with_a_body_names_a_function_parameter_in_uses() {
+    let checkout = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\npublic class Checkout\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
+    );
+
+    assert_eq!(issues(checkout, &[]), Vec::<String>::new());
+
+    let doubler = (
+        "app/Shop/Doubler.sharp",
+        "namespace App.Shop;\n\npublic class Doubler\n{\n    public Doubler(private Mapper mapper) { }\n\n    public int twice => this.mapper.apply(x => x * 2);\n}\n",
+    );
+    for declaration in [
+        "namespace App.Shop;\n\npublic interface Mapper\n{\n    int apply(Function<int(int)> f) uses f;\n}\n",
+        "namespace App.Shop;\n\npublic abstract class Mapper\n{\n    public abstract int apply(Function<int(int)>? f) uses f;\n}\n",
+    ] {
+        let mapper = ("app/Shop/Mapper.sharp", declaration);
+
+        assert_eq!(issues(mapper, &[doubler]), Vec::<String>::new(), "{declaration}");
+        assert_eq!(effect_issues(&[doubler, mapper]), Vec::<String>::new(), "{declaration}");
+    }
+}
+
+/// A name in `uses` that is no effect is refused with the effects its file can name: the named standard effects in the
+/// spec's order, then each `foreign` class of the standard library, of the file's namespace and of its imports, then
+/// `Events`. A `foreign` class the file cannot name stays out, so the message changes only with what the file reads.
+#[test]
+fn a_uses_that_names_no_effect_lists_the_effects_its_file_can_name() {
+    let payments = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic foreign class Payments\n{\n}\n");
+    let ledger = ("app/Books/Ledger.sharp", "namespace App.Books;\n\npublic foreign class Ledger\n{\n}\n");
+    let audit = ("app/Audit/Trail.sharp", "namespace App.Audit;\n\npublic foreign class Trail\n{\n}\n");
+    let gateway = (
+        "app/Billing/Gateway.sharp",
+        "namespace App.Billing;\n\nimport App.Books.Ledger;\n\npublic interface Gateway\n{\n    int charge(int cents) uses Clok;\n\n    int keep(Ledger ledger);\n}\n",
+    );
+
+    assert_eq!(
+        worded(gateway, &[payments, ledger, audit, ENVIRONMENT]),
+        [
+            "7:32 invalid-effect `Clok` is not an effect: `uses` takes Database, Http, Files, Console, Process, Clock, Random, Cache, Mail, Environment, Ledger, Payments, Events or a `foreign` class. | Written here. | An effect is a standard effect, a `foreign` class, or `Events`, the effect of `emit`."
+        ]
+    );
+}
+
 /// An `extern event` gives the plain PHP class it marks the effects its `uses` lists, spec section 15, as an `extern`
 /// of the class does, so creating the event has them.
 #[test]
@@ -10375,9 +10965,8 @@ fn an_on_clause_lists_events_or_interfaces_an_event_implements() {
     );
 }
 
-/// Spec section 15: a listener runs on an object the container creates, so it is not `static`, and its class-like is a
-/// class that is not abstract and whose constructor is public. It returns nothing. Until spec section 32's container
-/// exists, the object is created with no arguments, so a class whose constructor takes parameters is not supported yet.
+/// Spec section 15: a listener runs on an object PHP# creates, so it is not `static`, and its class-like is a class
+/// that is not abstract and whose constructor is public. It returns nothing.
 #[test]
 fn a_listener_is_an_instance_method_returning_nothing_in_a_class_the_container_creates() {
     let fixed = (
@@ -10402,10 +10991,6 @@ fn a_listener_is_an_instance_method_returning_nothing_in_a_class_the_container_c
     );
     let interface =
         ("app/Shop/Tick.sharp", "namespace App.Shop;\n\npublic interface Tick\n{\n    void tick() on OrderPaid;\n}\n");
-    let constructed = (
-        "app/Shop/Tick.sharp",
-        "namespace App.Shop;\n\npublic class Tick\n{\n    public Tick(public Logger logger { get; }) { }\n\n    public void tick() on OrderPaid { }\n}\n",
-    );
     let opened = (
         "app/Shop/Tick.sharp",
         "namespace App.Shop;\n\npublic class Tick\n{\n    public Tick() { }\n\n    public void tick() on OrderPaid { }\n}\n",
@@ -10459,12 +11044,41 @@ fn a_listener_is_an_instance_method_returning_nothing_in_a_class_the_container_c
             "5:17 invalid-event `Tick` is an interface, so the container cannot create it to run `tick`. | `tick` listens here."
         ]
     );
-    assert_eq!(
-        worded(constructed, &listened()),
-        [
-            "7:24 invalid-event A listener whose class takes constructor parameters is not supported yet in PHP#. | `tick` listens to events. | PHP# creates `Tick` with no arguments to run its listeners."
-        ]
+}
+
+/// Spec sections 15 and 32: PHP# creates a new object of a listener's class for every event, with no binding of the
+/// class, and fills its constructor as it fills a bound class's: each parameter from a binding in the base module of
+/// the class's namespace or of a namespace above it, of any lifetime. Each row is the modules of the project and the
+/// refusals `Tick`, which takes a `Logger`, gets.
+#[test]
+fn a_listener_class_takes_services_its_namespace_modules_bind() {
+    let tick = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public Tick(private Logger logger) { }\n\n    public void tick() on OrderPaid { }\n}\n",
     );
+    let module = |path: &'static str, namespace: &str, members: &str| {
+        (path, leak(format!("namespace {namespace};\n\nimport App.Shop.Logger;\n\nmodule\n{{\n{members}\n}}\n")))
+    };
+    let missing = "5:17 missing-service `Tick` listens to `OrderPaid` and needs a `Logger`, and no module binds one: the container can't build `Tick`. | Bind `Logger` in a module of `Tick`'s namespace or one above it, as in `transient Logger = Logger;`.";
+
+    for (modules, expected) in [
+        (vec![], vec![missing]),
+        (vec![module("app/Shop/Module.sharp", "App.Shop", "    transient Logger = Logger;")], vec![]),
+        (vec![module("app/Shop/Module.sharp", "App.Shop", "    scoped Logger = Logger;")], vec![]),
+        (vec![module("app/Module.sharp", "App", "    singleton Logger = Logger;")], vec![]),
+        (vec![module("app/Mail/Module.sharp", "App.Mail", "    singleton Logger = Logger;")], vec![missing]),
+    ] {
+        let files: Vec<_> = listened().into_iter().chain(modules.iter().copied()).collect();
+        let refused: Vec<_> =
+            refusals(tick, &files).into_iter().filter(|refusal| refusal.contains(" missing-service ")).collect();
+        assert_eq!(refused, expected, "{modules:?}");
+    }
+
+    let fixed = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    assert_eq!(refusals(fixed, &listened()), Vec::<String>::new());
 }
 
 const LABEL: (&str, &str) = (
@@ -10581,6 +11195,103 @@ fn a_getter_calling_a_property_holding_a_function_type_passes() {
 const FETCH: (&str, &str) = ("src/fetch.php", "<?php\n\nfunction fetch(int $id): int\n{\n    return $id;\n}\n");
 
 const FETCH_STUB: (&str, &str) = ("app/Stubs/Fetch.sharp", "namespace App.Stubs;\n\nextern global.fetch uses Http;\n");
+
+/// Spec section 29: a method without a body is pure unless it says `uses`, and every implementation is held to what
+/// the declaration allows, an interface's or an abstract class's. The refusal is at the call that has the effect.
+#[test]
+fn an_implementation_has_only_the_effects_its_declaration_allows() {
+    let implementation = (
+        "app/Shop/LiveRates.sharp",
+        "namespace App.Shop;\n\npublic class LiveRates : Rates\n{\n    public int rate(int id) => global.fetch(id);\n}\n",
+    );
+    let refused = "app/Shop/LiveRates.sharp:5:32 incompatible-effects: `LiveRates.rate` calls `global.fetch`, which has the effect `Http`, so";
+
+    for (declaration, allowed) in [
+        ("namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id);\n}\n", None),
+        ("namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id) uses Mail;\n}\n", None),
+        ("namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id) uses Mail, Http;\n}\n", Some(())),
+        ("namespace App.Shop;\n\npublic abstract class Rates\n{\n    public abstract int rate(int id);\n}\n", None),
+    ] {
+        let rates = ("app/Shop/Rates.sharp", declaration);
+        let issues = effect_issues(&[implementation, rates, FETCH, FETCH_STUB]);
+
+        match allowed {
+            Some(()) => assert_eq!(issues, Vec::<String>::new(), "{declaration}"),
+            None => assert!(issues.len() == 1 && issues[0].starts_with(refused), "{declaration}: {issues:?}"),
+        }
+    }
+    assert_eq!(
+        effect_issues(&[
+            implementation,
+            (
+                "app/Shop/Rates.sharp",
+                "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id) uses Mail;\n}\n"
+            ),
+            FETCH,
+            FETCH_STUB,
+        ]),
+        [format!("{refused} `uses Mail` on `Rates.rate` cannot accept it.")]
+    );
+    assert_eq!(
+        effect_issues(&[
+            implementation,
+            ("app/Shop/Rates.sharp", "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id);\n}\n"),
+            FETCH,
+            FETCH_STUB,
+        ]),
+        [format!("{refused} the pure `Rates.rate` cannot accept it.")]
+    );
+}
+
+/// An implementation that calls plain PHP with no `extern` is refused like a getter that does: the help names the
+/// `extern` to write, and the import its file lacks.
+#[test]
+fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write() {
+    let gauge = (
+        "app/Shop/Gauge.sharp",
+        "namespace App.Shop;\n\nimport Lib.Meter;\n\npublic class Gauge\n{\n    public Gauge(private Meter source) { }\n\n    public Meter meter() => this.source;\n}\n",
+    );
+    let rates =
+        ("app/Shop/Rates.sharp", "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id);\n}\n");
+    let implementation = (
+        "app/Shop/MeterRates.sharp",
+        "namespace App.Shop;\n\npublic class MeterRates : Rates\n{\n    public MeterRates(private Gauge gauge) { }\n\n    public int rate(int id) => this.gauge.meter().read();\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[implementation, rates, gauge, METER]),
+        [
+            "app/Shop/MeterRates.sharp:7:32 incompatible-effects: `MeterRates.rate` calls `Meter.read`, which has no `extern` declaration, so the pure `Rates.rate` cannot accept it. Help: Declare it in a .sharp file: `extern Meter.read;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
+        ]
+    );
+}
+
+/// A call of a method without a body has the effects its `uses` lists, which every implementation is held to, so a
+/// getter calling it through an interface is refused naming them.
+#[test]
+fn a_call_of_a_method_without_a_body_has_the_effects_its_uses_lists() {
+    let rates = |uses: &'static str| {
+        (
+            "app/Shop/Rates.sharp",
+            Box::leak(
+                format!("namespace App.Shop;\n\npublic interface Rates\n{{\n    int rate(int id){uses};\n}}\n")
+                    .into_boxed_str(),
+            ) as &str,
+        )
+    };
+    let quote = (
+        "app/Shop/Quote.sharp",
+        "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rates rates) { }\n\n    public int price => this.rates.rate(1);\n}\n",
+    );
+
+    assert_eq!(effect_issues(&[quote, rates("")]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[quote, rates(" uses Http")]),
+        [
+            "app/Shop/Quote.sharp:7:25 impure-getter: Getter `price` calls `Rates.rate`, which has the effect `Http`. Getters must be pure."
+        ]
+    );
+}
 
 /// Spec section 29: a call through a function value has the effects its function type lists, whether the value is a
 /// field, a parameter or a local, so a getter calling one that uses `Database` is refused and names `Database`.
@@ -10721,6 +11432,41 @@ fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_i
     );
 }
 
+/// A method value of a method without a body has the effects its `uses` lists, as a call of it does, so a function
+/// type holds it only when it lists them.
+#[test]
+fn a_method_value_of_a_method_without_a_body_is_held_to_its_uses() {
+    let rates = (
+        "app/Shop/Rates.sharp",
+        "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id) uses Http;\n\n    int fixed(int id);\n}\n",
+    );
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Rates rates) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.rates.rate) + Pricing.apply(this.rates.fixed);\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[rates]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, rates]),
+        [
+            "app/Shop/Pricing.sharp:9:39 invalid-argument: `Rates.rate` has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+        ]
+    );
+}
+
+/// A method value of a standard library method the prelude declares, as `List.wrap`, has no effect, so a pure function
+/// type holds it.
+#[test]
+fn a_method_value_of_a_prelude_method_is_pure() {
+    let shelf = (
+        "app/Shop/Shelf.sharp",
+        "namespace App.Shop;\n\npublic class Shelf\n{\n    public static List<Any?> make(Function<List<Any?>(Any?)> wrap) => wrap(1);\n\n    public List<Any?> run() => Shelf.make(List.wrap);\n}\n",
+    );
+
+    assert_eq!(issues(shelf, &[]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[shelf]), Vec::<String>::new());
+}
+
 /// A conditional may give either branch, so each lambda in it is held to the place's function type, whichever branch
 /// holds it and whatever the other branch holds.
 #[test]
@@ -10774,7 +11520,7 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect(
             "app/Stubs/Facade.sharp",
             leak(format!("namespace App.Stubs;\n\nimport Lib.{name};\n\nextern {name} uses {name};\n")),
         );
-        let files = [checkout, services, facade, client_stub, facade_stub];
+        let files = [checkout, services, facade, client_stub, facade_stub, ENVIRONMENT];
 
         assert_eq!(issues(checkout, &files[1..]), Vec::<String>::new(), "{name}");
         assert_eq!(
@@ -10812,7 +11558,7 @@ const SERVICES_STUB: (&str, &str) = (
 
 /// A plain PHP method value runs the method, so a function type holds it only when it lists every effect the method's
 /// `extern` declares, as a call of the method has them. A method with no `extern` has an unknown effect, and a method
-/// of `Sharp\Environment` has the effect `Environment`.
+/// of the `foreign` class `Sharp\Environment` has the effect `Environment`.
 #[test]
 fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
     let pricing = (
@@ -10820,9 +11566,9 @@ fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
         "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\nimport Sharp.Environment;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store, private Environment environment) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static string? read(Function<string?(string)> lookup) => lookup(\"HOME\");\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n\n    public string? home() => Pricing.read(this.environment.variable);\n}\n",
     );
 
-    assert_eq!(issues(pricing, &[SERVICES, SERVICES_STUB]), Vec::<String>::new());
+    assert_eq!(issues(pricing, &[SERVICES, SERVICES_STUB, ENVIRONMENT]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[pricing, SERVICES, SERVICES_STUB]),
+        effect_issues(&[pricing, SERVICES, SERVICES_STUB, ENVIRONMENT]),
         [
             "app/Shop/Pricing.sharp:16:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
             "app/Shop/Pricing.sharp:16:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int)>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`.",
@@ -11132,11 +11878,223 @@ fn a_getter_reading_the_environment_is_refused_with_the_effect_environment() {
     );
 
     assert_eq!(
-        effect_issues(&[deploy]),
+        effect_issues(&[deploy, ENVIRONMENT]),
         [
             "app/Ops/Deploy.sharp:7:29 impure-getter: Getter `region` calls `Environment.variable`, which has the effect `Environment`. Getters must be pure."
         ]
     );
+}
+
+/// Spec section 29 lists `require` among `Environment`'s instance members, so a call reads the environment only
+/// through an `Environment` object, never through the class.
+#[test]
+fn environment_require_is_called_on_an_environment_object() {
+    let deploy = (
+        "app/Ops/Deploy.sharp",
+        "namespace App.Ops;\n\npublic class Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string key() => this.environment.require(\"APP_KEY\");\n\n    public string staticKey() => Environment.require(\"APP_KEY\");\n}\n",
+    );
+
+    assert_eq!(issues(deploy, &[ENVIRONMENT]), ["9:46 invalid-static-method-access", "9:34 mixed-return-statement"]);
+}
+
+/// Spec section 29: code has a `foreign` class's effect by holding one of its objects, so a getter that calls or reads
+/// through a field or a constructor parameter of a project's `foreign` class is refused, naming the class.
+#[test]
+fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
+    let payments = (
+        "app/Billing/Payments.sharp",
+        "namespace App.Billing;\n\npublic foreign class Payments\n{\n    public int fee = 30;\n\n    public int charge(int cents) => cents;\n}\n",
+    );
+    let field = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    private Payments payments;\n\n    public Checkout(Payments payments)\n    {\n        this.payments = payments;\n    }\n\n    public int total => this.payments.charge(100);\n}\n",
+    );
+    let parameter = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.charge(100);\n}\n",
+    );
+    let read = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.fee;\n}\n",
+    );
+    let named_at_run_time = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.{\"fee\"};\n}\n",
+    );
+
+    for (form, refused) in [
+        (
+            field,
+            "app/Shop/Checkout.sharp:14:25 impure-getter: Getter `total` calls `Payments.charge`, which has the effect `Payments`. Getters must be pure.",
+        ),
+        (
+            parameter,
+            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Payments.charge`, which has the effect `Payments`. Getters must be pure.",
+        ),
+        (
+            read,
+            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Payments.fee`, which has the effect `Payments`. Getters must be pure.",
+        ),
+        (
+            named_at_run_time,
+            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Payments`, which has the effect `Payments`. Getters must be pure.",
+        ),
+    ] {
+        assert_eq!(effect_issues(&[form, payments]), [refused], "{}", form.1);
+    }
+
+    // A subclass of a `foreign` class is that class's object, so it has that class's effect.
+    let gateway = (
+        "app/Billing/Gateway.sharp",
+        "namespace App.Billing;\n\npublic abstract foreign class Gateway\n{\n    public virtual int fee() => 1;\n}\n",
+    );
+    let stripe = (
+        "app/Billing/Stripe.sharp",
+        "namespace App.Billing;\n\npublic class Stripe : Gateway\n{\n    public override int fee() => 2;\n}\n",
+    );
+    let subclass = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Stripe;\n\npublic class Checkout\n{\n    public Checkout(private Stripe stripe) { }\n\n    public int total => this.stripe.fee();\n}\n",
+    );
+    assert_eq!(
+        effect_issues(&[subclass, gateway, stripe]),
+        [
+            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Stripe.fee`, which has the effect `Gateway`. Getters must be pure."
+        ]
+    );
+}
+
+/// Spec section 29: code that reaches a `foreign` object has its class's effect, whatever its members do, so each
+/// member of a `foreign` class has that effect too. A pure interface method refuses a `foreign` implementation, and a
+/// call through an interface or a base class has the effect of its `foreign` implementation.
+#[test]
+fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class() {
+    let store = |uses: &'static str| {
+        (
+            "app/Cache/Store.sharp",
+            Box::leak(
+                format!("namespace App.Cache;\n\npublic interface Store\n{{\n    int size(){uses};\n}}\n")
+                    .into_boxed_str(),
+            ) as &str,
+        )
+    };
+    let quiet = (
+        "app/Cache/QuietStore.sharp",
+        "namespace App.Cache;\n\npublic foreign class QuietStore : Store\n{\n    public int size() => 3;\n}\n",
+    );
+    let quiet_reader = (
+        "app/Cache/QuietReader.sharp",
+        "namespace App.Cache;\n\npublic class QuietReader\n{\n    public QuietReader(private Store store) { }\n\n    public int count => this.store.size();\n\n    public Function<int()> counter() => () => this.store.size();\n}\n",
+    );
+    let plain = (
+        "app/Cache/Plain.sharp",
+        "namespace App.Cache;\n\npublic abstract class Plain\n{\n    public virtual int size() => 1;\n}\n",
+    );
+    let sneaky = (
+        "app/Cache/Sneaky.sharp",
+        "namespace App.Cache;\n\npublic foreign class Sneaky : Plain\n{\n    public override int size() => 2;\n}\n",
+    );
+    let plain_reader = (
+        "app/Cache/PlainReader.sharp",
+        "namespace App.Cache;\n\npublic class PlainReader\n{\n    public PlainReader(private Plain plain) { }\n\n    public int count => this.plain.size();\n\n    public Function<int()> counter() => () => this.plain.size();\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[quiet, store(""), quiet_reader]),
+        [
+            "app/Cache/QuietStore.sharp:5:26 incompatible-effects: `QuietStore.size` is a member of the `foreign` class `QuietStore`, so the pure `Store.size` cannot accept it."
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[quiet, store(" uses QuietStore"), quiet_reader]),
+        [
+            "app/Cache/QuietReader.sharp:7:25 impure-getter: Getter `count` calls `Store.size`, which has the effect `QuietStore`. Getters must be pure.",
+            "app/Cache/QuietReader.sharp:9:41 invalid-return-statement: This lambda calls `Store.size`, which has the effect `QuietStore`, so a `Function<int()>` cannot hold it.",
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[sneaky, plain, plain_reader]),
+        [
+            "app/Cache/PlainReader.sharp:7:25 impure-getter: Getter `count` reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`. Getters must be pure.",
+            "app/Cache/PlainReader.sharp:9:41 invalid-return-statement: This lambda reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`, so a `Function<int()>` cannot hold it.",
+        ]
+    );
+}
+
+/// Spec section 29: a `foreign` object reaches code only through constructors, so a static field holds none, alone or
+/// inside a collection. A static field written without its type holds nothing the check can name, so only the parser
+/// reports it.
+#[test]
+fn a_static_field_holding_a_foreign_object_is_refused() {
+    let store = ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore\n{\n}\n");
+    let message = "`Cache.store` is static, so it cannot hold a `RedisStore`.";
+
+    for (field, column) in [
+        ("public static RedisStore store;", 30),
+        ("public static RedisStore? store = null;", 31),
+        ("public static List<RedisStore> store = [];", 36),
+    ] {
+        let cache =
+            Box::leak(format!("namespace App.Cache;\n\npublic class Cache\n{{\n    {field}\n}}\n").into_boxed_str());
+
+        assert_eq!(
+            worded(("app/Cache/Cache.sharp", cache), &[store]),
+            [format!(
+                "5:{column} foreign-in-static {message} | A `foreign` object reaches code only through constructors, so no static holds one. | Take the `RedisStore` as a constructor parameter instead."
+            )],
+            "{field}"
+        );
+    }
+    assert_eq!(
+        worded(
+            ("app/Cache/Cache.sharp", "namespace App.Cache;\n\npublic class Cache\n{\n    public static store;\n}\n"),
+            &[store]
+        ),
+        ["5:19 parse A PHP# field needs a type, as in `private int count = 0;`. | Written here."]
+    );
+
+    let money = ("app/Cache/Money.sharp", "namespace App.Cache;\n\npublic class Money\n{\n}\n");
+    assert_eq!(
+        worded(
+            (
+                "app/Cache/Cache.sharp",
+                "namespace App.Cache;\n\npublic class Cache\n{\n    public static Money? cache = null;\n}\n"
+            ),
+            &[store, money]
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// Spec section 29: no static holds a `foreign` object, so a write of one into a static whose declared type is wider,
+/// such as `Any?`, a `List<Any>` or an interface the class implements, is refused at the value, as a changing
+/// collection method on a static is.
+#[test]
+fn a_foreign_object_written_into_a_static_is_refused() {
+    let store = ("app/Cache/Store.sharp", "namespace App.Cache;\n\npublic interface Store\n{\n}\n");
+    let redis =
+        ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore : Store\n{\n}\n");
+    let message = "foreign-in-static `Cache.loose` is static, so it cannot hold a `RedisStore`. | A `foreign` object reaches code only through constructors, so no static holds one. | Take the `RedisStore` as a constructor parameter instead.";
+
+    for (field, write, column) in [
+        ("public static Any? loose = null;", "Cache.loose = this.store;", 40),
+        ("public static List<Any> loose = [];", "Cache.loose = [this.store];", 40),
+        ("public static Store? loose = null;", "Cache.loose = this.store;", 40),
+        ("public static List<Any> loose = [];", "Cache.loose.add(this.store);", 42),
+    ] {
+        let cache = Box::leak(
+            format!(
+                "namespace App.Cache;\n\npublic class Cache\n{{\n    {field}\n\n    public Cache(private RedisStore store) {{ }}\n\n    public void keep() {{ {write} }}\n}}\n"
+            )
+            .into_boxed_str(),
+        );
+
+        assert_eq!(
+            worded(("app/Cache/Cache.sharp", cache), &[store, redis]),
+            [format!("9:{column} {message}")],
+            "{write}"
+        );
+    }
 }
 
 /// Two methods that call each other form one strongly connected part, which the solve iterates to a fixpoint instead
@@ -12006,4 +12964,423 @@ fn emit_has_the_effect_events() {
             "app/Shop/Checkout.sharp:7:39 invalid-property-default-value: This lambda emits `OrderPaid`, which has the effect `Events`, so a `Function<void()>` cannot hold it.",
         ]
     );
+}
+
+/// The services spec section 32's examples bind: two interfaces, their classes, a class that takes a `Mailer`, and
+/// classes a binding expression takes.
+const BOUND_SERVICES: [(&str, &str); 11] = [
+    ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
+    ("app/Mail/SmtpMailer.sharp", "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n"),
+    ("app/Mail/QueueMailer.sharp", "namespace App.Mail;\n\npublic class QueueMailer : Mailer\n{\n}\n"),
+    ("app/Pricing/PriceRule.sharp", "namespace App.Pricing;\n\npublic interface PriceRule\n{\n}\n"),
+    ("app/Pricing/TaxRule.sharp", "namespace App.Pricing;\n\npublic class TaxRule : PriceRule\n{\n}\n"),
+    ("app/Pricing/DiscountRule.sharp", "namespace App.Pricing;\n\npublic class DiscountRule : PriceRule\n{\n}\n"),
+    (
+        "app/Cache/RedisStore.sharp",
+        "namespace App.Cache;\n\npublic class RedisStore\n{\n    public RedisStore(private string url) { }\n}\n",
+    ),
+    ("app/Config.sharp", "namespace App;\n\npublic class Config\n{\n    public string url => \"redis://\";\n}\n"),
+    (
+        "app/Flags.sharp",
+        "namespace App;\n\npublic class Flags\n{\n    public bool enabled(string name) => name == \"queue\";\n}\n",
+    ),
+    (
+        "app/Shop/SendReceipt.sharp",
+        "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic class SendReceipt\n{\n    public SendReceipt(private Mailer mailer) { }\n}\n",
+    ),
+    (
+        "app/Shop/Cart.sharp",
+        "namespace App.Shop;\n\nimport App.Pricing.PriceRule;\n\npublic class Cart\n{\n    public Cart(private List<PriceRule> rules) { }\n}\n",
+    ),
+];
+
+/// `app/Shop/Module.sharp` binding `members`, with the imports the binding rows use.
+fn shop_module(members: &str) -> (&'static str, &'static str) {
+    (
+        "app/Shop/Module.sharp",
+        leak(format!(
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Mail.QueueMailer;\nimport App.Pricing.PriceRule;\nimport App.Pricing.TaxRule;\nimport App.Pricing.DiscountRule;\nimport App.Cache.RedisStore;\nimport App.Config;\nimport App.Flags;\n\nmodule\n{{\n{members}\n}}\n"
+        )),
+    )
+}
+
+/// Spec section 32: a binding's value is a class the container can build that is its service, a list of such classes
+/// for a `List` service, or one expression over its parameters whose value is its service, so an interface, an abstract
+/// class and an enum are refused. Each row is a module's bindings, from line 15, and the refusals they get.
+#[test]
+fn a_binding_gives_its_service_a_class_a_list_of_classes_or_one_expression_of_that_service() {
+    let base_mailer = (
+        "app/Shop/BaseMailer.sharp",
+        "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic abstract class BaseMailer : Mailer\n{\n}\n",
+    );
+    let channel = ("app/Shop/Channel.sharp", "namespace App.Shop;\n\npublic enum Channel\n{\n    case Mail;\n}\n");
+    let files: Vec<_> = BOUND_SERVICES.iter().copied().chain([base_mailer, channel]).collect();
+
+    for (members, expected) in [
+        (
+            "    singleton Mailer = SmtpMailer;\n    singleton Mailer for SendReceipt = QueueMailer;\n    singleton List<PriceRule> = [TaxRule, DiscountRule];\n    singleton RedisStore(Config config) = new RedisStore(config.url);\n    scoped QueueMailer = QueueMailer;\n    transient SmtpMailer = SmtpMailer;\n    singleton Config = Config;",
+            vec![],
+        ),
+        (
+            "    singleton Mailer = TaxRule;",
+            vec!["15:24 invalid-binding `TaxRule` is not a `Mailer`. | Bind `Mailer` to a class that implements it."],
+        ),
+        (
+            "    singleton Mailer = Mailer;",
+            vec![
+                "15:24 invalid-binding `Mailer` is an interface, so the container can't build it. | Bind `Mailer` to a class that the container can build.",
+            ],
+        ),
+        (
+            "    singleton Mailer = BaseMailer;",
+            vec![
+                "15:24 invalid-binding `BaseMailer` is an abstract class, so the container can't build it. | Bind `Mailer` to a class that the container can build.",
+            ],
+        ),
+        (
+            "    singleton Channel = Channel;",
+            vec![
+                "15:25 invalid-binding `Channel` is an enum, so the container can't build it. | Bind `Channel` to a class that the container can build.",
+            ],
+        ),
+        (
+            "    singleton Mailer = [SmtpMailer];",
+            vec![
+                "15:24 invalid-binding A list of classes binds a `List` service, and `Mailer` is no `List`. | Bind the service to one class, or bind a `List` of it.",
+            ],
+        ),
+        (
+            "    singleton List<PriceRule> = [TaxRule, SmtpMailer];",
+            vec![
+                "15:43 invalid-binding `SmtpMailer` is not a `PriceRule`. | Bind `PriceRule` to a class that implements it.",
+            ],
+        ),
+        (
+            "    singleton Mailer = new TaxRule();",
+            vec![
+                "15:24 invalid-return-statement Invalid return type for binding `Mailer`: expected `Mailer`, but found `TaxRule`. | A binding's value is the service it binds, so it must be a `Mailer`.",
+            ],
+        ),
+        (
+            "    singleton Mailer = Missing;",
+            vec![
+                "15:24 non-existent-class-like Cannot find type `Missing`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            ],
+        ),
+        (
+            "    singleton Missing = SmtpMailer;",
+            vec![
+                "15:15 non-existent-class-like Cannot find type `Missing`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            ],
+        ),
+        (
+            "    singleton Mailer for Missing = SmtpMailer;",
+            vec![
+                "15:26 non-existent-class-like Cannot find type `Missing`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            ],
+        ),
+        (
+            "    singleton Mailer = SmtpMailer;\n    singleton Mailer = QueueMailer;",
+            vec!["16:5 invalid-binding This module already binds `Mailer`: bind each service once. | "],
+        ),
+        (
+            "    singleton Mailer for SendReceipt = SmtpMailer;\n    singleton Mailer for SendReceipt = QueueMailer;",
+            vec![
+                "16:5 invalid-binding This module already binds `Mailer` for `SendReceipt`: bind each service once. | ",
+            ],
+        ),
+    ] {
+        let module = shop_module(members);
+        assert_eq!(refusals(module, &files), expected, "{members}");
+    }
+}
+
+/// Spec section 32: PHP# creates only the classes a module binds, so every parameter of a bound class's main
+/// constructor and of a binding's expression needs a binding, in the module of its namespace or of a namespace above
+/// it, the nearest one winning and a binding `for` the class before any other. A bound class's parameters resolve from
+/// its own namespace, and a binding's from its module's. The standard library's module binds
+/// `Environment` for every namespace. A class no module binds is ordinary code, checked by nothing here. Each row is
+/// the other modules of the project, `App.Shop`'s bindings from line 13, and the refusals they get.
+#[test]
+fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
+    let margin_rule = (
+        "app/Pricing/MarginRule.sharp",
+        "namespace App.Pricing;\n\nimport App.Flags;\n\npublic class MarginRule : PriceRule\n{\n    public MarginRule(private Flags flags) { }\n}\n",
+    );
+    let library = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Module.sharp",
+        "namespace Sharp;\n\nmodule\n{\n    singleton Environment = Environment;\n}\n",
+    );
+    let module = |path: &'static str, namespace: &str, members: &str| {
+        (
+            path,
+            leak(format!(
+                "namespace {namespace};\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Pricing.PriceRule;\nimport App.Pricing.TaxRule;\nimport App.Pricing.MarginRule;\nimport App.Cache.RedisStore;\nimport App.Flags;\n\nmodule\n{{\n{members}\n}}\n"
+            )),
+        )
+    };
+    let parent = module("app/Module.sharp", "App", "    singleton Mailer = SmtpMailer;");
+    let sibling = module("app/Mail/Module.sharp", "App.Mail", "    singleton Mailer = SmtpMailer;");
+    let app_flags = module("app/Module.sharp", "App", "    transient Flags = Flags;");
+    // A plain PHP class a module binds, whose constructor takes a parameter with no type.
+    let legacy = (
+        "app/Shop/LegacyMailer.php",
+        "<?php\n\nnamespace App\\Shop;\n\nuse App\\Mail\\Mailer;\n\nfinal class LegacyMailer implements Mailer\n{\n    public function __construct($dsn) { }\n}\n",
+    );
+    // A price rule that takes a value no binding gives, bound in a list beside one that takes nothing.
+    let coupon = (
+        "app/Shop/CouponRule.sharp",
+        "namespace App.Shop;\n\nimport App.Pricing.PriceRule;\n\npublic class CouponRule : PriceRule\n{\n    public CouponRule(private string code) { }\n}\n",
+    );
+    let untyped = "13:24 missing-service `LegacyMailer` takes `dsn` with no type, which no binding can give: the container can't build `LegacyMailer`. | Bind `Mailer` to an expression that creates it, as in `singleton Mailer(…) = new LegacyMailer(…);`.";
+    let code = "13:43 missing-service `CouponRule` takes a `string`, which no binding can give: the container can't build `CouponRule`. | Bind `List<PriceRule>` to an expression that creates it, as in `singleton List<PriceRule>(…) = [new TaxRule(), new CouponRule(…)];`.";
+    let mailer = |line: u32, column: u32| {
+        format!(
+            "{line}:{column} missing-service `SendReceipt` needs a `Mailer`, and no module binds one: the container can't build `SendReceipt`. | Bind `Mailer` in a module of `SendReceipt`'s namespace or one above it, as in `singleton Mailer = …;`."
+        )
+    };
+    let flags = "13:43 missing-service `MarginRule` needs a `Flags`, and no module binds one: the container can't build `MarginRule`. | Bind `Flags` in a module of `MarginRule`'s namespace or one above it, as in `transient Flags = Flags;`.";
+    let rules = "13:22 missing-service `Cart` needs a `List<PriceRule>`, and no module binds one: the container can't build `Cart`. | Bind `List<PriceRule>` in a module of `Cart`'s namespace or one above it, as in `singleton List<PriceRule> = …;`.";
+    let smtp = "13:22 missing-service `Mailer` needs a `SmtpMailer`, and no module binds one: the container can't build `Mailer`. | Bind `SmtpMailer` in a module of this namespace or one above it, as in `transient SmtpMailer = SmtpMailer;`.";
+    let environment = "13:26 missing-service `RedisStore` needs an `Environment`, and no module binds one: the container can't build `RedisStore`. | Bind `Environment` in a module of this namespace or one above it, as in `transient Environment = Environment;`.";
+    let url = "13:28 missing-service `RedisStore` takes a `string`, which no binding can give: the container can't build `RedisStore`. | Bind `RedisStore` to an expression that creates it, as in `transient RedisStore(…) = new RedisStore(…);`.";
+    let value = "13:22 missing-service `Mailer` takes a `string`, which no binding can give: the container can't build `Mailer`. | Take a service that gives the value, such as `Environment`, and read the value from it.";
+    let store =
+        "    singleton RedisStore(Environment environment) = new RedisStore(environment.require(\"REDIS_URL\"));";
+
+    for (modules, members, expected) in [
+        (vec![], "    singleton Mailer = SmtpMailer;", vec![]),
+        (vec![], "    transient SendReceipt = SendReceipt;", vec![mailer(13, 29)]),
+        (vec![], "    singleton Mailer = SmtpMailer;\n    transient SendReceipt = SendReceipt;", vec![]),
+        (vec![parent], "    transient SendReceipt = SendReceipt;", vec![]),
+        (vec![sibling], "    transient SendReceipt = SendReceipt;", vec![mailer(13, 29)]),
+        (
+            vec![],
+            "    singleton Mailer for Cart = SmtpMailer;\n    transient SendReceipt = SendReceipt;",
+            vec![mailer(14, 29)],
+        ),
+        (
+            vec![],
+            "    singleton Mailer for SendReceipt = SmtpMailer;\n    transient SendReceipt = SendReceipt;",
+            vec![],
+        ),
+        (vec![], "    transient Cart = Cart;", vec![rules.to_owned()]),
+        (vec![], "    singleton List<PriceRule> = [TaxRule, MarginRule];", vec![flags.to_owned()]),
+        (
+            vec![],
+            "    singleton List<PriceRule> = [TaxRule, MarginRule];\n    transient Flags = Flags;",
+            vec![flags.to_owned()],
+        ),
+        (vec![app_flags], "    singleton List<PriceRule> = [TaxRule, MarginRule];", vec![]),
+        (vec![], "    singleton Mailer(SmtpMailer smtp) = smtp;", vec![smtp.to_owned()]),
+        (vec![], "    singleton Mailer(SmtpMailer smtp) = smtp;\n    transient SmtpMailer = SmtpMailer;", vec![]),
+        (vec![], "    transient RedisStore = RedisStore;", vec![url.to_owned()]),
+        (vec![], "    singleton Mailer(string url) = new SmtpMailer();", vec![value.to_owned()]),
+        (vec![], store, vec![environment.to_owned()]),
+        (vec![library], store, vec![]),
+        (vec![legacy], "    singleton Mailer = LegacyMailer;", vec![untyped.to_owned()]),
+        (vec![coupon], "    singleton List<PriceRule> = [TaxRule, CouponRule];", vec![code.to_owned()]),
+    ] {
+        let shop = module("app/Shop/Module.sharp", "App.Shop", members);
+        let files: Vec<_> =
+            BOUND_SERVICES.iter().copied().chain([margin_rule, ENVIRONMENT]).chain(modules.iter().copied()).collect();
+        let refused: Vec<_> =
+            refusals(shop, &files).into_iter().filter(|refusal| refusal.contains(" missing-service ")).collect();
+        assert_eq!(refused, expected, "{modules:?}: {members}");
+    }
+
+    // The fix each "to an expression" help shows, with its arguments written, compiles with no refusal at all.
+    for (modules, fix) in [
+        (vec![library], store),
+        (vec![legacy], "    singleton Mailer = new LegacyMailer(\"smtp://localhost\");"),
+        (vec![coupon], "    singleton List<PriceRule> = [new TaxRule(), new CouponRule(\"SPRING\")];"),
+    ] {
+        let shop = module("app/Shop/Module.sharp", "App.Shop", fix);
+        let files: Vec<_> =
+            BOUND_SERVICES.iter().copied().chain([margin_rule, ENVIRONMENT]).chain(modules.iter().copied()).collect();
+        assert_eq!(refusals(shop, &files), Vec::<String>::new(), "{fix}");
+    }
+
+    let send_receipt = BOUND_SERVICES[9];
+    let others: Vec<_> = BOUND_SERVICES.iter().filter(|file| file.0 != send_receipt.0).copied().collect();
+    assert!(refusals(send_receipt, &others).iter().all(|refusal| !refusal.contains(" missing-service ")));
+}
+
+/// Spec section 32, as .NET's scope validation and Dagger's graph check refuse them: a service that needs itself, at
+/// each binding on the cycle, and a `scoped` service a `singleton` holds, directly or through `transient` services. A
+/// `singleton` that holds another `singleton` leaves that one's services to its own binding, which is refused once.
+/// Each row is a module's bindings, from line 12, and the refusals they get.
+#[test]
+fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refused() {
+    let looping = (
+        "app/Mail/LoopMailer.sharp",
+        "namespace App.Mail;\n\npublic class LoopMailer : Mailer\n{\n    public LoopMailer(private Mailer inner) { }\n}\n",
+    );
+    let flagged = (
+        "app/Mail/FlaggedMailer.sharp",
+        "namespace App.Mail;\n\nimport App.Flags;\n\npublic class FlaggedMailer : Mailer\n{\n    public FlaggedMailer(private Flags flags) { }\n}\n",
+    );
+    let wrapper = (
+        "app/Mail/Wrapper.sharp",
+        "namespace App.Mail;\n\npublic class Wrapper : Mailer\n{\n    public Wrapper(private FlaggedMailer flagged) { }\n}\n",
+    );
+    // A class that needs the service it is bound to twice, so the walk reaches its binding again after the cycle. It
+    // sits in `App`, the module's own namespace, so the module needs no import of it.
+    let twice = (
+        "app/TwiceMailer.sharp",
+        "namespace App;\n\nimport App.Mail.Mailer;\n\npublic class TwiceMailer : Mailer\n{\n    public TwiceMailer(private Mailer first, private Mailer second) { }\n}\n",
+    );
+    let others: Vec<_> = BOUND_SERVICES.iter().copied().chain([looping, flagged, wrapper, twice]).collect();
+    let twice_cycle = "12:5 service-cycle `Mailer` needs itself through `TwiceMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+    let cycle = "12:5 service-cycle `Mailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+    let captive = |line: u32| {
+        format!(
+            "{line}:5 captive-service The singleton `Mailer` holds the scoped `Flags`, which would outlive the scope it belongs to. | Make `Mailer` scoped too, or make `Flags` a singleton."
+        )
+    };
+
+    let through = "13:5 service-cycle `Mailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+    let looped = "12:5 service-cycle `LoopMailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+    let inner = "13:5 captive-service The singleton `FlaggedMailer` holds the scoped `Flags`, which would outlive the scope it belongs to. | Make `FlaggedMailer` scoped too, or make `Flags` a singleton.";
+
+    for (members, expected) in [
+        ("    singleton Mailer = LoopMailer;", vec![cycle.to_owned()]),
+        ("    singleton Mailer = TwiceMailer;", vec![twice_cycle.to_owned()]),
+        (
+            "    transient LoopMailer = LoopMailer;\n    transient Mailer(LoopMailer loop) = loop;",
+            vec![looped.to_owned(), through.to_owned()],
+        ),
+        ("    singleton Mailer = SmtpMailer;\n    singleton LoopMailer = LoopMailer;", vec![]),
+        (
+            "    scoped Flags = Flags;\n    singleton Mailer(Flags flags, SmtpMailer smtp) = smtp;\n    transient SmtpMailer = SmtpMailer;",
+            vec![captive(13)],
+        ),
+        ("    scoped Flags = Flags;\n    singleton Mailer = FlaggedMailer;", vec![captive(13)]),
+        (
+            "    scoped Flags = Flags;\n    singleton Mailer = Wrapper;\n    transient FlaggedMailer = FlaggedMailer;",
+            vec![captive(13)],
+        ),
+        (
+            "    scoped Flags = Flags;\n    scoped Mailer = Wrapper;\n    transient FlaggedMailer = FlaggedMailer;",
+            vec![],
+        ),
+        (
+            "    singleton Flags = Flags;\n    singleton Mailer = Wrapper;\n    transient FlaggedMailer = FlaggedMailer;",
+            vec![],
+        ),
+        (
+            "    scoped Flags = Flags;\n    singleton FlaggedMailer = FlaggedMailer;\n    singleton Mailer = Wrapper;",
+            vec![inner.to_owned()],
+        ),
+    ] {
+        // The module of `App` serves the classes of `App.Mail` and `App.Shop` below it.
+        let module = (
+            "app/Module.sharp",
+            leak(format!(
+                "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Mail.LoopMailer;\nimport App.Mail.FlaggedMailer;\nimport App.Mail.Wrapper;\nimport App.Flags;\n\nmodule\n{{\n{members}\n}}\n"
+            )),
+        );
+        assert_eq!(refusals(module, &others), expected, "{members}");
+    }
+}
+
+/// Spec section 32: an environment or test module overrides the base modules' bindings, so the services it changes
+/// are checked with the base bindings that reach them, and a problem it causes is reported at its own binding. Each
+/// row is the overriding file, its bindings from line 10, and the refusals it gets over a base module that binds
+/// `singleton Mailer = Wrapper;`, `singleton Flags = Flags;` and `transient FlaggedMailer = FlaggedMailer;`.
+#[test]
+fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() {
+    let looping = (
+        "app/Mail/LoopMailer.sharp",
+        "namespace App.Mail;\n\npublic class LoopMailer : Mailer\n{\n    public LoopMailer(private Mailer inner) { }\n}\n",
+    );
+    let flagged = (
+        "app/Mail/FlaggedMailer.sharp",
+        "namespace App.Mail;\n\nimport App.Flags;\n\npublic class FlaggedMailer : Mailer\n{\n    public FlaggedMailer(private Flags flags) { }\n}\n",
+    );
+    let wrapper = (
+        "app/Mail/Wrapper.sharp",
+        "namespace App.Mail;\n\npublic class Wrapper : Mailer\n{\n    public Wrapper(private FlaggedMailer flagged) { }\n}\n",
+    );
+    let base = (
+        "app/Module.sharp",
+        "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.Wrapper;\nimport App.Mail.FlaggedMailer;\n\nmodule\n{\n    singleton Mailer = Wrapper;\n    singleton Flags = Flags;\n    transient FlaggedMailer = FlaggedMailer;\n}\n",
+    );
+    let others: Vec<_> = BOUND_SERVICES.iter().copied().chain([looping, flagged, wrapper, base]).collect();
+    let captive = "10:5 captive-service The singleton `Mailer` holds the scoped `Flags`, which would outlive the scope it belongs to. | Make `Mailer` scoped too, or make `Flags` a singleton.";
+    let cycle = "10:5 service-cycle `Mailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+
+    for (path, members, expected) in [
+        ("app/Module.Production.sharp", "    singleton Flags = Flags;", vec![]),
+        ("app/Module.Production.sharp", "    scoped Flags = Flags;", vec![captive]),
+        ("app/Module.Production.sharp", "    scoped Flags = Flags;\n    transient Mailer = SmtpMailer;", vec![]),
+        ("app/Module.Production.sharp", "    transient Mailer = LoopMailer;", vec![cycle]),
+        ("tests/Mail/WrapperTest.sharp", "    scoped Flags = Flags;", vec![captive]),
+    ] {
+        let module = (
+            path,
+            leak(format!(
+                "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Mail.LoopMailer;\n\n\nmodule : App\n{{\n{members}\n}}\n"
+            )),
+        );
+        assert_eq!(refusals(module, &others), expected, "{path}: {members}");
+    }
+
+    // The container applies every `Module.<SHARP_ENV>.sharp` on a class's folders at once, so an environment is
+    // checked as one set: the base modules under all of its modules. `QueueMailer` in `App.Mail` takes a `Queue`, and
+    // `MailQueue` takes a `Mailer`. Each row is the base modules, the environment's modules, and the refusals each
+    // environment module gets.
+    let mail = [
+        BOUND_SERVICES[0],
+        BOUND_SERVICES[1],
+        ("app/Mail/Queue.sharp", "namespace App.Mail;\n\npublic interface Queue\n{\n}\n"),
+        ("app/Mail/MemoryQueue.sharp", "namespace App.Mail;\n\npublic class MemoryQueue : Queue\n{\n}\n"),
+        (
+            "app/Mail/MailQueue.sharp",
+            "namespace App.Mail;\n\npublic class MailQueue : Queue\n{\n    public MailQueue(private Mailer mailer) { }\n}\n",
+        ),
+        (
+            "app/Mail/QueueMailer.sharp",
+            "namespace App.Mail;\n\npublic class QueueMailer : Mailer\n{\n    public QueueMailer(private Queue queue) { }\n}\n",
+        ),
+        (
+            "app/Checkout.sharp",
+            "namespace App;\n\nimport App.Mail.Mailer;\n\npublic class Checkout\n{\n    public Checkout(private Mailer mailer) { }\n}\n",
+        ),
+    ];
+    let module = |path: &'static str, namespace: &str, header: &str, members: &str| {
+        (
+            path,
+            leak(format!(
+                "namespace {namespace};\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Mail.QueueMailer;\nimport App.Mail.Queue;\nimport App.Mail.MemoryQueue;\nimport App.Mail.MailQueue;\n\nmodule{header}\n{{\n{members}\n}}\n"
+            )),
+        )
+    };
+    let app =
+        module("app/Module.sharp", "App", "", "    singleton Mailer = SmtpMailer;\n    transient Checkout = Checkout;");
+    let mail_base = module("app/Mail/Module.sharp", "App.Mail", "", "    singleton Queue = MemoryQueue;");
+    let app_production = module("app/Module.Production.sharp", "App", " : App", "    singleton Mailer = QueueMailer;");
+    let memory_production =
+        module("app/Mail/Module.Production.sharp", "App.Mail", " : App.Mail", "    singleton Queue = MemoryQueue;");
+    let mail_production =
+        module("app/Mail/Module.Production.sharp", "App.Mail", " : App.Mail", "    singleton Queue = MailQueue;");
+    let no_queue = "12:24 missing-service `QueueMailer` needs a `Queue`, and no module binds one: the container can't build `QueueMailer`. | Bind `Queue` in a module of `QueueMailer`'s namespace or one above it, as in `singleton Queue = …;`.";
+    let mailer_cycle = "12:5 service-cycle `Mailer` needs itself through `QueueMailer`, then `MailQueue`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+    let queue_cycle = "12:5 service-cycle `Queue` needs itself through `MailQueue`, then `QueueMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+
+    for (base, environment, expected) in [
+        (vec![app], vec![app_production], vec![vec![no_queue]]),
+        (vec![app], vec![app_production, memory_production], vec![vec![], vec![]]),
+        (vec![app, mail_base], vec![app_production, mail_production], vec![vec![mailer_cycle], vec![queue_cycle]]),
+    ] {
+        for (analyzed, expected) in environment.iter().zip(expected) {
+            let others: Vec<_> = mail
+                .iter()
+                .chain(&base)
+                .chain(environment.iter().filter(|other| other.0 != analyzed.0))
+                .copied()
+                .collect();
+            assert_eq!(refusals(*analyzed, &others), expected, "{}", analyzed.0);
+        }
+    }
 }

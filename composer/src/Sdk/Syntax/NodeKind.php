@@ -72,6 +72,7 @@ enum NodeKind: string
     case On = 'On';
     case Operator = 'Operator';
     case Law = 'Law';
+    case Extension = 'Extension';
     case ConstructorInitializer = 'ConstructorInitializer';
     case NamedConstructor = 'NamedConstructor';
     case ConstructorName = 'ConstructorName';
@@ -228,7 +229,12 @@ enum NodeKind: string
     case Extern = 'Extern';
     case Uses = 'Uses';
     case Module = 'Module';
+    case ModuleParent = 'ModuleParent';
     case ModuleMember = 'ModuleMember';
+    case Binding = 'Binding';
+    case BindingTarget = 'BindingTarget';
+    case BindingValue = 'BindingValue';
+    case BindingClasses = 'BindingClasses';
     case Yield = 'Yield';
     case YieldFrom = 'YieldFrom';
     case YieldPair = 'YieldPair';

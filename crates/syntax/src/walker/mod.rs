@@ -21,6 +21,10 @@ use crate::cst::cst::AttributeList;
 use crate::cst::cst::Binary;
 use crate::cst::cst::BinaryOperator;
 use crate::cst::cst::BinaryPattern;
+use crate::cst::cst::Binding;
+use crate::cst::cst::BindingClasses;
+use crate::cst::cst::BindingTarget;
+use crate::cst::cst::BindingValue;
 use crate::cst::cst::Block;
 use crate::cst::cst::BracedExpressionStringPart;
 use crate::cst::cst::Break;
@@ -74,6 +78,7 @@ use crate::cst::cst::ExitConstruct;
 use crate::cst::cst::Expression;
 use crate::cst::cst::ExpressionStatement;
 use crate::cst::cst::Extends;
+use crate::cst::cst::Extension;
 use crate::cst::cst::Extern;
 use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
@@ -156,6 +161,7 @@ use crate::cst::cst::MixedUseItemList;
 use crate::cst::cst::Modifier;
 use crate::cst::cst::Module;
 use crate::cst::cst::ModuleMember;
+use crate::cst::cst::ModuleParent;
 use crate::cst::cst::NamedArgument;
 use crate::cst::cst::NamedConstructor;
 use crate::cst::cst::NamedPlaceholderArgument;
@@ -659,14 +665,58 @@ generate_ast_walker! {
     'arena Module as module => {
         walker.walk_keyword(&module.module, context);
 
+        if let Some(parent) = &module.parent {
+            walker.walk_module_parent(parent, context);
+        }
+
         for member in &module.members {
             walker.walk_module_member(member, context);
         }
     }
 
+    'arena ModuleParent as module_parent => {
+        walker.walk_identifier(&module_parent.name, context);
+    }
+
     'arena ModuleMember as module_member => {
         match module_member {
             ModuleMember::Law(law) => walker.walk_law(law, context),
+            ModuleMember::Binding(binding) => walker.walk_binding(binding, context),
+        }
+    }
+
+    'arena Binding as binding => {
+        walker.walk_keyword(&binding.lifetime, context);
+        walker.walk_hint(&binding.service, context);
+
+        if let Some(parameter_list) = &binding.parameter_list {
+            walker.walk_function_like_parameter_list(parameter_list, context);
+        }
+
+        if let Some(target) = &binding.target {
+            walker.walk_binding_target(target, context);
+        }
+
+        walker.walk_binding_value(&binding.value, context);
+        walker.walk_terminator(&binding.terminator, context);
+    }
+
+    'arena BindingTarget as binding_target => {
+        walker.walk_keyword(&binding_target.r#for, context);
+        walker.walk_identifier(&binding_target.class, context);
+    }
+
+    'arena BindingValue as binding_value => {
+        match binding_value {
+            BindingValue::Class(class) => walker.walk_identifier(class, context),
+            BindingValue::Classes(classes) => walker.walk_binding_classes(classes, context),
+            BindingValue::Expression(expression) => walker.walk_expression(expression, context),
+        }
+    }
+
+    'arena BindingClasses as binding_classes => {
+        for class in &binding_classes.classes {
+            walker.walk_identifier(class, context);
         }
     }
 
@@ -923,6 +973,18 @@ generate_ast_walker! {
             ClassLikeMember::NamedConstructor(named_constructor) => {
                 walker.walk_named_constructor(named_constructor, context);
             }
+            ClassLikeMember::Extension(extension) => {
+                walker.walk_extension(extension, context);
+            }
+        }
+    }
+
+    'arena Extension as extension => {
+        walker.walk_keyword(&extension.extension, context);
+        walker.walk_function_like_parameter_list(&extension.parameter_list, context);
+
+        for member in &extension.members {
+            walker.walk_class_like_member(member, context);
         }
     }
 
@@ -1294,6 +1356,10 @@ generate_ast_walker! {
 
         if let Some(on) = &method.on {
             walker.walk_on(on, context);
+        }
+
+        if let Some(uses) = &method.uses {
+            walker.walk_uses(uses, context);
         }
 
         if let Some(initializer) = &method.initializer {

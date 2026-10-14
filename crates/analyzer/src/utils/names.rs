@@ -17,7 +17,6 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
-use mago_names::STANDARD_EFFECTS;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
@@ -70,21 +69,20 @@ pub(crate) fn sharp_class_like_name(
 }
 
 /// Returns the effect `effect` as a `uses` in a `.sharp` file with the `imported_names` of its imports writes it. A
-/// standard effect is the name the file's import of it gives it, as in `Post` for `import Sharp.Mail as Post;`, or
-/// else its own name, which is that effect in every `uses` whatever class the file imports or declares under it, spec
-/// section 29. Any other effect is named as [`sharp_class_like_name`] names a class.
+/// standard effect, one of the `Sharp` namespace, is the name the file's import of it gives it, as in `Post` for
+/// `import Sharp.Mail as Post;`, or else its own name, which is that effect in every `uses` whatever class the file
+/// imports or declares under it, spec section 29. Any other effect is named as [`sharp_class_like_name`] names a class.
 pub(crate) fn sharp_effect_name(
     codebase: &CodebaseMetadata,
     imported_names: &WordMap<Word>,
     short_name_counts: &OnceCell<HashMap<String, u32>>,
     effect: Word,
 ) -> String {
-    match STANDARD_EFFECTS.iter().find(|standard| standard.as_bytes().eq_ignore_ascii_case(effect.as_bytes())) {
-        Some(standard) => imported_names
-            .get(&ascii_lowercase_word(standard.as_bytes()))
-            .map_or_else(|| short_name(standard), ToString::to_string),
-        None => sharp_class_like_name(codebase, imported_names, short_name_counts, effect),
+    if !effect.as_bytes().get(..6).is_some_and(|namespace| namespace.eq_ignore_ascii_case(b"Sharp\\")) {
+        return sharp_class_like_name(codebase, imported_names, short_name_counts, effect);
     }
+
+    imported_names.get(&ascii_lowercase_word(effect.as_bytes())).map_or_else(|| short_name(effect), ToString::to_string)
 }
 
 /// Whether another class-like of the project or its vendors has the short name of the class-like `name`, compared
@@ -227,18 +225,24 @@ fn binds_short_name(
 
 /// Whether a `.sharp` file with the `imported_names` and `scope` of its imports and namespace binds a name to the
 /// class-like `name`, as spec section 23 binds a name: by an import, under its short name or the name after `as`, by
-/// declaring it, or by sharing its namespace. A class-like directly in `Sharp` is imported by default, unless the file
-/// imports or declares another class-like of its short name.
+/// declaring it, by sharing its namespace, or by the [default import](imports_by_default) of `Sharp`.
 fn binds_class_like(imported_names: &WordMap<Word>, scope: &NamespaceScope, name: Word) -> bool {
-    let name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
-    if imported_names.contains_key(&ascii_lowercase_word(name)) {
+    let full_name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
+    if imported_names.contains_key(&ascii_lowercase_word(full_name)) {
         return true;
     }
 
-    let (bound, imported) = scope.resolve(NameKind::Default, short_name(name));
-    if bound.eq_ignore_ascii_case(name) {
-        return true;
-    }
+    let (bound, _) = scope.resolve(NameKind::Default, short_name(full_name));
+
+    bound.eq_ignore_ascii_case(full_name) || imports_by_default(scope, name)
+}
+
+/// Whether spec section 23's default import of `Sharp` binds the class-like `name` in a `.sharp` file with the `scope`
+/// of its imports and namespace: `name` is directly in `Sharp`, and the file imports or declares no other class-like
+/// of its short name.
+pub(crate) fn imports_by_default(scope: &NamespaceScope, name: Word) -> bool {
+    let name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
+    let (_, imported) = scope.resolve(NameKind::Default, short_name(name));
 
     !imported
         && name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(b"Sharp"))
@@ -252,6 +256,12 @@ where
     A: Arena,
 {
     if context.dialect.is_sharp() { word(mago_bytes::trim_start_byte(name.as_bytes(), b'$')) } else { name }
+}
+
+/// The article a message writes before `name`: "an" before a vowel, as in "an `Environment`", and "a" otherwise.
+#[must_use]
+pub(crate) fn article(name: &str) -> &'static str {
+    if name.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) { "an" } else { "a" }
 }
 
 /// Returns the variable `id` as the analyzed file writes it. The analyzer keys a variable, a parameter and a read

@@ -40,6 +40,7 @@ where
             parameter_list: self.parse_function_like_parameter_list()?,
             return_type_hint: self.parse_optional_function_like_return_type_hint()?,
             on: None,
+            uses: None,
             initializer: None,
             body: self.parse_method_body()?,
         })
@@ -53,12 +54,16 @@ where
     /// a field. A type has no length limit, so no fixed lookahead can decide before it. A PHP property, which starts
     /// with `var` or a `$` variable, still parses so the rest of the class does, and its PHP syntax is an error. So do
     /// `required` on any member but the constructor, which is one "not supported yet" error, and a type declared inside
-    /// the class-like. A class name, a `.` and a name followed by `(` is a named constructor.
+    /// the class-like. A class name, a `.` and a name followed by `(` is a named constructor. `extension(…)` with no
+    /// attribute or modifier before it is an extension, spec section 26.
     pub(crate) fn parse_sharp_member_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
     ) -> Result<ClassLikeMember<'arena>, ParseError> {
+        if attributes.is_empty() && modifiers.is_empty() && self.is_at_extension()? {
+            return self.parse_extension().map(ClassLikeMember::Extension);
+        }
         if self.stream.is_at(T!["var"])? || self.stream.is_at(T!["$variable"])? {
             return Ok(ClassLikeMember::Property(
                 self.parse_property_with_attributes_and_modifiers(attributes, modifiers)?,
@@ -111,6 +116,7 @@ where
                 parameter_list: self.parse_function_like_parameter_list()?,
                 return_type_hint: None,
                 on: None,
+                uses: None,
                 initializer: self.parse_optional_constructor_initializer()?,
                 body: self.parse_method_body()?,
             }));
@@ -156,6 +162,7 @@ where
             name: self.parse_local_identifier()?,
             parameter_list: self.parse_function_like_parameter_list()?,
             on: self.parse_optional_on()?,
+            uses: self.parse_optional_uses()?.map(|uses| &*self.arena.alloc(uses)),
             initializer: None,
             body: self.parse_method_body()?,
         }))

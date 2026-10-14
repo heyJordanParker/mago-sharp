@@ -39,6 +39,7 @@ where
                 cst::Modifier::Extern(_) => ModifierKind::Extern,
                 cst::Modifier::Lazy(_) => ModifierKind::Lazy,
                 cst::Modifier::Internal(_) => ModifierKind::Internal,
+                cst::Modifier::Foreign(_) => ModifierKind::Foreign,
             },
         }
     }

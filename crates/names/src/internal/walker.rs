@@ -12,12 +12,15 @@ use mago_syntax::cst::Assignment;
 use mago_syntax::cst::Attribute;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::BindingTarget;
+use mago_syntax::cst::BindingValue;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassConstantAccess;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
+use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::Constant;
 use mago_syntax::cst::ConstantAccess;
@@ -25,6 +28,7 @@ use mago_syntax::cst::Enum;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extends;
+use mago_syntax::cst::Extension;
 use mago_syntax::cst::Extern;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForOf;
@@ -48,6 +52,7 @@ use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::MethodPartialApplication;
 use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleParent;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
@@ -89,26 +94,29 @@ use mago_syntax::walker::walk_while_mut;
 
 use crate::CHANGING_COLLECTION_METHODS;
 use crate::ResolvedNames;
-use crate::STANDARD_EFFECTS;
 use crate::binding::Binding;
 use crate::binding::BindingError;
 use crate::binding::Local;
 use crate::binding::LocalKind;
+use crate::default_class;
 use crate::internal::context::NameResolutionContext;
 use crate::internal::locals::LocalScopes;
 use crate::kind::NameKind;
+use crate::resolver::NamespaceClasses;
 use crate::scope::concat_with_sep;
 use crate::scope::php_name;
 use crate::scope::trim_start_byte;
+use crate::shadowable_default_classes;
+use crate::shadows_a_default_class;
 
 /// A CST visitor (`MutWalker`) that traverses a PHP Concrete Syntax Tree
 /// to resolve names (classes, functions, constants, etc.) according to
 /// PHP's scoping and aliasing rules.
 ///
 /// In a PHP# file it is also the binder: it classifies every bare name as a local, `this`,
-/// a class or a constant, from the scopes of the file alone.
-#[derive(Debug, Default)]
-pub struct NameWalker<'arena> {
+/// a class or a constant, from the scopes of the file and the [`NamespaceClasses`] of its project.
+#[derive(Debug)]
+pub struct NameWalker<'arena, 'classes> {
     /// Accumulates the resolved names found during the CST walk.
     pub resolved_names: ResolvedNames<'arena>,
     /// Whether the walked program is PHP#.
@@ -126,6 +134,18 @@ pub struct NameWalker<'arena> {
     accessors: Option<Span>,
     /// The names of the class-likes the file declares, compared as PHP compares class names.
     declared_classes: foldhash::HashSet<IgnoringCase<'arena>>,
+    /// The class-likes of the project that win over a default class-like in their namespace.
+    namespace_classes: &'classes NamespaceClasses,
+    /// The extension block being walked in PHP#, whose receiver each of its members declares as a parameter.
+    extension: Option<ExtensionReceiver<'arena>>,
+}
+
+/// An extension block's receiver, spec section 26: its name, its declaration, and the members that declare it.
+#[derive(Debug)]
+struct ExtensionReceiver<'arena> {
+    name: &'arena [u8],
+    declaration: Span,
+    members: std::vec::Vec<Span>,
 }
 
 /// The member names of one class, compared as PHP compares them: method names ignoring case, and property and
@@ -159,12 +179,24 @@ impl Hash for IgnoringCase<'_> {
     }
 }
 
-impl<'arena> NameWalker<'arena> {
-    pub fn new(program: &Program<'arena>) -> Self {
+impl<'arena, 'classes> NameWalker<'arena, 'classes> {
+    pub fn new(program: &Program<'arena>, namespace_classes: &'classes NamespaceClasses) -> Self {
         let sharp = program.dialect.is_sharp();
         let declared_classes = if sharp { declared_class_names(program) } else { foldhash::HashSet::default() };
 
-        Self { sharp, declared_classes, ..Self::default() }
+        Self {
+            resolved_names: ResolvedNames::default(),
+            sharp,
+            locals: LocalScopes::default(),
+            member_objects: HashSet::new(),
+            class_members: std::vec::Vec::new(),
+            pattern_kinds: std::vec::Vec::new(),
+            lambdas: std::vec::Vec::new(),
+            accessors: None,
+            declared_classes,
+            namespace_classes,
+            extension: None,
+        }
     }
 
     fn declare(&mut self, name: &'arena [u8], declaration: Span, kind: LocalKind) {
@@ -174,6 +206,22 @@ impl<'arena> NameWalker<'arena> {
         }
 
         self.resolved_names.bind(declaration, Binding::Local(local));
+    }
+
+    /// Whether `member` is a member of the extension block being walked.
+    fn is_extension_member(&self, member: Span) -> bool {
+        self.extension.as_ref().is_some_and(|receiver| receiver.members.contains(&member))
+    }
+
+    /// Declares the receiver of the extension block being walked in the frame of `member`, one of the block's members,
+    /// as the static method the member runs as takes the receiver as its first parameter.
+    fn declare_receiver(&mut self, member: Span) {
+        if let Some(receiver) = &self.extension
+            && receiver.members.contains(&member)
+        {
+            let (name, declaration) = (receiver.name, receiver.declaration);
+            self.declare(name, declaration, LocalKind::Parameter);
+        }
     }
 
     /// Binds a bare name to a local, which each lambda declared after the local captures. `field`, which the accessor
@@ -282,40 +330,50 @@ impl<'arena> NameWalker<'arena> {
         self.locals.exit_block();
     }
 
-    /// Resolves a name written where a class goes. In a PHP# file a bare name of the standard library is the class in
-    /// the `Sharp` namespace, unless the file imports or declares a class-like of that name, spec section 23.
-    fn resolve_class<A>(&self, context: &NameResolutionContext<'arena, A>, name: &[u8]) -> (&'arena [u8], bool)
+    /// Resolves a name written where a class goes, as [`class_meaning`](Self::class_meaning) does. The class-like of
+    /// the file's namespace that would win over a default one is recorded whether the namespace holds it or not, since
+    /// adding or removing it changes what the name means.
+    fn resolve_class<A>(&mut self, context: &NameResolutionContext<'arena, A>, name: &[u8]) -> (&'arena [u8], bool)
+    where
+        A: Arena,
+    {
+        let (meaning, namespace_class) = self.class_meaning(context, name);
+        if let Some(namespace_class) = namespace_class {
+            self.resolved_names.add_namespace_class(namespace_class);
+        }
+
+        meaning
+    }
+
+    /// What a name written where a class goes means, and whether it was imported. In a PHP# file a bare name of the
+    /// standard library is the class in the `Sharp` namespace, unless the file imports or declares a class-like of that
+    /// name or its namespace holds one, spec section 23. Also returns the class-like of the file's namespace that would
+    /// win over the default one, held or not.
+    fn class_meaning<A>(
+        &self,
+        context: &NameResolutionContext<'arena, A>,
+        name: &[u8],
+    ) -> ((&'arena [u8], bool), Option<&'arena [u8]>)
     where
         A: Arena,
     {
         let (fqn, imported) = context.resolve(NameKind::Default, name);
         if !self.sharp || imported || self.declared_classes.contains(&IgnoringCase(name)) {
-            return (fqn, imported);
+            return ((fqn, imported), None);
         }
 
-        if let Some(effect) = standard_effect(name) {
-            return (effect, false);
-        }
-
-        let class: &'static [u8] = match name {
-            b"Int" => b"Sharp\\Int",
-            b"Float" => b"Sharp\\Float",
-            b"Bool" => b"Sharp\\Bool",
-            b"Position" => b"Sharp\\Position",
-            b"List" => b"Sharp\\List",
-            _ => return (fqn, imported),
+        let Some(class) = default_class(name) else {
+            return ((fqn, imported), None);
         };
+        // A default class-like is the class-like of its own namespace, so no other one wins over it there.
+        if !shadows_a_default_class(name) || fqn.eq_ignore_ascii_case(class) {
+            return ((class, false), None);
+        }
 
-        (class, false)
+        let meaning = if self.namespace_classes.contains(fqn) { (fqn, imported) } else { (class, false) };
+
+        (meaning, Some(fqn))
     }
-}
-
-/// The full name of the standard effect a bare `name` writes, such as `Sharp\Http` for `Http`.
-fn standard_effect(name: &[u8]) -> Option<&'static [u8]> {
-    STANDARD_EFFECTS
-        .iter()
-        .find(|effect| effect.strip_prefix("Sharp\\").is_some_and(|short| short.as_bytes() == name))
-        .map(|effect| effect.as_bytes())
 }
 
 /// The variables a pattern declares.
@@ -460,7 +518,7 @@ fn declared_class_names<'arena>(program: &Program<'arena>) -> foldhash::HashSet<
         .collect()
 }
 
-impl<'ast, 'arena, A> MutWalker<'ast, 'arena, NameResolutionContext<'arena, A>> for NameWalker<'arena>
+impl<'ast, 'arena, A> MutWalker<'ast, 'arena, NameResolutionContext<'arena, A>> for NameWalker<'arena, '_>
 where
     A: Arena,
 {
@@ -546,12 +604,12 @@ where
         self.resolved_names.bind(target.span(), Binding::Class);
     }
 
-    /// A name in `uses` names an effect, spec section 29. A standard effect's name is that effect even where the file
-    /// imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
+    /// A name in `uses` names an effect, spec section 29. A class name of the `Sharp` namespace is that class even where
+    /// the file imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
     fn walk_in_uses(&mut self, uses: &'ast Uses<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         for name in &uses.names {
-            let (fqn, imported) = match standard_effect(name.value) {
-                Some(effect) => (effect, false),
+            let (fqn, imported) = match default_class(name.value) {
+                Some(class) => (class, false),
                 None => self.resolve_class(context, name.value),
             };
 
@@ -606,9 +664,10 @@ where
         self.locals.exit_method();
     }
 
-    fn walk_in_method(&mut self, _method: &'ast Method<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+    fn walk_in_method(&mut self, method: &'ast Method<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
             self.locals.enter_method();
+            self.declare_receiver(method.span());
         }
     }
 
@@ -656,6 +715,63 @@ where
         self.resolved_names.insert_at(module.module.span, classlike, false);
     }
 
+    /// The module an environment or test module overrides is named by its full namespace, spec section 32, as a
+    /// `namespace` line names its own.
+    fn walk_in_module_parent(
+        &mut self,
+        module_parent: &'ast ModuleParent<'arena>,
+        context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.resolved_names.insert_at(module_parent.name.span(), arena_name(context, &module_parent.name), false);
+    }
+
+    /// A service binding's parameters are locals of its value alone, spec section 32, as a law's are. The crate's own
+    /// `Binding` is what a resolved name binds to, so the service binding goes by its full path.
+    fn walk_in_binding(
+        &mut self,
+        _binding: &'ast mago_syntax::cst::Binding<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.enter_method();
+    }
+
+    fn walk_out_binding(
+        &mut self,
+        _binding: &'ast mago_syntax::cst::Binding<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.exit_method();
+    }
+
+    /// The class after a binding's `for` is a class name, resolved as an `extends` names its parent.
+    fn walk_in_binding_target(
+        &mut self,
+        binding_target: &'ast BindingTarget<'arena>,
+        context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        let (class, imported) = self.resolve_class(context, binding_target.class.value());
+
+        self.resolved_names.insert_at(binding_target.class.span(), class, imported);
+    }
+
+    /// A binding's class value, or each class of its list, is a class name.
+    fn walk_in_binding_value(
+        &mut self,
+        binding_value: &'ast BindingValue<'arena>,
+        context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        let classes = match binding_value {
+            BindingValue::Class(class) => std::slice::from_ref(class),
+            BindingValue::Classes(classes) => classes.classes.as_slice(),
+            BindingValue::Expression(_) => return,
+        };
+        for class in classes {
+            let (name, imported) = self.resolve_class(context, class.value());
+
+            self.resolved_names.insert_at(class.span(), name, imported);
+        }
+    }
+
     /// A law binds as a static method does, spec section 28: its parameters are locals of the law alone.
     fn walk_in_law(&mut self, _law: &'ast Law<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         self.locals.enter_method();
@@ -663,6 +779,52 @@ where
 
     fn walk_out_law(&mut self, _law: &'ast Law<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         self.locals.exit_method();
+    }
+
+    /// An extension block's receiver is the first parameter of each member, spec section 26. The block's own frame
+    /// holds the receiver while its parameter list is walked, so no other member sees it.
+    fn walk_in_extension(
+        &mut self,
+        extension: &'ast Extension<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.enter_method();
+        self.extension = extension.parameter_list.parameters.first().map(|receiver| ExtensionReceiver {
+            name: receiver.variable.name,
+            declaration: receiver.variable.span,
+            members: extension.members.iter().map(HasSpan::span).collect(),
+        });
+    }
+
+    fn walk_out_extension(
+        &mut self,
+        _extension: &'ast Extension<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.extension = None;
+        self.locals.exit_method();
+    }
+
+    /// An extension's computed property runs as a static method too, so its expression sees the receiver.
+    fn walk_in_computed_property(
+        &mut self,
+        property: &'ast ComputedProperty<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        if self.is_extension_member(property.span()) {
+            self.locals.enter_method();
+            self.declare_receiver(property.span());
+        }
+    }
+
+    fn walk_out_computed_property(
+        &mut self,
+        property: &'ast ComputedProperty<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        if self.is_extension_member(property.span()) {
+            self.locals.exit_method();
+        }
     }
 
     fn walk_out_function(
@@ -1309,7 +1471,20 @@ where
         }
     }
 
+    /// Records each default class-like whose short name names another class-like in the PHP# file, once the
+    /// namespace's imports and declarations are known, so a refusal's help names the default one in a form the file
+    /// can write. The class-like of the file's namespace is not recorded as one the file names: only a refused file's
+    /// help reads it, and a refused file is analyzed again on every run.
     fn walk_out_namespace(&mut self, _namespace: &Namespace<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        if self.sharp {
+            for class in shadowable_default_classes().map(str::as_bytes) {
+                let ((meaning, _), _) = self.class_meaning(context, &class[b"Sharp\\".len()..]);
+                if meaning != class {
+                    self.resolved_names.shadow_default_class(class);
+                }
+            }
+        }
+
         context.exit_namespace();
     }
 }

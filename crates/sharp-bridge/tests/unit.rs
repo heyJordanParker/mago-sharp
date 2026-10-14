@@ -317,6 +317,9 @@ fn write(root: &Path, name: &str, contents: &str) {
     fs::write(path, contents).unwrap();
 }
 
+/// A file is there only under its exact name, case included, as on Linux, so a compile on a disk that ignores case
+/// stamps the same inputs as one on Linux. A missing folder holds no file, and a path through a file fails loudly, for
+/// a file and for a listing alike.
 #[test]
 fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
     let directory = tempfile::tempdir().unwrap();
@@ -329,6 +332,52 @@ fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
     assert_eq!(stamped.hash, source_hash(SOURCE.as_bytes()));
     assert_ne!(stamped.mtime_ns, 0);
     assert_eq!(stamp(directory.path(), b"app/Missing.sharp").unwrap(), None);
+    assert_eq!(
+        stamp(directory.path(), b"app/report.sharp").unwrap(),
+        None,
+        "a disk that ignores case still has no report.sharp"
+    );
+    assert_eq!(stamp(directory.path(), b"gone/Missing.sharp").unwrap(), None, "a missing folder holds no file");
+    for under_a_file in [&b"app/Report.sharp/Inner.php"[..], b"app/Report.sharp/*.sharp"] {
+        let error = stamp(directory.path(), under_a_file).expect_err("a file is no folder to read");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory, "{}", String::from_utf8_lossy(under_a_file));
+    }
+}
+
+/// `SOURCE_LISTING` stamps the names of a folder's `.sharp` files, so a file appearing, going or being renamed changes
+/// the stamp, and an edit, a file of another kind, a folder named like a source, a file below the folder, a file named
+/// only `.sharp`, and a dangling link, such as the one Emacs leaves beside an unsaved buffer, leave it, as the engine
+/// leaves them.
+#[test]
+fn a_source_listing_stamps_the_names_of_the_sharp_files_of_its_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "app/Report.sharp", SOURCE);
+    write(root, "app/Loud.sharp", SOURCE);
+    let listing = |root: &Path| stamp(root, b"app/*.sharp").unwrap().expect("a listing always stamps");
+
+    let stamped = listing(root);
+    assert_eq!(stamped.path, b"app/*.sharp");
+    assert_eq!((stamped.size, stamped.mtime_ns), (b"Loud.sharp\nReport.sharp\n".len() as u64, 0));
+    assert_eq!(stamped.hash, source_hash(b"Loud.sharp\nReport.sharp\n"));
+
+    write(root, "app/Report.sharp", "namespace App;\n");
+    write(root, "app/Model.php", "<?php\n");
+    write(root, "app/Deep/Inner.sharp", SOURCE);
+    write(root, "app/.sharp", SOURCE);
+    fs::create_dir_all(root.join("app/Folder.sharp")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("dev@laptop.4242:1760000000", root.join("app/.#Report.sharp")).unwrap();
+    assert_eq!(listing(root), stamped, "no name of a .sharp file of the folder changed");
+
+    write(root, "app/Quiet.sharp", SOURCE);
+    assert_ne!(listing(root), stamped, "a file appeared");
+    fs::remove_file(root.join("app/Quiet.sharp")).unwrap();
+    fs::rename(root.join("app/Loud.sharp"), root.join("app/Lout.sharp")).unwrap();
+    assert_ne!(listing(root), stamped, "a file was renamed to a name of the same length");
+
+    assert_eq!(stamp(root, b"*.sharp").unwrap().expect("the root's listing").hash, source_hash(b""));
+    assert_eq!(stamp(root, b"missing/*.sharp").unwrap().expect("a missing folder's listing").hash, source_hash(b""));
 }
 
 #[test]

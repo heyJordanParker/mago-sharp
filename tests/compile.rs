@@ -110,6 +110,29 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
     assert!(printed(&output).contains("Compiled 2 PHP# files into .sharp/."), "{}", printed(&output));
 }
 
+/// A dangling link named like a source, as Emacs leaves beside a buffer with unsaved changes, is no source: the loader
+/// skips it, and so does the listing of the folder of a file whose code reaches an extension, spec section 26.
+#[cfg(unix)]
+#[test]
+fn compile_skips_a_dangling_link_beside_a_file_that_reaches_an_extension() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "app/Shout.sharp",
+        "namespace App;\n\npublic static class Shout\n{\n    extension(string text)\n    {\n        public string loud() => text;\n    }\n}\n",
+    );
+    write(
+        root,
+        "app/Report.sharp",
+        "namespace App;\n\npublic class Report\n{\n    public string text(string name) => name.loud();\n}\n",
+    );
+    std::os::unix::fs::symlink("dev@laptop.4242:1760000000", root.join("app/.#Report.sharp")).unwrap();
+
+    compile_succeeds(root);
+    assert!(compiled(root, "app/Report.sharp").exists());
+}
+
 #[test]
 fn compile_refuses_a_file_with_an_error_writes_the_others_and_deletes_its_old_compiled_file() {
     let directory = project(ORDER, MONEY);
@@ -897,6 +920,38 @@ fn compile_proves_a_law_whose_calls_go_from_one_file_to_another_and_back_with_no
     assert!(!read(root, ".sharp/.lean/Code/App/Shared/Alpha.lean").contains("import Code."));
 }
 
+/// A call through the class, as `ShapeMath.doubled(s)`, is that static call already, as in C#, so it compiles and its
+/// law is proved the same way.
+#[test]
+fn compile_proves_a_law_through_an_extension_member_as_the_static_call_it_runs_as() {
+    let directory = lawful_project(&[
+        (
+            "app/Shared/Shape.sharp",
+            "namespace App.Shared;\n\nimport App.Shared.ShapeMath;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    public static int doubledOr(Shape? s) => s?.doubled() ?? 0;\n    public static bool flatOr(Shape? s) => s?.isFlat ?? true;\n    public static int direct(Shape s) => ShapeMath.doubled(s) + (ShapeMath.isFlat(s) ? 1 : 0);\n\n    law doubles(Shape s) => s.doubled() == s.sides + s.sides;\n    law flat(Shape s) => s.isFlat == (s.sides < 3);\n    law twice(int n) => n.twice() == n + n;\n    law absent(int unused) => Shape.doubledOr(null) == 0 && Shape.flatOr(null);\n    law throughTheClass(Shape s) => ShapeMath.doubled(s) == s.doubled() && ShapeMath.isFlat(s) == s.isFlat;\n}\n",
+        ),
+        (
+            "app/Shared/ShapeMath.sharp",
+            "namespace App.Shared;\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int doubled() => shape.sides + shape.sides;\n        public bool isFlat => shape.sides < 3;\n    }\n\n    extension(int n)\n    {\n        public int twice() => n + n;\n    }\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let laws = read(root, ".sharp/.lean/Code/App/Shared/Shape.lean");
+    for call in [
+        "App.Shared.ShapeMath.doubled s",
+        "App.Shared.ShapeMath.isFlat s",
+        "App.Shared.ShapeMath.twice n",
+        "App.Shared.ShapeMath.doubled (s.getD default)",
+        "App.Shared.ShapeMath.isFlat (s.getD default)",
+    ] {
+        assert!(laws.contains(call), "{call}:\n{laws}");
+    }
+    assert!(compiled(root, "app/Shared/Shape.sharp").exists());
+}
+
 #[test]
 fn compile_proves_spec_section_28_1_s_state_machine_law_over_an_enum_match() {
     let directory = lawful_project(&[
@@ -964,15 +1019,15 @@ fn compile_proves_spec_section_28_s_state_machine_law_with_a_class_as_its_event(
     );
 }
 
-/// A law never calls an interface's method, since an implementation can have effects: `Card.amount` returns a random
-/// number, so `Card.same` is false on almost every run, and a law must not prove it. A call through `?.` is refused too.
+/// A law never calls an interface's method, which Mago does not translate to Lean, even when every implementation is
+/// pure as spec section 29 holds `Card.amount` to. A call through `?.` is refused too.
 #[test]
 fn a_law_that_calls_an_interface_method_is_refused() {
     let payment = "namespace App.Shop;\n\npublic interface Payment\n{\n    int amount();\n}\n";
     for (file, source, law, calls) in [
         (
             "app/Shop/Card.sharp",
-            "namespace App.Shop;\n\npublic class Card : Payment\n{\n    public Card(public int cents { get; }) { }\n\n    public int amount() => global.random_int(1, 1000000);\n\n    public static bool same(Payment p) => p.amount() == p.amount();\n\n    law alwaysSame(Payment p) => Card.same(p);\n}\n",
+            "namespace App.Shop;\n\npublic class Card : Payment\n{\n    public Card(public int cents { get; }) { }\n\n    public int amount() => this.cents;\n\n    public static bool same(Payment p) => p.amount() == p.amount();\n\n    law alwaysSame(Payment p) => Card.same(p);\n}\n",
             "alwaysSame reaches the interface method Payment.amount in Card.same",
             ["9:43", "9:57"],
         ),
@@ -987,7 +1042,7 @@ fn a_law_that_calls_an_interface_method_is_refused() {
         let root = directory.path();
         let expected: Vec<String> = calls
             .iter()
-            .map(|at| format!("{file}:{at}:error - unmodeled-construct: Law {law}. Mago does not translate interface methods to Lean, because an implementation can have effects."))
+            .map(|at| format!("{file}:{at}:error - unmodeled-construct: Law {law}. Mago does not translate interface methods to Lean, because the implementation that runs is chosen at run time."))
             .collect();
 
         let output = compile_without_lean(root);
@@ -1058,15 +1113,16 @@ fn compile_refuses_module_sharp_when_its_law_does_not_hold() {
 /// `app/Shop/Module.sharp`, the folder's module, with one law.
 const SHOP_MODULE: &str = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n}\n";
 
-/// Spec section 32: a namespace's module is the one its folder's `Module.sharp` declares. A `module` in another file
-/// of the folder is refused on that file alone, and `Module.sharp` still compiles and proves its law.
+/// Spec section 32: a namespace's module is the one its folder's `Module.sharp` declares, and only it states laws. A
+/// misplaced `module` in another file of the folder is refused on that file alone, and `Module.sharp` still compiles
+/// and proves its law.
 #[test]
 fn compile_refuses_a_module_outside_module_sharp_on_its_own_file_and_proves_module_sharp() {
     for (other, code, refusal) in [
         (
             "app/Shop/CheckoutTest.sharp",
-            "namespace App.Shop;\n\nmodule : App.Shop\n{\n}\n\npublic class CheckoutTest { }\n",
-            "app/Shop/CheckoutTest.sharp:3:8:error - parse: A module that overrides another is not supported yet in PHP#.",
+            "namespace App.Shop;\n\nmodule : App.Shop\n{\n    law same(int a) => a == a;\n}\n\npublic class CheckoutTest { }\n",
+            "app/Shop/CheckoutTest.sharp:5:5:error - semantics: A module that overrides another states no laws: state it in its folder's Module.sharp.",
         ),
         (
             "app/Shop/CheckoutTest.sharp",
@@ -1076,7 +1132,7 @@ fn compile_refuses_a_module_outside_module_sharp_on_its_own_file_and_proves_modu
         (
             "app/Shop/Module.Production.sharp",
             "namespace App.Shop;\n\nmodule\n{\n}\n",
-            "app/Shop/Module.Production.sharp:3:1:error - semantics: An environment module is not supported yet in PHP#.",
+            "app/Shop/Module.Production.sharp:3:1:error - semantics: An environment module overrides its folder's module: write `module : App.Shop`.",
         ),
     ] {
         let directory = lawful_project(&[("app/Shop/Module.sharp", SHOP_MODULE), (other, code)]);
@@ -2551,5 +2607,13 @@ fn a_law_reaching_a_named_constructor_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n    public Shape.triangle() : this(3) { }\n\n    law threeSides(int unused) => new Shape.triangle().sides == 3;\n}\n",
         "Law threeSides reaches the named constructor Shape.triangle in Shape.threeSides. Mago does not translate constructor bodies to Lean.",
+    );
+}
+
+#[test]
+fn a_law_reaching_an_extension_member_lean_cannot_see_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic final class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    law summed(Shape s) => s.sum() >= 0;\n}\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int sum()\n        {\n            let total = 0;\n            for (let i = 0; i < shape.sides; i++) {\n                total += i;\n            }\n            return total;\n        }\n    }\n}\n",
+        "Law summed reaches a loop in ShapeMath.sum. Mago does not translate loops to Lean.",
     );
 }

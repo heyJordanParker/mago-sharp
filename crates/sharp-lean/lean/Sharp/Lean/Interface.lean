@@ -3,7 +3,7 @@ A PHP# interface: the type of the objects that implement it.
 
 A law that reaches an interface holds for every class that implements it, today's and every later one, so Lean knows
 nothing about the interface's values. A law passes them along and passes a class's value where the interface is
-expected, through `upcast`. It never calls their methods, since an implementation can have effects.
+expected, through `upcast`. It never calls their methods, since the implementation that runs is chosen at run time.
 -/
 
 namespace Sharp

@@ -284,6 +284,14 @@ fn populate_codebase_inner(
         }
     }
 
+    // A module's services are no symbol of their own, and a change to any module re-analyzes the whole project, so
+    // every binding's service is populated each time.
+    for module in &mut codebase.modules {
+        for binding in &mut module.bindings {
+            populate_union_type(&mut binding.service.type_union, &codebase.symbols, None, symbol_references, true);
+        }
+    }
+
     if !incremental || !class_likes_to_repopulate.is_empty() {
         let mut direct_classlike_descendants: WordMap<WordSet> = WordMap::default();
         let mut all_classlike_descendants: WordMap<WordSet> = WordMap::default();

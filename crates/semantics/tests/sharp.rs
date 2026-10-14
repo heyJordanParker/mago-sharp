@@ -90,29 +90,6 @@ fn extern_is_a_declaration_of_the_file_and_of_no_method_body() {
     assert_eq!(issues(code), ["13:9 This statement is not supported yet in PHP#."]);
 }
 
-const NOT_AN_EFFECT: &str = "is not an effect: `uses` takes Database, Http, Files, Console, Process, Clock, Random, Cache, Mail, Environment or Events.";
-
-/// Spec section 29: a function type's `uses` names effects, so a name that is no effect is refused, whether it names
-/// nothing or a class.
-#[test]
-fn a_function_type_uses_only_effects() {
-    let typo = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Htp>? charge = null;\n}\n";
-    let class = "namespace App.Shop;\n\nimport App.Orders.Order;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Order>? charge = null;\n}\n";
-
-    assert_eq!(issues(typo), [format!("5:32 `Htp` {NOT_AN_EFFECT}")]);
-    assert_eq!(issues(class), [format!("7:32 `Order` {NOT_AN_EFFECT}")]);
-}
-
-/// An `extern`'s `uses` takes the same effects as a function type's.
-#[test]
-fn an_extern_uses_only_effects() {
-    let typo = "namespace App.Stubs;\n\nimport Lib.Foo;\n\nextern Foo.bar uses Htp;\n";
-    let class = "namespace App.Stubs;\n\nimport App.Orders.Order;\nimport Lib.Foo;\n\nextern Foo.baz uses Order;\n";
-
-    assert_eq!(issues(typo), [format!("5:21 `Htp` {NOT_AN_EFFECT}")]);
-    assert_eq!(issues(class), [format!("6:21 `Order` {NOT_AN_EFFECT}")]);
-}
-
 /// `extern event` marks a plain PHP class as an event, spec section 15, so it names a class, with or without the
 /// effects its `uses` lists.
 #[test]
@@ -160,35 +137,6 @@ fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
     );
 }
 
-/// Spec section 29: a standard effect's name in a `uses` is that effect, even where the file imports or declares a
-/// class under the name, as a file that calls Laravel's `Http` facade still writes `uses Http`.
-#[test]
-fn a_uses_takes_a_standard_effect_where_a_class_has_its_name() {
-    for name in mago_names::STANDARD_EFFECTS.map(mago_names::short_name) {
-        for code in [
-            format!("namespace App.Stubs;\n\nimport Lib.{name};\n\nextern {name}.now uses {name};\n"),
-            format!(
-                "namespace App.Shop;\n\nimport Lib.{name};\n\nclass Checkout\n{{\n    Function<{name}(Cart) uses {name}>? charge = null;\n}}\n"
-            ),
-            format!("namespace App.Shop;\n\nclass {name}\n{{\n    Function<int() uses {name}>? tick = null;\n}}\n"),
-        ] {
-            assert_eq!(issues(leak(code.clone())), Vec::<String>::new(), "{code}");
-        }
-    }
-}
-
-/// Every standard effect passes a `uses`, `Events` too, written bare or through an import of its class.
-#[test]
-fn a_uses_takes_every_standard_effect_bare_or_imported() {
-    let function_type = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http, Mail, Events>? charge = null;\n    Function<int() uses Database, Files, Console, Process, Clock, Random, Cache, Environment>? all = null;\n}\n";
-    let extern_ = "namespace App.Stubs;\n\nimport Lib.Foo;\n\nextern Foo.bar uses Http, Events;\n";
-    let imported = "namespace App.Stubs;\n\nimport Lib.Foo;\nimport Sharp.Http;\n\nextern Foo.bar uses Http;\n";
-
-    assert_eq!(issues(function_type), Vec::<String>::new());
-    assert_eq!(issues(extern_), Vec::<String>::new());
-    assert_eq!(issues(imported), Vec::<String>::new());
-}
-
 /// Spec section 28: a law states a fact about the values of a class or an enum, and an interface has no values.
 #[test]
 fn a_law_is_a_member_of_a_class_or_an_enum_and_of_no_interface() {
@@ -228,13 +176,55 @@ fn a_law_parameter_with_a_default_or_a_spread_is_refused() {
 /// `Module.<Environment>.sharp`, waits for the container.
 #[test]
 fn a_module_is_declared_only_in_its_folders_module_sharp() {
-    let code = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n}\n";
-
-    for (path, expected) in [
-        ("app/Shop/Module.sharp", None),
-        ("app/Shop/Checkout.sharp", Some("3:1 A module is declared in its folder's Module.sharp.")),
-        ("app/Shop/Module.Production.sharp", Some("3:1 An environment module is not supported yet in PHP#.")),
+    for (path, header, expected) in [
+        ("app/Shop/Module.sharp", "", None),
+        (
+            "app/Shop/Module.sharp",
+            " : App.Shop",
+            Some("3:8 A folder's Module.sharp overrides no other module: remove its header."),
+        ),
+        (
+            "app/Shop/Module.Production.sharp",
+            "",
+            Some("3:1 An environment module overrides its folder's module: write `module : App.Shop`."),
+        ),
+        ("app/Shop/Module.Production.sharp", " : App.Shop", None),
+        (
+            "app/Shop/Module.Production.sharp",
+            " : App",
+            Some("3:10 An environment module overrides its own folder's module: write `module : App.Shop`."),
+        ),
+        ("app/Shop/Checkout.sharp", "", Some("3:1 A module is declared in its folder's Module.sharp.")),
+        ("app/Shop/CheckoutTest.sharp", " : App.Shop", None),
+        ("tests/Shop/CheckoutTest.sharp", " : App", None),
     ] {
+        let code = leak(format!("namespace App.Shop;\n\nmodule{header}\n{{\n    singleton Mailer = SmtpMailer;\n}}\n"));
+
+        assert_eq!(issues_in(path, code), Vec::from_iter(expected), "{path}{header}");
+    }
+
+    let outside_namespace = "module : App.Shop\n{\n    singleton Mailer = SmtpMailer;\n}\n";
+    assert_eq!(
+        issues_in("app/Shop/Module.Production.sharp", outside_namespace),
+        ["1:10 An environment module overrides its own folder's module, so its file needs a namespace."]
+    );
+}
+
+/// Spec section 32: an environment or test module only overrides services, so the laws that span a namespace's
+/// classes are stated in its folder's `Module.sharp`.
+#[test]
+fn a_module_that_overrides_another_states_no_laws() {
+    let law = "    law same(int a) => a == a;";
+    let refusal = "6:5 A module that overrides another states no laws: state it in its folder's Module.sharp.";
+
+    for (path, header, expected) in [
+        ("app/Shop/Module.sharp", "", None),
+        ("app/Shop/Module.Production.sharp", " : App.Shop", Some(refusal)),
+        ("app/Shop/CheckoutTest.sharp", " : App.Shop", Some(refusal)),
+    ] {
+        let code =
+            leak(format!("namespace App.Shop;\n\nmodule{header}\n{{\n    singleton Mailer = SmtpMailer;\n{law}\n}}\n"));
+
         assert_eq!(issues_in(path, code), Vec::from_iter(expected), "{path}");
     }
 }
@@ -259,6 +249,12 @@ fn module_sharp_holds_only_its_folders_module() {
             "{declaration}"
         );
     }
+
+    let environment = "namespace App.Shop;\n\nmodule : App.Shop\n{\n    singleton Mailer = SmtpMailer;\n}\n\npublic class Module\n{\n}\n";
+    assert_eq!(
+        issues_in("app/Shop/Module.Production.sharp", environment),
+        ["8:1 Module.Production.sharp holds only its folder's module."]
+    );
 }
 
 /// A module's laws are named by the module and their own names, compared ignoring case, so each name is stated once.
@@ -2081,6 +2077,32 @@ fn a_magic_constant_or_another_double_underscore_name_is_an_error_that_names_pos
     );
 }
 
+/// Spec section 23: once an imported class takes the short name `Position` or `Environment`, a help names the standard
+/// one through an aliased import, which is the only form the file can write.
+#[test]
+fn a_help_names_a_standard_class_the_file_shadows_through_an_aliased_import() {
+    let code =
+        leak(method("        Store.keep(__DIR__);\n        Store.keep($_SERVER);\n        return extra;\n").replace(
+            "namespace App.Tenant;\n",
+            "namespace App.Tenant;\n\nimport App.Shared.Environment;\nimport App.Shared.Position;\n",
+        ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "10:20 PHP# has no `__DIR__`: write `SharpPosition.current().directory` after `import Sharp.Position as SharpPosition;`.",
+            "11:20 PHP# has no superglobals; take a Request",
+        ]
+    );
+    let superglobal = check("src/Report.sharp", code).into_iter().find(|issue| issue.message.contains("superglobals"));
+    assert_eq!(
+        superglobal.expect("the superglobal is refused").notes,
+        [
+            "Request data arrives as an object, such as a framework's `Request`, and the process environment as `SharpEnvironment` after `import Sharp.Environment as SharpEnvironment;`."
+        ]
+    );
+}
+
 /// A declared `__Something__` name is refused as a read of one is, in every kind of declaration. A method named as
 /// PHP's magic methods are, starting but not ending with `__`, keeps its own error.
 #[test]
@@ -2628,11 +2650,152 @@ fn a_member_of_a_static_class_that_is_not_static_is_an_error() {
     );
 }
 
+/// A static class has no constructor, in its body or in an extension's.
 #[test]
 fn a_static_class_has_no_constructor() {
     let code = "namespace App.Tenant;\n\npublic static class Text\n{\n    public Text() {}\n}\n";
+    let extension = "namespace App.Tenant;\n\npublic static class Text\n{\n    extension(string value)\n    {\n        public Text() {}\n    }\n}\n";
 
     assert_eq!(issues(code), ["5:12 A static class has no constructor."]);
+    assert_eq!(issues(extension), ["7:16 A static class has no constructor."]);
+}
+
+/// Spec section 26: a static class declares extension blocks, each with one receiver and the methods and computed
+/// properties it adds to the receiver's type. They are instance members of the receiver, so they are not `static`.
+#[test]
+fn an_extension_in_a_static_class_adds_methods_and_computed_properties() {
+    let code = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug() => value;\n        public bool isBlank => value == \"\";\n        private string first(int count) => value;\n    }\n\n    extension(List<string> values)\n    {\n        public int size() => count(values);\n    }\n\n    public static string plain(string title) => title;\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// An extension adds members to a type from outside it, so only a static class declares one.
+#[test]
+fn an_extension_outside_a_static_class_is_an_error() {
+    for (owner, code) in [
+        (
+            "class",
+            "namespace App.Shared;\n\npublic class Text\n{\n    extension(string value)\n    {\n        public string slug() => value;\n    }\n}\n",
+        ),
+        (
+            "enum",
+            "namespace App.Shared;\n\npublic enum Size\n{\n    case Small;\n\n    extension(string value)\n    {\n        public string slug() => value;\n    }\n}\n",
+        ),
+        (
+            "interface",
+            "namespace App.Shared;\n\npublic interface Named\n{\n    extension(string value)\n    {\n        public string slug() => value;\n    }\n}\n",
+        ),
+    ] {
+        let line = if owner == "enum" { 7 } else { 5 };
+
+        assert_eq!(
+            issues(code),
+            [format!("{line}:5 An extension belongs in a static class, as in `public static class StringExtensions`.")],
+            "{owner}"
+        );
+    }
+}
+
+/// An extension's receiver is the one value every call has, so it is one parameter, with no modifier, no default and
+/// no `...`.
+#[test]
+fn an_extension_receiver_is_one_plain_parameter() {
+    let refusal = "An extension's receiver is one parameter, with no modifier, default or `...`, as in `extension(string value)`.";
+    for (receiver, column) in [
+        ("", 14),
+        ("string value, int count", 14),
+        ("string value = \"\"", 15),
+        ("string ...values", 15),
+        ("public string value", 15),
+    ] {
+        let code = format!(
+            "namespace App.Shared;\n\npublic static class TextExtensions\n{{\n    extension({receiver})\n    {{\n        public int size() => 0;\n    }}\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), [format!("5:{column} {refusal}")], "`{receiver}`");
+    }
+}
+
+/// An extension adds methods and computed properties to its receiver's type. A value of that type has no storage of
+/// the extension's, and the static class holds its constants, operators, laws and constructors.
+#[test]
+fn an_extension_holds_only_methods_and_computed_properties() {
+    let refusal =
+        "An extension adds only methods and computed properties, as in `public bool isBlank => value == \"\";`.";
+    for member in [
+        "private int count = 0;",
+        "public int size { get; } = 0;",
+        "public const int LIMIT = 80;",
+        "public static bool operator ==(string a, string b) => true;",
+        "law sameSize(string a) => a == a;",
+        "extension(int count) { }",
+    ] {
+        let code = format!(
+            "namespace App.Shared;\n\npublic static class TextExtensions\n{{\n    extension(string value)\n    {{\n        {member}\n    }}\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), [format!("7:9 {refusal}")], "`{member}`");
+    }
+}
+
+/// An extension member is an instance member of its receiver: it takes only an access modifier.
+#[test]
+fn an_extension_member_takes_only_an_access_modifier() {
+    for (modifier, column) in [("static", 16), ("abstract", 16), ("virtual", 16), ("override", 16)] {
+        let code = format!(
+            "namespace App.Shared;\n\npublic static class TextExtensions\n{{\n    extension(string value)\n    {{\n        public {modifier} string slug() => value;\n    }}\n}}\n"
+        );
+
+        assert_eq!(
+            issues(code.leak()),
+            [format!("7:{column} An extension member takes only an access modifier: remove `{modifier}`.")],
+            "`{modifier}`"
+        );
+    }
+}
+
+/// An extension member runs as a static method that takes its receiver, so it names the receiver, never `this`.
+#[test]
+fn this_in_an_extension_member_is_an_error() {
+    let code = "namespace App.Shared;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug() => this.trim();\n        public bool isBlank => this == \"\";\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:33 An extension member names its receiver: write `value`, not `this`.",
+            "8:32 An extension member names its receiver: write `value`, not `this`.",
+        ]
+    );
+}
+
+/// An extension member's body is checked as a method's, a computed property's too.
+#[test]
+fn an_extension_member_body_is_checked_as_a_method_body() {
+    let code = "namespace App.Shared;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string orDash() => value ?: \"-\";\n        public string dashed => value ?: \"-\";\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:41 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition.",
+            "8:39 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition.",
+        ]
+    );
+}
+
+/// A static class runs each extension member as a static method of its name, so two members, in its extensions or
+/// its own, cannot share a name.
+#[test]
+fn two_members_of_one_static_class_cannot_share_a_name_across_its_extensions() {
+    let code = "namespace App.Shared;\n\npublic static class Sizes\n{\n    extension(string value)\n    {\n        public int size() => 0;\n        public bool blank => value == \"\";\n    }\n\n    extension(List<int> values)\n    {\n        public int size() => 0;\n        public bool blank() => false;\n    }\n\n    public static int size(int count) => count;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "13:20 class method `Sizes.size` has already been defined",
+            "14:21 class method `Sizes.blank` has already been defined",
+            "17:23 class method `Sizes.size` has already been defined",
+        ]
+    );
 }
 
 #[test]
@@ -2644,13 +2807,14 @@ fn a_static_class_cannot_extend_a_class_or_implement_an_interface() {
 
 #[test]
 fn a_static_class_takes_only_public_and_static() {
-    let code = "namespace App.Tenant;\n\nabstract static class Text\n{\n}\n\nfinal static class Slug\n{\n}\n";
+    let code = "namespace App.Tenant;\n\nabstract static class Text\n{\n}\n\nfinal static class Slug\n{\n}\n\nforeign static class Clock\n{\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "3:1 A static class takes only `public` and `static`: remove `abstract`.",
             "7:1 A static class takes only `public` and `static`: remove `final`.",
+            "11:1 A static class takes only `public` and `static`: remove `foreign`.",
         ]
     );
     assert_eq!(
@@ -2671,23 +2835,63 @@ fn an_extern_method_outside_the_sharp_namespace_is_left_to_the_analyzer() {
     }
 }
 
+/// A `foreign` class takes a native body for what plain PHP cannot reach, as `Environment` reads the command line, so
+/// a `static` one is accepted there as in a static class, whatever its access.
 #[test]
-fn an_extern_method_is_public_static_in_a_static_class_with_no_body_in_any_namespace() {
+fn an_extern_method_is_static_in_a_static_or_foreign_class_with_no_body_in_any_namespace() {
     for namespace in ["Sharp.Text", "App"] {
         let code = leak(format!(
-            "namespace {namespace};\n\npublic class Plain\n{{\n    public static extern string slug(string title);\n}}\n\npublic static class Text\n{{\n    private static extern string trim(string title);\n    public static extern string pad(string title) => title;\n    public extern string cut(string title);\n}}\n"
+            "namespace {namespace};\n\npublic class Plain\n{{\n    public static extern string slug(string title);\n}}\n\npublic static class Text\n{{\n    private static extern string trim(string title);\n    public static extern string pad(string title) => title;\n    public extern string cut(string title);\n}}\n\npublic foreign class Shell\n{{\n    private static extern List<string> lines();\n    public extern string name();\n}}\n"
         ));
 
         assert_eq!(
             issues(code),
             [
-                "5:33 An `extern` method is `public static`, in a static class, with no body.",
-                "10:34 An `extern` method is `public static`, in a static class, with no body.",
-                "11:33 An `extern` method is `public static`, in a static class, with no body.",
-                "12:26 An `extern` method is `public static`, in a static class, with no body.",
+                "5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
+                "11:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
+                "12:26 An `extern` method is `static`, in a static or `foreign` class, with no body.",
+                "18:26 An `extern` method is `static`, in a static or `foreign` class, with no body.",
             ],
             "{namespace}"
         );
+    }
+}
+
+/// Spec section 29 works a body's effects out from its code, so only a method without a body, an interface's or an
+/// abstract class's, names effects in `uses`. A method with a body names only its function parameters there, as in
+/// `charge(…) uses prepare => …`.
+#[test]
+fn a_method_with_a_body_names_only_its_function_parameters_in_uses() {
+    let refused = |name: &str| {
+        format!("A method with a body takes no effect in `uses`, and `{name}` is not one of its function parameters.")
+    };
+    for (code, expected) in [
+        (
+            "public class Gateway\n{\n    public int charge(int cents) uses Http => cents;\n}\n",
+            vec![format!("5:39 {}", refused("Http"))],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents) uses Http\n    {\n        return cents;\n    }\n}\n",
+            vec![format!("5:39 {}", refused("Http"))],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
+            vec![],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)>? prepare) uses prepare => cents;\n}\n",
+            vec![],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare, cents, Http => cents;\n}\n",
+            vec![format!("5:76 {}", refused("cents")), format!("5:83 {}", refused("Http"))],
+        ),
+        ("public interface Gateway\n{\n    int charge(int cents) uses Http;\n}\n", vec![]),
+        ("public abstract class Gateway\n{\n    public abstract int charge(int cents) uses Http;\n}\n", vec![]),
+    ] {
+        let code = leak(format!("namespace App;\n\n{code}"));
+
+        assert_eq!(issues(code), expected, "{code}");
     }
 }
 
@@ -2699,7 +2903,7 @@ fn an_extern_method_with_a_body_has_its_body_checked() {
     assert_eq!(
         issues(code),
         [
-            "5:33 An `extern` method is `public static`, in a static class, with no body.",
+            "5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
             "7:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
         ]
     );
@@ -4483,7 +4687,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     for (code, note) in [
         (
             class,
-            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`.",
+            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a static class, extensions, with no other modifiers, `extends` or `implements`.",
         ),
         (
             body,

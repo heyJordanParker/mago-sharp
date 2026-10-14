@@ -532,3 +532,23 @@ fn an_on_clause_change_changes_the_fingerprint() {
     assert_ne!(plain, paid, "Adding an `on` clause should change the fingerprint");
     assert_ne!(paid, refunded, "Listing another event should change the fingerprint");
 }
+
+#[test]
+fn a_method_uses_change_changes_the_fingerprint() {
+    let rates = |code| fingerprint_of(b"src/Rates.sharp", code);
+    let pure = rates(b"interface Rates\n{\n    int rate(int id);\n}\n");
+    let http = rates(b"interface Rates\n{\n    int rate(int id) uses Http;\n}\n");
+    let mail = rates(b"interface Rates\n{\n    int rate(int id) uses Mail;\n}\n");
+
+    assert_ne!(pure, http, "Adding a `uses` should change the fingerprint");
+    assert_ne!(http, mail, "Changing an effect in `uses` should change the fingerprint");
+}
+
+#[test]
+fn a_foreign_modifier_change_changes_the_fingerprint() {
+    let payments = |code| fingerprint_of(b"src/Payments.sharp", code);
+    let plain = payments(b"public class Payments\n{\n}\n");
+    let foreign = payments(b"public foreign class Payments\n{\n}\n");
+
+    assert_ne!(plain, foreign, "Marking a class `foreign` should change the fingerprint");
+}

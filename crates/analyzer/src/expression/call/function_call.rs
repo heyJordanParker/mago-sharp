@@ -40,6 +40,7 @@ use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
+use crate::resolver::extension::is_imported_by_default;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_code_member;
@@ -505,6 +506,7 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("preg_grep", Replacement::Members(&[("Sharp\\Text\\Regex", "filter")])),
     ("preg_quote", Replacement::Members(&[("Sharp\\Text\\Regex", "escape")])),
     ("chr", Replacement::Members(&[("Sharp\\Text\\Text", "fromByte")])),
+    ("trim", Replacement::Members(&[("Sharp\\Text\\Text", "trim")])),
     ("date", Replacement::Members(&[("Sharp\\Time\\Date", "format")])),
     ("gmdate", Replacement::Members(&[("Sharp\\Time\\Date", "format")])),
     ("strtotime", Replacement::Members(&[("Sharp\\Time\\Date", "parse")])),
@@ -545,7 +547,7 @@ pub(crate) fn report_bare_function_call<A>(
             IssueCode::ReplacedBySyntax,
             format!("`{name}` is replaced by PHP# syntax: write {}.", syntax_form(context, form, arguments)),
         ),
-        Some(Replacement::Members(members)) => match member_form(context, members) {
+        Some(Replacement::Members(members)) => match member_form(context, members, arguments) {
             Some(form) => {
                 (IssueCode::WrappedFunction, format!("`{name}` is wrapped by the standard library: write {form}"))
             }
@@ -560,25 +562,42 @@ pub(crate) fn report_bare_function_call<A>(
     );
 }
 
-/// The standard library methods `members` names, as a `.sharp` file writes them, with the imports the file lacks.
-/// None when the codebase declares none of them.
-fn member_form<A>(context: &Context<'_, '_, A>, members: &[(&str, &str)]) -> Option<String>
+/// The standard library members `members` names, as a `.sharp` file writes them, with the imports the file lacks. An
+/// extension's member, spec section 26, is written on the call's first argument from `arguments`, and needs an import
+/// only where the file lacks its extensions by default. None when the codebase declares none of them.
+fn member_form<A>(
+    context: &Context<'_, '_, A>,
+    members: &[(&str, &str)],
+    arguments: Option<&ArgumentList<'_>>,
+) -> Option<String>
 where
     A: Arena,
 {
     let codebase = context.codebase;
-    let (classes, methods): (Vec<Word>, Vec<String>) = members
+    let receiver = arguments
+        .and_then(|arguments| arguments.arguments.first())
+        .and_then(|argument| argument_text(context, argument))
+        .unwrap_or_else(|| "x".to_owned());
+    let (classes, methods): (Vec<Option<Word>>, Vec<String>) = members
         .iter()
         .filter_map(|(class, method)| {
             let class = codebase.get_class_like(class.as_bytes())?;
             let method = codebase.get_method(class.name.as_bytes(), method.as_bytes())?;
+            let name = method.original_name;
+            let import = (!is_imported_by_default(context, class.name, method)).then_some(class.original_name);
 
-            Some((
-                class.original_name,
-                format!("`{}(…)`", display_code_member(context, class.original_name, method.original_name)),
-            ))
+            Some(if method.flags.is_extension_property() {
+                (import, format!("`{receiver}.{name}`"))
+            } else if method.flags.is_extension_method() {
+                let arguments = if method.parameters.len() > 1 { "…" } else { "" };
+
+                (import, format!("`{receiver}.{name}({arguments})`"))
+            } else {
+                (Some(class.original_name), format!("`{}(…)`", display_code_member(context, class.original_name, name)))
+            })
         })
         .unzip();
+    let classes: Vec<Word> = classes.into_iter().flatten().collect();
     let (last, others) = methods.split_last()?;
     let methods = if others.is_empty() { last.clone() } else { format!("{} or {last}", others.join(", ")) };
     let imports = display_missing_imports(context, classes).map(|imports| format!(" {imports}")).unwrap_or_default();

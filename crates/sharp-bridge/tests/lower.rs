@@ -671,8 +671,22 @@ fn a_file_with_extern_declarations_lowers_to_the_nodes_it_lowers_to_without_them
     assert_eq!(with.tree(), without.tree());
 }
 
-/// A law, spec section 28, is checked and never runs, so the engine gets the same tree without it. A module holds only
-/// laws, so its `Module.sharp` lowers to its namespace alone.
+/// `foreign` tells only the checker which effect a class's objects carry, spec section 29, so the engine gets the
+/// plain class, which a test fake may extend.
+#[test]
+fn a_foreign_class_lowers_to_the_nodes_of_the_plain_class() {
+    let foreign = Lowered::new(
+        "namespace App.Billing;\n\npublic foreign class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
+    );
+    let plain = Lowered::new(
+        "namespace App.Billing;\n\npublic class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
+    );
+
+    assert_eq!(foreign.tree(), plain.tree());
+}
+
+/// A law, spec section 28, is checked and never runs, so the engine gets the same tree without it. A module of laws
+/// alone binds no service, so its `Module.sharp` lowers to its namespace alone.
 #[test]
 fn a_class_an_enum_or_a_module_with_a_law_lowers_to_the_nodes_it_lowers_to_without_it() {
     for (path, with, without) in [
@@ -692,6 +706,283 @@ fn a_class_an_enum_or_a_module_with_a_law_lowers_to_the_nodes_it_lowers_to_witho
 
         assert!(with.0.is_ok(), "{path}: {:?}", with.0.err());
         assert_eq!(with.tree(), without.tree(), "{path}");
+    }
+}
+
+/// Spec section 32: a module file returns its bindings, after its classes, as the table `Sharp\Container` reads. Each
+/// row is a module's bindings and the binding the table holds for them, as php-src builds the PHP each comment shows.
+#[test]
+fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_value() {
+    let library = [
+        ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
+        ("app/Mail/SmtpMailer.sharp", "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n"),
+        ("app/Pricing/PriceRule.sharp", "namespace App.Pricing;\n\npublic interface PriceRule\n{\n}\n"),
+        ("app/Pricing/TaxRule.sharp", "namespace App.Pricing;\n\npublic class TaxRule : PriceRule\n{\n}\n"),
+        (
+            "app/Shop/SendReceipt.sharp",
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic class SendReceipt\n{\n    public SendReceipt(private Mailer mailer) { }\n}\n",
+        ),
+    ];
+    let module = |bindings: &str| {
+        format!(
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Pricing.PriceRule;\nimport App.Pricing.TaxRule;\n\nmodule\n{{\n{bindings}\n}}\n"
+        )
+    };
+
+    let mailer = r#"ZVAL "app\\mail\\mailer""#;
+    let smtp = r#"ZVAL "App\\Mail\\SmtpMailer""#;
+    for (bindings, expected) in [
+        // ['app\shop', 'app\mail\mailer', null, 'singleton', 'App\Mail\SmtpMailer']
+        ("    singleton Mailer = SmtpMailer;", [mailer, "ZVAL null", r#"ZVAL "singleton""#, smtp]),
+        // ['app\shop', 'app\mail\mailer', 'App\Shop\SendReceipt', 'scoped', 'App\Mail\SmtpMailer']
+        (
+            "    scoped Mailer for SendReceipt = SmtpMailer;",
+            [mailer, r#"ZVAL "App\\Shop\\SendReceipt""#, r#"ZVAL "scoped""#, smtp],
+        ),
+        // ['app\shop', 'list<app\pricing\pricerule>', null, 'transient', ['App\Pricing\TaxRule']]
+        (
+            "    transient List<PriceRule> = [TaxRule];",
+            [
+                r#"ZVAL "list<app\\pricing\\pricerule>""#,
+                "ZVAL null",
+                r#"ZVAL "transient""#,
+                indoc! {r#"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL "App\\Pricing\\TaxRule"
+                        null"#},
+            ],
+        ),
+        // ['app\shop', 'app\mail\mailer', null, 'singleton', static fn (\App\Mail\SmtpMailer $smtp) => $smtp]
+        (
+            "    singleton Mailer(SmtpMailer smtp) = smtp;\n    transient SmtpMailer = SmtpMailer;",
+            [
+                mailer,
+                "ZVAL null",
+                r#"ZVAL "singleton""#,
+                indoc! {r#"
+                    ARROW_FUNC [16] "" @10-10
+                      PARAM_LIST
+                        PARAM
+                          ZVAL "App\\Mail\\SmtpMailer"
+                          ZVAL "smtp"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      VAR
+                        ZVAL "smtp"
+                      null
+                      null"#},
+            ],
+        ),
+        // ['app\shop', 'app\mail\mailer', null, 'singleton',
+        //     static fn (#[\Sharp\Internal\Service('list<app\pricing\pricerule>')] array $rules) => new \App\Mail\SmtpMailer()]
+        (
+            "    singleton Mailer(List<PriceRule> rules) = new SmtpMailer();\n    transient List<PriceRule> = [TaxRule];",
+            [
+                mailer,
+                "ZVAL null",
+                r#"ZVAL "singleton""#,
+                indoc! {r#"
+                    ARROW_FUNC [16] "" @10-10
+                      PARAM_LIST
+                        PARAM
+                          TYPE [7]
+                          ZVAL "rules"
+                          null
+                          ATTRIBUTE_LIST
+                            ATTRIBUTE_GROUP
+                              ATTRIBUTE
+                                ZVAL "Sharp\\Internal\\Service"
+                                ARG_LIST
+                                  ZVAL "list<app\\pricing\\pricerule>"
+                          null
+                          null
+                      null
+                      NEW
+                        ZVAL "App\\Mail\\SmtpMailer"
+                        ARG_LIST
+                      null
+                      null"#},
+            ],
+        ),
+    ] {
+        let lowered = Lowered(common::checked("app/Shop/Module.sharp", &module(bindings), &library, lower));
+        // `return [[namespace, service, class, lifetime, value]];`, the file's third statement.
+        let table = lowered.child(lowered.root(), 2);
+        let entry = lowered.child(lowered.child(lowered.child(table, 0), 0), 0);
+        let fields: Vec<String> =
+            (0..5).map(|index| lowered.render(lowered.child(lowered.child(entry, index), 0))).collect();
+
+        let expected: Vec<String> =
+            std::iter::once(r#"ZVAL "app\\shop""#).chain(expected).map(|field| format!("{field}\n")).collect();
+        assert_eq!(fields, expected, "{bindings}");
+    }
+}
+
+/// Spec section 32: the standard library's module binds the services the library gives, such as `Environment`, for
+/// every namespace, so its table names the root namespace, which every class's lookup reaches last. An app's module
+/// names its own namespace. Each row is a module file, its code and the namespace its table names.
+#[test]
+fn the_standard_library_module_binds_its_services_for_the_root_namespace() {
+    let binding = "module\n{\n    singleton Environment = Environment;\n}\n";
+    for (path, namespace, expected) in [
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Module.sharp", "Sharp", "ZVAL \"\"\n"),
+        ("app/Module.sharp", "App", "ZVAL \"app\"\n"),
+    ] {
+        let code = format!("namespace {namespace};\n\n{binding}");
+        let lowered = Lowered(common::checked(path, &code, &[common::ENVIRONMENT], lower));
+        // `return [[namespace, service, class, lifetime, value]];`, the file's third statement.
+        let table = lowered.child(lowered.root(), 2);
+        let entry = lowered.child(lowered.child(lowered.child(table, 0), 0), 0);
+
+        assert_eq!(lowered.render(lowered.child(lowered.child(entry, 0), 0)), expected, "{path}");
+    }
+}
+
+/// Spec section 32: a test file's module applies while a test of a class the file declares runs, so the file hands
+/// its bindings to the container for each of its classes, as `\Sharp\Internal\testModule([...], [...])`, and returns
+/// nothing. Each row is the types the file declares beside its module and the classes the call names.
+#[test]
+fn a_test_module_hands_its_bindings_to_the_container_for_each_class_its_file_declares() {
+    let library = [
+        ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
+        ("app/Mail/FakeMailer.sharp", "namespace App.Mail;\n\npublic class FakeMailer : Mailer\n{\n}\n"),
+        ("app/Mail/SmtpMailer.sharp", "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n"),
+        (
+            "app/Shop/Module.sharp",
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule\n{\n    singleton Mailer = SmtpMailer;\n}\n",
+        ),
+    ];
+    let file = |types: &str| {
+        format!(
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.FakeMailer;\n\nmodule : App.Shop\n{{\n    singleton Mailer = FakeMailer;\n}}\n\n{types}"
+        )
+    };
+
+    for (types, classes) in [
+        ("public class CheckoutTest\n{\n}\n", vec!["App\\Shop\\CheckoutTest"]),
+        (
+            "public class CheckoutTest\n{\n}\n\npublic class RefundTest\n{\n}\n",
+            vec!["App\\Shop\\CheckoutTest", "App\\Shop\\RefundTest"],
+        ),
+        ("public class CheckoutTest\n{\n}\n\npublic interface Step\n{\n}\n", vec!["App\\Shop\\CheckoutTest"]),
+    ] {
+        let lowered = Lowered(common::checked("tests/Shop/CheckoutTest.sharp", &file(types), &library, lower));
+        let calls: Vec<u32> = (0..lowered.nodes().len() as u32)
+            .filter(|&node| {
+                lowered.nodes()[node as usize].kind == sharp_kind::SHARP_AST_CALL
+                    && lowered.render(lowered.child(node, 0)) == "ZVAL \"Sharp\\\\Internal\\\\testModule\"\n"
+            })
+            .collect();
+        let elements = classes
+            .iter()
+            .map(|class| format!("  ARRAY_ELEM\n    ZVAL {class:?}\n    null\n"))
+            .collect::<Vec<_>>()
+            .concat();
+
+        assert_eq!(calls.len(), 1, "{types}");
+        assert_eq!(
+            lowered.render(lowered.child(lowered.child(calls[0], 1), 0)),
+            format!("ARRAY [3]\n{elements}"),
+            "{types}"
+        );
+        assert!(lowered.nodes().iter().all(|node| node.kind != sharp_kind::SHARP_AST_RETURN), "{types}");
+    }
+}
+
+/// Spec section 32: PHPUnit runs the methods `Before` and `After` mark in its own process and in a child one, so
+/// each class of a test file starts its tests with the file's module before every other `Before` method and `setUp`,
+/// and ends them after every other `After` method and `tearDown`, by priority. A test module with no bindings still
+/// applies, so its tests run without the environment modules. A class of any other file gets neither method.
+#[test]
+fn a_test_files_class_starts_each_test_with_the_test_module_and_ends_it_after() {
+    let library = [
+        ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
+        ("app/Mail/FakeMailer.sharp", "namespace App.Mail;\n\npublic class FakeMailer : Mailer\n{\n}\n"),
+    ];
+    let file = |members: &str| {
+        format!(
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.FakeMailer;\n\nmodule : App.Shop\n{{\n{members}}}\n\npublic class CheckoutTest\n{{\n}}\n"
+        )
+    };
+    let hook = |name: &str, function: &str, argument: &str, attribute: &str, priority: i64| {
+        format!(
+            "METHOD [1] {name:?} @{{line}}-{{end}}\n  PARAM_LIST\n  null\n  STMT_LIST\n    CALL\n      ZVAL {function:?}\n      ARG_LIST\n{argument}  ZVAL [1] \"void\"\n  ATTRIBUTE_LIST\n    ATTRIBUTE_GROUP\n      ATTRIBUTE\n        ZVAL {attribute:?}\n        ARG_LIST\n          ZVAL {priority}\n"
+        )
+    };
+    let start = hook(
+        "__sharpStartTest",
+        "Sharp\\Internal\\startTest",
+        "        CLASS_NAME\n          ZVAL [1] \"static\"\n",
+        "PHPUnit\\Framework\\Attributes\\Before",
+        i64::MAX,
+    );
+    let end = hook("__sharpEndTest", "Sharp\\Internal\\endTest", "", "PHPUnit\\Framework\\Attributes\\After", i64::MIN);
+
+    for (members, line, table) in
+        [("    singleton Mailer = FakeMailer;\n", 11, "ARRAY [3]\n  ARRAY_ELEM\n"), ("", 10, "ARRAY [3]\n")]
+    {
+        let lowered = Lowered(common::checked("tests/Shop/CheckoutTest.sharp", &file(members), &library, lower));
+        let at = |hook: &str| hook.replace("{line}", &line.to_string()).replace("{end}", &(line + 2).to_string());
+
+        assert_eq!(lowered.declared("__sharpStartTest"), at(&start), "{members:?}");
+        assert_eq!(lowered.declared("__sharpEndTest"), at(&end), "{members:?}");
+        let call = (0..lowered.nodes().len() as u32)
+            .find(|&node| {
+                lowered.nodes()[node as usize].kind == sharp_kind::SHARP_AST_CALL
+                    && lowered.render(lowered.child(node, 0)) == "ZVAL \"Sharp\\\\Internal\\\\testModule\"\n"
+            })
+            .unwrap_or_else(|| panic!("{members:?}: the file calls testModule"));
+        let bindings = lowered.render(lowered.child(lowered.child(call, 1), 1));
+        assert!(bindings.starts_with(table), "{members:?}: {bindings}");
+    }
+
+    let base = Lowered(common::checked(
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\npublic class Checkout\n{\n}\n",
+        &library,
+        lower,
+    ));
+    let methods: Vec<String> = base
+        .nodes()
+        .iter()
+        .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD)
+        .map(|node| base.text(node.text))
+        .collect();
+    assert_eq!(methods, Vec::<String>::new());
+}
+
+/// Spec section 32: the container fills a class's main constructor, and reads each parameter's service from its PHP
+/// type. A `List` runs as `array`, so a constructor's collection of objects names its service in an attribute, and no
+/// other parameter does: a collection of values is no service. Each row is a parameter and the attributes the PHP of
+/// the constructor gives it. A method's parameter never has one.
+#[test]
+fn a_constructor_parameter_whose_php_type_drops_its_service_names_the_service() {
+    let library = [("app/Pricing/TaxRule.sharp", "namespace App.Pricing;\n\npublic class TaxRule\n{\n}\n")];
+    let service = |id: &str| {
+        format!(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Sharp\\\\Internal\\\\Service\"\n      ARG_LIST\n        ZVAL {id:?}\n"
+        )
+    };
+
+    for (parameter, constructor) in [
+        ("List<TaxRule> rules", service("list<app\\pricing\\taxrule>")),
+        ("Map<string, TaxRule> rules", service("array<string, app\\pricing\\taxrule>")),
+        ("List<string> names", "null\n".to_owned()),
+        ("TaxRule rule", "null\n".to_owned()),
+        ("int count", "null\n".to_owned()),
+    ] {
+        let code = format!(
+            "namespace App.Shop;\n\nimport App.Pricing.TaxRule;\n\npublic class Cart\n{{\n    public Cart({parameter}) {{ }}\n\n    public void price({parameter}) {{ }}\n}}\n"
+        );
+        let lowered = Lowered::with(&code, &library);
+        let attributes = |method: u32| lowered.render(lowered.child(lowered.child(lowered.child(method, 0), 0), 3));
+
+        assert_eq!(attributes(lowered.method_named("__construct")), constructor, "{parameter}");
+        assert_eq!(attributes(lowered.method_named("price")), "null\n", "{parameter}");
     }
 }
 
@@ -5468,7 +5759,6 @@ fn a_function_type_is_the_closure_class() {
 /// `App\Shop\Cart` and `App\Shop\Charge`, the parameter and return types of the function types below.
 const SHOP: (&str, &str) =
     ("src/App/Shop/Shop.php", "<?php namespace App\\Shop; final class Cart {} final class Charge {}");
-
 /// The type and the declaration of the one property `code` declares, rendered, after the checker accepts `code`.
 fn lowered_field(code: &str) -> (String, String) {
     let lowered = Lowered::with(code, &[SHOP]);
@@ -8752,8 +9042,10 @@ fn a_file_lowers_to_the_same_bytes_from_any_workspace_root_and_names_no_path() {
 #[test]
 fn environment_and_list_are_the_classes_of_the_sharp_namespace() {
     assert_eq!(
-        body(
-            "        const settings = new Environment();\n        const lines = List.wrap(extra);\n        return 1;\n"
+        body_in(
+            RUN,
+            "        const settings = new Environment();\n        const lines = List.wrap(extra);\n        return 1;\n",
+            &[common::ENVIRONMENT]
         ),
         indoc! {r#"
             STMT_LIST
@@ -13150,6 +13442,478 @@ fn every_operand_shape_the_checker_accepts_calls_the_class_that_declares_the_ope
                         VAR
                           ZVAL "order"
                     ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
+/// public static function slug(string $value, string $separator): string
+/// {
+///     return $value . $separator;
+/// }
+///
+/// public static function isBlank(string $value): bool
+/// {
+///     return $value === '';
+/// }
+/// ```
+///
+/// Spec section 26: an extension's method is the public static method of its static class that takes the receiver
+/// first, and a computed property is the one that takes only the receiver and returns its expression.
+#[test]
+fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug(string separator) => value + separator;\n\n        public bool isBlank => value == \"\";\n    }\n}\n",
+    );
+
+    assert_eq!(
+        (lowered.declared("slug"), lowered.declared("isBlank")),
+        (
+            indoc! {r#"
+                METHOD [17] "slug" @7-7
+                  PARAM_LIST
+                    PARAM
+                      ZVAL [1] "string"
+                      ZVAL "value"
+                      null
+                      null
+                      null
+                      null
+                    PARAM
+                      ZVAL [1] "string"
+                      ZVAL "separator"
+                      null
+                      null
+                      null
+                      null
+                  null
+                  STMT_LIST
+                    RETURN
+                      BINARY_OP [8]
+                        VAR
+                          ZVAL "value"
+                        VAR
+                          ZVAL "separator"
+                  ZVAL [1] "string"
+                  null
+            "#}
+            .to_owned(),
+            indoc! {r#"
+                METHOD [17] "isBlank" @9-9
+                  PARAM_LIST
+                    PARAM
+                      ZVAL [1] "string"
+                      ZVAL "value"
+                      null
+                      null
+                      null
+                      null
+                  null
+                  STMT_LIST
+                    RETURN
+                      BINARY_OP [16]
+                        VAR
+                          ZVAL "value"
+                        ZVAL ""
+                  ZVAL [1] "bool"
+                  null
+            "#}
+            .to_owned()
+        )
+    );
+}
+
+/// `App\Order`, a PHP class, `App\RushOrder`, its subclass with its own `total`, and `App\Receipt`, a final class.
+const ORDERS: (&str, &str) = (
+    "src/App/Order.php",
+    "<?php namespace App; class Order { public int $amount = 0; } class RushOrder extends Order { public function total(int $extra): int { return 9; } } final class Receipt { public int $amount = 0; }",
+);
+
+/// `App\Text\Extensions`, a project's extensions on `string`, on `App\Order`, on `App\Receipt` and on `Any`.
+const EXTENSIONS: (&str, &str) = (
+    "src/App/Text/Extensions.sharp",
+    "namespace App.Text;\n\nimport App.Order;\nimport App.Receipt;\n\npublic static class Extensions\n{\n    extension(string value)\n    {\n        public string slug(string separator) => value + separator;\n\n        public bool isBlank => value == \"\";\n    }\n\n    extension(Order order)\n    {\n        public int total(int extra) => order.amount + extra;\n\n        public bool isEmpty => order.amount == 0;\n    }\n\n    extension(Receipt receipt)\n    {\n        public int paid() => receipt.amount;\n    }\n\n    extension(Any value)\n    {\n        public string kind => \"value\";\n    }\n}\n",
+);
+
+/// The statements of `run`, declared with `signature` and holding `statements`, in a class that imports `Order`,
+/// `Receipt` and the extensions on them, lowered beside them.
+fn extension_body(signature: &str, statements: &str) -> String {
+    let code = format!(
+        "namespace App.Tenant;\n\nimport App.Order;\nimport App.Receipt;\nimport App.Text.Extensions;\n\nclass Report\n{{\n    public {signature}\n    {{\n{statements}    }}\n}}\n"
+    );
+
+    Lowered::with(&code, &[ORDERS, EXTENSIONS]).body()
+}
+
+/// ```php
+/// return \App\Text\Extensions::slug($title, '-') . \App\Text\Extensions::isBlank($title)
+///     . \App\Text\Extensions::paid($receipt) . \App\Text\Extensions::total($order, 2)
+///     . \App\Text\Extensions::isEmpty($order) . \App\Text\Extensions::kind($value);
+/// ```
+///
+/// Spec section 26: a member an extension adds runs as the static call of its method with the receiver first, for a
+/// method and a computed property alike, on any receiver: a `string`, an object of a final class or of a class a
+/// subclass can extend, and a value of `Any`. The checker chose it from the type the code shows. Called through its
+/// class, as `Extensions.total(order, 2)`, it is that static call already, as in C#.
+#[test]
+fn an_extension_member_is_the_static_call_of_its_method() {
+    assert_eq!(
+        extension_body(
+            "string run(string title, Receipt receipt, Order order, Any value)",
+            "        return title.slug(\"-\") + (title.isBlank ? \"y\" : \"n\") + (string) receipt.paid()\n            + (string) order.total(2) + (order.isEmpty ? \"y\" : \"n\") + value.kind;\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [8]
+                  BINARY_OP [8]
+                    BINARY_OP [8]
+                      BINARY_OP [8]
+                        BINARY_OP [8]
+                          STATIC_CALL
+                            ZVAL "App\\Text\\Extensions"
+                            ZVAL "slug"
+                            ARG_LIST
+                              VAR
+                                ZVAL "title"
+                              ZVAL "-"
+                          CONDITIONAL [1]
+                            STATIC_CALL
+                              ZVAL "App\\Text\\Extensions"
+                              ZVAL "isBlank"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "title"
+                            ZVAL "y"
+                            ZVAL "n"
+                        CAST [6]
+                          STATIC_CALL
+                            ZVAL "App\\Text\\Extensions"
+                            ZVAL "paid"
+                            ARG_LIST
+                              VAR
+                                ZVAL "receipt"
+                      CAST [6]
+                        STATIC_CALL
+                          ZVAL "App\\Text\\Extensions"
+                          ZVAL "total"
+                          ARG_LIST
+                            VAR
+                              ZVAL "order"
+                            ZVAL 2
+                    CONDITIONAL [1]
+                      STATIC_CALL
+                        ZVAL "App\\Text\\Extensions"
+                        ZVAL "isEmpty"
+                        ARG_LIST
+                          VAR
+                            ZVAL "order"
+                      ZVAL "y"
+                      ZVAL "n"
+                  STATIC_CALL
+                    ZVAL "App\\Text\\Extensions"
+                    ZVAL "kind"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
+        "#}
+    );
+    assert_eq!(
+        extension_body(
+            "string run(Order order)",
+            "        return (string) Extensions.total(order, 2) + (Extensions.isEmpty(order) ? \"y\" : \"n\");\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [8]
+                  CAST [6]
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "total"
+                      ARG_LIST
+                        VAR
+                          ZVAL "order"
+                        ZVAL 2
+                  CONDITIONAL [1]
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "isEmpty"
+                      ARG_LIST
+                        VAR
+                          ZVAL "order"
+                    ZVAL "y"
+                    ZVAL "n"
+        "#}
+    );
+}
+
+/// ```php
+/// $order = new \App\RushOrder();
+/// $rush = new \App\RushOrder();
+/// return \App\Text\Extensions::total($order, 2) + $rush->total(2);
+/// ```
+///
+/// Spec section 26: the type the code shows chooses the member, as in C# and Kotlin. On a value shown as an `Order`,
+/// the extension runs though the object is a `RushOrder` with its own `total`. On a value shown as a `RushOrder`, its
+/// own `total` runs.
+#[test]
+fn the_type_the_code_shows_chooses_between_an_extension_and_a_subclass_member() {
+    let code = "namespace App.Tenant;\n\nimport App.Order;\nimport App.RushOrder;\nimport App.Text.Extensions;\n\nclass Report\n{\n    public int run()\n    {\n        Order order = new RushOrder();\n        RushOrder rush = new RushOrder();\n        return order.total(2) + rush.total(2);\n    }\n}\n";
+
+    assert_eq!(
+        Lowered::with(code, &[ORDERS, EXTENSIONS]).body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "order"
+                NEW
+                  ZVAL "App\\RushOrder"
+                  ARG_LIST
+              ASSIGN
+                VAR
+                  ZVAL "rush"
+                NEW
+                  ZVAL "App\\RushOrder"
+                  ARG_LIST
+              RETURN
+                BINARY_OP [1]
+                  STATIC_CALL
+                    ZVAL "App\\Text\\Extensions"
+                    ZVAL "total"
+                    ARG_LIST
+                      VAR
+                        ZVAL "order"
+                      ZVAL 2
+                  METHOD_CALL
+                    VAR
+                      ZVAL "rush"
+                    ZVAL "total"
+                    ARG_LIST
+                      ZVAL 2
+        "#}
+    );
+}
+
+/// ```php
+/// return \App\Rush\Ranks::rank($rush) + \App\Text\Ranks::rank($order);
+/// ```
+///
+/// Spec section 26: of two imported extensions that fit, the one whose receiver is the most specific runs, as in C# and
+/// Kotlin: `Rush.Ranks` on a value shown as a `RushOrder`, and `Text.Ranks` on one shown as an `Order`.
+#[test]
+fn the_extension_with_the_most_specific_receiver_runs() {
+    let orders = (
+        "src/App/Text/Ranks.sharp",
+        "namespace App.Text;\n\nimport App.Order;\n\npublic static class Ranks\n{\n    extension(Order order)\n    {\n        public int rank() => 1;\n    }\n}\n",
+    );
+    let rush = (
+        "src/App/Rush/Ranks.sharp",
+        "namespace App.Rush;\n\nimport App.RushOrder;\n\npublic static class Ranks\n{\n    extension(RushOrder order)\n    {\n        public int rank() => 2;\n    }\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport App.Order;\nimport App.RushOrder;\nimport App.Rush.Ranks as RushRanks;\nimport App.Text.Ranks;\n\nclass Report\n{\n    public int run(RushOrder rush, Order order)\n    {\n        return rush.rank() + order.rank();\n    }\n}\n";
+
+    assert_eq!(
+        Lowered::with(code, &[ORDERS, orders, rush]).body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [1]
+                  STATIC_CALL
+                    ZVAL "App\\Rush\\Ranks"
+                    ZVAL "rank"
+                    ARG_LIST
+                      VAR
+                        ZVAL "rush"
+                  STATIC_CALL
+                    ZVAL "App\\Text\\Ranks"
+                    ZVAL "rank"
+                    ARG_LIST
+                      VAR
+                        ZVAL "order"
+        "#}
+    );
+}
+
+/// ```php
+/// return \App\Text\Extensions::slug($title, separator: '-')
+///     . (string) \App\Text\Extensions::total($order, extra: 2);
+/// ```
+///
+/// Spec section 26: a named argument passes to the extension's method by its name, as it does to any call.
+#[test]
+fn an_extension_member_passes_a_named_argument_by_its_name() {
+    assert_eq!(
+        extension_body(
+            "string run(string title, Order order)",
+            "        return title.slug(separator: \"-\") + (string) order.total(extra: 2);\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [8]
+                  STATIC_CALL
+                    ZVAL "App\\Text\\Extensions"
+                    ZVAL "slug"
+                    ARG_LIST
+                      VAR
+                        ZVAL "title"
+                      NAMED_ARG
+                        ZVAL "separator"
+                        ZVAL "-"
+                  CAST [6]
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "total"
+                      ARG_LIST
+                        VAR
+                          ZVAL "order"
+                        NAMED_ARG
+                          ZVAL "extra"
+                          ZVAL 2
+        "#}
+    );
+}
+
+/// `Sharp\Text\TextExtensions` at the standard library's path, beside a constant: its extension on `string` wraps
+/// `trim` with a method, `strlen` with a computed property and `strtoupper` with a method whose block returns it.
+const TEXT_EXTENSIONS: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/TextExtensions.sharp",
+    "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    public const int LIMIT = 80;\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public int length => global.strlen(text);\n\n        public string upper()\n        {\n            return global.strtoupper(text);\n        }\n    }\n}\n",
+);
+
+/// ```php
+/// return trim($name) . strlen(trim($name)) . strtoupper($name);
+/// ```
+///
+/// Spec section 8: a standard library extension member whose body is one call inlines as that call, so `name.trim()`
+/// runs as `trim($name)`, with no call of the library's method. Every file has the library's extensions.
+#[test]
+fn a_standard_library_extension_member_inlines_as_the_call_its_body_makes() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string run(string name)\n    {\n        return name.trim() + (string) name.trim().length + name.upper();\n    }\n}\n";
+
+    assert_eq!(
+        Lowered::inlining(code, &[], &[TEXT_EXTENSIONS]).body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [8]
+                  BINARY_OP [8]
+                    CALL
+                      ZVAL "trim"
+                      ARG_LIST
+                        VAR
+                          ZVAL "name"
+                    CAST [6]
+                      CALL
+                        ZVAL "strlen"
+                        ARG_LIST
+                          CALL
+                            ZVAL "trim"
+                            ARG_LIST
+                              VAR
+                                ZVAL "name"
+                  CALL
+                    ZVAL "strtoupper"
+                    ARG_LIST
+                      VAR
+                        ZVAL "name"
+        "#}
+    );
+}
+
+/// ```php
+/// $total = ($order === null ? null : \App\Text\Extensions::total($order, 2)) ?? 0;
+/// $blank = ($title === null ? null : \App\Text\Extensions::isBlank($title)) ?? false;
+/// $kind = $order === null ? null : \App\Text\Extensions::kind($order->amount);
+/// return $blank ? ($title === null ? null : \App\Text\Extensions::slug($title, '-')) : (string) $total;
+/// ```
+///
+/// Spec section 26: `?.` reaches an extension's member only when the receiver is not null, as it does any member, so
+/// the call runs under the conditional that tests the receiver. A member read with `.` later in the chain runs under
+/// it too, since PHP's `?->` would skip only its own link and pass `null` to the static call.
+#[test]
+fn a_null_safe_extension_member_runs_only_on_a_receiver_that_is_not_null() {
+    assert_eq!(
+        extension_body(
+            "string? run(string? title, Order? order)",
+            "        const total = order?.total(2) ?? 0;\n        const blank = title?.isBlank ?? false;\n        const kind = order?.amount.kind;\n        return blank ? title?.slug(\"-\") : (string) total;\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "total"
+                COALESCE
+                  CONDITIONAL [1]
+                    BINARY_OP [16]
+                      VAR
+                        ZVAL "order"
+                      ZVAL null
+                    ZVAL null
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "total"
+                      ARG_LIST
+                        VAR
+                          ZVAL "order"
+                        ZVAL 2
+                  ZVAL 0
+              ASSIGN
+                VAR
+                  ZVAL "blank"
+                COALESCE
+                  CONDITIONAL [1]
+                    BINARY_OP [16]
+                      VAR
+                        ZVAL "title"
+                      ZVAL null
+                    ZVAL null
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "isBlank"
+                      ARG_LIST
+                        VAR
+                          ZVAL "title"
+                  ZVAL false
+              ASSIGN
+                VAR
+                  ZVAL "kind"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "order"
+                    ZVAL null
+                  ZVAL null
+                  STATIC_CALL
+                    ZVAL "App\\Text\\Extensions"
+                    ZVAL "kind"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "order"
+                        ZVAL "amount"
+              RETURN
+                CONDITIONAL
+                  VAR
+                    ZVAL "blank"
+                  CONDITIONAL [1]
+                    BINARY_OP [16]
+                      VAR
+                        ZVAL "title"
+                      ZVAL null
+                    ZVAL null
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "slug"
+                      ARG_LIST
+                        VAR
+                          ZVAL "title"
+                        ZVAL "-"
+                  CAST [6]
+                    VAR
+                      ZVAL "total"
         "#}
     );
 }

@@ -61,6 +61,7 @@ use crate::effects::EffectSummary;
 use crate::effects::FunctionValue;
 use crate::effects::Roots;
 use crate::effects::Runs;
+use crate::effects::member_of_foreign_class;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_prelude_stub;
@@ -87,6 +88,12 @@ pub(crate) fn record<'ast, 'arena, A>(
     let function_values = std::mem::take(&mut artifacts.function_values);
     let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, initializer, code);
     summary.function_values = function_values;
+    // Code that reaches a `foreign` object has its class's effect, whatever its members do (spec section 29), so each
+    // member has it too. A pure declaration then refuses a `foreign` implementation, and a call through an interface or
+    // a base class has the effect of the `foreign` override it reaches.
+    if let Some(effect) = foreign_class(context.codebase, class) {
+        summary.effects.insert(0, (Effect::Foreign(effect), code.span(), member_of_foreign_class()));
+    }
     artifacts.effect_summaries.push(summary);
     artifacts.effect_summaries.append(&mut lambdas);
 }
@@ -151,21 +158,28 @@ pub(crate) fn record_function_values<A>(
                     continue;
                 };
 
+                // `class` is the class the value is read through, where a call's `extern` lookup starts too.
+                let class_name =
+                    codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+                let callee = (class_name, metadata.original_name);
                 let lowercase_method = ascii_lowercase_word(method.as_bytes());
-                if declaring.flags.is_sharp() {
+                if let Some(effect) = foreign_class(codebase, class) {
+                    Runs::Foreign { callee, effects: vec![Effect::Foreign(effect)] }
+                } else if declaring.flags.is_sharp() && metadata.method_metadata.as_ref().is_some_and(|m| m.is_abstract)
+                {
+                    Runs::Foreign {
+                        callee,
+                        effects: metadata.uses.iter().map(|effect| Effect::Foreign(*effect)).collect(),
+                    }
+                } else if declaring.flags.is_sharp() {
                     Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), lowercase_method))
+                } else if is_prelude_stub(declaring_class) {
+                    Runs::Foreign { callee, effects: Vec::new() }
                 } else {
-                    // `class` is the class the value is read through, where a call's `extern` lookup starts too.
-                    let class_name =
-                        codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
-                    let callee = (class_name, metadata.original_name);
-                    let effects = if is_prelude_stub(declaring_class) || is_prelude_stub(class) {
-                        prelude_stub_effects(class)
-                    } else {
-                        plain_php_effects(extern_of(codebase, class, lowercase_method), callee)
-                    };
-
-                    Runs::Foreign { callee, effects }
+                    Runs::Foreign {
+                        callee,
+                        effects: plain_php_effects(extern_of(codebase, class, lowercase_method), callee),
+                    }
                 }
             }
             Some(FunctionLikeIdentifier::Function(_)) | None => continue,
@@ -476,6 +490,19 @@ where
     }
 
     fn read_property(&mut self, object: &Expression<'arena>, property: &ClassLikeMemberSelector<'arena>, span: Span) {
+        // A member named at run time, as `payments.{name}`, still reaches the object.
+        let member = match property {
+            ClassLikeMemberSelector::Identifier(name) => word(name.value),
+            _ => empty_word(),
+        };
+        let codebase = self.codebase();
+        for class in self.object_classes(object) {
+            if let Some(effect) = foreign_class(codebase, class) {
+                let class = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+                self.summary.effects.push((Effect::Foreign(effect), span, (class, member)));
+            }
+        }
+
         let receiver = self.roots(object);
         for callee in self.accessors(object, property, b"get") {
             self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments: Vec::new() });
@@ -744,7 +771,25 @@ where
             return;
         };
 
+        let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+        let cause = (class_name, metadata.original_name);
+        if let Some(effect) = foreign_class(codebase, class) {
+            self.summary.effects.push((Effect::Foreign(effect), span, cause));
+
+            return;
+        }
+
         if codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|declaring| declaring.flags.is_sharp()) {
+            // A method without a body has the effects its `uses` lists, which each implementation is held to, spec
+            // section 29.
+            if metadata.method_metadata.as_ref().is_some_and(|method| method.is_abstract) {
+                for effect in &metadata.uses {
+                    self.summary.effects.push((Effect::Foreign(*effect), span, cause));
+                }
+
+                return;
+            }
+
             let callee = Body::Method(
                 ascii_lowercase_word(declaring_class.as_bytes()),
                 ascii_lowercase_word(method_name.as_bytes()),
@@ -756,10 +801,8 @@ where
             return;
         }
 
-        let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
-        let cause = (class_name, metadata.original_name);
-        if is_prelude_stub(declaring_class) || is_prelude_stub(class) {
-            self.prelude_stub_call(class, metadata, span, receiver, arguments, cause);
+        if is_prelude_stub(declaring_class) {
+            self.prelude_stub_call(metadata, span, receiver, arguments);
         } else {
             let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
@@ -865,17 +908,11 @@ where
     // Deleted once the standard library's `.sharp` sources replace the prelude stubs (php-sharp issue #60).
     fn prelude_stub_call(
         &mut self,
-        class: Word,
         metadata: &FunctionLikeMetadata,
         span: Span,
         receiver: Option<&'ast Expression<'arena>>,
         arguments: &'ast ArgumentList<'arena>,
-        cause: (Word, Word),
     ) {
-        for effect in prelude_stub_effects(class) {
-            self.summary.effects.push((effect, span, cause));
-        }
-
         // A function passed to the stub runs on the receiver's elements, as `uses f` will declare.
         let elements = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
         for argument in &arguments.arguments {
@@ -1136,14 +1173,15 @@ fn plain_php_effects(declaration: Option<&ExternMetadata>, cause: (Word, Word)) 
     }
 }
 
-/// The effects of a call of a method of the prelude stub `class`: a `Sharp\Environment` method reads the environment.
-// Deleted once the standard library's `.sharp` sources replace the prelude stubs (php-sharp issue #60).
-fn prelude_stub_effects(class: Word) -> Vec<Effect> {
-    if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Environment") {
-        vec![Effect::Foreign(word(b"Sharp\\Environment"))]
-    } else {
-        Vec::new()
-    }
+/// The `foreign` class an object of `class` is, spec section 29: `class` itself or a parent marked `foreign`, by its
+/// original name. Code that reaches such an object has that class's effect, whatever its members do.
+fn foreign_class(codebase: &CodebaseMetadata, class: Word) -> Option<Word> {
+    let metadata = codebase.get_class_like(class.as_bytes())?;
+
+    std::iter::once(metadata)
+        .chain(metadata.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(parent.as_bytes())))
+        .find(|metadata| metadata.flags.is_foreign())
+        .map(|metadata| metadata.original_name)
 }
 
 /// The lambda an expression is, unparenthesized.

@@ -1,27 +1,47 @@
-//! The rules effects decide: an `extern` declaration's own checks, and the rules over solved effects.
+//! The rules effects decide: an `extern` declaration's own checks, what a `uses` names and what a static holds, and
+//! the rules over solved effects.
 
 use std::cell::OnceCell;
 
 use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::union::TUnion;
+use mago_names::binding::MethodParts;
 use mago_names::display_sharp_member;
+use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Extern;
+use mago_syntax::cst::LocalIdentifier;
+use mago_syntax::cst::Method;
+use mago_syntax::cst::Program;
+use mago_syntax::cst::Uses;
+use mago_syntax::walker::Walker;
 use mago_word::Word;
+use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
+use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::context::block::BlockContext;
 use crate::effects::Body;
 use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
+use crate::effects::NAMED_EFFECTS;
 use crate::effects::Runs;
+use crate::effects::events;
+use crate::effects::is_effect;
+use crate::utils::names::display_member;
 use crate::utils::names::is_imported_namespace;
 use crate::utils::names::namespace_function;
 use crate::utils::names::sharp_class_like_name;
@@ -136,6 +156,49 @@ pub(crate) fn function_values_must_fit_their_types(
                 Runs::Body(_) => issue.with_annotation(Annotation::secondary(impurity.span)),
                 Runs::Foreign { .. } => issue,
             }
+        })
+        .collect()
+}
+
+/// Spec section 29: a method without a body is pure unless it says `uses`, and every implementation is held to what
+/// the declaration allows.
+pub(crate) fn implementations_must_fit_their_declarations(
+    effects: &Effects,
+    codebase: &CodebaseMetadata,
+    short_name_counts: &OnceCell<HashMap<String, u32>>,
+) -> IssueCollection {
+    effects
+        .unfit_implementations(codebase)
+        .map(|((class, member), ancestor, declaration, imports, scope, impurity)| {
+            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
+            let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
+            let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
+            let ancestor =
+                codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |ancestor| ancestor.original_name);
+            let declared = display_sharp_member(class_name(ancestor), declaration.original_name);
+            let allows = if declaration.uses.is_empty() {
+                format!("the pure `{declared}`")
+            } else {
+                let uses: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
+
+                format!("`uses {}` on `{declared}`", uses.join(", "))
+            };
+
+            impure(
+                IssueCode::IncompatibleEffects,
+                format!(
+                    "`{}` {}, so {allows} cannot accept it.",
+                    display_sharp_member(class_name(class), member),
+                    impurity.describe(&class_name, &effect_name)
+                ),
+                impurity.span,
+                "method",
+                &impurity,
+                &class_name,
+                &code_class_name,
+                &missing_import,
+            )
         })
         .collect()
 }
@@ -290,4 +353,182 @@ where
             Issue::error(format!("Method `{written}` does not exist.")).with_annotation(Annotation::primary(target)),
         );
     }
+}
+
+/// Spec section 29: each name a `uses` writes is an effect. Any file may declare a `foreign` class, so the check
+/// reads the codebase, and the file depends on each class it names.
+pub(crate) fn check_uses<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    program: &Program<'_>,
+) where
+    A: Arena,
+{
+    let mut found = UsesNames::default();
+    UsesWalker.walk_program(program, &mut found);
+
+    for name in found.names {
+        let effect = context.resolved_names.get(name);
+        artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, ascii_lowercase_word(effect), false);
+        if is_effect(context.codebase, effect) {
+            continue;
+        }
+
+        // The message names the `foreign` classes the file can name without another import: the standard library's,
+        // its namespace's and its imports'. The file depends on each class it could name, so the message follows a
+        // class that becomes `foreign` or stops being one, as a compile from scratch gives it.
+        let namespace = context.scope.namespace_name().unwrap_or_default();
+        let nameable: Vec<_> = context
+            .codebase
+            .class_likes
+            .values()
+            .filter(|class| {
+                let name = class.original_name.as_bytes();
+                let class_namespace = name.iter().rposition(|byte| *byte == b'\\').map_or(&b""[..], |end| &name[..end]);
+
+                class_namespace.eq_ignore_ascii_case(b"Sharp")
+                    || class_namespace.eq_ignore_ascii_case(namespace)
+                    || context.imported_names.contains_key(&ascii_lowercase_word(name))
+            })
+            .collect();
+        for class in &nameable {
+            artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, class.name, false);
+        }
+        let mut foreign: Vec<String> = nameable
+            .into_iter()
+            .filter(|class| class.flags.is_foreign())
+            .map(|class| {
+                sharp_class_like_name(
+                    context.codebase,
+                    &context.imported_names,
+                    &context.short_name_counts,
+                    class.original_name,
+                )
+            })
+            .collect();
+        foreign.sort_unstable();
+        let effects: Vec<String> = NAMED_EFFECTS.iter().map(short_name).chain(foreign).collect();
+
+        context.collector.report_with_code(
+            IssueCode::InvalidEffect,
+            Issue::error(format!(
+                "`{}` is not an effect: `uses` takes {}, {} or a `foreign` class.",
+                String::from_utf8_lossy(name.value),
+                effects.join(", "),
+                short_name(events()),
+            ))
+            .with_annotation(Annotation::primary(name.span).with_message("Written here."))
+            .with_note("An effect is a standard effect, a `foreign` class, or `Events`, the effect of `emit`."),
+        );
+    }
+}
+
+/// The names every effect `uses` of a program writes. A method's `uses` also names its function parameters, with or
+/// without a body, which are no effect, and a method with a body names only those, as the semantics checker holds it
+/// to.
+struct UsesWalker;
+
+/// The names [`UsesWalker`] collects, and the `uses` of the methods it read already.
+#[derive(Default)]
+struct UsesNames<'ast, 'arena> {
+    names: Vec<&'ast LocalIdentifier<'arena>>,
+    methods: Vec<Span>,
+}
+
+impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker {
+    fn walk_in_method(&self, method: &'ast Method<'arena>, found: &mut UsesNames<'ast, 'arena>) {
+        let Some(uses) = method.uses else {
+            return;
+        };
+
+        found.methods.push(uses.span());
+        if method.is_abstract() {
+            found.names.extend(MethodParts::of_method(method).uses_effects());
+        }
+    }
+
+    fn walk_in_uses(&self, uses: &'ast Uses<'arena>, found: &mut UsesNames<'ast, 'arena>) {
+        if !found.methods.contains(&uses.span()) {
+            found.names.extend(uses.names.iter());
+        }
+    }
+}
+
+/// Spec section 29: a `foreign` object reaches code only through constructors, so a static property of `class` holds
+/// none, alone or inside a collection.
+pub(crate) fn check_foreign_statics<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    for property in class.properties.values() {
+        if !property.flags.is_static() {
+            continue;
+        }
+        let Some(declared) = &property.type_declaration_metadata else {
+            continue;
+        };
+
+        report_foreign_in_static(
+            context,
+            class.original_name,
+            property.name.0,
+            &declared.type_union,
+            property.name_span.unwrap_or(declared.span),
+        );
+    }
+}
+
+/// Spec section 29: a write of a value of `value_type` at `span` to the static `property` of `class` stores no
+/// `foreign` object, whatever the static's declared type, as `Cache.loose = this.store` into an `Any?` would.
+pub(crate) fn check_foreign_static_write<A>(
+    context: &mut Context<'_, '_, A>,
+    class: Word,
+    property: Word,
+    value_type: &TUnion,
+    span: Span,
+) where
+    A: Arena,
+{
+    let class = context.codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+
+    report_foreign_in_static(context, class, property, value_type, span);
+}
+
+/// Reports `foreign-in-static` at `span` when `held_type`, a type the static `property` of `class` holds, holds a
+/// `foreign` object, alone or inside a collection.
+fn report_foreign_in_static<A>(
+    context: &mut Context<'_, '_, A>,
+    class: Word,
+    property: Word,
+    held_type: &TUnion,
+    span: Span,
+) where
+    A: Arena,
+{
+    let held = held_type.get_all_child_nodes().into_iter().find_map(|node| match node {
+        TypeRef::Atomic(TAtomic::Object(object)) => object
+            .get_name()
+            .and_then(|name| context.codebase.get_class_like(name.as_bytes()))
+            .filter(|held| held.flags.is_foreign()),
+        _ => None,
+    });
+    let Some(held) = held else {
+        return;
+    };
+
+    let held = sharp_class_like_name(
+        context.codebase,
+        &context.imported_names,
+        &context.short_name_counts,
+        held.original_name,
+    );
+    let property_name = display_member(context, class, property);
+    context.collector.report_with_code(
+        IssueCode::ForeignInStatic,
+        Issue::error(format!("`{property_name}` is static, so it cannot hold a `{held}`."))
+            .with_annotation(Annotation::primary(span))
+            .with_note("A `foreign` object reaches code only through constructors, so no static holds one.")
+            .with_help(format!("Take the `{held}` as a constructor parameter instead.")),
+    );
 }
