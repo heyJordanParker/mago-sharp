@@ -488,7 +488,8 @@ impl Effects {
 
     /// Each PHP# method with the first method without a body it implements whose `uses` does not list one of its
     /// effects: its class and member as messages name them, the declaration's class and metadata, the imports and the
-    /// scope of its file, and the call that has the effect.
+    /// scope of its file, and the call that has the effect. An implementation of `Sharp\Dispatcher::dispatch` is held
+    /// to nothing, spec section 15: it runs the listeners of every event, which may reach any effect.
     fn unfit_implementations<'effects>(
         &'effects self,
         codebase: &'effects CodebaseMetadata,
@@ -510,6 +511,9 @@ impl Effects {
                 let metadata = codebase.get_class_like(class.as_bytes())?;
 
                 metadata.all_parent_classes.iter().chain(&metadata.all_parent_interfaces).find_map(|ancestor| {
+                    if runs_listeners(*ancestor, method) {
+                        return None;
+                    }
                     let declaration =
                         codebase.get_method(ancestor.as_bytes(), method.as_bytes()).filter(|declaration| {
                             declaration.flags.is_sharp()
@@ -557,6 +561,12 @@ fn is_outside(effect: Effect, allowed: &[Word]) -> bool {
 /// The effect an `emit` has, `Sharp\Events`.
 fn events() -> Word {
     word(b"Sharp\\Events")
+}
+
+/// Whether `method` of `class` is `Sharp\Dispatcher::dispatch`, the method the engine calls with the listeners of
+/// every event, spec section 15.
+fn runs_listeners(class: Word, method: Word) -> bool {
+    class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Dispatcher") && method.as_bytes().eq_ignore_ascii_case(b"dispatch")
 }
 
 /// The standard effects that are names and no class, spec section 29, in the spec's order. As `Events` is, each is an

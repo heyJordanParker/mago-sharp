@@ -368,10 +368,10 @@ const ANY: &[u8] = b"Any";
 /// - `new` on a static class, in `analyze_class_instantiation`, and a class that extends one, in
 ///   `check_class_like_extends`, because the static class may be another file's.
 /// - an `extern` method anywhere but a standard library file whose class is under `Sharp`, in `Method`'s `analyze`,
-///   `@` in any file that is not the standard library's, in `UnaryPrefix`'s `analyze`, and a class or enum named
-///   `Sharp.Int`, `Sharp.Float` or `Sharp.Bool` in any file that is not the standard library's, in
-///   `report_sharp_type_class_outside_library`, because only the analyzer knows the file's package. The nearest
-///   `composer.json` above a file names it.
+///   `@` in any file that is not the standard library's, in `UnaryPrefix`'s `analyze`, and `namespace Sharp` or a
+///   namespace under it, which alone declares `Sharp.Int`, `Sharp.Float` and `Sharp.Bool`, in any file that is not the
+///   standard library's, in `report_standard_library_namespace`, because only the analyzer knows the file's package.
+///   The nearest `composer.json` above a file names it.
 /// - a bare call that finds no function while the enclosing class declares a method of that name, in
 ///   `bare_member_call`, because only the codebase knows which functions exist.
 /// - a bare call of a plain PHP function, `exit` included, which spec section 23 makes an error, in

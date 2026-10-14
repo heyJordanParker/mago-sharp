@@ -2117,7 +2117,10 @@ fn calling_a_function_that_does_not_exist_is_reported_as_in_php() {
 fn a_global_call_named_like_a_method_of_its_class_calls_the_php_function() {
     let sharp = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static float ceil(float x) => global.ceil(x);\n\n    public static int count(List<int> values) => global.count(values);\n}\n";
 
-    assert_eq!(issues(("src/Sharp/Math/Math.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(
+        issues(("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp", sharp), &[]),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -3134,29 +3137,34 @@ const ENVIRONMENT: (&str, &str) = (
 );
 
 /// The semantic checks let any file whose namespace is `Sharp` declare `Int`, `Float` and `Bool`, as the engine does,
-/// and only the analyzer knows the file is not the standard library's. It refuses them with the semantic checks'
-/// reserved-name message, under its own code.
+/// and only the analyzer knows the file is not the standard library's. So it refuses `namespace Sharp` and every
+/// namespace under it outside the standard library, which would also reach `Sharp.Internal` with no import. A
+/// namespace that only starts with the letters is the app's.
 #[test]
-fn a_type_class_of_the_standard_library_in_a_project_file_is_a_reserved_name() {
-    let class =
-        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => null;\n}\n";
-    let r#enum = "namespace Sharp;\n\npublic enum Int\n{\n    case One;\n}\n";
-
-    let class_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Sharp/Bool.sharp", class), &[]);
-    let enum_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Sharp/Int.sharp", r#enum), &[]);
-
-    let messages: Vec<String> = class_issues
-        .iter()
-        .map(|issue| format!("{} {}", located(class, issue), issue.message))
-        .chain(enum_issues.iter().map(|issue| format!("{} {}", located(r#enum, issue), issue.message)))
-        .collect();
-    assert_eq!(
-        messages,
-        [
-            "3:21 reserved-name-outside-library Cannot use `Bool` as a class name: it is reserved.",
-            "3:13 reserved-name-outside-library Cannot use `Int` as a class name: it is reserved.",
-        ]
+fn a_namespace_of_the_standard_library_in_a_project_file_is_a_reserved_name() {
+    let refusal = |namespace: &str| {
+        format!(
+            "1:11 reserved-name-outside-library `{namespace}` is a namespace of the standard library, and only the standard library declares code in it. | Declared here. | Declare the file in a namespace of the app."
+        )
+    };
+    let bool_class = (
+        "src/Sharp/Bool.sharp",
+        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => null;\n}\n",
     );
+    let int_enum = ("src/Sharp/Int.sharp", "namespace Sharp;\n\npublic enum Int\n{\n    case One;\n}\n");
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let inside = (
+        "app/Sneak/Inside.sharp",
+        "namespace Sharp;\n\nimport App.Shop.OrderPaid;\n\npublic class Inside\n{\n    public Listening watch() => Internal.listen(typeof(OrderPaid), (OrderPaid e) => { });\n}\n",
+    );
+    let internal = ("app/Sneak/Listen.sharp", "namespace Sharp.Internal;\n\npublic class Listen\n{\n}\n");
+    let sharpen = ("app/Sharpen/Knife.sharp", "namespace Sharpen;\n\npublic class Knife\n{\n}\n");
+
+    assert_eq!(worded(bool_class, &[]), [refusal("Sharp")]);
+    assert_eq!(worded(int_enum, &[]), [refusal("Sharp")]);
+    assert_eq!(worded(inside, &[EVENTS, order_event, order_paid]), [refusal("Sharp")]);
+    assert_eq!(worded(internal, &[]), [refusal("Sharp.Internal")]);
+    assert_eq!(worded(sharpen, &[]), Vec::<String>::new());
 }
 
 /// Spec section 23: a class cannot share its full name with a namespace, when the class or anything in the namespace
@@ -12318,26 +12326,33 @@ fn leak(code: String) -> &'static str {
 }
 
 /// Semantics takes a well-formed `extern` method in any namespace, because the engine compiles the standard library
-/// from `vendor/` without knowing it is vendored. The analyzer knows a project file, and refuses it there.
+/// from `vendor/` without knowing it is vendored. The analyzer knows a project file, and refuses it there, in a
+/// namespace of the standard library as in any other.
 #[test]
 fn an_extern_method_in_a_project_file_is_an_error_in_any_namespace() {
-    for analyzed in [
+    for (analyzed, reserved) in [
         (
-            "src/Sharp/Mine/Text.sharp",
-            "namespace Sharp.Mine;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            (
+                "src/Sharp/Mine/Text.sharp",
+                "namespace Sharp.Mine;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            ),
+            &["1:11 reserved-name-outside-library"][..],
         ),
         (
-            "src/App/Text.sharp",
-            "namespace App;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            (
+                "src/App/Text.sharp",
+                "namespace App;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n}\n",
+            ),
+            &[],
         ),
     ] {
         assert_eq!(
-            messages(analyzed, &[]),
-            ["Only the standard library declares native bodies: give `slug` a body."],
+            messages(analyzed, &[]).last().map(String::as_str),
+            Some("Only the standard library declares native bodies: give `slug` a body."),
             "{}",
             analyzed.0
         );
-        assert_eq!(issues(analyzed, &[]), ["5:33 native-body-outside-library"], "{}", analyzed.0);
+        assert_eq!(issues(analyzed, &[]), [reserved, &["5:33 native-body-outside-library"]].concat(), "{}", analyzed.0);
     }
 }
 
@@ -16454,6 +16469,269 @@ fn a_generic_interface_states_its_property_with_the_type_argument_the_header_giv
             "5:19 incompatible-property-type `Kept` gives `item` as `string`, and `Holder` states it as `int`. | Given here. | Stated here. | Give `item` the type `int`."
         ]
     );
+}
+
+/// Spec section 15: "An app replaces the dispatcher once at startup", so the app's top module that binds `Dispatcher`
+/// is the one that binds it. A binding in a module below it is refused, and so is each of two top modules of the same
+/// depth. An environment module of the top namespace, a test module and a package's module bind it freely.
+#[test]
+fn only_the_apps_top_module_binds_the_dispatcher() {
+    let recorder = (
+        "app/Recorder.sharp",
+        "namespace App;\n\nimport Sharp.Dispatcher;\n\npublic class Recorder : Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners) { }\n}\n",
+    );
+    let module = |path: &'static str, namespace: &str, header: &str| {
+        (
+            path,
+            leak(format!(
+                "namespace {namespace};\n\nimport App.Recorder;\nimport Sharp.Dispatcher;\n\nmodule{header}\n{{\n    singleton Dispatcher = Recorder;\n}}\n"
+            )),
+        )
+    };
+    let top = module("app/Module.sharp", "App", "");
+    let shop = module("app/Shop/Module.sharp", "App.Shop", "");
+    let admin = module("admin/Module.sharp", "Admin", "");
+    let production = module("app/Module.Production.sharp", "App", " : App");
+    let test = module("tests/Shop/CartTest.sharp", "App.Shop", " : App.Shop");
+    let package = module("vendor/acme/billing/src/Module.sharp", "Acme", "");
+    let below = "8:5 invalid-binding Only `app/Module.sharp` binds `Dispatcher`: an app binds it once, in its top module. | Remove this binding. The app's dispatcher serves every `emit`, and a test module replaces it in tests.";
+    let tied = |other: &str| {
+        format!(
+            "8:5 invalid-binding This module and `{other}` each bind `Dispatcher`, and an app binds it once, in its top module. | Bind `Dispatcher` in one module, in the namespace above both."
+        )
+    };
+
+    for (analyzed, others, expected) in [
+        (top, vec![shop], vec![]),
+        (shop, vec![top], vec![below.to_string()]),
+        (shop, vec![], vec![]),
+        (production, vec![top, shop], vec![]),
+        (test, vec![top], vec![]),
+        (top, vec![package], vec![]),
+        (top, vec![admin], vec![tied("admin/Module.sharp")]),
+        (admin, vec![top], vec![tied("app/Module.sharp")]),
+    ] {
+        let others: Vec<_> = [DISPATCHER, recorder].into_iter().chain(others).collect();
+        assert_eq!(refusals(analyzed, &others), expected, "{}", analyzed.0);
+    }
+}
+
+/// The standard library's `Dispatcher`, as `sharp/composer/` ships it.
+const DISPATCHER: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Dispatcher.sharp",
+    include_str!("../../../../composer/library/Sharp/Dispatcher.sharp"),
+);
+
+/// Spec section 15: a dispatcher runs the listeners of every event, which may reach any effect, so an implementation
+/// of `Dispatcher.dispatch` may too, while an implementation of any other declaration stays held to it. A call of
+/// `dispatch` has the effect `Events`, as `emit` does.
+#[test]
+fn a_dispatcher_may_reach_any_effect_and_a_call_of_dispatch_has_the_effect_events() {
+    let retrying = (
+        "app/Shop/Retrying.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Dispatcher;\n\npublic class Retrying : Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners)\n    {\n        global.fetch(listeners.count());\n        for (const listener of listeners)\n        {\n            listener(emitted);\n        }\n    }\n}\n",
+    );
+    let rates = (
+        "app/Shop/Rates.sharp",
+        "namespace App.Shop;\n\npublic interface Rates\n{\n    void dispatch(Any emitted, List<Function<void(Any)>> listeners);\n}\n",
+    );
+    let live_rates = (
+        "app/Shop/LiveRates.sharp",
+        "namespace App.Shop;\n\npublic class LiveRates : Rates\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners) { global.fetch(1); }\n}\n",
+    );
+    let monitor = (
+        "app/Shop/Monitor.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Dispatcher;\n\npublic class Monitor\n{\n    public Monitor(private Dispatcher dispatcher) { }\n\n    public int checked\n    {\n        get\n        {\n            this.dispatcher.dispatch(1, []);\n            return 1;\n        }\n    }\n}\n",
+    );
+
+    assert_eq!(issues(retrying, &[DISPATCHER, FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[retrying, DISPATCHER, FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[live_rates, rates, FETCH, FETCH_STUB]),
+        [
+            "app/Shop/LiveRates.sharp:5:78 incompatible-effects: `LiveRates.dispatch` calls `global.fetch`, which has the effect `Http`, so the pure `Rates.dispatch` cannot accept it."
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[monitor, DISPATCHER]),
+        [
+            "app/Shop/Monitor.sharp:13:13 impure-getter: Getter `checked` calls `Dispatcher.dispatch`, which has the effect `Events`. Getters must be pure."
+        ]
+    );
+}
+
+/// Spec section 15: code without a body allows `emit` with `uses Events`, so an implementation that emits fits an
+/// interface or abstract method that lists `Events`, and one that is pure or lists only another effect refuses it.
+#[test]
+fn code_without_a_body_allows_emit_with_uses_events() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let implementation = (
+        "app/Shop/StoreCheckout.sharp",
+        "namespace App.Shop;\n\npublic class StoreCheckout : Checkout\n{\n    public void complete(int orderId) { emit new OrderPaid(orderId); }\n}\n",
+    );
+
+    for (declaration, allowed) in [
+        ("namespace App.Shop;\n\npublic interface Checkout\n{\n    void complete(int orderId) uses Events;\n}\n", true),
+        (
+            "namespace App.Shop;\n\npublic abstract class Checkout\n{\n    public abstract void complete(int orderId) uses Events;\n}\n",
+            true,
+        ),
+        ("namespace App.Shop;\n\npublic interface Checkout\n{\n    void complete(int orderId);\n}\n", false),
+        ("namespace App.Shop;\n\npublic interface Checkout\n{\n    void complete(int orderId) uses Mail;\n}\n", false),
+    ] {
+        let issues =
+            effect_issues(&[implementation, ("app/Shop/Checkout.sharp", declaration), order_event, order_paid]);
+        if allowed {
+            assert_eq!(issues, Vec::<String>::new(), "{declaration}");
+        } else {
+            assert!(
+                issues.len() == 1
+                    && issues[0].starts_with("app/Shop/StoreCheckout.sharp:5:41 incompatible-effects:")
+                    && issues[0].contains("`Events`"),
+                "{declaration}: {issues:?}"
+            );
+        }
+    }
+}
+
+/// The standard library's `Events`, as `sharp/composer/` ships it.
+const EVENTS: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Events.sharp",
+    include_str!("../../../../composer/library/Sharp/Events.sharp"),
+);
+
+/// A class whose `watch` starts a listener with `Events.on<TEvent>` for the type `listened`, and holds its handle.
+fn watching(listened: &str) -> (&'static str, &'static str) {
+    let code = format!(
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Screen\n{{\n    public static List<int> seen {{ get; set; }} = [];\n\n    public Listening watch()\n    {{\n        const listening = Events.on<{listened}>(e => Screen.seen.add(1));\n        return listening;\n    }}\n}}\n"
+    );
+
+    ("app/Shop/Screen.sharp", Box::leak(code.into_boxed_str()) as &'static str)
+}
+
+/// Spec section 15: the standard library's `Events` analyzes clean, and `Events.on<T>` takes an event or an interface
+/// an event implements. Any other type is refused with the messages the `on` clause gives.
+#[test]
+fn events_on_takes_an_event_or_an_interface_an_event_implements() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let money = ("app/Shop/Money.sharp", "namespace App.Shop;\n\npublic class Money\n{\n}\n");
+    let unheard = ("app/Shop/Unheard.sharp", "namespace App.Shop;\n\npublic interface Unheard\n{\n}\n");
+    let others = [EVENTS, order_event, order_paid, money, unheard];
+
+    assert_eq!(worded(EVENTS, &[]), Vec::<String>::new());
+    assert_eq!(worded(watching("OrderPaid"), &others), Vec::<String>::new());
+    assert_eq!(worded(watching("OrderEvent"), &others), Vec::<String>::new());
+    let note =
+        "`Events.on` takes an event, which `event` or `extern event` declares, or an interface an event implements.";
+    assert_eq!(
+        worded(watching("Money"), &others),
+        [format!("11:37 invalid-event `Money` is not an event. | Given here. | {note}")]
+    );
+    assert_eq!(
+        worded(watching("int"), &others),
+        [format!("11:37 invalid-event `int` is not an event. | Given here. | {note}")]
+    );
+    assert_eq!(
+        worded(watching("Unheard"), &others),
+        [format!(
+            "11:37 invalid-event No event implements `Unheard`, so the listener never runs. | Given here. | {note}"
+        )]
+    );
+    // A class that doesn't exist is reported once, where the type is written, and a type parameter is the caller's.
+    assert_eq!(issues(watching("Missing"), &others), ["11:37 non-existent-class-like"]);
+    let forwarding = (
+        "app/Shop/Relay.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Relay\n{\n    public static Listening relay<TEvent>(Function<void(TEvent)> listener) => Events.on<TEvent>(listener);\n}\n",
+    );
+    assert_eq!(worded(forwarding, &others), Vec::<String>::new());
+}
+
+/// Spec section 15: a listener stops when its handle goes, so `Events.on` as a statement, which drops the handle at
+/// once, listens to nothing and is reported in PHP# words.
+#[test]
+fn a_dropped_events_on_handle_is_reported() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let dropping = (
+        "app/Shop/Screen.sharp",
+        "namespace App.Shop;\n\npublic class Screen\n{\n    public void watch()\n    {\n        Events.on<OrderPaid>(e => { });\n    }\n}\n",
+    );
+
+    assert_eq!(
+        worded(dropping, &[EVENTS, order_event, order_paid]),
+        [
+            "7:9 unused-method-call The value `Events.on` returns must be used. | Its value is dropped here. | `[NoDiscard]` on `Events.on` says the value it returns matters. | Keep the value in a local, pass it on, or return it."
+        ]
+    );
+}
+
+/// A `.sharp` file that drops the value of a plain PHP method marked `@must-use` hears it in PHP# words too, with the
+/// marker the method carries.
+#[test]
+fn a_dropped_must_use_value_is_reported_in_php_sharp_words() {
+    let tokens = (
+        "src/Lib/Tokens.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Tokens\n{\n    /** @must-use */\n    public static function issue(): string\n    {\n        return 'token';\n    }\n}\n",
+    );
+    let dropping = (
+        "src/App/Login.sharp",
+        "namespace App;\n\nimport Lib.Tokens;\n\npublic class Login\n{\n    public void start()\n    {\n        Tokens.issue();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        worded(dropping, &[tokens]),
+        [
+            "9:9 unused-method-call The value `Tokens.issue` returns must be used. | Its value is dropped here. | `@must-use` on `Tokens.issue` says the value it returns matters. | Keep the value in a local, pass it on, or return it."
+        ]
+    );
+}
+
+/// `Events.on` with no type argument, and a listener whose parameter has no type, gives no event to listen to. The
+/// missing type argument is reported once, with no second error about the event.
+#[test]
+fn events_on_with_no_type_is_reported_once() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let untyped = (
+        "app/Shop/Screen.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Screen\n{\n    public Listening watch() => Events.on(e => { });\n}\n",
+    );
+
+    assert_eq!(issues(untyped, &[EVENTS, order_event, order_paid]), ["7:33 missing-template-parameter"]);
+}
+
+/// Spec section 15: starting a listener changes what every later `emit` runs, so `Events.on` has the effect `Events`,
+/// which its body gets from `extern Internal.listen uses Events;`.
+#[test]
+fn events_on_has_the_effect_events() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let getter = (
+        "app/Shop/Gauge.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Gauge\n{\n    public Listening watching\n    {\n        get => Events.on<OrderPaid>(e => { });\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[getter, EVENTS, order_event, order_paid]),
+        [
+            "app/Shop/Gauge.sharp:9:16 impure-getter: Getter `watching` reaches `Events.on`, which calls `Internal.listen` with the effect `Events`. Getters must be pure."
+        ]
+    );
+}
+
+/// Spec section 15: PHP# code listens with `Events.on` and raises events with `emit`, so only the standard library
+/// imports `Sharp.Internal`, the namespace of the engine's functions.
+#[test]
+fn only_the_standard_library_imports_sharp_internal() {
+    let importing = (
+        "app/Shop/Shortcut.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Internal;\n\nextern Internal.listen uses Events;\n\npublic class Shortcut\n{\n}\n",
+    );
+
+    assert_eq!(
+        worded(importing, &[]),
+        [
+            "3:8 internal-outside-library `Sharp.Internal` holds the engine's functions, and only the standard library imports it. | Imported here. | Listen with `Events.on`, and raise an event with `emit`."
+        ]
+    );
+    assert_eq!(worded(EVENTS, &[]), Vec::<String>::new());
 }
 
 /// The services spec section 32's examples bind: two interfaces, their classes, a class that takes a `Mailer`, and
