@@ -48,6 +48,7 @@ use crate::invocation::return_type_fetcher::fetch_invocation_return_type;
 use crate::plugin::hook::StaticCall;
 use crate::reconciler::assertion_reconciler;
 use crate::utils::names::display_function_like_identifier;
+use crate::utils::names::namespace_function_name;
 
 pub mod function_call;
 pub mod method_call;
@@ -126,7 +127,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
             // PHP# calls a plain PHP function through its namespace, `Pdf.render(html)` or `global.now()`.
             Call::Method(call)
                 if context.dialect.is_sharp()
-                    && let Some(function) = function_call::namespace_function_name(context, call) =>
+                    && let Some(function) = namespace_function_name(context.resolved_names, context.codebase, call) =>
             {
                 function_call::analyze_namespace_function_call(context, block_context, artifacts, call, function)
             }

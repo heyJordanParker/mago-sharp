@@ -360,7 +360,9 @@ where
             return;
         }
 
-        let issue = if !member.is_empty() && is_imported_namespace(context, &r#extern.target, class) {
+        let issue = if !member.is_empty()
+            && is_imported_namespace(context.resolved_names, context.codebase, &r#extern.target, class)
+        {
             (IssueCode::NonExistentFunction, format!("Function `{written}` does not exist."))
         } else {
             (IssueCode::NonExistentClassLike, format!("Cannot find class, interface, enum, or type alias `{written}`."))

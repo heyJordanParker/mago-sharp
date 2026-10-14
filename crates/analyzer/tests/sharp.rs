@@ -4343,6 +4343,53 @@ fn is_is_not_and_as_narrow_as_their_php_does() {
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
+/// A plain PHP function called through `global.` narrows what PHP's call of it narrows, in every condition that
+/// narrows. Each row is a body of `run`, the name it narrows, read last in the body, and the type of that read.
+#[test]
+fn a_plain_php_function_called_through_global_narrows_as_in_php() {
+    let rows = [
+        ("if (global.array_key_exists(value, prices)) { return value; } return null;", "value", "string"),
+        ("if (global.key_exists(value, prices)) { return value; } return null;", "value", "string"),
+        ("if (global.in_array(value, sizes, true)) { return value; } return null;", "value", "int"),
+        ("if (global.in_array(value, tags, true)) { return value; } return null;", "value", "string"),
+        ("if (global.count(sizes) > 0) { return sizes; } return null;", "sizes", "non-empty-list<int>"),
+        ("if (global.strlen(text) > 0) { return text; } return null;", "text", "non-empty-string"),
+        ("if (global.function_exists(text)) { return text; } return null;", "text", "callable-string"),
+        ("if (global.is_a(value, typeof(Probe))) { return value; } return null;", "value", "Demo\\Probe"),
+        ("if (global.is_string(value)) { return value; } return null;", "value", "string"),
+        ("if (global.is_int(value)) { return value; } return null;", "value", "int"),
+        ("if (!global.is_null(key)) { return key; } return null;", "key", "string"),
+        ("return global.in_array(value, sizes, true) && value > 0;", "value", "int"),
+        (
+            "if (!global.array_key_exists(value, prices) || value == \"\") { return null; } return value;",
+            "value",
+            "non-empty-string",
+        ),
+        ("return global.in_array(value, sizes, true) ? value : null;", "value", "int"),
+        (
+            "return match (key) { string k when global.in_array(value, sizes, true) => value, default => null };",
+            "value",
+            "int",
+        ),
+        ("if (!global.array_key_exists(value, prices)) { return null; } return value;", "value", "string"),
+    ];
+
+    let wrong: Vec<String> = rows
+        .into_iter()
+        .filter_map(|(body, read, expected)| {
+            let sharp: &'static str = format!("namespace Demo;\n\nclass Probe\n{{\n    public Any? run(Any? value, string? key, string text, Map<string, int> prices, List<int> sizes, Set<string> tags)\n    {{\n        {body}\n    }}\n}}\n").leak();
+            let (_, artifacts) =
+                analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/Demo/Probe.sharp", sharp), &[]);
+            let start = sharp.rfind(read).unwrap() as u32;
+            let narrowed = artifacts.expression_types[&(start, start + read.len() as u32)].get_id();
+
+            (narrowed.as_bytes() != expected.as_bytes()).then(|| format!("{body} gives {narrowed}"))
+        })
+        .collect();
+
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
 #[test]
 fn a_match_narrows_each_arm_as_its_php_does() {
     let sharp = "namespace Demo;\n\nimport Lib.Shape;\nimport Lib.Circle;\nimport Lib.Square;\n\nclass Report\n{\n    public static string describe(Shape? shape) => match (shape) {\n        null => \"nothing\",\n        Circle c when c.radius > 10.0 => \"big\",\n        Circle => \"circle\",\n        default => \"other\",\n    };\n\n    public static string grade(int score) => match (score) {\n        < 0 => \"invalid\",\n        >= 90 => \"top\",\n        >= 50 and < 70 => \"pass\",\n        default => \"fail\",\n    };\n\n    public static float count(Shape? shape)\n    {\n        let total = 0.0;\n        match (shape) {\n            Circle c => {\n                total = c.radius;\n            },\n            Square s when s.side > 1.0 => total = s.side,\n            default => {},\n        }\n        return total;\n    }\n}\n";

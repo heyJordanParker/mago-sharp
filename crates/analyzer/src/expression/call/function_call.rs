@@ -46,8 +46,6 @@ use crate::utils::names::display_atomic;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
-use crate::utils::names::member_namespace;
-use crate::utils::names::namespace_member;
 use crate::utils::names::sharp_code_class_name;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
@@ -122,24 +120,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
     }
 }
 
-/// The plain PHP function a PHP# `Name.member(…)` calls, spec section 23: `global.now()` calls the function `now` of
-/// PHP's root namespace, and `Pdf.render(html)` after `import Vendor.Pdf;` the function `render` of that namespace,
-/// where no class is named `Vendor\Pdf`. An imported namespace names its function whether or not the function exists,
-/// so the call of a missing one is refused as a missing function.
-pub(super) fn namespace_function_name<A>(context: &Context<'_, '_, A>, call: &MethodCall<'_>) -> Option<Word>
-where
-    A: Arena,
-{
-    let name = context.resolved_names.static_call_class(call)?;
-    let ClassLikeMemberSelector::Identifier(member) = &call.method else {
-        return None;
-    };
-    let namespace = member_namespace(context, &name.name, member.value)?;
-
-    Some(namespace_member(namespace, member.value))
-}
-
-/// Analyzes `Name.member(…)` as a call of the plain PHP function `function`, which [`namespace_function_name`] found.
+/// Analyzes `Name.member(…)` as a call of the plain PHP function `function`, which
+/// [`crate::utils::names::namespace_function_name`] found.
 pub(super) fn analyze_namespace_function_call<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,

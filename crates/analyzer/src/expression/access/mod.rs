@@ -135,7 +135,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                     name: StaticPropertyName::Identifier(name),
                     ..
                 }) if context.dialect.is_sharp()
-                    && let Some(namespace) = member_namespace(context, &class_name.name, name.value) =>
+                    && let Some(namespace) =
+                        member_namespace(context.resolved_names, context.codebase, &class_name.name, name.value) =>
                 {
                     analyze_namespace_constant(
                         context,
