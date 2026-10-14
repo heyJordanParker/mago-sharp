@@ -16143,6 +16143,13 @@ fn events_on_takes_an_event_or_an_interface_an_event_implements() {
             "11:37 invalid-event No event implements `Unheard`, so the listener never runs. | Given here. | {note}"
         )]
     );
+    // A class that doesn't exist is reported once, where the type is written, and a type parameter is the caller's.
+    assert_eq!(issues(watching("Missing"), &others), ["11:37 non-existent-class-like"]);
+    let forwarding = (
+        "app/Shop/Relay.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Relay\n{\n    public static Listening relay<TEvent>(Function<void(TEvent)> listener) => Events.on<TEvent>(listener);\n}\n",
+    );
+    assert_eq!(worded(forwarding, &others), Vec::<String>::new());
 }
 
 /// Spec section 15: a listener stops when its handle goes, so `Events.on` as a statement, which drops the handle at

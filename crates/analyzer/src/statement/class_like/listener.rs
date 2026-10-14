@@ -19,6 +19,7 @@ use mago_word::Word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::expression::is_refused_type;
 use crate::statement::function_like::report_undefined_type;
 use crate::statement::is_event_class;
 use crate::statement::module::check_listener_services;
@@ -150,12 +151,11 @@ pub fn check_events_on<A>(context: &mut Context<'_, '_, A>, listened: &TUnion, a
 where
     A: Arena,
 {
-    let message = match listened.get_single_named_object() {
-        Some(named) => match context.codebase.get_class_like(named.name.as_bytes()) {
-            Some(class_like) => unheard_class(context, class_like, "the listener"),
-            None => None,
-        },
-        None if listened.has_template_types() => None,
+    let listened_class =
+        listened.get_single_named_object().and_then(|named| context.codebase.get_class_like(named.name.as_bytes()));
+    let message = match listened_class {
+        Some(class_like) => unheard_class(context, class_like, "the listener"),
+        None if listened.has_template_types() || is_refused_type(listened) => None,
         None => Some(format!("`{}` is not an event.", display_sharp_type(context, listened))),
     };
     let Some(message) = message else {
