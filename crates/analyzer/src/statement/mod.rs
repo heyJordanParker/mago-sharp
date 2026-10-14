@@ -183,6 +183,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                     {
                         for item in &sequence.items {
                             use_statement::check_sharp_import(context, &item.name);
+                            use_statement::check_internal_import(context, &item.name);
                             let imported_name = item
                                 .alias
                                 .as_ref()

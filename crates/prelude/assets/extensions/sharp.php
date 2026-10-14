@@ -473,3 +473,24 @@ final class SetMethods
      */
     public function sortedBy(\Closure $selector): array {}
 }
+
+/**
+ * The handle of a listener `Events.on` starts: the engine stops the listener when the handle is destroyed.
+ */
+final class Listening
+{
+    private function __construct() {}
+}
+
+namespace Sharp\Internal;
+
+/**
+ * Starts a listener on every event of the class or interface named `$event`, until its handle is destroyed. The
+ * standard library's `Events.on` runs it, and only the standard library reaches `Sharp.Internal`.
+ *
+ * @template T of object
+ *
+ * @param class-string<T> $event
+ * @param \Closure(T): void $listener
+ */
+function listen(string $event, \Closure $listener): \Sharp\Listening {}

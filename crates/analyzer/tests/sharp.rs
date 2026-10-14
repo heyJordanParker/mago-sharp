@@ -16100,6 +16100,105 @@ fn code_without_a_body_allows_emit_with_uses_events() {
     }
 }
 
+/// The standard library's `Events`, as `sharp/composer/` ships it.
+const EVENTS: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Events.sharp",
+    include_str!("../../../../composer/library/Sharp/Events.sharp"),
+);
+
+/// A class whose `watch` starts a listener with `Events.on<TEvent>` for the type `listened`, and holds its handle.
+fn watching(listened: &str) -> (&'static str, &'static str) {
+    let code = format!(
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Screen\n{{\n    public static List<int> seen {{ get; set; }} = [];\n\n    public Listening watch()\n    {{\n        const listening = Events.on<{listened}>(e => Screen.seen.add(1));\n        return listening;\n    }}\n}}\n"
+    );
+
+    ("app/Shop/Screen.sharp", Box::leak(code.into_boxed_str()) as &'static str)
+}
+
+/// Spec section 15: the standard library's `Events` analyzes clean, and `Events.on<T>` takes an event or an interface
+/// an event implements. Any other type is refused with the messages the `on` clause gives.
+#[test]
+fn events_on_takes_an_event_or_an_interface_an_event_implements() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let money = ("app/Shop/Money.sharp", "namespace App.Shop;\n\npublic class Money\n{\n}\n");
+    let unheard = ("app/Shop/Unheard.sharp", "namespace App.Shop;\n\npublic interface Unheard\n{\n}\n");
+    let others = [EVENTS, order_event, order_paid, money, unheard];
+
+    assert_eq!(worded(EVENTS, &[]), Vec::<String>::new());
+    assert_eq!(worded(watching("OrderPaid"), &others), Vec::<String>::new());
+    assert_eq!(worded(watching("OrderEvent"), &others), Vec::<String>::new());
+    let note =
+        "`Events.on` takes an event, which `event` or `extern event` declares, or an interface an event implements.";
+    assert_eq!(
+        worded(watching("Money"), &others),
+        [format!("11:37 invalid-event `Money` is not an event. | Given here. | {note}")]
+    );
+    assert_eq!(
+        worded(watching("int"), &others),
+        [format!("11:37 invalid-event `int` is not an event. | Given here. | {note}")]
+    );
+    assert_eq!(
+        worded(watching("Unheard"), &others),
+        [format!(
+            "11:37 invalid-event No event implements `Unheard`, so the listener never runs. | Given here. | {note}"
+        )]
+    );
+}
+
+/// Spec section 15: a listener stops when its handle goes, so `Events.on` as a statement, which drops the handle at
+/// once, listens to nothing and is reported.
+#[test]
+fn a_dropped_events_on_handle_is_reported() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let dropping = (
+        "app/Shop/Screen.sharp",
+        "namespace App.Shop;\n\npublic class Screen\n{\n    public void watch()\n    {\n        Events.on<OrderPaid>(e => { });\n    }\n}\n",
+    );
+
+    assert_eq!(
+        worded(dropping, &[EVENTS, order_event, order_paid]),
+        [
+            "7:9 unused-method-call The return value of 'on' must be used. | The result of this call is ignored | The function or method 'on' is marked with @must-use or #[NoDiscard], indicating its return value is important and should not be discarded. | Assign the result to a variable, pass it to another function, or use it in an expression."
+        ]
+    );
+}
+
+/// Spec section 15: starting a listener changes what every later `emit` runs, so `Events.on` has the effect `Events`,
+/// which its body gets from `extern Internal.listen uses Events;`.
+#[test]
+fn events_on_has_the_effect_events() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let getter = (
+        "app/Shop/Gauge.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Gauge\n{\n    public Listening watching\n    {\n        get => Events.on<OrderPaid>(e => { });\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[getter, EVENTS, order_event, order_paid]),
+        [
+            "app/Shop/Gauge.sharp:9:16 impure-getter: Getter `watching` reaches `Events.on`, which calls `Internal.listen` with the effect `Events`. Getters must be pure."
+        ]
+    );
+}
+
+/// Spec section 15: PHP# code listens with `Events.on` and raises events with `emit`, so only the standard library
+/// imports `Sharp.Internal`, the namespace of the engine's functions.
+#[test]
+fn only_the_standard_library_imports_sharp_internal() {
+    let importing = (
+        "app/Shop/Shortcut.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Internal;\n\nextern Internal.listen uses Events;\n\npublic class Shortcut\n{\n}\n",
+    );
+
+    assert_eq!(
+        worded(importing, &[]),
+        [
+            "3:8 internal-outside-library `Sharp.Internal` holds the engine's functions, and only the standard library imports it. | Imported here. | Listen with `Events.on`, and raise an event with `emit`."
+        ]
+    );
+    assert_eq!(worded(EVENTS, &[]), Vec::<String>::new());
+}
+
 /// The services spec section 32's examples bind: two interfaces, their classes, a class that takes a `Mailer`, and
 /// classes a binding expression takes.
 const BOUND_SERVICES: [(&str, &str); 11] = [
