@@ -140,7 +140,8 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
             return Ok(());
         };
 
-        let constant_type = read_constant(context, block_context, constant_metadata, name_bytes, self.span());
+        let constant_type =
+            read_constant(context, block_context, artifacts, constant_metadata, name_bytes, self.span());
         artifacts.set_expression_type(self, constant_type);
 
         Ok(())
@@ -167,7 +168,8 @@ pub(crate) fn analyze_namespace_constant<A>(
     // The name as the import and the read write it, which PHP finds as the codebase did: its namespace in any case.
     let full_name = namespace_member(namespace, member.value);
     if let Some(constant) = context.codebase.get_constant(full_name.as_bytes()) {
-        let constant_type = read_constant(context, block_context, constant, full_name.as_bytes(), read.span());
+        let constant_type =
+            read_constant(context, block_context, artifacts, constant, full_name.as_bytes(), read.span());
         artifacts.record_namespace_constant(read.span(), full_name);
         artifacts.set_expression_type(read, constant_type);
 
@@ -198,10 +200,12 @@ pub(crate) fn analyze_namespace_constant<A>(
 
 /// The type of a read at `span` of the constant `metadata`, whose full name is `name`, once the read is checked as
 /// every read of a constant is: for a deprecated or experimental constant, and for one the configured PHP version
-/// lacks.
+/// lacks. The read references the constant, as a call references its function, so an edit to the file that declares
+/// it reaches the reading file.
 fn read_constant<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
     metadata: &ConstantMetadata,
     name: &[u8],
     span: Span,
@@ -209,6 +213,8 @@ fn read_constant<A>(
 where
     A: Arena,
 {
+    artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, metadata.name, false);
+
     let display = BytesDisplay(name);
     if metadata.flags.is_deprecated() {
         context.collector.report_with_code(

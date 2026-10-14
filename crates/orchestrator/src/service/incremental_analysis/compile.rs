@@ -1936,6 +1936,73 @@ mod tests {
         }
     }
 
+    /// A project whose `Report` reads a library's constant through its namespace, `Pdf.DEFAULT_DPI`, and a constant of
+    /// PHP's root namespace, `global.APP_VERSION`, spec section 23, each declared in a plain PHP file of the project.
+    fn constants() -> Vec<(&'static str, String)> {
+        vec![
+            ("lib/Pdf.php", "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n".to_string()),
+            ("lib/version.php", "<?php\n\nconst APP_VERSION = 3;\n".to_string()),
+            ("app/Shop/Report.sharp", "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Report\n{\n    public int dpi() => Pdf.DEFAULT_DPI;\n\n    public int version() => global.APP_VERSION;\n}\n".to_string()),
+        ]
+    }
+
+    /// A read of a constant through its namespace lists the file that declares it as an input, as a call of a
+    /// function through its namespace does, so the engine refuses the compiled file once that file changes.
+    #[test]
+    fn a_read_of_a_constant_through_its_namespace_lists_the_file_that_declares_it_as_an_input() {
+        let database = shop_project(&constants());
+
+        let compiled = compile(&mut analyzed(&database), empty_stamp);
+
+        assert_eq!(
+            input_paths(accepted(&compiled, "app/Shop/Report.sharp")),
+            [
+                "Module.lean",
+                "app/Module.lean",
+                "app/Shop/Module.lean",
+                "app/Shop/Report.sharp",
+                "composer.lock",
+                "lib/Pdf.php",
+                "lib/version.php"
+            ]
+        );
+    }
+
+    /// Deleting a constant a file reads through its namespace, or changing its value's type, refuses that file, and a
+    /// compile after the edit refuses it as a clean compile does.
+    #[test]
+    fn a_compile_after_an_edit_to_a_constant_read_through_its_namespace_matches_a_clean_compile() {
+        let base = shop_project(&constants());
+
+        for (edited_file, from, to) in [
+            ("lib/Pdf.php", "const DEFAULT_DPI = 300;\n", ""),
+            ("lib/Pdf.php", "DEFAULT_DPI = 300;", "DEFAULT_DPI = \"300\";"),
+            ("lib/version.php", "const APP_VERSION = 3;\n", ""),
+            ("lib/version.php", "APP_VERSION = 3;", "APP_VERSION = \"3\";"),
+        ] {
+            let mut files = constants();
+            let (_, contents) =
+                files.iter_mut().find(|(name, _)| *name == edited_file).expect("the edited file exists");
+            assert!(contents.contains(from), "{edited_file} holds `{from}`");
+            *contents = contents.replace(from, to);
+            let edited = shop_project(&files);
+
+            let mut warm = analyzed(&base);
+            compile(&mut warm, empty_stamp);
+            warm.update_database(edited.read_only());
+            warm.analyze_incremental(None).expect("the warm path runs");
+            let warm = compile(&mut warm, empty_stamp);
+            let clean = compile(&mut analyzed(&edited), empty_stamp);
+
+            assert!(
+                outcomes(&clean)["app/Shop/Report.sharp"].is_err(),
+                "`{to}` refuses Report: {:#?}",
+                outcomes(&clean)
+            );
+            assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
+        }
+    }
+
     /// A `uses` that names no effect is refused with the effects its file can name. A class elsewhere that becomes
     /// `foreign`, in the file's namespace or in another, gives the same message after the edit as a clean compile does.
     #[test]
