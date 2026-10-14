@@ -74,6 +74,9 @@ impl MetadataFlags {
     /// A PHP# property whose `set` or `init` is `internal`, spec section 5: code outside its class's namespace and the
     /// namespaces below it can't write it. `INTERNAL` on a PHP# declaration or member is its `internal` reach.
     pub const INTERNAL_SET: MetadataFlags = MetadataFlags(1 << 51);
+    /// A PHP# class-like of a project: a file whose nearest `composer.json` says `"type": "project"`, so no other
+    /// package uses it, and spec section 5's too-wide warning runs on it.
+    pub const PROJECT: MetadataFlags = MetadataFlags(1 << 52);
 }
 
 impl MetadataFlags {
@@ -228,6 +231,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_internal_set(self) -> bool {
         self.contains(Self::INTERNAL_SET)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_project(self) -> bool {
+        self.contains(Self::PROJECT)
     }
 
     #[inline]

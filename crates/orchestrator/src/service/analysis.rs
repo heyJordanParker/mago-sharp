@@ -12,6 +12,7 @@ use mago_analyzer::external::FileAnalysisSnapshot;
 use mago_analyzer::external::apply_refinements;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
+use mago_analyzer::too_wide_members;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::reference::SymbolReferences;
@@ -204,6 +205,8 @@ impl AnalysisService {
             }
         }
 
+        // The file is the whole project here, so its uses, the late ones included, are every use.
+        analysis_result.issues.extend(too_wide_members(&self.codebase, &analysis_result.symbol_references));
         analysis_result.issues.extend(self.codebase.take_issues(true));
         let mut pragma_reconciler =
             DeferredIssueReconciler::new(analysis_result.take_deferred_pragmas(), self.database.files());
@@ -233,5 +236,47 @@ impl AnalysisService {
         issues.extend(pragma_reconciler.finish()?);
 
         Ok(issues)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use std::borrow::Cow;
+
+    use mago_database::file::File;
+    use mago_prelude::Prelude;
+
+    use super::*;
+
+    /// The analysis of one file, which the playground runs: the file is the whole project, so spec section 5's
+    /// too-wide warning reads its uses alone. A `public` member nothing outside its namespace uses warns, an `internal` or `private` one
+    /// does not, and the prelude's classes, which the project does not declare, get none.
+    #[test]
+    fn oneshot_warns_on_a_public_member_nothing_outside_its_namespace_uses() {
+        let source = "namespace App.Shop;\n\npublic class Cart\n{\n    public int total() => this.count();\n\n    internal int count() => this.spare();\n\n    private int spare() => 2;\n}\n";
+        let Prelude { mut database, metadata, symbol_references } = Prelude::build();
+        let mut file = File::ephemeral(Cow::Borrowed(b"src/App/Shop/Cart.sharp"), Cow::Borrowed(source.as_bytes()));
+        // The warning runs in a project, whose files the loader marks from its composer.json.
+        file.is_project = true;
+        let file_id = file.id;
+        database.add(file);
+        let service = AnalysisService::new(
+            database.read_only(),
+            metadata,
+            symbol_references,
+            Settings::default(),
+            ParserSettings::default(),
+            Arc::new(PluginRegistry::with_library_providers()),
+        );
+
+        let issues = service.oneshot(file_id).expect("the analysis runs");
+        let too_wide: Vec<_> = issues
+            .iter()
+            .filter(|issue| issue.code.as_deref() == Some("too-wide-member"))
+            .map(|issue| (issue.primary_span().map(|span| span.file_id), issue.message.as_str()))
+            .collect();
+
+        assert_eq!(too_wide, [(Some(file_id), "`Cart.total` is public, and nothing outside `App.Shop` uses it.")]);
     }
 }

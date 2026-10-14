@@ -78,6 +78,11 @@ pub struct File {
     /// `None` when no PSR-4 folder holds it. The loader sets it, with `is_standard_library`.
     pub folder_namespace: Option<FolderNamespace>,
 
+    /// Whether a `.sharp` file's nearest `composer.json` says `"type": "project"`: an application, whose code no other
+    /// package uses, so spec section 5's too-wide warning runs on it. Composer's default type is a library's. The
+    /// loader sets it, with `is_standard_library`.
+    pub is_project: bool,
+
     /// The contents of the file, if available.
     pub contents: Cow<'static, [u8]>,
 
@@ -123,7 +128,18 @@ impl File {
         let size = contents.len() as u32;
         let lines = line_starts(contents.as_ref());
 
-        Self { id, name, path, file_type, is_standard_library: false, folder_namespace: None, contents, size, lines }
+        Self {
+            id,
+            name,
+            path,
+            file_type,
+            is_standard_library: false,
+            folder_namespace: None,
+            is_project: false,
+            contents,
+            size,
+            lines,
+        }
     }
 
     /// Creates a new `File` instance by reading its contents from the filesystem.

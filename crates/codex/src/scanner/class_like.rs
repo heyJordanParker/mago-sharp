@@ -506,6 +506,7 @@ where
     if context.program.dialect.is_sharp() && !modifiers.is_some_and(Sequence::contains_public) {
         flags |= MetadataFlags::INTERNAL;
     }
+    flags.set(MetadataFlags::PROJECT, context.program.dialect.is_sharp() && context.file.is_project);
 
     let mut class_like_metadata = ClassLikeMetadata::new(name, original_name, span, name_span, flags);
     class_like_metadata.version_constraint = verdict.constraint;

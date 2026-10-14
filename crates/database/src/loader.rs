@@ -541,6 +541,8 @@ pub(crate) type Manifests = HashMap<PathBuf, Option<Arc<Manifest>>>;
 pub(crate) struct Manifest {
     /// Whether it names the standard library's package.
     is_standard_library: bool,
+    /// Whether it says `"type": "project"`.
+    is_project: bool,
     /// Its PSR-4 folders, `autoload`'s and `autoload-dev`'s.
     folders: Vec<Psr4Folder>,
 }
@@ -554,8 +556,8 @@ struct Psr4Folder {
 }
 
 /// Marks a `.sharp` file from its nearest `composer.json`: whether it is a PHP# source of the standard library, which
-/// names the standard library's package, vendored or in the package's own repository, and what its PSR-4 folders say
-/// about its namespace, from the folder that holds it most closely.
+/// names the standard library's package, vendored or in the package's own repository, whether its package is a
+/// project, and what its PSR-4 folders say about its namespace, from the folder that holds it most closely.
 pub(crate) fn mark_package(file: &mut File, workspace: &Path, manifests: &mut Manifests) {
     if !file.name.ends_with(b".sharp") {
         return;
@@ -567,6 +569,7 @@ pub(crate) fn mark_package(file: &mut File, workspace: &Path, manifests: &mut Ma
     };
 
     file.is_standard_library = manifest.is_standard_library;
+    file.is_project = manifest.is_project;
     file.folder_namespace = manifest
         .folders
         .iter()
@@ -642,6 +645,7 @@ fn read_manifest(directory: &Path, package: &serde_json::Value) -> Manifest {
 
     Manifest {
         is_standard_library: package.get("name").and_then(serde_json::Value::as_str) == Some(STANDARD_LIBRARY_PACKAGE),
+        is_project: package.get("type").and_then(serde_json::Value::as_str) == Some("project"),
         folders,
     }
 }
@@ -1236,6 +1240,27 @@ mod tests {
                 format!("{library}/library/Sharp/Text/Text.sharp"),
             ]
         );
+    }
+
+    /// Spec section 5's too-wide warning runs in a project: a `.sharp` file whose nearest `composer.json` says
+    /// `"type": "project"`. A package without a type is a library, as Composer's default type is.
+    #[test]
+    fn a_sharp_file_belongs_to_a_project_when_its_nearest_composer_json_says_so() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "composer.json", r#"{"name": "acme/app", "type": "project"}"#);
+        create_test_file(&temp_dir, "src/App/Page.sharp", "");
+        create_test_file(&temp_dir, "src/App/Page.php", "<?php");
+        create_test_file(&temp_dir, "vendor/acme/tools/composer.json", r#"{"name": "acme/tools"}"#);
+        create_test_file(&temp_dir, "vendor/acme/tools/src/Tools.sharp", "");
+
+        let mut config = create_test_config(&temp_dir, vec!["src"], vec!["vendor"]);
+        config.extensions = vec![Cow::Borrowed(b"php"), Cow::Borrowed(b"sharp")];
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        let in_project: Vec<String> =
+            db.files().filter(|file| file.is_project).map(|file| name_str(&file.name).into_owned()).collect();
+
+        assert_eq!(in_project, ["src/App/Page.sharp"]);
     }
 
     /// Spec section 5: an `autoload` PSR-4 folder maps a `.sharp` file's folder to the namespace it declares, the most

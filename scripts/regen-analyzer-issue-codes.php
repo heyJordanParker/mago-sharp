@@ -375,6 +375,7 @@ final class AnalyzerCodeModuleGenerator
         'service-cycle',
         'captive-service',
         'internal-access',
+        'too-wide-member',
     ];
 
     /**
