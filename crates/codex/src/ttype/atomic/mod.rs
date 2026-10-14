@@ -935,7 +935,7 @@ pub fn populate_atomic_type(
             }
         }
         TAtomic::Reference(reference) => match reference {
-            TReference::Symbol { name, parameters, variances, intersection_types } => {
+            TReference::Symbol { name, parameters, variances, intersection_types, is_readonly } => {
                 if let Some(parameters) = parameters {
                     for parameter in parameters {
                         populate!(union parameter);
@@ -964,6 +964,7 @@ pub fn populate_atomic_type(
                         let mut named_object = TNamedObject::new(*name)
                             .with_type_parameters(parameters.clone())
                             .with_variances(variances.clone());
+                        named_object.is_readonly = *is_readonly;
                         if let Some(intersection_types) = intersection_types {
                             for intersection_type in intersection_types {
                                 named_object.add_intersection_type(intersection_type);

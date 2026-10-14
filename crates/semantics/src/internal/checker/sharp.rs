@@ -4639,9 +4639,8 @@ fn report_readonly_storage(
         Some(Hint::Readonly(readonly)) => Some(readonly.hint),
         hint => hint,
     };
-    let written = written.map_or_else(String::new, |hint| {
-        format!("{} ", String::from_utf8_lossy(context.get_code_snippet(hint)))
-    });
+    let written = written
+        .map_or_else(String::new, |hint| format!("{} ", String::from_utf8_lossy(context.get_code_snippet(hint))));
     let name = BytesDisplay(name.strip_prefix(b"$").unwrap_or(name));
     context.report(
         Issue::error(format!(

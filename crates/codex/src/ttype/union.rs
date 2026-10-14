@@ -23,6 +23,7 @@ use crate::ttype::atomic::mixed::truthiness::TMixedTruthiness;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
 use crate::ttype::atomic::populate_atomic_type;
+use crate::ttype::atomic::reference::TReference;
 use crate::ttype::atomic::scalar::TScalar;
 use crate::ttype::atomic::scalar::bool::TBool;
 use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
@@ -392,6 +393,49 @@ impl TUnion {
     #[must_use]
     pub fn holds_readonly_object(&self) -> bool {
         self.types.iter().any(atomic_holds_readonly_object)
+    }
+
+    /// Whether a value of `input` placed where this declared type goes would lose its readonly, spec section 13: a
+    /// readonly object where this type takes a writable object or any value, and a collection or a type argument of
+    /// readonly objects where this type's takes writable ones. A type parameter takes the readonly with the value.
+    #[must_use]
+    pub fn drops_readonly_of(&self, input: &TUnion) -> bool {
+        input.types.iter().filter(|atomic| atomic_holds_readonly_object(atomic)).any(|atomic| match atomic {
+            TAtomic::Object(TObject::Named(named)) if named.is_readonly => {
+                !self.types.iter().any(|declared| matches!(declared, TAtomic::GenericParameter(_)))
+                    && self.types.iter().any(|declared| match declared {
+                        TAtomic::Object(TObject::Named(declared)) => !declared.is_readonly,
+                        TAtomic::Object(_) | TAtomic::Mixed(_) => true,
+                        _ => false,
+                    })
+            }
+            _ => {
+                let reached = readonly_reach(atomic);
+                self.types.iter().any(|declared| match (atomic, declared) {
+                    (TAtomic::Array(_), TAtomic::Array(_))
+                    | (TAtomic::Iterable(_), TAtomic::Iterable(_) | TAtomic::Array(_)) => {
+                        let declared_reach = readonly_reach(declared);
+                        // A `Map`'s key comes first in both, so each union meets the one in its place.
+                        reached
+                            .iter()
+                            .zip(declared_reach.iter())
+                            .any(|(input, declared)| declared.drops_readonly_of(input))
+                    }
+                    (TAtomic::Object(TObject::Named(input)), TAtomic::Object(TObject::Named(declared)))
+                        if input.name.as_bytes().eq_ignore_ascii_case(declared.name.as_bytes()) =>
+                    {
+                        input
+                            .type_parameters
+                            .iter()
+                            .flatten()
+                            .zip(declared.type_parameters.iter().flatten())
+                            .any(|(input, declared)| declared.drops_readonly_of(input))
+                    }
+                    (_, TAtomic::Mixed(_)) => true,
+                    _ => false,
+                })
+            }
+        })
     }
 
     /// Removes a specific atomic type from the union.
@@ -1478,19 +1522,26 @@ fn readonly_reach(atomic: &TAtomic) -> Vec<&TUnion> {
         TAtomic::Array(TArray::Set(element_type)) => vec![element_type.as_ref()],
         TAtomic::Iterable(iterable) => vec![iterable.key_type.as_ref(), iterable.value_type.as_ref()],
         TAtomic::Object(TObject::Named(named)) => named.type_parameters.iter().flatten().collect(),
+        TAtomic::Reference(TReference::Symbol { parameters, .. }) => parameters.iter().flatten().collect(),
         TAtomic::GenericParameter(generic) => vec![generic.constraint.as_ref()],
         _ => Vec::new(),
     }
 }
 
 fn atomic_holds_readonly_object(atomic: &TAtomic) -> bool {
-    matches!(atomic, TAtomic::Object(TObject::Named(named)) if named.is_readonly)
-        || readonly_reach(atomic).into_iter().any(TUnion::holds_readonly_object)
+    matches!(
+        atomic,
+        TAtomic::Object(TObject::Named(TNamedObject { is_readonly: true, .. }))
+            | TAtomic::Reference(TReference::Symbol { is_readonly: true, .. })
+    ) || readonly_reach(atomic).into_iter().any(TUnion::holds_readonly_object)
 }
 
 fn atomic_holds_writable_object(atomic: &TAtomic) -> bool {
-    matches!(atomic, TAtomic::Object(TObject::Named(named)) if !named.is_readonly)
-        || readonly_reach(atomic).into_iter().any(|union| union.types.iter().any(atomic_holds_writable_object))
+    matches!(
+        atomic,
+        TAtomic::Object(TObject::Named(TNamedObject { is_readonly: false, .. }))
+            | TAtomic::Reference(TReference::Symbol { is_readonly: false, .. })
+    ) || readonly_reach(atomic).into_iter().any(|union| union.types.iter().any(atomic_holds_writable_object))
 }
 
 fn make_atomic_readonly(atomic: &mut TAtomic) {
@@ -1525,6 +1576,12 @@ fn make_atomic_readonly(atomic: &mut TAtomic) {
         TAtomic::Object(TObject::Named(named)) => {
             named.is_readonly = true;
             for ty in named.type_parameters.iter_mut().flatten() {
+                readonly_known(ty);
+            }
+        }
+        TAtomic::Reference(TReference::Symbol { parameters, is_readonly, .. }) => {
+            *is_readonly = true;
+            for ty in parameters.iter_mut().flatten() {
                 readonly_known(ty);
             }
         }

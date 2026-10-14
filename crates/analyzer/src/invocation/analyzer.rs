@@ -69,8 +69,45 @@ use crate::invocation::template_result::populate_template_result_from_invocation
 use crate::invocation::template_result::refine_template_result_for_function_like;
 use crate::statement::function_like::known_type_or_error;
 use crate::utils::expression::get_block_expression_id;
+use crate::utils::names::display_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::names::is_prelude_stub;
+use crate::utils::quoted_source;
+use crate::utils::report_dropped_readonly;
+
+/// Reports `argument`, a readonly value passed where `parameter` takes a writable one, spec section 13, with the
+/// `readonly` to declare: on the parameter of a PHP# method, on the element type of a collection, or on the type
+/// argument a type parameter takes. A plain PHP parameter takes no `readonly`, since PHP# does not check plain PHP.
+fn report_readonly_argument<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    invocation: &Invocation<'_, '_, '_>,
+    parameter: InvocationTargetParameter<'_>,
+    parameter_type: &TUnion,
+    argument: &Expression<'_>,
+) where
+    A: Arena,
+{
+    let target = invocation.target.guess_name(context);
+    let readonly_type = display_type(context, &parameter_type.clone().to_readonly());
+    let declared_generic = parameter.get_type().is_some_and(|declared| {
+        declared.get_all_child_nodes().iter().any(|node| matches!(node, TypeRef::Atomic(TAtomic::GenericParameter(_))))
+    });
+    let fix = if invocation.target.get_sharp_collection_receiver().is_some() {
+        format!(". Declare the element type `{readonly_type}`.")
+    } else if declared_generic {
+        format!(". Declare the type argument `{readonly_type}`.")
+    } else if invocation.target.get_function_like_metadata().is_some_and(|function| function.flags.is_sharp())
+        && let Some(name) = parameter.get_name()
+    {
+        format!(". Declare the parameter `{readonly_type} {}`.", display_variable_name(context, name.0.as_bytes()))
+    } else {
+        format!(", and {target} is plain PHP, which PHP# does not check.")
+    };
+    let action = format!("pass {} to {target}", quoted_source(context, argument.span()));
+
+    report_dropped_readonly(context, block_context, IssueCode::InvalidArgument, argument, &action, &fix);
+}
 
 fn narrow_class_related_argument<A>(
     context: &Context<'_, '_, A>,
@@ -687,7 +724,16 @@ where
                     check_sharp_literal_kind(context, argument_expression, &final_parameter_type);
                 }
 
-                if verify_argument_type(
+                if context.dialect.is_sharp() && final_parameter_type.drops_readonly_of(&argument_value_type) {
+                    report_readonly_argument(
+                        context,
+                        block_context,
+                        invocation,
+                        parameter_ref,
+                        &final_parameter_type,
+                        argument_expression,
+                    );
+                } else if verify_argument_type(
                     context,
                     artifacts,
                     &argument_value_type,

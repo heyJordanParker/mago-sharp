@@ -18,6 +18,7 @@ use mago_syntax::cst::UnaryPrefixOperator;
 use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::context::block::BlockContext;
 
 pub mod availability;
 pub mod casing;
@@ -110,6 +111,30 @@ pub fn report_int_for_float<A>(
         code,
         Issue::error(format!("`int` is not `float`: {fix}"))
             .with_annotation(Annotation::primary(value.span()).with_message(format!("Declared `{declared}`."))),
+    );
+}
+
+/// Reports `value`, a readonly PHP# value that lands where a writable one goes, spec section 13, with the `code` of the
+/// place it lands. `action` says what the code does with it, as "pass order to this.save", and `fix` follows "is
+/// readonly" with the `readonly` to declare, as ". Declare it `readonly Order o`.", or why there is none.
+pub fn report_dropped_readonly<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    code: IssueCode,
+    value: &Expression<'_>,
+    action: &str,
+    fix: &str,
+) where
+    A: Arena,
+{
+    let writer = names::readonly_writer(context, block_context.scope.get_function_like());
+    let quoted = quoted_source(context, value.span());
+
+    context.collector.report_with_code(
+        code,
+        Issue::error(format!("{writer} cannot {action}: {quoted} is readonly{fix}"))
+            .with_annotation(Annotation::primary(value.span()).with_message("This value is readonly."))
+            .with_note("A readonly value stays read only: it never goes where code could change it."),
     );
 }
 

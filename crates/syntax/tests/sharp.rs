@@ -4568,7 +4568,8 @@ fn readonly_before_another_clause_is_an_error_that_names_the_last_place() {
 #[test]
 fn readonly_before_a_declaration_or_in_plain_php_is_a_modifier() {
     const SHARP: &str = "public readonly class Receipt { }\n";
-    const PHP: &str = "<?php class Bill { public function __construct(public readonly int $due) {} private readonly int $total; }\n";
+    const PHP: &str =
+        "<?php class Bill { public function __construct(public readonly int $due) {} private readonly int $total; }\n";
     let arena = LocalArena::new();
     let sharp = parse(&arena, "src/Receipt.sharp", SHARP);
     let php = parse(&arena, "src/Bill.php", PHP);

@@ -223,7 +223,13 @@ where
                 // `readonly readonly Order` reads as one readonly type inside another, which the checker refuses.
                 matches!(
                     token.kind,
-                    T!["(" | "self" | "array" | "callable" | "readonly" | QualifiedIdentifier | FullyQualifiedIdentifier]
+                    T!["("
+                        | "self"
+                        | "array"
+                        | "callable"
+                        | "readonly"
+                        | QualifiedIdentifier
+                        | FullyQualifiedIdentifier]
                 )
             }
             None => false,

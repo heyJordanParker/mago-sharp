@@ -89,6 +89,7 @@ use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::names::operator_symbol;
 use crate::utils::report_int_for_float;
 
 pub mod function;
@@ -206,6 +207,14 @@ pub fn capture_lambda_locals<A>(
 
         lambda_block_context.locals.insert(variable, variable_type);
         lambda_block_context.variables_possibly_in_scope.insert(variable);
+    }
+
+    // Spec section 13: a lambda reads `this` as the readonly method it is written in does.
+    let this = word("$this");
+    if let Some(this_type) = block_context.locals.get(&this)
+        && this_type.holds_readonly_object()
+    {
+        lambda_block_context.locals.insert(this, Rc::clone(this_type));
     }
 }
 
@@ -374,14 +383,15 @@ where
     } else if !block_context.scope.is_static()
         && let Some(class_like_metadata) = block_context.scope.get_class_like()
     {
-        block_context.locals.insert(
-            Word::from("$this"),
-            Rc::new(wrap_atomic(TAtomic::Object(get_this_type(
-                context,
-                class_like_metadata,
-                Some(function_like_metadata),
-            )))),
-        );
+        let mut this_type = get_this_type(context, class_like_metadata, Some(function_like_metadata));
+        // A lambda's `this` is readonly when it captured a readonly one.
+        if let TObject::Named(named) = &mut this_type
+            && block_context.locals.get(&word("$this")).is_some_and(|captured| captured.holds_readonly_object())
+        {
+            named.is_readonly = true;
+        }
+
+        block_context.locals.insert(Word::from("$this"), Rc::new(wrap_atomic(TAtomic::Object(this_type))));
     }
 
     if let FunctionLikeBody::Statements(statements, _) = body {
@@ -489,6 +499,7 @@ where
     parent_artifacts.call_targets.extend(std::mem::take(&mut artifacts.call_targets));
     parent_artifacts.namespace_constants.extend(std::mem::take(&mut artifacts.namespace_constants));
     parent_artifacts.function_values.append(&mut artifacts.function_values);
+    parent_artifacts.readonly_calls.append(&mut artifacts.readonly_calls);
     parent_artifacts.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));
     parent_artifacts.pending_readonly_property_writes.append(&mut artifacts.pending_readonly_property_writes);
 
@@ -511,6 +522,7 @@ where
             context.codebase.method_is_overriding(class_name.as_bytes(), function_like_metadata.name.as_bytes())
         });
 
+    let is_operator = operator_symbol(context, function_like_metadata).is_some();
     for (i, parameter_metadata) in function_like_metadata.parameters.iter().enumerate() {
         let parameter_variable_str = parameter_metadata.get_name().0;
 
@@ -663,6 +675,11 @@ where
         } else {
             declared_parameter_type
         };
+
+        // Spec section 13: the language runs an operator on readonly values, so its body reads its operands readonly.
+        if is_operator {
+            final_parameter_type = final_parameter_type.to_readonly();
+        }
 
         if parameter_metadata.flags.is_by_reference() {
             final_parameter_type.set_by_reference(parameter_metadata.flags.is_by_reference());
@@ -879,6 +896,7 @@ where
             .filter(|name| !class_like_metadata.declaring_property_ids.contains_key(name)),
     );
 
+    let this_is_readonly = block_context.locals.get(&word("$this")).is_some_and(|this| this.holds_readonly_object());
     for property_name in property_names {
         // These types seed `$this->prop`, i.e. internal access: the real property when it is
         // visible from within this class, the `@property*` annotation otherwise.
@@ -946,6 +964,11 @@ where
                 ..Default::default()
             },
         );
+
+        // Spec section 13: everything a readonly method reads through `this` is readonly.
+        if this_is_readonly && !property_metadata.flags.is_static() {
+            property_type = property_type.to_readonly();
+        }
 
         block_context.locals.insert(expression_id, Rc::new(property_type));
     }

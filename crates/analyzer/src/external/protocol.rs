@@ -1951,7 +1951,8 @@ fn encode_reference_snapshot<'type_info>(
     depth: usize,
 ) -> Result<(), ExternalAnalyzerError> {
     match reference {
-        TReference::Symbol { name, parameters, variances, intersection_types } => {
+        // A plugin sees plain PHP types, which carry no `readonly`.
+        TReference::Symbol { name, parameters, variances, intersection_types, is_readonly: _ } => {
             writer.write_u8(1);
             writer.write_bytes(name.as_bytes())?;
             encode_optional_unions(writer, parameters.as_deref(), types, depth + 1)?;
@@ -3081,6 +3082,7 @@ fn decode_complete_reference(
             parameters: decode_optional_complete_unions(reader, depth + 1)?,
             variances: decode_optional_variances(reader)?,
             intersection_types: decode_optional_complete_atomics(reader, depth + 1)?,
+            is_readonly: false,
         },
         2 => TReference::Member {
             class_like_name: word(reader.read_bytes("reference member class")?),

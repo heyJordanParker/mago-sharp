@@ -46,6 +46,8 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::Body;
+use crate::effects::ReadonlyCall;
 use crate::error::AnalysisError;
 use crate::expression::constant_access::field_storage;
 use crate::resolver::class_name::report_non_existent_class_like;
@@ -64,6 +66,10 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_method_name;
 use crate::utils::names::display_sharp_collection;
 use crate::utils::names::display_type;
+use crate::utils::names::is_prelude_stub;
+use crate::utils::names::readonly_writer;
+use crate::utils::names::sharp_method_declaration;
+use crate::utils::quoted_source;
 use crate::visibility::check_method_visibility;
 use crate::visibility::is_method_visible;
 use crate::visibility::is_visible_from_scope;
@@ -212,6 +218,7 @@ where
 {
     let mut result = MethodResolutionResult::default();
     let mut asserted_descendant_method_references = Vec::new();
+    let mut readonly_calls = Vec::new();
 
     analyze_member_object(context, block_context, artifacts, object, is_null_safe)?;
 
@@ -457,6 +464,20 @@ where
                     }
                 }
 
+                if context.dialect.is_sharp()
+                    && let TObject::Named(named) = obj_type
+                    && named.is_readonly
+                {
+                    check_calls_through_readonly(
+                        context,
+                        block_context,
+                        &mut readonly_calls,
+                        object,
+                        selector,
+                        &resolved_methods,
+                    );
+                }
+
                 result.resolved_methods.extend(resolved_methods);
             }
         }
@@ -469,8 +490,68 @@ where
     for method_id in asserted_descendant_method_references {
         artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &method_id);
     }
+    artifacts.readonly_calls.append(&mut readonly_calls);
 
     Ok(result)
+}
+
+/// Spec section 13: through a readonly `object`, only methods marked `readonly` run. A PHP# method without the marker
+/// is recorded for the error the effects solve words, because only the solve knows whether it changes `this`. A plain
+/// PHP method is an error here, since PHP# does not check it. A collection's methods are checked as the writes they
+/// make.
+fn check_calls_through_readonly<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    readonly_calls: &mut Vec<ReadonlyCall>,
+    object: &Expression<'_>,
+    selector: &ClassLikeMemberSelector<'_>,
+    resolved_methods: &[ResolvedMethod],
+) where
+    A: Arena,
+{
+    for resolved in resolved_methods {
+        let identifier = context.codebase.get_declaring_method_identifier(&resolved.method_identifier);
+        let declaring_class = identifier.get_class_name();
+        let (Some(method), Some(declaring)) = (
+            context.codebase.get_method_by_id(&identifier),
+            context.codebase.get_class_like(declaring_class.as_bytes()),
+        ) else {
+            continue;
+        };
+        if resolved.is_static || method.flags.is_readonly() || is_prelude_stub(declaring.name) {
+            continue;
+        }
+
+        let caller = readonly_writer(context, block_context.scope.get_function_like());
+        let call = quoted_source(context, object.span().join(selector.span()));
+        let receiver = quoted_source(context, object.span());
+        let class = display_class_like_name(context, resolved.classname);
+        if !declaring.flags.is_sharp() {
+            context.collector.report_with_code(
+                IssueCode::MissingReadonlyMarker,
+                Issue::error(format!("{caller} cannot call {call}: {receiver} is readonly."))
+                    .with_annotation(Annotation::primary(selector.span()))
+                    .with_help(format!(
+                        "{} is a plain PHP method of {}, which PHP# does not check.",
+                        method.original_name,
+                        display_class_like_name(context, declaring.original_name)
+                    )),
+            );
+
+            continue;
+        }
+
+        readonly_calls.push(ReadonlyCall {
+            callee: Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), identifier.get_method_name()),
+            span: selector.span(),
+            caller,
+            call,
+            receiver,
+            method: method.original_name.to_string(),
+            class: class.to_string(),
+            declaration: sharp_method_declaration(context, method),
+        });
+    }
 }
 
 /// Spec section 14 calls a property that holds a function as a method: the PHP# call `x.priceOf(line)` of a class

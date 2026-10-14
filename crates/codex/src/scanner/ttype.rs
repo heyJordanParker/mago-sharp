@@ -272,6 +272,7 @@ fn get_union_from_identifier_hint(identifier: &Identifier<'_>, resolved_names: &
         parameters: None,
         variances: None,
         intersection_types: None,
+        is_readonly: false,
     }))
 }
 

@@ -77,8 +77,6 @@ pub struct MethodParts<'ast, 'arena> {
     /// The `readonly` after a method's parameters, spec section 13. An operator, a named constructor and an extension
     /// member have none: each runs as a static method, with no `this`.
     pub readonly: Option<&'ast Keyword<'arena>>,
-    /// Whether this is a PHP# operator, whose operands are readonly by definition, spec section 13.
-    pub is_operator: bool,
     /// The events a method listens to. An operator and a named constructor listen to none.
     pub on: Option<&'ast On<'arena>>,
     /// The effects a method without a body allows, spec section 29. An operator and a named constructor have a body.
@@ -100,7 +98,6 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             parameter_list: &method.parameter_list,
             return_type_hint: method.return_type_hint.as_ref(),
             readonly: method.readonly.as_ref(),
-            is_operator: false,
             on: method.on.as_ref(),
             uses: method.uses,
             body: &method.body,
@@ -139,7 +136,6 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             parameter_list: &operator.parameter_list,
             return_type_hint: Some(&operator.return_type_hint),
             readonly: None,
-            is_operator: true,
             on: None,
             uses: None,
             body: &operator.body,
@@ -161,7 +157,6 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             parameter_list: &named_constructor.parameter_list,
             return_type_hint: None,
             readonly: None,
-            is_operator: false,
             on: None,
             uses: None,
             body: &named_constructor.body,
@@ -192,7 +187,6 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             parameter_list: receiver_first(arena, extension, &method.parameter_list)?,
             return_type_hint: method.return_type_hint.as_ref(),
             readonly: None,
-            is_operator: false,
             on: method.on.as_ref(),
             uses: method.uses,
             body: &method.body,
@@ -232,7 +226,6 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
                 .as_ref()
                 .map(|hint| &*arena.alloc(FunctionLikeReturnTypeHint { colon: None, hint: hint.clone() })),
             readonly: None,
-            is_operator: false,
             on: None,
             uses: None,
             body: arena.alloc(MethodBody::Expression(MethodExpressionBody {

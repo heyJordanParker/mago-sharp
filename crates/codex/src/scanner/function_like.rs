@@ -116,22 +116,13 @@ where
         .iter()
         .filter_map(|p| scan_function_like_parameter(p, Some(class_like_metadata.original_name), context, scope))
         .collect();
-    // Spec section 13: a method marked `readonly` keeps `this` readonly. An operator's operands, and `hash()` and
-    // `toString()`, which the language calls for the user, are readonly by definition.
+    // Spec section 13: a method marked `readonly` keeps `this` readonly, and so do `hash()` and `toString()`, which the
+    // language calls for the user. The analysis of an operator's body reads its operands readonly.
     if context.program.dialect.is_sharp() {
         let called_for_the_user = !method.modifiers.contains_static()
             && (method_name_str.eq_ignore_ascii_case(b"hash") || method_name_str.eq_ignore_ascii_case(b"toString"));
         if method.readonly.is_some() || called_for_the_user {
             metadata.flags |= MetadataFlags::READONLY;
-        }
-        if method.is_operator {
-            for parameter in &mut metadata.parameters {
-                for declared in [&mut parameter.type_declaration_metadata, &mut parameter.type_metadata] {
-                    if let Some(declared) = declared {
-                        declared.type_union = declared.type_union.clone().to_readonly();
-                    }
-                }
-            }
         }
     }
     metadata.listens =

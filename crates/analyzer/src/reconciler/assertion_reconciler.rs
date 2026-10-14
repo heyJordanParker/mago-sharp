@@ -67,6 +67,35 @@ pub fn reconcile<A>(
 where
     A: Arena,
 {
+    let narrowed = narrow(context, assertion, existing_var_type, key, inside_loop, span, can_report_issues, negated);
+
+    // Spec section 13: a value narrowed from a readonly object, as `shape is Circle c`, is readonly too.
+    if existing_var_type.is_some_and(|existing| {
+        existing
+            .types
+            .iter()
+            .any(|atomic| matches!(atomic, TAtomic::Object(TObject::Named(named)) if named.is_readonly))
+    }) {
+        narrowed.to_readonly()
+    } else {
+        narrowed
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn narrow<A>(
+    context: &mut Context<'_, '_, A>,
+    assertion: &Assertion,
+    existing_var_type: Option<&TUnion>,
+    key: Option<&[u8]>,
+    inside_loop: bool,
+    span: Option<&Span>,
+    can_report_issues: bool,
+    negated: bool,
+) -> TUnion
+where
+    A: Arena,
+{
     let codebase = context.codebase;
     let is_negation = assertion.is_negation();
 

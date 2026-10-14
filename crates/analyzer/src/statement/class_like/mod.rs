@@ -88,6 +88,7 @@ use crate::utils::names::display_property_name;
 use crate::utils::names::display_sharp_accessor;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
+use crate::utils::names::sharp_method_declaration;
 
 pub mod constant;
 pub mod enum_case;
@@ -3370,6 +3371,22 @@ fn report_signature_compatibility_issue<'ctx, A>(
                     .with_help(format!(
                         "Remove the method `{method_name}()` from `{child_name}`, or remove the final modifier from the parent method."
                     )),
+            );
+        }
+        SignatureCompatibilityIssue::ReadonlyDropped => {
+            let relation = if parent_class.kind.is_interface() { "implements" } else { "overrides" };
+            let declaration = sharp_method_declaration(context, parent_method);
+            context.collector.report_with_code(
+                IssueCode::IncompatibleReadonlyModifier,
+                Issue::error(format!(
+                    "{child_display} {relation} the readonly {parent_display}, so it is readonly too: declare it `{declaration} readonly`."
+                ))
+                .with_annotation(Annotation::primary(primary_span))
+                .with_annotation(
+                    Annotation::secondary(parent_method.name_span.unwrap_or(parent_method.span))
+                        .with_message("Declared `readonly` here."),
+                )
+                .with_note("A call through a readonly value runs any override, so every override keeps `this` readonly."),
             );
         }
         SignatureCompatibilityIssue::StaticModifierMismatch { child_is_static, parent_is_static: _ } => {

@@ -63,6 +63,7 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_type;
+use crate::utils::names::readonly_writer;
 use crate::utils::quoted_source;
 use crate::utils::template::get_template_types_for_class_member;
 use crate::visibility::check_method_visibility;
@@ -402,11 +403,26 @@ where
                 ),
             };
 
-            let Some(resolved_property) = resolved_property else {
+            let Some(mut resolved_property) = resolved_property else {
                 result.has_invalid_path = true;
 
                 continue;
             };
+
+            // Spec section 13: everything read through a readonly value is readonly, and nothing is written through it.
+            if context.dialect.is_sharp()
+                && let TObject::Named(named_object) = object
+                && named_object.is_readonly
+            {
+                if for_assignment {
+                    report_readonly_write(context, block_context, object_expression, property_selector);
+                    result.has_error_path = true;
+
+                    continue;
+                }
+
+                resolved_property.property_type = resolved_property.property_type.to_readonly();
+            }
 
             if resolved_property.is_magic {
                 if magic_method.is_none() {
@@ -449,6 +465,26 @@ where
         !result.properties.is_empty() && result.properties.iter().all(|p| !p.property_type.is_nullable());
 
     Ok(result)
+}
+
+/// Reports a write of `object.property` where `object` is readonly, spec section 13, once for the write.
+fn report_readonly_write<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    object: &Expression<'_>,
+    property: &ClassLikeMemberSelector<'_>,
+) where
+    A: Arena,
+{
+    let receiver = quoted_source(context, object.span());
+    let written = quoted_source(context, object.span().join(property.span()));
+    let writer = readonly_writer(context, block_context.scope.get_function_like());
+    context.collector.report_with_code(
+        IssueCode::InvalidPropertyWrite,
+        Issue::error(format!("{writer} cannot set {written}: {receiver} is readonly."))
+            .with_annotation(Annotation::primary(property.span()).with_message("Written here."))
+            .with_note("Through a `readonly` value, only `get` accessors and methods marked `readonly` run."),
+    );
 }
 
 enum ExternalPropertyResolution {

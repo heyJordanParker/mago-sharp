@@ -378,6 +378,7 @@ final class AnalyzerCodeModuleGenerator
         'missing-service',
         'service-cycle',
         'captive-service',
+        'missing-readonly-marker',
     ];
 
     /**

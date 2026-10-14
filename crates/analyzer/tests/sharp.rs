@@ -10293,7 +10293,7 @@ fn equality_needs_a_public_int_hash_in_the_class_or_a_parent() {
 /// it cannot declare them again, as C# cannot override an operator.
 #[test]
 fn a_subclass_cannot_declare_an_operator_its_parent_declares() {
-    let order = "namespace App;\n\npublic class Order : Money\n{\n    public static Order operator +(Order a, Order b) => a;\n\n    public static Order operator -(Order a) => a;\n}\n";
+    let order = "namespace App;\n\npublic class Order : Money\n{\n    public static Order operator +(Order a, Order b) => new Order(a.cents + b.cents);\n\n    public static Order operator -(Order a) => new Order(-a.cents);\n}\n";
 
     assert_eq!(
         messages(("src/App/Order.sharp", order), &[MONEY_OPERATORS]),
@@ -13402,4 +13402,172 @@ fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() 
             assert_eq!(refusals(*analyzed, &others), expected, "{}", analyzed.0);
         }
     }
+}
+
+/// The classes the spec section 13 tests read and write through readonly values.
+const READONLY_CLASSES: [(&str, &str); 4] = [
+    ("src/Customer.sharp", "namespace App;\n\npublic class Customer\n{\n    public int id { get; set; } = 1;\n}\n"),
+    ("src/Line.sharp", "namespace App;\n\npublic class Line\n{\n    public int amount { get; set; } = 1;\n}\n"),
+    ("src/Money.sharp", "namespace App;\n\npublic class Money\n{\n    public int amount { get; set; } = 0;\n}\n"),
+    (
+        "src/Order.sharp",
+        "namespace App;\n\npublic class Order\n{\n    public string number { get; set; } = \"A\";\n    public int paid { get; set; } = 0;\n    public Customer owner { get; set; } = new Customer();\n    public List<Line> lines { get; set; } = [];\n    public Map<string, int> counts { get; set; } = [:];\n\n    public Money totalIn(string currency) readonly => new Money();\n\n    public void markPaid() { this.paid = 1; }\n}\n",
+    ),
+];
+
+/// Spec section 13: readonly reaches everything read through a readonly value, so every write through it is an error,
+/// a `set` that a changing collection method runs included. A copy of a collection belongs to its local, and the
+/// objects in it stay readonly.
+#[test]
+fn a_write_through_a_readonly_value_is_an_error() {
+    let view = "namespace App;\n\npublic class View\n{\n    public int render(readonly Order order, Line line)\n    {\n        order.number = \"A-1\";\n        order.owner.id = 5;\n        order.lines.add(line);\n        order.counts[\"a\"] = 1;\n        order.paid += 1;\n        let copy = order.lines;\n        copy.add(line);\n        copy[0].amount = 1;\n        for (const l of order.lines) {\n            l.amount = 2;\n        }\n        return order.paid + copy.count();\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/View.sharp", view), &READONLY_CLASSES),
+        [
+            "render cannot set order.number: order is readonly.",
+            "render cannot set order.owner.id: order.owner is readonly.",
+            "render cannot set order.lines: order is readonly.",
+            "render cannot set order.counts: order is readonly.",
+            "render cannot set order.paid: order is readonly.",
+            "render cannot set copy[0].amount: copy[0] is readonly.",
+            "render cannot set l.amount: l is readonly.",
+        ]
+    );
+}
+
+/// Spec section 13: a readonly method is checked as if `this` were a readonly value, in a lambda it writes too.
+#[test]
+fn a_readonly_method_cannot_write_this() {
+    let counter = "namespace App;\n\npublic class Counter\n{\n    public int count { get; set; } = 0;\n    public Customer owner { get; set; } = new Customer();\n\n    public int bump() readonly\n    {\n        this.count = 1;\n        this.owner.id = 2;\n        const reset = () => { this.count = 3; };\n        reset();\n        return this.count;\n    }\n\n    public int hash() => this.count++;\n}\n";
+
+    assert_eq!(
+        messages(("src/Counter.sharp", counter), &READONLY_CLASSES),
+        [
+            "bump cannot set this.count: this is readonly.",
+            "bump cannot set this.owner.id: this.owner is readonly.",
+            "This lambda cannot set this.count: this is readonly.",
+            "hash cannot set this.count: this is readonly.",
+        ]
+    );
+}
+
+/// Spec section 13, and team-lead's ruling on question 1: a readonly value never goes where a writable one is
+/// expected, so it stays read only. The error names the `readonly` to write, or why there is none.
+#[test]
+fn a_readonly_value_never_goes_where_a_writable_one_is_expected() {
+    let keeper = "namespace App;\n\npublic class Keeper\n{\n    public Order? kept { get; set; } = null;\n\n    public void save(Order order) { }\n\n    public Order give(readonly Order order) { return order; }\n\n    public void keep(readonly Order order, List<Order> orders, List<readonly Order> views)\n    {\n        this.save(order);\n        Order o = order;\n        this.kept = order;\n        orders.add(order);\n        views.add(order);\n        readonly Order fine = order;\n        this.save(fine);\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Keeper.sharp", keeper), &READONLY_CLASSES),
+        [
+            "give cannot return order: order is readonly. Declare the return type `readonly Order`.",
+            "keep cannot pass order to Keeper.save: order is readonly. Declare the parameter `readonly Order order`.",
+            "keep cannot store order in o: order is readonly. Declare it `readonly Order o`.",
+            "keep cannot store order in this.kept: order is readonly, and a field or property keeps only a writable value.",
+            "keep cannot pass order to List<Order>.add: order is readonly. Declare the element type `readonly Order`.",
+            "keep cannot pass fine to Keeper.save: fine is readonly. Declare the parameter `readonly Order order`.",
+        ]
+    );
+}
+
+/// Spec section 13: through a readonly value only methods marked `readonly` run. A call of an unmarked one is an error
+/// that names the fix: the marker, when the method changes nothing in `this`, or the write that keeps it off.
+#[test]
+fn a_readonly_value_calls_only_readonly_methods() {
+    let order = (
+        "src/Order.sharp",
+        "namespace App;\n\npublic class Order\n{\n    public int paid { get; set; } = 0;\n\n    public int totalIn(string currency) readonly => this.paid;\n\n    public string label(string prefix, int width) => prefix;\n\n    public void markPaid() { this.paid = 1; }\n\n    public void reset() { this.clear(); }\n\n    private void clear() { this.paid = 0; }\n}\n",
+    );
+    let view = (
+        "src/View.sharp",
+        "namespace App;\n\npublic class View\n{\n    public Order order { get; set; } = new Order();\n\n    public int render(readonly Order order)\n    {\n        order.totalIn(\"USD\");\n        order.label(\"#\", 4);\n        order.markPaid();\n        order.reset();\n        return 0;\n    }\n\n    public void show() readonly\n    {\n        this.order.markPaid();\n        const pay = () => this.order.markPaid();\n        pay();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[order, view]),
+        [
+            "src/View.sharp:10:15 missing-readonly-marker: render cannot call order.label: order is readonly. Help: label does not change Order, so declare it `label(string prefix, int width) readonly`.",
+            "src/View.sharp:11:15 missing-readonly-marker: render cannot call order.markPaid: order is readonly. Help: markPaid changes Order: it writes `this.paid`.",
+            "src/View.sharp:12:15 missing-readonly-marker: render cannot call order.reset: order is readonly. Help: reset changes Order: it reaches `Order.clear`, which writes `this.paid`.",
+            "src/View.sharp:18:20 missing-readonly-marker: show cannot call this.order.markPaid: this.order is readonly. Help: markPaid changes Order: it writes `this.paid`.",
+            "src/View.sharp:19:38 missing-readonly-marker: This lambda cannot call this.order.markPaid: this.order is readonly. Help: markPaid changes Order: it writes `this.paid`.",
+        ]
+    );
+}
+
+/// Spec section 13: a readonly value stays readonly through a pattern that narrows it, a union and an operator's
+/// operands, which are readonly by definition.
+#[test]
+fn a_readonly_value_stays_readonly_through_narrowing_and_operators() {
+    let shapes = "namespace App;\n\npublic class Shape\n{\n    public int size { get; set; } = 0;\n}\n\npublic class Circle : Shape\n{\n    public int radius { get; set; } = 0;\n}\n";
+    let view = "namespace App;\n\npublic class Tag\n{\n    public int count { get; set; } = 0;\n\n    public static bool operator ==(Tag a, Tag b)\n    {\n        a.count = 1;\n        return true;\n    }\n\n    public int hash() => this.count;\n\n    public void show(readonly Shape shape, Shape other, bool flag)\n    {\n        if (shape is Circle c) {\n            c.radius = 1;\n        }\n        const either = flag ? shape : other;\n        either.size = 2;\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Tag.sharp", view), &[("src/Shapes.sharp", shapes)]),
+        [
+            "operator == cannot set a.count: a is readonly.",
+            "show cannot set c.radius: c is readonly.",
+            "show cannot set either.size: either is readonly.",
+        ]
+    );
+}
+
+/// Spec section 13: an override or an implementation of a readonly method keeps `readonly`, so a call through a
+/// readonly value never reaches a body that changes `this`.
+#[test]
+fn an_override_of_a_readonly_method_is_readonly() {
+    let shapes = "namespace App;\n\npublic interface Priced\n{\n    int price() readonly;\n}\n\npublic class Shape\n{\n    public int size { get; set; } = 0;\n\n    public virtual int area() readonly => this.size;\n}\n\npublic class Square : Shape, Priced\n{\n    public override int area() => this.size * this.size;\n\n    public int price() => 1;\n}\n\npublic class Circle : Shape, Priced\n{\n    public override int area() readonly => this.size;\n\n    public int price() readonly => 2;\n}\n";
+
+    assert_eq!(
+        messages(("src/Shapes.sharp", shapes), &[]),
+        [
+            "Square.price implements the readonly Priced.price, so it is readonly too: declare it `price() readonly`.",
+            "Square.area overrides the readonly Shape.area, so it is readonly too: declare it `area() readonly`.",
+        ]
+    );
+}
+
+/// Spec section 13 checks only PHP# code: a plain PHP file that calls a PHP# readonly method and changes the value it
+/// returns reports nothing.
+#[test]
+fn plain_php_reads_a_readonly_value_as_any_value() {
+    let order = "namespace App;\n\npublic class Order\n{\n    public int paid { get; set; } = 0;\n    public Order? next { get; set; } = null;\n\n    public readonly Order? following() readonly => this.next;\n}\n";
+    let caller = "<?php\n\nnamespace Lib;\n\nuse App\\Order;\n\nfunction pay(Order $order): void\n{\n    $next = $order->following();\n    if ($next !== null) {\n        $next->paid = 1;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Lib/pay.php", caller), &[("src/Order.sharp", order)]), Vec::<String>::new());
+}
+
+/// Spec section 13: PHP# does not check a plain PHP method, so a call of one through a readonly value is an error.
+#[test]
+fn a_readonly_value_calls_no_plain_php_method() {
+    let model = "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function save(): void {}\n}\n";
+    let order = "namespace App;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n}\n";
+    let view = "namespace App;\n\npublic class View\n{\n    public void render(readonly Order order)\n    {\n        order.save();\n    }\n}\n";
+
+    assert_eq!(
+        worded(("src/View.sharp", view), &[("src/Order.sharp", order), ("src/Lib/Model.php", model)]),
+        [
+            "7:15 missing-readonly-marker render cannot call order.save: order is readonly. | save is a plain PHP method of Model, which PHP# does not check."
+        ]
+    );
+}
+
+/// Spec section 13: `readonly` holds only types PHP# checks, so a plain PHP class under it is an error, and a type
+/// whose value never changes, an enum's, takes none.
+#[test]
+fn readonly_holds_only_types_php_sharp_checks() {
+    let model = "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function save(): void {}\n}\n";
+    let status = "namespace App;\n\npublic enum Status\n{\n    case Paid;\n}\n";
+    let view = "namespace App;\n\nimport Lib.Model;\n\npublic class Shows\n{\n    public void show(readonly Model model) { }\n\n    public void status(readonly Status status) { }\n\n    public void order(readonly Order order) { }\n}\n";
+    let mut others = READONLY_CLASSES.to_vec();
+    others.extend([("src/Lib/Model.php", model), ("src/Status.sharp", status)]);
+
+    assert_eq!(
+        messages(("src/Shows.sharp", view), &others),
+        [
+            "`readonly` holds only types PHP# checks, and `Model` is a plain PHP class: write `Model`.",
+            "A `Status` never changes, so `readonly` changes nothing: write `Status`.",
+        ]
+    );
 }

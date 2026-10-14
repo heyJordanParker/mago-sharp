@@ -78,6 +78,8 @@ use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::quoted_source;
+use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
 
 mod array_assignment;
@@ -787,6 +789,22 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
         if !assigned_type.by_reference() {
             Rc::make_mut(&mut assigned_type).set_by_reference(true);
         }
+    }
+
+    // Spec section 13: a typed local holds a readonly value only when its type says `readonly`. The local keeps its
+    // written type, as it does after any refused value.
+    if context.dialect.is_sharp()
+        && let Some(value) = source_expression
+        && let Some((local_type, _)) = block_context.local_types.get(&variable_id).cloned()
+        && local_type.drops_readonly_of(&assigned_type)
+    {
+        let name = display_variable_name(context, variable_id.as_bytes());
+        let fix =
+            format!(". Declare it `{} {name}`.", display_type(context, &local_type.as_ref().clone().to_readonly()));
+        let action = format!("store {} in {name}", quoted_source(context, value.span()));
+        report_dropped_readonly(context, block_context, IssueCode::InvalidLocalAssignmentValue, value, &action, &fix);
+
+        assigned_type = local_type;
     }
 
     let mut comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());

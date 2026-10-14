@@ -4,7 +4,12 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_php_version::feature::Feature;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
+use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Hint;
+use mago_syntax::cst::Program;
+use mago_syntax::cst::ReadonlyHint;
+use mago_syntax::walker::Walker;
 use mago_word::Word;
 use mago_word::WordSet;
 use mago_word::concat_word;
@@ -19,6 +24,7 @@ use crate::statement::class_like::initialization::compute_class_initializer_init
 use crate::statement::class_like::initialization::compute_transitive_initializations;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
+use crate::utils::quoted_source;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalInitializationState {
@@ -722,4 +728,68 @@ where
     }
 
     context.collector.report_with_code(IssueCode::PossiblyInvalidPropertyWrite, issue);
+}
+
+/// Spec section 13: `readonly` holds only types PHP# checks, so each `readonly` before a type of a PHP# program that
+/// names a plain PHP class is an error. One before an enum, whose value never changes, changes nothing. The semantics
+/// checks refuse every other type a `readonly` can't hold before any class is known.
+pub(crate) fn check_readonly_types<A>(context: &mut Context<'_, '_, A>, program: &Program<'_>)
+where
+    A: Arena,
+{
+    let mut found = Vec::new();
+    ReadonlyTypes.walk_program(program, &mut found);
+
+    for readonly in found {
+        let named = match readonly.hint {
+            Hint::Nullable(nullable) => named_classes(nullable.hint),
+            hint => named_classes(hint),
+        };
+        for name in named {
+            let Some(class) = context.codebase.get_class_like(context.resolved_names.get(&name)) else {
+                continue;
+            };
+            let written = quoted_source(context, name);
+            let message = if class.kind.is_enum() {
+                format!("A `{written}` never changes, so `readonly` changes nothing: write `{written}`.")
+            } else if !class.flags.is_sharp() {
+                format!(
+                    "`readonly` holds only types PHP# checks, and `{written}` is a plain PHP class: write `{written}`."
+                )
+            } else {
+                continue;
+            };
+
+            context.collector.report_with_code(
+                IssueCode::IncompatibleReadonlyModifier,
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(readonly.readonly.span).with_message("Written here."))
+                    .with_annotation(Annotation::secondary(name)),
+            );
+        }
+    }
+}
+
+/// Where `hint` names a class at its top: itself, or each member of a union. A type argument takes a `readonly` of
+/// its own.
+fn named_classes(hint: &Hint<'_>) -> Vec<Span> {
+    match hint {
+        Hint::Identifier(identifier) => vec![identifier.span()],
+        Hint::Generic(generic) => vec![generic.name.span],
+        Hint::Union(union) => {
+            let mut named = named_classes(union.left);
+            named.extend(named_classes(union.right));
+            named
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Collects each `readonly` before a type of a program.
+struct ReadonlyTypes;
+
+impl<'ast, 'arena> Walker<'ast, 'arena, Vec<&'ast ReadonlyHint<'arena>>> for ReadonlyTypes {
+    fn walk_in_readonly_hint(&self, readonly: &'ast ReadonlyHint<'arena>, found: &mut Vec<&'ast ReadonlyHint<'arena>>) {
+        found.push(readonly);
+    }
 }
