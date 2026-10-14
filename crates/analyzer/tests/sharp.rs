@@ -13303,6 +13303,23 @@ fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refus
     }
 }
 
+/// Spec sections 13 and 32: `readonly` promises what the constructor does with a service, so a readonly parameter takes
+/// the service of its type.
+#[test]
+fn a_readonly_parameter_takes_the_service_of_its_type() {
+    let reader = (
+        "app/Mail/ReaderMailer.sharp",
+        "namespace App.Mail;\n\nimport App.Flags;\n\npublic class ReaderMailer : Mailer\n{\n    public ReaderMailer(readonly Flags flags) { }\n}\n",
+    );
+    let module = (
+        "app/Module.sharp",
+        "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.ReaderMailer;\nimport App.Flags;\n\nmodule\n{\n    singleton Flags = Flags;\n    singleton Mailer = ReaderMailer;\n}\n",
+    );
+    let others: Vec<_> = BOUND_SERVICES.iter().copied().chain([reader]).collect();
+
+    assert_eq!(refusals(module, &others), Vec::<String>::new());
+}
+
 /// Spec section 32: an environment or test module overrides the base modules' bindings, so the services it changes
 /// are checked with the base bindings that reach them, and a problem it causes is reported at its own binding. Each
 /// row is the overriding file, its bindings from line 10, and the refusals it gets over a base module that binds

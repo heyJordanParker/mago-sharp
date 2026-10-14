@@ -746,7 +746,10 @@ where
             hint => named_classes(hint),
         };
         for name in named {
-            let Some(class) = context.codebase.get_class_like(context.resolved_names.get(&name)) else {
+            // A collection's name, as `Set`, resolves to no class.
+            let Some(class) =
+                context.resolved_names.resolve(&name).and_then(|resolved| context.codebase.get_class_like(resolved))
+            else {
                 continue;
             };
             let written = quoted_source(context, name);

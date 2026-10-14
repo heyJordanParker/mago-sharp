@@ -82,10 +82,11 @@ pub enum BindingValueMetadata {
 /// The id the container knows the service of `type` by: its type in lowercase, as PHP compares class names.
 ///
 /// A binding serves it, the analyzer resolves a parameter by it, and a compiled module's table and a parameter whose
-/// PHP type drops its type arguments carry it to the engine.
+/// PHP type drops its type arguments carry it to the engine. A `readonly` parameter takes the service of its type,
+/// spec section 13, because the mark promises only what the constructor does with it.
 #[must_use]
 pub fn service_id(r#type: &TUnion) -> Word {
-    ascii_lowercase_word(r#type.get_id().as_bytes())
+    ascii_lowercase_word(r#type.clone().without_readonly().get_id().as_bytes())
 }
 
 impl Lifetime {

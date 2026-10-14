@@ -382,7 +382,20 @@ impl TUnion {
     pub fn to_readonly(mut self) -> TUnion {
         if self.types.iter().any(atomic_holds_writable_object) {
             for atomic in self.types.to_mut() {
-                make_atomic_readonly(atomic);
+                set_atomic_readonly(atomic, true);
+            }
+        }
+
+        self
+    }
+
+    /// The union with no object in it readonly: the type a readonly value of it has to code that `readonly` makes no
+    /// promise to, such as the container, which serves one object to every parameter of its type.
+    #[must_use]
+    pub fn without_readonly(mut self) -> TUnion {
+        if self.holds_readonly_object() {
+            for atomic in self.types.to_mut() {
+                set_atomic_readonly(atomic, false);
             }
         }
 
@@ -1544,13 +1557,18 @@ fn atomic_holds_writable_object(atomic: &TAtomic) -> bool {
     ) || readonly_reach(atomic).into_iter().any(|union| union.types.iter().any(atomic_holds_writable_object))
 }
 
-fn make_atomic_readonly(atomic: &mut TAtomic) {
+/// Marks every object in `atomic` readonly, or none, spec section 13.
+fn set_atomic_readonly(atomic: &mut TAtomic, readonly: bool) {
+    let set = |union: TUnion| if readonly { union.to_readonly() } else { union.without_readonly() };
+    let differs = |union: &TUnion| {
+        union.types.iter().any(if readonly { atomic_holds_writable_object } else { atomic_holds_readonly_object })
+    };
     let readonly_arc = |union: &mut Arc<TUnion>| {
-        if union.types.iter().any(atomic_holds_writable_object) {
-            *union = Arc::new(union.as_ref().clone().to_readonly());
+        if differs(union) {
+            *union = Arc::new(set(union.as_ref().clone()));
         }
     };
-    let readonly_known = |union: &mut TUnion| *union = union.clone().to_readonly();
+    let readonly_known = |union: &mut TUnion| *union = set(union.clone());
 
     match atomic {
         TAtomic::Array(TArray::List(list)) => {
@@ -1574,13 +1592,13 @@ fn make_atomic_readonly(atomic: &mut TAtomic) {
             readonly_arc(&mut iterable.value_type);
         }
         TAtomic::Object(TObject::Named(named)) => {
-            named.is_readonly = true;
+            named.is_readonly = readonly;
             for ty in named.type_parameters.iter_mut().flatten() {
                 readonly_known(ty);
             }
         }
         TAtomic::Reference(TReference::Symbol { parameters, is_readonly, .. }) => {
-            *is_readonly = true;
+            *is_readonly = readonly;
             for ty in parameters.iter_mut().flatten() {
                 readonly_known(ty);
             }

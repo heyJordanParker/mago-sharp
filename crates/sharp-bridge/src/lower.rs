@@ -1209,6 +1209,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// type itself when it holds null already, as `T?` and `Any` do.
     fn nullable_hint(&mut self, hint: &Hint) -> u32 {
         match hint {
+            Hint::Readonly(readonly) => self.nullable_hint(readonly.hint),
             Hint::Nullable(_) | Hint::Mixed(_) => self.hint(hint),
             Hint::Union(_) => self.union(hint, Some(hint.span())),
             _ => {
@@ -1583,6 +1584,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 index
             }
             Hint::Union(_) => self.union(hint, None),
+            // Spec section 13: the checker keeps a readonly value read only, so the engine runs its type.
+            Hint::Readonly(readonly) => self.hint(readonly.hint),
             _ => unreachable!("check_slice refuses the type `{hint}`"),
         }
     }
@@ -3940,7 +3943,10 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
 /// any other parameter's class from its PHP type, and a collection of values is no service.
 fn dropped_service(hint: &Hint, service: &FunctionLikeParameterMetadata) -> Option<Word> {
     let r#type = &service.type_metadata.as_ref()?.type_union;
-    let collection = matches!(hint, Hint::Generic(_) | Hint::Nullable(NullableHint { hint: Hint::Generic(_), .. }));
+    let collection = matches!(
+        without_readonly(hint),
+        Hint::Generic(_) | Hint::Nullable(NullableHint { hint: Hint::Generic(_), .. })
+    );
     let of_objects =
         r#type.get_all_child_nodes().iter().any(|node| matches!(node, TypeRef::Atomic(TAtomic::Object(_))));
 
@@ -3949,12 +3955,20 @@ fn dropped_service(hint: &Hint, service: &FunctionLikeParameterMetadata) -> Opti
 
 /// Whether `parameter` is a `Set`, as `Some` of whether it is nullable.
 fn set_parameter(parameter: &FunctionLikeParameter) -> Option<bool> {
-    match &parameter.hint {
+    match parameter.hint.as_ref().map(without_readonly) {
         Some(Hint::Generic(generic)) if generic.name.value == b"Set" => Some(false),
         Some(Hint::Nullable(NullableHint { hint: Hint::Generic(generic), .. })) if generic.name.value == b"Set" => {
             Some(true)
         }
         _ => None,
+    }
+}
+
+/// The type `hint` writes after its `readonly`, spec section 13, which the engine runs as the type.
+fn without_readonly<'hint, 'arena>(hint: &'hint Hint<'arena>) -> &'hint Hint<'arena> {
+    match hint {
+        Hint::Readonly(readonly) => readonly.hint,
+        hint => hint,
     }
 }
 
