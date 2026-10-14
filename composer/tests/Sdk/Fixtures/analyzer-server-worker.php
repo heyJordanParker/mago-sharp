@@ -11,6 +11,7 @@ use Mago\Sdk\Analyzer\AfterFileAnalysisHook;
 use Mago\Sdk\Analyzer\BeforeAnalysisContext;
 use Mago\Sdk\Analyzer\BeforeAnalysisHook;
 use Mago\Sdk\Analyzer\FileAnalysis;
+use Mago\Sdk\Analyzer\Metadata\MemberIdentifier;
 use Mago\Sdk\Analyzer\MethodReturnTypeProvider;
 use Mago\Sdk\Analyzer\MethodTarget;
 use Mago\Sdk\Analyzer\NodeAnalysisContext;
@@ -18,6 +19,7 @@ use Mago\Sdk\Analyzer\NodeAnalysisHook;
 use Mago\Sdk\Analyzer\Plugin;
 use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Analyzer\ReferenceOrigin;
 use Mago\Sdk\Analyzer\ReturnTypeProviderContext;
 use Mago\Sdk\Analyzer\Type;
 use Mago\Sdk\Extension;
@@ -43,7 +45,8 @@ use function usort;
 require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
 
 /**
- * The hooks the analysis server tests drive: a before-analysis issue, a node hook that reports
+ * The hooks the analysis server tests drive: a before-analysis issue, a before-analysis reference
+ * from `src/flag.php` to `Box::value` while `PROOF_REFERENCE` is declared, a node hook that reports
  * each function and fails in a file marked `node hook: fail`, a failing after-analysis hook, and a
  * cross-file rule that reports a route declared by two analyzed files.
  *
@@ -87,6 +90,10 @@ final class ServerProofPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysi
         $marker = $context->codebase->getConstant('PROOF_BEFORE');
         if ($marker !== null) {
             $context->report(Level::Warning, 'before', Issue::at('Before-analysis hook ran.', $marker->location));
+        }
+
+        if ($context->codebase->getConstant('PROOF_REFERENCE') !== null) {
+            $context->references->add(ReferenceOrigin::file('src/flag.php'), new MemberIdentifier('Box', 'value'));
         }
     }
 
