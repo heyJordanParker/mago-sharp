@@ -17391,7 +17391,7 @@ fn a_method_value_read_through_a_readonly_value_calls_its_method() {
 /// readonly each parameter the type passes readonly, and returns a readonly value only where the type returns one.
 #[test]
 fn a_function_value_keeps_the_readonly_values_its_type_passes() {
-    let funcs = "namespace App;\n\npublic class Funcs\n{\n    public void keep(readonly Order order)\n    {\n        Function<void(readonly Order)> pay = (Order o) => { o.markPaid(); };\n        Function<void(readonly Order)> look = (readonly Order o) => { };\n        Function<void(readonly Order)> guess = (o) => { };\n        order.lines.map((Line l) => l.amount);\n        order.lines.map(l => l.amount);\n        Function<Order()> give = () => order;\n        Function<readonly Order()> lend = () => order;\n    }\n}\n";
+    let funcs = "namespace App;\n\npublic class Funcs\n{\n    public void keep(readonly Order order)\n    {\n        Function<void(readonly Order)> pay = (Order o) => { o.markPaid(); };\n        Function<void(readonly Order)> look = (readonly Order o) => { };\n        Function<void(readonly Order)> guess = (o) => { };\n        order.lines.map((Line l) => l.amount);\n        order.lines.map(l => l.amount);\n        Function<Order()> give = () => order;\n        Function<readonly Order()> lend = () => order;\n        int|Function<void(readonly Order)> either = (Order o) => { };\n    }\n}\n";
 
     assert_eq!(
         messages(("src/Funcs.sharp", funcs), &READONLY_CLASSES),
@@ -17399,6 +17399,7 @@ fn a_function_value_keeps_the_readonly_values_its_type_passes() {
             "keep cannot store (Order o) => { o.markPaid(); } in pay: it takes a writable `Order` where a readonly one is passed. Declare its parameter `readonly Order`.",
             "keep cannot pass (Line l) => l.amount to List<readonly Line>.map: it takes a writable `Line` where a readonly one is passed. Declare its parameter `readonly Line`.",
             "keep cannot store () => order in give: it returns a readonly `Order` where a writable one is expected. Declare the return `readonly Order`.",
+            "keep cannot store (Order o) => { } in either: it takes a writable `Order` where a readonly one is passed. Declare its parameter `readonly Order`.",
         ]
     );
 }
