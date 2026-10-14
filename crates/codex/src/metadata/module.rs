@@ -88,6 +88,37 @@ pub fn service_id(r#type: &TUnion) -> Word {
     ascii_lowercase_word(r#type.get_id().as_bytes())
 }
 
+/// The namespaces of the app's top modules that bind `Sharp.Dispatcher`, spec section 15.
+///
+/// Of the base and environment modules outside `vendor/` that bind it, they are the namespaces with the fewest parts,
+/// in order. The standard library's module, the one module of the root namespace, is never the app's. "An app replaces
+/// the dispatcher once at startup", so one namespace is the app's dispatcher, and two are an error.
+#[must_use]
+pub fn top_dispatcher_namespaces(modules: &[ModuleMetadata]) -> Vec<Word> {
+    let mut binding: Vec<Word> = modules
+        .iter()
+        .filter(|module| module.kind != ModuleKind::Test && !module.namespace.as_bytes().is_empty())
+        .filter(|module| !module.file.as_bytes().starts_with(b"vendor/"))
+        .filter(|module| module.bindings.iter().any(|binding| binding.binds_dispatcher()))
+        .map(|module| module.namespace)
+        .collect();
+    let parts = |namespace: &Word| namespace.as_bytes().split(|byte| *byte == b'\\').count();
+    let fewest = binding.iter().map(parts).min();
+    binding.retain(|namespace| Some(parts(namespace)) == fewest);
+    binding.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    binding.dedup();
+
+    binding
+}
+
+impl BindingMetadata {
+    /// Whether it binds `Sharp.Dispatcher`, the service every `emit` hands its event to.
+    #[must_use]
+    pub fn binds_dispatcher(&self) -> bool {
+        service_id(&self.service.type_union).as_bytes() == b"sharp\\dispatcher"
+    }
+}
+
 impl Lifetime {
     /// The lifetime a binding's keyword names: `singleton`, `scoped` or `transient`.
     #[must_use]

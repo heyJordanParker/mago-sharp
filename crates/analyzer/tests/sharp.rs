@@ -16471,6 +16471,51 @@ fn a_generic_interface_states_its_property_with_the_type_argument_the_header_giv
     );
 }
 
+/// Spec section 15: "An app replaces the dispatcher once at startup", so the app's top module that binds `Dispatcher`
+/// is the one that binds it. A binding in a module below it is refused, and so is each of two top modules of the same
+/// depth. An environment module of the top namespace, a test module and a package's module bind it freely.
+#[test]
+fn only_the_apps_top_module_binds_the_dispatcher() {
+    let recorder = (
+        "app/Recorder.sharp",
+        "namespace App;\n\nimport Sharp.Dispatcher;\n\npublic class Recorder : Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners) { }\n}\n",
+    );
+    let module = |path: &'static str, namespace: &str, header: &str| {
+        (
+            path,
+            leak(format!(
+                "namespace {namespace};\n\nimport App.Recorder;\nimport Sharp.Dispatcher;\n\nmodule{header}\n{{\n    singleton Dispatcher = Recorder;\n}}\n"
+            )),
+        )
+    };
+    let top = module("app/Module.sharp", "App", "");
+    let shop = module("app/Shop/Module.sharp", "App.Shop", "");
+    let admin = module("admin/Module.sharp", "Admin", "");
+    let production = module("app/Module.Production.sharp", "App", " : App");
+    let test = module("tests/Shop/CartTest.sharp", "App.Shop", " : App.Shop");
+    let package = module("vendor/acme/billing/src/Module.sharp", "Acme", "");
+    let below = "8:5 invalid-binding Only `app/Module.sharp` binds `Dispatcher`: an app binds it once, in its top module. | Remove this binding. The app's dispatcher serves every `emit`, and a test module replaces it in tests.";
+    let tied = |other: &str| {
+        format!(
+            "8:5 invalid-binding This module and `{other}` each bind `Dispatcher`, and an app binds it once, in its top module. | Bind `Dispatcher` in one module, in the namespace above both."
+        )
+    };
+
+    for (analyzed, others, expected) in [
+        (top, vec![shop], vec![]),
+        (shop, vec![top], vec![below.to_string()]),
+        (shop, vec![], vec![]),
+        (production, vec![top, shop], vec![]),
+        (test, vec![top], vec![]),
+        (top, vec![package], vec![]),
+        (top, vec![admin], vec![tied("admin/Module.sharp")]),
+        (admin, vec![top], vec![tied("app/Module.sharp")]),
+    ] {
+        let others: Vec<_> = [DISPATCHER, recorder].into_iter().chain(others).collect();
+        assert_eq!(refusals(analyzed, &others), expected, "{}", analyzed.0);
+    }
+}
+
 /// The standard library's `Dispatcher`, as `sharp/composer/` ships it.
 const DISPATCHER: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Dispatcher.sharp",

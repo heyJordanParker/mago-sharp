@@ -587,6 +587,37 @@ fn analyze_reports_a_type_class_of_the_standard_library_in_a_project_file() {
     );
 }
 
+/// The standard library's module serves the root namespace, so it is never the app's top module that binds
+/// `Dispatcher`, wherever the package sits. On a disk that ignores case, a project's `Vendor/` folder holds `vendor/`,
+/// so the package's path doesn't say it is vendored.
+#[test]
+fn analyze_never_takes_the_standard_library_module_for_the_app_dispatcher() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\", \"Vendor\"]\n");
+    let library = root.join("Vendor/heyjordanparker/php-sharp-composer");
+    write_library(&library);
+    for class in ["Module", "Dispatcher", "ImmediateDispatcher"] {
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../composer/library/Sharp/{class}.sharp")),
+        )
+        .unwrap();
+        write(&library, &format!("library/Sharp/{class}.sharp"), &source);
+    }
+    write(
+        root,
+        "app/Module.sharp",
+        "namespace App;\n\nimport Sharp.Dispatcher;\nimport Sharp.ImmediateDispatcher;\n\nmodule\n{\n    singleton Dispatcher = ImmediateDispatcher;\n}\n",
+    );
+
+    let output = run(root, "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(stderr.contains("No issues found."), "{stdout}{stderr}");
+}
+
 /// The standard library's own repository analyzes its sources as project code, and its root `composer.json` names
 /// the package, so its `extern` methods, `@`, and its `Int`, `Float` and `Bool` are the library's.
 #[test]

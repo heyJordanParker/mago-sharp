@@ -379,35 +379,32 @@ fn dispatcher_module(namespace: &str) -> String {
     )
 }
 
-/// Spec section 15: the dispatcher is one service for the whole app, so the listener table names the app's module
-/// whose binding of it serves every `emit`: the one whose namespace has the fewest parts, and none when no app module
-/// binds it.
+/// Spec section 15: the dispatcher is one service for the whole app, so the listener table names the app's top module
+/// that binds it, whose binding serves every `emit`, and none when no app module binds it. A binding below the top one
+/// is refused, and the table still names the top one.
 #[test]
 fn compile_names_the_app_module_that_binds_the_dispatcher() {
     let recorder = "namespace App;\n\nimport Sharp.Dispatcher;\n\npublic class Recorder : Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners) { }\n}\n";
     let shop = dispatcher_module("App.Shop");
-    let top = dispatcher_module("App");
     let [composer, dispatcher] = LIBRARY_DISPATCHER;
-    let directory = lawful_project(&[
-        composer,
-        dispatcher,
-        ("app/Recorder.sharp", recorder),
-        ("app/Shop/Module.sharp", &shop),
-        ("app/Module.sharp", &top),
-    ]);
+    let directory =
+        lawful_project(&[composer, dispatcher, ("app/Recorder.sharp", recorder), ("app/Shop/Module.sharp", &shop)]);
     let root = directory.path();
 
-    compile_succeeds(root);
-    assert!(read(root, ".sharp/listeners.php").ends_with("    'dispatcher' => ['app/Module.sharp', 'app'],\n];\n"));
-
-    std::fs::remove_file(root.join("app/Module.sharp")).unwrap();
     compile_succeeds(root);
     assert!(
         read(root, ".sharp/listeners.php")
             .ends_with("    'dispatcher' => ['app/Shop/Module.sharp', 'app\\\\shop'],\n];\n")
     );
 
+    write(root, "app/Module.sharp", &dispatcher_module("App"));
+    let output = compile(root);
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("Only `app/Module.sharp` binds `Dispatcher`"), "{}", printed(&output));
+    assert!(read(root, ".sharp/listeners.php").ends_with("    'dispatcher' => ['app/Module.sharp', 'app'],\n];\n"));
+
     std::fs::remove_file(root.join("app/Shop/Module.sharp")).unwrap();
+    std::fs::remove_file(root.join("app/Module.sharp")).unwrap();
     compile_succeeds(root);
     assert!(read(root, ".sharp/listeners.php").ends_with("    'dispatcher' => null,\n];\n"));
 }

@@ -11,9 +11,10 @@ use mago_allocator::LocalArena;
 use mago_analyzer::analysis_result::AnalysisResult;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::Listing;
+use mago_codex::metadata::module::BindingMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
-use mago_codex::metadata::module::service_id;
+use mago_codex::metadata::module::top_dispatcher_namespaces;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferences;
@@ -148,24 +149,24 @@ impl IncrementalAnalysisService {
         listeners.into_iter().map(|(_, _, listener)| listener).collect()
     }
 
-    /// The app's module whose binding of `Sharp.Dispatcher` serves the whole app, spec section 15: of the base and
-    /// environment modules outside `vendor/` that bind it, the one whose namespace has the fewest parts, then the first
-    /// by file name. `None` when none binds it, and the standard library's binding serves.
+    /// The app's module whose binding of `Sharp.Dispatcher` serves the whole app, spec section 15: a module of the one
+    /// namespace `top_dispatcher_namespaces` gives. `None` when no app module binds it, and the standard library's
+    /// binding serves, and when two namespaces tie, which the analyzer refuses.
     #[must_use]
     pub fn dispatcher_module(&self) -> Option<DispatcherModule> {
+        let [namespace] = top_dispatcher_namespaces(&self.codebase.modules)[..] else {
+            return None;
+        };
+
         self.codebase
             .modules
             .iter()
-            .filter(|module| matches!(module.kind, ModuleKind::Base | ModuleKind::Environment(_)))
-            .filter(|module| !module.file.as_bytes().starts_with(VENDOR))
-            .filter(|module| {
-                module
-                    .bindings
-                    .iter()
-                    .any(|binding| service_id(&binding.service.type_union).as_bytes() == b"sharp\\dispatcher")
+            .find(|module| {
+                module.kind != ModuleKind::Test
+                    && module.namespace == namespace
+                    && module.bindings.iter().any(BindingMetadata::binds_dispatcher)
             })
-            .min_by_key(|module| (module.namespace.as_bytes().split(|byte| *byte == b'\\').count(), module.file))
-            .map(|module| DispatcherModule { file: module.file, namespace: module.namespace })
+            .map(|module| DispatcherModule { file: module.file, namespace })
     }
 
     /// Compiles each `.sharp` file of the last analysis, in file name order.
