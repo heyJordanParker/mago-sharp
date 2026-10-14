@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
@@ -334,4 +335,26 @@ where
                     )
                 })
             })
+}
+
+/// Whether `name` is a member of `Class`, spec section 25: a member the standard library's extensions, under `Sharp\`,
+/// add to every class value, as `attributes`. A call or read of it through a class value reaches it, not a static of
+/// the class the value holds, and no PHP# class may declare a static of its name.
+pub(crate) fn is_class_member(codebase: &CodebaseMetadata, name: &[u8]) -> bool {
+    codebase.extensions.get(&ascii_lowercase_word(name)).is_some_and(|members| {
+        members.iter().any(|(_, method)| {
+            method.get_class_name().as_bytes().get(..6).is_some_and(|root| root.eq_ignore_ascii_case(b"sharp\\"))
+                && codebase
+                    .get_method_by_id(method)
+                    .and_then(|metadata| metadata.parameters.first())
+                    .and_then(|receiver| receiver.get_type_metadata())
+                    .is_some_and(|receiver| {
+                        receiver
+                            .type_union
+                            .types
+                            .iter()
+                            .all(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
+                    })
+        })
+    })
 }

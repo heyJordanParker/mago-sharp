@@ -35,7 +35,7 @@ use crate::context::block::BlockContext;
 use crate::context::scope::control_action::ControlAction;
 use crate::error::AnalysisError;
 use crate::expression::access::analyze_null_safe_class_value;
-use crate::expression::access::class_value_classes;
+use crate::expression::access::class_value_static_classes;
 use crate::expression::access::report_full_name;
 use crate::expression::access::report_member_of_mixed_kinds;
 use crate::invocation::Invocation;
@@ -146,7 +146,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                 )
             }
             // PHP# calls a static method through a class value, `type.m()`, as PHP's `$type::m()`.
-            Call::Method(call) if class_value_classes(context, block_context, call.object).is_some() => {
+            Call::Method(call)
+                if class_value_static_classes(context, block_context, call.object, &call.method).is_some() =>
+            {
                 let static_call = StaticCall {
                     class: call.object,
                     method: &call.method,
@@ -170,7 +172,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
             }
             // PHP# calls a static method through a class value that may be null, `type?.m()`, as PHP's `$type::m()`
             // when `type` holds a class.
-            Call::NullSafeMethod(call) if class_value_classes(context, block_context, call.object).is_some() => {
+            Call::NullSafeMethod(call)
+                if class_value_static_classes(context, block_context, call.object, &call.method).is_some() =>
+            {
                 let static_call = StaticCall {
                     class: call.object,
                     method: &call.method,

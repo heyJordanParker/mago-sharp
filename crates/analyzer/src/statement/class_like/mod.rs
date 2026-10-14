@@ -65,6 +65,7 @@ use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
+use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
@@ -83,6 +84,7 @@ use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_statics;
 use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
+use crate::resolver::extension::is_class_member;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
 use crate::statement::function_like::FunctionLikeBody;
@@ -1515,6 +1517,10 @@ where
         }
     }
 
+    if context.dialect.is_sharp() && class_like_metadata.flags.is_sharp() {
+        report_statics_named_like_class_members(context, members);
+    }
+
     // Check trait constant overrides AFTER constants have been analyzed
     // so we can compare their inferred values
     check_class_like_constants(context, class_like_metadata, members);
@@ -1531,6 +1537,49 @@ where
     }
 
     Ok(())
+}
+
+/// Reports each static of a PHP# class-like named like a member of `Class`, spec section 25, as TypeScript's error 2699
+/// refuses a static named like a member of `Function`: `type.y` through a class value reaches a static method, a
+/// static property, a constant and an enum case alike, and `Class`'s own member wins, so the static would never run.
+fn report_statics_named_like_class_members<A>(context: &mut Context<'_, '_, A>, members: &[ClassLikeMember<'_>])
+where
+    A: Arena,
+{
+    let mut statics: Vec<(&[u8], Span)> = Vec::new();
+    for member in members {
+        match member {
+            ClassLikeMember::Method(method) if method.is_static() => {
+                statics.push((method.name.value, method.name.span));
+            }
+            ClassLikeMember::Property(property) if property.modifiers().iter().any(Modifier::is_static) => {
+                for variable in property.variables() {
+                    statics.push((variable.name.strip_prefix(b"$").unwrap_or(variable.name), variable.span));
+                }
+            }
+            ClassLikeMember::Constant(constant) => {
+                statics.extend(constant.items.iter().map(|item| (item.name.value, item.name.span)));
+            }
+            ClassLikeMember::EnumCase(enum_case) => {
+                statics.push((enum_case.item.name().value, enum_case.item.name().span));
+            }
+            _ => {}
+        }
+    }
+
+    for (name, span) in statics {
+        if !is_class_member(context.codebase, name) {
+            continue;
+        }
+        let name = String::from_utf8_lossy(name);
+        context.collector.report_with_code(
+            IssueCode::NameAlreadyInUse,
+            Issue::error(format!(
+                "`{name}` is a member of `Class`, so `type.{name}` on a class value never reaches this static. Rename it."
+            ))
+            .with_annotation(Annotation::primary(span).with_message("Declared here.")),
+        );
+    }
 }
 
 /// Reports a PHP# class or event, declared at `span`, that does not give the property `property_name` that `parent`

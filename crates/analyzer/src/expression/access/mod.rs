@@ -34,6 +34,7 @@ use crate::error::AnalysisError;
 use crate::expression::binary::logical::merge_short_circuited_assignments;
 use crate::expression::constant_access::analyze_namespace_constant;
 use crate::resolver::class_name::resolve_classnames_from_expression;
+use crate::resolver::extension::is_class_member;
 use crate::resolver::property::resolve_method_value;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
@@ -95,7 +96,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
             // PHP# reads a member through a class value, `typeof(X).y` or `type.y`, as `Class.y` reads it on the class
             // the value holds, which is PHP's `$type::y`.
             Access::Property(access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(name), .. })
-                if let Some(classes) = class_value_classes(context, block_context, access.object) =>
+                if let Some(classes) =
+                    class_value_static_classes(context, block_context, access.object, &access.property) =>
             {
                 analyze_class_value_member(
                     context,
@@ -109,7 +111,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
             }
             Access::NullSafeProperty(
                 access @ NullSafePropertyAccess { property: ClassLikeMemberSelector::Identifier(name), .. },
-            ) if let Some(classes) = class_value_classes(context, block_context, access.object) => {
+            ) if let Some(classes) =
+                class_value_static_classes(context, block_context, access.object, &access.property) =>
+            {
                 let (object, span) = (access.object, access.span());
 
                 analyze_null_safe_class_value(
@@ -465,6 +469,27 @@ where
         }
         _ => None,
     }
+}
+
+/// The classes whose static `member` the class value `object` reaches, as [`class_value_classes`] gives them. None for
+/// a member of `Class`, which wins over the held class's static, spec section 25, so the access reaches the
+/// standard library extension that adds it to every class value.
+pub(crate) fn class_value_static_classes<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    object: &Expression<'_>,
+    member: &ClassLikeMemberSelector<'_>,
+) -> Option<Vec<Word>>
+where
+    A: Arena,
+{
+    if let ClassLikeMemberSelector::Identifier(name) = member
+        && is_class_member(context.codebase, name.value)
+    {
+        return None;
+    }
+
+    class_value_classes(context, block_context, object)
 }
 
 /// The static property a PHP# property access writes: `Class.name` on a class written by name, or `type.name` through a

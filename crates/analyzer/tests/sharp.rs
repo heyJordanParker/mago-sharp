@@ -10919,6 +10919,66 @@ fn an_override_of_a_method_returning_self_returns_self() {
     assert_eq!(explained(("src/Demo/Builder.sharp", sharp), &[]), Vec::<String>::new());
 }
 
+/// The standard library's `Sharp.ClassMembers`, which adds `Class`'s one member, `attributes`, to every class value.
+const CLASS_MEMBERS: (&str, &str) = (
+    "src/Sharp/ClassMembers.sharp",
+    "namespace Sharp;\n\nimport ReflectionAttribute;\nimport ReflectionClass;\n\npublic static class ClassMembers\n{\n    extension<T>(Class<T> type)\n    {\n        public List<TAttribute> attributes<TAttribute>()\n            => new ReflectionClass(type)\n                .getAttributes(typeof(TAttribute), ReflectionAttribute.IS_INSTANCEOF)\n                .map(attribute => attribute.newInstance());\n    }\n}\n",
+);
+
+/// `Class`'s own members win over a static of the class a class value holds, spec section 25: `attributes<Listen>()`
+/// through `typeof(Order)`, a `Class<Order>` and a local of an inferred class value is `Class`'s, a `List<Listen>`,
+/// while `type.defaultTag()` still calls `Order`'s static. A plain `string` has no `attributes`. Each wrong return
+/// shows the type the call gives.
+#[test]
+fn a_member_of_class_wins_over_a_static_of_the_held_class() {
+    let classes = "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Listen\n{\n    public Listen(public string topic { get; }) { }\n}\n\n[Listen(\"orders\")]\npublic class Order\n{\n    public static string defaultTag() => \"order\";\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public int written() => typeof(Order).attributes<Listen>();\n\n    public int typed(Class<Order> type) => type.attributes<Listen>();\n\n    public int inferred()\n    {\n        const type = typeof(Order);\n        return type.attributes<Listen>();\n    }\n\n    public int tag()\n    {\n        const type = typeof(Order);\n        return type.defaultTag();\n    }\n\n    public Any? text(string name) => name.attributes<Listen>();\n}\n";
+    let others = [("src/Demo/Classes.sharp", classes), CLASS_MEMBERS];
+
+    assert_eq!(issues(CLASS_MEMBERS, &[]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &others),
+        [
+            "Invalid return type for method `Report.written`: expected `int`, but found `List<Listen>`.",
+            "Invalid return type for method `Report.typed`: expected `int`, but found `List<Listen>`.",
+            "Invalid return type for method `Report.inferred`: expected `int`, but found `List<Listen>`.",
+            "Invalid return type for method `Report.tag`: expected `int`, but found `string`.",
+            "Attempting to access a method on a non-object type (`string`).",
+        ]
+    );
+}
+
+/// A PHP# class can't declare a static named like a member of `Class`, spec section 25, as TypeScript's error 2699
+/// refuses one named like a member of `Function`: `type.attributes` on a class value reaches `Class`'s, so a static
+/// method, a static property, a constant and an enum case of that name never run through it. An instance member and a
+/// static of another name are not reached through a class value, so they stay.
+#[test]
+fn a_static_named_like_a_member_of_class_is_an_error() {
+    let refusal = "`attributes` is a member of `Class`, so `type.attributes` on a class value never reaches this static. Rename it.";
+    for (member, column) in [
+        ("public static string attributes() => \"\";", 26),
+        ("public static string attributes { get; set; } = \"\";", 26),
+        ("public const string attributes = \"\";", 25),
+    ] {
+        let report = (
+            "src/Demo/Report.sharp",
+            &*format!("namespace Demo;\n\npublic class Report\n{{\n    {member}\n}}\n").leak(),
+        );
+
+        assert_eq!(issues(report, &[CLASS_MEMBERS]), [format!("5:{column} name-already-in-use")], "`{member}`");
+        assert_eq!(messages(report, &[CLASS_MEMBERS]), [refusal], "`{member}`");
+    }
+    let size = ("src/Demo/Size.sharp", "namespace Demo;\n\npublic enum Size\n{\n    case attributes;\n}\n");
+    let allowed = (
+        "src/Demo/Report.sharp",
+        "namespace Demo;\n\npublic class Report\n{\n    public string attributes() => \"\";\n\n    public static string tags() => \"\";\n}\n",
+    );
+
+    assert_eq!(issues(size, &[CLASS_MEMBERS]), ["5:10 name-already-in-use"]);
+    assert_eq!(messages(size, &[CLASS_MEMBERS]), [refusal]);
+    assert_eq!(issues(allowed, &[CLASS_MEMBERS]), Vec::<String>::new());
+}
+
 /// `new (type)(…)` creates an object from a class value, spec section 25: with the type arguments `new` names, or else
 /// those the value carries, as a `Class<Box<Order>>` carries `Order`. A `Class<Box>` carries none, so its `new` names
 /// them. The value must be a class value of a class: a `string`, or the class value of a type parameter whose bound
