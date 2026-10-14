@@ -50,6 +50,10 @@ impl Fingerprintable for Hint<'_> {
             Hint::Iterable(_) => "iterable".hash(hasher),
             Hint::Generic(g) => g.fingerprint_with_hasher(hasher, resolved_names, options),
             Hint::Function(f) => f.fingerprint_with_hasher(hasher, resolved_names, options),
+            Hint::Readonly(r) => {
+                "readonly".hash(hasher);
+                r.hint.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
         }
     }
 }

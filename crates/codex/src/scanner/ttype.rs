@@ -101,6 +101,8 @@ fn union_from_hint(
             union_from_hint(parenthesized_hint.hint, classname, resolved_names, dialect)
         }
         Hint::Identifier(identifier) => get_union_from_identifier_hint(identifier, resolved_names),
+        // Spec section 13: `readonly` before a type makes the value readonly, and everything read through it.
+        Hint::Readonly(readonly) => union_from_hint(readonly.hint, classname, resolved_names, dialect).to_readonly(),
         Hint::Nullable(nullable_hint) => match nullable_hint.hint {
             Hint::Null(_) => get_null(),
             Hint::String(_) => get_nullable_string(),

@@ -6,6 +6,7 @@ use crate::cst::cst::ConstructorInitializer;
 use crate::cst::cst::FunctionLikeReturnTypeHint;
 use crate::cst::cst::Hint;
 use crate::cst::cst::Identifier;
+use crate::cst::cst::Keyword;
 use crate::cst::cst::Method;
 use crate::cst::cst::MethodAbstractBody;
 use crate::cst::cst::MethodBody;
@@ -39,6 +40,7 @@ where
             name: self.parse_local_identifier()?,
             parameter_list: self.parse_function_like_parameter_list()?,
             return_type_hint: self.parse_optional_function_like_return_type_hint()?,
+            readonly: None,
             on: None,
             uses: None,
             initializer: None,
@@ -115,6 +117,7 @@ where
                 name,
                 parameter_list: self.parse_function_like_parameter_list()?,
                 return_type_hint: None,
+                readonly: self.parse_optional_readonly_marker()?,
                 on: None,
                 uses: None,
                 initializer: self.parse_optional_constructor_initializer()?,
@@ -161,11 +164,22 @@ where
             ampersand: None,
             name: self.parse_local_identifier()?,
             parameter_list: self.parse_function_like_parameter_list()?,
+            readonly: self.parse_optional_readonly_marker()?,
             on: self.parse_optional_on()?,
             uses: self.parse_optional_uses()?.map(|uses| &*self.arena.alloc(uses)),
             initializer: None,
             body: self.parse_method_body()?,
         }))
+    }
+
+    /// Parses the `readonly` after a PHP# method's parameters when one is here, spec section 13. It comes before `on`
+    /// and `uses`.
+    fn parse_optional_readonly_marker(&mut self) -> Result<Option<Keyword<'arena>>, ParseError> {
+        if !self.dialect.is_sharp() || !self.stream.is_at(T!["readonly"])? {
+            return Ok(None);
+        }
+
+        Ok(Some(self.expect_any_keyword()?))
     }
 
     /// Parses an `on` clause when one starts here: `on`, which stays a name everywhere else, and the events it lists.

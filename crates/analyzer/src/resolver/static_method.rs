@@ -628,6 +628,7 @@ where
         is_this: true,
         intersection_types: if intersections.is_empty() { None } else { Some(intersections) },
         remapped_parameters: false,
+        is_readonly: false,
     })
 }
 

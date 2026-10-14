@@ -374,6 +374,26 @@ impl TUnion {
         self
     }
 
+    /// The union as a PHP# readonly value has it, spec section 13: every object in it is readonly, inside a
+    /// collection's elements and an object's type arguments too, so everything read through the value is readonly. A
+    /// function value is never written, so a function type keeps its own parameter and return types.
+    #[must_use]
+    pub fn to_readonly(mut self) -> TUnion {
+        if self.types.iter().any(atomic_holds_writable_object) {
+            for atomic in self.types.to_mut() {
+                make_atomic_readonly(atomic);
+            }
+        }
+
+        self
+    }
+
+    /// Whether any object in the union is readonly, spec section 13.
+    #[must_use]
+    pub fn holds_readonly_object(&self) -> bool {
+        self.types.iter().any(atomic_holds_readonly_object)
+    }
+
     /// Removes a specific atomic type from the union.
     pub fn remove_type(&mut self, bad_type: &TAtomic) {
         self.types.to_mut().retain(|t| t != bad_type);
@@ -1435,6 +1455,80 @@ fn widen_atomic(atomic: &mut TAtomic, kind: WidenKind) {
             widen_arc_union(&mut conditional.then, kind);
             widen_arc_union(&mut conditional.otherwise, kind);
         }
+        _ => {}
+    }
+}
+
+/// The unions an atomic holds that a readonly value's reads reach: a collection's keys and elements, an object's
+/// type arguments and a type parameter's bound. A function type's are left out, because a function value is only
+/// called.
+fn readonly_reach(atomic: &TAtomic) -> Vec<&TUnion> {
+    match atomic {
+        TAtomic::Array(TArray::List(list)) => {
+            let known = list.known_elements.iter().flat_map(|known| known.values().map(|(_, ty)| ty));
+
+            std::iter::once(list.element_type.as_ref()).chain(known).collect()
+        }
+        TAtomic::Array(TArray::Keyed(keyed)) => {
+            let parameters = keyed.parameters.iter().flat_map(|(key, value)| [key.as_ref(), value.as_ref()]);
+            let known = keyed.known_items.iter().flat_map(|known| known.values().map(|(_, ty)| ty));
+
+            parameters.chain(known).collect()
+        }
+        TAtomic::Array(TArray::Set(element_type)) => vec![element_type.as_ref()],
+        TAtomic::Iterable(iterable) => vec![iterable.key_type.as_ref(), iterable.value_type.as_ref()],
+        TAtomic::Object(TObject::Named(named)) => named.type_parameters.iter().flatten().collect(),
+        TAtomic::GenericParameter(generic) => vec![generic.constraint.as_ref()],
+        _ => Vec::new(),
+    }
+}
+
+fn atomic_holds_readonly_object(atomic: &TAtomic) -> bool {
+    matches!(atomic, TAtomic::Object(TObject::Named(named)) if named.is_readonly)
+        || readonly_reach(atomic).into_iter().any(TUnion::holds_readonly_object)
+}
+
+fn atomic_holds_writable_object(atomic: &TAtomic) -> bool {
+    matches!(atomic, TAtomic::Object(TObject::Named(named)) if !named.is_readonly)
+        || readonly_reach(atomic).into_iter().any(|union| union.types.iter().any(atomic_holds_writable_object))
+}
+
+fn make_atomic_readonly(atomic: &mut TAtomic) {
+    let readonly_arc = |union: &mut Arc<TUnion>| {
+        if union.types.iter().any(atomic_holds_writable_object) {
+            *union = Arc::new(union.as_ref().clone().to_readonly());
+        }
+    };
+    let readonly_known = |union: &mut TUnion| *union = union.clone().to_readonly();
+
+    match atomic {
+        TAtomic::Array(TArray::List(list)) => {
+            readonly_arc(&mut list.element_type);
+            for (_, ty) in list.known_elements.iter_mut().flat_map(|known| known.values_mut()) {
+                readonly_known(ty);
+            }
+        }
+        TAtomic::Array(TArray::Keyed(keyed)) => {
+            if let Some((key, value)) = keyed.parameters.as_mut() {
+                readonly_arc(key);
+                readonly_arc(value);
+            }
+            for (_, ty) in keyed.known_items.iter_mut().flat_map(|known| known.values_mut()) {
+                readonly_known(ty);
+            }
+        }
+        TAtomic::Array(TArray::Set(element_type)) => readonly_arc(element_type),
+        TAtomic::Iterable(iterable) => {
+            readonly_arc(&mut iterable.key_type);
+            readonly_arc(&mut iterable.value_type);
+        }
+        TAtomic::Object(TObject::Named(named)) => {
+            named.is_readonly = true;
+            for ty in named.type_parameters.iter_mut().flatten() {
+                readonly_known(ty);
+            }
+        }
+        TAtomic::GenericParameter(generic) => readonly_arc(&mut generic.constraint),
         _ => {}
     }
 }

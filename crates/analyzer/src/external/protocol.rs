@@ -2965,6 +2965,8 @@ fn decode_complete_object(reader: &mut PayloadReader<'_>, depth: usize) -> Resul
                 is_this,
                 intersection_types,
                 remapped_parameters,
+                // An extension's payload carries no spec section 13 readonly flag: only the checker reads it.
+                is_readonly: false,
             })
         }
         3 => {

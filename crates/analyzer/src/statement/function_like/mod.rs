@@ -1065,6 +1065,8 @@ where
         is_this: true,
         intersection_types: if intersections.is_empty() { None } else { Some(intersections) },
         remapped_parameters: false,
+        // Spec section 13: a readonly method is checked as if `this` were a readonly value.
+        is_readonly: function_like_metadata.is_some_and(|metadata| metadata.flags.is_readonly()),
     })
 }
 
