@@ -141,30 +141,37 @@ where
     let function_type = artifacts.get_expression_type(call.function).cloned().unwrap_or_else(get_mixed);
     check_redundant_nullsafe(context, call.question_mark_dot, call.function, &function_type, true);
 
-    analyze_null_safe_value(context, block_context, artifacts, call.function, call.span(), |context, block_context, artifacts| {
-        let mut template_result = TemplateResult::default();
-        let (targets, encountered_invalid_targets) = resolve_callable_targets(
-            context,
-            &function_type.to_non_nullable(),
-            call.function.span(),
-            &mut template_result,
-        );
+    analyze_null_safe_value(
+        context,
+        block_context,
+        artifacts,
+        call.function,
+        call.span(),
+        |context, block_context, artifacts| {
+            let mut template_result = TemplateResult::default();
+            let (targets, encountered_invalid_targets) = resolve_callable_targets(
+                context,
+                &function_type.to_non_nullable(),
+                call.function.span(),
+                &mut template_result,
+            );
 
-        analyze_invocation_targets(
-            context,
-            block_context,
-            artifacts,
-            template_result,
-            targets,
-            InvocationArgumentsSource::ArgumentList(&call.argument_list),
-            call.span(),
-            None,
-            encountered_invalid_targets,
-            false,
-            false,
-            false,
-        )
-    })
+            analyze_invocation_targets(
+                context,
+                block_context,
+                artifacts,
+                template_result,
+                targets,
+                InvocationArgumentsSource::ArgumentList(&call.argument_list),
+                call.span(),
+                None,
+                encountered_invalid_targets,
+                false,
+                false,
+                false,
+            )
+        },
+    )
 }
 
 pub(super) fn resolve_targets<'ctx, 'arena, A>(

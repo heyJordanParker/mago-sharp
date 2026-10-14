@@ -3650,9 +3650,8 @@ fn bitwise_operators_their_compound_assignments_and_modulo_assignment_are_in_the
 
 #[test]
 fn operators_outside_the_slice_are_not_supported_yet() {
-    let code = leak(method(
-        "        let a = extra;\n        a = @extra;\n        a = extra <> 1;\n        return a;\n",
-    ));
+    let code =
+        leak(method("        let a = extra;\n        a = @extra;\n        a = extra <> 1;\n        return a;\n"));
 
     assert_eq!(
         issues(code),
@@ -4400,7 +4399,7 @@ fn an_enum_method_takes_collection_and_function_types_and_holds_lambdas_as_a_cla
 #[test]
 fn is_as_and_match_with_their_patterns_are_in_the_slice() {
     let code = leak(method(
-        "        if (extra is int count && count > 0) {\n            return count;\n        }\n        const small = extra is >= 1 and < 10 or 100 ? 1 : 0;\n        const report = this as Report;\n        const counted = this is { count: int total } && total > 0;\n        const big = this is Report { count: > 1000 } large && large.count > 0;\n        const plain = this is Report { count: 0 };\n        match (extra) {\n            0 => {\n                return 0;\n            },\n            int n when n < 0 => this.run(n),\n            default => {},\n        }\n        return match (extra) {\n            < 0 => -1,\n            not (0 or 1) => 2,\n            default => small,\n        };\n",
+        "        if (extra is int count && count > 0) {\n            return count;\n        }\n        const small = extra is >= 1 and < 10 or 100 ? 1 : 0;\n        const report = this as Report;\n        const counted = this is { count: int total } && total > 0;\n        const big = this is Report { count: > 1000 } large && large.count > 0;\n        const plain = this is Report { count: 0 };\n        const empty = extra is [];\n        const pair = extra is [int only, not null];\n        const rest = extra is [> 0, ...List<int> others] && others.count() > 0;\n        match (extra) {\n            0 => {\n                return 0;\n            },\n            int n when n < 0 => this.run(n),\n            default => {},\n        }\n        return match (extra) {\n            < 0 => -1,\n            not (0 or 1) => 2,\n            default => small,\n        };\n",
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
@@ -4430,6 +4429,22 @@ fn a_pattern_reads_no_local() {
             "19:31 `extra` is a parameter: compare its value in `when`, as in `int n when n == 2 + extra`.",
             "20:28 Write `this.limit`: members of the same object are always written with `this.`.",
             "21:27 `Report.ceiling` is a static member, which a constant value cannot read.",
+        ]
+    );
+}
+
+/// Spec section 21: a list pattern's rest is the `List` of the elements after the others.
+#[test]
+fn a_list_pattern_rest_is_a_list() {
+    let code = leak(method(
+        "        const mapped = extra is [...Map<string, int> entries];\n        const set = extra is [1, ...Set<int> rest];\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:37 A rest is a `List` of the elements after the others, as in `...List<Line> rest`.",
+            "8:37 A rest is a `List` of the elements after the others, as in `...List<Line> rest`.",
         ]
     );
 }
@@ -4489,7 +4504,7 @@ fn a_nullable_type_pattern_names_the_null_check_to_write() {
 #[test]
 fn a_pattern_variable_under_or_or_not_is_an_error_but_under_the_not_that_starts_is() {
     let code = leak(method(
-        "        const a = extra is int x or string y;\n        const b = extra is not (int z and > 0);\n        const c = match (extra) {\n            not int w => 1,\n            default => 0,\n        };\n        const d = this is Report { count: int v } or null;\n        return extra;\n",
+        "        const a = extra is int x or string y;\n        const b = extra is not (int z and > 0);\n        const c = match (extra) {\n            not int w => 1,\n            default => 0,\n        };\n        const d = this is Report { count: int v } or null;\n        const e = extra is [int u, ...List<int> t] or 1;\n        return extra;\n",
     ));
 
     assert_eq!(
@@ -4499,6 +4514,8 @@ fn a_pattern_variable_under_or_or_not_is_an_error_but_under_the_not_that_starts_
             "7:44 `y` is declared under `or` or `not`, where the pattern can match without a value for it.",
             "10:21 `w` is declared under `or` or `not`, where the pattern can match without a value for it.",
             "13:47 `v` is declared under `or` or `not`, where the pattern can match without a value for it.",
+            "14:33 `u` is declared under `or` or `not`, where the pattern can match without a value for it.",
+            "14:49 `t` is declared under `or` or `not`, where the pattern can match without a value for it.",
         ]
     );
 }
@@ -4530,7 +4547,7 @@ fn a_pattern_variable_named_this_is_an_error() {
 #[test]
 fn comparisons_and_equalities_do_not_chain_and_name_both_groupings() {
     let code = leak(method(
-        "        const a = extra < 1 < 2;\n        const b = extra == 1 != 2;\n        const c = extra is int is bool;\n        const d = extra < 1 is bool;\n        const e = extra is > 1 < 2;\n        const f = extra < 1 == true;\n        const g = extra == 1 is bool;\n        const h = (extra < 1) < 2;\n        match (extra) {\n            > 1 < 2 => this.run(1),\n            default => this.run(2),\n        }\n        return extra;\n",
+        "        const a = extra < 1 < 2;\n        const b = extra == 1 != 2;\n        const c = extra is int is bool;\n        const d = extra < 1 is bool;\n        const e = extra is > 1 < 2;\n        const f = extra < 1 == true;\n        const g = extra == 1 is bool;\n        const h = (extra < 1) < 2;\n        match (extra) {\n            > 1 < 2 => this.run(1),\n            default => this.run(2),\n        }\n        const i = this is Report { count: > 1 < 2 };\n        const j = extra is [> 1 < 2];\n        return extra;\n",
     ));
 
     assert_eq!(
@@ -4542,6 +4559,8 @@ fn comparisons_and_equalities_do_not_chain_and_name_both_groupings() {
             "10:19 Comparisons do not chain: write `(extra < 1) is bool` or `extra < (1 is bool)`.",
             "11:19 Comparisons do not chain: write `extra is > (1 < 2)`.",
             "16:13 Comparisons do not chain: write `> (1 < 2)`.",
+            "19:19 Comparisons do not chain: write `this is Report { count: > (1 < 2) }`.",
+            "20:19 Comparisons do not chain: write `extra is [> (1 < 2)]`.",
         ]
     );
 }

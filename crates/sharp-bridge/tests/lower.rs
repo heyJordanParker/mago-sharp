@@ -11657,6 +11657,83 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
 ///
 /// Spec section 21: a type pattern with properties tests the type, then each property on the value the name holds, or
 /// on the subject's hidden variable when it has no name. Each property is read once, as in a properties pattern.
+/// ```php
+/// $a = \is_array($values) && \count($values) === 0;
+/// $b = \is_array($values) && \count($values) >= 1 && \is_int($first = $values[0])
+///     && \is_array($rest = \array_slice($values, 1));
+/// ```
+#[test]
+fn a_list_pattern_tests_the_count_then_each_element_then_takes_the_rest() {
+    assert_eq!(
+        body_in(
+            "int run(List<int> values)",
+            "        const a = values is [];\n        const b = values is [int first, ...List<int> rest];\n        return 0;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                AND
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "values"
+                  BINARY_OP [16]
+                    CALL
+                      ZVAL "count"
+                      ARG_LIST
+                        VAR
+                          ZVAL "values"
+                    ZVAL 0
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                AND
+                  AND
+                    AND
+                      CALL
+                        ZVAL "is_array"
+                        ARG_LIST
+                          VAR
+                            ZVAL "values"
+                      GREATER_EQUAL
+                        CALL
+                          ZVAL "count"
+                          ARG_LIST
+                            VAR
+                              ZVAL "values"
+                        ZVAL 1
+                    CALL
+                      ZVAL "is_int"
+                      ARG_LIST
+                        ASSIGN
+                          VAR
+                            ZVAL "first"
+                          DIM
+                            VAR
+                              ZVAL "values"
+                            ZVAL 0
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "rest"
+                        CALL
+                          ZVAL "array_slice"
+                          ARG_LIST
+                            VAR
+                              ZVAL "values"
+                            ZVAL 1
+              RETURN
+                ZVAL 0
+            "#}
+    );
+}
+
 #[test]
 fn a_type_with_properties_tests_the_type_then_each_property() {
     assert_eq!(

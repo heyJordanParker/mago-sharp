@@ -6,6 +6,7 @@ use mago_algebra::saturate_clauses;
 use mago_allocator::Arena;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::r#enum::TEnum;
 use mago_codex::ttype::get_literal_string;
@@ -21,17 +22,23 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::As;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::Identifier;
+use mago_syntax::cst::ListPattern;
+use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Parenthesized;
+use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PropertiesPattern;
+use mago_syntax::cst::RestPattern;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::utils::pattern::PhpShape;
-use mago_syntax::utils::pattern::called_function;
+use mago_syntax::utils::pattern::called_functions;
 use mago_syntax::walker::Walker;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
@@ -58,6 +65,7 @@ use crate::utils::misc::check_for_paradox;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
 use crate::utils::names::display_missing_imports;
+use crate::utils::names::display_type;
 
 pub mod access;
 pub mod argument_list;
@@ -355,16 +363,23 @@ where
     context.patterns.truncate(patterns);
 
     // The PHP of a pattern calls a type test that no source the user wrote calls. It is the PHP# syntax itself, so it is
-    // never replaced by syntax. A properties pattern's `is_object` is its null check, which a value that cannot be null
-    // makes redundant. C# reports nothing there, and no source the user wrote can drop the check.
-    let mut pattern_calls = Vec::new();
+    // never replaced by syntax. Some calls are the shape of the pattern, which no source the user wrote can drop, so
+    // C# reports nothing there when they always hold: a properties pattern's `is_object` and a list pattern's
+    // `is_array`, their null checks, a list pattern's `count` and its rest's `is_array`, and the type test of a list's
+    // element, which the list's own type can make always true, as `[int, ...List<int> rest]` writes "any element".
+    let mut pattern_calls = PatternCalls::default();
     match node {
-        Node::Expression(expression) => PatternCalls.walk_expression(expression, &mut pattern_calls),
-        Node::Statement(statement) => PatternCalls.walk_statement(statement, &mut pattern_calls),
+        Node::Expression(expression) => PatternCallWalker.walk_expression(expression, &mut pattern_calls),
+        Node::Statement(statement) => PatternCallWalker.walk_statement(statement, &mut pattern_calls),
         _ => {}
     }
-    let pattern_call =
-        |span: Span| pattern_calls.iter().find(|call: &&LocalIdentifier| call.span.start.offset == span.start.offset);
+    let issues = refuse_list_patterns_on_other_values(php, &pattern_calls.lists, context, artifacts, issues);
+    let pattern_call = |span: Span| {
+        pattern_calls.calls.iter().find(|call: &&LocalIdentifier| call.span.start.offset == span.start.offset)
+    };
+    let is_shape = |call: &LocalIdentifier| {
+        matches!(call.value, b"is_object" | b"count" | b"is_array") || pattern_calls.element_tests.contains(&call.span)
+    };
     // The last arm of a `match` without `default` takes every value the arms before it leave, as `default` does, so its
     // test is always true and not redundant. An arm before it that is always true leaves nothing for the arms after it.
     let last_arm_test: Option<Span> = match node {
@@ -377,6 +392,22 @@ where
                     tests.iter().find(|(pattern, _)| *pattern == arm.pattern.span()).map(|(_, test)| test.span())
                 }
                 PatternMatchArm::Default(_) => None,
+            })
+        }
+        _ => None,
+    };
+    // A `match` on a list has `default` even when its list patterns cover every list, as `[]` and `[Line first,
+    // ...List<Line> rest]` do, because spec section 21 skips `default` only on an enum or a sealed interface. The last
+    // list arm before that `default` is then always true, which is the shape the spec asks for, not a mistake.
+    let covering_list_arm: Option<u32> = match node {
+        Node::Expression(Expression::PatternMatch(pattern_match))
+        | Node::Statement(Statement::PatternMatch(pattern_match)) => {
+            let last = pattern_match.arms.iter().rposition(|arm| !arm.is_default());
+            last.and_then(|last| match &pattern_match.arms.as_slice()[last] {
+                PatternMatchArm::Pattern(arm) if arm.guard.is_none() && holds_list_pattern(arm.pattern) => {
+                    Some(arm.pattern.span().start.offset)
+                }
+                _ => None,
             })
         }
         _ => None,
@@ -395,8 +426,10 @@ where
 
             // PHP's report on `match (true)` names `true`, so a PHP# `match` reports what it misses itself.
             !is_code(issue, IssueCode::MatchNotExhaustive)
+                && (!is_code(issue, IssueCode::MatchArmAlwaysTrue)
+                    || span.is_none_or(|span| Some(span.start.offset) != covering_list_arm))
                 && (!is_code(issue, IssueCode::ReplacedBySyntax) || called.is_none())
-                && (!redundant || called.is_none_or(|call| call.value != b"is_object"))
+                && (!always_true || called.is_none_or(|call| !is_shape(call)))
                 && (!always_true
                     || span.is_none_or(|span| !last_arm_test.is_some_and(|test| test.contains(&span.start))))
         })
@@ -433,13 +466,7 @@ where
             continue;
         }
 
-        context.collector.report_with_code(
-            IssueCode::ImpossibleTypeComparison,
-            Issue::error("This pattern never matches the value it tests.")
-                .with_annotation(Annotation::primary(pattern).with_message("Never matches."))
-                .with_note("PHP# makes a pattern that can never match an error, as C# does (CS8121).")
-                .with_help("Remove the pattern, or test a value that can match it."),
-        );
+        context.collector.report(never_matches(pattern));
     }
     context.collector.extend(issues);
     result?;
@@ -601,24 +628,168 @@ fn enum_value(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Option<(Word, Op
     }
 }
 
-/// Collects each function a pattern's PHP calls to test a value's type, at the span `called_function` gives it.
-struct PatternCalls;
+/// The error at a pattern that can never match the value it tests.
+fn never_matches(pattern: Span) -> Issue {
+    Issue::error("This pattern never matches the value it tests.")
+        .with_code(IssueCode::ImpossibleTypeComparison.as_str())
+        .with_annotation(Annotation::primary(pattern).with_message("Never matches."))
+        .with_note("PHP# makes a pattern that can never match an error, as C# does (CS8121).")
+        .with_help("Remove the pattern, or test a value that can match it.")
+}
 
-impl<'ast, 'arena> Walker<'ast, 'arena, Vec<LocalIdentifier<'static>>> for PatternCalls {
-    fn walk_in_type_pattern(&self, type_pattern: &'ast TypePattern<'arena>, calls: &mut Vec<LocalIdentifier<'static>>) {
-        calls.extend(called_function(Node::TypePattern(type_pattern)));
+/// Checks the value each list pattern tests, as its PHP's first read, the argument of the `\is_array` at its `[`, holds
+/// it. A list pattern tests a `List`: a value that holds no `List` never matches it, and a value that may be a `List` or
+/// another array, as `Any` may, waits for the type test of `List<T>`. Either one replaces the issues inside the list
+/// pattern and inside its value's read, which count and index the value as a list.
+fn refuse_list_patterns_on_other_values<A>(
+    php: Node<'_, '_>,
+    lists: &[(Span, Span)],
+    context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    issues: impl IntoIterator<Item = Issue>,
+) -> Vec<Issue>
+where
+    A: Arena,
+{
+    let mut reads = ListReads::default();
+    match php {
+        Node::Expression(expression) => ListReadWalker.walk_expression(expression, &mut reads),
+        Node::Statement(statement) => ListReadWalker.walk_statement(statement, &mut reads),
+        _ => {}
     }
 
-    fn walk_in_as(&self, r#as: &'ast As<'arena>, calls: &mut Vec<LocalIdentifier<'static>>) {
-        calls.extend(called_function(Node::As(r#as)));
+    let mut refused = Vec::new();
+    let mut refusals = Vec::new();
+    for &(list, left_bracket) in lists {
+        let Some((read, read_type)) = reads
+            .0
+            .iter()
+            .find(|(function, _)| function.start.offset == left_bracket.start.offset)
+            .and_then(|(_, read)| Some((read.span(), artifacts.get_expression_type(*read)?)))
+        else {
+            continue;
+        };
+
+        let kinds: Vec<ListKind> = read_type.types.iter().map(list_kind).collect();
+        let refusal = if kinds.contains(&ListKind::Unknown)
+            || (kinds.contains(&ListKind::List) && kinds.contains(&ListKind::OtherArray))
+        {
+            let read_type = display_type(context, read_type);
+
+            Issue::error(format!("A list pattern on a `{read_type}` is not supported yet in PHP#."))
+                .with_code(IssueCode::NotSupportedYet.as_str())
+                .with_annotation(Annotation::primary(list).with_message("Not supported yet."))
+                .with_note("A list pattern tests a `List`, and a value that may be another array needs the type test of `List<T>` first.")
+        } else if kinds.contains(&ListKind::List) || kinds.contains(&ListKind::Error) {
+            continue;
+        } else {
+            never_matches(list)
+        };
+
+        refused.extend([list, read]);
+        refusals.push(refusal);
     }
 
-    fn walk_in_properties_pattern(
-        &self,
-        properties: &'ast PropertiesPattern<'arena>,
-        calls: &mut Vec<LocalIdentifier<'static>>,
-    ) {
-        calls.extend(called_function(Node::PropertiesPattern(properties)));
+    issues
+        .into_iter()
+        .filter(|issue| issue.primary_span().is_none_or(|span| !refused.iter().any(|at| at.contains(&span.start))))
+        .chain(refusals)
+        .collect()
+}
+
+/// What a value's type is to a list pattern.
+#[derive(PartialEq)]
+enum ListKind {
+    List,
+    OtherArray,
+    /// A type that is never an array, as `int`, `string`, an object or null.
+    NotArray,
+    /// A type that may be any array, as `Any` or a type parameter.
+    Unknown,
+    /// The type of an expression a parse error refused.
+    Error,
+}
+
+fn list_kind(atomic: &TAtomic) -> ListKind {
+    match atomic {
+        TAtomic::Array(TArray::List(_)) => ListKind::List,
+        TAtomic::Array(_) => ListKind::OtherArray,
+        TAtomic::Scalar(_)
+        | TAtomic::Object(_)
+        | TAtomic::Callable(_)
+        | TAtomic::Resource(_)
+        | TAtomic::Null
+        | TAtomic::Void
+        | TAtomic::Never => ListKind::NotArray,
+        TAtomic::Error => ListKind::Error,
+        _ => ListKind::Unknown,
+    }
+}
+
+/// The value each `\is_array` call of a pattern's PHP tests, by the span of its function name.
+#[derive(Default)]
+struct ListReads<'ast, 'arena>(Vec<(Span, &'ast Expression<'arena>)>);
+
+struct ListReadWalker;
+
+impl<'ast, 'arena> Walker<'ast, 'arena, ListReads<'ast, 'arena>> for ListReadWalker {
+    fn walk_in_function_call(&self, call: &'ast FunctionCall<'arena>, reads: &mut ListReads<'ast, 'arena>) {
+        if let Expression::Identifier(Identifier::Local(function)) = call.function
+            && function.value == b"is_array"
+            && let Some(argument) = call.argument_list.arguments.first()
+        {
+            reads.0.push((function.span, argument.value()));
+        }
+    }
+}
+
+/// Whether a pattern holds a list pattern.
+fn holds_list_pattern(pattern: &Pattern<'_>) -> bool {
+    match pattern {
+        Pattern::List(_) => true,
+        Pattern::Not(not) => holds_list_pattern(not.pattern),
+        Pattern::Binary(binary) => holds_list_pattern(binary.left) || holds_list_pattern(binary.right),
+        Pattern::Parenthesized(parenthesized) => holds_list_pattern(parenthesized.pattern),
+        Pattern::Type(_) | Pattern::Value(_) | Pattern::Comparison(_) | Pattern::Properties(_) => false,
+    }
+}
+
+/// Each function a pattern's PHP calls to test a value, at the span `called_functions` gives it, the type a list
+/// pattern's element is tested against, and each list pattern with its `[`.
+#[derive(Default)]
+struct PatternCalls {
+    calls: Vec<LocalIdentifier<'static>>,
+    element_tests: Vec<Span>,
+    lists: Vec<(Span, Span)>,
+}
+
+/// Collects the `PatternCalls` of a PHP# `is`, `as` or `match`.
+struct PatternCallWalker;
+
+impl<'ast, 'arena> Walker<'ast, 'arena, PatternCalls> for PatternCallWalker {
+    fn walk_in_type_pattern(&self, type_pattern: &'ast TypePattern<'arena>, calls: &mut PatternCalls) {
+        calls.calls.extend(called_functions(Node::TypePattern(type_pattern)));
+    }
+
+    fn walk_in_as(&self, r#as: &'ast As<'arena>, calls: &mut PatternCalls) {
+        calls.calls.extend(called_functions(Node::As(r#as)));
+    }
+
+    fn walk_in_properties_pattern(&self, properties: &'ast PropertiesPattern<'arena>, calls: &mut PatternCalls) {
+        calls.calls.extend(called_functions(Node::PropertiesPattern(properties)));
+    }
+
+    fn walk_in_list_pattern(&self, list: &'ast ListPattern<'arena>, calls: &mut PatternCalls) {
+        calls.calls.extend(called_functions(Node::ListPattern(list)));
+        calls.lists.push((list.span(), list.left_bracket));
+        calls.element_tests.extend(list.elements.iter().filter_map(|element| match element {
+            ListPatternElement::Pattern(Pattern::Type(TypePattern { hint, .. })) => Some(hint.span()),
+            _ => None,
+        }));
+    }
+
+    fn walk_in_rest_pattern(&self, rest: &'ast RestPattern<'arena>, calls: &mut PatternCalls) {
+        calls.calls.extend(called_functions(Node::RestPattern(rest)));
     }
 }
 

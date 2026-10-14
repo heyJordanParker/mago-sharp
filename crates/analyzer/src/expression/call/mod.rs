@@ -168,12 +168,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                     },
                 )
             }
-            Call::NullSafeFunction(call) => function_call::analyze_null_safe_function_call(
-                context,
-                block_context,
-                artifacts,
-                call,
-            ),
+            Call::NullSafeFunction(call) => {
+                function_call::analyze_null_safe_function_call(context, block_context, artifacts, call)
+            }
             Call::NullSafeMethod(call) => {
                 call.analyze(context, block_context, artifacts)?;
                 report_member_of_mixed_kinds(context, artifacts, call.object, &call.method, true);

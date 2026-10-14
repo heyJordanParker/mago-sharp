@@ -50,6 +50,8 @@ pub enum Pattern<'arena> {
     Parenthesized(ParenthesizedPattern<'arena>),
     /// The matched object's properties, each tested against a pattern, as in `{ status: 200, body: string body }`.
     Properties(PropertiesPattern<'arena>),
+    /// The matched list's elements, each tested against a pattern, and the rest, as in `[Line first, ...List<Line> rest]`.
+    List(ListPattern<'arena>),
 }
 
 /// Represents a type pattern: a type, the properties the matched object's must match, and the name of a variable the
@@ -62,7 +64,7 @@ pub enum Pattern<'arena> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TypePattern<'arena> {
     pub hint: Hint<'arena>,
-    pub properties: Option<PropertiesPattern<'arena>>,
+    pub properties: Option<&'arena PropertiesPattern<'arena>>,
     pub variable: Option<LocalIdentifier<'arena>>,
 }
 
@@ -121,6 +123,37 @@ pub struct PropertyPattern<'arena> {
     pub pattern: &'arena Pattern<'arena>,
 }
 
+/// Represents a list pattern, which matches a list of exactly its elements, or of at least them when a rest ends it.
+///
+/// Example: `[]`, `[Line only]`, `[Line first, ...List<Line> rest]`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct ListPattern<'arena> {
+    pub left_bracket: Span,
+    pub elements: TokenSeparatedSequence<'arena, ListPatternElement<'arena>>,
+    pub right_bracket: Span,
+}
+
+/// Represents one element of a list pattern: a pattern the element at its place matches, or the rest.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
+pub enum ListPatternElement<'arena> {
+    Pattern(&'arena Pattern<'arena>),
+    Rest(RestPattern<'arena>),
+}
+
+/// Represents the rest of a list pattern: the elements after the others, in a list of its type, and its name.
+///
+/// Example: `...List<Line> rest`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct RestPattern<'arena> {
+    pub ellipsis: Span,
+    pub hint: &'arena Hint<'arena>,
+    pub variable: LocalIdentifier<'arena>,
+}
+
 impl BinaryPattern<'_> {
     /// Returns `true` for `and`, and `false` for `or`.
     #[inline]
@@ -152,7 +185,29 @@ impl HasSpan for Pattern<'_> {
             Pattern::Binary(pattern) => pattern.span(),
             Pattern::Parenthesized(pattern) => pattern.span(),
             Pattern::Properties(pattern) => pattern.span(),
+            Pattern::List(pattern) => pattern.span(),
         }
+    }
+}
+
+impl HasSpan for ListPattern<'_> {
+    fn span(&self) -> Span {
+        self.left_bracket.join(self.right_bracket)
+    }
+}
+
+impl HasSpan for ListPatternElement<'_> {
+    fn span(&self) -> Span {
+        match self {
+            ListPatternElement::Pattern(pattern) => pattern.span(),
+            ListPatternElement::Rest(rest) => rest.span(),
+        }
+    }
+}
+
+impl HasSpan for RestPattern<'_> {
+    fn span(&self) -> Span {
+        self.ellipsis.join(self.variable.span)
     }
 }
 

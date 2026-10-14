@@ -136,6 +136,8 @@ use crate::cst::cst::Label;
 use crate::cst::cst::Law;
 use crate::cst::cst::LegacyArray;
 use crate::cst::cst::List;
+use crate::cst::cst::ListPattern;
+use crate::cst::cst::ListPatternElement;
 use crate::cst::cst::Literal;
 use crate::cst::cst::LiteralFloat;
 use crate::cst::cst::LiteralInteger;
@@ -210,6 +212,7 @@ use crate::cst::cst::PropertyPattern;
 use crate::cst::cst::QualifiedIdentifier;
 use crate::cst::cst::RequireConstruct;
 use crate::cst::cst::RequireOnceConstruct;
+use crate::cst::cst::RestPattern;
 use crate::cst::cst::Return;
 use crate::cst::cst::ShellExecuteString;
 use crate::cst::cst::ShortOpeningTag;
@@ -2420,6 +2423,7 @@ generate_ast_walker! {
                 walker.walk_parenthesized_pattern(parenthesized_pattern, context);
             }
             Pattern::Properties(properties_pattern) => walker.walk_properties_pattern(properties_pattern, context),
+            Pattern::List(list_pattern) => walker.walk_list_pattern(list_pattern, context),
         });
     }
 
@@ -2462,6 +2466,24 @@ generate_ast_walker! {
     'arena PropertyPattern as property_pattern => {
         walker.walk_local_identifier(&property_pattern.name, context);
         walker.walk_pattern(property_pattern.pattern, context);
+    }
+
+    'arena ListPattern as list_pattern => {
+        for element in &list_pattern.elements {
+            walker.walk_list_pattern_element(element, context);
+        }
+    }
+
+    'arena ListPatternElement as list_pattern_element => {
+        match list_pattern_element {
+            ListPatternElement::Pattern(pattern) => walker.walk_pattern(pattern, context),
+            ListPatternElement::Rest(rest_pattern) => walker.walk_rest_pattern(rest_pattern, context),
+        }
+    }
+
+    'arena RestPattern as rest_pattern => {
+        walker.walk_hint(rest_pattern.hint, context);
+        walker.walk_local_identifier(&rest_pattern.variable, context);
     }
 
     'arena PatternMatch as pattern_match => {

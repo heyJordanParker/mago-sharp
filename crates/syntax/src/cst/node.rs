@@ -142,6 +142,8 @@ use crate::cst::cst::Label;
 use crate::cst::cst::Law;
 use crate::cst::cst::LegacyArray;
 use crate::cst::cst::List;
+use crate::cst::cst::ListPattern;
+use crate::cst::cst::ListPatternElement;
 use crate::cst::cst::Literal;
 use crate::cst::cst::LiteralFloat;
 use crate::cst::cst::LiteralInteger;
@@ -216,6 +218,7 @@ use crate::cst::cst::PropertyPattern;
 use crate::cst::cst::QualifiedIdentifier;
 use crate::cst::cst::RequireConstruct;
 use crate::cst::cst::RequireOnceConstruct;
+use crate::cst::cst::RestPattern;
 use crate::cst::cst::Return;
 use crate::cst::cst::ShellExecuteString;
 use crate::cst::cst::ShortOpeningTag;
@@ -546,6 +549,9 @@ pub enum NodeKind {
     ParenthesizedPattern,
     PropertiesPattern,
     PropertyPattern,
+    ListPattern,
+    ListPatternElement,
+    RestPattern,
     PatternMatch,
     PatternMatchArm,
     PatternMatchPatternArm,
@@ -830,6 +836,9 @@ pub enum Node<'ast, 'arena> {
     ParenthesizedPattern(&'ast ParenthesizedPattern<'arena>),
     PropertiesPattern(&'ast PropertiesPattern<'arena>),
     PropertyPattern(&'ast PropertyPattern<'arena>),
+    ListPattern(&'ast ListPattern<'arena>),
+    ListPatternElement(&'ast ListPatternElement<'arena>),
+    RestPattern(&'ast RestPattern<'arena>),
     PatternMatch(&'ast PatternMatch<'arena>),
     PatternMatchArm(&'ast PatternMatchArm<'arena>),
     PatternMatchPatternArm(&'ast PatternMatchPatternArm<'arena>),
@@ -1202,6 +1211,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::ParenthesizedPattern(_) => NodeKind::ParenthesizedPattern,
             Self::PropertiesPattern(_) => NodeKind::PropertiesPattern,
             Self::PropertyPattern(_) => NodeKind::PropertyPattern,
+            Self::ListPattern(_) => NodeKind::ListPattern,
+            Self::ListPatternElement(_) => NodeKind::ListPatternElement,
+            Self::RestPattern(_) => NodeKind::RestPattern,
             Self::PatternMatch(_) => NodeKind::PatternMatch,
             Self::PatternMatchArm(_) => NodeKind::PatternMatchArm,
             Self::PatternMatchPatternArm(_) => NodeKind::PatternMatchPatternArm,
@@ -2024,6 +2036,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Pattern::Binary(pattern) => f(Node::BinaryPattern(pattern)),
                 Pattern::Parenthesized(pattern) => f(Node::ParenthesizedPattern(pattern)),
                 Pattern::Properties(pattern) => f(Node::PropertiesPattern(pattern)),
+                Pattern::List(pattern) => f(Node::ListPattern(pattern)),
             },
             Node::TypePattern(node) => {
                 f(Node::Hint(&node.hint));
@@ -2056,6 +2069,19 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::PropertyPattern(node) => {
                 f(Node::LocalIdentifier(&node.name));
                 f(Node::Pattern(node.pattern));
+            }
+            Node::ListPattern(node) => {
+                for element in node.elements.iter() {
+                    f(Node::ListPatternElement(element));
+                }
+            }
+            Node::ListPatternElement(node) => match node {
+                ListPatternElement::Pattern(pattern) => f(Node::Pattern(pattern)),
+                ListPatternElement::Rest(rest) => f(Node::RestPattern(rest)),
+            },
+            Node::RestPattern(node) => {
+                f(Node::Hint(node.hint));
+                f(Node::LocalIdentifier(&node.variable));
             }
             Node::PatternMatch(node) => {
                 f(Node::Keyword(&node.r#match));
@@ -3244,6 +3270,9 @@ impl HasSpan for Node<'_, '_> {
             Self::ParenthesizedPattern(node) => node.span(),
             Self::PropertiesPattern(node) => node.span(),
             Self::PropertyPattern(node) => node.span(),
+            Self::ListPattern(node) => node.span(),
+            Self::ListPatternElement(node) => node.span(),
+            Self::RestPattern(node) => node.span(),
             Self::PatternMatch(node) => node.span(),
             Self::PatternMatchArm(node) => node.span(),
             Self::PatternMatchPatternArm(node) => node.span(),

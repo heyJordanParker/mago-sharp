@@ -11,6 +11,8 @@
 //! - `not`, `and` and `or` are `!`, `&&` and `||`.
 //! - `x is { total: > 0 }` is `is_object(x) && x->total > 0`, and `x is Paid { total: > 0 } p` is
 //!   `($p = x) instanceof Paid && $p->total > 0`.
+//! - `x is [Line first, ...List<Line> rest]` is `\is_array(x) && \count(x) >= 1 && ($first = x[0]) instanceof Line &&
+//!   \is_array($rest = \array_slice(x, 1))`, and `x is []` is `\is_array(x) && \count(x) === 0`.
 //! - `x as Calc` is `x instanceof Calc ? x : null`.
 //! - A `match` that gives a value is `match (true)` with one condition per arm, its pattern's test `and` its `when`
 //!   condition. A `match` that starts a statement is `if`, then `else if` per arm, and `else` for `default`.
@@ -32,6 +34,7 @@ use mago_span::Span;
 use crate::cst::Access;
 use crate::cst::Argument;
 use crate::cst::ArgumentList;
+use crate::cst::ArrayAccess;
 use crate::cst::As;
 use crate::cst::Assignment;
 use crate::cst::AssignmentOperator;
@@ -53,7 +56,10 @@ use crate::cst::IfStatementBody;
 use crate::cst::IfStatementBodyElseClause;
 use crate::cst::Is;
 use crate::cst::Keyword;
+use crate::cst::ListPattern;
+use crate::cst::ListPatternElement;
 use crate::cst::Literal;
+use crate::cst::LiteralInteger;
 use crate::cst::LocalIdentifier;
 use crate::cst::Match;
 use crate::cst::MatchArm;
@@ -116,21 +122,24 @@ where
     Some(PhpShape { php, temporaries: shape.temporaries - shape.first, tests: shape.tests })
 }
 
-/// The PHP function a pattern node calls to test a value's type, as the identifier its PHP calls.
+/// The PHP functions a pattern node calls to test a value, as the identifiers its PHP calls.
 ///
-/// It is `is_int`, `is_float`, `is_string` or `is_bool` at a scalar type of a type pattern or `as`, and `is_object` at
-/// the `{` of a properties pattern. The binder records each as the name resolved at that span, as it records a call's
-/// name.
-#[must_use]
-pub fn called_function(node: Node<'_, '_>) -> Option<LocalIdentifier<'static>> {
-    match node {
-        Node::TypePattern(type_pattern) => scalar_test(&type_pattern.hint),
-        Node::As(r#as) => scalar_test(r#as.hint),
-        Node::PropertiesPattern(properties) => {
-            Some(LocalIdentifier { span: properties.left_brace, value: b"is_object" })
-        }
-        _ => None,
-    }
+/// They are `is_int`, `is_float`, `is_string` or `is_bool` at a scalar type of a type pattern or `as`, `is_object` at
+/// the `{` of a properties pattern, `is_array` at the `[` and `count` at the `]` of a list pattern, and `is_array` at
+/// the `...` and `array_slice` at the type of a list pattern's rest. The binder records each as the name resolved at that span, as it records a
+/// call's name.
+pub fn called_functions(node: Node<'_, '_>) -> impl Iterator<Item = LocalIdentifier<'static>> {
+    let called = |span, value: &'static [u8]| Some(LocalIdentifier { span, value });
+    let functions = match node {
+        Node::TypePattern(type_pattern) => [scalar_test(&type_pattern.hint), None],
+        Node::As(r#as) => [scalar_test(r#as.hint), None],
+        Node::PropertiesPattern(properties) => [called(properties.left_brace, b"is_object"), None],
+        Node::ListPattern(list) => [called(list.left_bracket, b"is_array"), called(list.right_bracket, b"count")],
+        Node::RestPattern(rest) => [called(rest.ellipsis, b"is_array"), called(rest.hint.span(), b"array_slice")],
+        _ => [None, None],
+    };
+
+    functions.into_iter().flatten()
 }
 
 /// Whether a type pattern or an `as` has PHP that tests a value against `hint`.
@@ -411,7 +420,7 @@ where
                     None => test,
                 }
             }
-            // A list or enum case pattern, which the parser refuses as not supported yet.
+            // An enum case pattern, which the parser refuses as not supported yet.
             Pattern::Value(Expression::Error(_)) => return None,
             Pattern::Value(value) => {
                 let read = self.read(subject, follows);
@@ -446,13 +455,96 @@ where
                 self.test(parenthesized.pattern, parenthesized.left_parenthesis, subject)?
             }
             Pattern::Properties(properties) => {
-                let function = called_function(Node::PropertiesPattern(properties))?;
+                let function = called_functions(Node::PropertiesPattern(properties)).next()?;
                 let read = self.read(subject, pattern.span());
                 let test = self.call(function, read);
 
                 self.property_tests(test, properties, subject)?
             }
+            Pattern::List(list) => self.list_test(list, subject)?,
         })
+    }
+
+    /// `\is_array(s) && \count(s) === n`, or `\count(s) >= n` before a rest, then `&&` each element's test on `s[i]`,
+    /// then the rest's `\is_array($rest = \array_slice(s, n))`, which is always true and assigns the rest. The first
+    /// `\is_array` is the null check of a `List?`, as `\is_object` is a properties pattern's. Element `i` reads `s[i]`
+    /// at the start of its pattern, so an issue at the read is never taken for the `\is_array` at the `[`. The parser
+    /// takes a rest only at the end, so each element's index is its position in the list.
+    fn list_test(
+        &mut self,
+        list: &'arena ListPattern<'arena>,
+        subject: &mut Subject<'arena>,
+    ) -> Option<&'arena Expression<'arena>> {
+        let patterns: std::vec::Vec<&'arena Pattern<'arena>> = list
+            .elements
+            .iter()
+            .filter_map(|element| match element {
+                ListPatternElement::Pattern(pattern) => Some(*pattern),
+                ListPatternElement::Rest(_) => None,
+            })
+            .collect();
+        let rest = list.elements.iter().find_map(|element| match element {
+            ListPatternElement::Rest(rest) => Some(rest),
+            ListPatternElement::Pattern(_) => None,
+        });
+
+        let mut functions = called_functions(Node::ListPattern(list));
+        let (is_array, count) = (functions.next()?, functions.next()?);
+        let read = self.read(subject, list.left_bracket);
+        let array = self.call(is_array, read);
+        let length = self.integer(patterns.len(), start_of(list.right_bracket));
+        let operator = if rest.is_some() {
+            BinaryOperator::GreaterThanOrEqual(start_of(list.right_bracket))
+        } else {
+            BinaryOperator::Identical(start_of(list.right_bracket))
+        };
+        let read = self.read(subject, list.right_bracket);
+        let counted = self.call(count, read);
+        let counted = self.binary(counted, operator, length);
+        let mut test = self.binary(array, BinaryOperator::And(start_of(list.right_bracket)), counted);
+
+        for (index, pattern) in patterns.iter().enumerate() {
+            let follows = match index.checked_sub(1).and_then(|previous| list.elements.tokens.get(previous)) {
+                Some(comma) => comma.span_for(list.left_bracket.file_id),
+                None => list.left_bracket,
+            };
+            let at = start_of(pattern.span());
+            let array = self.read(subject, at);
+            let value = self.alloc(Expression::ArrayAccess(ArrayAccess {
+                array,
+                left_bracket: at,
+                index: self.integer(index, at),
+                right_bracket: at,
+            }));
+            // The count test makes the element there, so it is read without the `?? null` of a tested index.
+            let mut element = if is_named(pattern) {
+                Subject { first: Some(value), variable: None }
+            } else {
+                self.hidden(value, "match")
+            };
+            let element_test = self.test(pattern, follows, &mut element)?;
+
+            test = self.binary(test, BinaryOperator::And(start_of(follows)), element_test);
+        }
+
+        if let Some(rest) = rest {
+            let mut functions = called_functions(Node::RestPattern(rest));
+            let (is_array, array_slice) = (functions.next()?, functions.next()?);
+            let array = self.read(subject, rest.hint.span());
+            let start = self.integer(patterns.len(), end_of(rest.hint.span()));
+            let slice = self.call_with(array_slice, &[array, start]);
+            let name = self.php_variable(rest.variable.value);
+            let assignment = self.alloc(Expression::Assignment(Assignment {
+                lhs: self.variable(name, start_of(rest.ellipsis)),
+                operator: AssignmentOperator::Assign(start_of(rest.ellipsis)),
+                rhs: slice,
+            }));
+            let assigned = self.call(is_array, assignment);
+
+            test = self.binary(test, BinaryOperator::And(start_of(rest.ellipsis)), assigned);
+        }
+
+        Some(test)
     }
 
     /// `test`, then `&&` each property's test on the object `subject` holds, each property read once.
@@ -470,8 +562,11 @@ where
                 arrow: at,
                 property: ClassLikeMemberSelector::Identifier(property.name),
             })));
-            let mut property_subject =
-                if is_named(property.pattern) { Subject { first: Some(value), variable: None } } else { self.subject(value) };
+            let mut property_subject = if is_named(property.pattern) {
+                Subject { first: Some(value), variable: None }
+            } else {
+                self.subject(value)
+            };
             let property_test = self.test(property.pattern, property.colon, &mut property_subject)?;
 
             test = self.binary(test, BinaryOperator::And(at), property_test);
@@ -519,6 +614,13 @@ where
             return Subject { first: Some(value), variable: Some(self.php_variable(access.name.value())) };
         }
 
+        let tested = self.tested(value);
+
+        self.hidden(tested, prefix)
+    }
+
+    /// `value` in a hidden `$<prefix>#N`, which its first read assigns.
+    fn hidden(&mut self, value: &'arena Expression<'arena>, prefix: &str) -> Subject<'arena> {
         self.temporaries += 1;
         let name = self.arena.alloc_fmt(format_args!("${prefix}#{}", self.temporaries)).as_bytes();
         let at = start_of(value.span());
@@ -526,7 +628,7 @@ where
         let assignment = self.alloc(Expression::Assignment(Assignment {
             lhs: variable,
             operator: AssignmentOperator::Assign(at),
-            rhs: self.tested(value),
+            rhs: value,
         }));
 
         Subject { first: Some(assignment), variable: Some(name) }
@@ -568,10 +670,18 @@ where
         function: LocalIdentifier<'static>,
         argument: &'arena Expression<'arena>,
     ) -> &'arena Expression<'arena> {
+        self.call_with(function, &[argument])
+    }
+
+    fn call_with(
+        &self,
+        function: LocalIdentifier<'static>,
+        arguments: &[&'arena Expression<'arena>],
+    ) -> &'arena Expression<'arena> {
         let end = end_of(function.span);
-        let arguments = self
-            .arena
-            .alloc_slice_fill_iter([Argument::Positional(PositionalArgument { ellipsis: None, value: argument })]);
+        let arguments = self.arena.alloc_slice_fill_iter(
+            arguments.iter().map(|value| Argument::Positional(PositionalArgument { ellipsis: None, value })),
+        );
 
         self.alloc(Expression::Call(Call::Function(FunctionCall {
             function: self.alloc(Expression::Identifier(Identifier::Local(function))),
@@ -580,6 +690,14 @@ where
                 arguments: TokenSeparatedSequence::from_slices(arguments, &[]),
                 right_parenthesis: end,
             },
+        })))
+    }
+
+    fn integer(&self, value: usize, span: Span) -> &'arena Expression<'arena> {
+        self.alloc(Expression::Literal(Literal::Integer(LiteralInteger {
+            span,
+            raw: self.arena.alloc_fmt(format_args!("{value}")).as_bytes(),
+            value: Some(value as u64),
         })))
     }
 

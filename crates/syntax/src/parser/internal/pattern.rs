@@ -12,6 +12,8 @@ use crate::cst::cst::ComparisonPattern;
 use crate::cst::cst::Conditional;
 use crate::cst::cst::Expression;
 use crate::cst::cst::Is;
+use crate::cst::cst::ListPattern;
+use crate::cst::cst::ListPatternElement;
 use crate::cst::cst::LocalIdentifier;
 use crate::cst::cst::MatchGuard;
 use crate::cst::cst::NotPattern;
@@ -24,6 +26,7 @@ use crate::cst::cst::PatternMatchDefaultArm;
 use crate::cst::cst::PatternMatchPatternArm;
 use crate::cst::cst::PropertiesPattern;
 use crate::cst::cst::PropertyPattern;
+use crate::cst::cst::RestPattern;
 use crate::cst::cst::TypePattern;
 use crate::error::ParseError;
 use crate::parser::Parser;
@@ -124,12 +127,7 @@ where
                     value: self.parse_expression_with_precedence(Precedence::SharpComparison)?,
                 })
             }
-            T!["["] => {
-                let span = self.skip_balanced()?;
-                self.errors.push(ParseError::NotSupportedYetInSharp("A list pattern", span));
-
-                Pattern::Value(self.arena.alloc(Expression::Error(span)))
-            }
+            T!["["] => Pattern::List(self.parse_list_pattern()?),
             T!["-" | "+"] => Pattern::Value(self.parse_expression_with_precedence(Precedence::SharpComparison)?),
             kind if kind.is_literal() => {
                 Pattern::Value(self.parse_expression_with_precedence(Precedence::SharpComparison)?)
@@ -147,12 +145,43 @@ where
             }
             _ => Pattern::Type(TypePattern {
                 hint: self.parse_type_hint_in_expression()?,
-                properties: if self.stream.is_at(T!["{"])? { Some(self.parse_properties_pattern()?) } else { None },
+                properties: if self.stream.is_at(T!["{"])? {
+                    Some(self.arena.alloc(self.parse_properties_pattern()?))
+                } else {
+                    None
+                },
                 variable: self.parse_pattern_variable()?,
             }),
         };
 
         Ok(self.arena.alloc(pattern))
+    }
+
+    /// Parses `[pattern, …, ...List<T> rest]`, the elements a matched list's must match. Spec section 21 shows the
+    /// rest last, and a rest anywhere else waits for its ruling, so it is not supported yet.
+    fn parse_list_pattern(&mut self) -> Result<ListPattern<'arena>, ParseError> {
+        let elements = self.parse_comma_separated_sequence(T!["["], T!["]"], |parser| {
+            Ok(if parser.stream.is_at(T!["..."])? {
+                ListPatternElement::Rest(RestPattern {
+                    ellipsis: parser.stream.consume_span()?,
+                    hint: parser.arena.alloc(parser.parse_type_hint_in_expression()?),
+                    variable: parser.parse_local_identifier()?,
+                })
+            } else {
+                ListPatternElement::Pattern(parser.parse_pattern()?)
+            })
+        })?;
+        let last = elements.sequence.len().saturating_sub(1);
+        for (index, element) in elements.sequence.iter().enumerate() {
+            if let ListPatternElement::Rest(rest) = element
+                && index != last
+            {
+                self.errors
+                    .push(ParseError::NotSupportedYetInSharp("A rest before the end of a list pattern", rest.span()));
+            }
+        }
+
+        Ok(ListPattern { left_bracket: elements.open, elements: elements.sequence, right_bracket: elements.close })
     }
 
     /// Parses `{ name: pattern, … }`, the properties a matched object's must match.
@@ -165,7 +194,11 @@ where
             })
         })?;
 
-        Ok(PropertiesPattern { left_brace: properties.open, properties: properties.sequence, right_brace: properties.close })
+        Ok(PropertiesPattern {
+            left_brace: properties.open,
+            properties: properties.sequence,
+            right_brace: properties.close,
+        })
     }
 
     /// The name a type pattern declares, as in `int count`. `when`, which starts an arm's condition, and `and` and

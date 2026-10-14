@@ -59,6 +59,7 @@ use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Keyword;
+use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::LocalIdentifier;
@@ -1331,7 +1332,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             if report_pattern_reads(
                 Node::Expression(comparison.value),
                 comparison.value.span(),
-                context.get_code_snippet(&comparison.operator),
+                context.get_code_snippet(comparison.operator),
                 context,
             ) =>
         {
@@ -1355,6 +1356,21 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // Spec section 21: a list pattern's rest is a `List` of the elements after the others, whose type the walk checks
+        // as a method body's.
+        (Node::RestPattern(rest), Place::Pattern) => {
+            if !matches!(&rest.hint, Hint::Generic(generic) if generic.name.value == b"List") {
+                context.report(
+                    Issue::error("A rest is a `List` of the elements after the others, as in `...List<Line> rest`.")
+                        .with_annotation(Annotation::primary(rest.hint.span()).with_message("Written here.")),
+                );
+
+                return None;
+            }
+            check_local_name(rest.variable.value, rest.variable.span, "pattern variable", context);
+
+            Some(Body)
+        }
         (
             Node::TypePattern(_)
             | Node::ComparisonPattern(_)
@@ -1363,6 +1379,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::ParenthesizedPattern(_)
             | Node::PropertiesPattern(_)
             | Node::PropertyPattern(_)
+            | Node::ListPattern(_)
+            | Node::ListPatternElement(_)
             | Node::BinaryOperator(_),
             Place::Pattern,
         ) => Some(Place::Pattern),
@@ -2739,16 +2757,27 @@ fn report_chained_pattern(test: Span, pattern: &Pattern, context: &mut Context<'
                     values.push(value);
                 }
             }
-            Pattern::Type(_) => {}
+            Pattern::Type(TypePattern { properties, .. }) => {
+                for property in properties.iter().flat_map(|properties| properties.properties.iter()) {
+                    chained_values(property.pattern, values);
+                }
+            }
+            Pattern::Properties(properties) => {
+                for property in &properties.properties {
+                    chained_values(property.pattern, values);
+                }
+            }
             Pattern::Not(not) => chained_values(not.pattern, values),
             Pattern::Binary(binary) => {
                 chained_values(binary.left, values);
                 chained_values(binary.right, values);
             }
             Pattern::Parenthesized(parenthesized) => chained_values(parenthesized.pattern, values),
-            Pattern::Properties(properties) => {
-                for property in &properties.properties {
-                    chained_values(property.pattern, values);
+            Pattern::List(list) => {
+                for element in &list.elements {
+                    if let ListPatternElement::Pattern(pattern) = element {
+                        chained_values(pattern, values);
+                    }
                 }
             }
         }
@@ -3012,23 +3041,34 @@ fn report_hidden_pattern_variables(pattern: &Pattern, hidden: bool, context: &mu
             report_hidden_pattern_variables(property.pattern, hidden, context);
         }
     };
+    let report_variable = |variable: &LocalIdentifier, context: &mut Context<'_, '_, '_>| {
+        if hidden {
+            context.report(
+                Issue::error(format!(
+                    "`{}` is declared under `or` or `not`, where the pattern can match without a value for it.",
+                    BytesDisplay(variable.value)
+                ))
+                .with_annotation(Annotation::primary(variable.span).with_message("Declared here."))
+                .with_help("Declare the variable outside `or` and `not`, or test the value again where you use it."),
+            );
+        }
+    };
 
     match pattern {
         Pattern::Type(TypePattern { properties, variable, .. }) => {
-            if let Some(variable) = variable
-                && hidden
-            {
-                context.report(
-                    Issue::error(format!(
-                        "`{}` is declared under `or` or `not`, where the pattern can match without a value for it.",
-                        BytesDisplay(variable.value)
-                    ))
-                    .with_annotation(Annotation::primary(variable.span).with_message("Declared here."))
-                    .with_help("Declare the variable outside `or` and `not`, or test the value again where you use it."),
-                );
+            if let Some(variable) = variable {
+                report_variable(variable, context);
             }
             if let Some(properties) = properties {
                 report_properties(properties, context);
+            }
+        }
+        Pattern::List(list) => {
+            for element in &list.elements {
+                match element {
+                    ListPatternElement::Pattern(pattern) => report_hidden_pattern_variables(pattern, hidden, context),
+                    ListPatternElement::Rest(rest) => report_variable(&rest.variable, context),
+                }
             }
         }
         Pattern::Value(_) | Pattern::Comparison(_) => {}
@@ -3787,7 +3827,7 @@ fn supported(place: Place) -> &'static str {
             "A parameter default, an attribute argument, a constant's value, an enum case's value or a pattern's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
         }
         Place::Pattern => {
-            "A PHP# pattern is a type of `int`, `float`, `string`, `bool` or a class with an optional name, as in `int count`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`."
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool` or a class with an optional name, as in `int count`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."
         }
     }
 }

@@ -21,9 +21,11 @@ use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::Parenthesized;
 use mago_syntax::cst::Pattern;
+use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::Variable;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
@@ -1277,6 +1279,14 @@ fn written_words<'arena>(
         Pattern::Properties(properties) => {
             properties.properties.iter().find_map(|property| written_words(property.pattern, Vec::new(), value))
         }
+        Pattern::List(list) => list.elements.iter().find_map(|element| match element {
+            ListPatternElement::Pattern(pattern) => written_words(pattern, Vec::new(), value),
+            ListPatternElement::Rest(_) => None,
+        }),
+        Pattern::Type(TypePattern { properties, .. }) if pattern.span() != value => properties
+            .iter()
+            .flat_map(|properties| properties.properties.iter())
+            .find_map(|property| written_words(property.pattern, Vec::new(), value)),
         Pattern::Type(_) | Pattern::Value(_) => (pattern.span() == value).then_some(leading),
         Pattern::Comparison(_) => None,
     }

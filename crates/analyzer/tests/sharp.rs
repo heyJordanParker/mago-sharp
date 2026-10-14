@@ -3290,7 +3290,7 @@ fn a_redundant_null_check_names_the_test_it_is_written_with() {
 /// own operator.
 #[test]
 fn a_redundant_null_check_names_its_pattern_without_its_comments() {
-    let sharp = "namespace Demo;\n\nclass Billing\n{\n    public void renew(Customer report)\n    {\n        const a = report is /* c */ null;\n        const b = report is /* c */ not /* d */ null;\n        const c = report is (/* e */ null) or not null;\n        const d = report is { name: /* f */ null };\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Billing\n{\n    public void renew(Customer report, List<string> names)\n    {\n        const a = report is /* c */ null;\n        const b = report is /* c */ not /* d */ null;\n        const c = report is (/* e */ null) or not null;\n        const d = report is { name: /* f */ null };\n        const e = report is Customer { name: not /* g */ null } customer;\n        const f = names is [not /* h */ null];\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Billing\n{\n    public function renew(Customer $report): void\n    {\n        $a = $report === /* c */ null;\n        $b = $report !== /* c */ null;\n    }\n}\n";
     let redundant = |analyzed| -> Vec<String> {
         worded(analyzed, &[("src/Demo/Customer.sharp", CUSTOMER)])
@@ -3315,6 +3315,8 @@ fn a_redundant_null_check_names_its_pattern_without_its_comments() {
             "9:19 redundant-comparison Redundant `null` check: `Customer` is never `null`.",
             "9:47 redundant-comparison Redundant `not null` check: `Customer` is never `null`.",
             "10:31 redundant-comparison Redundant `null` check: `string` is never `null`.",
+            "11:40 redundant-comparison Redundant `not null` check: `string` is never `null`.",
+            "12:29 redundant-comparison Redundant `not null` check: `string` is never `null`.",
         ]
     );
 }
@@ -4158,6 +4160,36 @@ fn a_properties_pattern_on_a_value_that_cannot_be_null_reports_nothing_and_its_p
     assert_eq!(codes(&php_issues), ["redundant-type-comparison", "redundant-logical-operation"]);
 }
 
+/// Spec section 21: a list pattern tests the count, then each element against its pattern, and its rest takes the
+/// elements after them. Each element and the rest are typed from the list.
+#[test]
+fn list_patterns_test_the_count_and_each_element() {
+    let sharp = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static float total(List<Circle> circles) => match (circles) {\n        [] => 0.0,\n        [Circle { radius: > 1.0 } only] => only.radius,\n        [Circle first, ...List<Circle> rest] => first.radius + rest.count(),\n        default => -1.0,\n    };\n\n    public static bool pair(List<int> values) => values is [> 0, not 5];\n\n    public static int first(List<int> values)\n    {\n        if (values is [int head, ...List<int> tail]) {\n            return head + tail.count();\n        }\n        return 0;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
+
+    // A `List?` holds no list when it is null, and a nested list pattern tests an element.
+    let nullable = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int>? values) => match (values) {\n        null => -1,\n        [] => 0,\n        [int, ...List<int> rest] => 1 + rest.count(),\n        default => 2,\n    };\n\n    public static bool nested(List<List<int>> rows) => rows is [[1, int two]];\n}\n";
+    assert_eq!(issues(("src/Demo/Report.sharp", nullable), &[]), Vec::<String>::new());
+
+    // A value that holds no `List` never matches, and one that may be another array waits for the type test of
+    // `List<T>`.
+    let other = "namespace Demo;\n\nclass Report\n{\n    public static bool mapped(Map<string, int> entries) => entries is [int one];\n\n    public static bool text(string name) => name is [] or \"\";\n\n    public static bool any(Any value) => value is [1];\n\n    public static bool inner(List<Any> values) => values is [[]];\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", other), &[]),
+        [
+            "5:71 impossible-type-comparison This pattern never matches the value it tests. | Remove the pattern, or test a value that can match it.",
+            "7:53 impossible-type-comparison This pattern never matches the value it tests. | Remove the pattern, or test a value that can match it.",
+            "9:51 not-supported-yet A list pattern on a `Any` is not supported yet in PHP#. | ",
+            "11:62 not-supported-yet A list pattern on a `Any` is not supported yet in PHP#. | ",
+        ]
+    );
+
+    // Spec section 21 skips `default` only on an enum or a sealed interface, so a `match` on a list needs it.
+    let defaultless = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int> values) => match (values) {\n        [] => 0,\n        [int, ...List<int> rest] => 1,\n    };\n}\n";
+    assert_eq!(issues(("src/Demo/Report.sharp", defaultless), &[]), ["5:49 match-not-exhaustive"]);
+}
+
 /// Spec section 14.4: `f?.(x)` calls `f` only when it is not null. The call is checked against the function's
 /// signature, its result can also be null, and `?.` on a function that is never null is redundant.
 #[test]
@@ -4442,15 +4474,12 @@ fn an_arm_that_is_always_true_before_the_last_is_reported_with_the_arms_it_hides
 
 #[test]
 fn a_pattern_the_parser_refuses_reports_only_its_parse_error() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void count(int? count)\n    {\n        match (count) {\n            [int first] => {},\n            Shape.Circle(radius) => {},\n            default => {},\n        }\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void count(int? count)\n    {\n        match (count) {\n            1 => {},\n            Shape.Circle(radius) => {},\n            default => {},\n        }\n    }\n}\n";
 
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
     let messages: Vec<&str> = issues.iter().map(|issue| issue.message.as_str()).collect();
 
-    assert_eq!(
-        messages,
-        ["A list pattern is not supported yet in PHP#.", "An enum case pattern is not supported yet in PHP#."]
-    );
+    assert_eq!(messages, ["An enum case pattern is not supported yet in PHP#."]);
 }
 
 #[test]

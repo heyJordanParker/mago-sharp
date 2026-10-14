@@ -554,7 +554,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 Some(format!("({left} {} {right})", if binary.is_and() { "&&" } else { "||" }))
             }
             Pattern::Parenthesized(parenthesized) => self.pattern(subject, kind, parenthesized.pattern),
-            Pattern::Type(_) | Pattern::Properties(_) => {
+            Pattern::Type(_) | Pattern::Properties(_) | Pattern::List(_) => {
                 self.unmodeled(pattern.span(), "a type test".to_owned(), issues::TYPE_TEST);
                 None
             }

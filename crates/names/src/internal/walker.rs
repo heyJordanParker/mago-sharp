@@ -46,6 +46,8 @@ use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Is;
 use mago_syntax::cst::Law;
+use mago_syntax::cst::ListPattern;
+use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
@@ -67,6 +69,7 @@ use mago_syntax::cst::PropertiesPattern;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::PropertyHook;
 use mago_syntax::cst::PropertyHookList;
+use mago_syntax::cst::RestPattern;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::StaticMethodCall;
@@ -85,7 +88,7 @@ use mago_syntax::cst::UseItems;
 use mago_syntax::cst::Uses;
 use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
-use mago_syntax::utils::pattern::called_function;
+use mago_syntax::utils::pattern::called_functions;
 use mago_syntax::walker::MutWalker;
 use mago_syntax::walker::walk_binary_mut;
 use mago_syntax::walker::walk_conditional_mut;
@@ -297,9 +300,23 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
             .is_some_and(|members| members.others.contains(name) || members.methods.contains(&IgnoringCase(name)))
     }
 
-    /// Records the function a pattern's PHP calls as the name resolved at its span, as a call's name is.
-    fn record_called_function(&mut self, node: Node<'_, 'arena>) {
-        if let Some(function) = called_function(node) {
+    /// Declares a pattern's variable where the pattern is. It comes into scope only where the pattern's test holds:
+    /// `condition_variables` decides where.
+    fn declare_pattern_variable(&mut self, variable: &LocalIdentifier<'arena>) {
+        let Some(&kind) = self.pattern_kinds.last() else {
+            unreachable!("a pattern is inside an `is` or a `match` arm");
+        };
+        let local = Local { declaration: variable.span, kind };
+        if let Some(earlier) = self.locals.declare_out_of_scope(variable.value, local) {
+            self.resolved_names.report_binding_error(BindingError::Redeclared { name: variable.span, earlier });
+        }
+
+        self.resolved_names.bind(variable.span, Binding::Local(local));
+    }
+
+    /// Records each function a pattern's PHP calls as the name resolved at its span, as a call's name is.
+    fn record_called_functions(&mut self, node: Node<'_, 'arena>) {
+        for function in called_functions(node) {
             self.resolved_names.insert_at(function.span, function.value, false);
         }
     }
@@ -405,6 +422,14 @@ fn pattern_variables<'ast, 'arena>(
         }
         Pattern::Parenthesized(parenthesized) => pattern_variables(parenthesized.pattern, variables),
         Pattern::Properties(properties) => property_variables(properties, variables),
+        Pattern::List(list) => {
+            for element in &list.elements {
+                match element {
+                    ListPatternElement::Pattern(pattern) => pattern_variables(pattern, variables),
+                    ListPatternElement::Rest(rest) => variables.push(&rest.variable),
+                }
+            }
+        }
     }
 }
 
@@ -999,7 +1024,7 @@ where
         type_pattern: &'ast TypePattern<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.record_called_function(Node::TypePattern(type_pattern));
+        self.record_called_functions(Node::TypePattern(type_pattern));
 
         let Some(variable) = &type_pattern.variable else {
             if let TypePattern { hint: Hint::Identifier(Identifier::Local(name)), properties: None, .. } = type_pattern
@@ -1011,15 +1036,25 @@ where
             return;
         };
 
-        let Some(&kind) = self.pattern_kinds.last() else {
-            unreachable!("a type pattern is inside an `is` or a `match` arm");
-        };
-        let local = Local { declaration: variable.span, kind };
-        if let Some(earlier) = self.locals.declare_out_of_scope(variable.value, local) {
-            self.resolved_names.report_binding_error(BindingError::Redeclared { name: variable.span, earlier });
-        }
+        self.declare_pattern_variable(variable);
+    }
 
-        self.resolved_names.bind(variable.span, Binding::Local(local));
+    fn walk_in_list_pattern(
+        &mut self,
+        list: &'ast ListPattern<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.record_called_functions(Node::ListPattern(list));
+    }
+
+    /// A list pattern's rest is declared as a type pattern's variable is.
+    fn walk_in_rest_pattern(
+        &mut self,
+        rest: &'ast RestPattern<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.record_called_functions(Node::RestPattern(rest));
+        self.declare_pattern_variable(&rest.variable);
     }
 
     fn walk_in_is(&mut self, is: &'ast Is<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
@@ -1032,7 +1067,7 @@ where
     }
 
     fn walk_in_as(&mut self, r#as: &'ast As<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
-        self.record_called_function(Node::As(r#as));
+        self.record_called_functions(Node::As(r#as));
     }
 
     fn walk_in_properties_pattern(
@@ -1040,7 +1075,7 @@ where
         properties: &'ast PropertiesPattern<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.record_called_function(Node::PropertiesPattern(properties));
+        self.record_called_functions(Node::PropertiesPattern(properties));
     }
 
     /// The right side of `&&` sees the variables the left side assigns when it is true, and the right side of `||`
