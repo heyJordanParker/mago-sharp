@@ -328,8 +328,9 @@ const ANY: &[u8] = b"Any";
 /// checked, so every PHP form PHP# removes is refused by name wherever it is written. It does not run on a file with a
 /// parse error, which is the one error to fix first. The constructs PHP# never has, such as `$`
 /// variables, `global` and top-level functions, keep their own errors. So do the PHP forms PHP# removes, each an error
-/// that names its replacement. In a method body, they are `echo`, `print`, `die`, and `exit` without parentheses or
-/// with a string literal or a template as its first argument. In a method body and a constant expression, they are
+/// that names its replacement. In a method body, they are `echo`, `print`, `die`, `exit` without parentheses or
+/// with a string literal or a template as its first argument, and `switch`. In a method body and a constant
+/// expression, they are the word operators `and`, `or` and `xor`. In a method body and a constant expression, they are
 /// superglobals, read or written, magic constants and other `__Something__` names, `(array)` and `(object)`. A
 /// `__Something__` name is an error when it is declared too, as a class, interface, enum, enum case, method, property,
 /// constant, parameter or local. A method name that starts but does not end with `__`, as PHP's magic methods do,
@@ -1446,6 +1447,40 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Block(_), Lambda) => Some(Body),
         (Node::Expression(_), Lambda) => enter(node, Body, context),
         (Node::BinaryOperator(operator), Body | Constant) if is_slice_binary_operator(operator) => Some(place),
+        // Spec section 21 removes PHP's word operators, so `=` can no longer bind before `and`.
+        (
+            Node::BinaryOperator(
+                operator @ (BinaryOperator::LowAnd(_) | BinaryOperator::LowOr(_) | BinaryOperator::LowXor(_)),
+            ),
+            Body | Constant,
+        ) => {
+            let (form, instead): (&[u8], _) = match operator {
+                BinaryOperator::LowAnd(_) => (b"and", "write `&&`."),
+                BinaryOperator::LowOr(_) => (b"or", "write `||`."),
+                _ => (b"xor", "write `!=` between two `bool`s."),
+            };
+            report_removed(
+                operator.span(),
+                form,
+                instead,
+                "PHP#'s boolean operators are `&&`, `||` and `!`, which bind as they do in C#.",
+                context,
+            );
+
+            Some(place)
+        }
+        // Spec section 21: `match` is the only branching construct on a value.
+        (Node::Statement(Statement::Switch(switch)), Body) => {
+            report_removed(
+                switch.switch.span,
+                b"switch",
+                "write `match`.",
+                "`match` compares strictly, never falls through, and covers every case of an enum.",
+                context,
+            );
+
+            None
+        }
         // `check_cast` decided the cast at its `UnaryPrefix`.
         (Node::UnaryPrefixOperator(operator), Body | Constant) if operator.is_cast() => Some(place),
         (Node::UnaryPrefixOperator(operator @ UnaryPrefixOperator::ErrorControl(_)), Body | Constant)

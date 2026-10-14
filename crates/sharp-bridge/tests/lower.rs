@@ -240,10 +240,10 @@ fn php_syntax_returns_a_parse_error_and_no_nodes() {
 #[test]
 fn a_construct_outside_the_slice_returns_its_not_supported_error() {
     let lowered = Lowered::new(&method(
-        "        switch (extra) {\n            default: return 1;\n        }\n        return 1;\n",
+        "        while (extra > 0) {\n            while (extra > 1) {\n                break 2;\n            }\n        }\n        return 1;\n",
     ));
 
-    assert_eq!(lowered.diagnostics(), ["9:9 compile error: This statement is not supported yet in PHP#."]);
+    assert_eq!(lowered.diagnostics(), ["11:17 compile error: This statement is not supported yet in PHP#."]);
 }
 
 /// Spec section 2: each of the 43 PHP keywords PHP# doesn't use is a plain name, and so is a word that means something

@@ -338,16 +338,34 @@ fn a_law_and_a_method_named_alike_are_a_duplicate_member() {
 
 #[test]
 fn every_construct_outside_the_slice_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\ninterface Shape\n{\n}\n\ntrait Named\n{\n}\n\nclass Report\n{\n    public int run(int extra)\n    {\n        switch (extra) {\n            default: return 1;\n        }\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\ninterface Shape\n{\n}\n\ntrait Named\n{\n}\n\nclass Report\n{\n    public int run(int extra)\n    {\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "7:1 This statement is not supported yet in PHP#.",
-            "15:9 This statement is not supported yet in PHP#.",
-            "18:22 This `new` without arguments is not supported yet in PHP#.",
-            "19:25 This expression is not supported yet in PHP#.",
-            "20:22 This expression is not supported yet in PHP#.",
+            "15:22 This `new` without arguments is not supported yet in PHP#.",
+            "16:25 This expression is not supported yet in PHP#.",
+            "17:22 This expression is not supported yet in PHP#.",
+        ]
+    );
+}
+
+/// Spec section 21 removes `switch` for `match`, and PHP's `and`, `or` and `xor` for `&&`, `||` and `!`. Each is an
+/// error that names what to write, never "not supported yet", which would say a later version adds it.
+#[test]
+fn switch_and_or_and_xor_are_errors_that_name_their_replacement() {
+    let code = leak(method(
+        "        switch (extra) {\n            default: return 1;\n        }\n        let a = extra > 0;\n        a = a and true;\n        a = a or true;\n        a = a xor true;\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:9 PHP# has no `switch`: write `match`.",
+            "11:15 PHP# has no `and`: write `&&`.",
+            "12:15 PHP# has no `or`: write `||`.",
+            "13:15 PHP# has no `xor`: write `!=` between two `bool`s.",
         ]
     );
 }
@@ -3633,7 +3651,7 @@ fn bitwise_operators_their_compound_assignments_and_modulo_assignment_are_in_the
 #[test]
 fn operators_outside_the_slice_are_not_supported_yet() {
     let code = leak(method(
-        "        let a = extra;\n        a = @extra;\n        a = extra xor true;\n        a = extra and true;\n        a = extra or true;\n        a = extra <> 1;\n        return a;\n",
+        "        let a = extra;\n        a = @extra;\n        a = extra <> 1;\n        return a;\n",
     ));
 
     assert_eq!(
@@ -3641,9 +3659,6 @@ fn operators_outside_the_slice_are_not_supported_yet() {
         [
             "8:13 `@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.",
             "9:19 This operator is not supported yet in PHP#.",
-            "10:19 This operator is not supported yet in PHP#.",
-            "11:19 This operator is not supported yet in PHP#.",
-            "12:19 This operator is not supported yet in PHP#.",
         ]
     );
 }
