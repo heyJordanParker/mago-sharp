@@ -1318,6 +1318,26 @@ fn a_default_body_sees_only_its_interface_and_a_plain_php_class_gets_it_through_
     );
 }
 
+/// Spec section 22: a generic interface's default bodies read the type arguments each class gives the interface, in its
+/// header or through an interface that extends it, as a class's own methods do.
+#[test]
+fn a_generic_interface_gives_each_class_its_default_bodies_with_its_type_arguments() {
+    let sharp = "namespace Demo;\n\npublic interface Keyed<TKey>\n{\n    TKey key();\n\n    List<TKey> keys() => [this.key()];\n\n    TKey first() => this.keys()[0];\n}\n\npublic interface Named<TName> : Keyed<TName>\n{\n}\n\npublic class Order : Keyed<int>\n{\n    public int key() => 7;\n}\n\npublic class Tag : Named<string>\n{\n    public string key() => \"seven\";\n}\n\npublic static class Uses\n{\n    public static List<int> orderKeys() => new Order().keys();\n\n    public static string tagFirst() => new Tag().first();\n\n    public static string wrong() => new Order().first();\n}\n";
+
+    assert_eq!(issues(("src/Demo/Keyed.sharp", sharp), &[]), ["32:37 invalid-return-statement"]);
+
+    // A class that implements the interface holds its own type arguments, so a default body can't read the
+    // interface's while the code runs.
+    let reads = "namespace Demo;\n\npublic class Box<TValue>\n{\n    public TValue? value;\n}\n\npublic interface Held<TItem>\n{\n    bool holds(Any value) => value is TItem;\n\n    Box<TItem> boxed() => new Box<TItem>();\n}\n";
+    assert_eq!(
+        messages(("src/Demo/Held.sharp", reads), &[]),
+        [
+            "A default body of `Held` that reads its type parameters while the code runs is not supported yet in PHP#.",
+            "A default body of `Held` that reads its type parameters while the code runs is not supported yet in PHP#.",
+        ]
+    );
+}
+
 /// Spec section 22: implementing an abstract interface method takes no `override`, as the spec's `Page` implements
 /// `HasDesign`, and replacing a default body or a header trait's method replaces a method, so it takes `override`.
 #[test]

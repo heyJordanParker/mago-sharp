@@ -7,6 +7,7 @@ use mago_word::word;
 
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::misc::GenericParent;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
@@ -309,6 +310,10 @@ where
 
         let method_key = (class_like_metadata.name, lowercase_method_name);
 
+        if context.dialect.is_sharp() && class_like_metadata.kind.is_interface() {
+            report_default_body_type_reads(context, artifacts, class_like_metadata, method.body.span());
+        }
+
         if context.dialect.is_sharp() {
             effects::summary::record(
                 context,
@@ -571,6 +576,63 @@ pub(super) fn check_super_call<A>(
 
 /// The default value of a parameter of type `hint` as PHP# code writes it, when the default is a literal PHP# writes
 /// alike. An empty PHP array is `[:]` where the parameter is a map.
+/// Spec section 22 refuses, as not supported yet, a generic interface's default body that reads one of the interface's
+/// type parameters while the code runs: in `is`, `as`, `match` or `typeof`, or as a type argument of a `new` or a call.
+/// The engine finds a class's type arguments on `this`, and a class that implements the interface holds its own, not
+/// the interface's.
+fn report_default_body_type_reads<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    interface: &ClassLikeMetadata,
+    body: Span,
+) where
+    A: Arena,
+{
+    if interface.template_types.is_empty() {
+        return;
+    }
+
+    let reads_parameter = |r#type: &TUnion| {
+        std::iter::once(TypeRef::Union(r#type)).chain(r#type.get_all_child_nodes()).any(|node| {
+            matches!(
+                node,
+                TypeRef::Atomic(TAtomic::GenericParameter(parameter))
+                    if parameter.defining_entity == GenericParent::ClassLike(interface.name)
+            )
+        })
+    };
+    let mut reads: Vec<(u32, u32)> = artifacts
+        .tested_types
+        .iter()
+        .filter(|(_, tested)| reads_parameter(tested))
+        .map(|(range, _)| *range)
+        .chain(
+            artifacts
+                .inferred_type_arguments
+                .iter()
+                .filter(|(_, arguments)| arguments.iter().any(reads_parameter))
+                .map(|(range, _)| *range),
+        )
+        .filter(|(start, end)| body.start.offset <= *start && *end <= body.end.offset)
+        .collect();
+    reads.sort_unstable();
+    reads.dedup();
+
+    let interface_name = display_class_like_name(context, interface.original_name);
+    for (start, end) in reads {
+        context.collector.report_with_code(
+            IssueCode::NotSupportedYet,
+            Issue::error(format!(
+                "A default body of `{interface_name}` that reads its type parameters while the code runs is not supported yet in PHP#."
+            ))
+            .with_annotation(
+                Annotation::primary(Span::new(body.file_id, start.into(), end.into())).with_message("Read here."),
+            )
+            .with_help("Declare the method in each class that implements the interface."),
+        );
+    }
+}
+
 fn written_default(default: &TUnion, hint: Option<&TUnion>) -> Option<String> {
     if default.is_null() {
         Some("null".to_owned())

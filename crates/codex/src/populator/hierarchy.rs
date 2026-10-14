@@ -1,6 +1,9 @@
+use foldhash::fast::RandomState;
+use indexmap::IndexMap;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_word::Word;
+use mago_word::WordMap;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
@@ -27,6 +30,7 @@ use super::merge::merge_metadata_from_required_class_like;
 use super::merge::merge_metadata_from_required_interface;
 use super::merge::merge_metadata_from_trait;
 use super::signatures::populate_function_like_metadata;
+use super::templates::extend_type;
 
 #[inline]
 fn sorted_atoms(iter: impl Iterator<Item = Word>) -> Vec<Word> {
@@ -42,6 +46,40 @@ fn sorted_atoms(iter: impl Iterator<Item = Word>) -> Vec<Word> {
 ///
 /// Returns `Some(chain)` if a cycle is detected, where chain is the path of type names forming the cycle.
 /// Returns `None` if no cycle is found.
+/// The type arguments a PHP# class-like gives the trait of a generic interface's default bodies, spec section 22: those
+/// it gives the interface, written in its header, or through an interface its header names that extends it, as that
+/// interface's header gives them. None for the trait of an interface without type parameters.
+fn defaults_type_arguments(
+    metadata: &ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
+    defaults_trait: Word,
+) -> Option<Vec<TUnion>> {
+    let defaults = codebase.get_class_like_by_word(defaults_trait)?;
+    if defaults.template_types.is_empty() {
+        return None;
+    }
+    let interface = codebase.get_defaults_interface(defaults)?.name;
+    if let Some(offsets) = metadata.template_extended_offsets.get(&interface) {
+        return Some(offsets.clone());
+    }
+
+    sorted_atoms(metadata.direct_parent_interfaces.iter().copied()).into_iter().find_map(|header_interface| {
+        let header_metadata = codebase.get_class_like_by_word(header_interface)?;
+        let through = header_metadata.template_extended_parameters.get(&interface)?;
+        let mut given: IndexMap<Word, TUnion, RandomState> = IndexMap::default();
+        for (parameter, argument) in header_metadata
+            .get_template_type_names()
+            .into_iter()
+            .zip(metadata.template_extended_offsets.get(&header_interface)?)
+        {
+            given.insert(parameter, argument.clone());
+        }
+        let given = WordMap::from_iter([(header_interface, given)]);
+
+        Some(through.values().map(|argument| extend_type(argument, &given)).collect())
+    })
+}
+
 fn detect_circular_type_reference(
     type_name: Word,
     type_metadata: &TypeMetadata,
@@ -159,6 +197,12 @@ pub fn populate_class_like_metadata_iterative(
 
         let defaults: Vec<Word> =
             codebase.get_defaults_traits(&metadata).iter().map(|defaults| defaults.name).collect();
+        for defaults_trait in &defaults {
+            if let Some(offsets) = defaults_type_arguments(&metadata, codebase, *defaults_trait) {
+                metadata.template_type_uses_count.insert(*defaults_trait, offsets.len());
+                metadata.template_extended_offsets.insert(*defaults_trait, offsets);
+            }
+        }
         metadata.add_used_traits(defaults);
     }
 

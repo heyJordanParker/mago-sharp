@@ -70,6 +70,7 @@ use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::ttype::TypeMetadata;
+use crate::misc::GenericParent;
 use crate::scanner::class_alias::scan_class_like_alias;
 use crate::scanner::class_like::register_anonymous_class;
 use crate::scanner::class_like::register_class;
@@ -93,6 +94,8 @@ use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
+use crate::ttype::template::TemplateResult;
+use crate::ttype::template::inferred_type_replacer;
 use crate::ttype::union::TUnion;
 use crate::ttype::wrap_atomic;
 
@@ -434,6 +437,33 @@ impl Scanner {
         );
         defaults.kind = SymbolKind::Trait;
 
+        // A generic interface's trait takes its type parameters, as `@template` on a trait does, and each default body
+        // reads the trait's, so a class gives the bodies the type arguments it gives the interface, as `@use` does.
+        let mut reparent = TemplateResult::default();
+        for (parameter, template) in &interface_metadata.template_types {
+            let of_trait = TGenericParameter::new(
+                *parameter,
+                Arc::new(template.constraint.clone()),
+                GenericParent::ClassLike(name),
+            );
+            reparent.add_lower_bound(
+                *parameter,
+                GenericParent::ClassLike(interface_name),
+                wrap_atomic(TAtomic::GenericParameter(of_trait)),
+            );
+        }
+        for (parameter, template) in &interface_metadata.template_types {
+            let constraint = inferred_type_replacer::replace(&template.constraint, &reparent, &self.codebase);
+            let default = template
+                .default
+                .as_ref()
+                .map(|default| inferred_type_replacer::replace(default, &reparent, &self.codebase));
+            defaults.add_template_type(
+                *parameter,
+                GenericTemplate::new(GenericParent::ClassLike(name), constraint).with_default(default),
+            );
+        }
+
         for member in &interface.members {
             let ClassLikeMember::Method(method) = member else {
                 continue;
@@ -443,15 +473,21 @@ impl Scanner {
             }
 
             let method_name = ascii_lowercase_word(method.name.value);
-            let Some(signature) = self.codebase.function_likes.get_mut(&(interface_name, method_name)) else {
+            let Some(signature) = self.codebase.function_likes.get(&(interface_name, method_name)) else {
                 continue;
             };
             let mut body = signature.clone();
-            if let Some(method_metadata) = &mut signature.method_metadata {
-                method_metadata.is_abstract = true;
-            }
+            reparent_types(&mut body, &reparent, &self.codebase);
             if let Some(method_metadata) = &mut body.method_metadata {
                 method_metadata.is_abstract = false;
+            }
+            if let Some(method_metadata) = self
+                .codebase
+                .function_likes
+                .get_mut(&(interface_name, method_name))
+                .and_then(|signature| signature.method_metadata.as_mut())
+            {
+                method_metadata.is_abstract = true;
             }
 
             let method_identifier = MethodIdentifier::new(name, method_name);
@@ -1108,6 +1144,23 @@ where
 }
 
 #[allow(clippy::expect_used)]
+/// Replaces, in each type `method` declares, the type parameters `reparent` binds with the ones it binds them to.
+fn reparent_types(method: &mut FunctionLikeMetadata, reparent: &TemplateResult, codebase: &CodebaseMetadata) {
+    let replace = |type_metadata: &mut Option<TypeMetadata>| {
+        if let Some(type_metadata) = type_metadata {
+            type_metadata.type_union = inferred_type_replacer::replace(&type_metadata.type_union, reparent, codebase);
+        }
+    };
+
+    replace(&mut method.return_type_declaration_metadata);
+    replace(&mut method.return_type_metadata);
+    for parameter in &mut method.parameters {
+        replace(&mut parameter.type_declaration_metadata);
+        replace(&mut parameter.type_metadata);
+        replace(&mut parameter.out_type);
+    }
+}
+
 fn finalize_class_like<A>(scanner: &mut Scanner, context: &Context<'_, '_, A>)
 where
     A: Arena,
