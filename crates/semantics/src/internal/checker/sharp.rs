@@ -299,8 +299,8 @@ const ANY: &[u8] = b"Any";
 /// - `@`, which hides PHP's warnings, in a method body of a file whose namespace is `Sharp` or below it, where the
 ///   standard library writes it before a method throws its own exception. Anywhere else it is an error, and the
 ///   analyzer refuses it in any file that is not the standard library's.
-/// - The ternary `c ? a : b` in a method body, as spec section 21 writes it. PHP's `a ?: b` is an error, and a
-///   ternary as the condition of another needs parentheses, as in PHP 8.
+/// - The ternary `c ? a : b` in a method body, as spec section 21 writes it. PHP's `a ?: b` is an error, and
+///   `a ? b : c ? d : e` is `a ? b : (c ? d : e)`, as in C#.
 /// - Pattern matching in a method body, as spec section 21 writes it: `x is pattern`, `x as T` to a type that is not
 ///   nullable or `void`, and `match`, whose arms are `pattern => value`, `pattern when condition => value` and one
 ///   `default => value`. A `match` needs `default` unless its arms name only `Class.y` values or `null`, as a `match`
@@ -2559,8 +2559,8 @@ fn file_statements<'ast, 'arena>(program: &'ast Program<'arena>) -> impl Iterato
 }
 
 /// Checks a ternary, and returns the place of its parts. PHP#'s ternary is `c ? a : b`, and PHP's `a ?: b` does not
-/// exist, as spec section 21 says, so `?:` is reported between its two characters. A ternary as the condition of
-/// another needs parentheses, as in PHP 8, so it is reported over that condition, which the walk then skips.
+/// exist, as spec section 21 says, so `?:` is reported between its two characters. The parser reads
+/// `a ? b : c ? d : e` as `a ? b : (c ? d : e)`, so a ternary is the condition of another only in parentheses.
 fn check_conditional(conditional: &Conditional, context: &mut Context<'_, '_, '_>) -> Place {
     if conditional.then.is_none() {
         context.report(
@@ -2571,15 +2571,6 @@ fn check_conditional(conditional: &Conditional, context: &mut Context<'_, '_, '_
                 )
                 .with_note("`?:` tests truthiness, so it replaces `\"\"` and `\"0\"` along with null."),
         );
-    } else if let Expression::Conditional(nested @ Conditional { then: Some(_), .. }) = conditional.condition {
-        context.report(
-            Issue::error(
-                "Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`.",
-            )
-            .with_annotation(Annotation::primary(nested.span()).with_message("Nested here.")),
-        );
-
-        return Place::RefusedPart(nested.span());
     }
 
     Place::Body

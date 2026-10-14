@@ -3521,8 +3521,40 @@ fn grouping(code: &str, expression: &Expression) -> String {
             format!("({} is {pattern})", grouping(code, is.value))
         }
         Expression::As(r#as) => format!("({} as {})", grouping(code, r#as.value), source(code, r#as.hint)),
+        Expression::Conditional(Conditional { condition, then: Some(then), r#else, .. }) => {
+            format!("({} ? {} : {})", grouping(code, condition), grouping(code, then), grouping(code, r#else))
+        }
         _ => source(code, expression).to_owned(),
     }
+}
+
+/// Spec section 21: `a ? b : c ? d : e` means `a ? b : (c ? d : e)`, as in C#, Java, TypeScript, Swift and Dart. PHP
+/// reads it as `(a ? b : c) ? d : e`, which PHP 8 refuses.
+#[test]
+fn a_ternary_in_the_else_branch_nests_to_the_right() {
+    const CODE: &str = "class Report\n{\n    int run()\n    {\n        return a ? 1 : b ? 2 : 3;\n        return a ? 1 : b ? 2 : c ? 3 : 4;\n        return a ? b ? 1 : 2 : 3;\n        return a ? 1 : b ?? 2;\n        return (a ? 1 : b) ? 2 : 3;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let groupings: Vec<String> =
+        method_body(program).iter().map(|statement| grouping(CODE, expression(statement))).collect();
+    assert_eq!(
+        groupings,
+        [
+            "(a ? 1 : (b ? 2 : 3))",
+            "(a ? 1 : (b ? 2 : (c ? 3 : 4)))",
+            "(a ? (b ? 1 : 2) : 3)",
+            "(a ? 1 : (b ?? 2))",
+            "((a ? 1 : b) ? 2 : 3)",
+        ]
+    );
+
+    const PHP: &str = "<?php\n$a ? 1 : $b ? 2 : 3;\n";
+    let php = parse(&arena, "src/Report.php", PHP);
+    let groupings: Vec<String> =
+        php.statements.iter().skip(1).map(|statement| grouping(PHP, expression(statement))).collect();
+    assert_eq!(groupings, ["(($a ? 1 : $b) ? 2 : 3)"]);
 }
 
 #[test]

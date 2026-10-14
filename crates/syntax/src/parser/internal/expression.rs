@@ -651,12 +651,17 @@ where
                         r#else: self.parse_expression_with_precedence(Precedence::ElvisOrConditional)?,
                     })
                 } else {
+                    // PHP# reads `a ? b : c ? d : e` as `a ? b : (c ? d : e)`, as C# does (spec section 21): its else
+                    // branch takes another `? :`, and an assignment, as PHP's grammar already gives it one.
+                    let r#else =
+                        if self.dialect.is_sharp() { Precedence::Assignment } else { Precedence::ElvisOrConditional };
+
                     Expression::Conditional(Conditional {
                         condition: lhs,
                         question_mark: self.stream.consume_span()?,
                         then: Some(self.parse_expression_with_precedence(Precedence::Lowest)?),
                         colon: self.stream.eat_span(T![":"])?,
-                        r#else: self.parse_expression_with_precedence(Precedence::ElvisOrConditional)?,
+                        r#else: self.parse_expression_with_precedence(r#else)?,
                     })
                 }
             }

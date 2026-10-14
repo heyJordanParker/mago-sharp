@@ -2300,7 +2300,7 @@ fn an_expression_refused_at_part_of_it_has_the_rest_checked() {
             format!("13:14 PHP# has no `__LINE__`: {line}"),
             format!("14:9 {request}"),
             format!("14:24 {request}"),
-            "15:19 Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`.".to_owned(),
+            format!("15:19 {request}"),
             format!("15:38 PHP# has no `__LINE__`: {line}"),
         ]
     );
@@ -3998,16 +3998,12 @@ fn the_two_operand_ternary_is_not_part_of_php_sharp() {
     );
 }
 
+/// Spec section 21: `a ? b : c ? d : e` means `a ? b : (c ? d : e)`, so it needs no parentheses.
 #[test]
-fn a_ternary_nested_in_a_condition_without_parentheses_is_an_error_as_in_php() {
+fn a_ternary_in_the_else_branch_needs_no_parentheses() {
     let code = leak(method("        return extra > 1 ? 1 : extra > 0 ? 2 : 3;\n"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:16 Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`."
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
