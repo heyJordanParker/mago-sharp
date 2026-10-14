@@ -16,12 +16,14 @@ use crate::cst::Expression;
 use crate::cst::ForBody;
 use crate::cst::ForeachBody;
 use crate::cst::ForeachTarget;
+use crate::cst::FunctionCall;
 use crate::cst::IfBody;
 use crate::cst::LegacyArray;
 use crate::cst::List;
 use crate::cst::Literal;
 use crate::cst::LiteralInteger;
 use crate::cst::MatchArm;
+use crate::cst::NullSafeFunctionCall;
 use crate::cst::PartialApplication;
 use crate::cst::PatternMatch;
 use crate::cst::PatternMatchArm;
@@ -472,9 +474,10 @@ fn expression_control_flows<'arena>(expression: &'arena Expression<'arena>, cont
             expression_control_flows(clone.object, controls);
         }
         Expression::Call(call) => match call {
-            Call::Function(function_call) => {
-                expression_control_flows(function_call.function, controls);
-                for argument in &function_call.argument_list.arguments {
+            Call::Function(FunctionCall { function, argument_list })
+            | Call::NullSafeFunction(NullSafeFunctionCall { function, argument_list, .. }) => {
+                expression_control_flows(function, controls);
+                for argument in &argument_list.arguments {
                     expression_control_flows(argument.value(), controls);
                 }
             }

@@ -7,7 +7,9 @@ use crate::cst::ClassLikeConstantSelector;
 use crate::cst::ClassLikeMemberSelector;
 use crate::cst::Construct;
 use crate::cst::Expression;
+use crate::cst::FunctionCall;
 use crate::cst::MatchArm;
+use crate::cst::NullSafeFunctionCall;
 use crate::cst::PartialApplication;
 use crate::cst::Yield;
 
@@ -122,14 +124,17 @@ pub fn get_assignment_from_expression<'expr, 'arena>(
         Expression::Throw(throw) => get_assignment_from_expression(throw.exception),
         Expression::Clone(clone) => get_assignment_from_expression(clone.object),
         Expression::Call(call) => match &call {
-            Call::Function(function_call) => get_assignment_from_expression(function_call.function).or_else(|| {
-                function_call.argument_list.arguments.iter().find_map(|argument| match &argument {
-                    Argument::Positional(positional_argument) => {
-                        get_assignment_from_expression(positional_argument.value)
-                    }
-                    Argument::Named(named_argument) => get_assignment_from_expression(named_argument.value),
+            Call::Function(FunctionCall { function, argument_list })
+            | Call::NullSafeFunction(NullSafeFunctionCall { function, argument_list, .. }) => {
+                get_assignment_from_expression(function).or_else(|| {
+                    argument_list.arguments.iter().find_map(|argument| match &argument {
+                        Argument::Positional(positional_argument) => {
+                            get_assignment_from_expression(positional_argument.value)
+                        }
+                        Argument::Named(named_argument) => get_assignment_from_expression(named_argument.value),
+                    })
                 })
-            }),
+            }
             Call::Method(method_call) => get_assignment_from_expression(method_call.object)
                 .or_else(|| match &method_call.method {
                     ClassLikeMemberSelector::Expression(class_like_member_expression_selector) => {

@@ -27,6 +27,7 @@ use crate::cst::cst::Identifier;
 use crate::cst::cst::Instantiation;
 use crate::cst::cst::MethodCall;
 use crate::cst::cst::MethodPartialApplication;
+use crate::cst::cst::NullSafeFunctionCall;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::Parenthesized;
@@ -594,6 +595,15 @@ where
             T!["?->"] => {
                 let (question_mark_arrow, operator_refused) = self.consume_operator_span()?;
                 refused = operator_refused;
+                // PHP#'s `f?.(x)`, spec section 14.4.
+                if self.dialect.is_sharp() && !refused && self.stream.is_at(T!["("])? {
+                    return Ok(self.arena.alloc(Expression::Call(Call::NullSafeFunction(NullSafeFunctionCall {
+                        function: lhs,
+                        question_mark_dot: question_mark_arrow,
+                        argument_list: self.parse_argument_list()?,
+                    }))));
+                }
+
                 let selector = self.parse_classlike_member_selector()?;
 
                 if Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])) {

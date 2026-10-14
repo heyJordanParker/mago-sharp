@@ -3861,6 +3861,31 @@ fn a_properties_pattern_tests_each_property_against_a_pattern() {
     assert_eq!(written, ["status: 200", "body: string body"]);
 }
 
+/// Spec section 14.4: `f?.(x)` calls `f` only when it is not null, as C#'s `f?.Invoke(x)`. Each row is the function and
+/// its arguments, on a local, a property and a call's result. In PHP, `?->(` stays an error.
+#[test]
+fn question_mark_dot_before_arguments_calls_a_function_that_is_there() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        doubler?.(4);\n        this.handler?.(4, 5);\n        this.next()?.();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let calls: Vec<(&str, &str)> = method_body(program)
+        .iter()
+        .map(|statement| {
+            let Expression::Call(Call::NullSafeFunction(call)) = expression(statement) else {
+                panic!("expected `?.(`, got {statement:#?}");
+            };
+
+            (source(CODE, call.function), source(CODE, &call.argument_list))
+        })
+        .collect();
+    assert_eq!(calls, [("doubler", "(4)"), ("this.handler", "(4, 5)"), ("this.next()", "()")]);
+
+    const PHP: &str = "<?php\n$doubler?->(4);\n";
+    assert!(!parse(&arena, "src/Report.php", PHP).errors.is_empty());
+}
+
 /// Spec section 21: a properties pattern can test the type at the same time, and bind, as in C#. Each row is the type,
 /// its properties and its name. A pattern creates a variable only through a typed declaration, so a properties pattern
 /// without a type takes no name.

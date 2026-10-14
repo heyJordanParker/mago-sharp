@@ -4406,6 +4406,14 @@ fn is_as_and_match_with_their_patterns_are_in_the_slice() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 14.4: `f?.(x)` calls a function that may be null, on a local, a property or a call's result.
+#[test]
+fn a_null_safe_call_of_a_function_is_in_the_slice() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Function<int(int)>? handler = null;\n\n    public Function<int(int)>? next() => this.handler;\n\n    public int? run(Function<int(int)>? doubler)\n    {\n        const a = doubler?.(4);\n        const b = this.handler?.(a ?? 0);\n        return this.next()?.(b ?? 0);\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
 /// Spec section 21: a pattern takes types and constants only, as in C#, and a local's value is compared in `when`. A
 /// pattern's value is a constant value, so a static member of a class the file declares is the error a default gets.
 #[test]

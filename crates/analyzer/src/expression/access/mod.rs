@@ -75,7 +75,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
             ) if let Some(classes) = class_value_classes(context, block_context, access.object) => {
                 let (object, span) = (access.object, access.span());
 
-                analyze_null_safe_class_value(
+                analyze_null_safe_value(
                     context,
                     block_context,
                     artifacts,
@@ -452,15 +452,16 @@ where
     }
 }
 
-/// Analyzes a PHP# null-safe read or call through the class value `object`, `type?.y` or `type?.m()`, with `analyze`.
-/// The member is read only when `object` holds a class, so `analyze` runs with the local narrowed to its class values,
-/// as `if (type !== null)` narrows it, and the result at `span` can also be the `null` the read stops at. Mago's
-/// null-safe property read leaves out a receiver's `null` while it resolves instance members, and has no path that
-/// resolves a class value's static members, so the narrowing is this local's.
+/// Analyzes a PHP# null-safe read or call through `object` with `analyze`: a class value's `type?.y` or `type?.m()`, or
+/// a function's `f?.(x)`. The member is read, or the function called, only when `object` is not null, so `analyze`
+/// runs with a local `object` narrowed to its values that are not null, as `if (type !== null)` narrows it, and the
+/// result at `span` can also be the `null` the read stops at. Mago's null-safe property read leaves out a receiver's
+/// `null` while it resolves instance members, and has no path that resolves a class value's static members or calls a
+/// function value, so the narrowing is this local's.
 ///
 /// A null receiver skips a call's arguments, so the locals afterwards are the ones from before, with each local an
 /// argument writes merged as the short-circuited right-hand side of `&&` merges it.
-pub(crate) fn analyze_null_safe_class_value<'ctx, 'arena, A>(
+pub(crate) fn analyze_null_safe_value<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,

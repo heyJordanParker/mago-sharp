@@ -12,6 +12,8 @@ use crate::cst::cst::expression::Expression;
 #[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
 pub enum Call<'arena> {
     Function(FunctionCall<'arena>),
+    /// PHP#'s `f?.(x)`, which calls `f` only when it is not null.
+    NullSafeFunction(NullSafeFunctionCall<'arena>),
     Method(MethodCall<'arena>),
     NullSafeMethod(NullSafeMethodCall<'arena>),
     StaticMethod(StaticMethodCall<'arena>),
@@ -21,6 +23,17 @@ pub enum Call<'arena> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct FunctionCall<'arena> {
     pub function: &'arena Expression<'arena>,
+    pub argument_list: ArgumentList<'arena>,
+}
+
+/// Represents PHP#'s call of a function that may be null, which gives null when it is, as C#'s `f?.Invoke(x)`.
+///
+/// Example: `doubler?.(4)`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct NullSafeFunctionCall<'arena> {
+    pub function: &'arena Expression<'arena>,
+    pub question_mark_dot: Span,
     pub argument_list: ArgumentList<'arena>,
 }
 
@@ -55,7 +68,7 @@ impl<'arena> Call<'arena> {
     #[inline]
     #[must_use]
     pub const fn is_null_safe(&self) -> bool {
-        matches!(self, Call::NullSafeMethod(_))
+        matches!(self, Call::NullSafeFunction(_) | Call::NullSafeMethod(_))
     }
 
     #[inline]
@@ -63,6 +76,7 @@ impl<'arena> Call<'arena> {
     pub fn get_argument_list(&self) -> &ArgumentList<'arena> {
         match self {
             Call::Function(f) => &f.argument_list,
+            Call::NullSafeFunction(n) => &n.argument_list,
             Call::Method(m) => &m.argument_list,
             Call::NullSafeMethod(n) => &n.argument_list,
             Call::StaticMethod(s) => &s.argument_list,
@@ -74,6 +88,7 @@ impl HasSpan for Call<'_> {
     fn span(&self) -> Span {
         match self {
             Call::Function(f) => f.span(),
+            Call::NullSafeFunction(n) => n.span(),
             Call::Method(m) => m.span(),
             Call::NullSafeMethod(n) => n.span(),
             Call::StaticMethod(s) => s.span(),
@@ -82,6 +97,12 @@ impl HasSpan for Call<'_> {
 }
 
 impl HasSpan for FunctionCall<'_> {
+    fn span(&self) -> Span {
+        self.function.span().join(self.argument_list.span())
+    }
+}
+
+impl HasSpan for NullSafeFunctionCall<'_> {
     fn span(&self) -> Span {
         self.function.span().join(self.argument_list.span())
     }

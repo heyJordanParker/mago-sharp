@@ -4158,6 +4158,24 @@ fn a_properties_pattern_on_a_value_that_cannot_be_null_reports_nothing_and_its_p
     assert_eq!(codes(&php_issues), ["redundant-type-comparison", "redundant-logical-operation"]);
 }
 
+/// Spec section 14.4: `f?.(x)` calls `f` only when it is not null. The call is checked against the function's
+/// signature, its result can also be null, and `?.` on a function that is never null is redundant.
+#[test]
+fn a_null_safe_call_calls_only_a_function_that_is_there() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private Function<int(int)>? handler = null;\n\n    public Function<int(int)>? next() => this.handler;\n\n    public int? local(Function<int(int)>? doubler) => doubler?.(4);\n\n    public int? property() => this.handler?.(4);\n\n    public int? called() => this.next()?.(4);\n\n    public int sure(Function<int(int)>? doubler) => doubler?.(4);\n\n    public int? text(Function<int(int)>? doubler) => doubler?.(\"four\");\n\n    public int? never(Function<int(int)> doubler) => doubler?.(4);\n}\n";
+
+    // A result that can be null where `int` is returned gets the two errors a null-safe method call's result gets.
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "15:53 nullable-return-statement",
+            "15:53 invalid-return-statement",
+            "17:64 invalid-argument",
+            "19:61 redundant-nullsafe-operator",
+        ]
+    );
+}
+
 /// Spec section 21: `shape is Circle { radius: > 1.0 } big` tests the type, then each property on it, and binds `big`.
 /// It is checked as its PHP twin, `($big = $shape) instanceof Circle && $big->radius > 1.0`: the property reads the
 /// tested type's, and `big` is that type where the test holds.

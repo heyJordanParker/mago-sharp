@@ -1990,6 +1990,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             }
             Expression::Call(Call::Method(call)) => self.method_call(expression, call),
+            // `f?.(x)` whose conditional `null_safe_chain` built already tests `f`: the call of what `f` holds.
+            Expression::Call(Call::NullSafeFunction(call)) => {
+                let function = self.expression(call.function);
+                let arguments = self.arguments(&call.argument_list, &[]);
+
+                self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+            }
             Expression::Call(Call::Function(FunctionCall {
                 function: Expression::Identifier(function),
                 argument_list,
@@ -2535,7 +2542,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, an
-    /// extension's member, or any link below a collection method call that runs as PHP on the array or below an
+    /// extension's member, a call of a function that may be null, `f?.(x)`, or any link below a collection method call that runs as PHP on the array or below an
     /// extension's member, which runs as a static call, with its receiver, when `chain` is a member
     /// read, a call or an index whose chain holds one no conditional tests yet. A null there would reach the PHP
     /// function, where `?->` skips only the rest of its own chain. The walk stops at a receiver a hidden variable
@@ -2589,6 +2596,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     }
 
                     call.object
+                }
+                // PHP has no `?->` that calls a function, spec section 14.4's `f?.(x)`.
+                Expression::Call(Call::NullSafeFunction(call)) => {
+                    if !self.tested_links.contains(&link.span()) {
+                        return Some((link, call.function));
+                    }
+
+                    call.function
                 }
                 _ => return None,
             };

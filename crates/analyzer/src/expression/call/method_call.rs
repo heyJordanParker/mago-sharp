@@ -184,7 +184,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NullSafeMethodCall<'arena> {
         if context.dialect.is_sharp()
             && let Some(object_type) = artifacts.get_expression_type(self.object).cloned()
         {
-            check_redundant_nullsafe(context, self.question_mark_arrow, self.object, &object_type);
+            check_redundant_nullsafe(context, self.question_mark_arrow, self.object, &object_type, false);
         }
 
         if context.plugin_registry.has_nullsafe_method_call_hooks() {

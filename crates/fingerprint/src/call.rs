@@ -4,6 +4,7 @@ use mago_names::ResolvedNames;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::MethodCall;
+use mago_syntax::cst::NullSafeFunctionCall;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::StaticMethodCall;
 
@@ -22,6 +23,7 @@ impl Fingerprintable for Call<'_> {
     {
         match self {
             Call::Function(call) => call.fingerprint_with_hasher(hasher, resolved_names, options),
+            Call::NullSafeFunction(call) => call.fingerprint_with_hasher(hasher, resolved_names, options),
             Call::Method(call) => call.fingerprint_with_hasher(hasher, resolved_names, options),
             Call::NullSafeMethod(call) => call.fingerprint_with_hasher(hasher, resolved_names, options),
             Call::StaticMethod(call) => call.fingerprint_with_hasher(hasher, resolved_names, options),
@@ -40,6 +42,22 @@ impl Fingerprintable for FunctionCall<'_> {
         H: std::hash::Hasher,
     {
         "fn_call".hash(hasher);
+        self.function.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.argument_list.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for NullSafeFunctionCall<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "null_safe_fn_call".hash(hasher);
         self.function.fingerprint_with_hasher(hasher, resolved_names, options);
         self.argument_list.fingerprint_with_hasher(hasher, resolved_names, options);
     }

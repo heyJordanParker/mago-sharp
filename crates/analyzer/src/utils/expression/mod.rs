@@ -108,7 +108,7 @@ pub(crate) const fn expression_has_observable_side_effect(expression: &Expressio
 pub(crate) const fn expression_is_nullsafe(expr: &'_ Expression<'_>) -> bool {
     match expr {
         Expression::ArrayAccess(array_access) => expression_is_nullsafe(array_access.array),
-        Expression::Call(Call::NullSafeMethod(_)) => true,
+        Expression::Call(Call::NullSafeMethod(_) | Call::NullSafeFunction(_)) => true,
         Expression::Call(Call::Method(method_call)) => expression_is_nullsafe(method_call.object),
         Expression::Call(Call::StaticMethod(static_method_call)) => expression_is_nullsafe(static_method_call.class),
         Expression::Access(Access::NullSafeProperty(_)) => true,
@@ -183,6 +183,10 @@ pub(crate) fn get_nullsafe_base_expressions<'ast, 'arena>(
             Expression::Call(Call::NullSafeMethod(call)) => {
                 bases.push(call.object);
                 current = Some(unwrap_expression(call.object));
+            }
+            Expression::Call(Call::NullSafeFunction(call)) => {
+                bases.push(call.function);
+                current = Some(unwrap_expression(call.function));
             }
             Expression::Call(Call::Method(call)) => {
                 current = Some(unwrap_expression(call.object));

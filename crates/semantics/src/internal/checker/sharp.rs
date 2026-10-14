@@ -1532,7 +1532,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Node::Expression(
                 Expression::Assignment(_)
                 | Expression::UnaryPostfix(_)
-                | Expression::Call(Call::Method(_) | Call::NullSafeMethod(_))
+                | Expression::Call(Call::Method(_) | Call::NullSafeMethod(_) | Call::NullSafeFunction(_))
                 | Expression::Access(Access::Property(_) | Access::NullSafeProperty(_))
                 | Expression::Throw(_)
                 // The parser reads a template, and only a template, into an interpolated string.
@@ -1547,7 +1547,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::Assignment(_)
             | Node::UnaryPostfix(_)
             | Node::UnaryPostfixOperator(UnaryPostfixOperator::PostIncrement(_) | UnaryPostfixOperator::PostDecrement(_))
-            | Node::Call(Call::Method(_) | Call::NullSafeMethod(_))
+            | Node::Call(Call::Method(_) | Call::NullSafeMethod(_) | Call::NullSafeFunction(_))
+            | Node::NullSafeFunctionCall(_)
             | Node::Access(Access::Property(_) | Access::NullSafeProperty(_))
             | Node::ClassLikeMemberSelector(ClassLikeMemberSelector::Identifier(_))
             | Node::ArgumentList(_)

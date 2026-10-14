@@ -170,6 +170,7 @@ use crate::cst::cst::NamespaceBody;
 use crate::cst::cst::NamespaceImplicitBody;
 use crate::cst::cst::NestedVariable;
 use crate::cst::cst::NotPattern;
+use crate::cst::cst::NullSafeFunctionCall;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
@@ -2644,6 +2645,9 @@ generate_ast_walker! {
             Call::Function(function_call) => {
                 walker.walk_function_call(function_call, context);
             }
+            Call::NullSafeFunction(null_safe_function_call) => {
+                walker.walk_null_safe_function_call(null_safe_function_call, context);
+            }
             Call::Method(method_call) => {
                 walker.walk_method_call(method_call, context);
             }
@@ -2659,6 +2663,11 @@ generate_ast_walker! {
     'arena FunctionCall as function_call => {
         walker.walk_expression(function_call.function, context);
         walker.walk_argument_list(&function_call.argument_list, context);
+    }
+
+    'arena NullSafeFunctionCall as null_safe_function_call => {
+        walker.walk_expression(null_safe_function_call.function, context);
+        walker.walk_argument_list(&null_safe_function_call.argument_list, context);
     }
 
     'arena MethodCall as method_call => {

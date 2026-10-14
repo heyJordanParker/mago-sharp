@@ -89,6 +89,7 @@ impl<'arena> CallLikeNode<'arena> {
         match self {
             CallLikeNode::Call(call) => CallLikeArgumentListNode::ArgumentList(match call {
                 Call::Function(c) => &c.argument_list,
+                Call::NullSafeFunction(c) => &c.argument_list,
                 Call::Method(c) => &c.argument_list,
                 Call::NullSafeMethod(c) => &c.argument_list,
                 Call::StaticMethod(c) => &c.argument_list,
@@ -140,6 +141,7 @@ where
     let mut parts = match node {
         CallLikeNode::Call(c) => match c {
             Call::Function(c) => vec_in![f.arena; c.function.format(f)],
+            Call::NullSafeFunction(c) => vec_in![f.arena; c.function.format(f), Document::String(b"?.")],
             Call::StaticMethod(c) => vec_in![f.arena; c.class.format(f), Document::String(b"::"), c.method.format(f)],
             _ => {
                 return print_access_call_node(f, c);

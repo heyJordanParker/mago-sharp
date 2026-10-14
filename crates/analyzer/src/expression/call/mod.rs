@@ -33,7 +33,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::control_action::ControlAction;
 use crate::error::AnalysisError;
-use crate::expression::access::analyze_null_safe_class_value;
+use crate::expression::access::analyze_null_safe_value;
 use crate::expression::access::class_value_classes;
 use crate::expression::access::report_full_name;
 use crate::expression::access::report_member_of_mixed_kinds;
@@ -157,7 +157,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                     span: call.span(),
                 };
 
-                analyze_null_safe_class_value(
+                analyze_null_safe_value(
                     context,
                     block_context,
                     artifacts,
@@ -168,6 +168,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                     },
                 )
             }
+            Call::NullSafeFunction(call) => function_call::analyze_null_safe_function_call(
+                context,
+                block_context,
+                artifacts,
+                call,
+            ),
             Call::NullSafeMethod(call) => {
                 call.analyze(context, block_context, artifacts)?;
                 report_member_of_mixed_kinds(context, artifacts, call.object, &call.method, true);

@@ -176,6 +176,7 @@ use crate::cst::cst::NamespaceBody;
 use crate::cst::cst::NamespaceImplicitBody;
 use crate::cst::cst::NestedVariable;
 use crate::cst::cst::NotPattern;
+use crate::cst::cst::NullSafeFunctionCall;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
@@ -316,6 +317,7 @@ pub enum NodeKind {
     Block,
     Call,
     FunctionCall,
+    NullSafeFunctionCall,
     MethodCall,
     NullSafeMethodCall,
     StaticMethodCall,
@@ -601,6 +603,7 @@ pub enum Node<'ast, 'arena> {
     Block(&'ast Block<'arena>),
     Call(&'ast Call<'arena>),
     FunctionCall(&'ast FunctionCall<'arena>),
+    NullSafeFunctionCall(&'ast NullSafeFunctionCall<'arena>),
     MethodCall(&'ast MethodCall<'arena>),
     NullSafeMethodCall(&'ast NullSafeMethodCall<'arena>),
     StaticMethodCall(&'ast StaticMethodCall<'arena>),
@@ -972,6 +975,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Block(_) => NodeKind::Block,
             Self::Call(_) => NodeKind::Call,
             Self::FunctionCall(_) => NodeKind::FunctionCall,
+            Self::NullSafeFunctionCall(_) => NodeKind::NullSafeFunctionCall,
             Self::MethodCall(_) => NodeKind::MethodCall,
             Self::NullSafeMethodCall(_) => NodeKind::NullSafeMethodCall,
             Self::StaticMethodCall(_) => NodeKind::StaticMethodCall,
@@ -1336,11 +1340,16 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }
             Node::Call(node) => match node {
                 Call::Function(node) => f(Node::FunctionCall(node)),
+                Call::NullSafeFunction(node) => f(Node::NullSafeFunctionCall(node)),
                 Call::Method(node) => f(Node::MethodCall(node)),
                 Call::NullSafeMethod(node) => f(Node::NullSafeMethodCall(node)),
                 Call::StaticMethod(node) => f(Node::StaticMethodCall(node)),
             },
             Node::FunctionCall(node) => {
+                f(Node::Expression(node.function));
+                f(Node::ArgumentList(&node.argument_list));
+            }
+            Node::NullSafeFunctionCall(node) => {
                 f(Node::Expression(node.function));
                 f(Node::ArgumentList(&node.argument_list));
             }
@@ -3008,6 +3017,7 @@ impl HasSpan for Node<'_, '_> {
             Self::Block(node) => node.span(),
             Self::Call(node) => node.span(),
             Self::FunctionCall(node) => node.span(),
+            Self::NullSafeFunctionCall(node) => node.span(),
             Self::MethodCall(node) => node.span(),
             Self::NullSafeMethodCall(node) => node.span(),
             Self::StaticMethodCall(node) => node.span(),

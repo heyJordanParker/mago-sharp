@@ -33,6 +33,7 @@ pub use crate::cst::cst::block::Block;
 pub use crate::cst::cst::call::Call;
 pub use crate::cst::cst::call::FunctionCall;
 pub use crate::cst::cst::call::MethodCall;
+pub use crate::cst::cst::call::NullSafeFunctionCall;
 pub use crate::cst::cst::call::NullSafeMethodCall;
 pub use crate::cst::cst::call::StaticMethodCall;
 pub use crate::cst::cst::class_like::AnonymousClass;

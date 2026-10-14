@@ -7764,6 +7764,62 @@ fn a_null_safe_method_value_or_property_call_is_a_conditional_over_the_rest_of_t
 }
 
 /// ```php
+/// $a = ($doubler === null ? null : $doubler(4));
+/// return (($nullsafe#1 = $this->next()) === null ? null : $nullsafe#1($a ?? 0));
+/// ```
+///
+/// Spec section 14.4: PHP has no `?->` that calls a function, so `f?.(x)` is a conditional on `f`, as a null-safe
+/// property call is. A function other than a local goes into a hidden variable, so it runs once.
+#[test]
+fn a_null_safe_function_call_is_a_conditional_on_the_function() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public int? run(Function<int(int)>? doubler)\n    {\n        const a = doubler?.(4);\n        return this.next()?.(a ?? 0);\n    }\n\n    private Function<int(int)>? next() => null;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "doubler"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    VAR
+                      ZVAL "doubler"
+                    ARG_LIST
+                      ZVAL 4
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    ASSIGN
+                      VAR
+                        ZVAL "nullsafe#1"
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "next"
+                        ARG_LIST
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    VAR
+                      ZVAL "nullsafe#1"
+                    ARG_LIST
+                      COALESCE
+                        VAR
+                          ZVAL "a"
+                        ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
 /// return (($nullsafe#1 = (($nullsafe#2 = $this->next()) === null ? null : ($nullsafe#2->scale)(1))) === null
 ///     ? null : ($nullsafe#1->scale)(2));
 /// ```

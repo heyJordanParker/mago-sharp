@@ -137,7 +137,7 @@ where
     let is_all_null = object_type.is_null() || object_type.is_void();
 
     if is_null_safe && !for_assignment {
-        check_redundant_nullsafe(context, operator_span, object_expression, &object_type);
+        check_redundant_nullsafe(context, operator_span, object_expression, &object_type, false);
     }
 
     if context.dialect.is_sharp()
@@ -1469,12 +1469,14 @@ fn report_access_on_null<'ctx, A>(
     }
 }
 
-/// Reports a nullsafe operator on an object that is never `null`.
+/// Reports a nullsafe operator on an object that is never `null`. `called` is whether the operator calls the object
+/// itself, as PHP#'s `f?.(x)` does, which a plain call replaces.
 pub(crate) fn check_redundant_nullsafe<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
     operator_span: Span,
     object_expr: &Expression<'arena>,
     object_type: &TUnion,
+    called: bool,
 ) where
     A: Arena,
 {
@@ -1484,7 +1486,16 @@ pub(crate) fn check_redundant_nullsafe<'arena, A>(
         return;
     }
 
-    let (nullsafe, access) = if context.dialect.is_sharp() { ("?.", ".") } else { ("?->", "->") };
+    let (nullsafe, access) = match (context.dialect.is_sharp(), called) {
+        (true, true) => ("?.", ""),
+        (true, false) => ("?.", "."),
+        (false, _) => ("?->", "->"),
+    };
+    let help = if called {
+        "Call the function directly, as in `f(x)`.".to_owned()
+    } else {
+        format!("Consider using the direct property access operator (`{access}`) for clarity.")
+    };
 
     // A PHP# file that writes PHP's `?->` already has a parse error at the operator.
     let written =
@@ -1505,7 +1516,7 @@ pub(crate) fn check_redundant_nullsafe<'arena, A>(
                     .with_message(format!("This expression (type `{object_type_str}`) is never `null`")),
             )
             .with_note(format!("The nullsafe operator (`{nullsafe}`) short-circuits the access if the object is `null`. Since this expression is guaranteed not to be `null`, this check is unnecessary."))
-            .with_help(format!("Consider using the direct property access operator (`{access}`) for clarity.")),
+            .with_help(help),
     );
 
     context.collector.propose_with_code(IssueCode::RedundantNullsafeOperator, issue, |edits| {
