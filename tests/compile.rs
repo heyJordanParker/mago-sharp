@@ -7,6 +7,7 @@ use std::process::Output;
 
 use mago_sharp_bridge::unit::header;
 use mago_sharp_bridge::unit::source_hash;
+use mago_sharp_bridge::unit::stamp;
 use mago_sharp_lean::PACKAGE_FOLDER;
 
 const ORDER: &str = "namespace App;\n\npublic class Order\n{\n    public int total(int extra)\n    {\n        return extra + 1;\n    }\n}\n";
@@ -99,7 +100,7 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
     assert!(output.status.success(), "{}", printed(&output));
     assert_eq!(
         files_under(&root.join(".sharp")),
-        [Path::new("app/Order.sharpc"), Path::new("vendor/acme/money/src/Money.sharpc")]
+        [Path::new("app/Order.sharpc"), Path::new("listeners.php"), Path::new("vendor/acme/money/src/Money.sharpc")]
     );
     for (name, source) in [("app/Order.sharp", ORDER), (MONEY_PATH, MONEY)] {
         let bytes = std::fs::read(compiled(root, name)).unwrap();
@@ -175,7 +176,10 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
 
     std::fs::remove_file(root.join("app/Invoice.sharp")).unwrap();
     compile_succeeds(root);
-    assert_eq!(files_under(&root.join(".sharp")), [Path::new("vendor/acme/money/src/Money.sharpc")]);
+    assert_eq!(
+        files_under(&root.join(".sharp")),
+        [Path::new("listeners.php"), Path::new("vendor/acme/money/src/Money.sharpc")]
+    );
 }
 
 #[test]
@@ -246,7 +250,7 @@ fn compile_reports_a_link_to_a_file_outside_the_project_and_writes_no_compiled_f
 
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(printed(&output).contains("vendor/acme/money/src/Money.sharp is a link to"), "{}", printed(&output));
-    assert_eq!(files_under(&root.join(".sharp")), [Path::new("app/Order.sharpc")]);
+    assert_eq!(files_under(&root.join(".sharp")), [Path::new("app/Order.sharpc"), Path::new("listeners.php")]);
 }
 
 #[test]
@@ -271,9 +275,25 @@ fn compile_replaces_a_compiled_file_by_rename_so_no_reader_sees_a_partial_file()
 /// `app/OrderNotices.sharp`, whose two listeners run in their place in the class, not in name order.
 const NOTICES: &str = "namespace App;\n\npublic class OrderNotices\n{\n    public void send(OrderPaid e) on OrderPaid { }\n\n    public void refresh() on OrderPaid, OrderEvent { }\n}\n";
 
+/// The row of the input at `path` in the listener table, stamped as the engine reads it.
+fn input_row(root: &Path, path: &str) -> String {
+    let input = stamp(root, path.as_bytes()).unwrap().unwrap();
+    let hash: String = input.hash.iter().map(|byte| format!("{byte:02x}")).collect();
+
+    format!("        ['{path}', {}, {}, '{hash}'],\n", input.size, input.mtime_ns)
+}
+
+/// The listener table of `inputs` and `rows`.
+fn listener_table(root: &Path, inputs: &[&str], rows: &str) -> String {
+    let inputs: String = inputs.iter().map(|path| input_row(root, path)).collect();
+
+    format!("<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n];\n")
+}
+
 /// Spec section 15: `mago compile` lists every listener of an accepted file in `.sharp/listeners.php`, the table the
 /// engine runs them from, by its class's full name, then by its place in its class. A refused file's listeners leave
-/// the table, and so does the table once no listener is left.
+/// the table, and the table stays once no listener is left. Its inputs are each folder of a PHP# file, for a file that
+/// joins or leaves it, and each file that declares a listener, so the engine can tell when the table is out of date.
 #[test]
 fn compile_writes_every_listener_of_an_accepted_file_in_order() {
     let directory = lawful_project(&[
@@ -287,10 +307,15 @@ fn compile_writes_every_listener_of_an_accepted_file_in_order() {
     ]);
     let root = directory.path();
 
-    compile_succeeds(root);
+    let output = compile(root);
+    assert!(printed(&output).contains("Compiled 4 PHP# files into .sharp/."), "{}", printed(&output));
     assert_eq!(
         read(root, ".sharp/listeners.php"),
-        "<?php\n\nreturn [\n    ['App\\OrderNotices', 'send', ['App\\OrderPaid'], true],\n    ['App\\OrderNotices', 'refresh', ['App\\OrderPaid', 'App\\OrderEvent'], false],\n    ['App\\Receipts', 'deliver', ['App\\OrderPaid'], true],\n];\n"
+        listener_table(
+            root,
+            &["app/*.sharp", "app/OrderNotices.sharp", "app/Receipts.sharp"],
+            "        ['App\\OrderNotices', 'send', ['App\\OrderPaid'], true],\n        ['App\\OrderNotices', 'refresh', ['App\\OrderPaid', 'App\\OrderEvent'], false],\n        ['App\\Receipts', 'deliver', ['App\\OrderPaid'], true],\n",
+        )
     );
 
     write(root, "app/OrderNotices.sharp", &NOTICES.replace("public void send", "public static void send"));
@@ -298,13 +323,29 @@ fn compile_writes_every_listener_of_an_accepted_file_in_order() {
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert_eq!(
         read(root, ".sharp/listeners.php"),
-        "<?php\n\nreturn [\n    ['App\\Receipts', 'deliver', ['App\\OrderPaid'], true],\n];\n"
+        listener_table(
+            root,
+            &["app/*.sharp", "app/OrderNotices.sharp", "app/Receipts.sharp"],
+            "        ['App\\Receipts', 'deliver', ['App\\OrderPaid'], true],\n",
+        )
     );
 
     std::fs::remove_file(root.join("app/OrderNotices.sharp")).unwrap();
     std::fs::remove_file(root.join("app/Receipts.sharp")).unwrap();
+    write(root, "app/Shop/Cart.sharp", "namespace App.Shop;\n\npublic class Cart\n{\n}\n");
     compile_succeeds(root);
-    assert!(!root.join(".sharp/listeners.php").exists());
+    assert_eq!(read(root, ".sharp/listeners.php"), listener_table(root, &["app/*.sharp", "app/Shop/*.sharp"], ""));
+}
+
+/// A path the listener table quotes keeps a `'` and a `\` in its name.
+#[test]
+fn compile_quotes_each_input_path_of_the_listener_table() {
+    let directory = lawful_project(&[("app/it's\\here/Cart.sharp", "namespace App;\n\npublic class Cart\n{\n}\n")]);
+    let root = directory.path();
+
+    compile_succeeds(root);
+    let input = input_row(root, "app/it's\\here/*.sharp").replace("it's\\here", "it\\'s\\\\here");
+    assert!(read(root, ".sharp/listeners.php").contains(&input), "{}", read(root, ".sharp/listeners.php"));
 }
 
 /// Spec section 28.1's `app/Shared/Money.sharp`, whose law holds over its pure `add`.
@@ -867,7 +908,7 @@ fn compile_deletes_the_lean_package_once_no_law_and_no_proof_file_remain() {
 
     assert!(output.status.success(), "{}", printed(&output));
     assert!(!root.join(".sharp/.lean").exists());
-    assert_eq!(files_under(&root.join(".sharp")), [Path::new("app/Order.sharpc")]);
+    assert_eq!(files_under(&root.join(".sharp")), [Path::new("app/Order.sharpc"), Path::new("listeners.php")]);
 }
 
 #[test]
