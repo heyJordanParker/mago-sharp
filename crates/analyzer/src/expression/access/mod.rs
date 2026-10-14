@@ -505,15 +505,13 @@ where
 
     let before = block_context.locals.clone();
     let assigned_before = std::mem::take(&mut block_context.assigned_variable_ids);
-    let object_type = artifacts.get_rc_expression_type(object).cloned();
-    if let Some(object_type) = &object_type {
-        artifacts.set_expression_type(object, object_type.to_non_nullable());
-    }
+    let Some(object_type) = artifacts.get_rc_expression_type(object).cloned() else {
+        unreachable!("a class value's object is analyzed, and its type is how the class value was found");
+    };
+    artifacts.set_expression_type(object, object_type.to_non_nullable());
 
     analyze(context, block_context, artifacts)?;
-    if let Some(object_type) = object_type {
-        artifacts.set_rc_expression_type(object, object_type);
-    }
+    artifacts.set_rc_expression_type(object, object_type);
     let after = std::mem::replace(&mut block_context.locals, before.clone());
     let assigned = std::mem::replace(&mut block_context.assigned_variable_ids, assigned_before);
     merge_short_circuited_assignments(context, block_context, &before, &after, &assigned);

@@ -9490,11 +9490,12 @@ fn a_type_parameter_before_a_dot_is_not_read_as_a_constant() {
 }
 
 /// `TItem.member` reads the member of the type argument's class, which its bound declares, so a missing member is
-/// reported on the bound. A type parameter that can stand for a type that is not a class has no members to read, so a
-/// property read on it reports that once and reads nothing.
+/// reported on the bound, and a static method read without a call is its function value. A type parameter that can
+/// stand for a type that is not a class has no members to read, so a property read on it reports that once and reads
+/// nothing.
 #[test]
 fn a_static_member_of_a_type_parameter_is_its_bounds() {
-    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n}\n\npublic abstract class Builder<TItem : Maker, TAny>\n{\n    public int build() => TItem.make();\n\n    public int missing() => TItem.unknown();\n\n    public int open() => TAny.make();\n\n    public int read() => TAny.size;\n\n    public abstract TItem made(TAny value);\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n}\n\npublic abstract class Builder<TItem : Maker, TAny>\n{\n    public int build() => TItem.make();\n\n    public int missing() => TItem.unknown();\n\n    public int open() => TAny.make();\n\n    public int read() => TAny.size;\n\n    public int maker() => TItem.make;\n\n    public abstract TItem made(TAny value);\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Builder.sharp", sharp), &[]),
@@ -9504,6 +9505,7 @@ fn a_static_member_of_a_type_parameter_is_its_bounds() {
             "`TAny` can stand for a type that is not a class.",
             "Could not infer a precise return type for method `Builder.open`. Saw type `Any?`.",
             "`TAny` can stand for a type that is not a class.",
+            "Invalid return type for method `Builder.maker`: expected `int`, but found `Function<int()>`.",
         ]
     );
 }
