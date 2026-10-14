@@ -55,6 +55,10 @@ where
 
     let mut flags = if is_final { MetadataFlags::FINAL } else { MetadataFlags::empty() };
     flags |= MetadataFlags::origin_flags(context.file.file_type);
+    // Spec section 5: a PHP# `internal` constant runs as PHP's `public` one and reaches its class's namespace.
+    if context.program.dialect.is_sharp() && constant.modifiers.contains_internal() {
+        flags |= MetadataFlags::INTERNAL;
+    }
 
     let document = parse_docblock(context, constant);
 

@@ -648,6 +648,25 @@ fn a_field_without_a_type_is_a_parse_error_that_names_the_rule() {
 /// A property always has a type, an override of a plain PHP parent's property too, spec section 6.1. A bare name
 /// before `{` is the property's name, its accessors and initial value parse, and the class keeps parsing.
 #[test]
+fn internal_with_a_namespace_is_a_parse_error_that_names_the_rule() {
+    let code = "internal(App.Tenant) class Helper\n{\n    internal(App\\Tenant) int count() => 1;\n\n    public int run() => 1;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Helper.sharp", code);
+
+    let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        messages,
+        [
+            "`internal` takes no namespace: move the shared helper to the parent namespace.",
+            "`internal` takes no namespace: move the shared helper to the parent namespace.",
+        ]
+    );
+    let reaches: Vec<&str> = program.errors.iter().map(|error| source(code, error)).collect();
+    assert_eq!(reaches, ["(App.Tenant)", "(App\\Tenant)"]);
+    assert_eq!(class_members(program).len(), 2);
+}
+
+#[test]
 fn a_property_without_a_type_is_a_parse_error_that_names_the_rule() {
     for (property, name) in [
         ("protected override table { get; set; } = \"orders\";", "table"),

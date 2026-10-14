@@ -73,6 +73,10 @@ where
         flags |= MetadataFlags::INIT;
     }
 
+    if is_sharp {
+        flags |= sharp_internal_flags(&parameter.modifiers, parameter.hooks.as_ref());
+    }
+
     if parameter.modifiers.contains_abstract() {
         flags |= MetadataFlags::ABSTRACT;
     }
@@ -321,6 +325,10 @@ where
                 flags |= MetadataFlags::HAS_DEFAULT;
             }
 
+            if is_sharp {
+                flags |= sharp_internal_flags(&hooked_property.modifiers, Some(&hooked_property.hook_list));
+            }
+
             if is_sharp && !is_abstract && is_sharp_get_only(&hooked_property.hook_list, context) {
                 flags |= MetadataFlags::READONLY;
             }
@@ -393,6 +401,10 @@ where
                 flags |= MetadataFlags::FINAL;
             }
 
+            if is_sharp {
+                flags |= sharp_internal_flags(&computed_property.modifiers, None);
+            }
+
             let mut metadata =
                 PropertyMetadata::new(VariableIdentifier(php_variable_name(computed_property.variable.name)), flags);
 
@@ -450,6 +462,23 @@ where
 /// The write visibility of a PHP# property: its `set` or `init` accessor's access modifier, or the property's own for
 /// a `set` without one. A get-only property runs as `readonly`, or as `protected(set)` when its `get` has a body, and
 /// an `init` accessor without one as `protected(set)`, so both are written at `protected` at most.
+/// The flags of a PHP# member's `internal` reach, spec section 5: `INTERNAL` when the member is `internal`, and
+/// `INTERNAL_SET` when its `set` or `init` is. The member runs as PHP's `public`, so its visibility is `public`.
+fn sharp_internal_flags(
+    modifiers: &Sequence<'_, Modifier<'_>>,
+    accessors: Option<&PropertyHookList<'_>>,
+) -> MetadataFlags {
+    let mut flags = MetadataFlags::empty();
+    if modifiers.contains_internal() {
+        flags |= MetadataFlags::INTERNAL;
+    }
+    if accessors.and_then(PropertyHookList::setter).is_some_and(|setter| setter.modifiers.contains_internal()) {
+        flags |= MetadataFlags::INTERNAL_SET;
+    }
+
+    flags
+}
+
 fn sharp_write_visibility(accessors: &PropertyHookList, read_visibility: Visibility) -> Visibility {
     let setter = accessors.setter();
     match setter.and_then(|setter| setter.modifiers.first()).and_then(|modifier| Visibility::try_from(modifier).ok()) {

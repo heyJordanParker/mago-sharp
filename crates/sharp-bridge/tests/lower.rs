@@ -2207,7 +2207,7 @@ fn the_base_class_constructor_can_be_inherited() {
 fn super_calls_the_constructor_a_base_class_gets_for_its_initial_values() {
     let base = (
         "src/Lib/Stamped.sharp",
-        "namespace Lib;\n\nclass Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"p\");\n}\n",
+        "namespace Lib;\n\npublic class Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"p\");\n}\n",
     );
     let parent_construct = "  STATIC_CALL\n    ZVAL [1] \"parent\"\n    ZVAL \"__construct\"\n    ARG_LIST\n";
     for (code, body) in [
@@ -6932,6 +6932,84 @@ fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks
                         null
                         null
                 null
+        "#}
+    );
+}
+
+/// ```php
+/// class Shop
+/// {
+///     public const int MAX = 3;
+///     public int $views = 0;
+///     public int $stock = 0;
+///     public protected(set) int $id = 0;
+///     public function secret(): int { return 1; }
+/// }
+/// ```
+///
+/// PHP has no namespace reach, so spec section 5's `internal` runs as public, and the analyzer checks who reaches it.
+/// An `internal` class takes no flag, `internal set` takes no set visibility, and `internal init` takes the
+/// `protected(set)` of every `init`, which only constructors run.
+#[test]
+fn internal_runs_as_public() {
+    let lowered = Lowered::with(
+        "internal class Shop\n{\n    internal const int MAX = 3;\n    public int views { get; internal set; } = 0;\n    internal int stock { get; set; } = 0;\n    public int id { get; internal init; } = 0;\n\n    internal int secret() => 1;\n}\n",
+        &[],
+    );
+    let class = lowered.child(lowered.root(), 1);
+
+    assert_eq!(
+        lowered.render(class),
+        indoc! {r#"
+            CLASS "Shop" @1-9
+              null
+              null
+              STMT_LIST
+                CLASS_CONST_GROUP [1]
+                  CLASS_CONST_DECL
+                    CONST_ELEM
+                      ZVAL "MAX"
+                      ZVAL 3
+                      null
+                  null
+                  ZVAL [1] "int"
+                PROP_GROUP [1]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "views"
+                      ZVAL 0
+                      null
+                      null
+                  null
+                PROP_GROUP [1]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "stock"
+                      ZVAL 0
+                      null
+                      null
+                  null
+                PROP_GROUP [2049]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "id"
+                      ZVAL 0
+                      null
+                      null
+                  null
+                METHOD [1] "secret" @8-8
+                  PARAM_LIST
+                  null
+                  STMT_LIST
+                    RETURN
+                      ZVAL 1
+                  ZVAL [1] "int"
+                  null
+              null
+              null
         "#}
     );
 }

@@ -71,6 +71,9 @@ impl MetadataFlags {
     /// A PHP# extension's computed property, spec section 26: the public static method of a static class it runs as,
     /// which takes only the extension's receiver and is read as a property of the receiver.
     pub const EXTENSION_PROPERTY: MetadataFlags = MetadataFlags(1 << 50);
+    /// A PHP# property whose `set` or `init` is `internal`, spec section 5: code outside its class's namespace and the
+    /// namespaces below it can't write it. `INTERNAL` on a PHP# declaration or member is its `internal` reach.
+    pub const INTERNAL_SET: MetadataFlags = MetadataFlags(1 << 51);
 }
 
 impl MetadataFlags {
@@ -219,6 +222,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_internal(self) -> bool {
         self.contains(Self::INTERNAL)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_internal_set(self) -> bool {
+        self.contains(Self::INTERNAL_SET)
     }
 
     #[inline]

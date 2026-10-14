@@ -23,6 +23,93 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use mago_bytes::BytesDisplay;
 
+/// Whether PHP# code reaches `class`, or its member that is `internal` itself when `member_is_internal`. Spec section
+/// 5: an `internal` declaration or member reaches its namespace and every namespace below it, and a member is never
+/// more visible than its class, so every member of an `internal` class is `internal` too, as C#'s effective
+/// accessibility is. Plain PHP has no namespace visibility, so a `.php` file reaches everything.
+pub(crate) fn reaches_internal<A>(
+    context: &Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    member_is_internal: bool,
+) -> bool
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || !class.flags.is_sharp() || !(class.flags.is_internal() || member_is_internal) {
+        return true;
+    }
+
+    is_within_namespace(
+        context.scope.namespace_name().unwrap_or_default(),
+        namespace_of(class.original_name.as_bytes()),
+    )
+}
+
+/// Whether the namespace `inner` is `namespace` or one below it, as PHP writes both. Every namespace is within the
+/// global one.
+pub(crate) fn is_within_namespace(inner: &[u8], namespace: &[u8]) -> bool {
+    namespace.is_empty()
+        || inner.eq_ignore_ascii_case(namespace)
+        || (inner.len() > namespace.len()
+            && inner[..namespace.len()].eq_ignore_ascii_case(namespace)
+            && inner[namespace.len()] == b'\\')
+}
+
+/// The namespace of the class named `class`, as PHP writes it.
+pub(crate) fn namespace_of(class: &[u8]) -> &[u8] {
+    class.iter().rposition(|&byte| byte == b'\\').map_or(&b""[..], |end| &class[..end])
+}
+
+/// Checks that PHP# code reaches `class`, or one of its members, by [`reaches_internal`], and reports at `span` when
+/// it does not. `member` says whether the member is `internal` itself for this access, and `None` for the class.
+/// `member_name` gives the member's name as PHP# writes it, such as `Order.total` or `Order.total.set`, only when the
+/// check fails.
+pub(crate) fn check_internal_reach<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    member: Option<bool>,
+    member_name: impl FnOnce(&Context<'_, '_, A>) -> String,
+    span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    if reaches_internal(context, class, member.unwrap_or(false)) {
+        return true;
+    }
+
+    let namespace = namespace_of(class.original_name.as_bytes());
+    let caller = context.scope.namespace_name().unwrap_or_default();
+    let class_name = display_class_like_name(context, class.original_name);
+    let (reached, reason) = match member {
+        Some(false) => {
+            (member_name(context), format!("`{class_name}` is internal, so its members reach no further than it does."))
+        }
+        Some(true) => {
+            let name = member_name(context);
+            let reason = format!("`{name}` is internal.");
+
+            (name, reason)
+        }
+        None => (class_name.to_string(), format!("`{class_name}` is internal.")),
+    };
+    let dotted = |namespace: &[u8]| String::from_utf8_lossy(namespace).replace('\\', ".");
+    let (namespace, caller) = (dotted(namespace), dotted(caller));
+
+    context.collector.report_with_code(
+        IssueCode::InternalAccess,
+        Issue::error(format!("`{reached}` is internal to `{namespace}`, and `{caller}` is outside it."))
+            .with_annotation(Annotation::primary(span).with_message("Reached here."))
+            .with_note(reason)
+            .with_note("An `internal` declaration or member reaches its namespace and every namespace below it.")
+            .with_help(format!(
+                "Make `{class_name}` `public` where it is the API, or move this code under `{namespace}`."
+            )),
+    );
+
+    false
+}
+
 /// Checks if a method is visible from the current scope and reports a detailed
 /// error if it is not.
 ///
@@ -55,6 +142,18 @@ where
     let Some(method_metadata) = context.codebase.get_declaring_method(fqcn, method_name) else {
         return true;
     };
+
+    if let Some(class) = context.codebase.get_class_like(declaring_class.as_bytes())
+        && !check_internal_reach(
+            context,
+            class,
+            Some(method_metadata.flags.is_internal()),
+            |context| display_member(context, class.original_name, BytesDisplay(method_name)),
+            member_span.unwrap_or(access_span),
+        )
+    {
+        return false;
+    }
 
     // Get the effective visibility, checking trait alias visibility overrides
     let Some(visibility) = context.codebase.get_method_visibility(fqcn, method_name) else {
@@ -180,6 +279,16 @@ where
     let DeclaredProperty { declaring_class: declaring_class_metadata, property: property_metadata, kind } = *resolution;
     let property_name = property_metadata.name.0;
 
+    if !check_internal_reach(
+        context,
+        declaring_class_metadata,
+        Some(property_metadata.flags.is_internal()),
+        |context| display_member(context, declaring_class_metadata.original_name, property_name),
+        member_span.unwrap_or(access_span),
+    ) {
+        return false;
+    }
+
     if matches!(kind, DeclaredPropertyKind::Magic) {
         if !property_metadata.flags.is_writeonly() {
             return true;
@@ -288,6 +397,21 @@ where
 {
     let DeclaredProperty { declaring_class: declaring_class_metadata, property: property_metadata, kind } = *resolution;
     let property_name = property_metadata.name.0;
+
+    // A property whose `set` alone is `internal` is named by its accessor, as `Order.total.set`.
+    let flags = property_metadata.flags;
+    if !check_internal_reach(
+        context,
+        declaring_class_metadata,
+        Some(flags.is_internal() || flags.is_internal_set()),
+        |context| {
+            let property = display_member(context, declaring_class_metadata.original_name, property_name);
+            if flags.is_internal_set() && !flags.is_internal() { format!("{property}.set") } else { property }
+        },
+        member_span.unwrap_or(access_span),
+    ) {
+        return false;
+    }
 
     if matches!(kind, DeclaredPropertyKind::Magic) {
         if property_metadata.flags.is_readonly() {

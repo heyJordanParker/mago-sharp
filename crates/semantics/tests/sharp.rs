@@ -5,6 +5,7 @@ use std::path::Path;
 
 use mago_allocator::LocalArena;
 use mago_database::file::File;
+use mago_database::file::FolderNamespace;
 use mago_names::resolver::NameResolver;
 use mago_php_version::PHPVersion;
 use mago_reporting::Issue;
@@ -123,18 +124,18 @@ fn an_extern_event_names_a_class() {
 }
 
 /// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
-/// `public`, and each parameter is a type, a name and an optional default. An event is a class, so any capitalized word
-/// but a reserved type name names one, as `Print` and `Exit` do, and `Self` is refused.
+/// `public` or `internal`, spec section 5, and each parameter is a type, a name and an optional default. An event is a
+/// class, so any capitalized word but a reserved type name names one, as `Print` and `Exit` do, and `Self` is refused.
 #[test]
-fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
+fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties() {
     let code = "namespace App.Shop;\n\nprivate event Hidden(int id);\nstatic event Shared(int id);\npublic event Typed(public int id, int ...rest);\npublic event Tagged(Set<string> tags);\n[Logged] public event Noted(int id);\npublic event Tracked(int id { get; });\npublic event Maybe(int id, Set<int>? tags);\npublic event Paid(int orderId, string note = \"\") : Placed;\nevent Moved(int id);\ninterface Placed { }\npublic event Empty();\npublic event Print(int id);\npublic event Exit(int code);\npublic event Frozen(readonly int id);\npublic event Scoped(internal int id);\npublic event Self(int id);\n";
     let fixed = "namespace App.Shop;\n\npublic event Moved(int id);\n\nevent Emptied();\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:1 An event takes only `public`.",
-            "4:1 An event takes only `public`.",
+            "3:1 An event takes only `public` or `internal`.",
+            "4:1 An event takes only `public` or `internal`.",
             "5:20 An event's parameter takes no modifier: it is a public get-only property of the event.",
             "5:39 An event's parameter cannot be variadic: it is one property of the event.",
             "6:21 A `Set` parameter of an event is not supported yet in PHP#.",
@@ -1458,25 +1459,51 @@ fn an_interface_member_is_public_written_bare() {
     );
 }
 
-/// Spec section 5's `internal` is not supported yet: on a member, a parameter or a declaration it is one error at the
-/// modifier, and the member is not one written without an access modifier.
+/// Spec section 5: a namespace's inside is its folder. A file an `autoload` PSR-4 folder holds declares the namespace
+/// of its folder, or the file declares its way into another namespace, and a test folder's file declares any.
 #[test]
-fn internal_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    internal const int MAX = 1;\n    internal int count = 0;\n    internal int views { get; set; } = 0;\n    internal int total => 7;\n    public string name { get; internal set; } = \"\";\n\n    internal Report(internal int size { get; })\n    {\n    }\n\n    internal Report.empty() : this(0)\n    {\n    }\n\n    internal void run()\n    {\n    }\n}\n";
-    let message = "This modifier is not supported yet in PHP#.";
+fn a_file_declares_the_namespace_of_its_folder() {
+    let messages = |folder: Option<FolderNamespace>, code: &'static str| {
+        let arena = LocalArena::new();
+        let mut file = File::ephemeral(Cow::Borrowed(b"app/Tenant/Other/Order.sharp"), Cow::Borrowed(code.as_bytes()));
+        file.folder_namespace = folder;
+        let program = parse_file(&arena, &file);
+        let names = NameResolver::new(&arena).resolve(program);
 
+        SemanticsChecker::new(PHPVersion::new(8, 4, 0))
+            .check(&file, program, &names)
+            .into_iter()
+            .map(|issue| issue.message)
+            .collect::<Vec<_>>()
+    };
+    let other = || Some(FolderNamespace::Namespace("App.Tenant.Other".into()));
+    let error = "This file's folder holds the namespace `App.Tenant.Other`, so the file declares `namespace App.Tenant.Other;`.";
+
+    assert_eq!(messages(other(), "namespace App.Tenant.Other;\n\npublic class Order\n{\n}\n"), Vec::<String>::new());
+    assert_eq!(messages(other(), "namespace App.Tenant.Store;\n\npublic class Order\n{\n}\n"), [error]);
+    assert_eq!(messages(other(), "public class Order\n{\n}\n"), [error]);
     assert_eq!(
-        issues(code),
+        messages(Some(FolderNamespace::Test), "namespace App.Tenant.Store;\n\npublic class Order\n{\n}\n"),
+        Vec::<String>::new()
+    );
+    assert_eq!(messages(None, "namespace App.Tenant.Store;\n\npublic class Order\n{\n}\n"), Vec::<String>::new());
+}
+
+/// Spec section 5's `internal` is an access modifier of a member, a parameter's member, an accessor and a declaration.
+/// A field is `private` or `protected` (section 6), so a field or a constructor parameter without accessors is never
+/// `internal`, as it is never `public`.
+#[test]
+fn internal_is_an_access_modifier() {
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    internal const int MAX = 1;\n    internal int views { get; set; } = 0;\n    internal int total => 7;\n    public string name { get; internal set; } = \"\";\n\n    internal Report(internal int size { get; })\n    {\n    }\n\n    internal Report.empty() : this(0)\n    {\n    }\n\n    internal void run()\n    {\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+
+    let fields = "namespace App.Tenant;\n\npublic class Report\n{\n    internal int count = 0;\n\n    public Report(internal int size)\n    {\n    }\n}\n";
+    assert_eq!(
+        issues(fields),
         [
-            format!("5:5 {message}"),
-            format!("6:5 {message}"),
-            format!("7:5 {message}"),
-            format!("8:5 {message}"),
-            "9:31 This accessor is not supported yet in PHP#.".to_owned(),
-            format!("11:5 {message}"),
-            format!("11:21 {message}"),
-            format!("15:5 {message}"),
-            format!("19:5 {message}"),
+            "5:5 A PHP# field cannot be `internal`: a field is `private` or `protected`.",
+            "7:19 A constructor parameter declared `internal` needs accessors: it is a property, as in `internal int id { get; }`.",
         ]
     );
 
@@ -1488,12 +1515,24 @@ fn internal_is_not_supported_yet() {
     ] {
         let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
 
-        assert_eq!(issues(code), [format!("3:1 {message}")], "{declaration}");
+        assert_eq!(issues(code), Vec::<String>::new(), "{declaration}");
     }
 
     // An anonymous class is not supported yet, and `internal` among its modifiers is no other error.
     let anonymous = leak(method("        const other = new readonly internal class {};\n        return 1;\n"));
     assert_eq!(issues(anonymous), ["7:23 This expression is not supported yet in PHP#."]);
+}
+
+/// An accessor's access modifier reaches strictly less than its property's, as in C#. `internal` reaches a namespace
+/// and `protected` the subclasses, so neither is narrower than the other.
+#[test]
+fn an_internal_accessor_is_narrower_only_than_a_public_property() {
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public int a { get; internal set; } = 0;\n    internal int b { get; private set; } = 0;\n    internal int c { get; protected set; } = 0;\n    protected int d { get; internal set; } = 0;\n    internal int e { get; internal set; } = 0;\n    internal int f { get; public set; } = 0;\n}\n";
+    let error = |line: u32, column: u32, setter: &str| {
+        format!("{line}:{column} The `{setter}` accessor of a PHP# property must be narrower than the property.")
+    };
+
+    assert_eq!(issues(code), [error(7, 27, "set"), error(8, 28, "set"), error(9, 27, "set"), error(10, 27, "set")]);
 }
 
 #[test]
@@ -2265,7 +2304,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             format!("20:17 PHP# has no `__LINE__`: {line}"),
             "21:15 A constant without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             format!("21:21 PHP# has no `__LINE__`: {line}"),
-            "23:19 A `public` constructor parameter needs accessors: a public member is a property, as in `public int id { get; }`.".to_owned(),
+            "23:19 A constructor parameter declared `public` needs accessors: it is a property, as in `public int id { get; }`.".to_owned(),
             format!("23:35 PHP# has no `__LINE__`: {line}"),
             "23:45 A by-reference parameter is not supported yet in PHP#.".to_owned(),
             format!("23:54 PHP# has no `__LINE__`: {line}"),
@@ -2579,7 +2618,7 @@ fn a_public_constructor_parameter_without_accessors_is_an_error() {
     assert_eq!(
         issues(code),
         [
-            "5:19 A `public` constructor parameter needs accessors: a public member is a property, as in `public int id { get; }`."
+            "5:19 A constructor parameter declared `public` needs accessors: it is a property, as in `public int id { get; }`."
         ]
     );
 }

@@ -86,6 +86,7 @@ impl CompileCommand {
             .map(|file| {
                 let mut host = File::new(file.name.clone(), FileType::Host, file.path.clone(), file.contents.clone());
                 host.is_standard_library = file.is_standard_library;
+                host.folder_namespace = file.folder_namespace.clone();
                 host
             })
             .collect();

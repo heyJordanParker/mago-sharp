@@ -1544,6 +1544,74 @@ fn nameof_names_a_property_the_class_has_and_is_a_string() {
     );
 }
 
+/// The `App.Tenant.Store` classes the `internal` tests reach: `Hidden`, `internal` by default, and `Shop`, public
+/// with `internal` members.
+const TENANT_STORE: [(&str, &str); 2] = [
+    (
+        "src/App/Tenant/Store/Hidden.sharp",
+        "namespace App.Tenant.Store;\n\nclass Hidden\n{\n    public int total() => 1;\n}\n",
+    ),
+    (
+        "src/App/Tenant/Store/Shop.sharp",
+        "namespace App.Tenant.Store;\n\npublic class Shop\n{\n    internal const int MAX = 3;\n    public int views { get; internal set; } = 0;\n    internal int stock { get; set; } = 0;\n\n    internal int secret() => 1;\n\n    public Hidden make() => new Hidden();\n}\n",
+    ),
+];
+
+/// Spec section 5: `internal` reaches its namespace and every namespace below it, and is the default for classes. A
+/// member is never more visible than its class, so a public member of an `internal` class is `internal` too. Code
+/// outside the reach, a sibling or the parent namespace, gets the error where it reaches: the import of a class, or
+/// the member. A member it can't reach reads as no value, as a private one does, so only `internal-access` is kept.
+#[test]
+fn internal_reaches_its_namespace_and_every_namespace_below_it() {
+    let reach = |analyzed: (&'static str, &'static str)| -> Vec<String> {
+        analyze(&PLUGIN_REGISTRY, settings(), analyzed, &TENANT_STORE)
+            .into_iter()
+            .filter(|issue| issue.code.as_deref() == Some("internal-access"))
+            .map(|issue| issue.message)
+            .collect()
+    };
+    let body = "{\n    public int run(Shop shop)\n    {\n        const stock = shop.stock;\n        shop.secret();\n        shop.make().total();\n        shop.views = 2;\n        shop.stock = 1;\n        return Shop.MAX + shop.views + stock;\n    }\n}\n";
+    let code = |namespace: &str| -> &'static str {
+        leak(format!(
+            "namespace {namespace};\n\nimport App.Tenant.Store.Hidden;\nimport App.Tenant.Store.Shop;\n\npublic class Use\n{body}"
+        ))
+    };
+
+    assert_eq!(
+        messages(("src/App/Tenant/Store/Inner/Use.sharp", code("App.Tenant.Store.Inner")), &TENANT_STORE),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        messages(("src/App/Tenant/Store/Use.sharp", code("App.Tenant.Store")), &TENANT_STORE),
+        Vec::<String>::new()
+    );
+
+    for (path, namespace) in
+        [("src/App/Tenant/Other/Use.sharp", "App.Tenant.Other"), ("src/App/Tenant/Use.sharp", "App.Tenant")]
+    {
+        let outside =
+            |reached: &str| format!("`{reached}` is internal to `App.Tenant.Store`, and `{namespace}` is outside it.");
+
+        assert_eq!(
+            reach((path, code(namespace))),
+            [
+                outside("Hidden"),
+                outside("Shop.stock"),
+                outside("Shop.secret"),
+                outside("Hidden.total"),
+                outside("Shop.views.set"),
+                outside("Shop.stock"),
+                outside("Shop.MAX"),
+            ],
+            "{namespace}"
+        );
+    }
+
+    // Plain PHP has no namespace visibility, so a `.php` file reaches every PHP# class and member.
+    let php = "<?php\n\nnamespace App\\Tenant\\Other;\n\nuse App\\Tenant\\Store\\Hidden;\nuse App\\Tenant\\Store\\Shop;\n\nfinal class Plain\n{\n    public function run(Shop $shop, Hidden $hidden): int\n    {\n        $shop->views = 2;\n        return $shop->secret() + $hidden->total() + Shop::MAX;\n    }\n}\n";
+    assert_eq!(reach(("src/App/Tenant/Other/Plain.php", php)), Vec::<String>::new());
+}
+
 /// A PHP class that implements a class reports it, and keeps the metadata upstream Mago builds: only a PHP# header
 /// links its class as the parent.
 #[test]

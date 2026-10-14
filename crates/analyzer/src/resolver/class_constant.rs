@@ -36,6 +36,7 @@ use crate::resolver::selector::ResolvedSelector;
 use crate::resolver::selector::resolve_constant_selector;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
+use crate::visibility::check_internal_reach;
 
 /// Represents a successfully resolved class constant or enum case.
 #[derive(Debug)]
@@ -333,6 +334,13 @@ where
     if let Some(constant_metadata) = metadata.constants.get(&const_name) {
         let display = display_member(context, metadata.original_name, const_name);
         crate::utils::availability::check_class_constant_availability(context, constant_metadata, &display, const_span);
+        check_internal_reach(
+            context,
+            metadata,
+            Some(constant_metadata.flags.is_internal()),
+            |_| display.clone(),
+            const_span,
+        );
 
         // Prefer the docblock type (@var) when it exists, as it reflects the user's
         // intended type. When type_metadata was merely copied from the type declaration

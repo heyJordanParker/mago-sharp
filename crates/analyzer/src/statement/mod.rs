@@ -83,6 +83,7 @@ use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_sharp_type;
 use crate::utils::quoted_source;
+use crate::visibility::check_internal_reach;
 
 pub mod attributes;
 pub mod class_like;
@@ -189,6 +190,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                             // Spec section 26: an imported class's extensions apply to the whole file, so the file
                             // reads the class even where it names none of its members.
                             artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, imported, false);
+                        }
+
+                        // Spec section 5: a class of another namespace is named only through its import, since PHP#
+                        // writes no qualified name, so the import is where code outside an `internal` class's reach
+                        // names it.
+                        for item in &sequence.items {
+                            if let Some(class) = context.codebase.get_class_like(&php_name(&item.name)) {
+                                check_internal_reach(context, class, None, |_| String::new(), item.name.span());
+                            }
                         }
                     }
                     if context.settings.check_use_statements {

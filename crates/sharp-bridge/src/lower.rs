@@ -1400,8 +1400,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, default, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
-        let access = if property.modifiers().contains_visibility() { 0 } else { ZEND_ACC_PRIVATE };
-        let flags = modifier_flags(property.modifiers()) | access | accessor_flags;
+        let flags = modifier_flags(property.modifiers()) | accessor_flags;
+        // A member with no access modifier is private, spec section 5.
+        let access =
+            if flags & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE) == 0 { ZEND_ACC_PRIVATE } else { 0 };
+        let flags = flags | access;
         let attributes = self.attributes(attribute_lists, r#override, None);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])
@@ -3958,7 +3961,8 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
     let mut flags = 0;
     for modifier in modifiers {
         flags |= match modifier {
-            Modifier::Public(_) => ZEND_ACC_PUBLIC,
+            // PHP has no namespace reach, so the analyzer checks spec section 5's `internal`, and it runs as public.
+            Modifier::Public(_) | Modifier::Internal(_) => ZEND_ACC_PUBLIC,
             Modifier::Protected(_) => ZEND_ACC_PROTECTED,
             Modifier::Private(_) => ZEND_ACC_PRIVATE,
             Modifier::Static(_) => ZEND_ACC_STATIC,
@@ -3976,21 +3980,21 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::Readonly(_)
             | Modifier::PublicSet(_)
             | Modifier::ProtectedSet(_)
-            | Modifier::PrivateSet(_)
-            | Modifier::Internal(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
+            | Modifier::PrivateSet(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
         };
     }
 
     flags
 }
 
-/// The flags of a class's modifiers. `public` adds none, because every PHP class is public. A static class, whose
-/// members are all static, runs as a final PHP class.
+/// The flags of a class's modifiers. `public` and `internal` add none, because every PHP class is public and the
+/// analyzer checks spec section 5's namespace reach. A static class, whose members are all static, runs as a final
+/// PHP class.
 fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
     let mut flags = 0;
     for modifier in modifiers {
         flags |= match modifier {
-            Modifier::Public(_) => 0,
+            Modifier::Public(_) | Modifier::Internal(_) => 0,
             Modifier::Abstract(_) => ZEND_ACC_EXPLICIT_ABSTRACT_CLASS,
             Modifier::Final(_) | Modifier::Static(_) => ZEND_ACC_FINAL,
             Modifier::Protected(_)
@@ -4003,8 +4007,7 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::Override(_)
             | Modifier::Required(_)
             | Modifier::Extern(_)
-            | Modifier::Lazy(_)
-            | Modifier::Internal(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
+            | Modifier::Lazy(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
         };
     }
 
@@ -4069,8 +4072,10 @@ fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, 
         Some(setter) => match setter.modifiers.first() {
             // `init` sets the property while the object is created, in the constructors of its class and its
             // subclasses, so it runs as `protected(set)`, and the analyzer refuses every write after that.
-            None if setter.name.value == b"init" => ZEND_ACC_PROTECTED_SET,
-            None => 0,
+            None | Some(Modifier::Internal(_)) if setter.name.value == b"init" => ZEND_ACC_PROTECTED_SET,
+            // PHP has no namespace reach, so the analyzer checks spec section 5's `internal set`, and other classes
+            // of the namespace write the property as PHP's public set.
+            None | Some(Modifier::Internal(_)) => 0,
             Some(Modifier::Protected(_)) => ZEND_ACC_PROTECTED_SET,
             Some(Modifier::Private(_)) => ZEND_ACC_PRIVATE_SET,
             Some(modifier) => unreachable!("check_slice refuses the accessor modifier `{modifier}`"),

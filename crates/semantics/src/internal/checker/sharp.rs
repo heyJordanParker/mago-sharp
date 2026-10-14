@@ -1,4 +1,5 @@
 use mago_bytes::BytesDisplay;
+use mago_database::file::FolderNamespace;
 use mago_names::ResolvedNames;
 use mago_names::STANDARD_EFFECTS;
 use mago_names::binding::Binding;
@@ -14,6 +15,7 @@ use mago_reporting::Annotation;
 use mago_reporting::AnnotationKind;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
+use mago_span::Position;
 use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
@@ -596,11 +598,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(_), File) => Some(Enum),
         (Node::Event(_), File) => Some(Place::Event),
-        (Node::Modifier(Modifier::Public(_)), Place::Event) => Some(Place::Event),
-        // Spec section 5's `internal` is not supported yet on any declaration.
-        (Node::Modifier(modifier), Place::Event) if !matches!(modifier, Modifier::Internal(_)) => {
+        (Node::Modifier(Modifier::Public(_) | Modifier::Internal(_)), Place::Event) => Some(Place::Event),
+        (Node::Modifier(modifier), Place::Event) => {
             context.report(
-                Issue::error("An event takes only `public`.")
+                Issue::error("An event takes only `public` or `internal`.")
                     .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier."))
                     .with_note("An event runs as a final class, and its parameters are its public get-only properties."),
             );
@@ -651,7 +652,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Modifier::Private(_)
                 | Modifier::Abstract(_)
                 | Modifier::Final(_)
-                | Modifier::Static(_),
+                | Modifier::Static(_)
+                | Modifier::Internal(_),
             ),
             Class,
         ) => Some(Class),
@@ -660,7 +662,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(place)
         }
-        (Node::Modifier(Modifier::Public(_)), Interface | Enum) => Some(place),
+        (Node::Modifier(Modifier::Public(_) | Modifier::Internal(_)), Interface | Enum) => Some(place),
         (Node::ClassLikeMember(ClassLikeMember::Method(_)), Interface) => Some(Interface),
         // An interface states a property its classes give, as `OrderEvent` states `orderId`, spec section 15.
         (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
@@ -838,7 +840,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         },
         (
             Node::ClassLikeConstant(_)
-            | Node::Modifier(Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)),
+            | Node::Modifier(
+                Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_),
+            ),
             ClassConstant,
         ) => Some(ClassConstant),
         (Node::ClassLikeConstantItem(_), ClassConstant) => Some(Constant),
@@ -883,6 +887,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 Modifier::Public(_)
                 | Modifier::Protected(_)
                 | Modifier::Private(_)
+                | Modifier::Internal(_)
                 | Modifier::Static(_)
                 | Modifier::Abstract(_)
                 | Modifier::Virtual(_)
@@ -975,6 +980,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 Modifier::Public(_)
                 | Modifier::Protected(_)
                 | Modifier::Private(_)
+                | Modifier::Internal(_)
                 | Modifier::Static(_)
                 | Modifier::Abstract(_)
                 | Modifier::Virtual(_)
@@ -1016,15 +1022,20 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // Outside a constructor, PHP's own check reports a parameter with an access modifier.
         (Node::FunctionLikeParameter(parameter), Method)
             if parameter.hooks.is_none()
-                && let Some(public) = parameter.modifiers.get_public()
+                && let Some(access) = parameter
+                    .modifiers
+                    .iter()
+                    .find(|modifier| matches!(modifier, Modifier::Public(_) | Modifier::Internal(_)))
                 && is_constructor_parameter(parameter, context.program) =>
         {
+            let level = BytesDisplay(access.get_keyword().value);
+
             report_refusal(
-                Issue::error(
-                    "A `public` constructor parameter needs accessors: a public member is a property, as in `public int id { get; }`.",
-                )
-                .with_annotation(Annotation::primary(public.span()).with_message("Declared `public` here."))
-                .with_note("A `public` parameter without accessors is an error, as a public field is."),
+                Issue::error(format!(
+                    "A constructor parameter declared `{level}` needs accessors: it is a property, as in `{level} int id {{ get; }}`."
+                ))
+                .with_annotation(Annotation::primary(access.span()).with_message(format!("Declared `{level}` here.")))
+                .with_note("A field is `private` or `protected`, so a parameter without accessors is one."),
                 parameter.span(),
                 Parameter,
                 context,
@@ -1101,6 +1112,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 Modifier::Public(_)
                 | Modifier::Protected(_)
                 | Modifier::Private(_)
+                | Modifier::Internal(_)
                 | Modifier::Static(_)
                 | Modifier::Final(_)
                 | Modifier::Abstract(_),
@@ -1865,7 +1877,7 @@ fn check_extension(extension: &Extension, context: &mut Context<'_, '_, '_>) {
                 continue;
             }
         };
-        // Spec section 5's `internal` is an access modifier, which the walk refuses as not supported yet.
+        // Spec section 5's `internal` is an access modifier.
         for modifier in modifiers
             .iter()
             .filter(|modifier| !modifier.is_read_visibility() && !matches!(modifier, Modifier::Internal(_)))
@@ -1933,8 +1945,8 @@ fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Contex
         Issue::error(message).with_annotation(Annotation::primary(span).with_message("Remove this."))
     };
     let issue = if let Some(modifier) = parameter.modifiers.first() {
-        // The issue covers the modifier, not the parameter, so the walk stops here: it would refuse `readonly` and
-        // `internal` again as not supported yet.
+        // The issue covers the modifier, not the parameter, so the walk stops here: it would refuse `readonly` again
+        // as not supported yet.
         context.report(remove(
             modifier.span(),
             "An event's parameter takes no modifier: it is a public get-only property of the event.",
@@ -2191,11 +2203,19 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
 
     match property {
         Property::Plain(field) => {
-            if let Some(public) = field.modifiers.get_public() {
+            if let Some(access) =
+                field.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Public(_) | Modifier::Internal(_)))
+            {
+                let level = BytesDisplay(access.get_keyword().value);
+
                 Err(Box::new(
-                    Issue::error("A PHP# field cannot be `public`: a field is `private` or `protected`.")
-                        .with_annotation(Annotation::primary(public.span()).with_message("Declared `public` here."))
-                        .with_help("Declare a property, as in `public int views { get; set; }`, to make it public."),
+                    Issue::error(format!("A PHP# field cannot be `{level}`: a field is `private` or `protected`."))
+                        .with_annotation(
+                            Annotation::primary(access.span()).with_message(format!("Declared `{level}` here.")),
+                        )
+                        .with_help(format!(
+                            "Declare a property, as in `{level} int views {{ get; set; }}`, to make it {level}."
+                        )),
                 ))
             } else if field.items.len() > 1 {
                 Err(Box::new(not_supported(
@@ -2364,13 +2384,12 @@ fn report_methods_named_as_properties(class: ClassLike, context: &mut Context<'_
     }
 }
 
-/// Whether the slice has a class constant, with the refusal when it does not: an access modifier and one name.
-/// Whether a member writes its access, spec section 5's `internal` included, which the walk refuses on its own as not
-/// supported yet.
+/// Whether a member writes its access, spec section 5's `internal` included.
 fn writes_access(modifiers: &Sequence<Modifier>) -> bool {
-    modifiers.contains_visibility() || modifiers.iter().any(|modifier| matches!(modifier, Modifier::Internal(_)))
+    modifiers.contains_visibility() || modifiers.contains_internal()
 }
 
+/// Whether the slice has a class constant, with the refusal when it does not: an access modifier and one name.
 fn is_slice_constant(constant: &ClassLikeConstant) -> Result<(), Box<Issue>> {
     let not_supported = |span: Span, message: &str, note: &str| {
         Box::new(
@@ -2407,7 +2426,9 @@ fn check_accessors(
     name: Span,
     context: &mut Context<'_, '_, '_>,
 ) {
-    let reach = modifiers.get_first_read_visibility().map_or(0, visibility_reach);
+    let access = modifiers.iter().find(|modifier| {
+        matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
+    });
     let mut declared: Vec<&[u8]> = Vec::new();
 
     for accessor in &accessors.hooks {
@@ -2416,7 +2437,7 @@ fn check_accessors(
             report_not_supported(
                 accessor.span(),
                 "accessor",
-                "A PHP# property's accessors are `get` and `set` or `init`, each written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private` or `protected`.",
+                "A PHP# property's accessors are `get` and `set` or `init`, each written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private`, `protected` or `internal`.",
                 context,
             );
         } else if declared.contains(&name) {
@@ -2432,14 +2453,14 @@ fn check_accessors(
                         "Keep `init` to set it only while the object is created, or `set` to set it at any time.",
                     ),
             );
-        } else if accessor.modifiers.first().is_some_and(|modifier| visibility_reach(modifier) >= reach) {
+        } else if accessor.modifiers.first().is_some_and(|modifier| !is_narrower(modifier, access)) {
             let setter = BytesDisplay(name);
 
             context.report(
                 Issue::error(format!("The `{setter}` accessor of a PHP# property must be narrower than the property."))
                     .with_annotation(Annotation::primary(accessor.span()).with_message("Declared here."))
                     .with_help(format!(
-                        "Write `private {setter};` or `protected {setter};` narrower than the property, or `{setter};`."
+                        "Write `private {setter};`, or `protected {setter};` or `internal {setter};` under a public property, narrower than the property, or `{setter};`."
                     )),
             );
         }
@@ -2457,15 +2478,17 @@ fn check_accessors(
 }
 
 /// Whether the slice has an accessor: `get`, `set` or `init` without attributes, `&` or a parameter list, where only
-/// `set` and `init` take an access modifier, `private`, `protected` or `public`, which `check_accessors` compares with
-/// the property's.
+/// `set` and `init` take an access modifier, `private`, `protected`, `internal` or `public`, which `check_accessors`
+/// compares with the property's.
 fn is_slice_accessor(accessor: &PropertyHook) -> bool {
     accessor.attribute_lists.is_empty()
         && accessor.ampersand.is_none()
         && accessor.parameter_list.is_none()
         && match accessor.modifiers.as_slice() {
             [] => accessor.name.value == b"get" || accessor.is_setter(),
-            [Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)] => accessor.is_setter(),
+            [Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_)] => {
+                accessor.is_setter()
+            }
             _ => false,
         }
 }
@@ -2603,12 +2626,15 @@ fn report_this(node: Node<'_, '_>, message: &str, help: Option<&str>, context: &
 }
 
 /// How far a visibility modifier reaches: `private` least, then `protected`, then `public`.
-const fn visibility_reach(modifier: &Modifier) -> u8 {
-    match modifier {
-        Modifier::Public(_) | Modifier::PublicSet(_) => 2,
-        Modifier::Protected(_) | Modifier::ProtectedSet(_) => 1,
-        _ => 0,
-    }
+/// Whether the access modifier `setter` reaches strictly less than `property`, the property's own access modifier, as
+/// C# requires of an accessor's. `internal` and `protected` reach different code, a namespace and the subclasses, so
+/// neither is narrower than the other, and `private` is narrower than both.
+const fn is_narrower(setter: &Modifier, property: Option<&Modifier>) -> bool {
+    matches!(
+        (property, setter),
+        (Some(Modifier::Public(_)), Modifier::Internal(_) | Modifier::Protected(_) | Modifier::Private(_))
+            | (Some(Modifier::Internal(_) | Modifier::Protected(_)), Modifier::Private(_))
+    )
 }
 
 /// Whether the slice has a namespace: the file's first, with a name and no braces.
@@ -3303,7 +3329,7 @@ fn check_named_constructor(constructor: &NamedConstructor, class: &Class, contex
         );
     }
 
-    // Spec section 5's `internal` is an access, which the walk refuses as not supported yet.
+    // Spec section 5's `internal` is an access.
     let is_access = |modifier: &Modifier| modifier.is_read_visibility() || matches!(modifier, Modifier::Internal(_));
     for modifier in constructor.modifiers.iter().filter(|modifier| !is_access(modifier)) {
         report(
@@ -3986,10 +4012,31 @@ fn check_capitalized(name: &[u8], span: Span, context: &mut Context<'_, '_, '_>)
 /// Checks the namespace, classes and imports of a PHP# file: each part of the namespace starts with a capital letter,
 /// and the classes and imports name no class twice, which the engine also checks when it compiles the file. An import's
 /// namespace keeps its letters, because it names a namespace another file declares, often a plain PHP one.
+///
+/// Spec section 5: a namespace's inside is its folder, so a file an `autoload` PSR-4 folder holds declares the
+/// namespace that folder maps its folder to, and no file declares its way into a namespace. A test folder, one
+/// `autoload-dev` maps, may declare the namespace it tests.
 #[inline]
 pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) {
     let (classes, imports) = declarations(program);
     let name = first_namespace(program).and_then(|namespace| namespace.name.as_ref());
+
+    if let Some(FolderNamespace::Namespace(folder)) = &context.source_file.folder_namespace
+        && name.is_none_or(|name| name.value() != folder.as_bytes())
+    {
+        let issue = Issue::error(format!(
+            "This file's folder holds the namespace `{folder}`, so the file declares `namespace {folder};`."
+        ))
+        .with_note("A namespace's inside is its folder, so no file declares its way into another namespace.");
+
+        context.report(match name {
+            Some(name) => issue.with_annotation(Annotation::primary(name.span()).with_message("Declared here.")),
+            None => issue.with_annotation(
+                Annotation::primary(Span::new(context.source_file.id, Position::new(0), Position::new(0)))
+                    .with_message("The file declares no namespace."),
+            ),
+        });
+    }
 
     if let Some(name) = name {
         let mut start = 0;

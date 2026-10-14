@@ -325,6 +325,7 @@ impl<'config> Database<'config> {
             let old = &**arc;
             let mut file = File::new(old.name.clone(), old.file_type, old.path.clone(), new_contents);
             file.is_standard_library = old.is_standard_library;
+            file.folder_namespace.clone_from(&old.folder_namespace);
             *arc = Arc::new(file);
         }
 

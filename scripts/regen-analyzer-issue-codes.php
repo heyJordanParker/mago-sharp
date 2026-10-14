@@ -374,6 +374,7 @@ final class AnalyzerCodeModuleGenerator
         'missing-service',
         'service-cycle',
         'captive-service',
+        'internal-access',
     ];
 
     /**

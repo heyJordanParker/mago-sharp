@@ -191,7 +191,7 @@ where
         span.start.offset,
         interface.left_brace.start.offset,
         &interface.attribute_lists,
-        None,
+        Some(&interface.modifiers),
         &interface.members,
         interface.extends.as_ref(),
         None,
@@ -257,7 +257,7 @@ where
         span.start.offset,
         r#enum.left_brace.start.offset,
         &r#enum.attribute_lists,
-        None,
+        Some(&r#enum.modifiers),
         &r#enum.members,
         None,
         r#enum.implements.as_ref(),
@@ -501,6 +501,11 @@ where
 
     let mut flags = MetadataFlags::origin_flags(context.file.file_type);
     flags.set(MetadataFlags::SHARP, context.program.dialect.is_sharp());
+    // Spec section 5: a PHP# class-like is `internal` unless it is `public`, so it reaches its namespace and every
+    // namespace below it.
+    if context.program.dialect.is_sharp() && !modifiers.is_some_and(Sequence::contains_public) {
+        flags |= MetadataFlags::INTERNAL;
+    }
 
     let mut class_like_metadata = ClassLikeMetadata::new(name, original_name, span, name_span, flags);
     class_like_metadata.version_constraint = verdict.constraint;
