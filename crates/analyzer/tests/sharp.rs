@@ -12715,6 +12715,84 @@ fn emit_has_the_effect_events() {
     );
 }
 
+/// The standard library's `Dispatcher`, as `sharp/composer/` ships it.
+const DISPATCHER: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Dispatcher.sharp",
+    include_str!("../../../../composer/library/Sharp/Dispatcher.sharp"),
+);
+
+/// Spec section 15: a dispatcher runs the listeners of every event, which may reach any effect, so an implementation
+/// of `Dispatcher.dispatch` may too, while an implementation of any other declaration stays held to it. A call of
+/// `dispatch` has the effect `Events`, as `emit` does.
+#[test]
+fn a_dispatcher_may_reach_any_effect_and_a_call_of_dispatch_has_the_effect_events() {
+    let retrying = (
+        "app/Shop/Retrying.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Dispatcher;\n\npublic class Retrying : Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void()>> listeners)\n    {\n        fetch(listeners.count());\n        for (const listener of listeners)\n        {\n            listener();\n        }\n    }\n}\n",
+    );
+    let rates = (
+        "app/Shop/Rates.sharp",
+        "namespace App.Shop;\n\npublic interface Rates\n{\n    void dispatch(Any emitted, List<Function<void()>> listeners);\n}\n",
+    );
+    let live_rates = (
+        "app/Shop/LiveRates.sharp",
+        "namespace App.Shop;\n\npublic class LiveRates : Rates\n{\n    public void dispatch(Any emitted, List<Function<void()>> listeners) { fetch(1); }\n}\n",
+    );
+    let monitor = (
+        "app/Shop/Monitor.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Dispatcher;\n\npublic class Monitor\n{\n    public Monitor(private Dispatcher dispatcher) { }\n\n    public int checked\n    {\n        get\n        {\n            this.dispatcher.dispatch(1, []);\n            return 1;\n        }\n    }\n}\n",
+    );
+
+    assert_eq!(issues(retrying, &[DISPATCHER, FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[retrying, DISPATCHER, FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[live_rates, rates, FETCH, FETCH_STUB]),
+        [
+            "app/Shop/LiveRates.sharp:5:75 incompatible-effects: `LiveRates.dispatch` calls `fetch`, which has the effect `Http`, so the pure `Rates.dispatch` cannot accept it."
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[monitor, DISPATCHER]),
+        [
+            "app/Shop/Monitor.sharp:13:13 impure-getter: Getter `checked` calls `Dispatcher.dispatch`, which has the effect `Events`. Getters must be pure."
+        ]
+    );
+}
+
+/// Spec section 15: code without a body allows `emit` with `uses Events`, so an implementation that emits fits an
+/// interface or abstract method that lists `Events`, and one that is pure or lists only another effect refuses it.
+#[test]
+fn code_without_a_body_allows_emit_with_uses_events() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let implementation = (
+        "app/Shop/StoreCheckout.sharp",
+        "namespace App.Shop;\n\npublic class StoreCheckout : Checkout\n{\n    public void complete(int orderId) { emit new OrderPaid(orderId); }\n}\n",
+    );
+
+    for (declaration, allowed) in [
+        ("namespace App.Shop;\n\npublic interface Checkout\n{\n    void complete(int orderId) uses Events;\n}\n", true),
+        (
+            "namespace App.Shop;\n\npublic abstract class Checkout\n{\n    public abstract void complete(int orderId) uses Events;\n}\n",
+            true,
+        ),
+        ("namespace App.Shop;\n\npublic interface Checkout\n{\n    void complete(int orderId);\n}\n", false),
+        ("namespace App.Shop;\n\npublic interface Checkout\n{\n    void complete(int orderId) uses Mail;\n}\n", false),
+    ] {
+        let issues =
+            effect_issues(&[implementation, ("app/Shop/Checkout.sharp", declaration), order_event, order_paid]);
+        if allowed {
+            assert_eq!(issues, Vec::<String>::new(), "{declaration}");
+        } else {
+            assert!(
+                issues.len() == 1
+                    && issues[0].starts_with("app/Shop/StoreCheckout.sharp:5:41 incompatible-effects:")
+                    && issues[0].contains("`Events`"),
+                "{declaration}: {issues:?}"
+            );
+        }
+    }
+}
+
 /// The services spec section 32's examples bind: two interfaces, their classes, a class that takes a `Mailer`, and
 /// classes a binding expression takes.
 const BOUND_SERVICES: [(&str, &str); 11] = [
