@@ -1338,6 +1338,33 @@ mod tests {
         }
     }
 
+    /// Each edit compiles the same after the warm path as after a full analysis, in a one-off compile and under
+    /// `mago analyze --watch`, which analyzes with `diff`. A body edit leaves every other class unanalyzed, and the
+    /// compile still types each of their expressions.
+    #[test]
+    fn a_compile_after_each_edit_matches_a_clean_compile() {
+        let base = shop_project(&shop(MONEY, RATE));
+
+        for diff in [false, true] {
+            for edit in edits() {
+                let mut files = shop(&edit.money, &edit.rate);
+                if edit.deleted {
+                    files.retain(|(name, _)| *name != edit.edited);
+                }
+                let edited = shop_project(&files);
+
+                let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
+                compile(&mut warm, empty_stamp);
+                warm.update_database(edited.read_only());
+                warm.analyze_incremental(None).expect("the warm path runs");
+                let warm_compiled = compile(&mut warm, empty_stamp);
+                let clean_compiled = compile(&mut analyzed(&edited), empty_stamp);
+
+                assert_eq!(bodies(&warm_compiled), bodies(&clean_compiled), "diff {diff}: {}", edit.name);
+            }
+        }
+    }
+
     fn declarations(signature: &FileSignature) -> Vec<SymbolIdentifier> {
         signature
             .ast_nodes

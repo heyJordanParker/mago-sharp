@@ -49,6 +49,10 @@ fn database(files: &[(&'static str, &str)]) -> Database<'static> {
 }
 
 fn server(repository: &Path, database: Database<'static>) -> Server {
+    server_with(repository, database, AnalyzerSettings::new(PHPVersion::PHP85))
+}
+
+fn server_with(repository: &Path, database: Database<'static>, analyzer_settings: AnalyzerSettings) -> Server {
     let command = WorkerCommand::new("php")
         .with_argument(repository.join("composer/tests/Sdk/Fixtures/analyzer-server-worker.php"))
         .with_current_directory(repository);
@@ -61,7 +65,7 @@ fn server(repository: &Path, database: Database<'static>) -> Server {
 
     let settings = Settings {
         parser: ParserSettings::default(),
-        analyzer: AnalyzerSettings::new(PHPVersion::PHP85),
+        analyzer: analyzer_settings,
         plugin_registry: Arc::new(registry),
         use_progress_bars: false,
     };
@@ -133,6 +137,43 @@ fn a_failed_analysis_resets_the_server_so_the_next_answers_like_a_fresh_one() {
         .issues,
     );
     assert_eq!(recovered, fresh);
+}
+
+/// Declaring `PROOF_REFERENCE` gives the before-analysis hook a new reference, so the warm pass analyzes every file
+/// again, the unchanged `Broken` too. Under `diff`, as `mago analyze --watch` analyzes, `Broken` keeps its issue.
+#[test]
+fn a_warm_pass_whose_before_analysis_references_changed_reports_what_a_fresh_pass_reports() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the changed references test") {
+        return;
+    }
+
+    let broken = "<?php\nfinal class Broken { public function value(): int { return 'text'; } }\n";
+    let watch = || AnalyzerSettings { diff: true, ..AnalyzerSettings::new(PHPVersion::PHP85) };
+    let mut warm = server_with(
+        repository,
+        database(&[("src/box.php", BOX), ("src/broken.php", broken), ("src/flag.php", "<?php\nconst PROOF_OK = 1;\n")]),
+        watch(),
+    );
+    warm.analyze().expect("initial analysis");
+
+    let flag = FileId::new(b"src/flag.php");
+    let referencing = "<?php\nconst PROOF_REFERENCE = 1;\n";
+    warm.database_mut().update(flag, Cow::Borrowed(referencing.as_bytes()));
+    let after = codes(&warm.analyze_incremental(&[flag]).expect("analysis after the references changed").issues);
+
+    let fresh = codes(
+        &server_with(
+            repository,
+            database(&[("src/box.php", BOX), ("src/broken.php", broken), ("src/flag.php", referencing)]),
+            watch(),
+        )
+        .analyze()
+        .expect("fresh analysis")
+        .issues,
+    );
+    assert!(fresh.contains_key("invalid-return-statement"), "Broken returns a string: {fresh:#?}");
+    assert_eq!(after, fresh);
 }
 
 /// The messages the reading hook reports under `code`.
