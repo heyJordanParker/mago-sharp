@@ -75,9 +75,77 @@ pub struct ReadonlyHint<'arena> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct GenericHint<'arena> {
     pub name: LocalIdentifier<'arena>,
+    pub type_arguments: TypeArgumentList<'arena>,
+}
+
+/// The number of type arguments a PHP# generic type takes when `name` is one of PHP#'s own `List`, `Map`, `Set` and
+/// `Class`, which name no class, or `None` for any other name.
+#[must_use]
+pub fn built_in_generic_arity(name: &[u8]) -> Option<usize> {
+    match name {
+        b"List" | b"Set" | b"Class" => Some(1),
+        b"Map" => Some(2),
+        _ => None,
+    }
+}
+
+/// Represents the PHP# type arguments of a type, a `new` or a call, as spec section 11 writes them.
+///
+/// # Examples
+///
+/// ```csharp
+/// new PaginatedList<Order>(rows)
+/// ```
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TypeArgumentList<'arena> {
     pub less_than: Span,
     pub arguments: TokenSeparatedSequence<'arena, Hint<'arena>>,
     pub greater_than: Span,
+}
+
+/// Represents the PHP# type parameters of a class, an interface or a method, as spec section 11 declares them.
+///
+/// # Examples
+///
+/// ```csharp
+/// public class PaginatedList<out TItem : DatabaseEntity, TKey> { }
+/// ```
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TypeParameterList<'arena> {
+    pub less_than: Span,
+    pub parameters: TokenSeparatedSequence<'arena, TypeParameter<'arena>>,
+    pub greater_than: Span,
+}
+
+/// Represents one PHP# type parameter: its variance from spec section 11.1, its name, and its bound from section 11.
+///
+/// # Examples
+///
+/// ```csharp
+/// out TItem : DatabaseEntity & Shareable
+/// ```
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TypeParameter<'arena> {
+    pub variance: Option<Keyword<'arena>>,
+    pub name: LocalIdentifier<'arena>,
+    pub bound: Option<TypeParameterBound<'arena>>,
+}
+
+/// Represents the bound of a PHP# type parameter, as spec section 11 writes it after a colon.
+///
+/// # Examples
+///
+/// ```csharp
+/// : DatabaseEntity & Shareable
+/// ```
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TypeParameterBound<'arena> {
+    pub colon: Span,
+    pub hint: Hint<'arena>,
 }
 
 /// Represents a PHP# function type, as spec section 14.1 writes it: the return type, then the parameter types in
@@ -351,7 +419,36 @@ impl HasSpan for ReadonlyHint<'_> {
 
 impl HasSpan for GenericHint<'_> {
     fn span(&self) -> Span {
-        self.name.span().join(self.greater_than)
+        self.name.span().join(self.type_arguments.span())
+    }
+}
+
+impl HasSpan for TypeArgumentList<'_> {
+    fn span(&self) -> Span {
+        self.less_than.join(self.greater_than)
+    }
+}
+
+impl HasSpan for TypeParameterList<'_> {
+    fn span(&self) -> Span {
+        self.less_than.join(self.greater_than)
+    }
+}
+
+impl HasSpan for TypeParameter<'_> {
+    fn span(&self) -> Span {
+        let start = self.variance.map_or(self.name.span, |variance| variance.span);
+
+        match &self.bound {
+            Some(bound) => start.join(bound.span()),
+            None => start.join(self.name.span),
+        }
+    }
+}
+
+impl HasSpan for TypeParameterBound<'_> {
+    fn span(&self) -> Span {
+        self.colon.join(self.hint.span())
     }
 }
 

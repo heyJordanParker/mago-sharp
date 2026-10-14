@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
@@ -32,12 +33,15 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::binary::logical::merge_short_circuited_assignments;
 use crate::expression::constant_access::analyze_namespace_constant;
+use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::property::resolve_method_value;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
 use crate::utils::expression::get_bare_name_variable_id;
+use crate::utils::names::and_list;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::member_namespace;
+use mago_names::short_name;
 
 pub mod class_constant_access;
 pub mod property_access;
@@ -58,6 +62,36 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
             Access::Property(PropertyAccess {
                 object, property: ClassLikeMemberSelector::Identifier(name), ..
             }) if report_full_name(context, object, Some(name)) => Ok(()),
+            // `TItem.y` reads `y` on the class of the type argument the code runs with, any class `TItem`'s bound holds,
+            // as a class value's member is read. The resolution reports a bound that holds a type that is no class.
+            Access::Property(
+                access @ PropertyAccess {
+                    object: Expression::ConstantAccess(class),
+                    property: ClassLikeMemberSelector::Identifier(name),
+                    ..
+                },
+            ) if context.resolved_names.is_type_parameter(&class.name) => {
+                let classes: Vec<Word> =
+                    resolve_classnames_from_expression(context, block_context, artifacts, access.object, false)?
+                        .into_iter()
+                        .filter_map(|class| class.fqcn)
+                        .collect();
+                if classes.is_empty() {
+                    artifacts.set_expression_type(&access.span(), get_never());
+
+                    return Ok(());
+                }
+
+                analyze_class_value_member(
+                    context,
+                    block_context,
+                    artifacts,
+                    access.object,
+                    name,
+                    access.span(),
+                    classes,
+                )
+            }
             // PHP# reads a member through a class value, `typeof(X).y` or `type.y`, as `Class.y` reads it on the class
             // the value holds, which is PHP's `$type::y`.
             Access::Property(access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(name), .. })
@@ -125,14 +159,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
 
                     Ok(())
                 }
-                Some(StaticProperty {
-                    class: class @ Expression::ConstantAccess(class_name),
-                    name: StaticPropertyName::Identifier(name),
-                    span,
-                }) if block_context.flags.inside_constant_expression()
-                    || context
-                        .codebase
-                        .class_constant_exists(context.resolved_names.get(&class_name.name), name.value) =>
+                Some(StaticProperty { class, name: StaticPropertyName::Identifier(name), span })
+                    if let Some(class_name) = context.resolved_names.static_property_class(access)
+                        && (block_context.flags.inside_constant_expression()
+                            || context
+                                .codebase
+                                .class_constant_exists(context.resolved_names.get(&class_name.name), name.value)) =>
                 {
                     class_constant_access::analyze_class_constant_access(
                         context,
@@ -143,15 +175,26 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                         span,
                     )
                 }
-                Some(StaticProperty {
-                    class: Expression::ConstantAccess(class_name),
-                    name: StaticPropertyName::Identifier(name),
-                    span,
-                }) if is_static_method_value(context, context.resolved_names.get(&class_name.name), name.value) => {
-                    let class_id = word(context.resolved_names.get(&class_name.name));
-                    let method_type =
-                        resolve_method_value(context, block_context, artifacts, class_id, word(name.value), span)
-                            .unwrap_or_else(get_mixed);
+                Some(StaticProperty { name: StaticPropertyName::Identifier(name), span, .. })
+                    if let Some(class_name) = context.resolved_names.static_property_class(access)
+                        && is_static_method_value(
+                            context,
+                            context.resolved_names.get(&class_name.name),
+                            name.value,
+                        ) =>
+                {
+                    let class = TObject::new_named(word(context.resolved_names.get(&class_name.name)));
+                    let method_type = resolve_method_value(
+                        context,
+                        block_context,
+                        artifacts,
+                        &class,
+                        None,
+                        word(name.value),
+                        span,
+                        span,
+                    )
+                    .unwrap_or_else(get_mixed);
                     artifacts.set_expression_type(self, method_type);
 
                     Ok(())
@@ -373,12 +416,10 @@ where
     } else {
         format!("`{receiver}.{member}` is {} but {last}, so PHP# cannot tell how to read it.", rest.join(", "))
     };
-    let class = first_class.as_bytes().rsplit(|byte| *byte == b'\\').next().unwrap_or_default();
-
     Some((
         Issue::error(message)
             .with_annotation(Annotation::primary(name.span).with_message("Not the same kind of member on every class")),
-        String::from_utf8_lossy(class).into_owned(),
+        short_name(first_class),
     ))
 }
 
@@ -388,17 +429,6 @@ where
     A: Arena,
 {
     String::from_utf8_lossy(&context.source_file.contents[object.span().to_range_usize()]).into_owned()
-}
-
-/// The class names `classes` as an English list, each in backticks: "`A`", "`A` and `B`", "`A`, `B` and `C`".
-fn and_list(classes: &[Word]) -> String {
-    let names: Vec<String> = classes.iter().map(|class| format!("`{}`", BytesDisplay(class.as_bytes()))).collect();
-
-    match names.split_last() {
-        Some((last, [])) => last.clone(),
-        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-        None => String::new(),
-    }
 }
 
 /// The classes `object` holds when it is a PHP# class value: `typeof(X)`, or a local holding the class-string of a
@@ -435,6 +465,30 @@ where
         }
         _ => None,
     }
+}
+
+/// The static property a PHP# property access writes: `Class.name` on a class written by name, or `type.name` through a
+/// class value, which writes it on the class the value holds, as `Class.name` does.
+pub(crate) fn written_static_property<'ast, 'arena, A>(
+    context: &Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+    access: &'ast PropertyAccess<'arena>,
+) -> Option<StaticProperty<'ast, 'arena>>
+where
+    A: Arena,
+{
+    StaticProperty::from_property_access(access, context.resolved_names).or_else(|| match &access.property {
+        ClassLikeMemberSelector::Identifier(name)
+            if class_value_classes(context, block_context, access.object).is_some() =>
+        {
+            Some(StaticProperty {
+                class: access.object,
+                name: StaticPropertyName::Identifier(name),
+                span: access.span(),
+            })
+        }
+        _ => None,
+    })
 }
 
 /// Analyzes PHP#'s `type.name` read through a class value as `Class.y` reads it on the classes the value holds: the
@@ -490,8 +544,10 @@ where
             object.analyze(context, block_context, artifacts)?;
             let mut method_type = None;
             for class in classes {
-                let value = resolve_method_value(context, block_context, artifacts, class, word(name.value), span)
-                    .unwrap_or_else(get_mixed);
+                let class = TObject::new_named(class);
+                let value =
+                    resolve_method_value(context, block_context, artifacts, &class, None, word(name.value), span, span)
+                        .unwrap_or_else(get_mixed);
                 method_type = Some(add_optional_union_type(value, method_type.as_ref(), context.codebase));
             }
             artifacts.set_expression_type(&span, method_type.unwrap_or_else(get_mixed));

@@ -8,7 +8,6 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::get_array_parameters;
-use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::template::TemplateResult;
@@ -27,6 +26,7 @@ use crate::expression::binary::comparison::check_sorted_by_key;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationTarget;
 use crate::invocation::resolver::resolve_invocation_type;
+use crate::statement::function_like::is_map_key;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::map_key_error;
 use crate::statement::key_type_mixes_a_backed_enum;
@@ -54,6 +54,7 @@ where
         return Ok(fetch_set_filter_return_type(context, invocation, template_result, parameters));
     }
 
+    // `sortedBy` orders by the key its function returns, and `groupBy` and `associateBy` key the `Map` they return by it.
     if context.dialect.is_sharp()
         && let Some(argument) = invocation.arguments_source.get_argument(0).filter(|argument| !argument.is_unpacked())
         && let Some(selector) = argument.value()
@@ -71,7 +72,7 @@ where
             check_sorted_by_key(context, selector, key_type);
         } else if keys_a_map_by_its_function(&invocation.target)
             && fills_key_parameter
-            && !get_backing_key_type(key_type, context.codebase).is_always_array_key(true)
+            && !is_map_key(context, key_type)
         {
             let key_name = display_sharp_type(context, key_type);
             let error = map_key_error(context, key_type, &key_name, selector.span());

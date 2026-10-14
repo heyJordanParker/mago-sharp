@@ -40,6 +40,7 @@ use crate::utils::names::display_value_type;
 use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
+use crate::utils::template::explain_blocked_substitution;
 
 #[inline]
 pub fn analyze<'ctx, 'arena, A>(
@@ -133,7 +134,7 @@ where
             );
         }
 
-        let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
+        let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
 
         // Spec section 13: a field or a property keeps only a writable value, since `readonly` never goes on one.
         let mut dropped_readonly = false;
@@ -246,12 +247,18 @@ where
                     issue = issue.with_note(type_diff);
                 }
 
-                context.collector.report_with_code(
-                    issue_kind,
-                    issue.with_help(
-                        "Consider adding a type assertion to narrow the type of the value before the assignment.",
-                    ),
+                let issue = issue.with_help(
+                    "Consider adding a type assertion to narrow the type of the value before the assignment.",
                 );
+
+                let (issue_kind, issue) = explain_blocked_substitution(
+                    context,
+                    assigned_value_type,
+                    &resolved_property.property_type,
+                    IssueCode::InvalidPropertyAssignmentValue,
+                    (issue_kind, issue),
+                );
+                context.collector.report_with_code(issue_kind, issue);
             } else {
                 if let Some(value_span) = assigned_value_span {
                     issue = Issue::error(format!(
@@ -281,12 +288,18 @@ where
                     issue = issue.with_note(type_diff);
                 }
 
-                context.collector.report_with_code(
+                let issue = issue
+                    .with_note(format!("The type `{assigned_type_str}` is not compatible with and cannot be assigned to `{property_type_str}`."))
+                    .with_help("Change the assigned value to match the property's type, or update the property's type declaration.");
+
+                let (code, issue) = explain_blocked_substitution(
+                    context,
+                    assigned_value_type,
+                    &resolved_property.property_type,
                     IssueCode::InvalidPropertyAssignmentValue,
-                    issue
-                         .with_note(format!("The type `{assigned_type_str}` is not compatible with and cannot be assigned to `{property_type_str}`."))
-                         .with_help("Change the assigned value to match the property's type, or update the property's type declaration."),
+                    (IssueCode::InvalidPropertyAssignmentValue, issue),
                 );
+                context.collector.report_with_code(code, issue);
             }
         }
 

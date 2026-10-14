@@ -177,6 +177,7 @@ enum NodeKind: string
     case Literal = 'Literal';
     case Pipe = 'Pipe';
     case TypeOf = 'TypeOf';
+    case GenericClass = 'GenericClass';
     case LiteralFloat = 'LiteralFloat';
     case LiteralInteger = 'LiteralInteger';
     case LiteralString = 'LiteralString';
@@ -260,6 +261,10 @@ enum NodeKind: string
     case GenericHint = 'GenericHint';
     case FunctionHint = 'FunctionHint';
     case ReadonlyHint = 'ReadonlyHint';
+    case TypeArgumentList = 'TypeArgumentList';
+    case TypeParameterList = 'TypeParameterList';
+    case TypeParameter = 'TypeParameter';
+    case TypeParameterBound = 'TypeParameterBound';
     case ParenthesizedHint = 'ParenthesizedHint';
     case UnionHint = 'UnionHint';
     case Unset = 'Unset';

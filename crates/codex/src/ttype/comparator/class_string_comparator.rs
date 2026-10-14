@@ -14,6 +14,8 @@ use crate::ttype::atomic::scalar::string::TStringLiteral;
 use crate::ttype::comparator::ComparisonResult;
 use crate::ttype::comparator::atomic_comparator;
 
+/// Whether `container_class_string` holds the class string `input_scalar`. Under PHP#'s rules, a `Class<TItem>` names
+/// the opaque type parameter `TItem`, so it holds only `Class<TItem>`, and passes as a class type its bound reaches.
 #[inline]
 pub fn is_contained_by(
     codebase: &CodebaseMetadata,
@@ -40,6 +42,9 @@ pub fn is_contained_by(
 
             Cow::Owned(class_name_object(codebase, *value))
         }
+        TClassLikeString::Generic { .. } if atomic_comparison_result.sharp_rules => {
+            Cow::Owned(container_class_string.get_object_type(codebase))
+        }
         TClassLikeString::Generic { constraint, .. } | TClassLikeString::OfType { constraint, .. } => {
             Cow::Borrowed(constraint.as_ref())
         }
@@ -58,6 +63,9 @@ pub fn is_contained_by(
                 return matches!(fake_container_type.as_ref(), TAtomic::Object(TObject::Any));
             }
             TClassLikeString::Literal { value } => Cow::Owned(class_name_object(codebase, *value)),
+            TClassLikeString::Generic { .. } if atomic_comparison_result.sharp_rules => {
+                Cow::Owned(input_class_string.get_object_type(codebase))
+            }
             TClassLikeString::Generic { constraint, .. } | TClassLikeString::OfType { constraint, .. } => {
                 Cow::Borrowed(constraint.as_ref())
             }

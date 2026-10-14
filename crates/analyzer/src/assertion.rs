@@ -42,6 +42,7 @@ use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::dialect::Dialect;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
@@ -676,7 +677,7 @@ fn get_possible_array_key_argument_type(
                 }
             }
             TArray::Set(element_type) => {
-                for atomic in get_backing_key_type(element_type, codebase).types.as_ref() {
+                for atomic in get_backing_key_type(element_type, codebase, Dialect::Sharp).types.as_ref() {
                     add_possible_key_argument_type(atomic, input_key_type, &mut key_type, codebase);
                 }
             }
@@ -1791,6 +1792,13 @@ where
 
     if let Some(counter_variable_id) = variable_id {
         match right {
+            // A PHP# test of a type parameter or of a class with type arguments narrows to the type it reads.
+            Expression::Identifier(_) if let Some(tested) = artifacts.get_tested_type(right) => {
+                if_types.insert(
+                    counter_variable_id,
+                    vec![tested.types.iter().map(|atomic| Assertion::IsType(atomic.clone())).collect()],
+                );
+            }
             Expression::Identifier(identifier) => {
                 let resolved_name = context.resolved_names.get(identifier);
 

@@ -33,6 +33,7 @@ use crate::cst::cst::control_flow::pattern_match::PatternMatch;
 use crate::cst::cst::function_like::arrow_function::ArrowFunction;
 use crate::cst::cst::function_like::closure::Closure;
 use crate::cst::cst::identifier::Identifier;
+use crate::cst::cst::instantiation::GenericClass;
 use crate::cst::cst::instantiation::Instantiation;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::literal::Literal;
@@ -101,6 +102,7 @@ pub enum Expression<'arena> {
     As(As<'arena>),
     PatternMatch(PatternMatch<'arena>),
     TypeOf(TypeOf<'arena>),
+    GenericClass(GenericClass<'arena>),
     Error(Span),
 }
 
@@ -122,7 +124,9 @@ impl<'arena> Expression<'arena> {
             Self::Literal(_) => true,
             Self::Identifier(_) => true,
             Self::MagicConstant(_) => true,
-            Self::TypeOf(_) => true,
+            // A class value with type arguments is created while the code runs, spec section 25.
+            Self::TypeOf(type_of) => type_of.type_arguments.is_none(),
+            Self::GenericClass(generic_class) => generic_class.class.is_constant(version, initialization),
             Self::ConstantAccess(_) => true,
             Self::Self_(_) => true,
             Self::Parent(_) => true,
@@ -463,6 +467,7 @@ impl<'arena> Expression<'arena> {
             Expression::As(_) => NodeKind::As,
             Expression::PatternMatch(_) => NodeKind::PatternMatch,
             Expression::TypeOf(_) => NodeKind::TypeOf,
+            Expression::GenericClass(_) => NodeKind::GenericClass,
             Expression::Error(_) => NodeKind::Error,
         }
     }
@@ -514,6 +519,7 @@ impl HasSpan for Expression<'_> {
             Expression::As(expression) => expression.span(),
             Expression::PatternMatch(expression) => expression.span(),
             Expression::TypeOf(expression) => expression.span(),
+            Expression::GenericClass(expression) => expression.span(),
             Expression::Error(span) => *span,
         })
     }

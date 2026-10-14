@@ -50,15 +50,18 @@ use crate::effects::Body;
 use crate::effects::ReadonlyCall;
 use crate::error::AnalysisError;
 use crate::expression::constant_access::field_storage;
+use crate::expression::instantiation::bare_generic_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::property::DeclaredPropertyKind;
+use crate::resolver::property::get_localized_property_type;
 use crate::resolver::property::localize_property_type;
 use crate::resolver::property::resolve_declared_property;
 use crate::resolver::selector::resolve_member_selector;
 use crate::utils::expression::analyze_member_object;
 use crate::utils::expression::get_bare_name_variable_id;
+use crate::utils::expression::is_this;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
@@ -70,6 +73,7 @@ use crate::utils::names::is_prelude_stub;
 use crate::utils::names::readonly_writer;
 use crate::utils::names::sharp_method_declaration;
 use crate::utils::quoted_source;
+use crate::utils::template::check_private_method_reach;
 use crate::visibility::check_method_visibility;
 use crate::visibility::is_method_visible;
 use crate::visibility::is_visible_from_scope;
@@ -266,11 +270,12 @@ where
             .iter()
             .filter(|atomic| declared.is_none() || !matches!(atomic, TAtomic::Array(_)))
             .chain(declared.iter().flat_map(|declared| declared.types.iter()))
+            .map(|atomic| (atomic, atomic))
             .collect::<Vec<_>>();
 
-        while let Some(object_atomic) = object_atomics.pop() {
+        while let Some((object_atomic, written_atomic)) = object_atomics.pop() {
             if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = object_atomic {
-                object_atomics.extend(constraint.types.iter());
+                object_atomics.extend(constraint.types.iter().map(|bound| (bound, written_atomic)));
                 continue;
             }
 
@@ -312,7 +317,7 @@ where
                         result.has_invalid_target = true;
                     }
 
-                    report_call_on_non_object(context, object_atomic, object.span(), selector.span());
+                    report_call_on_non_object(context, object_atomic, written_atomic, object.span(), selector.span());
                     continue;
                 }
             };
@@ -339,7 +344,7 @@ where
                     continue;
                 }
 
-                let resolved_methods = resolve_method_from_object(
+                let mut resolved_methods = resolve_method_from_object(
                     context,
                     block_context,
                     object.span(),
@@ -478,13 +483,25 @@ where
                     );
                 }
 
+                for resolved_method in &mut resolved_methods {
+                    check_private_method_reach(context, object, &resolved_method.method_identifier, selector.span());
+
+                    // `Self` on a PHP# receiver typed by a type parameter is that type parameter, spec section 11.
+                    if context.dialect.is_sharp()
+                        && resolved_method.declaring_object.is_none()
+                        && let TAtomic::GenericParameter(parameter) = written_atomic
+                    {
+                        resolved_method.static_class_type = StaticClassType::Generic(parameter.clone());
+                    }
+                }
                 result.resolved_methods.extend(resolved_methods);
             }
         }
     } else {
         result.has_invalid_target = true;
         result.encountered_mixed = true;
-        report_call_on_non_object(context, &TAtomic::Mixed(TMixed::new()), object.span(), selector.span());
+        let mixed = TAtomic::Mixed(TMixed::new());
+        report_call_on_non_object(context, &mixed, &mixed, object.span(), selector.span());
     }
 
     for method_id in asserted_descendant_method_references {
@@ -1349,22 +1366,56 @@ where
                 return None;
             };
             let property_name = concat_word!(b"$", property.value);
-            let property_type = |class: &[u8]| {
-                let declaring_class = context.codebase.get_declaring_property_class(class, property_name.as_bytes())?;
-                let is_sharp = context.codebase.get_class_like(declaring_class.as_bytes())?.flags.is_sharp();
-
-                is_sharp.then(|| context.codebase.get_property_type(class, property_name.as_bytes()))?
+            let is_declared_in_sharp = |class: &[u8]| {
+                context
+                    .codebase
+                    .get_declaring_property_class(class, property_name.as_bytes())
+                    .and_then(|declaring_class| context.codebase.get_class_like(declaring_class.as_bytes()))
+                    .is_some_and(|metadata| metadata.flags.is_sharp())
             };
 
-            // `Class.name` is a static property of the class it names. Any other object is analyzed before its
-            // property's collection is asked for, so its class is its expression type.
+            // `Class.name` is a static property of the class it names, and `Counter<Order>.items` has `Counter`'s type
+            // parameters given by its type arguments, as `Orders.items` has them given by `Orders : Counter<Order>`.
+            // `this` keeps no expression type: it is the `$this` local, the scope's class with its type parameters. A
+            // property plain PHP declares keeps PHP's array, which takes either collection literal.
             if let Some(class) = context.resolved_names.static_property_class(access) {
-                property_type(context.resolved_names.get(&class.name)).cloned()
+                let class = context.resolved_names.get(&class.name);
+                let declared = is_declared_in_sharp(class)
+                    .then(|| context.codebase.get_property_type(class, property_name.as_bytes()))??;
+                // A bare `Counter.items`, refused where it is read, reads as its bounds.
+                let bounds = bare_generic_class(context, access.object).map(|(_, bounds)| bounds);
+                let type_arguments = artifacts
+                    .get_expression_type(access.object)
+                    .and_then(TUnion::get_single_named_object)
+                    .and_then(|object| object.get_type_parameters())
+                    .or(bounds.as_deref());
+                let class_metadata = context.codebase.get_class_like(class)?;
+                let declaring_class = context
+                    .codebase
+                    .get_declaring_property_class(class, property_name.as_bytes())
+                    .and_then(|declaring_class| context.codebase.get_class_like(declaring_class.as_bytes()))?;
+
+                Some(localize_property_type(
+                    context,
+                    declared,
+                    type_arguments.unwrap_or_default(),
+                    class_metadata,
+                    declaring_class,
+                ))
             } else {
-                artifacts.get_expression_type(access.object)?.types.iter().find_map(|atomic| match atomic {
-                    TAtomic::Object(object) => property_type(object.get_name()?.as_bytes()).cloned(),
-                    _ => None,
-                })
+                let receiver = if is_this(access.object, context.resolved_names) {
+                    block_context.locals.get(&word("$this"))?.as_ref()
+                } else {
+                    artifacts.get_expression_type(access.object)?
+                };
+                let is_sharp_receiver = receiver.types.iter().any(|atomic| match atomic {
+                    TAtomic::Object(object) => {
+                        object.get_name().is_some_and(|name| is_declared_in_sharp(name.as_bytes()))
+                    }
+                    _ => false,
+                });
+
+                is_sharp_receiver.then(|| get_localized_property_type(context, receiver, property_name))?
             }
         }
         _ => None,
@@ -1412,15 +1463,18 @@ where
     true
 }
 
+/// Reports a method call on `atomic_type`, which is not an object. A PHP# message names the type the code wrote,
+/// `written_type`, such as the type parameter whose bound `atomic_type` is.
 fn report_call_on_non_object<A>(
     context: &mut Context<'_, '_, A>,
     atomic_type: &TAtomic,
+    written_type: &TAtomic,
     obj_span: Span,
     selector_span: Span,
 ) where
     A: Arena,
 {
-    let type_str = display_atomic(context, atomic_type);
+    let type_str = display_atomic(context, if context.dialect.is_sharp() { written_type } else { atomic_type });
 
     context.collector.report_with_code(
         if atomic_type.is_mixed() { IssueCode::MixedMethodAccess } else { IssueCode::InvalidMethodAccess },

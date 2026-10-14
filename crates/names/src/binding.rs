@@ -20,6 +20,7 @@ use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::TokenSeparatedSequence;
+use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::Uses;
 use mago_word::Word;
 use mago_word::concat_word;
@@ -72,6 +73,8 @@ pub struct MethodParts<'ast, 'arena> {
     pub span: Span,
     pub attribute_lists: &'ast Sequence<'arena, AttributeList<'arena>>,
     pub modifiers: &'ast Sequence<'arena, Modifier<'arena>>,
+    /// The method's PHP# type parameters. An operator and a named constructor declare none.
+    pub type_parameters: Option<&'ast TypeParameterList<'arena>>,
     pub parameter_list: &'ast FunctionLikeParameterList<'arena>,
     pub return_type_hint: Option<&'ast FunctionLikeReturnTypeHint<'arena>>,
     /// The `readonly` after a method's parameters, spec section 13. An operator, a named constructor and an extension
@@ -95,10 +98,11 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: method.span(),
             attribute_lists: &method.attribute_lists,
             modifiers: &method.modifiers,
+            type_parameters: method.type_parameters,
             parameter_list: &method.parameter_list,
             return_type_hint: method.return_type_hint.as_ref(),
             readonly: method.readonly.as_ref(),
-            on: method.on.as_ref(),
+            on: method.on,
             uses: method.uses,
             body: &method.body,
             returns_value: method.returns_value(),
@@ -133,6 +137,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: operator.span(),
             attribute_lists: &operator.attribute_lists,
             modifiers: &operator.modifiers,
+            type_parameters: None,
             parameter_list: &operator.parameter_list,
             return_type_hint: Some(&operator.return_type_hint),
             readonly: None,
@@ -154,6 +159,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: named_constructor.span(),
             attribute_lists: &named_constructor.attribute_lists,
             modifiers: &named_constructor.modifiers,
+            type_parameters: None,
             parameter_list: &named_constructor.parameter_list,
             return_type_hint: None,
             readonly: None,
@@ -184,10 +190,11 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: method.span(),
             attribute_lists: &method.attribute_lists,
             modifiers: static_modifiers(arena, extension, &method.modifiers),
+            type_parameters: method.type_parameters,
             parameter_list: receiver_first(arena, extension, &method.parameter_list)?,
             return_type_hint: method.return_type_hint.as_ref(),
             readonly: None,
-            on: method.on.as_ref(),
+            on: method.on,
             uses: method.uses,
             body: &method.body,
             returns_value: method.returns_value(),
@@ -220,6 +227,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: property.span(),
             attribute_lists: &property.attribute_lists,
             modifiers: static_modifiers(arena, extension, &property.modifiers),
+            type_parameters: None,
             parameter_list: receiver_first(arena, extension, own)?,
             return_type_hint: property
                 .hint
@@ -274,7 +282,7 @@ where
     }))
 }
 
-/// What a bare PHP# name refers to.
+/// What a bare PHP# name, or a type name that names a type parameter, refers to.
 ///
 /// The parser reads `x`, `x.y` and `x.y()` the same way whatever `x` is. The binder then decides,
 /// from the scopes of the file alone, what each bare name means.
@@ -294,6 +302,12 @@ pub enum Binding {
     Member,
     /// `field` in an accessor body: the storage of the property the accessor belongs to.
     Field,
+    /// A type parameter of the enclosing method, class or interface, written as a type. Its resolved name is the name
+    /// as written, as in `TItem`.
+    TypeParameter {
+        /// The name in the type parameter's declaration, as `TItem` in `<TItem : DatabaseEntity>`.
+        declaration: Span,
+    },
 }
 
 /// A PHP# scope rule a bare name breaks. The name still has its [`Binding`].

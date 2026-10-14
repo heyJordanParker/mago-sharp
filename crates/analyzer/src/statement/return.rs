@@ -11,7 +11,6 @@ use mago_codex::ttype::combine_union_types;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
-use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::get_mixed;
@@ -41,7 +40,8 @@ use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::is_refused;
 use crate::statement::function_like::body_return_type;
-use crate::statement::function_like::expect_function_type;
+use crate::statement::function_like::expect_type;
+use crate::statement::function_like::get_scope_static_class_type;
 use crate::statement::function_like::known_type_or_error;
 use crate::utils::docblock::check_docblock_type_incompatibility;
 use crate::utils::docblock::get_type_from_var_docblock;
@@ -60,6 +60,7 @@ use crate::utils::names::display_value_type;
 use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
+use crate::utils::template::explain_blocked_substitution;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
     fn analyze<'ctx, A>(
@@ -97,12 +98,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
 
         let inferred_return_type = if let Some(return_value) = self.value.as_ref() {
             let return_type = block_context.scope.get_function_like().and_then(body_return_type);
-            expect_function_type(
-                context,
-                artifacts,
-                return_value,
-                return_type.map(|return_type| &return_type.type_union),
-            );
+            expect_type(context, artifacts, return_value, return_type.map(|return_type| &return_type.type_union));
             if let Some(return_type) = return_type {
                 check_sharp_literal_kind(context, return_value, &return_type.type_union);
             }
@@ -116,7 +112,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
             // A refused value is `never`, and its error already reports it.
             if let Some(inferred_return_type) = &inferred_return_type
                 && inferred_return_type.is_never()
-                && !is_refused(return_value)
+                && !is_refused(return_value, context)
             {
                 context.collector.report_with_code(
                     IssueCode::NeverReturn,
@@ -206,11 +202,7 @@ pub fn handle_return_value<'ctx, A>(
 
     let mut expansion_options = TypeExpansionOptions {
         self_class: block_context.scope.get_class_like_name(),
-        static_class_type: if let Some(calling_class) = block_context.scope.get_class_like_name() {
-            StaticClassType::Name(calling_class)
-        } else {
-            StaticClassType::None
-        },
+        static_class_type: get_scope_static_class_type(context, &block_context.scope),
         ..Default::default()
     };
 
@@ -297,11 +289,7 @@ pub fn handle_return_value<'ctx, A>(
             &mut expected_type,
             &TypeExpansionOptions {
                 self_class: block_context.scope.get_class_like_name(),
-                static_class_type: if let Some(calling_class) = block_context.scope.get_class_like_name() {
-                    StaticClassType::Name(calling_class)
-                } else {
-                    StaticClassType::None
-                },
+                static_class_type: get_scope_static_class_type(context, &block_context.scope),
                 function_is_final: if let Some(method_metadata) = &function_like_metadata.method_metadata {
                     method_metadata.is_final
                 } else {
@@ -375,7 +363,7 @@ pub fn handle_return_value<'ctx, A>(
     }
 
     if let Some(return_value) = return_value {
-        let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
+        let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
 
         if takes_any_value(&expected_return_type, &inferred_return_type, union_comparison_result.sharp_rules) {
             return;
@@ -552,14 +540,14 @@ pub fn handle_return_value<'ctx, A>(
             );
         }
 
-        if union_comparison_result.type_coerced.unwrap_or(false) {
+        let (code, mut issue) = if union_comparison_result.type_coerced.unwrap_or(false) {
             if union_comparison_result.type_coerced_from_as_mixed.unwrap_or(false) {
                 return;
             }
 
             if union_comparison_result.type_coerced_from_nested_mixed.unwrap_or(false) {
                 let mixed = display_type(context, &get_mixed());
-                let mut issue = Issue::error(format!(
+                let issue = Issue::error(format!(
                     "Returned type `{inferred_return_type_str}` is less specific than the declared return type `{expected_return_type_str}` for {kind} `{function_name}` due to nested '{mixed}'."
                 ))
                 .with_annotation(
@@ -575,13 +563,9 @@ pub fn handle_return_value<'ctx, A>(
                     )
                 );
 
-                if let Some(type_diff) = get_type_diff(context, &expected_return_type, &inferred_return_type) {
-                    issue = issue.with_note(type_diff);
-                }
-
-                context.collector.report_with_code(IssueCode::LessSpecificNestedReturnStatement, issue);
+                (IssueCode::LessSpecificNestedReturnStatement, issue)
             } else {
-                let mut issue = Issue::error(format!(
+                let issue = Issue::error(format!(
                     "Returned type `{inferred_return_type_str}` is less specific than the declared return type `{expected_return_type_str}` for {kind} `{function_name}`."
                 ))
                 .with_annotation(
@@ -599,11 +583,7 @@ pub fn handle_return_value<'ctx, A>(
                     )
                );
 
-                if let Some(type_diff) = get_type_diff(context, &expected_return_type, &inferred_return_type) {
-                    issue = issue.with_note(type_diff);
-                }
-
-                context.collector.report_with_code(IssueCode::LessSpecificReturnStatement, issue);
+                (IssueCode::LessSpecificReturnStatement, issue)
             }
         } else {
             // Spec section 28: a law is a static function-like the class keeps apart from its methods, and it has no
@@ -627,7 +607,7 @@ pub fn handle_return_value<'ctx, A>(
                     ),
                 ),
             };
-            let mut issue = Issue::error(format!(
+            let issue = Issue::error(format!(
                 "Invalid return type for {kind} `{function_name}`: expected `{expected_return_type_str}`, but found `{inferred_return_type_str}`."
             ))
             .with_annotation(
@@ -641,12 +621,21 @@ pub fn handle_return_value<'ctx, A>(
             )
             .with_help(help);
 
-            if let Some(type_diff) = get_type_diff(context, &expected_return_type, &inferred_return_type) {
-                issue = issue.with_note(type_diff);
-            }
+            (IssueCode::InvalidReturnStatement, issue)
+        };
 
-            context.collector.report_with_code(IssueCode::InvalidReturnStatement, issue);
+        if let Some(type_diff) = get_type_diff(context, &expected_return_type, &inferred_return_type) {
+            issue = issue.with_note(type_diff);
         }
+
+        let (code, issue) = explain_blocked_substitution(
+            context,
+            &inferred_return_type,
+            &expected_return_type,
+            IssueCode::InvalidReturnStatement,
+            (code, issue),
+        );
+        context.collector.report_with_code(code, issue);
     } else if require_return_value
         && !function_like_metadata.flags.has_yield()
         && !matches!(
@@ -735,8 +724,8 @@ fn handle_property_hook_return<'ctx, A>(
         inferred_return_type = Rc::new(inner);
     }
 
-    let sharp_rules = context.dialect.is_sharp();
-    if takes_any_value(&expected_return_type, &inferred_return_type, sharp_rules) {
+    let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
+    if takes_any_value(&expected_return_type, &inferred_return_type, comparison_result.sharp_rules) {
         return;
     }
 
@@ -769,7 +758,6 @@ fn handle_property_hook_return<'ctx, A>(
         return;
     }
 
-    let mut comparison_result = ComparisonResult::with_sharp_rules(sharp_rules);
     if is_contained_by(
         context.codebase,
         &inferred_return_type,

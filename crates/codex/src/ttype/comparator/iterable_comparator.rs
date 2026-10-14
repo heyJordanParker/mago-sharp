@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use mago_syntax::dialect::Dialect;
+
 use crate::metadata::CodebaseMetadata;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::comparator::ComparisonResult;
@@ -34,7 +36,8 @@ pub fn is_contained_by(
     }
 
     // A PHP# `Map` keyed by a backed enum is also an iterable of the backing values, which plain PHP receives.
-    if let Cow::Owned(backing_k) = get_backing_key_type(&input_k, codebase)
+    let dialect = if atomic_comparison_result.sharp_rules { Dialect::Sharp } else { Dialect::Php };
+    if let Cow::Owned(backing_k) = get_backing_key_type(&input_k, codebase, dialect)
         && !union_comparator::is_contained_by(
             codebase,
             &input_k,
@@ -42,7 +45,7 @@ pub fn is_contained_by(
             false,
             input_k.ignore_falsable_issues(),
             inside_assertion,
-            &mut ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules),
+            &mut atomic_comparison_result.nested(),
         )
     {
         input_k = backing_k;
@@ -51,7 +54,7 @@ pub fn is_contained_by(
     let mut all_types_contain = true;
 
     for (input, container) in [(&input_k, &container_k), (&input_v, &container_v)] {
-        let mut nested_comparison_result = ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules);
+        let mut nested_comparison_result = atomic_comparison_result.nested();
         if !union_comparator::is_contained_by(
             codebase,
             input,

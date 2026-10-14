@@ -388,6 +388,7 @@ where
         method.name_span,
         "method",
         concat_word!(&class_like_metadata.original_name, "::", &method_name),
+        body,
     );
 
     // Check for missing type hints
@@ -454,7 +455,7 @@ where
             span: initializer.span(),
         };
 
-        return analyze_static_method_call(context, block_context, artifacts, call);
+        return analyze_static_method_call(context, block_context, artifacts, call, None);
     }
 
     if !initializer.argument_list.arguments.is_empty() {
