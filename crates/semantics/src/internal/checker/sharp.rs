@@ -3011,9 +3011,9 @@ fn body_without_braces(statement: &Statement, context: &Context<'_, '_, '_>) -> 
 }
 
 /// Checks the arms of a `match`, and returns whether its children can be checked. Spec section 21 needs a `default`
-/// arm on a value that is not an enum, and section 20 lets a `match` on an enum leave it out when its arms cover every
-/// case. Only the analyzer knows the value's type, so a `match` whose arms all name `Class.y` values or `null` may
-/// leave out `default`, and the analyzer reports the cases it misses. A `match` without arms covers no case, so it needs
+/// arm on a value that is not an enum or a sealed interface, and section 20 lets a `match` on one leave it out when its
+/// arms cover every case. Only the analyzer knows the value's type, so a `match` whose arms all name `Class.y` values,
+/// classes or `null` may leave out `default`, and the analyzer reports the cases it misses. A `match` without arms covers no case, so it needs
 /// `default`. A block arm is only in a `match` statement. The engine takes one `default` arm, as PHP's `match` does.
 fn check_pattern_match(pattern_match: &PatternMatch, is_expression: bool, context: &mut Context<'_, '_, '_>) -> bool {
     let mut defaults = pattern_match.arms.iter().filter(|arm| arm.is_default());
@@ -3072,6 +3072,8 @@ fn names_class_values(arm: &PatternMatchArm, context: &Context<'_, '_, '_>) -> b
                 context.names.static_property_class(access).is_some()
             }
             Pattern::Value(Expression::Literal(Literal::Null(_))) => true,
+            // A class, as a case of an enum with data or an implementer of a sealed interface, spec section 20.
+            Pattern::Type(TypePattern { hint: Hint::Identifier(_), .. }) => true,
             Pattern::Binary(binary) if !binary.is_and() => {
                 is_class_value(binary.left, context) && is_class_value(binary.right, context)
             }

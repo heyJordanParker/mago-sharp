@@ -6,6 +6,7 @@ use mago_algebra::saturate_clauses;
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
@@ -22,6 +23,8 @@ use mago_span::HasPosition;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::As;
+use mago_syntax::cst::Binary;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Identifier;
@@ -66,6 +69,7 @@ use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::override_attribute;
 use crate::utils::misc::check_for_paradox;
+use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
 use crate::utils::names::display_missing_imports;
@@ -469,6 +473,7 @@ where
                 }
                 _ => None,
             })
+            .map(|test| handled_test(test, context.arena, artifacts))
             .collect();
 
         report_unhandled(pattern_match, &handled, context, block_context, artifacts);
@@ -521,18 +526,19 @@ fn report_unhandled<'ctx, 'arena, A>(
         .and_then(|id| block_context.locals.get(&id).map(|value| (**value).clone()))
         .or_else(|| artifacts.get_expression_type(pattern_match.expression).cloned())
         .unwrap_or_else(get_mixed);
-    let is_enum = value_type
-        .types
-        .iter()
-        .all(|atomic| matches!(atomic, TAtomic::Null) || enum_value(atomic, context.codebase).is_some());
+    let is_closed = value_type.types.iter().all(|atomic| {
+        matches!(atomic, TAtomic::Null)
+            || enum_value(atomic, context.codebase).is_some()
+            || closed_class(atomic, context.codebase).is_some()
+    });
 
-    let (missing, enums) = if is_enum {
+    let (missing, enums) = if is_closed {
         missing_cases(pattern_match.span(), &value_type, handled, context, block_context, artifacts)
     } else {
         (vec![], vec![])
     };
     let message = match missing.as_slice() {
-        _ if !is_enum => "A `match` needs a `default` arm.".to_owned(),
+        _ if !is_closed => "A `match` needs a `default` arm.".to_owned(),
         [] => return,
         [only] => format!("This `match` misses `{only}`."),
         [rest @ .., last] => {
@@ -629,11 +635,100 @@ where
             }
         }
     }
+    // A closed set of classes leaves each class no arm tests, of all the cases of an enum with data or all the
+    // implementers of a sealed interface while the value is still the set's type, and else each class left.
+    let tested: Vec<&[u8]> = handled
+        .iter()
+        .filter_map(|test| match test.unparenthesized() {
+            Expression::Binary(Binary {
+                operator: BinaryOperator::Instanceof(_),
+                rhs: Expression::Identifier(class),
+                ..
+            }) => context.resolved_names.resolve(class),
+            _ => None,
+        })
+        .collect();
+    let mut left_classes: Vec<&ClassLikeMetadata> = Vec::new();
+    for class in atomics().filter_map(|atomic| closed_class(atomic, context.codebase)) {
+        let members: Vec<&ClassLikeMetadata> = match &class.permitted_inheritors {
+            Some(inheritors) => inheritors
+                .iter()
+                .filter_map(|inheritor| context.codebase.get_class_like(inheritor.as_bytes()))
+                .collect(),
+            None => vec![class],
+        };
+        for member in members {
+            let is_tested = tested.iter().any(|tested| tested.eq_ignore_ascii_case(member.name.as_bytes()));
+            if !is_tested && !left_classes.iter().any(|known| known.name == member.name) {
+                left_classes.push(member);
+            }
+        }
+    }
+    left_classes.sort_by_key(|class| (class.span.file_id, class.span.start.offset));
+    for class in left_classes {
+        // A case is written through its enum, as `PaymentResult.Paid`.
+        let enum_name = class.direct_parent_class.filter(|_| class.flags.is_enum_case_class());
+        missing.push(match enum_name.and_then(|name| context.codebase.get_class_like(name.as_bytes())) {
+            Some(r#enum) => {
+                let case = class.original_name.as_bytes().rsplit(|&byte| byte == b'\\').next().unwrap_or_default();
+
+                display_code_member(context, r#enum.original_name, word(case))
+            }
+            None => display_class_like_name(context, class.original_name).to_string(),
+        });
+    }
+
     if atomics().any(|atomic| matches!(atomic, TAtomic::Null)) {
         missing.push("null".to_owned());
     }
 
     (missing, named)
+}
+
+/// What an arm's `test` handles of the value a `match` tests, spec section 20. A type pattern that names its value is
+/// `($p = s) instanceof C`, which narrows `$p`, and a case pattern adds the tests of its fields and properties, so a
+/// test whose first part is `instanceof` and whose other parts are always true, as a field unpacked with the type the
+/// case declares, handles the class: it is `s instanceof C`. Any other test handles what it tests.
+fn handled_test<'arena, A>(
+    test: &'arena Expression<'arena>,
+    arena: &'arena A,
+    artifacts: &AnalysisArtifacts,
+) -> &'arena Expression<'arena>
+where
+    A: Arena,
+{
+    let mut parts = Vec::new();
+    let mut rest = test.unparenthesized();
+    while let Expression::Binary(Binary { lhs, operator: BinaryOperator::And(_), rhs }) = rest {
+        parts.push(*rhs);
+        rest = lhs.unparenthesized();
+    }
+    let Expression::Binary(Binary { lhs, operator: operator @ BinaryOperator::Instanceof(_), rhs }) = rest else {
+        return test;
+    };
+    if !parts.iter().all(|part| artifacts.get_expression_type(part).is_some_and(TUnion::is_true)) {
+        return test;
+    }
+    let subject = match lhs.unparenthesized() {
+        Expression::Assignment(assignment) => assignment.rhs,
+        subject => subject,
+    };
+
+    arena.alloc(Expression::Binary(Binary { lhs: subject, operator: *operator, rhs }))
+}
+
+/// The class a value of `atomic` is in a closed set of, spec section 20: a case of an enum with data, an enum with
+/// data, a sealed interface, or a class its permitted inheritors name.
+fn closed_class<'codebase>(
+    atomic: &TAtomic,
+    codebase: &'codebase CodebaseMetadata,
+) -> Option<&'codebase ClassLikeMetadata> {
+    let TAtomic::Object(TObject::Named(object)) = atomic else {
+        return None;
+    };
+    let class = codebase.get_class_like(object.name.as_bytes())?;
+
+    (class.flags.is_enum_case_class() || class.permitted_inheritors.is_some()).then_some(class)
 }
 
 /// The enum and the case a type holds: one case, or every case of the enum when the case is `None`. `None` for a type

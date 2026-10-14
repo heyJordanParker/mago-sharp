@@ -4224,6 +4224,23 @@ fn a_case_pattern_unpacks_the_fields_by_position() {
     );
 }
 
+/// Spec sections 20 and 21: a `match` over an enum whose cases carry data needs no `default` when its arms handle each
+/// case, and names the cases it misses otherwise. An arm with `when` handles nothing, and a plain case is handled by
+/// its value.
+#[test]
+fn a_match_over_a_closed_set_needs_no_default() {
+    let code = "namespace App;\n\nclass Shop\n{\n    public string covered(PaymentResult result) => match (result) {\n        PaymentResult.Paid(string transactionId) => transactionId,\n        PaymentResult.Declined d => d.reason,\n        PaymentResult.RequiresAction(string redirect) => redirect,\n    };\n\n    public string missing(PaymentResult result) => match (result) {\n        PaymentResult.Paid p => \"paid\",\n    };\n\n    public string guarded(PaymentResult result, bool test) => match (result) {\n        PaymentResult.Paid p when test => \"test\",\n        PaymentResult.Declined d => \"declined\",\n        PaymentResult.RequiresAction a => \"action\",\n    };\n\n    public string mixed(CheckoutState state) => match (state) {\n        CheckoutState.Open => \"open\",\n        CheckoutState.Paying p => p.gateway,\n    };\n\n    public string open(CheckoutState state) => match (state) {\n        CheckoutState.Paying p => p.gateway,\n    };\n}\n";
+
+    assert_eq!(
+        refusals(("src/App/Shop.sharp", code), &[PAYMENT_RESULT, CHECKOUT_STATE]),
+        [
+            "11:52 match-not-exhaustive This `match` misses `PaymentResult.Declined` and `PaymentResult.RequiresAction`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "15:63 match-not-exhaustive This `match` misses `PaymentResult.Paid`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "26:48 match-not-exhaustive This `match` misses `CheckoutState.Open`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+        ]
+    );
+}
+
 /// A file that declares the class a case runs as clashes with the case, whichever is read first.
 #[test]
 fn a_class_named_as_a_case_is_an_error_that_names_the_case() {
