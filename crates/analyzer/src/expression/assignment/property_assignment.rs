@@ -25,6 +25,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
+use crate::expression::access::refuse_statics_of_no_class;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::get_written_literal_type;
@@ -88,6 +89,9 @@ where
     if resolution_result.class_value
         && let ClassLikeMemberSelector::Identifier(name) = &property_access.property
     {
+        if refuse_statics_of_no_class(context, artifacts, property_access.object, property_access.span()) {
+            return Ok(());
+        }
         let written = StaticProperty {
             class: property_access.object,
             name: StaticPropertyName::Identifier(name),

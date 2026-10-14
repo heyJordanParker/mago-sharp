@@ -65,6 +65,7 @@ use crate::external::PropertyAccessKind;
 use crate::invocation::infer_parameter_templates_from_argument;
 use crate::invocation::rename_trait_objects;
 use crate::resolver::class_name::class_value_classes;
+use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
@@ -192,7 +193,7 @@ where
 
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(_) = property_selector
-        && class_value_classes(&object_type).is_some()
+        && (class_value_classes(&object_type).is_some() || holds_no_class(&object_type))
     {
         result.class_value = true;
 

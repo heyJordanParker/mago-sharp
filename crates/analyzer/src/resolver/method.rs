@@ -52,6 +52,7 @@ use crate::error::AnalysisError;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
 use crate::resolver::class_name::class_value_classes;
+use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
@@ -250,7 +251,9 @@ where
 
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(_) = selector
-        && artifacts.get_expression_type(object).and_then(class_value_classes).is_some()
+        && artifacts
+            .get_expression_type(object)
+            .is_some_and(|object_type| class_value_classes(object_type).is_some() || holds_no_class(object_type))
     {
         result.class_value = true;
 

@@ -47,6 +47,7 @@ use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_static_write;
 use crate::error::AnalysisError;
 use crate::expression::access::analyze_through_class_value;
+use crate::expression::access::refuse_statics_of_no_class;
 use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
@@ -366,6 +367,9 @@ where
     // PHP# calls a static method through a class value, `type.m()`, as PHP's `$type::m()`, spec section 25.
     if method_resolution.class_value {
         context.collector.extend(receiver_issues);
+        if refuse_statics_of_no_class(context, artifacts, object, span) {
+            return argument_list.analyze(context, block_context, artifacts);
+        }
         let call = StaticCall { class: object, method: selector, argument_list, span };
 
         return analyze_through_class_value(

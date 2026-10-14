@@ -1,9 +1,11 @@
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -29,6 +31,8 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::binary::logical::merge_short_circuited_assignments;
 use crate::expression::constant_access::analyze_namespace_constant;
+use crate::resolver::class_name::holds_no_class;
+use crate::resolver::class_name::report_class_value_of_no_class;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::property::resolve_method_value;
 use crate::resolver::static_property::StaticProperty;
@@ -520,6 +524,36 @@ where
     artifacts.set_expression_type(&span, member_type.as_nullable());
 
     Ok(())
+}
+
+/// Refuses a static member read, written or called at `span` through `object`, an analyzed PHP# class value of a type
+/// that is no class, as `t.MAX` on a `Class<int>`: only a class's `Class` has statics, spec section 25. The access is
+/// a refused value, so nothing reports again on it. Whether it was refused.
+pub(crate) fn refuse_statics_of_no_class<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    object: &Expression<'_>,
+    span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    let Some(object_type) = artifacts.get_expression_type(object).filter(|object_type| holds_no_class(object_type))
+    else {
+        return false;
+    };
+
+    let object_type = object_type.clone();
+    report_class_value_of_no_class(
+        context,
+        object,
+        &object_type,
+        "has statics",
+        "Reach a static through the class value of a class, as in `typeof(Order).defaultTag()`.",
+    );
+    artifacts.set_expression_type(&span, TUnion::from_atomic(TAtomic::Error));
+
+    true
 }
 
 /// Whether PHP# `Class.name` reads the static method `name`: the class has no static property of that name, which the

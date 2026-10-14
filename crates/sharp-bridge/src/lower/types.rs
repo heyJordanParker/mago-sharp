@@ -412,14 +412,21 @@ impl<'analysis> Types<'analysis> {
             })
             || r#type.types.iter().any(|atomic| match atomic {
                 TAtomic::Object(TObject::Named(object)) => is_sharp_generic(object),
-                // A `Class<PaginatedList>` names no type arguments, so PHP's `string` type is the whole of its check.
-                TAtomic::Scalar(TScalar::ClassLikeString(class_value @ TClassLikeString::OfType { .. })) => {
-                    matches!(class_value.constraint(), Some(TAtomic::Object(TObject::Named(object)))
-                    if is_sharp_generic(object)
-                        && !object.get_type_parameters().is_some_and(|arguments| {
-                            arguments.iter().any(TUnion::from_unspecified_template)
-                        }))
-                }
+                // A `Class<PaginatedList>` names no type arguments, so PHP's `string` type is the whole of its check. A
+                // `Class<int>` or a `Class<int|string>` takes only the text `typeof` gives its type, which PHP's `string`
+                // type doesn't check.
+                TAtomic::Scalar(TScalar::ClassLikeString(
+                    class_value @ TClassLikeString::OfType { constraint, .. },
+                )) => match class_value.constraint() {
+                    Some(TAtomic::Object(TObject::Named(object))) => {
+                        is_sharp_generic(object)
+                            && !object
+                                .get_type_parameters()
+                                .is_some_and(|arguments| arguments.iter().any(TUnion::from_unspecified_template))
+                    }
+                    Some(TAtomic::Object(_) | TAtomic::GenericParameter(_)) => false,
+                    _ => !constraint.is_mixed() && is_written_in_sharp(constraint),
+                },
                 TAtomic::GenericParameter(parameter) => {
                     matches!(parameter.defining_entity, GenericParent::ClassLike(_))
                 }

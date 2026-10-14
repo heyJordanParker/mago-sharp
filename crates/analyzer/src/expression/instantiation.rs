@@ -64,6 +64,8 @@ use crate::invocation::template_result::seed_type_arguments;
 use crate::resolver::class_name::ResolutionOrigin;
 use crate::resolver::class_name::ResolvedClassname;
 use crate::resolver::class_name::class_value_class;
+use crate::resolver::class_name::holds_no_class;
+use crate::resolver::class_name::report_class_value_of_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::statement::function_like::get_this_type;
@@ -94,24 +96,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
             self.class.analyze(context, block_context, artifacts)?;
             block_context.flags.set_inside_call(was_inside_call);
 
-            if let Some(value_type) = artifacts.get_expression_type(self.class.unparenthesized())
-                && value_type.types.iter().any(|atomic| {
-                    matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(class_value @ TClassLikeString::OfType { .. }))
-                        if !matches!(class_value.constraint(), Some(TAtomic::Object(_) | TAtomic::GenericParameter(_))))
-                })
+            if let Some(value_type) = artifacts.get_expression_type(self.class.unparenthesized()).cloned()
+                && holds_no_class(&value_type)
             {
-                let written =
-                    String::from_utf8_lossy(&context.source_file.contents[self.class.unparenthesized().span().to_range_usize()]);
-                context.collector.report_with_code(
-                    IssueCode::InvalidClassStringExpression,
-                    Issue::error(format!(
-                        "`{written}` is a `{}`, and only a class's `Class` creates objects.",
-                        display_type(context, value_type)
-                    ))
-                    .with_annotation(
-                        Annotation::primary(self.class.unparenthesized().span()).with_message("Used as a class value here."),
-                    )
-                    .with_help("Create an object from the class value of a class, as in `new (typeof(Order))()`."),
+                report_class_value_of_no_class(
+                    context,
+                    self.class.unparenthesized(),
+                    &value_type,
+                    "creates objects",
+                    "Create an object from the class value of a class, as in `new (typeof(Order))()`.",
                 );
                 self.argument_list.analyze(context, block_context, artifacts)?;
                 artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));

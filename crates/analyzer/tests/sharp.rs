@@ -10264,11 +10264,12 @@ fn typeof_of_any_type_is_the_class_of_that_type() {
 
 /// `typeof` of a nullable or union type is the `Class` of that whole type, spec section 25, as C#'s `typeof(int?)` is,
 /// and a written `Class` of any one type holds it in a field, a parameter and a local. `Class<X>` fits `Class<Y>` when
-/// `X` fits `Y`, so `Class<int>` fits `Class<int|string>` and not the reverse. Only a class's `Class` creates objects,
-/// so `new` of a `Class<int>` is refused.
+/// `X` fits `Y`, so `Class<int>` fits `Class<int|string>` and not the reverse. Only a class's `Class` creates objects
+/// and has statics, so `new`, a static read, a static call and a static write through a `Class<int>` are each refused
+/// once.
 #[test]
 fn typeof_of_a_nullable_or_union_type_is_its_class_and_class_holds_any_type() {
-    let kinds = "namespace Demo;\n\npublic class Kinds\n{\n    private Class<int?> maybe = typeof(int?);\n\n    public Class<int?> kept() => this.maybe;\n\n    public static int nullable() => typeof(int?);\n    public static int either() => typeof(int|string);\n    public static Class<int|string> widened() => typeof(int);\n    public static Class<int> narrowed() => typeof(int|string);\n    public static Class<string> other() => typeof(int);\n\n    public static Class<int|string> local(Class<int|string> given)\n    {\n        Class<int> t = typeof(int);\n        Class<int|string> u = t;\n        return given;\n    }\n\n    public static Any made()\n    {\n        Class<int> t = typeof(int);\n        return new (t)();\n    }\n\n    public static Any built(Class<int|string> either) => new (either)();\n\n    public static List<T> none<T>(Class<T> type) => [];\n\n    public static int inferred() => Kinds.none(typeof(int|string));\n}\n";
+    let kinds = "namespace Demo;\n\npublic class Kinds\n{\n    private Class<int?> maybe = typeof(int?);\n\n    public Class<int?> kept() => this.maybe;\n\n    public static int nullable() => typeof(int?);\n    public static int either() => typeof(int|string);\n    public static Class<int|string> widened() => typeof(int);\n    public static Class<int> narrowed() => typeof(int|string);\n    public static Class<string> other() => typeof(int);\n\n    public static Class<int|string> local(Class<int|string> given)\n    {\n        Class<int> t = typeof(int);\n        Class<int|string> u = t;\n        return given;\n    }\n\n    public static Any made()\n    {\n        Class<int> t = typeof(int);\n        return new (t)();\n    }\n\n    public static Any built(Class<int|string> either) => new (either)();\n\n    public static List<T> none<T>(Class<T> type) => [];\n\n    public static int inferred() => Kinds.none(typeof(int|string));\n\n    public static Any read(Class<int> t) => t.MAX;\n\n    public static Any direct() => typeof(int).MAX;\n\n    public static Any called(Class<int|string> either) => either.make(1);\n\n    public static void written(Class<int?> maybe)\n    {\n        maybe.count = 1;\n    }\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Kinds.sharp", kinds), &[]),
@@ -10280,6 +10281,10 @@ fn typeof_of_a_nullable_or_union_type_is_its_class_and_class_holds_any_type() {
             "`t` is a `Class<int>`, and only a class's `Class` creates objects.",
             "`either` is a `Class<int|string>`, and only a class's `Class` creates objects.",
             "Invalid return type for method `Kinds.inferred`: expected `int`, but found `List<int|string>`.",
+            "`t` is a `Class<int>`, and only a class's `Class` has statics.",
+            "`typeof(int)` is a `Class<int>`, and only a class's `Class` has statics.",
+            "`either` is a `Class<int|string>`, and only a class's `Class` has statics.",
+            "`maybe` is a `Class<int?>`, and only a class's `Class` has statics.",
         ]
     );
 }

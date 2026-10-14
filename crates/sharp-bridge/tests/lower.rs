@@ -8138,7 +8138,7 @@ fn a_bound_writes_a_type_parameter_of_its_own_class_as_any() {
 /// call. A lambda writes them the same way, and the engine reads them from the method's call the lambda captured them
 /// from: a lambda whose body, or a lambda in it, names a `#` is a `CLOSURE` whose `use` list ends with the method's
 /// hidden local, by value. A method whose call needs its type arguments, or whose parameter names a PHP# class with type
-/// arguments, a class value of one, or a type parameter, ends its parameter list with its metadata: a `SHARP_TYPE_ARGS` of the bounds of its
+/// arguments, a class value of one or of a type that is no class, or a type parameter, ends its parameter list with its metadata: a `SHARP_TYPE_ARGS` of the bounds of its
 /// own type parameters and a type text list with each parameter's type, `Any?` for one the engine never checks. Plain
 /// PHP's generics are erased, so a parameter of a plain PHP class with type arguments is never checked, and a call from
 /// plain PHP gives a method's own type parameters none, so a parameter of one is never checked either.
@@ -8181,6 +8181,8 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
             public List<Any?> unbound() => Repository.repeat(new Holder().get(), 4);
 
             public void kinds(Class<PaginatedList<Order>> pages, Class<PaginatedList> any, Class<Order> order, Class<Holder<Order>> holders) { }
+
+            public void types(Class<int|string> either, Class<int> number, Class<Any> anything) { }
         }
 
         public class PaginatedList<TItem : DatabaseEntity>
@@ -8376,6 +8378,13 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
             .ends_with(&metadata("null", r#"ZVAL "Class<App.PaginatedList<App.Order>>, Any?, Any?, Any?""#)),
         "{}",
         lowered.parameters_of("kinds")
+    );
+    // A class value of a type that is no class is only the text `typeof` gives that type, which PHP's `string` type
+    // doesn't check.
+    assert!(
+        lowered.parameters_of("types").ends_with(&metadata("null", r#"ZVAL "Class<int|string>, Class<int>, Any?""#)),
+        "{}",
+        lowered.parameters_of("types")
     );
     assert_eq!(lowered.parameters_of("pairWith"), format!("PARAM_LIST\n{}", metadata(r#"ZVAL "Any?""#, "null")));
     assert!(!lowered.parameters_of("run").contains("SHARP_TYPE_ARGS"));

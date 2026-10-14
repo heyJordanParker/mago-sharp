@@ -37,6 +37,7 @@ use crate::expression::is_refused_type;
 use crate::statement::get_type_from_hint;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_type;
 
 /// Describes the origin and nature of a class name resolution.
 ///
@@ -292,6 +293,39 @@ pub(crate) fn class_value_classes(class_value_type: &TUnion) -> Option<Vec<Word>
         .collect::<Option<Vec<_>>>()?;
 
     (!classes.is_empty()).then_some(classes)
+}
+
+/// Whether `class_value_type` holds a PHP# class value of a type that is no class, as a `Class<int>` or a
+/// `Class<int|string>`, spec section 25. Only a class's `Class` creates objects and has statics.
+pub(crate) fn holds_no_class(class_value_type: &TUnion) -> bool {
+    class_value_type.types.iter().any(|atomic| {
+        matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(class_value @ TClassLikeString::OfType { .. }))
+            if !matches!(class_value.constraint(), Some(TAtomic::Object(_) | TAtomic::GenericParameter(_))))
+    })
+}
+
+/// Reports `value`, of the type `value_type` that [`holds_no_class`], where only a class's `Class` does what `does`
+/// says: "creates objects" for `new (value)()`, and "has statics" for a static member read, written or called through
+/// it. The caller types the refused expression `TAtomic::Error`, so nothing reports again on it.
+pub(crate) fn report_class_value_of_no_class<A>(
+    context: &mut Context<'_, '_, A>,
+    value: &Expression<'_>,
+    value_type: &TUnion,
+    does: &str,
+    help: &str,
+) where
+    A: Arena,
+{
+    let written = String::from_utf8_lossy(&context.source_file.contents[value.span().to_range_usize()]);
+    context.collector.report_with_code(
+        IssueCode::InvalidClassStringExpression,
+        Issue::error(format!(
+            "`{written}` is a `{}`, and only a class's `Class` {does}.",
+            display_type(context, value_type)
+        ))
+        .with_annotation(Annotation::primary(value.span()).with_message("Used as a class value here."))
+        .with_help(help.to_owned()),
+    );
 }
 
 /// The class with type arguments a PHP# class value holds, as `Counter<Order>` for a `Class<Counter<Order>>`, spec
