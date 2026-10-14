@@ -80,6 +80,9 @@ pub enum ParseError {
     /// A `uses` clause written after a PHP# function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, at
     /// the clause. A function type lists its effects inside its brackets.
     UsesAfterFunctionTypeInSharp(Span),
+    /// A PHP# method's `readonly` written before its `on` or `uses` clause, at the `readonly`. Spec section 13: it is
+    /// always the last clause.
+    ReadonlyNotLastInSharp(Span),
     /// A member other than a binding or a law written in a PHP# module, such as a method or a statement, at the
     /// member. Spec section 32: a module holds no statements, branches, loops or methods.
     OtherMemberInSharpModule(Span),
@@ -133,6 +136,7 @@ impl HasFileId for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
@@ -177,6 +181,7 @@ impl HasSpan for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
@@ -293,6 +298,10 @@ impl std::fmt::Display for ParseError {
                 "A function type lists its effects inside its brackets, as in `Function<Charge(Cart) uses Http>`."
                     .to_string()
             }
+            ParseError::ReadonlyNotLastInSharp(_) => {
+                "A method's `readonly` is its last clause, after `on` and `uses`, as in `Money quote(Cart cart) uses Http readonly;`."
+                    .to_string()
+            }
             ParseError::OtherMemberInSharpModule(_) => {
                 "A module holds only service bindings and laws: give each binding one expression.".to_string()
             }
@@ -360,6 +369,7 @@ impl From<&ParseError> for Issue {
             | ParseError::ConditionalInGuardInSharp(..)
             | ParseError::UndeclarableOperatorInSharp(..)
             | ParseError::UsesAfterFunctionTypeInSharp(..)
+            | ParseError::ReadonlyNotLastInSharp(..)
             | ParseError::OtherMemberInSharpModule(..)
             | ParseError::ComputedParameterInSharp(..)
             | ParseError::ConstructorInitializerInSharp(..)

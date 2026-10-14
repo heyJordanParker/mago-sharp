@@ -68,7 +68,10 @@ pub fn check_property(
                 last_abstract = Some(modifier.span());
             }
             Modifier::Static(_) => {
-                if let Some(last_readonly) = last_readonly {
+                // A PHP# file refuses `readonly` on any field, spec section 13, with the message that names `{ get; }`.
+                if let Some(last_readonly) = last_readonly
+                    && !context.program.dialect.is_sharp()
+                {
                     context.report(
                         Issue::error(format!("Readonly property `{property_display}` cannot be static."))
                             .with_annotation(

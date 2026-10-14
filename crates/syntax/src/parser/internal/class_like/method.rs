@@ -156,23 +156,39 @@ where
             )?));
         }
 
+        let name = self.parse_local_identifier()?;
+        let parameter_list = self.parse_function_like_parameter_list()?;
+        let early = self.parse_optional_readonly_marker()?;
+        let on = self.parse_optional_on()?;
+        let uses = self.parse_optional_uses()?.map(|uses| &*self.arena.alloc(uses));
+        let readonly = match early {
+            // Spec section 13: `readonly` is the last clause, so one written before `on` or `uses` names that place.
+            Some(early) if on.is_some() || uses.is_some() => {
+                self.errors.push(ParseError::ReadonlyNotLastInSharp(early.span));
+
+                Some(early)
+            }
+            Some(early) => Some(early),
+            None => self.parse_optional_readonly_marker()?,
+        };
+
         Ok(ClassLikeMember::Method(Method {
             attribute_lists: attributes,
             modifiers,
             function: None,
             return_type_hint: Some(FunctionLikeReturnTypeHint { colon: None, hint }),
             ampersand: None,
-            name: self.parse_local_identifier()?,
-            parameter_list: self.parse_function_like_parameter_list()?,
-            readonly: self.parse_optional_readonly_marker()?,
-            on: self.parse_optional_on()?,
-            uses: self.parse_optional_uses()?.map(|uses| &*self.arena.alloc(uses)),
+            name,
+            parameter_list,
+            readonly,
+            on,
+            uses,
             initializer: None,
             body: self.parse_method_body()?,
         }))
     }
 
-    /// Parses the `readonly` after a PHP# method's parameters when one is here, spec section 13. It comes before `on`
+    /// Parses a PHP# method's `readonly` when one is here, spec section 13: its last clause, after the parameters, `on`
     /// and `uses`.
     fn parse_optional_readonly_marker(&mut self) -> Result<Option<Keyword<'arena>>, ParseError> {
         if !self.dialect.is_sharp() || !self.stream.is_at(T!["readonly"])? {

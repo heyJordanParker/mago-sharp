@@ -118,7 +118,7 @@ fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
             "7:1 This construct is not supported yet in PHP#.",
             "8:29 An event's parameter takes no accessors: it is a get-only property of the event.",
             "9:28 A `Set` parameter of an event is not supported yet in PHP#.",
-            "16:21 An event's parameter takes no modifier: it is a public get-only property of the event.",
+            "16:21 An `int` never changes, so `readonly` changes nothing: write `int`.",
             "17:21 An event's parameter takes no modifier: it is a public get-only property of the event.",
             "18:14 Cannot use `Self` as a class name: it is reserved."
         ]
@@ -2421,13 +2421,10 @@ fn a_protected_or_private_class_reports_only_the_php_error() {
 }
 
 #[test]
-fn a_final_method_and_a_readonly_class_are_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nfinal class Report\n{\n    final public int run()\n    {\n        return 1;\n    }\n}\n\nabstract class Shape\n{\n    abstract public int area();\n}\n\nreadonly class Point\n{\n}\n";
+fn a_final_method_is_not_supported_yet() {
+    let code = "namespace App.Tenant;\n\nfinal class Report\n{\n    final public int run()\n    {\n        return 1;\n    }\n}\n\nabstract class Shape\n{\n    abstract public int area();\n}\n";
 
-    assert_eq!(
-        issues(code),
-        ["5:5 This modifier is not supported yet in PHP#.", "16:1 This modifier is not supported yet in PHP#."]
-    );
+    assert_eq!(issues(code), ["5:5 This modifier is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -2527,7 +2524,7 @@ fn a_promoted_member_outside_the_slice_is_not_supported_yet() {
         [
             "7:21 Promoted properties are not allowed outside of constructors.",
             "5:51 Parameter `b` cannot have the `static` modifier.",
-            "5:27 This modifier is not supported yet in PHP#.",
+            "5:27 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `private int a { get; }`.",
         ]
     );
 
@@ -3047,7 +3044,7 @@ fn fields_outside_the_slice_are_not_supported_yet() {
     assert_eq!(
         issues(code),
         [
-            "5:13 This modifier is not supported yet in PHP#.",
+            "5:13 A field or property is never `readonly`: declare a get-only property, as in `private int count { get; }`.",
             "6:5 A field declaring several names is not supported yet in PHP#.",
         ]
     );
@@ -4564,7 +4561,7 @@ fn a_lambda_parameter_outside_the_slice_is_not_supported_yet() {
         issues(code),
         [
             "7:26 A by-reference parameter is not supported yet in PHP#.",
-            "8:25 This modifier is not supported yet in PHP#.",
+            "8:25 An `int` never changes, so `readonly` changes nothing: write `int`.",
         ]
     );
 }
@@ -4876,4 +4873,57 @@ fn an_interface_or_an_enum_declares_no_operator() {
 
     assert_eq!(issues_in("src/Priced.sharp", interface), ["5:5 This class member is not supported yet in PHP#."]);
     assert_eq!(issues_in("src/Suit.sharp", r#enum), ["7:5 This class member is not supported yet in PHP#."]);
+}
+
+/// Spec section 13: `readonly` goes before any type PHP# checks, a value's, and after a method's parameters, `this`'s.
+#[test]
+fn readonly_goes_before_a_value_s_type_and_after_a_method_s_parameters() {
+    let code = "namespace App;\n\npublic interface Quotes\n{\n    readonly Money quote(readonly Cart cart) uses Http readonly;\n}\n\npublic class Shop\n{\n    private Customer owner = new Customer();\n\n    public Shop(readonly Order order) { }\n\n    public readonly Customer customer => this.owner;\n\n    public readonly Customer? buyer(readonly List<readonly Line> lines, Function<Money?(readonly Line, string)> priceOf) readonly\n    {\n        readonly Customer c = this.owner;\n        const free = (readonly Line line) => line.free;\n        return c;\n    }\n}\n\npublic static class OrderLabels\n{\n    extension(readonly Order order)\n    {\n        public string caption() => \"order\";\n    }\n}\n";
+
+    assert_eq!(issues_in("src/Shop.sharp", code), Vec::<String>::new());
+}
+
+/// Spec section 13: a field, a property, a parameter that declares a member and a class keep a value with `{ get; }`,
+/// so `readonly` on one is an error that names it.
+#[test]
+fn readonly_on_storage_names_a_get_only_property() {
+    let code = "namespace App;\n\npublic class Invoice\n{\n    private readonly Money total;\n    public readonly Money due { get; set; }\n    private readonly static int count = 0;\n\n    public Invoice(public readonly Money paid, private readonly Money left { get; }) { }\n}\n\npublic readonly class Receipt { }\n";
+
+    assert_eq!(
+        issues_in("src/Invoice.sharp", code),
+        [
+            "5:13 A field or property is never `readonly`: declare a get-only property, as in `private Money total { get; }`.",
+            "6:12 A field or property is never `readonly`: declare a get-only property, as in `public Money due { get; }`.",
+            "7:13 A field or property is never `readonly`: declare a get-only property, as in `private int count { get; }`.",
+            "9:27 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `public Money paid { get; }`.",
+            "9:56 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `private Money left { get; }`.",
+            "12:8 A class is never `readonly`: declare each of its properties get-only, with `{ get; }`.",
+        ]
+    );
+}
+
+/// Spec section 13: a `readonly` that can't matter is an error, as a `?` that can't matter is: before a type that never
+/// changes, twice, in a pattern, on a method with no `this` to keep, and where the language already reads only.
+#[test]
+fn readonly_that_cannot_matter_is_an_error() {
+    let code = "namespace App;\n\npublic class Report\n{\n    public int count(readonly int a, readonly string? b, readonly bool c, readonly float d) => 0;\n    public void any(readonly Any value) { }\n    public void twice(readonly readonly Order order) { }\n    public bool test(Any value) => value is readonly Order;\n    public static int total() readonly => 0;\n    public Report() readonly { }\n    public int hash() readonly => 1;\n    public static bool operator ==(readonly Report a, Report b) => true;\n}\n\npublic enum Suit\n{\n    case Hearts;\n\n    public string label() readonly => \"hearts\";\n}\n\npublic static class Labels\n{\n    extension(Report report)\n    {\n        public string caption() readonly => \"report\";\n    }\n}\n";
+
+    assert_eq!(
+        issues_in("src/Report.sharp", code),
+        [
+            "5:22 An `int` never changes, so `readonly` changes nothing: write `int`.",
+            "5:38 A `string?` never changes, so `readonly` changes nothing: write `string?`.",
+            "5:58 A `bool` never changes, so `readonly` changes nothing: write `bool`.",
+            "5:75 A `float` never changes, so `readonly` changes nothing: write `float`.",
+            "6:21 `readonly` holds only types PHP# checks, and `Any` can hold a plain PHP object: write a PHP# type.",
+            "7:32 `readonly` is written once.",
+            "8:45 `is` keeps a value readonly: write `is Order`.",
+            "9:31 A static method has no `this` to keep readonly: remove `readonly`.",
+            "10:21 A constructor sets `this`, so it is never readonly: remove `readonly`.",
+            "11:23 `hash()` is readonly by definition: remove `readonly`.",
+            "12:36 An operator's operands are readonly by definition: write `Report a`.",
+            "19:27 An enum case never changes, so an enum method needs no `readonly`: remove it.",
+            "26:33 An extension member has no `this`: write `readonly` before its receiver's type, as in `extension(readonly Report report)`.",
+        ]
+    );
 }

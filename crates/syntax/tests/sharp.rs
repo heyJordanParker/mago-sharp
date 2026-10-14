@@ -4505,11 +4505,11 @@ fn readonly_before_a_type_is_a_readonly_type() {
     );
 }
 
-/// Spec section 13: `readonly` after a method's parameters marks the method, before `on` and `uses`, whatever its
-/// body.
+/// Spec section 13: `readonly` after a method's parameters marks the method, as its last clause, after `on` and
+/// `uses`, whatever its body.
 #[test]
 fn readonly_after_the_parameters_marks_the_method() {
-    const CODE: &str = "interface Quotes\n{\n    Money quote(Cart cart) readonly;\n}\n\nclass Order\n{\n    public Money totalIn(string currency) readonly { return this.total; }\n    public int count() readonly => 1;\n    public abstract int size() readonly;\n    public void paid(OrderPaid e) readonly on OrderPaid { }\n    public void markPaid() { }\n}\n";
+    const CODE: &str = "interface Quotes\n{\n    Money quote(Cart cart) uses Http readonly;\n}\n\nclass Order\n{\n    public Money totalIn(string currency) readonly { return this.total; }\n    public int count() readonly => 1;\n    public abstract int size() readonly;\n    public void paid(OrderPaid e) on OrderPaid readonly { }\n    public void markPaid() { }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Order.sharp", CODE);
 
@@ -4536,6 +4536,30 @@ fn readonly_after_the_parameters_marks_the_method() {
     assert_eq!(
         marked,
         [("quote", true), ("totalIn", true), ("count", true), ("size", true), ("paid", true), ("markPaid", false)]
+    );
+}
+
+/// Spec section 13: `readonly` written before `on` or `uses` is an error at it that says to write it last, and the
+/// method keeps its mark.
+#[test]
+fn readonly_before_another_clause_is_an_error_that_names_the_last_place() {
+    const CODE: &str = "class Order\n{\n    public Money quote(Cart cart) readonly uses Http;\n    public void paid(OrderPaid e) readonly on OrderPaid { }\n    public void sent(OrderPaid e) readonly on OrderPaid uses Mail { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Order.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    let message = "A method's `readonly` is its last clause, after `on` and `uses`, as in `Money quote(Cart cart) uses Http readonly;`.";
+    assert_eq!(
+        errors,
+        [(message.to_string(), "readonly"), (message.to_string(), "readonly"), (message.to_string(), "readonly")]
+    );
+    assert!(
+        class_members(program)
+            .iter()
+            .all(|member| matches!(member, ClassLikeMember::Method(method) if method.readonly.is_some())),
+        "{:#?}",
+        class_members(program)
     );
 }
 

@@ -220,7 +220,11 @@ where
                 b"struct" | b"virtual" | b"override" | b"required" | b"extern" | b"lazy" | b"internal" | b"foreign"
             ),
             Some(token) => {
-                matches!(token.kind, T!["(" | "self" | "array" | "callable" | QualifiedIdentifier | FullyQualifiedIdentifier])
+                // `readonly readonly Order` reads as one readonly type inside another, which the checker refuses.
+                matches!(
+                    token.kind,
+                    T!["(" | "self" | "array" | "callable" | "readonly" | QualifiedIdentifier | FullyQualifiedIdentifier]
+                )
             }
             None => false,
         })
