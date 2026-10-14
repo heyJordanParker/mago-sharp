@@ -178,19 +178,20 @@ where
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?.map(|list| &*self.arena.alloc(list));
         let parameter_list = self.parse_function_like_parameter_list()?;
-        let early = self.parse_optional_readonly_marker()?;
+        let after_parameters = self.parse_optional_readonly_marker()?;
         let on = self.parse_optional_on()?.map(|on| &*self.arena.alloc(on));
+        let after_on = self.parse_optional_readonly_marker()?;
         let uses = self.parse_optional_uses()?.map(|uses| &*self.arena.alloc(uses));
-        let readonly = match early {
-            // Spec section 13: `readonly` is the last clause, so one written before `on` or `uses` names that place.
-            Some(early) if on.is_some() || uses.is_some() => {
-                self.errors.push(ParseError::ReadonlyNotLastInSharp(early.span));
-
-                Some(early)
-            }
-            Some(early) => Some(early),
-            None => self.parse_optional_readonly_marker()?,
-        };
+        let last = self.parse_optional_readonly_marker()?;
+        // Spec section 13: `readonly` is the last clause, so one written before `on` or `uses` names that place.
+        let misplaced = [
+            after_parameters.as_ref().filter(|_| on.is_some() || uses.is_some()),
+            after_on.as_ref().filter(|_| uses.is_some()),
+        ];
+        for early in misplaced.into_iter().flatten() {
+            self.errors.push(ParseError::ReadonlyNotLastInSharp(early.span));
+        }
+        let readonly = last.or(after_on).or(after_parameters);
 
         Ok(ClassLikeMember::Method(Method {
             attribute_lists: attributes,

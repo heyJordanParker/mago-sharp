@@ -16555,7 +16555,7 @@ fn a_readonly_value_calls_only_readonly_methods() {
 #[test]
 fn a_readonly_value_stays_readonly_through_narrowing_and_operators() {
     let shapes = "namespace App;\n\npublic class Shape\n{\n    public int size { get; set; } = 0;\n}\n\npublic class Circle : Shape\n{\n    public int radius { get; set; } = 0;\n}\n";
-    let view = "namespace App;\n\npublic class Tag\n{\n    public int count { get; set; } = 0;\n\n    public static bool operator ==(Tag a, Tag b)\n    {\n        a.count = 1;\n        return true;\n    }\n\n    public int hash() => this.count;\n\n    public void show(readonly Shape shape, Shape other, bool flag)\n    {\n        if (shape is Circle c) {\n            c.radius = 1;\n        }\n        const either = flag ? shape : other;\n        either.size = 2;\n    }\n\n    public void put<T : Shape>(readonly T item, readonly List<Shape> shapes)\n    {\n        item.size = 3;\n        const first = shapes.first(s => s.size > 0);\n        first.size = 4;\n        shapes.map(s => s.size = 5);\n    }\n}\n";
+    let view = "namespace App;\n\npublic class Tag\n{\n    public int count { get; set; } = 0;\n\n    public static bool operator ==(Tag a, Tag b)\n    {\n        a.count = 1;\n        return true;\n    }\n\n    public int hash() => this.count;\n\n    public void show(readonly Shape shape, Shape other, bool flag)\n    {\n        if (shape is Circle c) {\n            c.radius = 1;\n        }\n        const either = flag ? shape : other;\n        either.size = 2;\n        Circle? viaAs = shape as Circle;\n    }\n\n    public void put<T : Shape>(readonly T item, readonly List<Shape> shapes)\n    {\n        item.size = 3;\n        const first = shapes.first(s => s.size > 0);\n        first.size = 4;\n        shapes.map(s => s.size = 5);\n    }\n}\n";
 
     assert_eq!(
         messages(("src/Tag.sharp", view), &[("src/Shapes.sharp", shapes)]),
@@ -16563,6 +16563,7 @@ fn a_readonly_value_stays_readonly_through_narrowing_and_operators() {
             "operator == cannot set a.count: a is readonly.",
             "show cannot set c.radius: c is readonly.",
             "show cannot set either.size: either is readonly.",
+            "show cannot store shape as Circle in viaAs: shape as Circle is readonly. Declare it `readonly Circle? viaAs`.",
             "put cannot set item.size: item is readonly.",
             "put cannot set first.size: first is readonly.",
             "This lambda cannot set s.size: s is readonly.",

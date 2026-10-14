@@ -1422,6 +1422,16 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(Body)
         }
         (Node::As(r#as), Body) => match r#as.hint {
+            // Spec section 13: a conversion of a readonly value is readonly already, as a narrowing pattern is.
+            Hint::Readonly(readonly) => {
+                let written = String::from_utf8_lossy(context.get_code_snippet(readonly.hint)).into_owned();
+                context.report(
+                    Issue::error(format!("`as` keeps a value readonly: write `as {written}`."))
+                        .with_annotation(Annotation::primary(readonly.readonly.span).with_message("Written here.")),
+                );
+
+                None
+            }
             Hint::Nullable(_) | Hint::Void(_) => {
                 let issue = Issue::error("`as` converts to a type that is not nullable or `void`.")
                     .with_annotation(Annotation::primary(r#as.hint.span()).with_message("Written here."))

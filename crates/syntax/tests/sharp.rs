@@ -5092,7 +5092,7 @@ fn readonly_after_the_parameters_marks_the_method() {
 /// method keeps its mark.
 #[test]
 fn readonly_before_another_clause_is_an_error_that_names_the_last_place() {
-    const CODE: &str = "class Order\n{\n    public Money quote(Cart cart) readonly uses Http;\n    public void paid(OrderPaid e) readonly on OrderPaid { }\n    public void sent(OrderPaid e) readonly on OrderPaid uses Mail { }\n}\n";
+    const CODE: &str = "class Order\n{\n    public Money quote(Cart cart) readonly uses Http;\n    public void paid(OrderPaid e) readonly on OrderPaid { }\n    public void sent(OrderPaid e) readonly on OrderPaid uses Mail { }\n    public void kept(OrderPaid e) on OrderPaid readonly uses Mail { }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Order.sharp", CODE);
 
@@ -5101,7 +5101,12 @@ fn readonly_before_another_clause_is_an_error_that_names_the_last_place() {
     let message = "A method's `readonly` is its last clause, after `on` and `uses`, as in `Money quote(Cart cart) uses Http readonly;`.";
     assert_eq!(
         errors,
-        [(message.to_string(), "readonly"), (message.to_string(), "readonly"), (message.to_string(), "readonly")]
+        [
+            (message.to_string(), "readonly"),
+            (message.to_string(), "readonly"),
+            (message.to_string(), "readonly"),
+            (message.to_string(), "readonly")
+        ]
     );
     assert!(
         class_members(program)

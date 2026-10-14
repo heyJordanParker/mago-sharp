@@ -5296,7 +5296,7 @@ fn readonly_on_storage_names_a_get_only_property() {
 /// changes, twice, in a pattern, on a method with no `this` to keep, and where the language already reads only.
 #[test]
 fn readonly_that_cannot_matter_is_an_error() {
-    let code = "namespace App;\n\npublic class Report\n{\n    public int count(readonly int a, readonly string? b, readonly bool c, readonly float d) => 0;\n    public void any(readonly Any value) { }\n    public void twice(readonly readonly Order order) { }\n    public bool test(Any value) => value is readonly Order;\n    public static int total() readonly => 0;\n    public Report() readonly { }\n    public int hash() readonly => 1;\n    public static bool operator ==(readonly Report a, Report b) => true;\n}\n\npublic enum Suit\n{\n    case Hearts;\n\n    public string label() readonly => \"hearts\";\n}\n\npublic static class Labels\n{\n    extension(Report report)\n    {\n        public string caption() readonly => \"report\";\n    }\n}\n";
+    let code = "namespace App;\n\npublic class Report\n{\n    public int count(readonly int a, readonly string? b, readonly bool c, readonly float d) => 0;\n    public void any(readonly Any value) { }\n    public void twice(readonly readonly Order order) { }\n    public bool test(Any value) => value is readonly Order || (value as readonly Order) != null;\n    public static int total() readonly => 0;\n    public Report() readonly { }\n    public int hash() readonly => 1;\n    public static bool operator ==(readonly Report a, Report b) => true;\n}\n\npublic enum Suit\n{\n    case Hearts;\n\n    public string label() readonly => \"hearts\";\n}\n\npublic static class Labels\n{\n    extension(Report report)\n    {\n        public string caption() readonly => \"report\";\n    }\n}\n";
 
     assert_eq!(
         issues_in("src/Report.sharp", code),
@@ -5308,6 +5308,7 @@ fn readonly_that_cannot_matter_is_an_error() {
             "6:21 `readonly` holds only types PHP# checks, and `Any` can hold a plain PHP object: write a PHP# type.",
             "7:32 `readonly` is written once.",
             "8:45 `is` keeps a value readonly: write `is Order`.",
+            "8:73 `as` keeps a value readonly: write `as Order`.",
             "9:31 A static method has no `this` to keep readonly: remove `readonly`.",
             "10:21 A constructor sets `this`, so it is never readonly: remove `readonly`.",
             "11:23 `hash()` is readonly by definition: remove `readonly`.",
