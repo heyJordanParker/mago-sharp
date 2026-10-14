@@ -371,6 +371,8 @@ final class AnalyzerCodeModuleGenerator
         'named-constructor-without-new',
         'named-constructor-clash',
         'invalid-event',
+        'invalid-struct',
+        'missing-required-property',
         'invalid-effect',
         'foreign-in-static',
         'incompatible-effects',

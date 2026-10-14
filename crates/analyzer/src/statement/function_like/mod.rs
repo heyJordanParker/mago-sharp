@@ -40,12 +40,12 @@ use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::get_signature_of_function_like_metadata;
 use mago_codex::ttype::get_arraykey;
-use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_keyed_array;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_void;
+use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
@@ -67,7 +67,6 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Statement;
-use mago_syntax::dialect::Dialect;
 use mago_syntax::walker::Walker;
 use mago_text_edit::Safety;
 use mago_text_edit::TextEdit;
@@ -90,6 +89,7 @@ use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::class_like::method::analyze_constructor_initializer;
 use crate::statement::class_like::property::analyze_property_hook;
+use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::r#return::handle_return_value;
 use crate::statement::r#static::infer_static_local_types;
 use crate::utils::expression::get_variable_id;
@@ -1917,8 +1917,7 @@ where
         return false;
     }
 
-    report_map_keys_without_backing_value(context, &type_metadata.type_union, type_metadata.span);
-    report_unsupported_set_elements(context, &type_metadata.type_union, type_metadata.span);
+    report_collection_keys_without_equality(context, &type_metadata.type_union, type_metadata.span);
 
     let codebase = context.codebase;
     let mut is_refused = false;
@@ -2079,20 +2078,10 @@ where
     true
 }
 
-/// Whether a PHP# `Map` can be keyed by `key_type`. Spec section 12 keys a `Map` by an `int`, a `string` or a type with
-/// an `int` or `string` backing value, which runs as its backing value. A class value is none of them, though it runs as
-/// its plain class name. A `Map` type, a `Map` literal and the `Map` a collection method infers all keep this rule.
-pub(crate) fn is_map_key<A>(context: &Context<'_, '_, A>, key_type: &TUnion) -> bool
-where
-    A: Arena,
-{
-    !key_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
-        && get_backing_key_type(key_type, context.codebase, context.dialect).is_always_array_key(true)
-}
-
-/// Reports each PHP# `Map` written in `type_union` whose key type [`is_map_key`] refuses: a class value, or a class or
-/// an enum without a backing value. A key type that names no type is reported as a type that cannot be found.
-pub fn report_map_keys_without_backing_value<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
+/// Reports each PHP# `Map` written in `type_union` whose key type has no `==` and `hash()`, or is a struct that holds a
+/// class instance, and each `Set` whose element type does, spec section 12: a `Set`'s element takes exactly what a
+/// `Map`'s key takes. A key type that names no type is reported as a type that cannot be found.
+pub fn report_collection_keys_without_equality<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
 {
@@ -2101,66 +2090,45 @@ where
     }
 
     for type_ref in type_union.get_all_child_nodes() {
-        let TypeRef::Atomic(TAtomic::Array(TArray::Keyed(keyed_array))) = type_ref else {
-            continue;
+        let (key_type, in_set) = match type_ref {
+            TypeRef::Atomic(TAtomic::Array(TArray::Keyed(keyed_array))) => {
+                let Some((key_type, _)) = keyed_array.get_generic_parameters() else {
+                    unreachable!("PHP# writes no array shape, so each `Map` type it writes has a key type");
+                };
+
+                (key_type, false)
+            }
+            TypeRef::Atomic(TAtomic::Array(TArray::Set(element_type))) => (element_type.as_ref(), true),
+            _ => continue,
         };
-        let Some((key_type, _)) = keyed_array.get_generic_parameters() else {
+        if is_key_type(key_type, context.codebase) {
+            report_class_held_by_key(context, key_type, in_set, span);
             continue;
-        };
-        if is_map_key(context, key_type)
-            || key_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Reference(TReference::Symbol { .. })))
-        {
+        }
+        if key_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Reference(TReference::Symbol { .. }))) {
             continue;
         }
 
         let key_id = display_sharp_type(context, key_type);
-        let error = map_key_error(context, key_type, &key_id, span);
+        let error = collection_key_error(key_id.as_str(), in_set, span);
         context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
     }
 }
 
-/// Reports each PHP# `Set` written in `type_union` whose element type is a class or an enum without a backing value.
-/// A `Set` runs keyed by each element, so the first `Set` slice holds `int`, `string` and backed enums, and the
-/// semantic checks refuse every other element a type can name without the codebase.
-pub(crate) fn report_unsupported_set_elements<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
-where
-    A: Arena,
-{
-    if !context.dialect.is_sharp() {
-        return;
-    }
-
-    for type_ref in type_union.get_all_child_nodes() {
-        let TypeRef::Atomic(TAtomic::Array(TArray::Set(element_type))) = type_ref else {
-            continue;
-        };
-        if get_backing_key_type(element_type, context.codebase, Dialect::Sharp).is_always_array_key(true) {
-            continue;
-        }
-
-        context.collector.report_with_code(
-            IssueCode::NotSupportedYet,
-            Issue::error("This type is not supported yet in PHP#.").with_annotation(Annotation::primary(span)),
-        );
-    }
-}
-
-/// The error for a PHP# `Map` keyed by `key_type`, written `key_id`, a type [`is_map_key`] refuses, written or inferred
-/// at `span`. A `Map` type, a `Map` literal and the `Map` a collection method infers state the rule in these words. A
-/// key type whose other parts key a `Map`, as `Status?`, is refused for its `null` alone.
-pub(crate) fn map_key_error<A>(context: &Context<'_, '_, A>, key_type: &TUnion, key_id: &str, span: Span) -> Issue
-where
-    A: Arena,
-{
-    let reason = if key_type.is_nullable() && is_map_key(context, &key_type.to_non_nullable()) {
-        "may be null"
+/// The error for a PHP# `Map` keyed by, or a `Set` of, a type written `key_id` that has no `==` and `hash()`, at
+/// `span`. A `Map` or `Set` type, a literal and a `groupBy` key state the rule of spec section 12 in these words.
+pub(crate) fn collection_key_error(key_id: &str, in_set: bool, span: Span) -> Issue {
+    let (rule, held, fix) = if in_set {
+        ("A `Set`'s element", format!("`{key_id}` is this `Set`'s element."), "Fill the `Set` with")
     } else {
-        "has none"
+        ("A `Map`'s key", format!("`{key_id}` keys this `Map`."), "Key the `Map` by")
     };
 
     Issue::error(format!(
-        "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `{key_id}` {reason}."
+        "{rule} is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `{key_id}` is none of them."
     ))
-    .with_annotation(Annotation::primary(span).with_message(format!("`{key_id}` keys this `Map`.")))
-    .with_help("Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.")
+    .with_annotation(Annotation::primary(span).with_message(held))
+    .with_help(format!(
+        "{fix} an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`."
+    ))
 }

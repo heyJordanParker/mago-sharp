@@ -94,6 +94,7 @@ use mago_syntax::cst::ReadonlyHint;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::StringPart;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Terminator;
 use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::TypeParameterList;
@@ -433,6 +434,8 @@ pub enum Place {
     TypeParameter,
     /// An event, spec section 15: its modifiers, parameters and header.
     Event,
+    /// A struct, spec section 10: its modifiers, backing type and header. Its members are a class's.
+    Struct,
     /// A module and its members.
     Module,
     /// An extension block of a static class: its receiver and its members.
@@ -597,7 +600,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Statement::Class(_)
                 | Statement::Interface(_)
                 | Statement::Enum(_)
-                | Statement::Event(_),
+                | Statement::Event(_)
+                | Statement::Struct(_),
             )
             | Node::Namespace(_)
             | Node::NamespaceBody(_)
@@ -615,18 +619,33 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             File,
         ) => Some(File),
         (Node::Class(class), File) => {
-            report_methods_named_as_properties(class, context);
+            report_methods_named_as_properties(ClassLike::of_class(class), context);
             if class.modifiers.contains_static() {
                 check_static_class(class, context);
             }
             for member in &class.members {
                 if let ClassLikeMember::NamedConstructor(constructor) = member {
-                    check_named_constructor(constructor, class, context);
+                    check_named_constructor(constructor, &class.name, class.modifiers.contains_abstract(), context);
                 }
             }
 
             Some(Class)
         }
+        (Node::Struct(r#struct), File) => {
+            report_methods_named_as_properties(ClassLike::of_struct(r#struct), context);
+            check_struct_declaration(r#struct, context);
+            for member in &r#struct.members {
+                if let ClassLikeMember::NamedConstructor(constructor) = member {
+                    check_named_constructor(constructor, &r#struct.name, false, context);
+                }
+            }
+
+            Some(Place::Struct)
+        }
+        // `check_struct_declaration` reports every modifier but `public`. A struct's members are a class's.
+        (Node::Modifier(modifier), Place::Struct) => matches!(modifier, Modifier::Public(_)).then_some(Place::Struct),
+        (Node::AttributeList(_), Place::Struct) => Some(Attribute),
+        (Node::ClassLikeMember(_), Place::Struct) => enter(node, Class, context),
         // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
         (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(_), File) => Some(Enum),
@@ -690,7 +709,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             ),
             Class,
         ) => Some(Class),
-        (Node::Inheritance(inheritance), Class | Interface | Enum | Place::Event) => {
+        (Node::Inheritance(inheritance), Class | Interface | Enum | Place::Event | Place::Struct) => {
             check_header(inheritance, place, context);
 
             Some(Header)
@@ -1006,13 +1025,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::PropertyAbstractItem(_)
             | Node::PropertyConcreteItem(_)
             | Node::DirectVariable(_)
-            // `is_slice_property` refuses `override` on a member that is not a field.
+            // `is_slice_property` refuses `override` on a member that is not a field, and `required` on one without
+            // `init` or `set`.
             | Node::Modifier(
                 Modifier::Public(_)
                 | Modifier::Protected(_)
                 | Modifier::Private(_)
                 | Modifier::Static(_)
-                | Modifier::Override(_),
+                | Modifier::Override(_)
+                | Modifier::Required(_),
             ),
             FieldOrProperty,
         ) => Some(FieldOrProperty),
@@ -1738,7 +1759,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         ) => Some(Instantiation),
         // `new (type)(…)` creates an object from the class value in the parentheses, spec section 25.
         (Node::Expression(Expression::Parenthesized(_)), Instantiation) => Some(Body),
-        (Node::ArgumentList(_), Instantiation) => Some(Body),
+        (Node::ArgumentList(_) | Node::ObjectInitializer(_), Instantiation) => Some(Body),
+        // Spec section 16: `with` copies an object, and an object initializer names the values it sets.
+        (
+            Node::Expression(Expression::With(_)) | Node::With(_) | Node::ObjectInitializer(_) | Node::NamedValue(_),
+            Body,
+        ) => Some(Body),
         (Node::AssignmentOperator(operator), Body) if is_slice_assignment_operator(operator) => Some(Body),
         (Node::PositionalArgument(_), Body) => Some(Body),
         // A constructor runs once, when `new` creates the object, so no code calls one as a method, as in C#.
@@ -2037,6 +2063,77 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
                 report(non_static(variable.name), variable.span, "Declared without `static` here.");
             }
             _ => {}
+        }
+    }
+}
+
+/// Reports what spec section 10 refuses in a struct: a modifier but `public`, `readonly` above all because every
+/// struct is read-only, a `set` accessor, and a member modifier only a subclass would need.
+fn check_struct_declaration(r#struct: &Struct, context: &mut Context<'_, '_, '_>) {
+    let mut report = |issue: Issue| context.report(issue);
+
+    for modifier in &r#struct.modifiers {
+        let issue = match modifier {
+            Modifier::Public(_) => continue,
+            Modifier::Readonly(_) => Issue::error("Every struct is already read-only: write `struct`.")
+                .with_annotation(Annotation::primary(modifier.span()).with_message("Remove `readonly`.")),
+            _ => Issue::error(format!(
+                "A struct takes only `public`: remove `{}`.",
+                BytesDisplay(modifier.get_keyword().value)
+            ))
+            .with_annotation(Annotation::primary(modifier.span()).with_message("Written here."))
+            .with_note("A struct is a value: it has objects, and no subclasses."),
+        };
+        report(issue);
+    }
+
+    let parameters = r#struct.members.iter().flat_map(|member| match member {
+        ClassLikeMember::Method(method) => method.parameter_list.parameters.as_slice(),
+        _ => &[],
+    });
+    let accessor_lists = r#struct
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            ClassLikeMember::Property(Property::Hooked(property)) => {
+                Some((&property.hook_list, property.item.variable().name))
+            }
+            _ => None,
+        })
+        .chain(parameters.clone().filter_map(|parameter| Some((parameter.hooks.as_ref()?, parameter.variable.name))));
+    for (accessors, name) in accessor_lists {
+        for setter in accessors.hooks.iter().filter(|accessor| accessor.name.value == b"set") {
+            report(
+                Issue::error(format!(
+                    "A struct never changes, so `{}` takes `init`, not `set`.",
+                    BytesDisplay(name.strip_prefix(b"$").unwrap_or(name))
+                ))
+                .with_annotation(Annotation::primary(setter.name.span).with_message("Written here."))
+                .with_note("A struct's property is set only while the struct is created."),
+            );
+        }
+    }
+
+    let member_modifiers = r#struct
+        .members
+        .iter()
+        .flat_map(|member| match member {
+            ClassLikeMember::Method(method) => method.modifiers.as_slice(),
+            ClassLikeMember::Property(property) => property.modifiers().as_slice(),
+            ClassLikeMember::Constant(constant) => constant.modifiers.as_slice(),
+            ClassLikeMember::NamedConstructor(constructor) => constructor.modifiers.as_slice(),
+            _ => &[],
+        })
+        .chain(parameters.flat_map(|parameter| parameter.modifiers.as_slice()));
+    for modifier in member_modifiers {
+        if matches!(
+            modifier,
+            Modifier::Protected(_) | Modifier::Virtual(_) | Modifier::Abstract(_) | Modifier::Override(_)
+        ) {
+            report(
+                Issue::error("A struct has no subclasses, so write `private`.")
+                    .with_annotation(Annotation::primary(modifier.span()).with_message("Written here.")),
+            );
         }
     }
 }
@@ -2356,6 +2453,21 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
         }
     }
 
+    // Language rule 9: a required property is set where its object is created, so it takes `init` or `set`.
+    if let Some(required) = property.modifiers().iter().find(|modifier| matches!(modifier, Modifier::Required(_)))
+        && !matches!(property, Property::Hooked(hooked) if hooked.hook_list.setter().is_some())
+    {
+        let name = property.first_variable().name;
+
+        return Err(Box::new(
+            Issue::error(format!(
+                "`{}` is required, so it is set when its object is created: give it `init` or `set`.",
+                BytesDisplay(name.strip_prefix(b"$").unwrap_or(name))
+            ))
+            .with_annotation(Annotation::primary(required.span()).with_message("Written here.")),
+        ));
+    }
+
     let is_override = property.modifiers().iter().any(|modifier| matches!(modifier, Modifier::Override(_)));
     if is_override && !matches!(property, Property::Plain(_)) {
         return Err(Box::new(not_supported(
@@ -2475,9 +2587,9 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
 /// Reports each method named as a property of its class, compared ignoring case as PHP finds a method. Spec section 14
 /// calls a property holding a function as `order.priceOf(line)`, and the engine calls the property only when the
 /// class has no method of that name, so one name declares one member, as in C#.
-fn report_methods_named_as_properties(class: &Class, context: &mut Context<'_, '_, '_>) {
+fn report_methods_named_as_properties(class: ClassLike, context: &mut Context<'_, '_, '_>) {
     let mut properties: Vec<&DirectVariable> = Vec::new();
-    for member in &class.members {
+    for member in class.members {
         match member {
             ClassLikeMember::Property(property) => properties.extend(property.variables()),
             ClassLikeMember::Method(method) => properties.extend(
@@ -2492,7 +2604,7 @@ fn report_methods_named_as_properties(class: &Class, context: &mut Context<'_, '
         }
     }
 
-    for member in &class.members {
+    for member in class.members {
         let ClassLikeMember::Method(method) = member else {
             continue;
         };
@@ -3191,12 +3303,22 @@ fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
     }
 }
 
+/// Whether `hint` keys a `Map` and is a `Set`'s element by its kind alone, spec section 12: a type with `==` and
+/// `hash()` with no code, or a named type, which the analyzer accepts when it is an enum, a struct, a class that
+/// declares `operator ==`, or a type parameter bounded by one.
+fn is_key_hint(hint: &Hint) -> bool {
+    match hint {
+        Hint::Integer(_) | Hint::Float(_) | Hint::Bool(_) | Hint::String(_) | Hint::Identifier(_) => true,
+        Hint::Nullable(nullable) => is_key_hint(nullable.hint),
+        _ => false,
+    }
+}
+
 /// Whether the slice has a type: the built-in types of spec section 24, or a class or a type parameter written by its
 /// short name, or a nullable type, or `List<T>`, `Map<TKey, TValue>` or `Set<T>` of spec section 12, `Class<T>` of
 /// section 25 or a class with type arguments of section 11, or a function type of spec section 14.1 without a `void`
 /// parameter, whose inner types the walk checks next, refusing a `void` type argument and a wrong count of them as
-/// such. The analyzer checks a generic class's arity. A `Set` holds an `int`, a `string` or a named type, which the
-/// analyzer accepts only as a backed enum, because its elements run as the keys of a PHP array.
+/// such. The analyzer checks a generic class's arity.
 fn is_slice_type(hint: &Hint) -> bool {
     match hint {
         Hint::Integer(_)
@@ -3207,13 +3329,7 @@ fn is_slice_type(hint: &Hint) -> bool {
         | Hint::Identifier(Identifier::Local(_))
         | Hint::Nullable(_) => true,
         Hint::Mixed(any) => any.value == ANY,
-        Hint::Generic(generic) => match (generic.name.value, generic.type_arguments.arguments.as_slice()) {
-            (b"Set", [element]) => matches!(
-                element,
-                Hint::Integer(_) | Hint::String(_) | Hint::Identifier(Identifier::Local(_)) | Hint::Void(_)
-            ),
-            _ => true,
-        },
+        Hint::Generic(_) => true,
         Hint::Function(function) => !function.parameters.iter().any(|parameter| matches!(parameter, Hint::Void(_))),
         _ => false,
     }
@@ -3403,21 +3519,28 @@ fn check_generic(generic: &GenericHint, place: Place, context: &mut Context<'_, 
         return None;
     }
 
+    let key = match (generic.name.value, generic.type_arguments.arguments.as_slice()) {
+        (b"Map", [key, _]) => Some((key, "A `Map`'s key")),
+        (b"Set", [element]) => Some((element, "A `Set`'s element")),
+        _ => None,
+    };
     match (generic.name.value, generic.type_arguments.arguments.as_slice()) {
-        // The analyzer refuses a named key type without an `int` or `string` backing value, and a class value, with the
-        // check a `Map` literal's key and an inferred key keep. A key type outside the slice, nullable or not, is
-        // refused once, by the walk, as that type.
-        (b"Map", [key, _])
-            if !matches!(key, Hint::Integer(_) | Hint::String(_) | Hint::Identifier(_))
-                && !matches!(key, Hint::Generic(class) if class.name.value == b"Class")
-                && is_slice_type(match key {
-                    Hint::Nullable(nullable) => nullable.hint,
-                    key => key,
-                }) =>
+        // A `Set`'s element takes exactly what a `Map`'s key takes. The analyzer refuses a named key type without `==`
+        // and `hash()`, with the check a `Map` literal's key and an inferred key keep, and a class value keys one as
+        // its class name. A key type outside the slice, nullable or not, is refused once, by the walk, as that type.
+        _ if let Some((key, rule)) = key
+            && !is_key_hint(key)
+            && !matches!(key, Hint::Generic(class) if class.name.value == b"Class")
+            && is_slice_type(match key {
+                Hint::Nullable(nullable) => nullable.hint,
+                key => key,
+            }) =>
         {
             report_refusal(
-                Issue::error("A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.")
-                    .with_annotation(Annotation::primary(key.span()).with_message("Key type written here.")),
+                Issue::error(format!(
+                    "{rule} is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
+                ))
+                .with_annotation(Annotation::primary(key.span()).with_message("Key type written here.")),
                 generic.span(),
                 place,
                 context,
@@ -3683,11 +3806,11 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
         _ => {}
     }
 
-    if instantiation.argument_list.is_none() {
+    if instantiation.argument_list.is_none() && instantiation.initializer.is_none() {
         report_not_supported(
             instantiation.span(),
             "`new` without arguments",
-            "PHP# creates an object with `new Class(arguments)`, parentheses included.",
+            "PHP# creates an object with `new Class(arguments)`, parentheses included, or with an object initializer, as in `new Class { name: value }`.",
             context,
         );
 
@@ -3764,14 +3887,19 @@ fn has_required_constructor(class: &ClassLike) -> bool {
 /// one PHP reserves, and passes control to the main constructor with `: this(…)`. `check_members` reports a name
 /// another member of the class has, as PHP's duplicate-method check, since the named constructor runs as the static
 /// method of its name.
-fn check_named_constructor(constructor: &NamedConstructor, class: &Class, context: &mut Context<'_, '_, '_>) {
-    let class_name = BytesDisplay(class.name.value);
+fn check_named_constructor(
+    constructor: &NamedConstructor,
+    class: &LocalIdentifier,
+    is_abstract: bool,
+    context: &mut Context<'_, '_, '_>,
+) {
+    let class_name = BytesDisplay(class.value);
     let name = BytesDisplay(constructor.name.value);
     let mut report = |message: String, span: Span, written: &str| {
         context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message(written)));
     };
 
-    if class.modifiers.contains_abstract() {
+    if is_abstract {
         report(
             "An abstract class has no objects of its own, so it declares no named constructor.".to_owned(),
             constructor.name.span,
@@ -3779,7 +3907,7 @@ fn check_named_constructor(constructor: &NamedConstructor, class: &Class, contex
         );
     }
 
-    if constructor.class.value != class.name.value {
+    if constructor.class.value != class.value {
         report(
             format!("A named constructor is declared on its own class, as in `{class_name}.{name}`."),
             constructor.class.span,
@@ -3787,7 +3915,7 @@ fn check_named_constructor(constructor: &NamedConstructor, class: &Class, contex
         );
     }
 
-    if constructor.name.value.eq_ignore_ascii_case(class.name.value) {
+    if constructor.name.value.eq_ignore_ascii_case(class.value) {
         report(
             format!(
                 "A named constructor cannot have its class's name: `new {class_name}(…)` calls the main constructor."
@@ -4239,7 +4367,9 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 /// What the slice has at a place, as the note of a refusal there.
 fn supported(place: Place) -> &'static str {
     match place {
-        Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface`, `enum` and `event`.",
+        Place::File => {
+            "At file level, PHP# supports `namespace`, `import`, `class`, `struct`, `interface`, `enum` and `event`."
+        }
         Place::Class => {
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a static class, extensions, with no other modifiers, `extends` or `implements`."
         }
@@ -4261,6 +4391,7 @@ fn supported(place: Place) -> &'static str {
         Place::Event => {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
         }
+        Place::Struct => unreachable!("the walk enters every part of a struct"),
         Place::Module => unreachable!("a module holds only its header, bindings and laws, and `enter` takes each one"),
         Place::Extension => unreachable!("`enter` places an extension's keyword, receiver and every member of it"),
         Place::FieldOrProperty => {
@@ -4807,8 +4938,8 @@ fn check_member_access(object: &Expression, member: &ClassLikeMemberSelector, co
     }
 }
 
-/// A class or an enum a PHP# file declares. The slice's class rules treat both alike, and an enum declares no type
-/// parameters.
+/// A class, a struct or an enum a PHP# file declares. The slice's class rules treat them alike, and a struct and an
+/// enum declare no type parameters.
 #[derive(Clone, Copy)]
 struct ClassLike<'ast, 'arena> {
     name: &'ast LocalIdentifier<'arena>,
@@ -4828,6 +4959,17 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
             members: &class.members,
             is_static: class.modifiers.contains_static(),
             is_foreign: class.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Foreign(_))),
+        }
+    }
+
+    fn of_struct(r#struct: &'ast Struct<'arena>) -> Self {
+        Self {
+            name: &r#struct.name,
+            span: r#struct.span(),
+            type_parameters: None,
+            members: &r#struct.members,
+            is_static: false,
+            is_foreign: false,
         }
     }
 }
@@ -4857,6 +4999,7 @@ fn collect_declarations<'ast, 'arena>(
 ) {
     match statement {
         Statement::Class(class) => classes.push(ClassLike::of_class(class)),
+        Statement::Struct(r#struct) => classes.push(ClassLike::of_struct(r#struct)),
         Statement::Enum(r#enum) => classes.push(ClassLike {
             name: &r#enum.name,
             span: r#enum.span(),
@@ -5122,10 +5265,12 @@ fn enclosing_class<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> 
     classes.into_iter().find(|class| class.span.contains(&span.start))
 }
 
-/// The name of the class, interface or enum of a PHP# file whose body holds `span`, in any of the file's namespaces.
+/// The name of the class, struct, interface or enum of a PHP# file whose body holds `span`, in any of the file's
+/// namespaces.
 fn enclosing_class_like_name<'arena>(program: &Program<'arena>, span: Span) -> Option<&'arena [u8]> {
     file_statements(program).find_map(|statement| match statement {
         Statement::Class(class) if class.span().contains(&span.start) => Some(class.name.value),
+        Statement::Struct(r#struct) if r#struct.span().contains(&span.start) => Some(r#struct.name.value),
         Statement::Interface(interface) if interface.span().contains(&span.start) => Some(interface.name.value),
         Statement::Enum(r#enum) if r#enum.span().contains(&span.start) => Some(r#enum.name.value),
         _ => None,

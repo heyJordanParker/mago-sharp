@@ -517,7 +517,14 @@ where
                 TArray::Set(_) => format!("Set<{}>", display_sharp_type(context, &value)),
             }
         }
-        TAtomic::Iterable(iterable) => format!("Iterable<{}>", display_sharp_type(context, iterable.get_value_type())),
+        TAtomic::Iterable(iterable) if iterable.get_key_type().is_mixed() => {
+            format!("Iterable<{}>", display_sharp_type(context, iterable.get_value_type()))
+        }
+        TAtomic::Iterable(iterable) => format!(
+            "iterable<{}, {}>",
+            display_sharp_type(context, iterable.get_key_type()),
+            display_sharp_type(context, iterable.get_value_type())
+        ),
         TAtomic::Object(TObject::Any) => "Object".to_owned(),
         TAtomic::Object(object) => {
             let Some(name) = object.get_name() else {

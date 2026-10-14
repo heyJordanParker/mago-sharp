@@ -472,12 +472,12 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required` and `via` are spec syntax outside the slice. Each one is a single error where it starts, and the class
-/// around it still parses.
+/// `required` on a method and `via` are spec syntax outside the slice. Each one is a single error where it starts, and
+/// the class around it still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     for (member, message, start) in [
-        ("public required int count { get; set; }", "`required` is not supported yet in PHP#.", "required"),
+        ("public required int count() { return 1; }", "`required` is not supported yet in PHP#.", "required"),
         ("public string name { get; set; } via Trimmed, Tracked;", "`via` is not supported yet in PHP#.", "via"),
         (
             "public Report(public int id { get; } via Tracked, int other) {}",
@@ -598,6 +598,75 @@ fn a_case_that_carries_data_is_one_not_supported_error_and_the_enum_parses_on() 
     assert_eq!(run.name.value, b"run");
 }
 
+/// A generic struct waits for generics, spec section 10's question 4, so its type parameters are one error, nested
+/// ones included, and the struct parses on. It is refused whole, so it keeps no members, whose types name its
+/// parameters, and the file has that one error.
+#[test]
+fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
+    for parameters in ["<T>", "<TKey, TValue>", "<T : Box<int>>", "<T : Map<string, List<int>>>"] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("struct Pair{parameters} : HasLabel\n{{\n    public int run() {{ return 1; }}\n}}\n\nstruct Next {{ }}\n")
+                .into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Pair.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{parameters}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), "A generic struct is not supported yet in PHP#.");
+        assert_eq!(source(code, error), parameters);
+        let Some(Statement::Struct(pair)) = program.statements.first() else {
+            panic!("expected a struct for `{parameters}`, got {:#?}", program.statements);
+        };
+        assert!(pair.inheritance.is_some(), "the header after `{parameters}` parses");
+        assert!(pair.members.is_empty(), "the struct keeps no members after `{parameters}`");
+        assert!(
+            matches!(program.statements.get(1), Some(Statement::Struct(_))),
+            "the struct after `{parameters}` parses"
+        );
+    }
+}
+
+/// A struct's header lists interfaces only, spec section 10, a generic one with its type arguments, so a type such as
+/// `string` there is one error at the type, and the interfaces after it still parse.
+#[test]
+fn a_struct_header_lists_interfaces_only() {
+    for (header, refused, interfaces) in [
+        (" : HasLabel, Sortable", None, &[&b"HasLabel"[..], b"Sortable"][..]),
+        (" : Comparable<Username>, HasLabel", None, &[b"Comparable", b"HasLabel"]),
+        (" : string", Some("string"), &[]),
+        (" : int, HasLabel", Some("int"), &[b"HasLabel"]),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("struct Username{header}\n{{\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Username.sharp", code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        let expected: Vec<(String, &str)> = refused
+            .map(|refused| {
+                (
+                    "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value."
+                        .to_owned(),
+                    refused,
+                )
+            })
+            .into_iter()
+            .collect();
+        assert_eq!(errors, expected, "{header}");
+        let Some(Statement::Struct(username)) = program.statements.first() else {
+            panic!("expected a struct for `{header}`, got {:#?}", program.statements);
+        };
+        let named: Vec<&[u8]> =
+            username.inheritance.iter().flat_map(|inheritance| inheritance.names()).map(|name| name.value()).collect();
+        assert_eq!(named, interfaces, "{header}");
+        assert!(matches!(username.members.as_slice(), [ClassLikeMember::Method(_)]), "{header}");
+    }
+}
+
 /// A PHP#-only parse error is its own message, so `mago analyze` shows the rule as the issue's title.
 #[test]
 fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
@@ -616,8 +685,12 @@ fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
         ),
         ("class Report\n{\n    private count = 0;\n}\n", "A PHP# field needs a type, as in `private int count = 0;`."),
         (
-            "class Report\n{\n    public required int count { get; set; }\n}\n",
+            "class Report\n{\n    public required int count() { return 1; }\n}\n",
             "`required` is not supported yet in PHP#.",
+        ),
+        (
+            "struct Username : string\n{\n}\n",
+            "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value.",
         ),
         (
             "class Report\n{\n    public void run() { for (const line in lines) {} }\n}\n",
@@ -4106,8 +4179,62 @@ fn grouping(code: &str, expression: &Expression) -> String {
             format!("({} is {pattern})", grouping(code, is.value))
         }
         Expression::As(r#as) => format!("({} as {})", grouping(code, r#as.value), source(code, r#as.hint)),
+        Expression::With(with) => {
+            format!("({} with {})", grouping(code, with.object), source(code, &with.initializer))
+        }
         _ => source(code, expression).to_owned(),
     }
+}
+
+/// Spec section 16: `with` copies the object before it with the values its initializer names, the shorthand `y` among
+/// them. It binds tighter than `+` and `!` and looser than unary `-`, at PHP's `instanceof` level, and follows a `new`
+/// with its own initializer.
+#[test]
+fn with_copies_the_object_before_it_with_the_values_it_names() {
+    const CODE: &str = "class Report\n{\n    Point run()\n    {\n        return p with { x: 1, y };\n        return a + b with { x: 1 };\n        return !p with { open: true };\n        return -p with { x: 1 };\n        return new Point { x: 1, y } with { x: 2 };\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let groupings: Vec<String> =
+        method_body(program).iter().map(|statement| grouping(CODE, expression(statement))).collect();
+    assert_eq!(
+        groupings,
+        [
+            "(p with { x: 1, y })",
+            "(a + (b with { x: 1 }))",
+            "!p with { open: true }",
+            "(-p with { x: 1 })",
+            "(new Point { x: 1, y } with { x: 2 })",
+        ]
+    );
+    let Expression::With(with) = expression(&method_body(program)[0]) else {
+        panic!("expected `with`, got {:#?}", method_body(program)[0]);
+    };
+    let values: Vec<(&str, bool)> =
+        with.initializer.values.iter().map(|value| (source(CODE, &value.name), value.is_shorthand())).collect();
+    assert_eq!(values, [("x", false), ("y", true)]);
+}
+
+/// Spec section 16: an object initializer follows `new` with or without arguments, and a named constructor, and may be
+/// empty. `{` after `new X` opens one only where a name and `:`, `,` or `}` follow, or `}` closes it at once.
+#[test]
+fn an_object_initializer_follows_new() {
+    const CODE: &str = "class Report\n{\n    Point run()\n    {\n        new Point { x: 1, y };\n        new Point(1) { x: 2 };\n        new Point.origin() { x: 1 };\n        new Point { };\n        new Point();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let initializers: Vec<Option<&str>> = method_body(program)
+        .iter()
+        .map(|statement| match expression(statement) {
+            Expression::Instantiation(instantiation) => {
+                instantiation.initializer.as_ref().map(|initializer| source(CODE, initializer))
+            }
+            other => panic!("expected `new`, got {other:#?}"),
+        })
+        .collect();
+    assert_eq!(initializers, [Some("{ x: 1, y }"), Some("{ x: 2 }"), Some("{ x: 1 }"), Some("{ }"), None]);
 }
 
 #[test]

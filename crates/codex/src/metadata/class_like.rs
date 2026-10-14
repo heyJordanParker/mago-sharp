@@ -102,6 +102,7 @@ pub struct ClassLikeMetadata {
     pub enum_cases: WordMap<EnumCaseMetadata>,
     pub invalid_dependencies: WordSet,
     pub attributes: Vec<AttributeMetadata>,
+    /// The backing type of a backed enum, or of a PHP# struct that declares one, spec section 10.
     pub enum_type: Option<TAtomic>,
     pub has_sealed_methods: Option<bool>,
     pub has_sealed_properties: Option<bool>,
@@ -118,7 +119,38 @@ pub struct ClassLikeMetadata {
     pub version_constraint: VersionConstraint,
 }
 
+/// A key a PHP# struct's `parse` reads, spec section 10: a main constructor parameter, or a property an object
+/// initializer may set that the constructor does not.
+#[derive(Clone, Copy, Debug)]
+pub struct ParsedField<'codebase> {
+    /// The name, without `$`.
+    pub name: &'codebase [u8],
+    /// The key `parse` reads: the name, or the one `[Key("…")]` gives a parameter.
+    pub key: &'codebase [u8],
+    pub r#type: &'codebase TUnion,
+    /// Whether a missing key leaves the field to its default value or its initial value.
+    pub has_default: bool,
+    /// Whether the main constructor takes the field, rather than a write after it runs.
+    pub is_parameter: bool,
+    /// The span of the field's name, where the codex has one.
+    pub span: Option<Span>,
+}
+
 impl ClassLikeMetadata {
+    /// The properties `==` compares on a PHP# struct, spec section 10: each one with storage that is not static, in the
+    /// order the struct declares them.
+    #[must_use]
+    pub fn struct_properties(&self) -> Vec<&PropertyMetadata> {
+        let mut properties: Vec<&PropertyMetadata> = self
+            .properties
+            .values()
+            .filter(|property| !property.flags.is_static() && !property.flags.is_virtual_property())
+            .collect();
+        properties.sort_by_key(|property| property.span.map(|span| span.start.offset));
+
+        properties
+    }
+
     /// Returns whether this class-like's inherited metadata is incomplete.
     ///
     /// Synthetic enum contracts are materialized by the scanner and do not make

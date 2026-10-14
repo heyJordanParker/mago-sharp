@@ -19,7 +19,7 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
-use mago_codex::ttype::get_backing_key_type;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
@@ -30,7 +30,6 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Expression;
-use mago_syntax::dialect::Dialect;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -39,6 +38,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::invocation::InvocationTarget;
+use crate::invocation::InvocationTargetParameter;
 use crate::invocation::analyzer::adjust_offset_for_variadic;
 use crate::statement::function_like::rejected_nullable_parameter::writes_null;
 use crate::utils::expression::is_referenceable;
@@ -71,6 +71,55 @@ fn shareable_part(union: &TUnion, is_sharp: bool) -> Option<Cow<'_, TUnion>> {
         .collect();
 
     (!types.is_empty()).then(|| Cow::Owned(TUnion::from_vec(types)))
+}
+
+/// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
+/// keys are `int` or `string`. A `Map` keyed by anything else, as an enum, a struct or a `float`, has no such array,
+/// where PHP would cast or refuse each key, so its call is refused here rather than failing where it runs. Returns
+/// whether it refused the call.
+pub(super) fn check_array_crossing<A>(
+    context: &mut Context<'_, '_, A>,
+    input_type: &TUnion,
+    parameter: InvocationTargetParameter<'_>,
+    parameter_type: &TUnion,
+    argument_offset: usize,
+    input_expression: &Expression<'_>,
+    invocation_target: &InvocationTarget<'_>,
+) -> bool
+where
+    A: Arena,
+{
+    if !parameter_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))) {
+        return false;
+    }
+    let Some(key_type) = input_type.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Array(map @ TArray::Keyed(_)) => Some(get_array_parameters(map, context.codebase).0),
+        _ => None,
+    }) else {
+        return false;
+    };
+    if key_type.is_always_array_key(true) {
+        return false;
+    }
+
+    let parameter = parameter.get_name().map_or_else(
+        || format!("argument #{}", argument_offset + 1),
+        |name| format!("parameter `{}`", display_variable_name(context, name.0.as_bytes())),
+    );
+    let target_kind = invocation_target.guess_kind();
+    let target = invocation_target.guess_name(context);
+    let input = display_type(context, input_type);
+    let key = display_type(context, &key_type);
+    context.collector.report_with_code(
+        IssueCode::InvalidArgument,
+        Issue::error(format!(
+            "`{input}` can't be passed to the {parameter} of {target_kind} `{target}`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `{key}`."
+        ))
+        .with_annotation(Annotation::primary(input_expression.span()).with_message(format!("This `Map` is keyed by `{key}`")))
+        .with_annotation(Annotation::secondary(invocation_target.span()).with_message("Plain PHP declares this call"))
+        .with_help("Pass a `Map` keyed by `int` or `string`, such as one keyed by a field of each key."),
+    );
+    true
 }
 
 /// Checks if an argument can be passed by reference.
@@ -322,15 +371,6 @@ where
         }
     }
 
-    // Spec section 11 checks a value from plain PHP where it enters PHP#, so a plain PHP caller passes the backing
-    // values where PHP# takes a `Map` keyed by a backed enum, its key read as the target writes it.
-    let backing_parameter_type = if context.dialect.is_sharp() {
-        None
-    } else {
-        get_backing_array_type(parameter_type, context.codebase, invocation_target.get_dialect())
-    };
-    let parameter_type = backing_parameter_type.as_ref().unwrap_or(parameter_type);
-
     // Spec section 12 converts a list passed where a `Set` is expected: a PHP# method or lambda makes a `Set` of each
     // parameter it declares `Set` before its body runs, so that parameter takes a `List` of its elements too. A call
     // through a `Function` value, of plain PHP, or of a parameter whose `Set` comes from a template runs no such body.
@@ -541,32 +581,6 @@ fn can_argument_be_identical(codebase: &CodebaseMetadata, input_type: &TUnion, p
                 false,
             )
     })
-}
-
-/// Returns `parameter_type` with each `Map` keyed by a backed enum keyed by the backing type instead, or `None` when
-/// it has no such `Map`, for a call `dialect` code writes.
-fn get_backing_array_type(parameter_type: &TUnion, codebase: &CodebaseMetadata, dialect: Dialect) -> Option<TUnion> {
-    let backing_atomic = |atomic: &TAtomic| {
-        let TAtomic::Array(TArray::Keyed(keyed_array)) = atomic else {
-            return None;
-        };
-        let (key_type, value_type) = keyed_array.parameters.as_ref()?;
-        let Cow::Owned(backing_key_type) = get_backing_key_type(key_type, codebase, dialect) else {
-            return None;
-        };
-
-        let mut backing_array = keyed_array.clone();
-        backing_array.parameters = Some((Arc::new(backing_key_type), Arc::clone(value_type)));
-        Some(TAtomic::Array(TArray::Keyed(backing_array)))
-    };
-
-    if !parameter_type.types.iter().any(|atomic| backing_atomic(atomic).is_some()) {
-        return None;
-    }
-
-    Some(TUnion::from_vec(
-        parameter_type.types.iter().map(|atomic| backing_atomic(atomic).unwrap_or_else(|| atomic.clone())).collect(),
-    ))
 }
 
 /// Whether a parameter declared `declared_type` is written `Set<T>` or `Set<T>?`, the parameters the lowering converts.

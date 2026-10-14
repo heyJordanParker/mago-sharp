@@ -1,6 +1,7 @@
 use mago_allocator::prelude::*;
 use mago_database::file::HasFileId;
 use mago_span::Span;
+use mago_syntax_core::stack::ensure_sufficient_stack;
 
 use crate::T;
 use crate::cst::cst::AttributeList;
@@ -17,6 +18,10 @@ where
     A: Arena,
 {
     pub(crate) fn parse_classlike_member(&mut self) -> Result<ClassLikeMember<'arena>, ParseError> {
+        ensure_sufficient_stack(|| self.parse_classlike_member_inner())
+    }
+
+    fn parse_classlike_member_inner(&mut self) -> Result<ClassLikeMember<'arena>, ParseError> {
         self.read_php_construct()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {

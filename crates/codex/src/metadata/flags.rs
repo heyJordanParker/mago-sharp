@@ -73,6 +73,12 @@ impl MetadataFlags {
     pub const EXTENSION_PROPERTY: MetadataFlags = MetadataFlags(1 << 50);
     /// A PHP# `foreign` class, spec section 29: an effect, which code has by holding one of its objects.
     pub const FOREIGN: MetadataFlags = MetadataFlags(1 << 51);
+    /// A PHP# struct, spec section 10: a final class whose object never changes and compares by value.
+    pub const STRUCT: MetadataFlags = MetadataFlags(1 << 52);
+    /// A PHP# property each creation of its object must set, spec sections 6.1 and 10: one written `required`, or a
+    /// struct's public `init` property with no initial value that its main constructor does not take. What a
+    /// constructor assigns is its own `MethodMetadata::assigned_properties`.
+    pub const REQUIRED: MetadataFlags = MetadataFlags(1 << 53);
 }
 
 impl MetadataFlags {
@@ -179,6 +185,18 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_foreign(self) -> bool {
         self.contains(Self::FOREIGN)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_struct(self) -> bool {
+        self.contains(Self::STRUCT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_required(self) -> bool {
+        self.contains(Self::REQUIRED)
     }
 
     #[inline]

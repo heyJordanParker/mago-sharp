@@ -29,6 +29,8 @@ use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::get_signature_of_function_like_metadata;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_php_passed_type;
+use mago_codex::ttype::get_php_received_type;
 use mago_codex::ttype::template::TemplateBound;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
@@ -43,7 +45,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
-use mago_syntax::dialect::Dialect;
+use mago_syntax::cst::Variable;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
 use mago_word::WordSet;
@@ -57,6 +59,8 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
+use crate::expression::with::CREATED_OBJECT_PREFIX;
+use crate::expression::with::is_set_by_with;
 use crate::external::PropertyAccessKind;
 use crate::invocation::infer_parameter_templates_from_argument;
 use crate::invocation::rename_trait_objects;
@@ -876,6 +880,36 @@ pub(crate) fn resolve_property_for_external_access<'ctx>(
     }
 }
 
+/// Whether `object_expr` is the object `new` with an object initializer or `with` creates, spec section 16, which
+/// they set properties of while it is created.
+fn is_created_object(object_expr: &Expression) -> bool {
+    matches!(object_expr, Expression::Variable(Variable::Direct(variable))
+        if variable.name.starts_with(CREATED_OBJECT_PREFIX))
+}
+
+/// The first method, in declaration order, that the struct `r#struct` declares on its objects and that returns the
+/// struct: a method that returns a changed copy, as spec section 10's `moved` does.
+fn first_copying_method<A>(context: &Context<'_, '_, A>, r#struct: &ClassLikeMetadata) -> Option<String>
+where
+    A: Arena,
+{
+    r#struct
+        .methods
+        .iter()
+        .filter_map(|method| context.codebase.get_method(r#struct.name.as_bytes(), method.as_bytes()))
+        .filter(|method| {
+            method.method_metadata.as_ref().is_some_and(|metadata| !metadata.is_static && !metadata.is_constructor)
+                && method.return_type_metadata.as_ref().is_some_and(|return_type| {
+                    return_type.type_union.types.iter().any(|atomic| {
+                        matches!(atomic, TAtomic::Object(TObject::Named(object))
+                            if object.name.as_bytes().eq_ignore_ascii_case(r#struct.name.as_bytes()))
+                    })
+                })
+        })
+        .min_by_key(|method| method.span.start.offset)
+        .map(|method| method.original_name.to_string())
+}
+
 /// Finds a property in a class, gets its type, and handles template localization. `written_atomic` is the receiver as
 /// it is typed, which is `object`'s type parameter when `object` is that type parameter's bound.
 fn find_property_in_class<'ctx, 'ast, 'arena, A>(
@@ -1150,6 +1184,17 @@ where
     let mut read_type = (for_assignment && (resolution.is_magic() || used_set_hook_param))
         .then(|| resolution.declared_type(context.codebase));
 
+    // Plain PHP reads a PHP# property's `Map` or `Set` as the object it runs as, and writes either the object or the
+    // PHP array PHP# turns into one.
+    if !context.dialect.is_sharp() && resolution.declaring_class.flags.is_sharp() {
+        property_type = if for_assignment {
+            get_php_passed_type(&property_type, context.codebase)
+        } else {
+            get_php_received_type(&property_type, context.codebase)
+        };
+        read_type = read_type.map(|read_type| get_php_received_type(&read_type, context.codebase));
+    }
+
     let expand_and_localize = |ty: &mut TUnion| {
         expander::expand_union(
             context.codebase,
@@ -1181,13 +1226,42 @@ where
     // its class or a subclass, or in a named constructor, where C# allows an `init` accessor. A lambda may run after
     // the object is created, so it cannot set one, as C# refuses with CS8852. The property's own accessor body writes
     // its storage through `field`, on `this` only.
-    if for_assignment && context.dialect.is_sharp() && property_metadata.flags.is_init() {
+    // A struct never changes, spec section 10: every property is set only while the struct is created, `init` or not.
+    let is_struct = declaring_class_metadata.flags.is_struct();
+    if for_assignment && context.dialect.is_sharp() && (is_struct || property_metadata.flags.is_init()) {
         let writes_its_storage = is_backing_store_access(object_expr, prop_name, block_context, context.resolved_names);
-        let creates_this = is_this(object_expr, context.resolved_names)
-            && block_context.scope.get_function_like().is_some_and(|function_like| {
-                function_like.flags.is_named_constructor()
-                    || function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
-            });
+        let creates_this = is_created_object(object_expr)
+            || is_this(object_expr, context.resolved_names)
+                && block_context.scope.get_function_like().is_some_and(|function_like| {
+                    function_like.flags.is_named_constructor()
+                        || function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
+                });
+
+        if is_struct && !writes_its_storage && !creates_this {
+            // `with` can't set a get-only property, so neither `with` nor a method, which may be a `with` on it, is
+            // named as its fix. The main constructor sets every property.
+            let message = if !is_set_by_with(property_metadata) {
+                let name = display_class_like_name(context, declaring_class_metadata.name);
+                let property = display_property_name(context, prop_name);
+
+                format!(
+                    "A struct never changes; return a changed copy built with its main constructor, `new {name}(…)`, or declare `{property}` `{{ get; init; }}` and return a changed copy built with `with`."
+                )
+            } else if let Some(method) = first_copying_method(context, declaring_class_metadata) {
+                format!("A struct never changes; return a changed copy from a method, such as `{method}`.")
+            } else {
+                "A struct never changes; return a changed copy built with `with`.".to_owned()
+            };
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(selector.span()).with_message("Written here."))
+                    .with_note("A struct's properties are set only while it is created."),
+            );
+            result.has_error_path = true;
+
+            return None;
+        }
 
         if !writes_its_storage && !creates_this {
             let property = display_property_name(context, prop_name);
@@ -1210,6 +1284,7 @@ where
             &resolution,
             access_span,
             Some(selector.span()),
+            is_created_object(object_expr),
         )
     } else {
         check_resolved_property_read_visibility(context, block_context, &resolution, access_span, Some(selector.span()))
@@ -1978,7 +2053,6 @@ where
                     index,
                     span,
                     false,
-                    Dialect::Sharp,
                 ));
             }
         }
