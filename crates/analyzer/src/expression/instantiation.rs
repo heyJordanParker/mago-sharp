@@ -727,16 +727,16 @@ where
 
     // PHP#'s `new TItem(…)` creates the type argument, and `new (type)(…)` the class a class value holds, any subclass
     // of the class, so the class keeps a constructor every subclass must keep, as `new Self(…)` needs, spec section 25.
-    // A plain PHP class's own constructor checks the call.
-    let holds_any_subclass =
-        context.dialect.is_sharp() && classname.is_from_class_string() && !classname.is_from_literal_class_string();
-    if has_inconsistent_constructor && holds_any_subclass && metadata.flags.is_sharp() {
+    // That holds for every class value, `typeof(Loose)` included, as the spec writes the rule. A plain PHP class's own
+    // constructor checks the call.
+    let through_class_value = context.dialect.is_sharp() && classname.is_from_class_string();
+    if has_inconsistent_constructor && through_class_value && metadata.flags.is_sharp() {
         let written = String::from_utf8_lossy(&context.source_file.contents[class_expression_span.to_range_usize()]);
         let holder = match &classname.origin {
             ResolutionOrigin::SpecificClassLikeString(TClassLikeString::Generic { parameter_name, .. }) => {
                 format!("`{parameter_name}` can be")
             }
-            _ => "the class value can hold".to_owned(),
+            _ => "a class value can hold".to_owned(),
         };
         context.collector.report_with_code(
             IssueCode::UnsafeInstantiation,
@@ -750,7 +750,7 @@ where
         );
     } else if has_inconsistent_constructor
         && !skip_constructor_warning
-        && !holds_any_subclass
+        && !through_class_value
         && (classname.is_static() || classname.is_from_class_string() || classname.is_object_instance())
     {
         let mut issue = if classname.is_static() {

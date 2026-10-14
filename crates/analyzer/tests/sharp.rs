@@ -10885,13 +10885,13 @@ fn an_override_of_a_method_returning_self_returns_self() {
 /// `new (type)(…)` creates an object from a class value, spec section 25: with the type arguments `new` names, or else
 /// those the value carries, as a `Class<Box<Order>>` carries `Order`. A `Class<Box>` carries none, so its `new` names
 /// them. The value must be a class value of a class: a `string`, or the class value of a type parameter whose bound
-/// holds a type that is no class, is refused. The class keeps a `required` constructor, because the value can hold any
-/// subclass. Each row's wrong return shows the type the `new` gives. The PHP twin's `new $type()` on a `class-string`
-/// of the PHP# class keeps Mago's issues.
+/// holds a type that is no class, is refused. The class keeps a `required` constructor, because a class value can hold
+/// any subclass, also when this one holds exactly `typeof(Loose)`. Each row's wrong return shows the type the `new`
+/// gives. The PHP twin's `new $type()` on a `class-string` of the PHP# class keeps Mago's issues.
 #[test]
 fn new_through_a_class_value_gives_the_object_the_type_arguments_it_names_or_the_value_carries() {
     let classes = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public Self copy() => new Self();\n\n    public TItem? first() => null;\n}\n\npublic class Plain\n{\n    public required Plain()\n    {\n    }\n}\n\npublic class Loose\n{\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    private Class<Box> kind = typeof(Box);\n\n    private Class<Plain> plain = typeof(Plain);\n\n    private Class<Box<Order>> orders = typeof(Box<Order>);\n\n    public Any? make() => new (this.kind)();\n\n    public Box<int> typed() => new (this.kind)<string>();\n\n    public Plain made() => new (this.plain)();\n\n    public Box<int> carried() => new (this.orders)();\n\n    public Any? text(string kind) => new (kind)();\n\n    public Loose loose(Class<Loose> type) => new (type)();\n\n    public TItem blank<TItem>()\n    {\n        const type = typeof(TItem);\n        return new (type)();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    private Class<Box> kind = typeof(Box);\n\n    private Class<Plain> plain = typeof(Plain);\n\n    private Class<Box<Order>> orders = typeof(Box<Order>);\n\n    public Any? make() => new (this.kind)();\n\n    public Box<int> typed() => new (this.kind)<string>();\n\n    public Plain made() => new (this.plain)();\n\n    public Box<int> carried() => new (this.orders)();\n\n    public Any? text(string kind) => new (kind)();\n\n    public Loose loose(Class<Loose> type) => new (type)();\n\n    public TItem blank<TItem>()\n    {\n        const type = typeof(TItem);\n        return new (type)();\n    }\n\n    public Loose exact() => new (typeof(Loose))();\n\n    public Loose kept()\n    {\n        const type = typeof(Loose);\n        return new (type)();\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @param class-string<Box> $type */\n    public static function make(string $type): mixed\n    {\n        return new $type();\n    }\n\n    /** @param class-string<Plain> $type */\n    public static function plain(string $type): Plain\n    {\n        return new $type();\n    }\n}\n";
 
     assert_eq!(explained(("src/Demo/Report.php", php), &[("src/Demo/Classes.sharp", classes)]), Vec::<String>::new());
@@ -10903,8 +10903,10 @@ fn new_through_a_class_value_gives_the_object_the_type_arguments_it_names_or_the
             "13:32 invalid-return-statement Box<string> cannot be used as Box<int>. | This has type `Box<string>`. | A type parameter without `out` or `in` is invariant, so neither substitution is allowed.",
             "17:34 invalid-return-statement Box<Order> cannot be used as Box<int>. | This has type `Box<Order>`. | A type parameter without `out` or `in` is invariant, so neither substitution is allowed.",
             "19:43 invalid-class-string-expression `kind` is a `string`, not a `Class`: `new (…)` creates an object from a class value. | Used as a class value here. | Get a class value with `typeof`, as in `typeof(Order)`.",
-            "21:46 unsafe-instantiation `new (type)(…)` needs a `required` constructor: the class value can hold any subclass of `Loose`, so every subclass must keep a constructor that `new (type)(…)` can call. | Created here. | Declare the constructor of `Loose` `required`, as in `public required Loose(…)`.",
+            "21:46 unsafe-instantiation `new (type)(…)` needs a `required` constructor: a class value can hold any subclass of `Loose`, so every subclass must keep a constructor that `new (type)(…)` can call. | Created here. | Declare the constructor of `Loose` `required`, as in `public required Loose(…)`.",
             "26:21 invalid-class-string-expression `TItem` can stand for a type that is not a class. | Used as a class here. | Bound `TItem` by a class, as in `<TItem : Order>`.",
+            "29:29 unsafe-instantiation `new (typeof(Loose))(…)` needs a `required` constructor: a class value can hold any subclass of `Loose`, so every subclass must keep a constructor that `new (typeof(Loose))(…)` can call. | Created here. | Declare the constructor of `Loose` `required`, as in `public required Loose(…)`.",
+            "34:16 unsafe-instantiation `new (type)(…)` needs a `required` constructor: a class value can hold any subclass of `Loose`, so every subclass must keep a constructor that `new (type)(…)` can call. | Created here. | Declare the constructor of `Loose` `required`, as in `public required Loose(…)`.",
         ]
     );
 }
