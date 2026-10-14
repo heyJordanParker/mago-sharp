@@ -20,7 +20,6 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::LocalIdentifier;
-use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 
@@ -169,9 +168,7 @@ where
             metadata.template_types.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
             HashMap::default(),
         );
-        if !infer_unfixed_templates(context, &parameter.type_union, receiver, &mut template_result, Dialect::Sharp)
-            .is_empty()
-        {
+        if !infer_unfixed_templates(context, &parameter.type_union, receiver, &mut template_result).is_empty() {
             return false;
         }
 
