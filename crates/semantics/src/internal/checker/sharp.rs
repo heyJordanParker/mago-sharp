@@ -848,7 +848,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ClassLikeConstantItem(_), ClassConstant) => Some(Constant),
         (Node::HookedProperty(property), FieldOrProperty) => {
             let variable = property.item.variable();
-            check_accessors(&property.modifiers, &property.hook_list, variable.span, context);
+            // `is_interface_property` took an interface property's accessors.
+            if !is_in_interface(context.program, property.span()) {
+                check_accessors(&property.modifiers, &property.hook_list, variable.span, context);
+            }
             check_accessor_bodies(&property.hook_list, variable.name, context);
             if let Some(initial_value) = &property.initial_value
                 && !context.names.has_storage(&property.hook_list)
@@ -860,6 +863,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         // `check_accessors` reported each accessor outside the slice. An accessor body is a method body.
         (Node::PropertyHookList(_), FieldOrProperty | Parameter) => Some(place),
+        // `is_interface_property` took an interface property's accessors, and the walk reports an access modifier on
+        // one as an interface member's.
+        (Node::PropertyHook(accessor), FieldOrProperty) if is_in_interface(context.program, accessor.span()) => {
+            Some(place)
+        }
         (Node::PropertyHook(accessor), FieldOrProperty | Parameter) => is_slice_accessor(accessor).then_some(place),
         (
             Node::PropertyHookBody(_) | Node::PropertyHookAbstractBody(_) | Node::PropertyHookConcreteBody(_),
@@ -1973,31 +1981,30 @@ fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Contex
 
 /// Whether the slice has an interface property: a type, a name and `{ get; }` or `{ get; set; }`, which PHP runs as a
 /// public interface property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section
-/// 15. A class gives one stated with `set` a `set` too, which the analyzer checks. An access modifier keeps it in the
-/// slice, and `enter` reports the modifier where the walk reaches it.
+/// 15. A class gives one stated with `set` a `set` too, which the analyzer checks. An access modifier, on the property
+/// or on an accessor, keeps it in the slice, and `enter` reports the modifier where the walk reaches it.
 fn is_interface_property(property: &HookedProperty) -> bool {
-    let is_bare = |accessor: &PropertyHook, name: &[u8]| {
+    let is_access = |modifier: &Modifier| {
+        matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
+    };
+    let is_stated = |accessor: &PropertyHook, name: &[u8]| {
         accessor.name.value == name
-            && is_slice_accessor(accessor)
-            && accessor.modifiers.is_empty()
+            && accessor.attribute_lists.is_empty()
+            && accessor.ampersand.is_none()
+            && accessor.modifiers.iter().all(is_access)
             && accessor.parameter_list.is_none()
             && matches!(accessor.body, PropertyHookBody::Abstract(_))
     };
 
     property.attribute_lists.is_empty()
         && property.var.is_none()
-        && property.modifiers.iter().all(|modifier| {
-            matches!(
-                modifier,
-                Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_)
-            )
-        })
+        && property.modifiers.iter().all(is_access)
         && property.hint.is_some()
         && matches!(property.item, PropertyItem::Abstract(_))
         && property.initial_value.is_none()
         && match property.hook_list.hooks.as_slice() {
-            [get] => is_bare(get, b"get"),
-            [get, set] => is_bare(get, b"get") && is_bare(set, b"set"),
+            [get] => is_stated(get, b"get"),
+            [get, set] => is_stated(get, b"get") && is_stated(set, b"set"),
             _ => false,
         }
 }
