@@ -2155,6 +2155,55 @@ mod tests {
         }
     }
 
+    /// Spec section 20.1: a `match` over a sealed interface handles each class of its namespace that implements it, so a
+    /// file added to or removed from that namespace changes whether the unchanged file of the `match` is refused, in a
+    /// one-off compile and under `mago analyze --watch`, which analyzes with `diff`.
+    #[test]
+    fn a_compile_after_a_sealed_interface_gains_or_loses_an_implementer_matches_a_clean_compile() {
+        let implementer = |name: &str| {
+            (
+                if name == "Popup" { "app/PopupInteraction.sharp" } else { "app/ScrollInteraction.sharp" },
+                format!(
+                    "namespace App;\n\npublic class {name}Interaction : Interaction\n{{\n    public string name() => \"{name}\";\n}}\n"
+                ),
+            )
+        };
+        let interaction = (
+            "app/Interaction.sharp",
+            "namespace App;\n\npublic sealed interface Interaction\n{\n    string name();\n}\n".to_string(),
+        );
+        let shop = (
+            "app/Shop.sharp",
+            "namespace App;\n\npublic class Shop\n{\n    public string run(Interaction interaction) => match (interaction) {\n        PopupInteraction popup => popup.name(),\n    };\n}\n"
+                .to_string(),
+        );
+        let popup_only = vec![interaction.clone(), shop.clone(), implementer("Popup")];
+        let both = vec![interaction, shop, implementer("Popup"), implementer("Scroll")];
+
+        for diff in [false, true] {
+            for (before, after, refused) in [(&popup_only, &both, true), (&both, &popup_only, false)] {
+                let (base, edited) = (shop_project(before), shop_project(after));
+
+                let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
+                compile(&mut warm, empty_stamp);
+                warm.update_database(edited.read_only());
+                warm.analyze_incremental(None).expect("the warm path runs");
+                let warm = compile(&mut warm, empty_stamp);
+                let clean = compile(&mut analyzed(&edited), empty_stamp);
+
+                let row = format!("diff {diff}: {} to {} files", before.len(), after.len());
+                let shop_refusal = match &clean["app/Shop.sharp"] {
+                    Compilation::Refused(issues) => messages(issues),
+                    Compilation::Accepted(_) => Vec::new(),
+                };
+                let expected: Vec<String> =
+                    if refused { vec!["This `match` misses `ScrollInteraction`.".to_string()] } else { Vec::new() };
+                assert_eq!(shop_refusal, expected, "{row}");
+                assert_eq!(outcomes(&warm), outcomes(&clean), "{row}");
+            }
+        }
+    }
+
     /// Each spec section 26 refusal of `service`, as `file: message`.
     fn hidden_members(service: &IncrementalAnalysisService) -> Vec<String> {
         let mut refusals: Vec<String> = service

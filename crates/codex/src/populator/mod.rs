@@ -120,6 +120,8 @@ fn populate_codebase_inner(
         }
     }
 
+    populate_sealed_interfaces(codebase);
+
     let sorted_classes = sorter::sort_class_likes(codebase, &class_likes_to_repopulate);
     for class_name in sorted_classes {
         hierarchy::populate_class_like_metadata_iterative(class_name, codebase, symbol_references);
@@ -337,6 +339,37 @@ fn populate_codebase_inner(
 
     codebase.safe_symbols = safe_symbols;
     codebase.safe_symbol_members = safe_symbol_members;
+}
+
+/// Sets the permitted inheritors of each PHP# sealed interface, spec section 20.1: the classes and enums of its
+/// namespace that implement it. A class elsewhere is then not permitted to implement it, and a `match` over it covers
+/// the set. A new implementer changes the set without changing the interface, so this runs on every population.
+fn populate_sealed_interfaces(codebase: &mut CodebaseMetadata) {
+    fn namespace(name: &Word) -> &[u8] {
+        let name = name.as_bytes();
+
+        &name[..name.iter().rposition(|&byte| byte == b'\\').unwrap_or(0)]
+    }
+
+    let sealed: Vec<Word> =
+        codebase.class_likes.iter().filter(|(_, metadata)| metadata.flags.is_sealed()).map(|(name, _)| *name).collect();
+
+    for interface in sealed {
+        let implementers: WordSet = codebase
+            .class_likes
+            .iter()
+            .filter(|(name, metadata)| {
+                (metadata.kind.is_class() || metadata.kind.is_enum())
+                    && metadata.direct_parent_interfaces.contains(&interface)
+                    && namespace(name) == namespace(&interface)
+            })
+            .map(|(name, _)| *name)
+            .collect();
+
+        if let Some(metadata) = codebase.class_likes.get_mut(&interface) {
+            metadata.permitted_inheritors = Some(implementers);
+        }
+    }
 }
 
 /// Populates a single constant's type metadata.

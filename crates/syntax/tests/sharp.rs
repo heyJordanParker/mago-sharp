@@ -602,6 +602,44 @@ fn a_case_that_carries_data_parses_with_its_fields() {
     assert_eq!(run.name.value, b"run");
 }
 
+/// Spec section 20.1: `sealed` before `interface` makes a sealed interface, at the start of a file, after attributes
+/// and after modifiers. Before a class, and in a `.php` file, it stays a parse error, and elsewhere it is a name.
+#[test]
+fn a_sealed_interface_parses_and_sealed_stays_a_name_elsewhere() {
+    let arena = LocalArena::new();
+    for code in [
+        "sealed interface Interaction { }\n",
+        "public sealed interface Interaction { }\n",
+        "[Deprecated]\npublic sealed interface Interaction { }\n",
+        "public interface Interaction { }\n",
+    ] {
+        let program = parse(&arena, "src/Interaction.sharp", code);
+        assert!(program.errors.is_empty(), "{code}: {:#?}", program.errors);
+        let Some(Statement::Interface(interface)) = program.statements.first() else {
+            panic!("expected an interface in {code}, got {:#?}", program.statements);
+        };
+        assert_eq!(interface.sealed.is_some(), code.contains("sealed"), "{code}");
+        assert_eq!(
+            &code[interface.span().start.offset as usize..interface.span().end.offset as usize],
+            code.trim_end()
+        );
+    }
+
+    for (path, code) in [
+        ("src/Banner.sharp", "public sealed class Banner { }\n"),
+        ("src/Interaction.php", "<?php\n\nsealed interface Interaction { }\n"),
+    ] {
+        assert!(!parse(&arena, path, code).errors.is_empty(), "{code} parsed");
+    }
+
+    let program = parse(
+        &arena,
+        "src/Shop.sharp",
+        "class Shop\n{\n    void run(int sealed)\n    {\n        const kept = sealed;\n    }\n}\n",
+    );
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+}
+
 /// Spec section 20: a case is a type of its own, written through its enum as `PaymentResult.Paid`, and a named
 /// constructor's name still parses.
 #[test]

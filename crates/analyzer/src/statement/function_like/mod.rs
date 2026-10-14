@@ -519,6 +519,7 @@ where
     parent_artifacts.namespace_constants.extend(std::mem::take(&mut artifacts.namespace_constants));
     parent_artifacts.function_values.append(&mut artifacts.function_values);
     parent_artifacts.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));
+    parent_artifacts.listings.extend(std::mem::take(&mut artifacts.listings));
     parent_artifacts.pending_readonly_property_writes.append(&mut artifacts.pending_readonly_property_writes);
 
     Ok(artifacts)

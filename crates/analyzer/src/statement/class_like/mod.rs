@@ -1819,6 +1819,30 @@ fn check_class_like_extends<'ctx, 'arena, A>(
     }
 }
 
+/// Reports `class`, which implements the sealed `interface` at `span` from another namespace, spec section 20.1.
+fn report_outside_implementer<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    interface: &ClassLikeMetadata,
+    span: Span,
+) where
+    A: Arena,
+{
+    let dotted = |name: Word| String::from_utf8_lossy(name.as_bytes()).replace('\\', ".");
+    let (class_name, interface_name) = (dotted(class.original_name), dotted(interface.original_name));
+    let namespace = interface_name.rsplit_once('.').map_or("", |(namespace, _)| namespace);
+
+    context.collector.report_with_code(
+        IssueCode::InvalidImplement,
+        Issue::error(format!(
+            "`{class_name}` cannot implement the sealed interface `{interface_name}`: its implementers sit in the namespace `{namespace}`."
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Implemented here."))
+        .with_note("A sealed interface is a closed set of classes, all in its namespace, so a `match` over it can handle each.")
+        .with_help(format!("Move the class into the namespace `{namespace}`, or implement another interface.")),
+    );
+}
+
 #[allow(clippy::unwrap_used)]
 fn check_class_like_implements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -1898,7 +1922,11 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                 );
             }
 
-            if !class_like_metadata.is_permitted_to_inherit(implemented_metadata) {
+            if !class_like_metadata.is_permitted_to_inherit(implemented_metadata)
+                && implemented_metadata.flags.is_sealed()
+            {
+                report_outside_implementer(context, class_like_metadata, implemented_metadata, implemented_type.span());
+            } else if !class_like_metadata.is_permitted_to_inherit(implemented_metadata) {
                 context.collector.report_with_code(
                     IssueCode::InvalidImplement,
                     Issue::error(format!("{using_kind_capitalized} `{using_name}` is not permitted to implement `{implemented_name}`"))

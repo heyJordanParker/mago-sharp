@@ -4375,6 +4375,34 @@ const CHECKOUT_STATE: (&str, &str) = (
     "namespace App;\n\npublic enum CheckoutState\n{\n    case Open;\n    case Paying(string gateway);\n}\n",
 );
 
+const INTERACTION: (&str, &str) =
+    ("src/App/Interaction.sharp", "namespace App;\n\npublic sealed interface Interaction\n{\n    string name();\n}\n");
+
+const POPUP_INTERACTION: (&str, &str) = (
+    "src/App/PopupInteraction.sharp",
+    "namespace App;\n\npublic class PopupInteraction : Interaction\n{\n    public string name() => \"popup\";\n}\n",
+);
+
+const SCROLL_INTERACTION: (&str, &str) = (
+    "src/App/ScrollInteraction.sharp",
+    "namespace App;\n\npublic class ScrollInteraction : Interaction\n{\n    public string name() => \"scroll\";\n}\n",
+);
+
+/// Spec section 20.1: a sealed interface's implementers sit in its namespace. A class of another namespace that
+/// implements it is an error that names the namespace, and an implementer in it is not.
+#[test]
+fn a_sealed_interface_is_implemented_only_in_its_namespace() {
+    let banner = "namespace App.Shop;\n\nimport App.Interaction;\n\npublic class Banner : Interaction\n{\n    public string name() => \"banner\";\n}\n";
+
+    assert_eq!(refusals(POPUP_INTERACTION, &[INTERACTION]), Vec::<String>::new());
+    assert_eq!(
+        refusals(("src/App/Shop/Banner.sharp", banner), &[INTERACTION, POPUP_INTERACTION]),
+        [
+            "5:23 invalid-implement `App.Shop.Banner` cannot implement the sealed interface `App.Interaction`: its implementers sit in the namespace `App`. | Move the class into the namespace `App`, or implement another interface."
+        ]
+    );
+}
+
 /// Spec section 20: each case of an enum with a case that carries data is a type of its own. `PaymentResult.Declined(…)`
 /// creates one, its fields are its properties, a method can take one case alone, and a plain case is one object of its
 /// own type.
@@ -4429,20 +4457,24 @@ fn a_case_pattern_unpacks_the_fields_by_position() {
     );
 }
 
-/// Spec sections 20 and 21: a `match` over an enum whose cases carry data needs no `default` when its arms handle each
-/// case, and names the cases it misses otherwise. An arm with `when` handles nothing, and a plain case is handled by
-/// its value.
+/// Spec sections 20, 20.1 and 21: a `match` over an enum whose cases carry data, or over a sealed interface, needs no
+/// `default` when its arms handle each case or implementer, and names the ones it misses otherwise. An arm with `when`
+/// handles nothing, and a plain case is handled by its value.
 #[test]
 fn a_match_over_a_closed_set_needs_no_default() {
-    let code = "namespace App;\n\nclass Shop\n{\n    public string covered(PaymentResult result) => match (result) {\n        PaymentResult.Paid(string transactionId) => transactionId,\n        PaymentResult.Declined d => d.reason,\n        PaymentResult.RequiresAction(string redirect) => redirect,\n    };\n\n    public string missing(PaymentResult result) => match (result) {\n        PaymentResult.Paid p => \"paid\",\n    };\n\n    public string guarded(PaymentResult result, bool test) => match (result) {\n        PaymentResult.Paid p when test => \"test\",\n        PaymentResult.Declined d => \"declined\",\n        PaymentResult.RequiresAction a => \"action\",\n    };\n\n    public string mixed(CheckoutState state) => match (state) {\n        CheckoutState.Open => \"open\",\n        CheckoutState.Paying p => p.gateway,\n    };\n\n    public string open(CheckoutState state) => match (state) {\n        CheckoutState.Paying p => p.gateway,\n    };\n\n    public string one(PaymentResult.Paid paid, bool test) => match (paid) {\n        PaymentResult.Paid p when test => p.transactionId,\n    };\n}\n";
+    let code = "namespace App;\n\nclass Shop\n{\n    public string covered(PaymentResult result) => match (result) {\n        PaymentResult.Paid(string transactionId) => transactionId,\n        PaymentResult.Declined d => d.reason,\n        PaymentResult.RequiresAction(string redirect) => redirect,\n    };\n\n    public string missing(PaymentResult result) => match (result) {\n        PaymentResult.Paid p => \"paid\",\n    };\n\n    public string guarded(PaymentResult result, bool test) => match (result) {\n        PaymentResult.Paid p when test => \"test\",\n        PaymentResult.Declined d => \"declined\",\n        PaymentResult.RequiresAction a => \"action\",\n    };\n\n    public string mixed(CheckoutState state) => match (state) {\n        CheckoutState.Open => \"open\",\n        CheckoutState.Paying p => p.gateway,\n    };\n\n    public string open(CheckoutState state) => match (state) {\n        CheckoutState.Paying p => p.gateway,\n    };\n\n    public string one(PaymentResult.Paid paid, bool test) => match (paid) {\n        PaymentResult.Paid p when test => p.transactionId,\n    };\n\n    public string interacted(Interaction interaction) => match (interaction) {\n        PopupInteraction popup => popup.name(),\n        ScrollInteraction scroll => scroll.name(),\n    };\n\n    public string half(Interaction interaction) => match (interaction) {\n        PopupInteraction popup => popup.name(),\n    };\n}\n";
 
     assert_eq!(
-        refusals(("src/App/Shop.sharp", code), &[PAYMENT_RESULT, CHECKOUT_STATE]),
+        refusals(
+            ("src/App/Shop.sharp", code),
+            &[PAYMENT_RESULT, CHECKOUT_STATE, INTERACTION, POPUP_INTERACTION, SCROLL_INTERACTION]
+        ),
         [
             "11:52 match-not-exhaustive This `match` misses `PaymentResult.Declined` and `PaymentResult.RequiresAction`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
             "15:63 match-not-exhaustive This `match` misses `PaymentResult.Paid`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
             "26:48 match-not-exhaustive This `match` misses `CheckoutState.Open`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
             "30:62 match-not-exhaustive This `match` misses `PaymentResult.Paid`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "39:52 match-not-exhaustive This `match` misses `ScrollInteraction`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
         ]
     );
 }

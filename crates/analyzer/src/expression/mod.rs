@@ -66,6 +66,7 @@ use crate::context::block::BlockContext;
 use crate::context::scope::var_has_root;
 use crate::error::AnalysisError;
 use crate::expression::instantiation::analyze_anonymous_class_constructor;
+use crate::external::Listing;
 use crate::formula::get_formula;
 use crate::formula::negate_or_synthesize;
 use crate::plugin::ExpressionHookResult;
@@ -638,7 +639,7 @@ fn report_unhandled<'ctx, 'arena, A>(
     handled: &[&Expression<'arena>],
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
-    artifacts: &AnalysisArtifacts,
+    artifacts: &mut AnalysisArtifacts,
 ) where
     A: Arena,
 {
@@ -695,11 +696,20 @@ fn missing_cases<'ctx, 'arena, A>(
     handled: &[&Expression<'arena>],
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
-    artifacts: &AnalysisArtifacts,
+    artifacts: &mut AnalysisArtifacts,
 ) -> (Vec<String>, Vec<Word>)
 where
     A: Arena,
 {
+    // A new implementer of a sealed interface joins its set without changing the interface, so the file is analyzed
+    // again when the classes that implement it change, spec section 20.1. The `match` reads the set whether or not its
+    // arms leave a class of it.
+    for atomic in value_type.types.iter() {
+        if let Some(interface) = closed_class(atomic, context.codebase).filter(|class| class.flags.is_sealed()) {
+            artifacts.listings.insert(Listing::DirectDescendants(interface.name));
+        }
+    }
+
     let thresholds = context.settings.algebra_thresholds();
     let size_threshold = context.settings.formula_size_threshold;
     let assertion_context = context.get_assertion_context_from_block(block_context);

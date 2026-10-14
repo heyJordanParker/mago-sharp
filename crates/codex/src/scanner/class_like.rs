@@ -189,7 +189,7 @@ where
     A: Arena,
 {
     let span = interface.span();
-    let class_like_metadata = scan_class_like(
+    let mut class_like_metadata = scan_class_like(
         codebase,
         word(context.resolved_names.get(&interface.name)),
         SymbolKind::Interface,
@@ -208,6 +208,10 @@ where
         context,
         scope,
     )?;
+    // Spec section 20.1: the populator gathers a sealed interface's implementers, the classes of its namespace.
+    if interface.sealed.is_some() {
+        class_like_metadata.flags |= MetadataFlags::SEALED;
+    }
 
     finish_registration(codebase, class_like_metadata)
 }
