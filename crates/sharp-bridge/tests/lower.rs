@@ -8661,6 +8661,66 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
 }
 
 /// ```php
+/// public function seed(object $owner): bool { return $owner instanceof \Lib\HasLabel; }
+/// ```
+///
+/// Spec section 22: a plain PHP trait is a type, and no PHP value is `instanceof` a trait. So a trait type is PHP's
+/// `object`, and its PHP# type text, as #102 writes it, makes a call from plain PHP check the argument, a `List` of it
+/// checks each element, and `is` reads it while the code runs, as the engine's test finds a trait any class up the
+/// chain uses.
+#[test]
+fn a_trait_type_is_object_and_its_test_reads_the_trait() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.HasLabel;\n\npublic class Seeder\n{\n    public bool seed(HasLabel owner, List<HasLabel> owners, Any other) => other is HasLabel;\n}\n",
+        &[(
+            "src/Lib/HasLabel.php",
+            "<?php namespace Lib; trait HasLabel { public function label(): string { return 'label'; } }",
+        )],
+    );
+
+    assert_eq!(
+        lowered.declared("seed"),
+        indoc! {r#"
+            METHOD [1] "seed" @7-7
+              PARAM_LIST
+                PARAM
+                  TYPE [8]
+                  ZVAL "owner"
+                  null
+                  null
+                  null
+                  null
+                PARAM
+                  TYPE [7]
+                  ZVAL "owners"
+                  null
+                  null
+                  null
+                  null
+                PARAM
+                  ZVAL [1] "mixed"
+                  ZVAL "other"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  null
+                  ZVAL "Lib.HasLabel, List<Lib.HasLabel>, Any?"
+              null
+              STMT_LIST
+                RETURN
+                  SHARP_IS_TYPE
+                    VAR
+                      ZVAL "other"
+                    ZVAL "Lib.HasLabel"
+              ZVAL [1] "bool"
+              null
+        "#}
+    );
+}
+
+/// ```php
 /// class Both implements \App\Described, \App\Told
 /// {
 ///     use \App\Described\Defaults, \App\Told\Defaults {

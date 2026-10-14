@@ -387,7 +387,8 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// `r#type` as the type text an entry check tests a value from plain PHP against, when part of it is a PHP# class
-    /// with a type argument the check can test, or a class value of one, since PHP's own `string` type checks no class
+    /// with a type argument the check can test, a plain PHP trait, whose PHP type is `object`, or a class value of a
+    /// generic class, since PHP's own `string` type checks no class
     /// value, a type parameter of the class, or, with `collections`, a collection whose elements the check can test,
     /// since PHP's own `array` type checks none. None for a type only a plain PHP docblock writes, such as
     /// `array<array-key, int>`, since the engine reads the check as PHP#. None otherwise: plain PHP's generics are
@@ -419,7 +420,10 @@ impl<'analysis> Types<'analysis> {
                 _ => false,
             })
             || r#type.types.iter().any(|atomic| match atomic {
-                TAtomic::Object(TObject::Named(object)) => is_sharp_generic(object),
+                // A plain PHP trait is PHP's `object`, spec section 22, so the check tests that a class uses it.
+                TAtomic::Object(TObject::Named(object)) => {
+                    is_sharp_generic(object) || self.codebase.get_trait(object.name.as_bytes()).is_some()
+                }
                 // A `Class<PaginatedList>` names no type arguments, so PHP's `string` type is the whole of its check.
                 TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
                     matches!(constraint.as_ref(), TAtomic::Object(TObject::Named(object))

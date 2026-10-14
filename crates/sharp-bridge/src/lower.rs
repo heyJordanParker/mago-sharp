@@ -267,6 +267,7 @@ const IS_LONG: u32 = 4;
 const IS_DOUBLE: u32 = 5;
 const IS_STRING: u32 = 6;
 const IS_ARRAY: u32 = 7;
+const IS_OBJECT: u32 = 8;
 const ZEND_ARRAY_SYNTAX_SHORT: u32 = 3;
 const ZEND_ADD: u32 = 1;
 const ZEND_SUB: u32 = 2;
@@ -1911,7 +1912,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `array`. A generic class type is its class, and `Class<T>` is `string`, because plain PHP receives a class
     /// value as its class-name string (spec section 25). A function type runs as PHP's `\Closure`. A type parameter is
     /// its bound, or `mixed` without one, as the PHP twin written with `@template` declares it, and the classes a bound
-    /// joins with `&` are one intersection.
+    /// joins with `&` are one intersection. A plain PHP trait is `object`, because no value is `instanceof` a trait, and
+    /// its PHP# type text checks it, spec section 22.
     fn erase<'hint>(&self, hint: &'hint Hint<'_>) -> PhpType<'hint>
     where
         'arena: 'hint,
@@ -1927,6 +1929,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         Some(php_type) => php_type.clone(),
                         None => unreachable!("the binder binds `{name}` to a type parameter the file declares"),
                     }
+                }
+                _ if self.types.class_declaration(self.names.get(name)).kind == DeclarationKind::Trait => {
+                    PhpType::Keyword(IS_OBJECT)
                 }
                 _ => PhpType::Classes(vec![self.names.get(name)]),
             },

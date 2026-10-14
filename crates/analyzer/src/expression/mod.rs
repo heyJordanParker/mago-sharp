@@ -383,9 +383,13 @@ where
 
         // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any` or of a
         // union is `instanceof` a name spanning the whole type, and narrows to the type written, which the analysis
-        // records as the type the test reads.
+        // records as the type the test reads. So is a test of a plain PHP trait, spec section 22, since no value is
+        // `instanceof` one.
         let reads_type_arguments = match hint {
-            Hint::Identifier(name) => context.resolved_names.is_type_parameter(name),
+            Hint::Identifier(name) => {
+                context.resolved_names.is_type_parameter(name)
+                    || context.codebase.get_trait(context.resolved_names.get(name)).is_some()
+            }
             Hint::Generic(_) | Hint::Mixed(_) | Hint::Union(_) => has_type_test(hint),
             _ => false,
         };
