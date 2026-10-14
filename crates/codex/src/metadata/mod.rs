@@ -846,16 +846,25 @@ impl CodebaseMetadata {
     /// `receiver`, spec section 26, sorted: the member of that name that a class the value can be declares or
     /// inherits, a method or property, or one a docblock declares with `@method` or `@property`. `__call` and `__get`
     /// declare none. A `List`, `Map` or `Set` has the methods of `Sharp\ListMethods`, `Sharp\MapMethods` or
-    /// `Sharp\SetMethods`. A class below the type competes with no extension, which is chosen from the type the code
-    /// shows.
+    /// `Sharp\SetMethods`. A type parameter shows its bound, so it has the members its bound's classes have. A class
+    /// below the type competes with no extension, which is chosen from the type the code shows.
     #[must_use]
     pub fn get_classes_hidden_by_extension(&self, receiver: &TUnion, name: &[u8]) -> Vec<Word> {
+        /// The types a value of type `atomic` shows: a type parameter's bound's, at any depth, or `atomic` itself.
+        fn shown(atomic: &TAtomic) -> Vec<&TAtomic> {
+            match atomic {
+                TAtomic::GenericParameter(parameter) => parameter.constraint.types.iter().flat_map(shown).collect(),
+                _ => vec![atomic],
+            }
+        }
+
         let method_name = ascii_lowercase_word(name);
         let property_name = concat_word!(b"$", name);
 
         let mut classes: Vec<Word> = receiver
             .types
             .iter()
+            .flat_map(shown)
             .filter_map(|atomic| match atomic {
                 TAtomic::Object(object) => object.get_name(),
                 TAtomic::Array(TArray::List(_)) => Some(word("Sharp\\ListMethods")),

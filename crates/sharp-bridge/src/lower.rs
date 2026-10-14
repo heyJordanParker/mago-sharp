@@ -1204,8 +1204,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         match member {
             ClassLikeMember::Method(method) => {
                 self.enter(method.name.value);
-                let (parameters, statements) =
-                    self.extension_parameters(std::iter::once(receiver).chain(&method.parameter_list.parameters));
+                let (parameters, statements) = self.extension_parameters(
+                    method.name.value,
+                    std::iter::once(receiver).chain(&method.parameter_list.parameters),
+                );
                 let body = self.method_body(&method.body, method.returns_value(), statements);
                 let (start, return_type) = match &method.return_type_hint {
                     Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
@@ -1227,7 +1229,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     unreachable!("semantics refuses a computed property without a type");
                 };
                 self.enter(property.variable.name);
-                let (parameters, mut statements) = self.extension_parameters([receiver]);
+                let (parameters, mut statements) = self.extension_parameters(property.variable.name, [receiver]);
                 let line = self.line(&property.body);
                 let value = self.expression(property.body.expression);
                 statements.push(self.node(SHARP_AST_RETURN, 0, line, &[value]));
@@ -1248,10 +1250,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
     }
 
-    /// The parameter list of an extension's member, the receiver first, with the statements that make each `Set`
-    /// parameter a `Set`, as a method's body starts with.
+    /// The parameter list of the extension member `name`, the receiver first, ending with the metadata a call from
+    /// plain PHP is checked against, as a method's does, with the statements that make each `Set` parameter a `Set`, as
+    /// a method's body starts with.
     fn extension_parameters<'parameter, 'ast>(
         &mut self,
+        name: &[u8],
         parameters: impl IntoIterator<Item = &'parameter FunctionLikeParameter<'ast>> + Clone,
     ) -> (u32, Vec<u32>)
     where
@@ -1266,6 +1270,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let Some(line) = line else {
             unreachable!("an extension's member takes its receiver");
         };
+        let metadata = self.types.method_metadata(self.class, name);
+        lowered.extend(self.parameter_metadata(metadata, line));
 
         (self.node(SHARP_AST_PARAM_LIST, 0, line, &lowered), self.set_parameters(parameters))
     }

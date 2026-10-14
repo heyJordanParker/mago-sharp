@@ -16543,6 +16543,40 @@ fn the_type_the_code_shows_chooses_between_an_extension_and_a_subclass_member() 
 }
 
 /// ```php
+/// return $rush->total(2) + \App\Text\Extensions::total($order, 2);
+/// ```
+///
+/// Spec section 26: a receiver typed by a type parameter shows its bound, so a member the bound declares runs, as
+/// `RushOrder`'s own `total` does for `TRush : RushOrder`, and an extension runs only where the bound declares none, as
+/// for `TOrder : Order`.
+#[test]
+fn a_type_parameter_receiver_runs_the_member_its_bound_declares_over_an_extension() {
+    let code = "namespace App.Tenant;\n\nimport App.Order;\nimport App.RushOrder;\nimport App.Text.Extensions;\n\nclass Report\n{\n    public int run<TRush : RushOrder, TOrder : Order>(TRush rush, TOrder order)\n    {\n        return rush.total(2) + order.total(2);\n    }\n}\n";
+
+    assert_eq!(
+        Lowered::with(code, &[ORDERS, EXTENSIONS]).body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [1]
+                  METHOD_CALL
+                    VAR
+                      ZVAL "rush"
+                    ZVAL "total"
+                    ARG_LIST
+                      ZVAL 2
+                  STATIC_CALL
+                    ZVAL "App\\Text\\Extensions"
+                    ZVAL "total"
+                    ARG_LIST
+                      VAR
+                        ZVAL "order"
+                      ZVAL 2
+        "#}
+    );
+}
+
+/// ```php
 /// return \App\Rush\Ranks::rank($rush) + \App\Text\Ranks::rank($order);
 /// ```
 ///
