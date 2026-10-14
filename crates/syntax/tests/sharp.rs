@@ -5010,7 +5010,7 @@ fn readonly_types<'a>(code: &'a str, node: Node<'_, '_>) -> Vec<&'a str> {
     let mut found = Vec::new();
     node.visit_children(|child| {
         if let Node::ReadonlyHint(readonly) = child {
-            assert_eq!(readonly.readonly.value, b"readonly");
+            assert_eq!(readonly.readonly.value, b"readonly", "a readonly type starts at its keyword");
             found.push(source(code, readonly));
         }
         found.extend(readonly_types(code, child));
