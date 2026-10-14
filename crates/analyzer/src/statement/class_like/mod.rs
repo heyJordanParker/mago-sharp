@@ -3647,7 +3647,8 @@ where
 
 /// Reports a PHP# constructor that `new Self(…)` cannot call, below a `required` one, by the rule of spec section 25 it
 /// breaks: it must start with the parameters of the constructor above it, and give each parameter it adds a default.
-/// The code stays the one the signature check found.
+/// The code stays the one the signature check found. A parameter without a type, which only a file the parser refused
+/// declares, reads as `Any?`.
 fn report_required_constructor_mismatch<A>(
     context: &mut Context<'_, '_, A>,
     child_name: &Word,
@@ -3691,9 +3692,11 @@ fn report_required_constructor_mismatch<A>(
             let start = parent_method
                 .parameters
                 .iter()
-                .map(|parameter| match &parameter.type_metadata {
-                    Some(r#type) => format!("{} {}", display_type(context, &r#type.type_union), name(parameter)),
-                    None => name(parameter),
+                .map(|parameter| {
+                    let r#type =
+                        parameter.type_metadata.as_ref().map_or_else(get_mixed, |r#type| r#type.type_union.clone());
+
+                    format!("{} {}", display_type(context, &r#type), name(parameter))
                 })
                 .collect::<Vec<_>>()
                 .join(", ");

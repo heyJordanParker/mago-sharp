@@ -2845,6 +2845,13 @@ fn an_extension_block_type_parameter_appears_in_its_receiver() {
         ("extension<T>(List<T> items)", vec![]),
         ("extension<TLeft, TRight>(Map<string, Function<TRight(TLeft)>> items)", vec![]),
         ("extension<T : Order>(List<T> items)", vec![]),
+        ("extension<TItem>(Function<TItem(Order)> make)", vec![]),
+        (
+            "extension<T>(List<T> items, int count)",
+            vec![
+                "5:17 An extension's receiver is one parameter, with no modifier, default or `...`, as in `extension(string value)`.",
+            ],
+        ),
         (
             "extension<T, TOther>(List<T> items)",
             vec![

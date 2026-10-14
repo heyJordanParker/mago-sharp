@@ -363,12 +363,14 @@ pub fn seed_extension_type_arguments<A>(
                 .type_union
                 .get_template_types()
                 .into_iter()
-                .filter_map(|atomic| match atomic {
-                    TAtomic::GenericParameter(parameter) => Some(parameter.parameter_name),
+                .map(|atomic| match atomic {
+                    TAtomic::GenericParameter(parameter) => parameter.parameter_name,
                     TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic { parameter_name, .. })) => {
-                        Some(*parameter_name)
+                        *parameter_name
                     }
-                    _ => None,
+                    other => {
+                        unreachable!("get_template_types gives type parameters and their class values, not {other:?}")
+                    }
                 })
                 .collect()
         })

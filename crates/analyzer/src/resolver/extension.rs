@@ -153,37 +153,37 @@ where
 /// Whether a value of type `receiver` fits the receiver of the extension member `metadata`, its first parameter. The
 /// type parameters of an extension block, `T` in `extension<T>(List<T> items)`, are first inferred from `receiver`, as
 /// a call infers them from its argument, so a `List<Order>` fits as a `List<Order>`. A receiver outside a type
-/// parameter's bound fits none.
+/// parameter's bound fits none, and so does every receiver of a member whose own receiver has no type, which only a
+/// file the parser refused declares.
 fn fits<A>(context: &Context<'_, '_, A>, receiver: &TUnion, metadata: &FunctionLikeMetadata) -> bool
 where
     A: Arena,
 {
-    let Some(parameter) = metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()) else {
-        return false;
-    };
-    let parameter = if metadata.template_types.is_empty() {
-        Cow::Borrowed(&parameter.type_union)
-    } else {
-        let mut template_result = TemplateResult::new(
-            metadata.template_types.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
-            HashMap::default(),
-        );
-        if !infer_unfixed_templates(context, &parameter.type_union, receiver, &mut template_result).is_empty() {
-            return false;
-        }
+    metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()).is_some_and(|parameter| {
+        let parameter = if metadata.template_types.is_empty() {
+            Cow::Borrowed(&parameter.type_union)
+        } else {
+            let mut template_result = TemplateResult::new(
+                metadata.template_types.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
+                HashMap::default(),
+            );
+            if !infer_unfixed_templates(context, &parameter.type_union, receiver, &mut template_result).is_empty() {
+                return false;
+            }
 
-        Cow::Owned(inferred_type_replacer::replace(&parameter.type_union, &template_result, context.codebase))
-    };
+            Cow::Owned(inferred_type_replacer::replace(&parameter.type_union, &template_result, context.codebase))
+        };
 
-    union_comparator::is_contained_by(
-        context.codebase,
-        receiver,
-        &parameter,
-        false,
-        false,
-        false,
-        &mut ComparisonResult::new(),
-    )
+        union_comparator::is_contained_by(
+            context.codebase,
+            receiver,
+            &parameter,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::new(),
+        )
+    })
 }
 
 /// The members of `candidates` whose receiver fits inside every other candidate's, as C# overload resolution and
