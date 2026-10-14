@@ -4690,6 +4690,38 @@ fn every_descendant_of_a_required_constructor_keeps_a_matching_constructor() {
     );
 }
 
+/// Below a `required` constructor, a constructor `new Self(…)` cannot call says which of spec section 25's two rules it
+/// breaks, in the words a PHP# class is written in: its leading parameters, or a parameter it adds without a default.
+/// The code stays the one PHP's check gives.
+#[test]
+fn a_constructor_below_a_required_one_names_the_rule_it_breaks() {
+    let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Row;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null) : super(row)\n    {\n    }\n}\n\npublic class Invoice : DatabaseEntity\n{\n    public Invoice(Row row, Clock clock) : super(row)\n    {\n    }\n}\n\npublic class Reordered : DatabaseEntity\n{\n    public Reordered(Clock clock, Row row) : super(row)\n    {\n    }\n}\n\npublic class Renamed : DatabaseEntity\n{\n    public Renamed(Row other) : super(other)\n    {\n    }\n}\n\npublic class Retyped : DatabaseEntity\n{\n    public Retyped(Clock row) : super(new Row())\n    {\n    }\n}\n\npublic class Dropped : DatabaseEntity\n{\n    public Dropped() : super(new Row())\n    {\n    }\n}\n\npublic class Shipment : Order\n{\n    public Shipment(Row row, Clock? clock, int count) : super(row, clock)\n    {\n    }\n}\n";
+    let others = [("src/Lib/Row.php", ROW), ("src/Lib/Clock.php", CLOCK)];
+
+    assert_eq!(
+        issues(("src/Demo/DatabaseEntity.sharp", sharp), &others),
+        [
+            "22:12 incompatible-parameter-count",
+            "29:12 incompatible-parameter-count",
+            "36:12 incompatible-parameter-name",
+            "43:12 incompatible-parameter-type",
+            "50:12 incompatible-parameter-count",
+            "57:12 incompatible-parameter-count",
+        ]
+    );
+    assert_eq!(
+        messages(("src/Demo/DatabaseEntity.sharp", sharp), &others),
+        [
+            "`Invoice`'s constructor adds `clock` with no default, so `new Self(row)` cannot call it: give `clock` a default.",
+            "`Reordered`'s constructor must start with `Row row`, as `DatabaseEntity`'s does, so `new Self(row)` can call it.",
+            "`Renamed`'s constructor must start with `Row row`, as `DatabaseEntity`'s does, so `new Self(row)` can call it.",
+            "`Retyped`'s constructor must start with `Row row`, as `DatabaseEntity`'s does, so `new Self(row)` can call it.",
+            "`Dropped`'s constructor must start with `Row row`, as `DatabaseEntity`'s does, so `new Self(row)` can call it.",
+            "`Shipment`'s constructor adds `count` with no default, so `new Self(row, clock)` cannot call it: give `count` a default.",
+        ]
+    );
+}
+
 /// Only a `required` constructor binds the subclasses' constructors, so without one a subclass constructor may add a
 /// parameter without a default, as in PHP.
 #[test]

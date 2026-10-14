@@ -11,6 +11,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleKind;
+use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
@@ -3326,6 +3327,73 @@ where
     true
 }
 
+/// Reports a PHP# constructor that `new Self(…)` cannot call, below a `required` one, by the rule of spec section 25 it
+/// breaks: it must start with the parameters of the constructor above it, and give each parameter it adds a default.
+/// The code stays the one the signature check found.
+fn report_required_constructor_mismatch<A>(
+    context: &mut Context<'_, '_, A>,
+    child_name: &Word,
+    parent_name: &Word,
+    child_method: &FunctionLikeMetadata,
+    parent_method: &FunctionLikeMetadata,
+    incompatibility: method_signature::SignatureCompatibilityIssue,
+    primary_span: Span,
+) where
+    A: Arena,
+{
+    use method_signature::SignatureCompatibilityIssue;
+
+    let name = |parameter: &FunctionLikeParameterMetadata| {
+        String::from_utf8_lossy(mago_bytes::trim_start_byte(parameter.name.0.as_bytes(), b'$')).into_owned()
+    };
+    let arguments = parent_method.parameters.iter().map(name).collect::<Vec<_>>().join(", ");
+    let keeps_the_start = parent_method
+        .parameters
+        .iter()
+        .enumerate()
+        .all(|(index, parent)| child_method.parameters.get(index).is_some_and(|child| child.name == parent.name));
+    let added =
+        child_method.parameters.iter().skip(parent_method.parameters.len()).find(|child| !child.flags.has_default());
+
+    let code = match incompatibility {
+        SignatureCompatibilityIssue::ParameterNameMismatch { .. } => IssueCode::IncompatibleParameterName,
+        SignatureCompatibilityIssue::IncompatibleParameterType { .. } => IssueCode::IncompatibleParameterType,
+        _ => IssueCode::IncompatibleParameterCount,
+    };
+    let leading_type_differs = matches!(incompatibility, SignatureCompatibilityIssue::IncompatibleParameterType { .. });
+    let issue = match added {
+        Some(added) if keeps_the_start && !leading_type_differs => {
+            let added = name(added);
+
+            Issue::error(format!(
+                "`{child_name}`'s constructor adds `{added}` with no default, so `new Self({arguments})` cannot call it: give `{added}` a default."
+            ))
+        }
+        _ => {
+            let start = parent_method
+                .parameters
+                .iter()
+                .map(|parameter| match &parameter.type_metadata {
+                    Some(r#type) => format!("{} {}", display_type(context, &r#type.type_union), name(parameter)),
+                    None => name(parameter),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            Issue::error(format!(
+                "`{child_name}`'s constructor must start with `{start}`, as `{parent_name}`'s does, so `new Self({arguments})` can call it."
+            ))
+        }
+    };
+
+    context.collector.report_with_code(
+        code,
+        issue
+            .with_annotation(Annotation::primary(primary_span).with_message("Declared here."))
+            .with_note("A `required` constructor lets `new Self(…)` create any subclass, so every class below it keeps a constructor `new Self(…)` can call."),
+    );
+}
+
 fn report_signature_compatibility_issue<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     child_class: &'ctx ClassLikeMetadata,
@@ -3341,6 +3409,28 @@ fn report_signature_compatibility_issue<'ctx, A>(
     let parent_name = display_class_like_name(context, parent_class.original_name);
     let child_class_span = child_class.name_span.unwrap_or(child_class.span);
     let parent_class_span = parent_class.name_span.unwrap_or(parent_class.span);
+    if context.dialect.is_sharp()
+        && parent_class.flags.is_sharp()
+        && parent_class.flags.has_consistent_constructor()
+        && method_name.as_bytes().eq_ignore_ascii_case(b"__construct")
+        && let Some(child_constructor) =
+            context.codebase.get_declaring_method(child_class.name.as_bytes(), b"__construct")
+        && let Some(parent_constructor) =
+            context.codebase.get_declaring_method(parent_class.name.as_bytes(), b"__construct")
+    {
+        report_required_constructor_mismatch(
+            context,
+            &child_name,
+            &parent_name,
+            child_constructor,
+            parent_constructor,
+            incompatibility,
+            primary_span,
+        );
+
+        return;
+    }
+
     let (child_display, parent_display) = if context.dialect.is_sharp() {
         let method_name = parent_method.original_name;
 
