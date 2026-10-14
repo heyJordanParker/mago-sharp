@@ -24,7 +24,6 @@ use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
-use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
@@ -232,16 +231,6 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
-    /// The full name of the constant the read `constant` reaches, as the analysis found it: the constant of that name
-    /// in the file's namespace, or else the global one.
-    #[must_use]
-    pub fn constant_target(&self, constant: &ConstantAccess) -> Word {
-        self.codebase
-            .get_constant_or_global(self.names.get(constant), constant.name.value())
-            .unwrap_or_else(|| unreachable!("the checker refuses the undefined constant `{}`", constant.name))
-            .name
-    }
-
     /// The inline form of the standard library method `declaration` names, if it has one.
     pub(crate) fn inline_form(&self, declaration: &Declaration) -> Option<&'analysis InlineForm> {
         if !matches!(declaration.kind, DeclarationKind::Method { .. } | DeclarationKind::StaticMethod) {
@@ -410,6 +399,24 @@ impl<'analysis> Types<'analysis> {
             .find_map(|(collection, methods)| class.as_bytes().eq_ignore_ascii_case(methods).then_some(collection))?;
 
         Some((collection, method.as_bytes().to_ascii_lowercase()))
+    }
+
+    /// The plain PHP function the method call `call` runs, as `Pdf.render(html)` and `global.now()` call one, spec
+    /// section 23, with the name its declaration writes. None for a call of a method.
+    pub(crate) fn namespace_function(&self, call: &Expression) -> Option<Word> {
+        let Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function), .. }) =
+            self.artifacts.get_callees(call).next()
+        else {
+            return None;
+        };
+
+        Some(self.codebase.get_function(function.as_bytes()).map_or(*function, |metadata| metadata.original_name))
+    }
+
+    /// The full name of the plain PHP constant the read `read` reaches through its namespace, as `global.PHP_EOL` and
+    /// `Pdf.DEFAULT_DPI` read one, spec section 23. None for any other read.
+    pub(crate) fn namespace_constant(&self, read: &Expression) -> Option<Word> {
+        self.artifacts.get_namespace_constant(read)
     }
 
     /// The parameters of the plain PHP function or method the call `call` runs, as the analysis resolved it, which a

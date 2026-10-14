@@ -149,7 +149,7 @@ pub(crate) fn member_of_foreign_class() -> (Word, Word) {
 }
 
 impl Impurity {
-    /// The reason as a sentence's predicate, such as "calls `getenv`, which has no `extern` declaration", with each
+    /// The reason as a sentence's predicate, such as "calls `global.getenv`, which has no `extern` declaration", with each
     /// class named by `class_name` and each effect by `effect_name`.
     pub(crate) fn describe(&self, class_name: &dyn Fn(Word) -> String, effect_name: &dyn Fn(Word) -> String) -> String {
         if self.cause == member_of_foreign_class()
@@ -187,11 +187,19 @@ impl Impurity {
     }
 }
 
-/// A class name and a member as a message writes them, the class named by `class_name`: `Clock.now`, `trim` with no
-/// class, and `Clock` with no member.
+/// A class name and a member as a message writes them, the class named by `class_name`: `Clock.now`, `global.trim` or
+/// a function value's `step` as written with no class, `Pdf.render` for the function `Vendor\Pdf\render`, named
+/// through its namespace as spec section 23 calls it, and `Clock` with no member.
 fn written((class, member): (Word, Word), class_name: &dyn Fn(Word) -> String) -> String {
     if class.is_empty() {
-        member.to_string()
+        let name = member.as_bytes();
+        match name.iter().rposition(|byte| *byte == b'\\') {
+            Some(separator) => display_sharp_member(
+                class_name(word(&name[..separator])),
+                String::from_utf8_lossy(&name[separator + 1..]),
+            ),
+            None => member.to_string(),
+        }
     } else if member.is_empty() {
         class_name(class)
     } else {

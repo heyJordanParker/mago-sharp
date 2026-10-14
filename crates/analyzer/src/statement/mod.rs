@@ -172,14 +172,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                     if context.dialect.is_sharp()
                         && let UseItems::Sequence(sequence) = &r#use.items
                     {
-                        let imported_names = Arc::make_mut(&mut context.imported_names);
                         for item in &sequence.items {
+                            use_statement::check_sharp_import(context, &item.name);
                             let imported_name = item
                                 .alias
                                 .as_ref()
                                 .map_or_else(|| item.name.last_segment(), |alias| alias.identifier.value);
                             let imported = ascii_lowercase_word(&php_name(&item.name));
-                            imported_names.insert(imported, word(imported_name));
+                            Arc::make_mut(&mut context.imported_names).insert(imported, word(imported_name));
                             // Spec section 26: an imported class's extensions apply to the whole file, so the file
                             // reads the class even where it names none of its members.
                             artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, imported, false);
@@ -578,10 +578,16 @@ pub fn analyze_statements<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    for statement in statements {
+    for (index, statement) in statements.iter().enumerate() {
         let is_declaration = statement.is_declaration();
 
         if block.flags.has_returned() {
+            if context.dialect.is_sharp() {
+                report_statement_that_never_runs(context, statement, &statements[..index]);
+
+                break;
+            }
+
             if context.settings.find_unused_expressions {
                 let is_harmless = match &statement {
                     Statement::Break(_) => true,
@@ -620,6 +626,61 @@ where
     }
 
     Ok(())
+}
+
+/// Refuses `statement`, the first statement of its block that never runs because the statement before it ends the
+/// block, as Java and Zig refuse an unreachable statement (spec section 7). The analysis reads no statement after it, so
+/// PHP# compiles none, and the rest of the block gets no refusal of its own, as in Java. `before` holds the statements
+/// before it in its block, and the last of them is the one that ends it.
+fn report_statement_that_never_runs<A>(
+    context: &mut Context<'_, '_, A>,
+    statement: &Statement<'_>,
+    before: &[Statement<'_>],
+) where
+    A: Arena,
+{
+    let Some(end) = before.last() else {
+        unreachable!("a block whose code before it never finishes is refused at that code's condition");
+    };
+    let line = context.source_file.line_number(end.span().start.offset) + 1;
+
+    context.collector.report_with_code(
+        IssueCode::UnevaluatedCode,
+        Issue::error(format!("This statement never runs, because line {line} ends the block."))
+            .with_annotation(Annotation::primary(statement.span()))
+            .with_help(format!("Delete it, or move it above line {line}.")),
+    );
+}
+
+/// Refuses, in a `.sharp` file, the `condition` of an `if` or a `for … of` that never finishes, as `global.exit(1)`
+/// does, so the block it guards never runs (spec section 7). `block_context` is the context once the condition is
+/// analyzed. The help replaces the whole statement, which never gets past its condition, with the condition. Returns
+/// whether it refused, and the caller then reads no statement of the block, as `analyze_statements` reads none after a
+/// statement that ends its block.
+pub(crate) fn refuse_condition_that_never_finishes<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    condition: &Expression<'_>,
+    keyword: &str,
+) -> bool
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || !block_context.flags.has_returned() {
+        return false;
+    }
+
+    let span = condition.span();
+    let written =
+        String::from_utf8_lossy(&context.source_file.contents[span.start.offset as usize..span.end.offset as usize]);
+    context.collector.report_with_code(
+        IssueCode::UnevaluatedCode,
+        Issue::error("This condition never finishes, so its block never runs.")
+            .with_annotation(Annotation::primary(span))
+            .with_help(format!("Write `{written};` as its own statement, and delete the `{keyword}`.")),
+    );
+
+    true
 }
 
 /// Checks statement expressions for unused results or lack of side effects.
