@@ -4744,7 +4744,7 @@ fn a_second_default_arm_or_a_block_arm_in_a_match_that_gives_a_value_is_an_error
 #[test]
 fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
     let code = leak(method(
-        "        const a = extra is int? n;\n        const b = extra as int?;\n        const c = extra as Map<string, float>?;\n        return extra;\n",
+        "        const a = extra is int? n;\n        const b = extra as int?;\n        const c = extra as Map<string, float>?;\n        const d = extra as void;\n        return extra;\n",
     ));
 
     assert_eq!(
@@ -4753,6 +4753,7 @@ fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
             "7:28 A type pattern is never nullable: null never matches a type.",
             "8:28 `as` converts to a type that is not nullable or `void`.",
             "9:28 `as` converts to a type that is not nullable or `void`.",
+            "10:28 `as` converts to a type that is not nullable or `void`.",
         ]
     );
     let helps: Vec<_> = check("src/Report.sharp", code).into_iter().filter_map(|issue| issue.help).collect();
