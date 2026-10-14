@@ -2658,14 +2658,19 @@ fn an_accessor_body_on_a_constructor_parameter_is_an_error() {
     );
 }
 
-/// `lazy` is a modifier of spec section 6.5, which the engine cannot run yet on a property or anywhere else.
+/// Spec section 6.5: `lazy T name => expr;` is a `lazy` property's only form, so `lazy` with accessors, on a field or
+/// on a method is an error that names it.
 #[test]
-fn lazy_off_a_parameter_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public lazy int total => 1;\n\n    public lazy int run() => 1;\n}\n";
+fn lazy_is_a_computed_property() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public lazy int total => 1;\n    public lazy int? found => null;\n    public lazy int views { get; set; } = 0;\n    private lazy int count = 0;\n\n    public lazy int run() => 1;\n}\n";
 
     assert_eq!(
         issues(code),
-        ["5:12 `lazy` is not supported yet in PHP#.", "7:12 `lazy` is not supported yet in PHP#."]
+        [
+            "7:12 A `lazy` property computes its value on the first read: write `lazy` with `=>`, as in `lazy Plan views => this.load();`.",
+            "8:13 A `lazy` property computes its value on the first read: write `lazy` with `=>`, as in `lazy Plan count => this.load();`.",
+            "10:12 Only a property is `lazy`, written as in `public lazy Plan plan => this.load();`.",
+        ]
     );
 }
 

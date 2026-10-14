@@ -40,6 +40,7 @@ use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::CompositeString;
+use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Construct;
@@ -701,7 +702,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 ClassLikeMember::NamedConstructor(
                     constructor @ NamedConstructor { initializer: Some(initializer), .. },
                 ) => self.named_constructor(constructor, initializer),
-                ClassLikeMember::Property(property) => self.property(property, parent_name),
+                ClassLikeMember::Property(property) => {
+                    if let Property::Computed(computed) = property
+                        && is_lazy(&computed.modifiers)
+                        && matches!(computed.hint, Some(Hint::Nullable(_)))
+                    {
+                        members.push(self.lazy_flag(computed));
+                    }
+
+                    self.property(property, parent_name)
+                }
                 ClassLikeMember::Constant(constant) => self.constant(constant),
                 ClassLikeMember::Extension(extension) => {
                     for member in &extension.members {
@@ -1351,14 +1361,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.hooks(hooked.item.variable().name, &hooked.hook_list),
             ),
             Property::Computed(computed) => {
+                let lazy = is_lazy(&computed.modifiers);
                 let hook = self.accessor_bodies(computed.variable.name, |lowering| {
-                    let body = lowering.short_body(b"get", &computed.body);
+                    let body =
+                        if lazy { lowering.lazy_body(computed) } else { lowering.short_body(b"get", &computed.body) };
 
                     lowering.hook(b"get", computed.body.arrow, &computed.body, body)
                 });
 
                 (
-                    0,
+                    // A lazy property keeps its value in its own storage, which only its `get` hook writes.
+                    if lazy { ZEND_ACC_PRIVATE_SET } else { 0 },
                     &computed.attribute_lists,
                     self.node(SHARP_AST_STMT_LIST, 0, self.line(computed.body.arrow), &[hook]),
                 )
@@ -1461,6 +1474,58 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let kind = if accessor == b"get" { SHARP_AST_PROPERTY_HOOK_SHORT_BODY } else { SHARP_AST_STMT_LIST };
 
         self.node(kind, 0, line, &[expression])
+    }
+
+    /// The `get` body of `lazy T name => expr;`, spec section 6.5: it runs `expr` on the first read and keeps the value
+    /// in the property's storage, `get => $this->name ??= expr;`. A nullable value can be null, so it keeps whether
+    /// it ran in the hidden flag [`Lowering::lazy_flag`] declares:
+    /// `get { if (!$this->{'name#lazy'}) { $this->name = expr; $this->{'name#lazy'} = true; } return $this->name; }`.
+    /// A throw in `expr` keeps nothing, so the next read runs it again.
+    fn lazy_body(&mut self, computed: &ComputedProperty) -> u32 {
+        let line = self.line(computed.body.arrow);
+        let storage = self.storage(line);
+        let value = self.expression(computed.body.expression);
+        if !matches!(computed.hint, Some(Hint::Nullable(_))) {
+            let kept = self.node(SHARP_AST_ASSIGN_COALESCE, 0, line, &[storage, value]);
+
+            return self.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[kept]);
+        }
+
+        let keep = self.node(SHARP_AST_ASSIGN, 0, line, &[storage, value]);
+        let flag = self.lazy_flag_fetch(line, computed.variable.name);
+        let r#true = self.zval(line, sharp_value::SHARP_TRUE, |_| {});
+        let ran = self.node(SHARP_AST_ASSIGN, 0, line, &[flag, r#true]);
+        let first_read = self.node(SHARP_AST_STMT_LIST, 0, line, &[keep, ran]);
+        let flag = self.lazy_flag_fetch(line, computed.variable.name);
+        let not_ran = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[flag]);
+        let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[not_ran, first_read]);
+        let r#if = self.node(SHARP_AST_IF, 0, line, &[branch]);
+        let storage = self.storage(line);
+        let r#return = self.node(SHARP_AST_RETURN, 0, line, &[storage]);
+
+        self.node(SHARP_AST_STMT_LIST, 0, line, &[r#if, r#return])
+    }
+
+    /// The hidden flag of a nullable `lazy` property, `private bool ${'name#lazy'} = false;`, which its `get` hook sets
+    /// once the value is kept. No PHP# name has a `#`, so it names no member a program declares.
+    fn lazy_flag(&mut self, computed: &ComputedProperty) -> u32 {
+        let line = self.line(&computed.variable);
+        let hint = self.string(ZEND_NAME_NOT_FQ, line, b"bool");
+        let name = self.string(0, line, &lazy_flag_name(computed.variable.name));
+        let r#false = self.zval(line, sharp_value::SHARP_FALSE, |_| {});
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, r#false, NULL, NULL]);
+        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+
+        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PRIVATE, line, &[hint, declaration, NULL])
+    }
+
+    /// `$this->{'name#lazy'}`, the hidden flag of the nullable `lazy` property `name`.
+    fn lazy_flag_fetch(&mut self, line: u32, property: &[u8]) -> u32 {
+        let this = self.string(0, line, b"this");
+        let this = self.node(SHARP_AST_VAR, 0, line, &[this]);
+        let name = self.string(0, line, &lazy_flag_name(property));
+
+        self.node(SHARP_AST_PROP, 0, line, &[this, name])
     }
 
     /// An auto accessor's body over the storage: `get => $this->name;` or `set { $this->name = $value; }`.
@@ -3878,6 +3943,16 @@ fn is_current_position(class: &[u8], call: &MethodCall) -> bool {
         && call.argument_list.arguments.is_empty()
 }
 
+/// Whether a property is `lazy`, spec section 6.5.
+fn is_lazy(modifiers: &Sequence<Modifier>) -> bool {
+    modifiers.iter().any(|modifier| matches!(modifier, Modifier::Lazy(_)))
+}
+
+/// `name#lazy`, the hidden flag of the nullable `lazy` property `name`.
+fn lazy_flag_name(property: &[u8]) -> Vec<u8> {
+    [property, b"#lazy"].concat()
+}
+
 /// The flags of a member's modifiers. Every modifier is named, so a new one does not compile until it is decided.
 fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
     let mut flags = 0;
@@ -3890,14 +3965,18 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             Modifier::Abstract(_) => ZEND_ACC_ABSTRACT,
             // PHP methods are open to overriding, and `method` lowers `override` to `#[\Override]`. PHP has no
             // `required` constructor, and the checker proves every subclass keeps one `new Self(…)` can call. `method`
-            // gives an `extern` method the body that calls its native function.
-            Modifier::Virtual(_) | Modifier::Override(_) | Modifier::Required(_) | Modifier::Extern(_) => 0,
+            // gives an `extern` method the body that calls its native function. `property` gives a `lazy` property
+            // the `get` hook that keeps its value.
+            Modifier::Virtual(_)
+            | Modifier::Override(_)
+            | Modifier::Required(_)
+            | Modifier::Extern(_)
+            | Modifier::Lazy(_) => 0,
             Modifier::Final(_)
             | Modifier::Readonly(_)
             | Modifier::PublicSet(_)
             | Modifier::ProtectedSet(_)
             | Modifier::PrivateSet(_)
-            | Modifier::Lazy(_)
             | Modifier::Internal(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
         };
     }

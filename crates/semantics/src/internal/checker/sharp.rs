@@ -212,7 +212,7 @@ const ANY: &[u8] = b"Any";
 ///   alone may be `required`, which keeps it callable as `new Self(…)` on every subclass, spec section 25. The parser
 ///   reports `required` on any other member as not supported yet. A class has one constructor, and `check_members`
 ///   reports a second one, because PHP# has no overloading by argument types. A parameter cannot be `lazy`, because a
-///   lazy property computes its own value, and `lazy` anywhere else is not supported yet. The constructor passes
+///   lazy property computes its own value. The constructor passes
 ///   control to its base class with `: super(…)`, whose arguments are a method body's expressions without `this`,
 ///   because they run before the object exists, as C#'s CS0027 says. `: this(…)` belongs to a named constructor, so on
 ///   the main one it is an error. The analyzer checks the arguments against the base class's constructor. A
@@ -632,11 +632,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // `is_slice_property` keeps `lazy` to a computed property.
+        (Node::Modifier(Modifier::Lazy(_)), FieldOrProperty) => Some(FieldOrProperty),
         (Node::Modifier(Modifier::Lazy(lazy)), _) => {
             context.report(
-                Issue::error("`lazy` is not supported yet in PHP#.")
-                    .with_annotation(Annotation::primary(lazy.span).with_message("Not supported yet."))
-                    .with_note("A lazy property computes its value on the first read, which the engine cannot run yet."),
+                Issue::error("Only a property is `lazy`, written as in `public lazy Plan plan => this.load();`.")
+                    .with_annotation(Annotation::primary(lazy.span).with_message("Written here.")),
             );
 
             None
@@ -2073,6 +2074,8 @@ fn report_optional_before_required(parameters: &FunctionLikeParameterList, conte
 /// An override is a property, spec section 6.1, so a field takes no `override`, and no `virtual` or `abstract` either:
 /// a subclass overrides a `protected` field with a property already. An abstract property declares accessors with no
 /// body and no initial value. The analyzer checks an override against its parent.
+///
+/// A `lazy` property is computed, spec section 6.5: `lazy T name => expr;` is its only form.
 fn is_slice_property(property: &Property, version: &PHPVersion, names: &ResolvedNames) -> Result<(), Box<Issue>> {
     let not_supported = |span: Span, message: &str, note: &str| {
         Issue::error(message)
@@ -2125,6 +2128,18 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
 
     let name = BytesDisplay(property.first_variable().name);
     let modifier = |found: fn(&Modifier) -> bool| property.modifiers().iter().find(|modifier| found(modifier));
+    if let Some(lazy) = modifier(|modifier| matches!(modifier, Modifier::Lazy(_)))
+        && !matches!(property, Property::Computed(_))
+    {
+        return Err(Box::new(
+            Issue::error(format!(
+                "A `lazy` property computes its value on the first read: write `lazy` with `=>`, as in `lazy Plan {name} => this.load();`."
+            ))
+            .with_annotation(Annotation::primary(lazy.span()).with_message("Written here."))
+            .with_note("It takes no accessors and no initial value."),
+        ));
+    }
+
     if let Property::Plain(_) = property {
         if let Some(r#override) = modifier(|modifier| matches!(modifier, Modifier::Override(_))) {
             return Err(Box::new(

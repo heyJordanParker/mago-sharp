@@ -6936,6 +6936,100 @@ fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks
     );
 }
 
+/// ```php
+/// public private(set) int $doubled { get => $this->doubled ??= 2; }
+/// private bool ${'found#lazy'} = false;
+/// public private(set) ?int $found { get { if (!$this->{'found#lazy'}) { $this->found = null; $this->{'found#lazy'} = true; } return $this->found; } }
+/// ```
+///
+/// A `lazy` property keeps its first value in its own storage, which only its `get` hook writes. A nullable one can
+/// keep null, so a hidden flag beside it says whether the body ran.
+#[test]
+fn a_lazy_property_keeps_its_first_value_in_its_storage() {
+    let lowered = Lowered::with(
+        "class Plan\n{\n    public lazy int doubled => 2;\n    public lazy int? found => null;\n}\n",
+        &[],
+    );
+    let class = lowered.child(lowered.root(), 1);
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 2)),
+        indoc! {r#"
+            STMT_LIST
+              PROP_GROUP [4097]
+                ZVAL [1] "int"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "doubled"
+                    null
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "get" @3-3
+                        null
+                        null
+                        PROPERTY_HOOK_SHORT_BODY
+                          ASSIGN_COALESCE
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "doubled"
+                            ZVAL 2
+                        null
+                        null
+                null
+              PROP_GROUP [4]
+                ZVAL [1] "bool"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "found#lazy"
+                    ZVAL false
+                    null
+                    null
+                null
+              PROP_GROUP [4097]
+                ZVAL [257] "int"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "found"
+                    null
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "get" @4-4
+                        null
+                        null
+                        STMT_LIST
+                          IF
+                            IF_ELEM
+                              UNARY_OP [14]
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "found#lazy"
+                              STMT_LIST
+                                ASSIGN
+                                  PROP
+                                    VAR
+                                      ZVAL "this"
+                                    ZVAL "found"
+                                  ZVAL null
+                                ASSIGN
+                                  PROP
+                                    VAR
+                                      ZVAL "this"
+                                    ZVAL "found#lazy"
+                                  ZVAL true
+                          RETURN
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "found"
+                        null
+                        null
+                null
+        "#}
+    );
+}
+
 /// The members of `RushOrder : Order : Model`, where the PHP# class `Order` overrides `table` with `string?` and
 /// `model` is the plain PHP class `Model`.
 fn rush_order_members(model: &str) -> String {
