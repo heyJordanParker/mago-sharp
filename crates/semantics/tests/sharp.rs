@@ -1552,18 +1552,19 @@ fn an_interface_constant_or_another_interface_modifier_is_not_supported_yet() {
     );
 }
 
-/// An interface states a get-only property its classes give, as `OrderEvent` states the `orderId` its events give,
-/// spec section 15. A `set` accessor or an accessor body is not supported yet.
+/// An interface states a property its classes give, `{ get; }` as `OrderEvent` states the `orderId` its events give,
+/// spec section 15, or `{ get; set; }`, spec section 6.1. An accessor body, or a `set` with an access modifier, is not
+/// supported yet.
 #[test]
-fn an_interface_property_is_get_only() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n}\n";
+fn an_interface_property_is_get_only_or_settable() {
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n    string tag { get; private set; }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "6:24 Interface virtual property `Named.label` must be abstract.",
             "6:5 This class member is not supported yet in PHP#.",
-            "7:5 This class member is not supported yet in PHP#."
+            "8:5 This class member is not supported yet in PHP#."
         ]
     );
 

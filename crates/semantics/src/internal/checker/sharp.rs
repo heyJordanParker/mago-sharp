@@ -1971,10 +1971,19 @@ fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Contex
     report_refusal(issue, parameter.span(), Place::Parameter, context)
 }
 
-/// Whether the slice has an interface property: a type, a name and `{ get; }`, which PHP runs as a public interface
-/// property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section 15. An access
-/// modifier keeps it in the slice, and `enter` reports the modifier where the walk reaches it.
+/// Whether the slice has an interface property: a type, a name and `{ get; }` or `{ get; set; }`, which PHP runs as a
+/// public interface property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section
+/// 15. A class gives one stated with `set` a `set` too, which the analyzer checks. An access modifier keeps it in the
+/// slice, and `enter` reports the modifier where the walk reaches it.
 fn is_interface_property(property: &HookedProperty) -> bool {
+    let is_bare = |accessor: &PropertyHook, name: &[u8]| {
+        accessor.name.value == name
+            && is_slice_accessor(accessor)
+            && accessor.modifiers.is_empty()
+            && accessor.parameter_list.is_none()
+            && matches!(accessor.body, PropertyHookBody::Abstract(_))
+    };
+
     property.attribute_lists.is_empty()
         && property.var.is_none()
         && property.modifiers.iter().all(|modifier| {
@@ -1986,10 +1995,11 @@ fn is_interface_property(property: &HookedProperty) -> bool {
         && property.hint.is_some()
         && matches!(property.item, PropertyItem::Abstract(_))
         && property.initial_value.is_none()
-        && matches!(
-            property.hook_list.hooks.as_slice(),
-            [accessor] if accessor.name.value == b"get" && is_slice_accessor(accessor) && matches!(accessor.body, PropertyHookBody::Abstract(_))
-        )
+        && match property.hook_list.hooks.as_slice() {
+            [get] => is_bare(get, b"get"),
+            [get, set] => is_bare(get, b"get") && is_bare(set, b"set"),
+            _ => false,
+        }
 }
 
 /// Reports an access modifier on an interface member. A member is public, written bare, as TypeScript and Swift

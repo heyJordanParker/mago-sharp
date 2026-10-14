@@ -12307,6 +12307,33 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     );
 }
 
+/// Spec section 6.1: a PHP# interface states a property `{ get; set; }`, and a class gives it `{ get; set; }`. A class
+/// that gives it get-only is refused, naming the `set` the interface states.
+#[test]
+fn a_class_gives_an_interface_property_stated_with_set_a_set() {
+    let settable = (
+        "app/Shop/Settable.sharp",
+        "namespace App.Shop;\n\npublic interface Settable\n{\n    int total { get; set; }\n}\n",
+    );
+    let tally = (
+        "app/Shop/Tally.sharp",
+        "namespace App.Shop;\n\npublic class Tally : Settable\n{\n    public int total { get; set; } = 0;\n\n    public static int bump(Settable settable)\n    {\n        settable.total = settable.total + 1;\n        return settable.total;\n    }\n}\n",
+    );
+    let fixed = (
+        "app/Shop/Fixed.sharp",
+        "namespace App.Shop;\n\npublic class Fixed : Settable\n{\n    public int total { get; }\n\n    public Fixed(int total)\n    {\n        this.total = total;\n    }\n}\n",
+    );
+
+    assert_eq!(worded(settable, &[]), Vec::<String>::new());
+    assert_eq!(worded(tally, &[settable]), Vec::<String>::new());
+    assert_eq!(
+        worded(fixed, &[settable]),
+        [
+            "5:16 incompatible-property-access `Fixed` gives `total` get-only, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+}
+
 /// An interface member is public, written bare: a class gives a bare property and a bare method as public ones, an
 /// event gives the property, and other code reads and calls them through the interface.
 #[test]
