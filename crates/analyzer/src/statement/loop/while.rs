@@ -40,6 +40,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for While<'arena> {
             self.body.statements(),
             self.span(),
             is_while_true,
+            "while",
         )?;
 
         context.report_non_bool_condition(self.condition, artifacts.get_expression_type(self.condition), "while");

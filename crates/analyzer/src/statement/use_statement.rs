@@ -78,6 +78,35 @@ where
     }
 }
 
+/// Spec section 23: a PHP# `import` names a class or the namespace of a plain PHP library's functions, never one
+/// function, which the file calls through its namespace instead.
+pub(crate) fn check_sharp_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>)
+where
+    A: Arena,
+{
+    let fqn = php_name(name);
+    if context.codebase.class_like_exists(&fqn) || !context.codebase.function_exists(&fqn) {
+        return;
+    }
+
+    // A function of PHP's root namespace is called through `global`, which no file imports.
+    let message = match fqn.iter().rposition(|byte| *byte == b'\\') {
+        Some(separator) => {
+            let namespace = String::from_utf8_lossy(&fqn[..separator]).replace('\\', ".");
+            let last = namespace.rsplit('.').next().unwrap_or(&namespace).to_owned();
+            let function = String::from_utf8_lossy(&fqn[separator + 1..]);
+
+            format!("import `{namespace}`, and call `{last}.{function}(…)`")
+        }
+        None => format!("call `global.{}(…)`", String::from_utf8_lossy(&fqn)),
+    };
+    context.collector.report_with_code(
+        IssueCode::FunctionImport,
+        Issue::error(format!("An import names a class or a namespace, not a function: {message}."))
+            .with_annotation(Annotation::primary(name.span()).with_message("Imports one function.")),
+    );
+}
+
 fn check_typed_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>, fqn: &[u8], use_type: &UseType<'_>)
 where
     A: Arena,

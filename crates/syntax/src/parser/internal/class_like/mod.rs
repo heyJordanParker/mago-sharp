@@ -10,6 +10,7 @@ use crate::cst::cst::Interface;
 use crate::cst::cst::Modifier;
 use crate::cst::cst::Statement;
 use crate::cst::cst::Trait;
+use crate::cst::cst::TypeParameterList;
 use crate::cst::sequence::Sequence;
 use crate::error::ParseError;
 use crate::parser::Parser;
@@ -76,11 +77,17 @@ where
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
     ) -> Result<Interface<'arena>, ParseError> {
+        let interface = self.expect_keyword(T!["interface"])?;
+        let name = self.parse_local_identifier()?;
+        let type_parameters = self.parse_optional_type_parameter_list()?;
+        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
+
         Ok(Interface {
             attribute_lists: attributes,
             modifiers,
-            interface: self.expect_keyword(T!["interface"])?,
-            name: self.parse_local_identifier()?,
+            interface,
+            name,
+            type_parameters,
             extends: self.parse_optional_extends()?,
             inheritance: self.parse_optional_inheritance()?,
             left_brace: self.stream.eat_span(T!["{"])?,
@@ -93,6 +100,7 @@ where
 
                     let position_before = self.stream.current_position();
                     self.state.members_of = "An interface";
+                    self.state.type_parameters_of.clone_from(&type_parameter_names);
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -130,11 +138,17 @@ where
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
     ) -> Result<Class<'arena>, ParseError> {
+        let class = self.expect_keyword(T!["class"])?;
+        let name = self.parse_local_identifier()?;
+        let type_parameters = self.parse_optional_type_parameter_list()?;
+        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
+
         Ok(Class {
             attribute_lists: attributes,
             modifiers,
-            class: self.expect_keyword(T!["class"])?,
-            name: self.parse_local_identifier()?,
+            class,
+            name,
+            type_parameters,
             extends: self.parse_optional_extends()?,
             implements: self.parse_optional_implements()?,
             inheritance: self.parse_optional_inheritance()?,
@@ -148,6 +162,7 @@ where
 
                     let position_before = self.stream.current_position();
                     self.state.members_of = "A class";
+                    self.state.type_parameters_of.clone_from(&type_parameter_names);
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -190,6 +205,7 @@ where
 
                     let position_before = self.stream.current_position();
                     self.state.members_of = "A class";
+                    self.state.type_parameters_of = None;
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -240,6 +256,7 @@ where
 
                     let position_before = self.stream.current_position();
                     self.state.members_of = "A trait";
+                    self.state.type_parameters_of = None;
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -296,6 +313,7 @@ where
 
                     let position_before = self.stream.current_position();
                     self.state.members_of = "An enum";
+                    self.state.type_parameters_of = None;
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -319,8 +337,8 @@ where
     }
 
     /// The backing type after `:`, as PHP writes `: string`, and in PHP# the interfaces, as in `: string, HasLabel` or
-    /// `: HasLabel`. A leading class name opens the interfaces, and any other type is the backing type, which
-    /// `check_enum` holds to `int` or `string`.
+    /// `: HasLabel`. A leading class name, with or without type arguments, opens the interfaces, and any other type is
+    /// the backing type, which `check_enum` holds to `int` or `string`.
     fn parse_enum_header(
         &mut self,
     ) -> Result<(Option<EnumBackingTypeHint<'arena>>, Option<Inheritance<'arena>>), ParseError> {
@@ -334,8 +352,8 @@ where
             return Ok((Some(EnumBackingTypeHint { colon, hint }), None));
         }
 
-        if let Hint::Identifier(first) = hint {
-            return Ok((None, Some(self.parse_inheritance_from(colon, first)?)));
+        if matches!(hint, Hint::Identifier(_) | Hint::Generic(_)) {
+            return Ok((None, Some(self.parse_inheritance_from(colon, hint)?)));
         }
 
         let backing_type_hint = Some(EnumBackingTypeHint { colon, hint });
@@ -344,8 +362,17 @@ where
         }
 
         let comma = self.stream.consume_span()?;
-        let first = self.parse_identifier()?;
+        let first = self.parse_type_hint()?;
 
         Ok((backing_type_hint, Some(self.parse_inheritance_from(comma, first)?)))
     }
+}
+
+/// The names of the type parameters `list` declares, as `T` or `TKey, TValue`, or `None` when it declares none.
+fn type_parameter_names(list: Option<&TypeParameterList<'_>>) -> Option<std::boxed::Box<str>> {
+    list.map(|list| {
+        let names = list.parameters.iter().map(|parameter| String::from_utf8_lossy(parameter.name.value));
+
+        names.collect::<std::vec::Vec<_>>().join(", ").into_boxed_str()
+    })
 }

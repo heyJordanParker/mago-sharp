@@ -35,6 +35,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::TypeArgumentList;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
 use crate::analyzable::Analyzable;
@@ -45,6 +46,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_static_write;
 use crate::error::AnalysisError;
+use crate::expression::access::written_static_property;
 use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
@@ -56,6 +58,7 @@ use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
 use crate::expression::constant_access::field_storage;
+use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
@@ -69,6 +72,7 @@ use crate::invocation::return_type_fetcher::fetch_declared_invocation_return_typ
 use crate::invocation::return_type_fetcher::fetch_function_like_provider_return_type;
 use crate::invocation::return_type_fetcher::fetch_invocation_return_type;
 use crate::invocation::template_result::populate_template_result_from_invocation;
+use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::resolver::method::UndocumentedMethod;
@@ -125,6 +129,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for MethodCall<'arena> {
             artifacts,
             self.object,
             &self.method,
+            self.type_arguments.as_ref(),
             &self.argument_list,
             false, // is_nullsafe
             self.span(),
@@ -177,6 +182,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NullSafeMethodCall<'arena> {
             artifacts,
             self.object,
             &self.method,
+            self.type_arguments.as_ref(),
             &self.argument_list,
             true, // is_nullsafe
             self.span(),
@@ -318,6 +324,7 @@ fn analyze_method_call<'ctx, 'ast, 'arena, A>(
     artifacts: &mut AnalysisArtifacts,
     object: &'ast Expression<'arena>,
     selector: &'ast ClassLikeMemberSelector<'arena>,
+    type_arguments: Option<&'ast TypeArgumentList<'arena>>,
     argument_list: &'ast ArgumentList<'arena>,
     is_null_safe: bool,
     span: Span,
@@ -509,6 +516,17 @@ where
             .entry(*var_id)
             .or_default()
             .push(vec![mago_codex::assertion::Assertion::IsNotType(mago_codex::ttype::atomic::TAtomic::Null)]);
+    }
+
+    if let Some(type_arguments) = type_arguments {
+        seed_method_type_arguments(
+            context,
+            block_context,
+            artifacts,
+            type_arguments,
+            &invocation_targets,
+            &mut method_resolution.template_result,
+        );
     }
 
     if has_resolved_methods || method_resolution.undocumented_methods.is_empty() {
@@ -717,7 +735,10 @@ where
             Ok(None)
         }
         Expression::Access(Access::Property(access)) => {
-            let written = match StaticProperty::from_property_access(access, context.resolved_names) {
+            let written = match written_static_property(context, block_context, access) {
+                // Reading `Counter.items` reported its missing type arguments, and the write back would again.
+                Some(static_property) if bare_generic_class(context, static_property.class).is_some() => Ok(()),
+                // The read of the collection analyzed its class.
                 Some(static_property) => static_property_assignment::analyze(
                     context,
                     block_context,
@@ -726,6 +747,7 @@ where
                     &changed_type,
                     None,
                     get_block_expression_id(collection, context, block_context),
+                    true,
                 ),
                 None => property_assignment::analyze(
                     context,

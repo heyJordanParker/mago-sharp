@@ -9,6 +9,7 @@ use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::GenericClass;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::PropertyHookBody;
@@ -63,7 +64,7 @@ pub const INLINED_COLLECTION_METHODS: [(&str, &str); 18] = [
 
 /// The class-likes directly in `Sharp` that a bare name in a `.sharp` file names by default, spec section 23, and that
 /// a class-like of the file's namespace can win over: the standard library's ten effect classes and `Events`, the
-/// effect of `emit` (spec section 29), then the standard library's types.
+/// effect of `emit` (spec section 29), then `Position`.
 pub(crate) fn shadowable_default_classes() -> impl Iterator<Item = &'static str> {
     [
         "Sharp\\Database",
@@ -78,7 +79,6 @@ pub(crate) fn shadowable_default_classes() -> impl Iterator<Item = &'static str>
         "Sharp\\Environment",
         "Sharp\\Events",
         "Sharp\\Position",
-        "Sharp\\Replaces",
     ]
     .into_iter()
 }
@@ -132,7 +132,8 @@ pub struct ResolvedNames<'arena> {
     /// for backward compatibility.
     names: HashMap<u32, (u32, (&'arena [u8], bool))>,
 
-    /// Start offset of every bare PHP# name -> what it refers to. Empty for PHP.
+    /// Start offset of every bare PHP# name, and of every PHP# type name that names a type parameter -> what it refers
+    /// to. Empty for PHP.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
     bindings: HashMap<u32, Binding>,
 
@@ -248,7 +249,8 @@ impl<'arena> ResolvedNames<'arena> {
             .collect()
     }
 
-    /// Returns what the bare PHP# name starting at the given position refers to.
+    /// Returns what the bare PHP# name starting at the given position refers to, or the type parameter a PHP# type name
+    /// there names.
     ///
     /// Returns `None` for every name in a PHP file.
     pub fn binding<T>(&self, position: &T) -> Option<Binding>
@@ -258,8 +260,19 @@ impl<'arena> ResolvedNames<'arena> {
         self.bindings.get(&position.offset()).copied()
     }
 
+    /// Returns whether the PHP# type name starting at the given position names a type parameter.
+    ///
+    /// Returns `false` for every name in a PHP file.
+    pub fn is_type_parameter<T>(&self, name: &T) -> bool
+    where
+        T: HasPosition,
+    {
+        matches!(self.binding(name), Some(Binding::TypeParameter { .. }))
+    }
+
     /// Returns the class of a PHP# static call, `Class.method()`: the object of `call` when the binder bound it to a
-    /// class. Returns `None` for an instance call and for every call in a PHP file.
+    /// class, or to a type parameter, which stands for the class of the type argument the code runs with. Returns
+    /// `None` for an instance call and for every call in a PHP file.
     ///
     /// The checker and the engine both read this, so they never disagree on a static call.
     #[must_use]
@@ -268,7 +281,8 @@ impl<'arena> ResolvedNames<'arena> {
     }
 
     /// Returns the class of a PHP# static property access, `Class.name`: the object of `access` when the binder bound
-    /// it to a class. Returns `None` for an instance property and for every access in a PHP file.
+    /// it to a class or to a type parameter, as [`Self::static_call_class`] does. Returns `None` for an instance
+    /// property and for every access in a PHP file.
     ///
     /// The checker, the analyzer and the engine all read this, so they never disagree on a static property.
     #[must_use]
@@ -299,9 +313,16 @@ impl<'arena> ResolvedNames<'arena> {
             || self.uses_field(accessors)
     }
 
+    /// The class name of a member's object: a bare name bound to a class or a type parameter, or the class of
+    /// `Counter<Order>`, whose type arguments a caller that reads them takes from the object.
     fn class_object<'ast>(&self, object: &'ast Expression<'ast>) -> Option<&'ast ConstantAccess<'ast>> {
         match object {
-            Expression::ConstantAccess(access) if self.binding(&access.name) == Some(Binding::Class) => Some(access),
+            Expression::ConstantAccess(access)
+                if matches!(self.binding(&access.name), Some(Binding::Class | Binding::TypeParameter { .. })) =>
+            {
+                Some(access)
+            }
+            Expression::GenericClass(GenericClass { class, .. }) => self.class_object(class),
             _ => None,
         }
     }

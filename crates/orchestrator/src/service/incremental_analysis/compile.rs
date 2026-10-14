@@ -145,9 +145,8 @@ impl IncrementalAnalysisService {
     /// An accepted file's inputs are its own source, `composer.lock`, and each file outside `vendor/` whose edit makes
     /// the warm path re-analyze it: each file whose signature edit reaches it through the cascade or reaches a symbol
     /// its extension hooks or providers read, every file when they listed names, each file that declares a class alias
-    /// or a patch, each standard library file, whose `[Replaces]` decides which calls compile, and each file that
-    /// declares a method whose return it reads from that method's body, along every chain of such returns, with that
-    /// file's own inputs.
+    /// or a patch, and each file that declares a method whose return it reads from that method's body, along every
+    /// chain of such returns, with that file's own inputs.
     ///
     /// A file that states a law also lists its proof file and every source its laws reach. A file that declares a
     /// module or a listener also lists the module files its check resolves services through, each folder's
@@ -241,12 +240,7 @@ impl IncrementalAnalysisService {
             .codebase
             .class_like_alias_declarations()
             .map(|(_, _, span)| span.file_id)
-            .chain(
-                self.database
-                    .files()
-                    .filter(|file| file.file_type.is_patch() || file.is_standard_library)
-                    .map(|file| file.id),
-            )
+            .chain(self.database.files().filter(|file| file.file_type.is_patch()).map(|file| file.id))
             .collect();
 
         let inputs_start = std::time::Instant::now();
@@ -1200,7 +1194,7 @@ mod tests {
         );
     }
 
-    const TEXT: &str = "namespace Sharp;\n\npublic class Text\n{\n    public static string shout(string text) => strtoupper(text);\n}\n";
+    const TEXT: &str = "namespace Sharp;\n\npublic class Text\n{\n    public static string shout(string text) => global.strtoupper(text);\n}\n";
     const TITLE: &str = "namespace App;\n\nimport Sharp.Text;\n\npublic class Title\n{\n    public string of(string name)\n    {\n        return Text.shout(name);\n    }\n}\n";
     const TEXT_PATH: &str = "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text.sharp";
 
@@ -1936,6 +1930,125 @@ mod tests {
             assert!(
                 outcomes(&clean).iter().any(|(name, outcome)| *name != edited_file && outcome.is_err()),
                 "`{to}` refuses a file that reads {edited_file}: {:#?}",
+                outcomes(&clean)
+            );
+            assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
+        }
+    }
+
+    /// A project whose `Shelf` and `Orders` read the bounds of the type parameters of `Box`, `Source` and `Tools.same`,
+    /// and whose `Reader` reads the variance of `Feed`'s and the count of `Pair`'s.
+    fn bounds() -> Vec<(&'static str, String)> {
+        vec![
+            ("app/Shop/Entity.sharp", "namespace App.Shop;\n\npublic abstract class Entity\n{\n}\n".to_string()),
+            ("app/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order : Entity\n{\n}\n".to_string()),
+            ("app/Shop/Customer.sharp", "namespace App.Shop;\n\npublic class Customer\n{\n}\n".to_string()),
+            ("app/Shop/Box.sharp", "namespace App.Shop;\n\npublic class Box<TItem : Entity>\n{\n    public Box() { }\n}\n".to_string()),
+            ("app/Shop/Source.sharp", "namespace App.Shop;\n\npublic interface Source<TItem : Entity>\n{\n    TItem? first();\n}\n".to_string()),
+            ("app/Shop/Tools.sharp", "namespace App.Shop;\n\npublic class Tools\n{\n    public static T same<T : Entity>(T value) => value;\n}\n".to_string()),
+            ("app/Shop/Shelf.sharp", "namespace App.Shop;\n\npublic class Shelf\n{\n    public Box<Order> box() => new Box<Order>();\n\n    public Order same(Order order) => Tools.same(order);\n}\n".to_string()),
+            ("app/Shop/Orders.sharp", "namespace App.Shop;\n\npublic class Orders : Source<Order>\n{\n    public Order? first() => null;\n}\n".to_string()),
+            ("app/Shop/Feed.sharp", "namespace App.Shop;\n\npublic interface Feed<out TItem : Entity>\n{\n    TItem? next();\n}\n".to_string()),
+            ("app/Shop/Pair.sharp", "namespace App.Shop;\n\npublic class Pair<TFirst>\n{\n    public Pair() { }\n}\n".to_string()),
+            ("app/Shop/Reader.sharp", "namespace App.Shop;\n\npublic class Reader\n{\n    public Entity? read(Feed<Entity> feed) => feed.next();\n\n    public Entity? orders(Feed<Order> feed) => this.read(feed);\n\n    public Pair<Order> pair() => new Pair<Order>();\n}\n".to_string()),
+        ]
+    }
+
+    #[test]
+    fn a_compile_after_an_edit_to_a_type_parameter_list_matches_a_clean_compile() {
+        let base = shop_project(&bounds());
+
+        for (edited_file, from, to) in [
+            ("app/Shop/Box.sharp", "<TItem : Entity>", "<TItem : Customer>"),
+            ("app/Shop/Source.sharp", "<TItem : Entity>", "<TItem : Customer>"),
+            ("app/Shop/Tools.sharp", "<T : Entity>", "<T : Customer>"),
+            ("app/Shop/Feed.sharp", "<out TItem : Entity>", "<TItem : Entity>"),
+            ("app/Shop/Pair.sharp", "<TFirst>", "<TFirst, TSecond>"),
+        ] {
+            let mut files = bounds();
+            let (_, contents) =
+                files.iter_mut().find(|(name, _)| *name == edited_file).expect("the edited file exists");
+            assert!(contents.contains(from), "{edited_file} holds `{from}`");
+            *contents = contents.replace(from, to);
+            let edited = shop_project(&files);
+
+            let mut warm = analyzed(&base);
+            compile(&mut warm, empty_stamp);
+            warm.update_database(edited.read_only());
+            warm.analyze_incremental(None).expect("the warm path runs");
+            let warm = compile(&mut warm, empty_stamp);
+            let clean = compile(&mut analyzed(&edited), empty_stamp);
+
+            assert!(
+                outcomes(&clean).iter().any(|(name, outcome)| *name != edited_file && outcome.is_err()),
+                "`{to}` refuses a file that reads {edited_file}: {:#?}",
+                outcomes(&clean)
+            );
+            assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
+        }
+    }
+
+    /// A project whose `Report` reads a library's constant through its namespace, `Pdf.DEFAULT_DPI`, and a constant of
+    /// PHP's root namespace, `global.APP_VERSION`, spec section 23, each declared in a plain PHP file of the project.
+    fn constants() -> Vec<(&'static str, String)> {
+        vec![
+            ("lib/Pdf.php", "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n".to_string()),
+            ("lib/version.php", "<?php\n\nconst APP_VERSION = 3;\n".to_string()),
+            ("app/Shop/Report.sharp", "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Report\n{\n    public int dpi() => Pdf.DEFAULT_DPI;\n\n    public int version() => global.APP_VERSION;\n}\n".to_string()),
+        ]
+    }
+
+    /// A read of a constant through its namespace lists the file that declares it as an input, as a call of a
+    /// function through its namespace does, so the engine refuses the compiled file once that file changes.
+    #[test]
+    fn a_read_of_a_constant_through_its_namespace_lists_the_file_that_declares_it_as_an_input() {
+        let database = shop_project(&constants());
+
+        let compiled = compile(&mut analyzed(&database), empty_stamp);
+
+        assert_eq!(
+            input_paths(accepted(&compiled, "app/Shop/Report.sharp")),
+            [
+                "Module.lean",
+                "app/Module.lean",
+                "app/Shop/Module.lean",
+                "app/Shop/Report.sharp",
+                "composer.lock",
+                "lib/Pdf.php",
+                "lib/version.php"
+            ]
+        );
+    }
+
+    /// Deleting a constant a file reads through its namespace, or changing its value's type, refuses that file, and a
+    /// compile after the edit refuses it as a clean compile does.
+    #[test]
+    fn a_compile_after_an_edit_to_a_constant_read_through_its_namespace_matches_a_clean_compile() {
+        let base = shop_project(&constants());
+
+        for (edited_file, from, to) in [
+            ("lib/Pdf.php", "const DEFAULT_DPI = 300;\n", ""),
+            ("lib/Pdf.php", "DEFAULT_DPI = 300;", "DEFAULT_DPI = \"300\";"),
+            ("lib/version.php", "const APP_VERSION = 3;\n", ""),
+            ("lib/version.php", "APP_VERSION = 3;", "APP_VERSION = \"3\";"),
+        ] {
+            let mut files = constants();
+            let (_, contents) =
+                files.iter_mut().find(|(name, _)| *name == edited_file).expect("the edited file exists");
+            assert!(contents.contains(from), "{edited_file} holds `{from}`");
+            *contents = contents.replace(from, to);
+            let edited = shop_project(&files);
+
+            let mut warm = analyzed(&base);
+            compile(&mut warm, empty_stamp);
+            warm.update_database(edited.read_only());
+            warm.analyze_incremental(None).expect("the warm path runs");
+            let warm = compile(&mut warm, empty_stamp);
+            let clean = compile(&mut analyzed(&edited), empty_stamp);
+
+            assert!(
+                outcomes(&clean)["app/Shop/Report.sharp"].is_err(),
+                "`{to}` refuses Report: {:#?}",
                 outcomes(&clean)
             );
             assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");

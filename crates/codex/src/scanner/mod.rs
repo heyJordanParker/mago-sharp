@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use mago_allocator::Arena;
 
 use mago_database::file::File;
@@ -81,9 +83,14 @@ use crate::scanner::function_like::scan_function;
 use crate::scanner::function_like::scan_initial_values_constructor;
 use crate::scanner::function_like::scan_method;
 use crate::scanner::property::scan_promoted_property;
-use crate::ttype::get_named_object;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::generic::TGenericParameter;
+use crate::ttype::atomic::object::TObject;
+use crate::ttype::atomic::object::named::TNamedObject;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
+use crate::ttype::union::TUnion;
+use crate::ttype::wrap_atomic;
 
 mod assertion_inference;
 mod attribute;
@@ -385,18 +392,6 @@ impl Scanner {
         let is_required = method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_)));
         if (method_metadata.is_final || is_required) && is_constructor {
             class_like_metadata.flags |= MetadataFlags::CONSISTENT_CONSTRUCTOR;
-        }
-
-        if context.file.is_standard_library {
-            let file = word(context.file.name.as_ref());
-            for (function, _) in function_like_metadata.replaced_functions() {
-                let wrapper = (file, function_like_metadata.span, method_identifier);
-                let wrappers =
-                    self.codebase.wrapped_functions.entry(ascii_lowercase_word(function.as_bytes())).or_default();
-                if !wrappers.contains(&wrapper) {
-                    wrappers.push(wrapper);
-                }
-            }
         }
 
         self.template_constraints.push(
@@ -946,7 +941,8 @@ where
     }
 
     /// A PHP# named constructor registers as the public static method it runs as, spec section 9.1, which returns an
-    /// object of the class that declares it. It is not inherited, so a subclass may declare its own of the same name:
+    /// object of the class that declares it, with the class's own type parameters, as `Box<TItem>`, which the type
+    /// arguments its `new` names fix. It is not inherited, so a subclass may declare its own of the same name:
     /// the method is neither final, as a PHP# method without `virtual` is, nor abstract, as one without a body is.
     #[inline]
     fn walk_in_named_constructor(
@@ -965,8 +961,24 @@ where
             method_metadata.is_final = false;
             method_metadata.is_abstract = false;
             method.flags |= MetadataFlags::NAMED_CONSTRUCTOR;
+            let type_parameters: Vec<TUnion> = class
+                .template_types
+                .iter()
+                .map(|(name, template)| {
+                    wrap_atomic(TAtomic::GenericParameter(TGenericParameter {
+                        parameter_name: *name,
+                        constraint: Arc::new(template.constraint.clone()),
+                        defining_entity: template.defining_entity,
+                        intersection_types: None,
+                    }))
+                })
+                .collect();
+            let object = TNamedObject::new_with_type_parameters(
+                class.original_name,
+                (!type_parameters.is_empty()).then_some(type_parameters),
+            );
             method.set_return_type_declaration_metadata(Some(TypeMetadata::new(
-                get_named_object(class.original_name, None),
+                wrap_atomic(TAtomic::Object(TObject::Named(object))),
                 named_constructor.name.span,
             )));
         }

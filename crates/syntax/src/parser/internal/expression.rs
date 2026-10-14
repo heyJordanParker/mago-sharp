@@ -23,6 +23,7 @@ use crate::cst::cst::ConstructorName;
 use crate::cst::cst::Expression;
 use crate::cst::cst::FunctionCall;
 use crate::cst::cst::FunctionPartialApplication;
+use crate::cst::cst::GenericClass;
 use crate::cst::cst::Identifier;
 use crate::cst::cst::Instantiation;
 use crate::cst::cst::MethodCall;
@@ -162,6 +163,20 @@ where
                 left = self.arena.alloc(Expression::ConstantAccess(ConstantAccess { name: *identifier }));
             }
 
+            // `Counter<Order>.count` reads a static member of one type argument's class, spec section 11. A `.` after
+            // the `>` makes the `<` a type argument list, as in C#.
+            if self.dialect.is_sharp()
+                && kind == T!["<"]
+                && let Expression::ConstantAccess(_) = left
+                && self.stream.peek_kind_after_type_arguments(0)? == Some(T!["."])
+            {
+                left = self.arena.alloc(Expression::GenericClass(GenericClass {
+                    class: left,
+                    type_arguments: self.parse_type_argument_list()?,
+                }));
+                continue;
+            }
+
             // Stop parsing if the next token is a terminator.
             if matches!(kind, T![";" | "?>"]) {
                 break;
@@ -284,6 +299,7 @@ where
             return Ok(self.arena.alloc(Expression::Instantiation(Instantiation {
                 new,
                 class: self.arena.alloc(class),
+                type_arguments: None,
                 constructor: Some(ConstructorName {
                     dot: self.stream.eat_span(T!["."])?,
                     name: self.parse_local_identifier()?,
@@ -568,8 +584,21 @@ where
                 let (arrow, operator_refused) = self.consume_operator_span()?;
                 refused = operator_refused;
                 let selector = self.parse_classlike_member_selector()?;
+                let type_arguments = if Precedence::CallDim > precedence {
+                    self.parse_optional_call_type_argument_list()?
+                } else {
+                    None
+                };
 
-                if Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])) {
+                if type_arguments.is_some() {
+                    Expression::Call(Call::Method(MethodCall {
+                        object: lhs,
+                        arrow,
+                        method: selector,
+                        type_arguments,
+                        argument_list: self.parse_argument_list()?,
+                    }))
+                } else if Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])) {
                     let partial_args = self.parse_partial_argument_list()?;
 
                     if partial_args.has_placeholders() {
@@ -584,6 +613,7 @@ where
                             object: lhs,
                             arrow,
                             method: selector,
+                            type_arguments: None,
                             argument_list: partial_args.into_argument_list(self.arena),
                         }))
                     }
@@ -595,12 +625,20 @@ where
                 let (question_mark_arrow, operator_refused) = self.consume_operator_span()?;
                 refused = operator_refused;
                 let selector = self.parse_classlike_member_selector()?;
+                let type_arguments = if Precedence::CallDim > precedence {
+                    self.parse_optional_call_type_argument_list()?
+                } else {
+                    None
+                };
 
-                if Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])) {
+                if type_arguments.is_some()
+                    || (Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])))
+                {
                     Expression::Call(Call::NullSafeMethod(NullSafeMethodCall {
                         object: lhs,
                         question_mark_arrow,
                         method: selector,
+                        type_arguments,
                         argument_list: self.parse_argument_list()?,
                     }))
                 } else {

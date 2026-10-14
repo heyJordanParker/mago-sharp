@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
@@ -28,11 +29,16 @@ use mago_codex::ttype::template::TemplateBound;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
+use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::empty_word;
 
 use crate::context::Context;
 use crate::invocation::Invocation;
+use crate::invocation::InvocationTarget;
+use crate::invocation::MethodInvocationKind;
+use crate::invocation::MethodTargetContext;
+use crate::resolver::property::specialize_member_type;
 
 /// Resolves a type resulting from an invocation.
 pub fn resolve_invocation_type<'ctx, 'arena, A>(
@@ -108,7 +114,126 @@ where
         }
     }
 
-    resolve_union(context, invocation, &template_result, parameters, invocation_type)
+    let resolved_type = resolve_union(context, invocation, &template_result, parameters, invocation_type);
+    let Some((method_context, receiver)) = get_sharp_receiver(context, invocation) else {
+        return resolved_type;
+    };
+
+    // A PHP# member of a receiver has the type a method value of it has, spec section 11, so `specialize_member_type`
+    // computes both, once over the resolved type, and nothing expands its result again.
+    specialize_for_receiver(context, method_context, receiver, &template_result, resolved_type)
+}
+
+/// PHP#'s type of `member_type`, which the method `method_context` runs on `receiver` declares, for that receiver.
+fn specialize_for_receiver<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    method_context: &MethodTargetContext<'ctx>,
+    receiver: &TObject,
+    template_result: &TemplateResult,
+    member_type: TUnion,
+) -> TUnion
+where
+    A: Arena,
+{
+    let self_parameter = match &method_context.class_type {
+        StaticClassType::Generic(parameter) => Some(parameter),
+        _ => None,
+    };
+
+    specialize_member_type(
+        context,
+        receiver,
+        self_parameter,
+        get_declaring_class(context, method_context),
+        method_context.class_like_metadata.name,
+        template_result,
+        |options| {
+            let mut member_type = member_type;
+            expander::expand_union(context.codebase, &mut member_type, options);
+            member_type
+        },
+    )
+}
+
+/// The class that declares the method an invocation runs, or the class it runs on when no method was resolved.
+fn get_declaring_class<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    method_context: &MethodTargetContext<'ctx>,
+) -> &'ctx ClassLikeMetadata
+where
+    A: Arena,
+{
+    method_context
+        .declaring_method_id
+        .and_then(|method| context.codebase.get_class_like(method.get_class_name().as_bytes()))
+        .unwrap_or(method_context.class_like_metadata)
+}
+
+/// The receiver of a PHP# member, or of a member PHP# calls, with the context of the method that runs on it: the
+/// object, or the bound of the type parameter a PHP# call's receiver is typed by. A method found through a `@mixin` has
+/// none: its receiver does not inherit the class that declares it, so upstream's expansion types it.
+fn get_sharp_receiver<'target, 'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    invocation: &'target Invocation<'ctx, '_, '_>,
+) -> Option<(&'target MethodTargetContext<'ctx>, &'target TObject)>
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() && !invocation.target.get_dialect().is_sharp() {
+        return None;
+    }
+
+    let method_context = invocation.target.get_method_context()?;
+    if method_context.declaring_object_type.is_some() {
+        return None;
+    }
+
+    match &method_context.class_type {
+        StaticClassType::Object(receiver) => Some((method_context, receiver)),
+        StaticClassType::Generic(parameter) if method_context.invocation_kind == MethodInvocationKind::Instance => {
+            let receiver = parameter.constraint.types.iter().find_map(|bound| match bound {
+                TAtomic::Object(object) => Some(object),
+                _ => None,
+            })?;
+
+            Some((method_context, receiver))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the invocation calls a PHP# method value, whose type `specialize_member_type` gave for its receiver when it
+/// was read. The call then replaces only its own type arguments, and binds no `Self` again to the class that declares
+/// the method.
+fn calls_sharp_method_value<A>(context: &Context<'_, '_, A>, invocation: &Invocation<'_, '_, '_>) -> bool
+where
+    A: Arena,
+{
+    (context.dialect.is_sharp() || invocation.target.get_dialect().is_sharp())
+        && matches!(
+            invocation.target,
+            InvocationTarget::FunctionLike {
+                identifier: FunctionLikeIdentifier::Method(..),
+                inferred_return_type: Some(_),
+                ..
+            }
+        )
+}
+
+/// Names `calling_class`, the class a member runs on, where `declaring_class`, a trait that declares the member, names
+/// itself, as PHP runs a trait's `self`.
+pub(crate) fn rename_trait_objects(declaring_class: &ClassLikeMetadata, calling_class: Word, union: &mut TUnion) {
+    if !declaring_class.kind.is_trait() {
+        return;
+    }
+
+    for atomic in union.types.to_mut() {
+        if let TAtomic::Object(TObject::Named(named_object)) = atomic
+            && named_object.name.as_bytes().eq_ignore_ascii_case(declaring_class.name.as_bytes())
+        {
+            named_object.name = calling_class;
+        }
+    }
 }
 
 fn resolve_union<'ctx, 'arena, A>(
@@ -129,6 +254,10 @@ where
     }
 
     resulting_union.types = Cow::Owned(resulting_atomics);
+
+    if get_sharp_receiver(context, invocation).is_some() {
+        return resulting_union;
+    }
 
     if !template_result.lower_bounds.is_empty() || resulting_union.has_template_types() {
         // Replace templates first so derived types (e.g. `template-type<T, ...>`)
@@ -153,29 +282,9 @@ where
             .get_function_like_metadata()
             .and_then(|metadata| metadata.method_metadata.as_ref())
             .is_some_and(|metadata| metadata.is_final);
-
-        if let Some(declaring_method_id) = &method_context.declaring_method_id {
-            let declaring_class_name = declaring_method_id.get_class_name();
-            if declaring_class_name != method_context.class_like_metadata.name
-                && let Some(declaring_class_meta) = context.codebase.get_class_like(declaring_class_name.as_bytes())
-                && declaring_class_meta.kind.is_trait()
-            {
-                let mut new_atomics = Vec::with_capacity(resulting_union.types.len());
-                for atomic in resulting_union.types.as_ref() {
-                    match atomic {
-                        TAtomic::Object(TObject::Named(named_object))
-                            if named_object.name.as_bytes().eq_ignore_ascii_case(declaring_class_name.as_bytes()) =>
-                        {
-                            let mut new_object = named_object.clone();
-                            new_object.name = method_context.class_like_metadata.name;
-                            new_atomics.push(TAtomic::Object(TObject::Named(new_object)));
-                        }
-                        _ => new_atomics.push(atomic.clone()),
-                    }
-                }
-
-                resulting_union.types = Cow::Owned(new_atomics);
-            }
+        let declaring_class = get_declaring_class(context, method_context);
+        if declaring_class.name != method_context.class_like_metadata.name {
+            rename_trait_objects(declaring_class, method_context.class_like_metadata.name, &mut resulting_union);
         }
     } else {
         static_class_type = StaticClassType::default();
@@ -188,11 +297,17 @@ where
         .get_all_child_nodes()
         .into_iter()
         .any(|node| matches!(node, TypeRef::Atomic(TAtomic::Variable(_))));
-    if !has_lexically_bound_parameter {
+    if !has_lexically_bound_parameter && !calls_sharp_method_value(context, invocation) {
         expander::expand_union(
             context.codebase,
             &mut resulting_union,
-            &TypeExpansionOptions { self_class, static_class_type, function_is_final, allow_mixin_static_rebind },
+            &TypeExpansionOptions {
+                self_class,
+                static_class_type,
+                function_is_final,
+                allow_mixin_static_rebind,
+                ..Default::default()
+            },
         );
     }
 
@@ -569,8 +684,18 @@ where
         resolve_union(context, invocation, template_result, parameters, (*conditional.otherwise).clone());
     let negated = conditional.negated;
 
-    let subject = inferred_type_replacer::replace(&subject, template_result, context.codebase);
-    let target = inferred_type_replacer::replace(&target, template_result, context.codebase);
+    // A PHP# member compares its operands as its receiver gives them, and leaves its branches to
+    // `resolve_invocation_type`, which specializes the result once.
+    let (subject, target) = match get_sharp_receiver(context, invocation) {
+        Some((method_context, receiver)) => (
+            specialize_for_receiver(context, method_context, receiver, template_result, subject),
+            specialize_for_receiver(context, method_context, receiver, template_result, target),
+        ),
+        None => (
+            inferred_type_replacer::replace(&subject, template_result, context.codebase),
+            inferred_type_replacer::replace(&target, template_result, context.codebase),
+        ),
+    };
 
     if !subject.is_never() {
         let mut comparison_result = ComparisonResult::new();

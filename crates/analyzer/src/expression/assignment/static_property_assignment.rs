@@ -31,6 +31,8 @@ use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::report_int_for_float;
 
+/// Writes `assigned_value_type` to the static property `property_access` names. A write back after a read of the same
+/// place, `class_is_analyzed`, does not analyze its class again.
 pub(crate) fn analyze<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -39,11 +41,13 @@ pub(crate) fn analyze<'ctx, 'arena, A>(
     assigned_value_type: &TUnion,
     assigned_value: Option<&Expression<'arena>>,
     property_access_id: Option<Word>,
+    class_is_analyzed: bool,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
 {
-    let property_resolution = resolve_static_properties(context, block_context, artifacts, property_access, true)?;
+    let property_resolution =
+        resolve_static_properties(context, block_context, artifacts, property_access, true, class_is_analyzed)?;
 
     let mut resolved_property_type = None;
     let mut matched_all_properties = true;
@@ -57,7 +61,7 @@ where
             );
         }
 
-        let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
+        let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
 
         let type_match_found = union_comparator::is_contained_by(
             context.codebase,

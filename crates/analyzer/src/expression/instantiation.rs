@@ -12,8 +12,10 @@ use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_object;
 use mago_codex::ttype::template::GenericTemplate;
@@ -22,14 +24,19 @@ use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
+use mago_names::binding::Binding;
+use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::ConstructorName;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::GenericClass;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::PartialArgumentList;
+use mago_syntax::cst::TypeArgumentList;
 use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
@@ -40,6 +47,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -47,12 +55,17 @@ use crate::invocation::MethodInvocationKind;
 use crate::invocation::MethodTargetContext;
 use crate::invocation::analyzer::analyze_invocation;
 use crate::invocation::post_process::post_invocation_process;
+use crate::invocation::template_result::seed_type_arguments;
 use crate::resolver::class_name::ResolutionOrigin;
 use crate::resolver::class_name::ResolvedClassname;
+use crate::resolver::class_name::class_value_class;
+use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::class_name::resolve_classnames_from_expression;
+use crate::statement::function_like::get_this_type;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
+use crate::utils::names::display_type;
 use crate::utils::names::sharp_code_class_name;
 use crate::utils::template::get_generic_parameter_for_offset;
 use crate::visibility::check_method_visibility;
@@ -69,6 +82,58 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     {
         let classnames = resolve_classnames_from_expression(context, block_context, artifacts, self.class, false)?;
         if classnames.is_empty() {
+            return Ok(());
+        }
+        // A refused value, as `value as Function<int()>` gives, reported itself, so `new` of it reports nothing again.
+        if artifacts.get_expression_type(self.class.unparenthesized()).is_some_and(is_refused_type) {
+            self.argument_list.analyze(context, block_context, artifacts)?;
+            artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+            return Ok(());
+        }
+
+        // PHP#'s `new (type)(…)` creates an object from a class value, which `typeof` gives, spec section 25. The class
+        // value of a type parameter whose bound holds a type that is no class names no class.
+        if context.dialect.is_sharp()
+            && let Expression::Parenthesized(value) = self.class
+            && classnames.iter().any(|classname| !classname.is_from_class_string() && !classname.is_invalid())
+        {
+            let value_type = artifacts.get_expression_type(value.expression).cloned().unwrap_or_else(get_mixed);
+            let parameter = value_type.types.iter().find_map(|atomic| match atomic {
+                TAtomic::Scalar(TScalar::ClassLikeString(class_value @ TClassLikeString::Generic { .. })) => {
+                    Some(class_value)
+                }
+                _ => None,
+            });
+            let (issue, created) = match parameter {
+                Some(class_value @ TClassLikeString::Generic { parameter_name, .. }) => (
+                    Issue::error(format!("`{parameter_name}` can stand for a type that is not a class."))
+                        .with_annotation(
+                            Annotation::primary(value.expression.span()).with_message("Used as a class here."),
+                        )
+                        .with_help(format!("Bound `{parameter_name}` by a class, as in `<{parameter_name} : Order>`.")),
+                    wrap_atomic(class_value.get_object_type(context.codebase)),
+                ),
+                _ => {
+                    let written = String::from_utf8_lossy(
+                        &context.source_file.contents[value.expression.span().to_range_usize()],
+                    );
+                    let issue = Issue::error(format!(
+                        "`{written}` is a `{}`, not a `Class`: `new (…)` creates an object from a class value.",
+                        display_type(context, &value_type)
+                    ))
+                    .with_annotation(
+                        Annotation::primary(value.expression.span()).with_message("Used as a class value here."),
+                    )
+                    .with_help("Get a class value with `typeof`, as in `typeof(Order)`.");
+
+                    (issue, get_never())
+                }
+            };
+            context.collector.report_with_code(IssueCode::InvalidClassStringExpression, issue);
+            self.argument_list.analyze(context, block_context, artifacts)?;
+            artifacts.set_expression_type(self, created);
+
             return Ok(());
         }
 
@@ -121,6 +186,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
                 &classname,
                 instantiation_span,
                 class_expression_span,
+                self.type_arguments.as_ref(),
                 self.constructor.as_ref(),
                 argument_list,
             )?;
@@ -138,6 +204,63 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     }
 }
 
+/// `Counter<Order>` read as an expression, before `.count` or `.reset()`, spec section 11: its type is the class with
+/// the type arguments, reported unless they fit its type parameters, as `new` reports them. A static member read through
+/// it takes them from that type. A class that does not exist is reported here, as `typeof` of one is. The checker
+/// refuses type arguments after a name that is not a class's, so that has the error type, and nothing reports again.
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for GenericClass<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        if !matches!(self.class, Expression::ConstantAccess(class)
+            if context.resolved_names.binding(&class.name) == Some(Binding::Class))
+        {
+            artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+            return Ok(());
+        }
+
+        let classnames = resolve_classnames_from_expression(context, block_context, artifacts, self.class, false)?;
+        let class_type = match classnames.as_slice() {
+            [ResolvedClassname { fqcn: Some(fqcn), .. }]
+                if let Some(metadata) = context.codebase.get_class_like(fqcn.as_bytes()) =>
+            {
+                let class_name = display_class_like_name(context, metadata.original_name);
+                let type_arguments = seed_type_arguments(
+                    context,
+                    block_context,
+                    artifacts,
+                    &self.type_arguments,
+                    class_name,
+                    metadata.name_span.unwrap_or(metadata.span),
+                    &metadata.template_types,
+                    &mut TemplateResult::new(IndexMap::with_hasher(RandomState::default()), HashMap::default()),
+                );
+
+                wrap_atomic(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(
+                    metadata.original_name,
+                    type_arguments,
+                ))))
+            }
+            [ResolvedClassname { fqcn: Some(fqcn), .. }] => {
+                report_non_existent_class_like(context, self.class.span(), *fqcn);
+
+                TUnion::from_atomic(TAtomic::Error)
+            }
+            _ => unreachable!("a name bound as a class resolves to the one class it names"),
+        };
+        artifacts.set_expression_type(self, class_type);
+
+        Ok(())
+    }
+}
+
 /// Analyzes `new` of `classname` with its main constructor, or with the PHP# named `constructor` it declares, spec
 /// section 9.1.
 #[allow(clippy::too_many_arguments)]
@@ -148,6 +271,7 @@ fn analyze_class_instantiation<'ctx, 'arena, A>(
     classname: &ResolvedClassname,
     instantiation_span: Span,
     class_expression_span: Span,
+    type_arguments: Option<&TypeArgumentList<'arena>>,
     constructor: Option<&ConstructorName<'arena>>,
     argument_list: Option<&ArgumentList<'arena>>,
 ) -> Result<TUnion, AnalysisError>
@@ -277,6 +401,17 @@ where
     }
     // class kind is a regular class; no kind-specific instantiation diagnostic to emit
 
+    // `new` of a class value of a generic PHP# class that names no type arguments gives the object those the value
+    // carries, as a `Class<PaginatedList<Order>>` does, spec section 25. A `Class<PaginatedList>` carries none.
+    let class_value_type_arguments = match &classname.origin {
+        ResolutionOrigin::SpecificClassLikeString(class_value)
+            if context.dialect.is_sharp() && metadata.flags.is_sharp() && !metadata.template_types.is_empty() =>
+        {
+            class_value_class(class_value).and_then(TNamedObject::get_type_parameters).map(<[_]>::to_vec)
+        }
+        _ => None,
+    };
+
     if classname.is_from_class_string() && (metadata.kind.is_interface() || metadata.kind.is_trait()) {
         let kind_name = if metadata.kind.is_interface() { "interface" } else { "trait" };
 
@@ -397,9 +532,49 @@ where
 
     let mut template_result = TemplateResult::new(IndexMap::with_hasher(RandomState::default()), HashMap::default());
 
+    let mut is_refused = false;
+    let written_type_parameters = match type_arguments {
+        Some(type_arguments) => seed_type_arguments(
+            context,
+            block_context,
+            artifacts,
+            type_arguments,
+            classname_str,
+            metadata.name_span.unwrap_or(metadata.span),
+            &metadata.template_types,
+            &mut template_result,
+        ),
+        // PHP#'s `new Self(…)` names no type arguments, spec section 11: `Self` is the class with its own type
+        // parameters, as in a return type, so they stand for written ones.
+        None if context.dialect.is_sharp() && classname.is_static() => {
+            let own_type_parameters = get_this_type(context, metadata, None).get_type_parameters().map(<[_]>::to_vec);
+            for (own_type_parameter, (template_name, template)) in
+                own_type_parameters.iter().flatten().zip(&metadata.template_types)
+            {
+                template_result.add_lower_bound(*template_name, template.defining_entity, own_type_parameter.clone());
+            }
+
+            own_type_parameters
+        }
+        None if let Some(class_value_type_arguments) = class_value_type_arguments => {
+            for (type_argument, (template_name, template)) in
+                class_value_type_arguments.iter().zip(&metadata.template_types)
+            {
+                template_result.add_lower_bound(*template_name, template.defining_entity, type_argument.clone());
+            }
+
+            Some(class_value_type_arguments)
+        }
+        None => {
+            is_refused = report_missing_type_arguments(context, metadata, class_expression_span);
+
+            None
+        }
+    };
+
     let is_spl_object_storage = metadata.original_name.as_bytes().eq_ignore_ascii_case(b"splobjectstorage");
 
-    if let Some(constructor) = context.codebase.get_method_by_id(&constructor_declraing_id) {
+    let binds_type_arguments = if let Some(constructor) = context.codebase.get_method_by_id(&constructor_declraing_id) {
         has_inconsistent_constructor =
             has_inconsistent_constructor && !constructor.method_metadata.as_ref().is_some_and(|meta| meta.is_final);
         constructor_span = Some(constructor.name_span.unwrap_or(constructor.span));
@@ -465,6 +640,33 @@ where
             is_impossible = true;
         }
 
+        true
+    } else if let Some(argument_list) = &argument_list
+        && !argument_list.arguments.is_empty()
+    {
+        if !metadata.has_incomplete_hierarchy() {
+            context.collector.report_with_code(
+                IssueCode::TooManyArguments,
+                Issue::error(format!(
+                    "Class `{classname_str}` has no `__construct` method, but arguments were provided to `new`."
+                ))
+                .with_annotation(Annotation::primary(argument_list.span()).with_message("Arguments provided here"))
+                .with_annotation(
+                    Annotation::secondary(class_expression_span)
+                        .with_message(format!("For class `{classname_str}` which has no constructor")),
+                )
+                .with_help("Remove the arguments, or define a `__construct` method in the class if arguments are needed for initialization."),
+            );
+        }
+
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        false
+    } else {
+        true
+    };
+
+    if binds_type_arguments {
         let mut resolved_template_types = vec![];
         let mut recorded_type_arguments = vec![];
         for (offset, (template_name, _)) in metadata.template_types.iter().enumerate() {
@@ -518,45 +720,37 @@ where
             artifacts.record_type_arguments(instantiation_span, recorded_type_arguments.into_iter(), context.codebase);
             type_parameters = Some(resolved_template_types);
         }
-    } else if let Some(argument_list) = &argument_list
-        && !argument_list.arguments.is_empty()
-    {
-        if !metadata.has_incomplete_hierarchy() {
-            context.collector.report_with_code(
-                IssueCode::TooManyArguments,
-                Issue::error(format!(
-                    "Class `{classname_str}` has no `__construct` method, but arguments were provided to `new`."
-                ))
-                .with_annotation(Annotation::primary(argument_list.span()).with_message("Arguments provided here"))
-                .with_annotation(
-                    Annotation::secondary(class_expression_span)
-                        .with_message(format!("For class `{classname_str}` which has no constructor")),
-                )
-                .with_help("Remove the arguments, or define a `__construct` method in the class if arguments are needed for initialization."),
-            );
-        }
-
-        argument_list.analyze(context, block_context, artifacts)?;
-    } else if !metadata.template_types.is_empty() {
-        artifacts.record_type_arguments(
-            instantiation_span,
-            metadata.template_types.iter().map(|_| None),
-            context.codebase,
-        );
-        type_parameters = Some(
-            metadata
-                .template_types
-                .iter()
-                .map(|(_, _)| if is_spl_object_storage { get_never() } else { wrap_atomic(TAtomic::Placeholder) })
-                .collect(),
-        );
     }
 
     let skip_constructor_warning =
         classname.is_from_class_string() && (metadata.kind.is_interface() || metadata.kind.is_trait());
 
-    if has_inconsistent_constructor
+    // PHP#'s `new TItem(…)` creates the type argument, and `new (type)(…)` the class a class value holds, any subclass
+    // of the class, so the class keeps a constructor every subclass must keep, as `new Self(…)` needs, spec section 25.
+    // A plain PHP class's own constructor checks the call.
+    let holds_any_subclass =
+        context.dialect.is_sharp() && classname.is_from_class_string() && !classname.is_from_literal_class_string();
+    if has_inconsistent_constructor && holds_any_subclass && metadata.flags.is_sharp() {
+        let written = String::from_utf8_lossy(&context.source_file.contents[class_expression_span.to_range_usize()]);
+        let holder = match &classname.origin {
+            ResolutionOrigin::SpecificClassLikeString(TClassLikeString::Generic { parameter_name, .. }) => {
+                format!("`{parameter_name}` can be")
+            }
+            _ => "the class value can hold".to_owned(),
+        };
+        context.collector.report_with_code(
+            IssueCode::UnsafeInstantiation,
+            Issue::error(format!(
+                "`new {written}(…)` needs a `required` constructor: {holder} any subclass of `{classname_str}`, so every subclass must keep a constructor that `new {written}(…)` can call.",
+            ))
+            .with_annotation(Annotation::primary(instantiation_span).with_message("Created here."))
+            .with_help(format!(
+                "Declare the constructor of `{classname_str}` `required`, as in `public required {classname_str}(…)`."
+            )),
+        );
+    } else if has_inconsistent_constructor
         && !skip_constructor_warning
+        && !holds_any_subclass
         && (classname.is_static() || classname.is_from_class_string() || classname.is_object_instance())
     {
         let mut issue = if classname.is_static() {
@@ -605,6 +799,15 @@ where
         return Ok(get_never());
     }
 
+    // A refused `new Box(…)` reports nothing again where its object goes.
+    if is_refused {
+        return Ok(wrap_atomic(TAtomic::Error));
+    }
+
+    if written_type_parameters.is_some() {
+        type_parameters = written_type_parameters;
+    }
+
     let constraint_object = TAtomic::Object(TObject::Named(TNamedObject {
         name: metadata.original_name,
         type_parameters,
@@ -627,6 +830,62 @@ where
         };
 
     Ok(wrap_atomic(result_atomic))
+}
+
+/// Reports `class` written at `span` in a PHP# file without type arguments, as a type, after `new` or before a static
+/// member, when it is a generic PHP# class, which spec section 11 refuses, as C# does (CS0305). Each type argument has
+/// its own static members, so a bare `Counter.count` names none of them. Returns whether it refused it, so the caller
+/// gives the refused type no type the next check would report again.
+pub(crate) fn report_missing_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || !class.flags.is_sharp() || class.template_types.is_empty() {
+        return false;
+    }
+
+    let class_name = short_name(class.original_name);
+    let arguments = match class.template_types.len() {
+        1 => "type argument".to_owned(),
+        count => format!("{count} type arguments"),
+    };
+
+    context.collector.report_with_code(
+        IssueCode::MissingTemplateParameter,
+        Issue::error(format!("`{class_name}` needs its {arguments}."))
+            .with_annotation(Annotation::primary(span).with_message(format!("`{class_name}` has type parameters")))
+            .with_note("A type, `new` and a static member name the type arguments of a generic class."),
+    );
+
+    true
+}
+
+/// The generic PHP# class that `class`, a bare class name before a static member as in `Counter.count`, names without
+/// its type arguments in a PHP# file, with its bounds, the type arguments a plain PHP call of the member runs with.
+pub(crate) fn bare_generic_class<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    class: &Expression<'_>,
+) -> Option<(&'ctx ClassLikeMetadata, Vec<TUnion>)>
+where
+    A: Arena,
+{
+    let name = match class {
+        Expression::Identifier(name) => name,
+        Expression::ConstantAccess(access) if context.resolved_names.binding(&access.name) == Some(Binding::Class) => {
+            &access.name
+        }
+        _ => return None,
+    };
+    let class = context.codebase.get_class_like(context.resolved_names.get(name))?;
+    if !context.dialect.is_sharp() || !class.flags.is_sharp() || class.template_types.is_empty() {
+        return None;
+    }
+
+    Some((class, class.template_types.values().map(|template| template.constraint.clone()).collect()))
 }
 
 /// Analyzes the constructor invocation for an anonymous class.

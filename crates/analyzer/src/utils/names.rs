@@ -6,6 +6,7 @@ use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -20,6 +21,8 @@ use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_names::short_name;
+use mago_span::HasPosition;
+use mago_syntax::cst::Identifier;
 use mago_syntax_core::utils::is_part_of_identifier;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -652,6 +655,18 @@ where
     }
 }
 
+/// The names `names` as an English list, each in backticks: "`A`", "`A` and `B`", "`A`, `B` and `C`".
+#[must_use]
+pub(crate) fn and_list(names: &[Word]) -> String {
+    let names: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+
+    match names.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 /// The class-like `name` as code in a `.sharp` file, with the `imported_names` and `scope` of its imports and
 /// namespace, writes it: by the name the file's import gives it, by the [alias](sharp_import_alias) that
 /// [`sharp_missing_imports`] imports it under when the file binds its short name to another class-like, or else by its
@@ -698,7 +713,7 @@ pub(crate) fn is_prelude_stub(class: Word) -> bool {
 }
 
 /// Produces a user-facing display string for a `FunctionLikeIdentifier`: a method reads `Order::total` in PHP and
-/// `Order.total` in a `.sharp` file.
+/// `Order.total` in a `.sharp` file, and a namespace's function `Vendor\Pdf\render` reads `Pdf.render` there.
 #[must_use]
 pub(crate) fn display_function_like_identifier<A>(
     context: &Context<'_, '_, A>,
@@ -708,7 +723,19 @@ where
     A: Arena,
 {
     match identifier {
-        FunctionLikeIdentifier::Function(name) => display_function_name(context, *name).to_string(),
+        FunctionLikeIdentifier::Function(name) => {
+            let name = display_function_name(context, *name);
+            // A `.sharp` file calls a plain PHP function through its namespace, spec section 23.
+            match name.as_bytes().iter().rposition(|byte| *byte == b'\\') {
+                Some(separator) if context.dialect.is_sharp() => display_member(
+                    context,
+                    display_class_like_name(context, word(&name.as_bytes()[..separator])),
+                    String::from_utf8_lossy(&name.as_bytes()[separator + 1..]),
+                ),
+                None if context.dialect.is_sharp() => format!("global.{name}"),
+                _ => name.to_string(),
+            }
+        }
         FunctionLikeIdentifier::Method(class_name, method_name) => display_member(
             context,
             display_class_like_name(context, *class_name),
@@ -716,4 +743,57 @@ where
         ),
         FunctionLikeIdentifier::Closure(name) => name.to_string(),
     }
+}
+
+/// The plain PHP function `member` of the namespace `namespace`, as PHP# calls one: `Pdf.render(html)` after
+/// `import Vendor.Pdf;`, spec section 23. The caller reads a name that is also a class's as the class.
+#[must_use]
+pub(crate) fn namespace_function(
+    codebase: &CodebaseMetadata,
+    namespace: Word,
+    member: Word,
+) -> Option<&FunctionLikeMetadata> {
+    codebase.get_function(&[namespace.as_bytes(), b"\\", member.as_bytes()].concat())
+}
+
+/// Whether `name`, which resolves to `full_name`, names a namespace a file imports, as `Pdf` does after
+/// `import Vendor.Pdf;` when no class is named `Vendor\Pdf`. Its member is then one of the namespace's functions,
+/// spec section 23, whether or not that function exists.
+#[must_use]
+pub(crate) fn is_imported_namespace<A, T>(context: &Context<'_, '_, A>, name: &T, full_name: Word) -> bool
+where
+    A: Arena,
+    T: HasPosition,
+{
+    context.resolved_names.is_imported(name) && !context.codebase.class_like_exists(full_name.as_bytes())
+}
+
+/// The namespace whose plain PHP function or constant the PHP# `name.member` names, spec section 23: PHP's root
+/// namespace, the empty word, for `global`, and the namespace `name` resolves to when the file imports it, or when
+/// that namespace has a function or a constant `member`, as long as no class has the namespace's name. None when
+/// `name` is a class.
+#[must_use]
+pub(crate) fn member_namespace<A>(context: &Context<'_, '_, A>, name: &Identifier<'_>, member: &[u8]) -> Option<Word>
+where
+    A: Arena,
+{
+    if name.value() == b"global" {
+        return Some(word(""));
+    }
+
+    let namespace = word(context.resolved_names.get(name));
+    let full_name = namespace_member(namespace, member);
+    let names_member = context.codebase.function_exists(full_name.as_bytes())
+        || context.codebase.constant_exists(full_name.as_bytes());
+
+    ((is_imported_namespace(context, name, namespace) || names_member)
+        && !context.codebase.class_like_exists(namespace.as_bytes()))
+    .then_some(namespace)
+}
+
+/// The full name of the function or constant `member` of `namespace`, which [`member_namespace`] found: the bare
+/// name in PHP's root namespace.
+#[must_use]
+pub(crate) fn namespace_member(namespace: Word, member: &[u8]) -> Word {
+    if namespace.is_empty() { word(member) } else { word([namespace.as_bytes(), b"\\", member].concat()) }
 }

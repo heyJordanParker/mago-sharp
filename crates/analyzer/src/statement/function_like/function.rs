@@ -123,6 +123,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Function<'arena> {
             self.name.span(),
             "function",
             function_name,
+            None,
         );
 
         if context.settings.find_unused_parameters {

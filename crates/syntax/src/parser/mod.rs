@@ -44,6 +44,9 @@ pub struct State {
     /// The class-like whose members the parser reads, as a message names it: `A class`, `An interface`, `An enum`,
     /// `A trait` or `A module`.
     pub members_of: &'static str,
+    /// The type parameter names of the class whose members the parser reads, as `T` or `TKey, TValue`, or `None` when
+    /// it declares none.
+    pub type_parameters_of: Option<std::boxed::Box<str>>,
 }
 
 /// The main parser for PHP source code.
