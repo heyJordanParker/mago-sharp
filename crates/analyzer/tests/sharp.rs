@@ -11321,7 +11321,7 @@ fn an_override_of_a_method_returning_self_returns_self() {
 
 /// The standard library's `Sharp.ClassMembers`, which adds `Class`'s one member, `attributes`, to every class value.
 const CLASS_MEMBERS: (&str, &str) = (
-    "src/Sharp/ClassMembers.sharp",
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ClassMembers.sharp",
     "namespace Sharp;\n\nimport ReflectionAttribute;\nimport ReflectionClass;\n\npublic static class ClassMembers\n{\n    extension<T>(Class<T> type)\n    {\n        public List<TAttribute> attributes<TAttribute : Object>()\n            => new ReflectionClass(type)\n                .getAttributes(typeof(TAttribute), ReflectionAttribute.IS_INSTANCEOF)\n                .map(attribute => attribute.newInstance());\n    }\n}\n",
 );
 
