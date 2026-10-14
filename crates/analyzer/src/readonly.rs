@@ -753,12 +753,11 @@ where
                 continue;
             };
             let written = quoted_source(context, name);
+            let fix = quoted_source(context, readonly.hint.span());
             let message = if class.kind.is_enum() {
-                format!("A `{written}` never changes, so `readonly` changes nothing: write `{written}`.")
+                format!("A `{written}` never changes, so `readonly` changes nothing: write `{fix}`.")
             } else if !class.flags.is_sharp() {
-                format!(
-                    "`readonly` holds only types PHP# checks, and `{written}` is a plain PHP class: write `{written}`."
-                )
+                format!("`readonly` holds only types PHP# checks, and `{written}` is a plain PHP class: write `{fix}`.")
             } else {
                 continue;
             };

@@ -473,14 +473,10 @@ where
                     && let TObject::Named(named) = obj_type
                     && named.is_readonly
                 {
-                    check_calls_through_readonly(
-                        context,
-                        block_context,
-                        &mut readonly_calls,
-                        object,
-                        selector,
-                        &resolved_methods,
-                    );
+                    // A method no class declares runs the class's `__call`.
+                    let called =
+                        if resolved_methods.is_empty() { &resolved_magic_call_method } else { &resolved_methods };
+                    check_calls_through_readonly(context, block_context, &mut readonly_calls, object, selector, called);
                 }
 
                 for resolved_method in &mut resolved_methods {
@@ -533,7 +529,7 @@ fn check_calls_through_readonly<A>(
             context.codebase.get_method_by_id(&identifier),
             context.codebase.get_class_like(declaring_class.as_bytes()),
         ) else {
-            continue;
+            unreachable!("a resolved method's declaring identifier names a method of a class the codebase holds");
         };
         if resolved.is_static || method.flags.is_readonly() || is_prelude_stub(declaring.name) {
             continue;
@@ -550,7 +546,7 @@ fn check_calls_through_readonly<A>(
                     .with_annotation(Annotation::primary(selector.span()))
                     .with_help(format!(
                         "{} is a plain PHP method of {}, which PHP# does not check.",
-                        method.original_name,
+                        quoted_source(context, selector.span()),
                         display_class_like_name(context, declaring.original_name)
                     )),
             );

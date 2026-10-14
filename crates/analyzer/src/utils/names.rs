@@ -665,10 +665,12 @@ where
         .map(|parameter| {
             let name = parameter.get_name().0.as_bytes();
             let name = String::from_utf8_lossy(name.strip_prefix(b"$").unwrap_or(name));
-            match parameter.get_type_declaration_metadata() {
-                Some(declared) => format!("{} {name}", display_sharp_type(context, &declared.type_union)),
-                None => name.into_owned(),
-            }
+            // A parameter written without its type, a parse error, shows as written.
+            let declared = parameter
+                .get_type_declaration_metadata()
+                .map(|declared| format!("{} ", display_sharp_type(context, &declared.type_union)));
+
+            format!("{}{name}", declared.unwrap_or_default())
         })
         .collect();
 

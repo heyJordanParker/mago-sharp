@@ -3397,6 +3397,40 @@ pub(super) mod testing {
         assert!(!writer.finish().is_empty(), "expected an encoded payload");
     }
 
+    /// An external analyzer's payload has no spec section 13 readonly flag, so a class it names is never readonly.
+    #[test]
+    fn an_external_analyzers_class_is_never_readonly() {
+        let mut writer = PayloadWriter::new();
+        writer.write_u16(0);
+        writer.write_u32(2);
+        writer.write_u8(SNAPSHOT_OBJECT);
+        writer.write_u8(2);
+        writer.write_bytes(b"Order").unwrap();
+        for absent in ["type parameters", "variances", "static", "this", "intersections", "remapped"] {
+            writer.write_bool(absent.is_empty());
+        }
+        writer.write_u8(SNAPSHOT_REFERENCE);
+        writer.write_u8(1);
+        writer.write_bytes(b"Order").unwrap();
+        for absent in ["parameters", "variances", "intersections"] {
+            writer.write_bool(absent.is_empty());
+        }
+        let payload = writer.finish();
+
+        let union = decode_complete_union(&mut PayloadReader::new(&payload), 0).unwrap();
+
+        assert!(
+            matches!(
+                union.types.as_ref(),
+                [
+                    TAtomic::Object(TObject::Named(TNamedObject { is_readonly: false, .. })),
+                    TAtomic::Reference(TReference::Symbol { is_readonly: false, .. }),
+                ]
+            ),
+            "{union:?}"
+        );
+    }
+
     /// A codebase that declares the string-backed enum `Status`.
     fn string_backed_status() -> CodebaseMetadata {
         let arena = mago_allocator::LocalArena::new();

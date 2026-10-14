@@ -5277,7 +5277,7 @@ fn readonly_goes_before_a_value_s_type_and_after_a_method_s_parameters() {
 /// so `readonly` on one is an error that names it.
 #[test]
 fn readonly_on_storage_names_a_get_only_property() {
-    let code = "namespace App;\n\npublic class Invoice\n{\n    private readonly Money total;\n    public readonly Money due { get; set; }\n    private readonly static int count = 0;\n\n    public Invoice(public readonly Money paid, private readonly Money left { get; }) { }\n}\n\npublic readonly class Receipt { }\n";
+    let code = "namespace App;\n\npublic class Invoice\n{\n    private readonly Money total;\n    public readonly Money due { get; set; }\n    private readonly static int count = 0;\n    protected readonly Money owed;\n\n    public Invoice(public readonly Money paid, private readonly Money left { get; }) { }\n}\n\npublic readonly class Receipt { }\n";
 
     assert_eq!(
         issues_in("src/Invoice.sharp", code),
@@ -5285,9 +5285,10 @@ fn readonly_on_storage_names_a_get_only_property() {
             "5:13 A field or property is never `readonly`: declare a get-only property, as in `private Money total { get; }`.",
             "6:12 A field or property is never `readonly`: declare a get-only property, as in `public Money due { get; }`.",
             "7:13 A field or property is never `readonly`: declare a get-only property, as in `private int count { get; }`.",
-            "9:27 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `public Money paid { get; }`.",
-            "9:56 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `private Money left { get; }`.",
-            "12:8 A class is never `readonly`: declare each of its properties get-only, with `{ get; }`.",
+            "8:15 A field or property is never `readonly`: declare a get-only property, as in `protected Money owed { get; }`.",
+            "10:27 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `public Money paid { get; }`.",
+            "10:56 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `private Money left { get; }`.",
+            "13:8 A class is never `readonly`: declare each of its properties get-only, with `{ get; }`.",
         ]
     );
 }
@@ -5296,7 +5297,7 @@ fn readonly_on_storage_names_a_get_only_property() {
 /// changes, twice, in a pattern, on a method with no `this` to keep, and where the language already reads only.
 #[test]
 fn readonly_that_cannot_matter_is_an_error() {
-    let code = "namespace App;\n\npublic class Report\n{\n    public int count(readonly int a, readonly string? b, readonly bool c, readonly float d) => 0;\n    public void any(readonly Any value) { }\n    public void twice(readonly readonly Order order) { }\n    public bool test(Any value) => value is readonly Order || (value as readonly Order) != null;\n    public static int total() readonly => 0;\n    public Report() readonly { }\n    public int hash() readonly => 1;\n    public static bool operator ==(readonly Report a, Report b) => true;\n}\n\npublic enum Suit\n{\n    case Hearts;\n\n    public string label() readonly => \"hearts\";\n}\n\npublic static class Labels\n{\n    extension(Report report)\n    {\n        public string caption() readonly => \"report\";\n    }\n}\n";
+    let code = "namespace App;\n\npublic class Report\n{\n    public int count(readonly int a, readonly string? b, readonly bool c, readonly float d) => 0;\n    public void any(readonly Any value) { }\n    public void twice(readonly readonly Order order) { }\n    public bool test(Any value) => value is readonly Order || (value as readonly Order) != null;\n    public static int total() readonly => 0;\n    public Report() readonly { }\n    public int hash() readonly => 1;\n    public string toString() readonly => \"report\";\n    public static bool operator ==(readonly Report a, Report b) => true;\n}\n\npublic enum Suit\n{\n    case Hearts;\n\n    public string label() readonly => \"hearts\";\n}\n\npublic static class Labels\n{\n    extension(Report report)\n    {\n        public string caption() readonly => \"report\";\n    }\n}\n";
 
     assert_eq!(
         issues_in("src/Report.sharp", code),
@@ -5312,9 +5313,10 @@ fn readonly_that_cannot_matter_is_an_error() {
             "9:31 A static method has no `this` to keep readonly: remove `readonly`.",
             "10:21 A constructor sets `this`, so it is never readonly: remove `readonly`.",
             "11:23 `hash()` is readonly by definition: remove `readonly`.",
-            "12:36 An operator's operands are readonly by definition: write `Report a`.",
-            "19:27 An enum case never changes, so an enum method needs no `readonly`: remove it.",
-            "26:33 An extension member has no `this`: write `readonly` before its receiver's type, as in `extension(readonly Report report)`.",
+            "12:30 `toString()` is readonly by definition: remove `readonly`.",
+            "13:36 An operator's operands are readonly by definition: write `Report a`.",
+            "20:27 An enum case never changes, so an enum method needs no `readonly`: remove it.",
+            "27:33 An extension member has no `this`: write `readonly` before its receiver's type, as in `extension(readonly Report report)`.",
         ]
     );
 }

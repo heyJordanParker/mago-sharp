@@ -16490,6 +16490,21 @@ fn a_write_through_a_readonly_value_is_an_error() {
     );
 }
 
+/// Spec section 13: code outside any method, at a file's top level, keeps a readonly value read only too, and its
+/// message names it `This code`.
+#[test]
+fn top_level_code_keeps_a_readonly_value_read_only() {
+    let main = "namespace App;\n\nreadonly Order o = new Order();\no.number = \"x\";\nOrder w = o;\n";
+
+    assert_eq!(
+        messages(("src/main.sharp", main), &READONLY_CLASSES),
+        [
+            "This code cannot set o.number: o is readonly.",
+            "This code cannot store o in w: o is readonly. Declare it `readonly Order w`.",
+        ]
+    );
+}
+
 /// Spec section 13: a readonly method is checked as if `this` were a readonly value, in a lambda it writes too.
 #[test]
 fn a_readonly_method_cannot_write_this() {
@@ -16510,16 +16525,22 @@ fn a_readonly_method_cannot_write_this() {
 /// expected, so it stays read only. The error names the `readonly` to write, or why there is none.
 #[test]
 fn a_readonly_value_never_goes_where_a_writable_one_is_expected() {
-    let keeper = "namespace App;\n\npublic class Keeper\n{\n    public Order? kept { get; set; } = null;\n\n    public void save(Order order) { }\n\n    public Order give(readonly Order order) { return order; }\n\n    public void keep(readonly Order order, List<Order> orders, List<readonly Order> views)\n    {\n        this.save(order);\n        Order o = order;\n        this.kept = order;\n        orders.add(order);\n        views.add(order);\n        readonly Order fine = order;\n        this.save(fine);\n    }\n}\n";
+    let keeper = "namespace App;\n\nimport Lib.Archive;\n\npublic class Keeper\n{\n    public Order? kept { get; set; } = null;\n\n    public void save(Order order) { }\n\n    public Order give(readonly Order order) { return order; }\n\n    public void keep(readonly Order order, List<Order> orders, List<readonly Order> views, Box<Order> box)\n    {\n        this.save(order);\n        Order o = order;\n        this.kept = order;\n        orders.add(order);\n        views.add(order);\n        box.put(order);\n        Archive.store(order);\n        readonly Order fine = order;\n        this.save(fine);\n    }\n}\n";
+    let boxed = "namespace App;\n\npublic class Box<T>\n{\n    public void put(T item) { }\n}\n";
+    let archive = "<?php\n\nnamespace Lib;\n\nclass Archive\n{\n    public static function store(\\App\\Order $order): void {}\n}\n";
+    let mut others = READONLY_CLASSES.to_vec();
+    others.extend([("src/Box.sharp", boxed), ("src/Lib/Archive.php", archive)]);
 
     assert_eq!(
-        messages(("src/Keeper.sharp", keeper), &READONLY_CLASSES),
+        messages(("src/Keeper.sharp", keeper), &others),
         [
             "give cannot return order: order is readonly. Declare the return type `readonly Order`.",
             "keep cannot pass order to Keeper.save: order is readonly. Declare the parameter `readonly Order order`.",
             "keep cannot store order in o: order is readonly. Declare it `readonly Order o`.",
             "keep cannot store order in this.kept: order is readonly, and a field or property keeps only a writable value.",
             "keep cannot pass order to List<Order>.add: order is readonly. Declare the element type `readonly Order`.",
+            "keep cannot pass order to Box.put: order is readonly. Declare the type argument `readonly Order`.",
+            "keep cannot pass order to Archive.store: order is readonly, and Archive.store is plain PHP, which PHP# does not check.",
             "keep cannot pass fine to Keeper.save: fine is readonly. Declare the parameter `readonly Order order`.",
         ]
     );
@@ -16596,17 +16617,21 @@ fn plain_php_reads_a_readonly_value_as_any_value() {
     assert_eq!(issues(("src/Lib/pay.php", caller), &[("src/Order.sharp", order)]), Vec::<String>::new());
 }
 
-/// Spec section 13: PHP# does not check a plain PHP method, so a call of one through a readonly value is an error.
+/// Spec section 13: PHP# does not check a plain PHP method, so a call of one through a readonly value is an error: a
+/// declared method, one a `@method` tag declares, and one the class's `__call` runs.
 #[test]
 fn a_readonly_value_calls_no_plain_php_method() {
-    let model = "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function save(): void {}\n}\n";
+    let model = "<?php\n\nnamespace Lib;\n\n/** @method void touch() */\nclass Model\n{\n    public function save(): void {}\n\n    public function __call(string $name, array $arguments): mixed { return null; }\n}\n";
     let order = "namespace App;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n}\n";
-    let view = "namespace App;\n\npublic class View\n{\n    public void render(readonly Order order)\n    {\n        order.save();\n    }\n}\n";
+    let view = "namespace App;\n\npublic class View\n{\n    public void render(readonly Order order)\n    {\n        order.save();\n        order.touch();\n        order.publish();\n    }\n}\n";
 
     assert_eq!(
         worded(("src/View.sharp", view), &[("src/Order.sharp", order), ("src/Lib/Model.php", model)]),
         [
-            "7:15 missing-readonly-marker render cannot call order.save: order is readonly. | save is a plain PHP method of Model, which PHP# does not check."
+            "7:15 missing-readonly-marker render cannot call order.save: order is readonly. | save is a plain PHP method of Model, which PHP# does not check.",
+            "8:15 missing-readonly-marker render cannot call order.touch: order is readonly. | touch is a plain PHP method of Model, which PHP# does not check.",
+            "9:15 missing-readonly-marker render cannot call order.publish: order is readonly. | publish is a plain PHP method of Model, which PHP# does not check.",
+            "9:15 non-documented-method Ambiguous method call to `publish` on class `Order`. | This method is not explicitly defined | On an object of type `Order` | While this call might be handled by `__call()` or `__callStatic()`, Mago cannot verify its arguments or return type without a corresponding `@method` docblock tag. | To enable full analysis, add a `@method` tag to the docblock of the `Order` class. For example: `/** @method returnType publish(argType $argName) */`",
         ]
     );
 }
@@ -16617,7 +16642,7 @@ fn a_readonly_value_calls_no_plain_php_method() {
 fn readonly_holds_only_types_php_sharp_checks() {
     let model = "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function save(): void {}\n}\n";
     let status = "namespace App;\n\npublic enum Status\n{\n    case Paid;\n}\n";
-    let view = "namespace App;\n\nimport Lib.Model;\n\npublic class Shows\n{\n    public void show(readonly Model model) { }\n\n    public void status(readonly Status status) { }\n\n    public void order(readonly Order order) { }\n}\n";
+    let view = "namespace App;\n\nimport Lib.Model;\n\npublic class Shows\n{\n    public void show(readonly Model model) { }\n\n    public void status(readonly Status status) { }\n\n    public void order(readonly Order order) { }\n\n    public void either(readonly Order|Model value) { }\n\n    public readonly Self same() readonly => this;\n}\n";
     let mut others = READONLY_CLASSES.to_vec();
     others.extend([("src/Lib/Model.php", model), ("src/Status.sharp", status)]);
 
@@ -16626,6 +16651,7 @@ fn readonly_holds_only_types_php_sharp_checks() {
         [
             "`readonly` holds only types PHP# checks, and `Model` is a plain PHP class: write `Model`.",
             "A `Status` never changes, so `readonly` changes nothing: write `Status`.",
+            "`readonly` holds only types PHP# checks, and `Model` is a plain PHP class: write `Order|Model`.",
         ]
     );
 }

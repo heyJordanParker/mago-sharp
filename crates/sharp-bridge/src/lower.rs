@@ -1364,7 +1364,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// type itself when it holds null already, as `T?` and `Any` do.
     fn nullable_hint(&mut self, hint: &Hint) -> u32 {
         match hint {
-            Hint::Readonly(readonly) => self.nullable_hint(readonly.hint),
             Hint::Nullable(_) | Hint::Mixed(_) => self.hint(hint),
             Hint::Union(_) => self.union(hint, Some(hint.span())),
             _ => {
