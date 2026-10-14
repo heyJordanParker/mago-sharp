@@ -3890,12 +3890,13 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             Modifier::Private(_) => ZEND_ACC_PRIVATE,
             Modifier::Static(_) => ZEND_ACC_STATIC,
             Modifier::Abstract(_) => ZEND_ACC_ABSTRACT,
+            // The checker keeps `final` on an override only, spec section 22, where it stops the override chain.
+            Modifier::Final(_) => ZEND_ACC_FINAL,
             // PHP methods are open to overriding, and `method` lowers `override` to `#[\Override]`. PHP has no
             // `required` constructor, and the checker proves every subclass keeps one `new Self(…)` can call. `method`
             // gives an `extern` method the body that calls its native function.
             Modifier::Virtual(_) | Modifier::Override(_) | Modifier::Required(_) | Modifier::Extern(_) => 0,
-            Modifier::Final(_)
-            | Modifier::Readonly(_)
+            Modifier::Readonly(_)
             | Modifier::PublicSet(_)
             | Modifier::ProtectedSet(_)
             | Modifier::PrivateSet(_)

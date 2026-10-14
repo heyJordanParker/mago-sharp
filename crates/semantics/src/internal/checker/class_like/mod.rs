@@ -469,7 +469,10 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                     );
                 }
 
-                if let MethodBody::Concrete(body) = &method.body {
+                // A PHP# interface method's body is its default body, which `check_slice` checks.
+                if let MethodBody::Concrete(body) = &method.body
+                    && !context.program.dialect.is_sharp()
+                {
                     context.report(
                         Issue::error(format!("Interface method `{method_display}` cannot have a body."))
                             .with_annotations([
@@ -518,6 +521,8 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
             }
             ClassLikeMember::Property(property) => {
                 match &property {
+                    // `check_slice` refuses a field in a PHP# interface in PHP#'s words.
+                    Property::Plain(_) if context.program.dialect.is_sharp() => {}
                     Property::Plain(plain_property) => {
                         context.report(
                                     Issue::error(format!(

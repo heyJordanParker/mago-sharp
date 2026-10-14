@@ -75,13 +75,13 @@ where
             return Err(self.parse_nested_type(attributes, modifiers)?);
         }
 
-        // `required` or `extern` written before any other modifier starts the member's modifiers.
+        // `required`, `extern`, `virtual` or `override` written before any other modifier starts the member's
+        // modifiers, so an interface method written `virtual float area();` gets the checker's modifier error.
         let modifiers = if modifiers.is_empty()
-            && self
-                .stream
-                .lookahead(0)?
-                .is_some_and(|token| token.kind == T![Identifier] && matches!(token.value, b"required" | b"extern"))
-        {
+            && self.stream.lookahead(0)?.is_some_and(|token| {
+                token.kind == T![Identifier]
+                    && matches!(token.value, b"required" | b"extern" | b"virtual" | b"override")
+            }) {
             self.parse_modifier_sequence()?
         } else {
             modifiers

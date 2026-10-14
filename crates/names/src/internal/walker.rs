@@ -1224,6 +1224,21 @@ where
         let classlike = context.qualify_name(interface.name.value);
 
         self.resolved_names.insert_at(interface.name.span, classlike, false);
+
+        // A default body, spec section 22, writes the interface's members with `this.`, as a class method does.
+        if self.sharp {
+            self.class_members.push(class_member_names(&interface.members));
+        }
+    }
+
+    fn walk_out_interface(
+        &mut self,
+        _interface: &'ast Interface<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        if self.sharp {
+            self.class_members.pop();
+        }
     }
 
     fn walk_in_trait(&mut self, r#trait: &'ast Trait<'arena>, context: &mut NameResolutionContext<'arena, A>) {

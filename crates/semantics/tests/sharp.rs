@@ -1048,6 +1048,43 @@ fn an_interface_declares_methods_without_an_access_modifier_or_a_body() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 22: an interface method gives a default body, as a block or an expression, and the body is checked as
+/// a class method's body is. A plain PHP interface method with a body is still PHP's error.
+#[test]
+fn an_interface_method_gives_a_default_body_checked_as_a_class_method_body() {
+    let code = "namespace App;\n\npublic interface HasDesign\n{\n    string designColumn { get; }\n    string designKey() => `design:${this.designColumn}`;\n    string designName()\n    {\n        return this.designColumn;\n    }\n}\n";
+    assert_eq!(issues(code), Vec::<String>::new());
+
+    let refused = "namespace App;\n\ninterface HasDesign\n{\n    string designColumn { get; }\n    string designKey()\n    {\n        return designColumn;\n    }\n    string designLabel() => $label;\n}\n";
+    assert_eq!(
+        issues(refused),
+        [
+            "8:16 Write `this.designColumn`: members of the same object are always written with `this.`.",
+            "10:29 PHP# variables have no `$`: write `label`."
+        ]
+    );
+
+    let php = "<?php\n\ninterface HasDesign\n{\n    public function designKey(): string\n    {\n        return 'design';\n    }\n}\n";
+    assert_eq!(
+        issues_in("src/HasDesign.php", php),
+        [
+            "5:21 Interface method `HasDesign::designKey` cannot have a body.",
+            "6:5 Interface method `HasDesign::designKey` is implicitly abstract and cannot have a concrete body."
+        ]
+    );
+}
+
+/// Spec section 22: every field is declared in the class that owns it, so an interface holds none.
+#[test]
+fn an_interface_holds_no_fields() {
+    let code = "namespace App;\n\ninterface Counted\n{\n    private int count = 0;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["5:5 An interface holds no fields: the class that implements `Counted` declares `count`."]
+    );
+}
+
 #[test]
 fn a_class_or_an_interface_names_its_base_class_and_interfaces_after_a_colon() {
     let code = "namespace App.Tenant;\n\nimport Lib.Entity;\n\npublic interface Linkable : Named\n{\n    string link();\n}\n\npublic class Page : Entity, Linkable\n{\n    public string link()\n    {\n        return \"page\";\n    }\n}\n";
@@ -1415,9 +1452,16 @@ fn internal_is_not_supported_yet() {
 
 #[test]
 fn another_modifier_on_an_interface_method_is_an_error() {
-    let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    static float unit();\n}\n";
+    let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    static float unit();\n    virtual float area();\n    override float size();\n}\n";
 
-    assert_eq!(issues(code), ["5:5 An interface method takes no modifier: every interface method is public."]);
+    assert_eq!(
+        issues(code),
+        [
+            "5:5 An interface method takes no modifier: every interface method is public.",
+            "6:5 An interface method takes no modifier: every interface method is public.",
+            "7:5 An interface method takes no modifier: every interface method is public."
+        ]
+    );
 }
 
 #[test]
@@ -2421,12 +2465,30 @@ fn a_protected_or_private_class_reports_only_the_php_error() {
 }
 
 #[test]
-fn a_final_method_and_a_readonly_class_are_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nfinal class Report\n{\n    final public int run()\n    {\n        return 1;\n    }\n}\n\nabstract class Shape\n{\n    abstract public int area();\n}\n\nreadonly class Point\n{\n}\n";
+fn a_readonly_class_is_not_supported_yet() {
+    let code = "namespace App.Tenant;\n\nabstract class Shape\n{\n    abstract public int area();\n}\n\nreadonly class Point\n{\n}\n";
+
+    assert_eq!(issues(code), ["8:1 This modifier is not supported yet in PHP#."]);
+}
+
+/// Spec section 22: `final override` stops an override chain. A PHP# method is closed unless it is `virtual`, so every
+/// other modifier that can't change what a subclass may do is an error that says why.
+#[test]
+fn final_marks_only_an_override_and_a_modifier_that_cant_matter_is_an_error() {
+    let code = "namespace App.Tenant;\n\npublic abstract class Middle : Root\n{\n    public final override string kind() => \"middle\";\n    public final string name() => \"middle\";\n    private virtual string secret() => \"middle\";\n    public virtual override string label() => \"middle\";\n    public abstract virtual string draw();\n    public static virtual string make() => \"middle\";\n    public virtual Middle() { }\n}\n\npublic final class Closed\n{\n    public virtual string open() => \"closed\";\n}\n\npublic final class Leaf : Middle\n{\n    public final override string label() => \"leaf\";\n}\n\npublic enum Shade\n{\n    case Light;\n    public virtual string label() => \"light\";\n}\n";
 
     assert_eq!(
         issues(code),
-        ["5:5 This modifier is not supported yet in PHP#.", "16:1 This modifier is not supported yet in PHP#."]
+        [
+            "6:12 `final` marks only an override: a PHP# method is already closed unless it is `virtual`.",
+            "7:13 A `private` method is never replaced, so `virtual` can't matter.",
+            "8:12 An override is already open to the subclasses below it, so `virtual` can't matter.",
+            "9:21 An `abstract` method is already open to the subclasses below it, so `virtual` can't matter.",
+            "11:12 A constructor is never replaced, so `virtual` can't matter.",
+            "16:12 `Closed` is `final`, so no subclass replaces its methods, and `virtual` can't matter.",
+            "21:12 `Leaf` is `final`, so no subclass replaces its methods, and `final` can't matter.",
+            "27:12 `Shade` is an enum, so no subclass replaces its methods, and `virtual` can't matter."
+        ]
     );
 }
 
@@ -4201,14 +4263,14 @@ fn a_spread_in_attribute_arguments_reports_only_the_php_error() {
 }
 
 #[test]
-fn implements_or_a_member_modifier_in_an_enum_is_not_supported_yet() {
+fn implements_in_an_enum_is_not_supported_yet_and_a_final_enum_method_is_an_error() {
     let code = "namespace App.Tenant;\n\nimport Lib.Shape;\n\nenum Status : string implements Shape\n{\n    case Active = \"a\";\n\n    final public string label()\n    {\n        return this.name;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "5:22 This `implements` clause is not supported yet in PHP#.",
-            "9:5 This modifier is not supported yet in PHP#.",
+            "9:5 `final` marks only an override: a PHP# method is already closed unless it is `virtual`.",
         ]
     );
 }

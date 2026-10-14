@@ -352,7 +352,8 @@ pub fn check_method<'ast, 'arena>(
                                 .with_message(format!("Method `{method_display}` defined here.")),
                         ]),
                 );
-            } else if class_like_is_interface {
+            } else if class_like_is_interface && !context.program.dialect.is_sharp() {
+                // A PHP# interface method's body is its default body, spec section 22, which `check_slice` checks.
                 context.report(
                     Issue::error(format!(
                         "Interface method `{method_display}` is implicitly abstract and cannot have a concrete body.",

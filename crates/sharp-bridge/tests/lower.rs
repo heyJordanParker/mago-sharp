@@ -6917,6 +6917,52 @@ fn virtual_lowers_to_nothing_and_override_to_the_override_attribute() {
 }
 
 /// ```php
+/// #[\Override] final public function name(): string { return 'thumbnail'; }
+/// ```
+///
+/// `final override` stops an override chain, spec section 22, so it lowers to PHP's `final`, and the engine refuses a
+/// plain PHP subclass that replaces the method too.
+#[test]
+fn final_override_lowers_to_a_final_method_with_the_override_attribute() {
+    let lowered = Lowered::with(
+        "class Thumbnail : Image\n{\n    public final override string name()\n    {\n        return \"thumbnail\";\n    }\n}\n",
+        &[("src/Image.php", "<?php class Image { public function name(): string { return 'image'; } }")],
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              CLASS "Thumbnail" @1-7
+                ZVAL "Image"
+                null
+                STMT_LIST
+                  METHOD [33] "name" @3-6
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ZVAL "thumbnail"
+                    ZVAL [1] "string"
+                    ATTRIBUTE_LIST
+                      ATTRIBUTE_GROUP
+                        ATTRIBUTE
+                          ZVAL "Override"
+                          null
+                null
+                null
+        "#}
+    );
+}
+
+/// ```php
 /// #[\Override] protected $table = 'orders';
 /// #[\Override] public bool $timestamps = false;
 /// ```
