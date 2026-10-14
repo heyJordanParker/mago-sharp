@@ -267,8 +267,10 @@ const ANY: &[u8] = b"Any";
 /// - A constant, an enum case or a static member is reached through its class name, as in `Report.count`, and the
 ///   engine looks up which one it is when it runs. A bare constant or static member name is an error that names the
 ///   class. A constant expression, which is a parameter default, an attribute argument, a constant's value, a
-///   constant initial value or an enum case's value, reads only a constant or an enum case this way, as PHP does: a
-///   static field or property there is an error when this file declares it, and the analyzer reports it otherwise.
+///   constant initial value, an enum case's value or a pattern's value, reads only a constant or an enum case this
+///   way, as PHP does: a static field or property there is an error when this file declares it, and the analyzer
+///   reports it otherwise. A pattern's value reads no local, parameter or `this`, as spec section 21 says: their values
+///   are compared in `when`.
 /// - In expressions: literals, list literals `[a, b]` and `[...a, b]`, map literals `["key": value]` and `[:]`, index reads
 ///   `value[key]`, templates, parentheses, bare names, assignment, the operators below, and method calls and property
 ///   reads written with `.` or `?.` and a member name, `new Class(...)` and `new Class.name(...)` on a class written by
@@ -436,10 +438,10 @@ pub enum Place {
     RefusedPart(Span),
     /// An attribute list: its attributes' names and arguments.
     Attribute,
-    /// A constant expression: a parameter default, an attribute argument, a class constant's value or an enum case's
-    /// value.
+    /// A constant expression: a parameter default, an attribute argument, a class constant's value, an enum case's
+    /// value or a pattern's value.
     Constant,
-    /// A pattern of `is` or of a `match` arm, whose values are the method body's.
+    /// A pattern of `is` or of a `match` arm, whose values are constant expressions, as in C#.
     Pattern,
 }
 
@@ -1308,6 +1310,28 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::PatternMatchArmBody(_),
             Body,
         ) => Some(Body),
+        // Spec section 21: a pattern takes types and constants only, and a local's value is compared in `when`. The
+        // binder binds a bare name of a type pattern to the local of that name, so the name reports here.
+        (Node::Pattern(pattern @ Pattern::Type(TypePattern { hint: Hint::Identifier(name), variable: None })), Body | Place::Pattern)
+            if report_pattern_reads(Node::Identifier(name), pattern.span(), b"==", context) =>
+        {
+            None
+        }
+        (Node::Pattern(Pattern::Value(value)), Body | Place::Pattern)
+            if report_pattern_reads(Node::Expression(value), value.span(), b"==", context) =>
+        {
+            None
+        }
+        (Node::ComparisonPattern(comparison), Place::Pattern)
+            if report_pattern_reads(
+                Node::Expression(comparison.value),
+                comparison.value.span(),
+                context.get_code_snippet(&comparison.operator),
+                context,
+            ) =>
+        {
+            None
+        }
         (Node::Pattern(_), Body | Place::Pattern) => Some(Place::Pattern),
         (Node::Hint(Hint::Nullable(_)), Place::Pattern) => {
             context.report(
@@ -1337,8 +1361,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::BinaryOperator(_),
             Place::Pattern,
         ) => Some(Place::Pattern),
-        // A value or a comparison's value is a method body's expression.
-        (Node::Expression(_), Place::Pattern) => enter(node, Body, context),
+        // A value or a comparison's value is a constant value, as in C#.
+        (Node::Expression(_), Place::Pattern) => enter(node, Constant, context),
 
         // PHP refuses the file at compile time, so the engine would too.
         (Node::LiteralString(string), Body | Constant) if string.value.is_none() => {
@@ -2531,6 +2555,42 @@ fn report_this_in_initializer(initializer: &ConstructorInitializer, context: &mu
     );
 }
 
+/// Reports each local, parameter and `this` that `node`, the value of a pattern at `value`, reads, and returns whether
+/// it reported one. Spec section 21 compares such a value in `when`, so the report writes that `when` with the pattern's
+/// `operator`.
+fn report_pattern_reads(node: Node<'_, '_>, value: Span, operator: &[u8], context: &mut Context<'_, '_, '_>) -> bool {
+    let mut reported = false;
+    if let Node::Identifier(name) = node {
+        let what = match context.names.binding(name) {
+            Some(Binding::Local(Local { kind: LocalKind::Parameter, .. })) => Some("a parameter"),
+            Some(Binding::Local(_)) => Some("a local"),
+            Some(Binding::This) => Some("the object the method runs on"),
+            // `check_constant_access` reports a bare member with its own error, which says to write `this.`.
+            Some(Binding::Member) => return true,
+            _ => None,
+        };
+        if let Some(what) = what {
+            let name_text = BytesDisplay(name.value());
+            let operator = BytesDisplay(operator);
+            let value_text = BytesDisplay(context.get_code_snippet(value));
+            context.report(
+                Issue::error(format!(
+                    "`{name_text}` is {what}: compare its value in `when`, as in `int n when n {operator} {value_text}`."
+                ))
+                .with_annotation(Annotation::primary(name.span()).with_message("Read here."))
+                .with_note("A pattern takes types and constants only, such as `Circle`, `200` or `Status.Paid`."),
+            );
+            reported = true;
+        }
+    }
+
+    ensure_sufficient_stack(|| {
+        node.visit_children(|child| reported |= report_pattern_reads(child, value, operator, context));
+    });
+
+    reported
+}
+
 /// Reports each `this` in `node` with `message` and `help`, and returns whether it reported one.
 fn report_this(node: Node<'_, '_>, message: &str, help: Option<&str>, context: &mut Context<'_, '_, '_>) -> bool {
     let mut reported = false;
@@ -3707,7 +3767,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
         }
         Place::Constant => {
-            "A parameter default, an attribute argument, a constant's value or an enum case's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
+            "A parameter default, an attribute argument, a constant's value, an enum case's value or a pattern's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
         }
         Place::Pattern => {
             "A PHP# pattern is a type of `int`, `float`, `string`, `bool` or a class with an optional name, as in `int count`, a value, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`."
@@ -4518,7 +4578,9 @@ fn report_static_member_in_constant(
             BytesDisplay(member.value)
         ))
         .with_annotation(Annotation::primary(span).with_message("Read here."))
-        .with_note("A default, a constant's value and a constant initial value read constants and enum cases only."),
+        .with_note(
+            "A default, a constant's value, a constant initial value and a pattern read constants and enum cases only.",
+        ),
     );
 }
 

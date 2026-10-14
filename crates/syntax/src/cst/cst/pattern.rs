@@ -54,8 +54,7 @@ pub enum Pattern<'arena> {
 
 /// Represents a type pattern: a type, and the name of a variable the matched value is assigned to.
 ///
-/// A bare name without a variable is a local's value when a local of that name is in scope, which the binder
-/// decides.
+/// A bare name without a variable is a type, never a local's value: a pattern takes types and constants only.
 ///
 /// Example: `int`, `Paid paid`
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]

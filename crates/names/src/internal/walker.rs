@@ -981,8 +981,8 @@ where
     /// A pattern's variable is declared where the pattern is, and comes into scope only where its test holds:
     /// `condition_variables` decides where.
     ///
-    /// A bare name without a variable is the value of the local of that name when one is in scope, and a type
-    /// otherwise, as reading (a) of spec section 21 decides.
+    /// A bare name without a variable is a type. When a local of that name is in scope, the name binds to the local,
+    /// so the semantic check reports it: spec section 21's patterns take types and constants only.
     fn walk_in_type_pattern(
         &mut self,
         type_pattern: &'ast TypePattern<'arena>,

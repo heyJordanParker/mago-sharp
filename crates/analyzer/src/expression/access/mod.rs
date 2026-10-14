@@ -89,13 +89,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
             // PHP# writes both `Class::NAME` and `Class::$name` as `Class.name`, with a bare name bound to a class.
             // Like the engine, a read is the constant or enum case when the class has one by that name, then the
             // static property, then the static method as a closure, as `Class::name(...)`. A constant expression
-            // reads only the constant or enum case, as PHP's does.
+            // reads only the constant or enum case, as PHP's does, and so does a pattern, which spec section 21 says
+            // takes constants only.
             Access::Property(access) => match StaticProperty::from_property_access(access, context.resolved_names) {
                 Some(StaticProperty {
                     class: class @ Expression::ConstantAccess(class_name),
                     name: StaticPropertyName::Identifier(name),
                     span,
                 }) if block_context.flags.inside_constant_expression()
+                    || context.patterns.iter().any(|(_, pattern)| pattern.span().contains(&span.start))
                     || context
                         .codebase
                         .class_constant_exists(context.resolved_names.get(&class_name.name), name.value) =>

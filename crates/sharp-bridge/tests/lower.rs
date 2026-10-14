@@ -11505,23 +11505,20 @@ fn an_index_a_pattern_tests_coalesces_a_missing_key_to_null() {
 }
 
 /// ```php
-/// $limit = 10;
 /// $a = $extra === 200;
-/// $b = \is_int($extra) && $extra >= 1 && $extra < $limit || !($extra === -1);
-/// $c = $extra === $limit;
-/// $d = \is_object($extra) && (${'match#1'} = $extra->count) > 0 && \is_string($label = $extra->name);
+/// $b = \is_int($extra) && $extra >= 1 && $extra < 10 || !($extra === -1);
+/// $c = \is_object($extra) && (${'match#1'} = $extra->count) > 0 && \is_string($label = $extra->name);
 /// ```
 ///
 /// A value is compared with `===`, a comparison keeps its operator, and `and`, `or` and `not` are `&&`, `||` and
-/// `!`. A bare name is the local's value when a local of that name is in scope. A properties pattern tests that the
-/// value is an object, then reads each property once. A comparison orders a `Calc`, which declares no `operator <=>`,
-/// only once `int` has ruled it out.
+/// `!`. A properties pattern tests that the value is an object, then reads each property once. A comparison orders a
+/// `Calc`, which declares no `operator <=>`, only once `int` has ruled it out.
 #[test]
 fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
     assert_eq!(
         body_in(
             "Calc|int run(Calc|int extra)",
-            "        let limit = 10;\n        const a = extra is 200;\n        const b = extra is int and >= 1 and < limit or (not -1);\n        const c = extra is limit;\n        const d = extra is { count: > 0, name: string label };\n        return extra;\n",
+            "        const a = extra is 200;\n        const b = extra is int and >= 1 and < 10 or (not -1);\n        const c = extra is { count: > 0, name: string label };\n        return extra;\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; final class Calc { public int $count = 0; public ?string $name = null; }",
@@ -11529,10 +11526,6 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
         ),
         indoc! {r#"
             STMT_LIST
-              ASSIGN
-                VAR
-                  ZVAL "limit"
-                ZVAL 10
               ASSIGN
                 VAR
                   ZVAL "a"
@@ -11558,8 +11551,7 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
                     BINARY_OP [20]
                       VAR
                         ZVAL "extra"
-                      VAR
-                        ZVAL "limit"
+                      ZVAL 10
                   UNARY_OP [14]
                     BINARY_OP [16]
                       VAR
@@ -11569,14 +11561,6 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
               ASSIGN
                 VAR
                   ZVAL "c"
-                BINARY_OP [16]
-                  VAR
-                    ZVAL "extra"
-                  VAR
-                    ZVAL "limit"
-              ASSIGN
-                VAR
-                  ZVAL "d"
                 AND
                   AND
                     CALL

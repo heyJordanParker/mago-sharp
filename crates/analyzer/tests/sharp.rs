@@ -1193,6 +1193,19 @@ fn a_class_member_read_in_a_constant_expression_is_checked_as_a_class_constant()
     assert_eq!(sharp_issues, ["9:42 non-existent-class-constant"]);
 }
 
+/// Spec section 21: a pattern takes types and constants only, so its value is a constant expression. `Class.y` there is
+/// the class constant or enum case, and a static property is a constant the class does not have.
+#[test]
+fn a_pattern_takes_constants_of_the_codebase_only() {
+    let registry = "<?php\n\nnamespace Lib;\n\nenum Order: string\n{\n    case Ascending = 'asc';\n}\n\nfinal class Registry\n{\n    public const int VERSION = 2;\n    public static string $label = 'registry';\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Order;\nimport Lib.Registry;\n\nclass Members\n{\n    public bool run(Any? value)\n    {\n        return value is Registry.VERSION or Order.Ascending or Registry.label;\n    }\n\n    public bool below(int value) => value is < Registry.label;\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Members.sharp", sharp), &[("src/Lib/Registry.php", registry)]),
+        ["10:73 non-existent-class-constant", "13:57 non-existent-class-constant"]
+    );
+}
+
 /// A PHP class extends a PHP# abstract class and implements a PHP# interface, whose method has no access modifier
 /// and is public, as their PHP twins are.
 #[test]

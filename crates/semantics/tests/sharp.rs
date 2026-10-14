@@ -4406,6 +4406,26 @@ fn is_as_and_match_with_their_patterns_are_in_the_slice() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 21: a pattern takes types and constants only, as in C#, and a local's value is compared in `when`. A
+/// pattern's value is a constant value, so a static member of a class the file declares is the error a default gets.
+#[test]
+fn a_pattern_reads_no_local() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 10;\n    private static int ceiling = 5;\n    private int limit = 3;\n\n    public void run(int extra, Any? value)\n    {\n        const top = 10;\n        let label = match (value) {\n            top => \"local\",\n            extra => \"parameter\",\n            default => \"other\",\n        };\n        let tested = value is this.limit;\n        tested = value is < top;\n        tested = value is 2 + extra;\n        tested = value is -limit;\n        tested = value is Report.ceiling;\n        tested = value is Report.MAX or -10 or \"10\" or 2 + 8;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "13:13 `top` is a local: compare its value in `when`, as in `int n when n == top`.",
+            "14:13 `extra` is a parameter: compare its value in `when`, as in `int n when n == extra`.",
+            "17:31 `this` is the object the method runs on: compare its value in `when`, as in `int n when n == this.limit`.",
+            "18:29 `top` is a local: compare its value in `when`, as in `int n when n < top`.",
+            "19:31 `extra` is a parameter: compare its value in `when`, as in `int n when n == 2 + extra`.",
+            "20:28 Write `this.limit`: members of the same object are always written with `this.`.",
+            "21:27 `Report.ceiling` is a static member, which a constant value cannot read.",
+        ]
+    );
+}
+
 #[test]
 fn a_match_without_a_default_arm_is_an_error() {
     let code =
