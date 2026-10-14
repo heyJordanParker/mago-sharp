@@ -2,22 +2,18 @@ use mago_allocator::Arena;
 use mago_codex::ttype::get_int_or_string;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
-use mago_reporting::Annotation;
-use mago_reporting::Issue;
-use mago_span::HasSpan;
 use mago_syntax::cst::DieConstruct;
 use mago_syntax::cst::ExitConstruct;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
-use crate::code::IssueCode;
 use crate::common::construct::ConstructInput;
 use crate::common::construct::analyze_construct_inputs;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::control_action::ControlAction;
 use crate::error::AnalysisError;
-use crate::utils::names::display_type;
+use crate::expression::call::function_call::report_bare_function_call;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for ExitConstruct<'arena> {
     fn analyze<'ctx, A>(
@@ -44,28 +40,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ExitConstruct<'arena> {
             true,
         )?;
 
-        if is_sharp
-            && let Some(argument) = self.arguments.as_ref().and_then(|arguments| arguments.arguments.first())
-            && let Some(argument_type) = artifacts.get_expression_type(argument.value())
-            && !argument_type.is_int()
-            && !argument_type.is_never()
-        {
-            let argument_type_str = display_type(context, argument_type);
-            let issue = if argument_type.has_string() || argument_type.has_mixed() {
-                Issue::error("PHP# has no `die`: write the message to STDERR, then `exit(1)`.")
-                    .with_annotation(
-                        Annotation::primary(self.span())
-                            .with_message(format!("This is `{argument_type_str}`, not an `int`.")),
-                    )
-                    .with_note(
-                        "`die(\"…\")` and `exit(\"…\")` print the message and exit with status 0, which reports success.",
-                    )
-            } else {
-                Issue::error(format!("`exit` takes an `int` status: this is `{argument_type_str}`."))
-                    .with_annotation(Annotation::primary(self.span()).with_message("This status is not an `int`."))
-            };
-
-            context.collector.report_with_code(IssueCode::InvalidArgument, issue);
+        // Spec section 23: PHP's `exit` is a plain PHP function, so a bare `exit(…)` is refused as any bare call is.
+        if is_sharp && let Some(exit) = context.codebase.get_function(b"exit") {
+            report_bare_function_call(context, block_context, artifacts, exit, self.arguments.as_ref(), self.exit.span);
         }
 
         block_context.flags.set_has_returned(true);

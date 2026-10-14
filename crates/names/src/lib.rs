@@ -64,7 +64,7 @@ pub const INLINED_COLLECTION_METHODS: [(&str, &str); 18] = [
 
 /// The class-likes directly in `Sharp` that a bare name in a `.sharp` file names by default, spec section 23, and that
 /// a class-like of the file's namespace can win over: the standard library's ten effect classes and `Events`, the
-/// effect of `emit` (spec section 29), then the standard library's types.
+/// effect of `emit` (spec section 29), then `Position`.
 pub(crate) fn shadowable_default_classes() -> impl Iterator<Item = &'static str> {
     [
         "Sharp\\Database",
@@ -79,7 +79,6 @@ pub(crate) fn shadowable_default_classes() -> impl Iterator<Item = &'static str>
         "Sharp\\Environment",
         "Sharp\\Events",
         "Sharp\\Position",
-        "Sharp\\Replaces",
     ]
     .into_iter()
 }

@@ -581,15 +581,6 @@ fn a_standard_library_name_in_a_catch_a_header_or_an_attribute_is_the_class_in_t
     }
 }
 
-#[test]
-fn a_bare_replaces_attribute_is_the_attribute_of_the_standard_library() {
-    const CODE: &str = "namespace Sharp.Time;\n\npublic static class Date\n{\n    [Replaces(\"date\")]\n    public static string format(int timestamp) => \"\";\n}\n";
-    let arena = LocalArena::new();
-    let names = bind(&arena, CODE);
-
-    assert_eq!(resolved(&names, CODE, "Replaces", 0), b"Sharp\\Replaces");
-}
-
 /// An `extern` target binds through the file's imports as a class first, and `Class.member` binds its class and keeps
 /// the member name as written, spec section 29.
 #[test]
@@ -771,18 +762,18 @@ fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
 }
 
 /// A help that names a standard class reads whether the file's bare short name names another class-like: one of its
-/// namespace, one it imports, or one it declares. `Sharp.Replaces` is the class-like of its own namespace, so a file in
+/// namespace, one it imports, or one it declares. `Sharp.Position` is the class-like of its own namespace, so a file in
 /// `Sharp` records no class-like of its namespace for it.
 #[test]
 fn a_file_records_each_default_class_its_short_name_no_longer_names() {
-    let namespace_classes = NamespaceClasses::new(["App\\Position", "Sharp\\Replaces"]);
+    let namespace_classes = NamespaceClasses::new(["App\\Position", "Sharp\\Position"]);
 
     for (code, shadowed) in [
         ("namespace App;\n\nclass Paths\n{\n}\n", vec!["Sharp\\Position"]),
         ("namespace App;\n\nimport Lib.Clock;\n\nclass Paths\n{\n}\n", vec!["Sharp\\Clock", "Sharp\\Position"]),
         ("namespace Shop;\n\nclass Cache\n{\n}\n", vec!["Sharp\\Cache"]),
         ("namespace Shop;\n\nclass Paths\n{\n}\n", vec![]),
-        ("namespace Sharp;\n\nclass Paths\n{\n    [Replaces(\"x\")]\n    public void run() { }\n}\n", vec![]),
+        ("namespace Sharp;\n\nclass Paths\n{\n    public string here() => Position.current().file;\n}\n", vec![]),
     ] {
         let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(code.as_bytes()));
         let arena = LocalArena::new();
@@ -801,7 +792,6 @@ fn a_file_records_each_default_class_its_short_name_no_longer_names() {
             "Sharp\\Environment",
             "Sharp\\Events",
             "Sharp\\Position",
-            "Sharp\\Replaces",
         ]
         .into_iter()
         .filter(|class| names.shadows_default_class(class.as_bytes()))

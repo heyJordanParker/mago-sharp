@@ -105,6 +105,8 @@ pub struct AnalysisArtifacts {
     /// or a class with type arguments, keyed by the span of the type it writes. Apart from `expression_types`, because the `instanceof`
     /// a test runs as spans that type too when nothing the code writes stands before it.
     pub(crate) tested_types: HashMap<(u32, u32), TUnion>,
+    /// The full name of the plain PHP constant each PHP# read through a namespace reaches, keyed by the read's span.
+    pub(crate) namespace_constants: HashMap<(u32, u32), Word>,
     /// The function values the analysis gave places whose function types list effects, until the body that gives them
     /// records its summary.
     pub(crate) function_values: Vec<FunctionValue>,
@@ -147,6 +149,7 @@ impl AnalysisArtifacts {
             effect_summaries: Vec::new(),
             call_targets: HashMap::default(),
             tested_types: HashMap::default(),
+            namespace_constants: HashMap::default(),
             function_values: Vec::new(),
             variable_definedness: HashMap::default(),
             variable_definedness_targets: None,
@@ -337,6 +340,20 @@ impl AnalysisArtifacts {
     /// and not one before or around it.
     pub(crate) fn get_expected_type(&self, expression: &impl HasSpan) -> Option<&TUnion> {
         self.expected_type.as_ref().filter(|(span, _)| *span == expression.span()).map(|(_, expected)| expected)
+    }
+
+    /// The full name of the plain PHP constant the PHP# read `read` reaches through its namespace, as `global.PHP_EOL`
+    /// and `Pdf.DEFAULT_DPI` read one, spec section 23. None for any other read.
+    pub fn get_namespace_constant<T>(&self, read: &T) -> Option<Word>
+    where
+        T: HasSpan,
+    {
+        self.namespace_constants.get(&get_expression_range(read)).copied()
+    }
+
+    /// Records that the PHP# read at `span` reaches the plain PHP constant `constant`.
+    pub(crate) fn record_namespace_constant(&mut self, span: Span, constant: Word) {
+        self.namespace_constants.insert((span.start.offset, span.end.offset), constant);
     }
 
     /// Get the type of expression `expression`.

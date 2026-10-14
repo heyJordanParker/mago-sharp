@@ -421,7 +421,7 @@ where
     context.patterns.truncate(patterns);
 
     // The PHP of a pattern calls a type test that no source the user wrote calls. It is the PHP# syntax itself, so it is
-    // never replaced by syntax. A properties pattern's `is_object` is its null check, which a value that cannot be null
+    // never a bare call to refuse. A properties pattern's `is_object` is its null check, which a value that cannot be null
     // makes redundant. C# reports nothing there, and no source the user wrote can drop the check.
     let mut pattern_calls = Vec::new();
     match node {
@@ -480,7 +480,8 @@ where
 
             // PHP's report on `match (true)` names `true`, so a PHP# `match` reports what it misses itself.
             !is_code(issue, IssueCode::MatchNotExhaustive)
-                && (!is_code(issue, IssueCode::ReplacedBySyntax) || called.is_none())
+                && (!(is_code(issue, IssueCode::ReplacedBySyntax) || is_code(issue, IssueCode::BareFunctionCall))
+                    || called.is_none())
                 && (!redundant || called.is_none_or(|call| call.value != b"is_object"))
                 && (!always_true
                     || span.is_none_or(|span| {

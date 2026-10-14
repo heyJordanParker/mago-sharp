@@ -17,6 +17,7 @@ use mago_syntax::cst::Access;
 use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Identifier;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::PropertyAccess;
@@ -31,6 +32,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::binary::logical::merge_short_circuited_assignments;
+use crate::expression::constant_access::analyze_namespace_constant;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::property::resolve_method_value;
 use crate::resolver::static_property::StaticProperty;
@@ -38,6 +40,7 @@ use crate::resolver::static_property::StaticPropertyName;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::and_list;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::member_namespace;
 use mago_names::short_name;
 
 pub mod class_constant_access;
@@ -125,6 +128,37 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
             // static property, then the static method as a closure, as `Class::name(...)`. A constant expression
             // reads only the constant or enum case, as PHP's does.
             Access::Property(access) => match StaticProperty::from_property_access(access, context.resolved_names) {
+                // Spec section 23: `global.PHP_EOL`, and `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;`, read a plain
+                // PHP constant through its namespace, as a plain PHP function is called through it.
+                Some(StaticProperty {
+                    class: Expression::ConstantAccess(class_name),
+                    name: StaticPropertyName::Identifier(name),
+                    ..
+                }) if context.dialect.is_sharp()
+                    && let Some(namespace) = member_namespace(context, &class_name.name, name.value) =>
+                {
+                    analyze_namespace_constant(
+                        context,
+                        block_context,
+                        artifacts,
+                        access,
+                        &class_name.name,
+                        name,
+                        namespace,
+                    );
+
+                    Ok(())
+                }
+                // A name that is no class, no namespace the file imports and no namespace of a function or constant
+                // of that name, as `Nope` in `Nope.render`.
+                Some(StaticProperty { class: Expression::ConstantAccess(class_name), .. })
+                    if context.dialect.is_sharp()
+                        && !context.codebase.class_like_exists(context.resolved_names.get(&class_name.name)) =>
+                {
+                    report_unknown_class_read(context, artifacts, access, &class_name.name);
+
+                    Ok(())
+                }
                 Some(StaticProperty { class, name: StaticPropertyName::Identifier(name), span })
                     if let Some(class_name) = context.resolved_names.static_property_class(access)
                         && (block_context.flags.inside_constant_expression()
@@ -255,6 +289,29 @@ where
     }
 
     false
+}
+
+/// Reports the PHP# read `read` of `name.member` when `name` names no class, no namespace the file imports, and no
+/// namespace with a function or constant of that member's name, so the read reaches nothing. The read gets no type,
+/// as after an invalid call target.
+fn report_unknown_class_read<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    read: &PropertyAccess<'_>,
+    name: &Identifier<'_>,
+) where
+    A: Arena,
+{
+    let written = BytesDisplay(name.value());
+    context.collector.report_with_code(
+        IssueCode::NonExistentClassLike,
+        Issue::error(format!("`{written}` names no class, and no namespace this file imports."))
+            .with_annotation(Annotation::primary(name.span()).with_message("Names nothing here."))
+            .with_help(format!(
+                "Check the spelling of `{written}`, or import the class or the namespace whose member this reads."
+            )),
+    );
+    artifacts.set_expression_type(read, get_mixed());
 }
 
 /// Reports a PHP# member read or call whose member is a method on some classes the receiver can be and a property on

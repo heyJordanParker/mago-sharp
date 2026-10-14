@@ -73,6 +73,7 @@ use crate::reconciler::reconcile_keyed_types;
 use crate::resolver::method::get_declared_collection;
 use crate::statement::r#loop::assignment_map_visitor::get_assignment_map;
 use crate::statement::r#loop::cleaner::clean_nodes;
+use crate::statement::refuse_condition_that_never_finishes;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_bool;
 use crate::utils::names::display_class_like_name;
@@ -154,6 +155,7 @@ fn analyze_for_or_while_loop<'ctx, 'ast, 'arena, A>(
     statements: &'ast [Statement<'arena>],
     span: Span,
     infinite_loop: bool,
+    keyword: &str,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
@@ -187,6 +189,7 @@ where
         artifacts,
         false,
         infinite_loop,
+        keyword,
     )?;
 
     loop_block_context.loop_bounds = previous_loop_bounds;
@@ -249,7 +252,7 @@ fn inherit_loop_block_context<'ctx, A>(
     let has_break = loop_scope.final_actions.contains(ControlAction::Break);
     let has_continue = loop_scope.final_actions.contains(ControlAction::Continue);
     let has_break_or_continue = has_break || has_continue;
-    let can_leave_loop = !known_infinite_loop || has_break;
+    let can_leave_loop = (!known_infinite_loop || has_break) && !loop_scope.condition_never_finishes;
 
     inherit_branch_context_properties(context, block_context, &inner_loop_block_context);
 
@@ -309,6 +312,7 @@ fn analyze<'ctx, 'ast, 'arena, A>(
     artifacts: &mut AnalysisArtifacts,
     is_do: bool,
     always_enters_loop: bool,
+    keyword: &str,
 ) -> Result<(BlockContext<'ctx>, LoopScope), AnalysisError>
 where
     A: Arena,
@@ -430,7 +434,8 @@ where
             artifacts.set_loop_scope(loop_scope.clone());
         }
 
-        analyze_statements(statements, context, &mut continue_context, artifacts)?;
+        let body = body_to_analyze(context, &continue_context, artifacts, pre_conditions, statements, is_do, keyword);
+        analyze_statements(body, context, &mut continue_context, artifacts)?;
         loop_scope = unsafe {
             // SAFETY: we know the loop scope will remain in the context.
             artifacts.take_loop_scope_unchecked()
@@ -479,7 +484,9 @@ where
 
             loop_scope = {
                 artifacts.set_loop_scope(loop_scope);
-                analyze_statements(statements, context, &mut continue_context, artifacts)?;
+                let body =
+                    body_to_analyze(context, &continue_context, artifacts, pre_conditions, statements, is_do, keyword);
+                analyze_statements(body, context, &mut continue_context, artifacts)?;
 
                 unsafe {
                     // SAFETY: we know the loop scope will remain in the context.
@@ -785,7 +792,16 @@ where
 
                 let loop_scope = {
                     artifacts.set_loop_scope(loop_scope);
-                    analyze_statements(statements, context, &mut continue_context, artifacts)?;
+                    let body = body_to_analyze(
+                        context,
+                        &continue_context,
+                        artifacts,
+                        pre_conditions,
+                        statements,
+                        is_do,
+                        keyword,
+                    );
+                    analyze_statements(body, context, &mut continue_context, artifacts)?;
 
                     unsafe {
                         // SAFETY: we know the loop scope will remain in the context.
@@ -1257,6 +1273,47 @@ fn can_condition_be_initially_false(pre_condition: &Expression<'_>, artifacts: &
         },
         _ => false,
     }
+}
+
+/// The statements of a loop's body to analyze in `body_context`, the context once the loop's conditions are applied:
+/// none in a `.sharp` file when a condition never finishes, as `global.exit(1)` does, because the body then never runs
+/// (spec section 7). The condition refused is the one whose type is `never`, or the last one when the code that never
+/// finishes sits inside a condition. The loop scope then records that the loop is never left, so the code after it is
+/// refused too. A `do … while` runs its body before its condition, so it keeps its body. Each pass of the loop analysis
+/// refuses the condition again, and the loop keeps the issues of one pass.
+fn body_to_analyze<'ast, 'arena, A>(
+    context: &mut Context<'_, 'arena, A>,
+    body_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    pre_conditions: &[&Expression<'arena>],
+    statements: &'ast [Statement<'arena>],
+    is_do: bool,
+    keyword: &str,
+) -> &'ast [Statement<'arena>]
+where
+    A: Arena,
+{
+    if is_do {
+        return statements;
+    }
+
+    let condition = pre_conditions
+        .iter()
+        .find(|condition| artifacts.get_expression_type(**condition).is_some_and(TUnion::is_never))
+        .or(pre_conditions.last());
+    let Some(condition) = condition else {
+        return statements;
+    };
+    if !refuse_condition_that_never_finishes(context, body_context, condition, keyword) {
+        return statements;
+    }
+
+    let Some(loop_scope) = artifacts.get_loop_scope_mut() else {
+        unreachable!("each pass sets the loop's scope before it reads the loop's body");
+    };
+    loop_scope.condition_never_finishes = true;
+
+    &[]
 }
 
 fn apply_pre_condition_to_loop_context<'ctx, 'arena, A>(

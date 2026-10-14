@@ -183,13 +183,13 @@ const RUN: &str = "int run(int extra)";
 /// `Sharp\Text` at the standard library's path, with methods each inlining rule takes or leaves.
 const TEXT: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text.sharp",
-    "namespace Sharp;\n\npublic class Text\n{\n    public static string shout(string text) => strtoupper(text);\n\n    public static string padded(string text, int width = 8) => str_pad(trim(text), width);\n\n    public static string twice(string text) => str_repeat(text, strlen(text));\n\n    public static string trimmed(string text)\n    {\n        const trimmed = trim(text);\n        return trimmed;\n    }\n\n    public static Text make() => new Text();\n\n    public string label() => \"text\";\n\n    public string wrapped(string format) => sprintf(format, this.label());\n\n    public string secret(string text) => this.hidden(text);\n\n    private string hidden(string text) => strtolower(text);\n\n    public static string quiet(string text) => Text.muted(text);\n\n    protected static string muted(string text) => strtolower(text);\n\n    public virtual string echoed(string text) => this.wrapped(text);\n\n    public static string again(string text) => Self.shout(text);\n}\n",
+    "namespace Sharp;\n\npublic class Text\n{\n    public static string shout(string text) => global.strtoupper(text);\n\n    public static string padded(string text, int width = 8) => global.str_pad(global.trim(text), width);\n\n    public static string twice(string text) => global.str_repeat(text, global.strlen(text));\n\n    public static string trimmed(string text)\n    {\n        const trimmed = global.trim(text);\n        return trimmed;\n    }\n\n    public static Text make() => new Text();\n\n    public string label() => \"text\";\n\n    public string wrapped(string format) => global.sprintf(format, this.label());\n\n    public string secret(string text) => this.hidden(text);\n\n    private string hidden(string text) => global.strtolower(text);\n\n    public static string quiet(string text) => Text.muted(text);\n\n    protected static string muted(string text) => global.strtolower(text);\n\n    public virtual string echoed(string text) => this.wrapped(text);\n\n    public static string again(string text) => Self.shout(text);\n}\n",
 );
 
 /// `Lib\Loud`, a project file with a method the inlining rule would take in the standard library.
 const LOUD: (&str, &str) = (
     "src/Lib/Loud.sharp",
-    "namespace Lib;\n\npublic class Loud\n{\n    public static string shout(string text) => strtoupper(text);\n}\n",
+    "namespace Lib;\n\npublic class Loud\n{\n    public static string shout(string text) => global.strtoupper(text);\n}\n",
 );
 
 /// The statements of `run`, declared with `signature` and holding `statements` in a class that imports `Sharp.Text`
@@ -256,9 +256,8 @@ fn php_syntax_returns_a_parse_error_and_no_nodes() {
 
 #[test]
 fn a_construct_outside_the_slice_returns_its_not_supported_error() {
-    let lowered = Lowered::new(&method(
-        "        switch (extra) {\n            default: return 1;\n        }\n        return 1;\n",
-    ));
+    let lowered =
+        Lowered::new(&method("        switch (extra) {\n            default: break;\n        }\n        return 1;\n"));
 
     assert_eq!(lowered.diagnostics(), ["9:9 compile error: This statement is not supported yet in PHP#."]);
 }
@@ -627,7 +626,10 @@ fn every_line_is_the_line_the_zend_scanner_counts() {
     assert_eq!(lines, [("SHARP_AST_RETURN".to_owned(), 5, 0), ("SHARP_AST_METHOD".to_owned(), 3, 6)]);
 
     let refused = Lowered::new("class Report\r{\r    public void run() { echo 1; }\r}\r");
-    assert_eq!(refused.diagnostics(), ["3:25 compile error: PHP# has no `echo`: write `printf` or `fwrite`."]);
+    assert_eq!(
+        refused.diagnostics(),
+        ["3:25 compile error: PHP# has no `echo`: write `global.printf` or `global.fwrite`."]
+    );
 }
 
 /// ```php
@@ -675,7 +677,7 @@ fn a_file_with_extern_declarations_lowers_to_the_nodes_it_lowers_to_without_them
     let library =
         [("vendor/acme/Mailer.php", "<?php\n\nnamespace Acme;\n\nclass Mailer\n{\n}\n\nclass Failed\n{\n}\n")];
     let with = Lowered::with(
-        "namespace App.Tenant;\n\nimport Acme.Failed;\nimport Acme.Mailer;\n\nextern Mailer uses Mail, Http;\nextern trim;\nextern event Failed;\n\nclass Report\n{\n}\n",
+        "namespace App.Tenant;\n\nimport Acme.Failed;\nimport Acme.Mailer;\n\nextern Mailer uses Mail, Http;\nextern global.trim;\nextern event Failed;\n\nclass Report\n{\n}\n",
         &library,
     );
     let without = Lowered::with(
@@ -1371,7 +1373,7 @@ fn an_expression_body_is_the_body_that_returns_its_expression() {
 #[test]
 fn a_computed_property_is_a_property_with_a_short_get_hook() {
     let lowered = Lowered::new(
-        "class Report\n{\n    private string name = \"\";\n\n    public string slug => strtolower(this.name);\n}\n",
+        "class Report\n{\n    private string name = \"\";\n\n    public string slug => global.strtolower(this.name);\n}\n",
     );
     let class = lowered.child(lowered.root(), 1);
 
@@ -1758,7 +1760,7 @@ fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
 #[test]
 fn a_promoted_property_with_accessor_bodies_is_a_promoted_parameter_with_hooks() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public Report(public string title { get => field; set => field = trim(value); }, public int id { get => field; })\n    {\n    }\n}\n",
+        "class Report\n{\n    public Report(public string title { get => field; set => field = global.trim(value); }, public int id { get => field; })\n    {\n    }\n}\n",
     );
     let parameters: Vec<String> = lowered
         .nodes()
@@ -2302,7 +2304,7 @@ fn the_base_class_constructor_can_be_inherited() {
             "STMT_LIST\n  STATIC_CALL\n    ZVAL [1] \"parent\"\n    ZVAL \"__construct\"\n    ARG_LIST\n      VAR\n        ZVAL \"id\"\n",
         ),
         (
-            "namespace App.Tenant;\n\nimport Lib.Record;\n\nclass Report : Record\n{\n    private string label = strtoupper(\"x\");\n}\n",
+            "namespace App.Tenant;\n\nimport Lib.Record;\n\nclass Report : Record\n{\n    private string label = global.strtoupper(\"x\");\n}\n",
             "STMT_LIST\n  ASSIGN\n    PROP\n      VAR\n        ZVAL \"this\"\n      ZVAL \"label\"\n    CALL\n      ZVAL \"strtoupper\"\n      ARG_LIST\n        ZVAL \"x\"\n  STATIC_CALL\n    ZVAL [1] \"parent\"\n    ZVAL \"__construct\"\n    ARG_LIST\n",
         ),
     ] {
@@ -2322,7 +2324,7 @@ fn the_base_class_constructor_can_be_inherited() {
 fn super_calls_the_constructor_a_base_class_gets_for_its_initial_values() {
     let base = (
         "src/Lib/Stamped.sharp",
-        "namespace Lib;\n\nclass Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"p\");\n}\n",
+        "namespace Lib;\n\nclass Stamped\n{\n    public string stamp { get; set; } = global.strtoupper(\"p\");\n}\n",
     );
     let parent_construct = "  STATIC_CALL\n    ZVAL [1] \"parent\"\n    ZVAL \"__construct\"\n    ARG_LIST\n";
     for (code, body) in [
@@ -2331,11 +2333,11 @@ fn super_calls_the_constructor_a_base_class_gets_for_its_initial_values() {
             format!("STMT_LIST\n{parent_construct}"),
         ),
         (
-            "namespace App.Tenant;\n\nclass Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"q\");\n}\n\nclass Report : Stamped\n{\n    public Report() : super() { }\n}\n",
+            "namespace App.Tenant;\n\nclass Stamped\n{\n    public string stamp { get; set; } = global.strtoupper(\"q\");\n}\n\nclass Report : Stamped\n{\n    public Report() : super() { }\n}\n",
             format!("STMT_LIST\n{parent_construct}"),
         ),
         (
-            "namespace App.Tenant;\n\nimport Lib.Stamped;\n\nclass Report : Stamped\n{\n    private string extra = strtoupper(\"e\");\n}\n",
+            "namespace App.Tenant;\n\nimport Lib.Stamped;\n\nclass Report : Stamped\n{\n    private string extra = global.strtoupper(\"e\");\n}\n",
             format!(
                 "STMT_LIST\n  ASSIGN\n    PROP\n      VAR\n        ZVAL \"this\"\n      ZVAL \"extra\"\n    CALL\n      ZVAL \"strtoupper\"\n      ARG_LIST\n        ZVAL \"e\"\n{parent_construct}"
             ),
@@ -3084,14 +3086,14 @@ fn method_modifiers_become_the_method_flags() {
 }
 
 /// ```php
-/// public function make(\Lib\Calc $other, float $rate = 1.5, int $loud = PHP_DEBUG): \Lib\Calc {}
+/// public function make(\Lib\Calc $other, float $rate = 1.5, int $loud = \PHP_DEBUG): \Lib\Calc {}
 /// ```
 ///
-/// A class type is its full name with `ZEND_NAME_FQ`, which is 0.
+/// A class type and PHP's constant are each their full name with `ZEND_NAME_FQ`, which is 0.
 #[test]
 fn parameters_carry_their_type_name_and_default() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public Calc make(Calc other, float rate = 1.5, int loud = PHP_DEBUG) { return other; }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public Calc make(Calc other, float rate = 1.5, int loud = global.PHP_DEBUG) { return other; }\n}\n",
         &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")],
     );
     let method = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_METHOD).expect("a method");
@@ -3118,7 +3120,7 @@ fn parameters_carry_their_type_name_and_default() {
                 ZVAL [1] "int"
                 ZVAL "loud"
                 CONST
-                  ZVAL [1] "PHP_DEBUG"
+                  ZVAL "PHP_DEBUG"
                 null
                 null
                 null
@@ -3540,7 +3542,7 @@ fn a_set_literal_holds_each_element_under_its_key() {
     assert_eq!(
         body_in(
             "void run(Calc status, string name)",
-            "        Set<string> tags = [\"vip\", \"new\"];\n        Set<Calc> states = [Calc.Active, status];\n        Set<string> names = [strtoupper(name)];\n",
+            "        Set<string> tags = [\"vip\", \"new\"];\n        Set<Calc> states = [Calc.Active, status];\n        Set<string> names = [global.strtoupper(name)];\n",
             &[("src/Lib/Calc.php", "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; }")]
         ),
         indoc! {r#"
@@ -3915,7 +3917,7 @@ fn set_methods_read_and_change_each_element_under_its_key() {
     assert_eq!(
         body_in(
             "bool run(Set<string> tags, Set<Calc> states, Calc status, string name)",
-            "        tags.add(name);\n        tags.remove(strtoupper(name));\n        states.add(status);\n        states.remove(Calc.Closed);\n        tags.clear();\n        return tags.contains(name);\n",
+            "        tags.add(name);\n        tags.remove(global.strtoupper(name));\n        states.add(status);\n        states.remove(Calc.Closed);\n        tags.clear();\n        return tags.contains(name);\n",
             &[("src/Lib/Calc.php", "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; }")]
         ),
         indoc! {r#"
@@ -5847,7 +5849,7 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
 #[test]
 fn a_variadic_or_operator_set_parameter_becomes_a_set_before_the_body_runs() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Order\n{\n    public int many(Set<string> ...groups) => count(groups);\n\n    public static Order operator +(Order order, Set<string> tags) => order;\n\n    public int maybe(Set<string>? ...groups) => count(groups);\n}\n",
+        "namespace App.Tenant;\n\nclass Order\n{\n    public int many(Set<string> ...groups) => global.count(groups);\n\n    public static Order operator +(Order order, Set<string> tags) => order;\n\n    public int maybe(Set<string>? ...groups) => global.count(groups);\n}\n",
     );
     let body = |name: &str| lowered.render(lowered.child(lowered.method_named(name), 2));
 
@@ -6618,7 +6620,7 @@ fn a_generic_class_type_is_its_class_and_a_class_value_type_is_string() {
 
             public Class<Model>? load(Class<Model> type, Class<Model>? other = null) { return other; }
 
-            public PaginatedList<Order>? page(PaginatedList<Order> rows) { return count(this.elements) > 0 ? rows : null; }
+            public PaginatedList<Order>? page(PaginatedList<Order> rows) { return global.count(this.elements) > 0 ? rows : null; }
         }
     "},
         &[(
@@ -7096,7 +7098,7 @@ fn a_lambda_takes_union_and_variadic_parameters_and_a_spread_call() {
     assert_eq!(
         body_in(
             "int run(List<int> extra)",
-            "        const pick = (int|string key, (int|Calc)? fallback, int ...rest) => count(rest);\n        return pick(1, null, ...extra);\n",
+            "        const pick = (int|string key, (int|Calc)? fallback, int ...rest) => global.count(rest);\n        return pick(1, null, ...extra);\n",
             &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")]
         ),
         indoc! {r#"
@@ -7210,7 +7212,7 @@ fn a_spread_argument_is_an_unpack_of_its_value() {
     assert_eq!(
         body_in(
             "int run(int first, int ...extra)",
-            "        Calc.sum(...extra);\n        this.run(1, ...extra);\n        const made = new Calc(...extra);\n        return max(first, ...extra);\n",
+            "        Calc.sum(...extra);\n        this.run(1, ...extra);\n        const made = new Calc(...extra);\n        return global.max(first, ...extra);\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; final class Calc { public function __construct(int ...$n) {} public static function sum(int ...$n): int { return 0; } }",
@@ -7806,7 +7808,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
 
             public Box<Order> listed()
             {
-                return orders();
+                return global.orders();
             }
 
             public void keep(Box<Order> box) { }
@@ -7941,7 +7943,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
 fn a_collection_the_project_returns_from_plain_php_is_checked_element_by_element() {
     let body = body_in(
         "int run()",
-        "        let ints = Calc.ints();\n        let keyed = Calc.keyed();\n        let untyped = Calc.untyped();\n        let anything = Calc.anything();\n        let letters = str_split(\"ab\");\n        return 1;\n",
+        "        let ints = Calc.ints();\n        let keyed = Calc.keyed();\n        let untyped = Calc.untyped();\n        let anything = Calc.anything();\n        let letters = global.str_split(\"ab\");\n        return 1;\n",
         &[(
             "src/Lib/Calc.php",
             "<?php namespace Lib; final class Calc { /** @return list<int> */ public static function ints(): array { return []; } /** @return array<array-key, int> */ public static function keyed(): array { return []; } public static function untyped(): array { return []; } /** @return list<mixed> */ public static function anything(): array { return []; } }",
@@ -9480,7 +9482,7 @@ fn typeof_in_an_attribute_argument_is_the_class_name() {
 
 /// ```php
 /// public const int MAX = 3;
-/// protected const LIMIT = PHP_INT_MAX - 1;
+/// protected const LIMIT = \PHP_INT_MAX - 1;
 /// ```
 ///
 /// A constant is a class constant group of one constant, as php-src's grammar builds it: the constant list, no
@@ -9488,7 +9490,7 @@ fn typeof_in_an_attribute_argument_is_the_class_name() {
 #[test]
 fn a_class_constant_is_a_class_constant_group_of_one_constant() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 3;\n    protected const LIMIT = PHP_INT_MAX - 1;\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 3;\n    protected const LIMIT = global.PHP_INT_MAX - 1;\n}\n",
     );
     let class = lowered.child(lowered.root(), 2);
 
@@ -9510,7 +9512,7 @@ fn a_class_constant_is_a_class_constant_group_of_one_constant() {
                     ZVAL "LIMIT"
                     BINARY_OP [2]
                       CONST
-                        ZVAL [1] "PHP_INT_MAX"
+                        ZVAL "PHP_INT_MAX"
                       ZVAL 1
                     null
                 null
@@ -9876,7 +9878,7 @@ fn a_member_is_the_property_or_method_the_checker_found_on_the_receiver() {
 #[test]
 fn a_magic_property_and_a_magic_method_of_a_php_class_are_a_property_and_a_method() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Bag;\n\nclass Report\n{\n    public int run(Bag bag)\n    {\n        return bag.size + bag.count() + strlen(gettype(bag.other)) + strlen(gettype(bag.untagged()));\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Bag;\n\nclass Report\n{\n    public int run(Bag bag)\n    {\n        return bag.size + bag.count() + global.strlen(global.gettype(bag.other)) + global.strlen(global.gettype(bag.untagged()));\n    }\n}\n",
         &[(
             "src/Lib/Bag.php",
             "<?php namespace Lib; /** @property int $size\n * @method int count() */ final class Bag { public function __get(string $name): mixed { return 1; } public function __call(string $name, array $arguments): mixed { return 1; } }",
@@ -10363,7 +10365,7 @@ fn a_declared_member_wins_over_a_magic_one() {
 #[test]
 fn a_call_only_call_serves_is_a_method_call_beside_a_private_property_of_its_name() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Bag;\n\nclass Report\n{\n    public int run(Bag bag)\n    {\n        return strlen(gettype(bag.handler())) + strlen(gettype(bag.untagged()));\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Bag;\n\nclass Report\n{\n    public int run(Bag bag)\n    {\n        return global.strlen(global.gettype(bag.handler())) + global.strlen(global.gettype(bag.untagged()));\n    }\n}\n",
         &[(
             "src/Lib/Bag.php",
             "<?php namespace Lib; final class Bag { private \\Closure $handler; public function __construct() { $this->handler = fn (): int => 1; } public function __call(string $name, array $arguments): mixed { return 1; } }",
@@ -10782,7 +10784,7 @@ fn a_member_read_through_a_class_value_is_the_fetch_of_its_kind_on_that_class() 
     assert_eq!(
         body_in(
             RUN,
-            "        const type = typeof(Calc);\n        return typeof(Calc).MAX + type.MAX + type.count + strlen(type.defaultTag());\n",
+            "        const type = typeof(Calc);\n        return typeof(Calc).MAX + type.MAX + type.count + global.strlen(type.defaultTag());\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; abstract class Calc { public const int MAX = 3; public static int $count = 0; public static function defaultTag(): string { return 'div'; } }",
@@ -10837,7 +10839,7 @@ fn a_null_safe_member_read_through_a_class_value_is_a_conditional_over_the_stati
     assert_eq!(
         body_in(
             RUN,
-            "        const type = extra > 0 ? typeof(Calc) : null;\n        const max = type?.MAX;\n        const count = type?.count;\n        const tag = type?.defaultTag();\n        return (max ?? 0) + (count ?? 0) + strlen(tag ?? \"\");\n",
+            "        const type = extra > 0 ? typeof(Calc) : null;\n        const max = type?.MAX;\n        const count = type?.count;\n        const tag = type?.defaultTag();\n        return (max ?? 0) + (count ?? 0) + global.strlen(tag ?? \"\");\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; abstract class Calc { public const int MAX = 3; public static int $count = 0; public static function defaultTag(): string { return 'div'; } }",
@@ -10962,7 +10964,7 @@ fn a_static_method_read_through_a_class_value_is_its_first_class_callable() {
     assert_eq!(
         body_in(
             RUN,
-            "        const type = typeof(Calc);\n        const Function<string()> tag = type.defaultTag;\n        return strlen(tag());\n",
+            "        const type = typeof(Calc);\n        const Function<string()> tag = type.defaultTag;\n        return global.strlen(tag());\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; abstract class Calc { public static function defaultTag(): string { return 'div'; } }",
@@ -12389,7 +12391,7 @@ fn the_ternary_is_a_conditional_marked_when_parenthesized() {
 fn error_control_is_a_silence_of_its_expression() {
     let lowered = Lowered::named(
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp",
-        "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static string run(string x)\n    {\n        return @trim(x);\n    }\n}\n",
+        "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static string run(string x)\n    {\n        return @global.trim(x);\n    }\n}\n",
     );
 
     assert_eq!(
@@ -12569,16 +12571,24 @@ fn parentheses_only_group() {
 
 /// ```php
 /// {
-///     $inner = PHP_INT_MAX;
+///     $inner = \PHP_INT_MAX;
+///     $own = LIMIT;
 /// }
 /// ```
 ///
-/// `[1]` on the constant's name is `ZEND_NAME_NOT_FQ`: like PHP, the engine looks the constant up in the namespace,
-/// then globally.
+/// `global.PHP_INT_MAX` names PHP's constant by its full name, `ZEND_NAME_FQ`, which is 0, spec section 23. A bare
+/// name is the code's own constant, and `[1]` on its name is `ZEND_NAME_NOT_FQ`: the engine looks it up in the
+/// file's namespace.
 #[test]
-fn a_block_is_a_statement_list_and_a_constant_is_looked_up_by_its_short_name() {
+fn a_block_is_a_statement_list_and_a_constant_is_looked_up_by_the_name_it_is_read_by() {
+    let limit = ("src/App/Tenant/constants.php", "<?php\n\nnamespace App\\Tenant;\n\nconst LIMIT = 3;\n");
+
     assert_eq!(
-        body("        {\n            let inner = PHP_INT_MAX;\n        }\n        return 1;\n"),
+        body_in(
+            RUN,
+            "        {\n            let inner = global.PHP_INT_MAX;\n            let own = LIMIT;\n        }\n        return 1;\n",
+            &[limit]
+        ),
         indoc! {r#"
             STMT_LIST
               STMT_LIST
@@ -12586,7 +12596,12 @@ fn a_block_is_a_statement_list_and_a_constant_is_looked_up_by_its_short_name() {
                   VAR
                     ZVAL "inner"
                   CONST
-                    ZVAL [1] "PHP_INT_MAX"
+                    ZVAL "PHP_INT_MAX"
+                ASSIGN
+                  VAR
+                    ZVAL "own"
+                  CONST
+                    ZVAL [1] "LIMIT"
               RETURN
                 ZVAL 1
         "#}
@@ -12687,8 +12702,10 @@ fn while_and_do_while_are_their_php_kinds() {
 }
 
 /// ```php
-/// while (true) {
+/// while ($again) {
 ///     continue;
+/// }
+/// while (true) {
 ///     break;
 /// }
 /// ```
@@ -12697,19 +12714,27 @@ fn while_and_do_while_are_their_php_kinds() {
 #[test]
 fn break_and_continue_have_a_null_depth() {
     assert_eq!(
-        body("        while (true) {\n            continue;\n            break;\n        }\n        return 1;\n"),
-        indoc! {"
+        body_in(
+            "int run(bool again)",
+            "        while (again) {\n            continue;\n        }\n        while (true) {\n            break;\n        }\n        return 1;\n",
+            &[]
+        ),
+        indoc! {r#"
             STMT_LIST
               WHILE
-                ZVAL true
+                VAR
+                  ZVAL "again"
                 STMT_LIST
                   CONTINUE
                     null
+              WHILE
+                ZVAL true
+                STMT_LIST
                   BREAK
                     null
               RETURN
                 ZVAL 1
-        "}
+        "#}
     );
 }
 
@@ -13183,8 +13208,8 @@ fn a_loop_key_bounded_by_a_backed_enum_and_an_interface_reads_back_through_the_e
 }
 
 /// ```php
-/// throw new \App\Tenant\Failure($extra);
-/// return \App\Tenant\Failure::last() ?? throw new \App\Tenant\Failure(0);
+/// $code = $extra > 0 ? $extra : throw new \App\Tenant\Failure(0);
+/// throw new \App\Tenant\Failure($code);
 /// ```
 ///
 /// `throw` is an expression, and a `throw` statement is that expression alone.
@@ -13193,31 +13218,35 @@ fn throw_is_a_throw_expression() {
     assert_eq!(
         body_in(
             RUN,
-            "        throw new Failure(extra);\n        return Failure.last() ?? throw new Failure(0);\n",
+            "        let code = extra > 0 ? extra : throw new Failure(0);\n        throw new Failure(code);\n",
             &[(
                 "src/App/Tenant/Failure.php",
-                "<?php namespace App\\Tenant; final class Failure extends \\Exception { public function __construct(int $code) { parent::__construct('', $code); } public static function last(): ?int { return null; } }",
+                "<?php namespace App\\Tenant; final class Failure extends \\Exception { public function __construct(int $code) { parent::__construct('', $code); } }",
             )]
         ),
         indoc! {r#"
             STMT_LIST
-              THROW
-                NEW
-                  ZVAL "App\\Tenant\\Failure"
-                  ARG_LIST
+              ASSIGN
+                VAR
+                  ZVAL "code"
+                CONDITIONAL
+                  GREATER
                     VAR
                       ZVAL "extra"
-              RETURN
-                COALESCE
-                  STATIC_CALL
-                    ZVAL "App\\Tenant\\Failure"
-                    ZVAL "last"
-                    ARG_LIST
+                    ZVAL 0
+                  VAR
+                    ZVAL "extra"
                   THROW
                     NEW
                       ZVAL "App\\Tenant\\Failure"
                       ARG_LIST
                         ZVAL 0
+              THROW
+                NEW
+                  ZVAL "App\\Tenant\\Failure"
+                  ARG_LIST
+                    VAR
+                      ZVAL "code"
         "#}
     );
 }
@@ -13487,15 +13516,24 @@ fn a_catch_clause_of_a_type_parameter_tests_its_type_argument() {
 }
 
 /// ```php
-/// return \strlen(\sprintf("%d", \count($extra, mode: 0)));
+/// return \strlen(\Vendor\Pdf\render(\sprintf("%d", \count($extra, mode: 0))));
 /// ```
 ///
-/// PHP# calls only global functions, PHP's own and those a library or the app declares, so a call names the global
-/// function with `ZEND_NAME_FQ`, which is 0.
+/// Spec section 23 calls a plain PHP function through its namespace: `global.strlen(…)` a function of PHP's root
+/// namespace, and `Pdf.render(…)` after `import Vendor.Pdf;` a function of that namespace. Each is a call of the
+/// function by its full name, with `ZEND_NAME_FQ`, which is 0.
 #[test]
-fn a_function_call_is_a_call_of_the_global_function() {
+fn a_call_through_a_namespace_is_a_call_of_its_plain_php_function() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public int run(List<int> extra)\n    {\n        return global.strlen(Pdf.render(global.sprintf(\"%d\", global.count(extra, mode: 0))));\n    }\n}\n",
+        &[(
+            "src/Vendor/Pdf/functions.php",
+            "<?php namespace Vendor\\Pdf; function render(string $html): string { return $html; }",
+        )],
+    );
+
     assert_eq!(
-        body_in("int run(List<int> extra)", "        return strlen(sprintf(\"%d\", count(extra, mode: 0)));\n", &[]),
+        lowered.body(),
         indoc! {r#"
             STMT_LIST
               RETURN
@@ -13503,17 +13541,48 @@ fn a_function_call_is_a_call_of_the_global_function() {
                   ZVAL "strlen"
                   ARG_LIST
                     CALL
-                      ZVAL "sprintf"
+                      ZVAL "Vendor\\Pdf\\render"
                       ARG_LIST
-                        ZVAL "%d"
                         CALL
-                          ZVAL "count"
+                          ZVAL "sprintf"
                           ARG_LIST
-                            VAR
-                              ZVAL "extra"
-                            NAMED_ARG
-                              ZVAL "mode"
-                              ZVAL 0
+                            ZVAL "%d"
+                            CALL
+                              ZVAL "count"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "extra"
+                                NAMED_ARG
+                                  ZVAL "mode"
+                                  ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
+/// return \Vendor\Pdf\DEFAULT_DPI + \PHP_INT_SIZE;
+/// ```
+///
+/// Spec section 23 reads a plain PHP constant through its namespace, as it calls a function: `Pdf.DEFAULT_DPI` after
+/// `import Vendor.Pdf;`, and `global.PHP_INT_SIZE` from PHP's root namespace. Each is a read of the constant by its
+/// full name, with `ZEND_NAME_FQ`, which is 0.
+#[test]
+fn a_read_through_a_namespace_is_a_read_of_its_plain_php_constant() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public int run()\n    {\n        return Pdf.DEFAULT_DPI + global.PHP_INT_SIZE;\n    }\n}\n",
+        &[("src/Vendor/Pdf/constants.php", "<?php namespace Vendor\\Pdf; const DEFAULT_DPI = 300;")],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [1]
+                  CONST
+                    ZVAL "Vendor\\Pdf\\DEFAULT_DPI"
+                  CONST
+                    ZVAL "PHP_INT_SIZE"
         "#}
     );
 }
@@ -13522,14 +13591,14 @@ fn a_function_call_is_a_call_of_the_global_function() {
 /// return \run($extra);
 /// ```
 ///
-/// Spec section 4 writes every member as `this.m()` or `Class.m()`, so a bare call inside `run` calls the global
-/// function `run`, not the method.
+/// Spec section 4 writes every member as `this.m()` or `Class.m()`, so `global.run(extra)` inside `run` calls the
+/// global function `run`, not the method.
 #[test]
-fn a_bare_call_named_like_a_method_of_its_class_is_a_call_of_the_global_function() {
+fn a_global_call_named_like_a_method_of_its_class_is_a_call_of_the_global_function() {
     assert_eq!(
         body_in(
             RUN,
-            "        return run(extra);\n",
+            "        return global.run(extra);\n",
             &[("src/run.php", "<?php function run(int $extra): int { return $extra; }")]
         ),
         indoc! {r#"
@@ -13545,31 +13614,22 @@ fn a_bare_call_named_like_a_method_of_its_class_is_a_call_of_the_global_function
 }
 
 /// ```php
-/// exit(1);
 /// exit($extra);
-/// exit();
 /// ```
 ///
-/// PHP 8.4 makes `exit` a function, so php-src's grammar builds `exit(…)` as a call of the global function `exit`,
-/// named with `ZEND_NAME_FQ`, which is 0.
+/// PHP 8.4 makes `exit` a function, so `global.exit(…)` is a call of the global function `exit`, named with
+/// `ZEND_NAME_FQ`, which is 0, as php-src's grammar builds `exit(…)`.
 #[test]
 fn exit_is_a_call_of_the_global_function_exit() {
     assert_eq!(
-        body("        exit(1);\n        exit(extra);\n        exit();\n"),
+        body("        global.exit(extra);\n"),
         indoc! {r#"
             STMT_LIST
               CALL
                 ZVAL "exit"
                 ARG_LIST
-                  ZVAL 1
-              CALL
-                ZVAL "exit"
-                ARG_LIST
                   VAR
                     ZVAL "extra"
-              CALL
-                ZVAL "exit"
-                ARG_LIST
         "#}
     );
 }
@@ -13585,7 +13645,7 @@ fn exit_is_a_call_of_the_global_function_exit() {
 fn a_template_is_an_encaps_list_of_its_text_and_interpolations() {
     assert_eq!(
         body(
-            "        const label = `Order ${extra}: ${strlen(\"x\")}!`;\n        const alone = `${extra}`;\n        const plain = `plain \\x41`;\n        return extra;\n"
+            "        const label = `Order ${extra}: ${global.strlen(\"x\")}!`;\n        const alone = `${extra}`;\n        const plain = `plain \\x41`;\n        return extra;\n"
         ),
         indoc! {r#"
             STMT_LIST
@@ -13920,7 +13980,7 @@ fn a_template_over_several_lines_keeps_the_line_of_each_part() {
 ///     {
 ///     }
 ///
-///     #[\Lib\Entity(true, PHP_INT_MAX)]
+///     #[\Lib\Entity(true, \PHP_INT_MAX)]
 ///     public function run(#[\Lib\Field] int $extra): void
 ///     {
 ///     }
@@ -13933,7 +13993,7 @@ fn a_template_over_several_lines_keeps_the_line_of_each_part() {
 #[test]
 fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Field;\nimport Lib.Entity;\n\n[Entity(label: \"Orders\", order: 2 * 3), Searchable]\n[Entity(null)]\nclass Report\n{\n    [Field] private int count = 0;\n\n    public Report([Field(-1.5)] public int total { get; })\n    {\n    }\n\n    [Entity(true, PHP_INT_MAX)]\n    public void run([Field] int extra)\n    {\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Field;\nimport Lib.Entity;\n\n[Entity(label: \"Orders\", order: 2 * 3), Searchable]\n[Entity(null)]\nclass Report\n{\n    [Field] private int count = 0;\n\n    public Report([Field(-1.5)] public int total { get; })\n    {\n    }\n\n    [Entity(true, global.PHP_INT_MAX)]\n    public void run([Field] int extra)\n    {\n    }\n}\n",
         &[common::FIELD, common::ENTITY, common::SEARCHABLE],
     );
 
@@ -13999,7 +14059,7 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
                         ARG_LIST
                           ZVAL true
                           CONST
-                            ZVAL [1] "PHP_INT_MAX"
+                            ZVAL "PHP_INT_MAX"
               ATTRIBUTE_LIST
                 ATTRIBUTE_GROUP
                   ATTRIBUTE
@@ -14871,7 +14931,7 @@ fn a_backed_enum_is_a_final_enum_class_with_its_backing_type_cases_and_methods()
 #[test]
 fn a_pure_enum_is_a_final_enum_class_of_unit_cases_without_a_backing_type() {
     let lowered = Lowered::new(
-        "enum Suit\n{\n    case Hearts;\n    case Spades;\n\n    public string label() => this.name;\n\n    public static int size() => count(Suit.cases());\n}\n",
+        "enum Suit\n{\n    case Hearts;\n    case Spades;\n\n    public string label() => this.name;\n\n    public static int size() => global.count(Suit.cases());\n}\n",
     );
 
     assert_eq!(
@@ -15442,7 +15502,7 @@ fn a_method_whose_body_is_one_call_reading_each_slot_once_gives_an_inline_form()
 fn a_method_that_runs_position_current_gives_no_inline_form() {
     assert_eq!(
         form_names(
-            "namespace Sharp;\n\npublic class Here\n{\n    public static Position now() => Position.current();\n\n    public static string shout(string text) => strtoupper(text);\n}\n"
+            "namespace Sharp;\n\npublic class Here\n{\n    public static Position now() => Position.current();\n\n    public static string shout(string text) => global.strtoupper(text);\n}\n"
         ),
         ["sharp\\here::shout"]
     );
@@ -15473,10 +15533,10 @@ fn a_form_that_reads_its_slots_in_order_first_inlines_with_any_arguments() {
     );
 }
 
-/// `Sharp\Padding` at the standard library's path, with a method whose body reads the global constant `STR_PAD_LEFT`.
+/// `Sharp\Padding` at the standard library's path, with a method whose body reads PHP's constant `STR_PAD_LEFT`.
 const PADDING: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Padding.sharp",
-    "namespace Sharp;\n\npublic class Padding\n{\n    public static string left(string text, int width) => str_pad(text, width, \" \", STR_PAD_LEFT);\n\n    public static string after(string text, int start) => substr(text, start, null);\n}\n",
+    "namespace Sharp;\n\npublic class Padding\n{\n    public static string left(string text, int width) => global.str_pad(text, width, \" \", global.STR_PAD_LEFT);\n\n    public static string after(string text, int start) => global.substr(text, start, null);\n}\n",
 );
 
 /// The statements of `run`, declared with `signature` and holding `statements` in a class of `namespace` that imports
@@ -15493,8 +15553,8 @@ fn padded_body(namespace: &str, signature: &str, statements: &str) -> String {
 /// return \str_pad($name, 4, ' ', \STR_PAD_LEFT);
 /// ```
 ///
-/// A form may read a global constant, as it reads a literal. The form is copied out of the standard library file's
-/// namespace, so it names the constant by its full name, `ZEND_NAME_FQ`, which is 0.
+/// A form may read PHP's constant through `global`, as it reads a literal. `global.STR_PAD_LEFT` names the constant by
+/// its full name, `ZEND_NAME_FQ`, which is 0, so the copy of the form in the caller's namespace reads the same one.
 #[test]
 fn a_form_that_reads_a_global_constant_names_it_by_its_full_name() {
     assert_eq!(
@@ -15566,15 +15626,18 @@ fn a_form_that_reads_a_global_constant_inlines_the_same_tree_in_any_namespace() 
 }
 
 /// ```php
-/// return \str_pad($name, PHP_INT_SIZE, ' ', \STR_PAD_LEFT);
+/// return \str_pad($name, WIDTH, ' ', \STR_PAD_LEFT);
 /// ```
 ///
-/// A constant the caller passes keeps the caller's short name, `[1]` `ZEND_NAME_NOT_FQ`, which the engine looks up
-/// in the caller's namespace first, as the caller wrote it. Only the form's own constant takes its full name.
+/// A constant of its own the caller passes keeps the caller's short name, `[1]` `ZEND_NAME_NOT_FQ`, which the engine
+/// looks up in the caller's namespace, as the caller wrote it. The form's PHP constant keeps its full name.
 #[test]
 fn a_constant_the_caller_passes_keeps_its_short_name_beside_the_forms_full_name() {
+    let width = ("src/App/Tenant/constants.php", "<?php\n\nnamespace App\\Tenant;\n\nconst WIDTH = 4;\n");
+    let code = "namespace App.Tenant;\n\nimport Sharp.Padding;\n\nclass Report\n{\n    public string run(string name)\n    {\n        return Padding.left(name, WIDTH);\n    }\n}\n";
+
     assert_eq!(
-        padded_body("App.Tenant", "string run(string name)", "        return Padding.left(name, PHP_INT_SIZE);\n"),
+        Lowered::inlining(code, &[width], &[PADDING]).body(),
         indoc! {r#"
             STMT_LIST
               RETURN
@@ -15584,7 +15647,7 @@ fn a_constant_the_caller_passes_keeps_its_short_name_beside_the_forms_full_name(
                     VAR
                       ZVAL "name"
                     CONST
-                      ZVAL [1] "PHP_INT_SIZE"
+                      ZVAL [1] "WIDTH"
                     ZVAL " "
                     CONST
                       ZVAL "STR_PAD_LEFT"
@@ -16675,7 +16738,7 @@ fn an_extension_member_passes_a_named_argument_by_its_name() {
 /// `trim` with a method, `strlen` with a computed property and `strtoupper` with a method whose block returns it.
 const TEXT_EXTENSIONS: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/TextExtensions.sharp",
-    "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    public const int LIMIT = 80;\n\n    extension(string text)\n    {\n        public string trim() => trim(text);\n\n        public int length => strlen(text);\n\n        public string upper()\n        {\n            return strtoupper(text);\n        }\n    }\n}\n",
+    "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    public const int LIMIT = 80;\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public int length => global.strlen(text);\n\n        public string upper()\n        {\n            return global.strtoupper(text);\n        }\n    }\n}\n",
 );
 
 /// ```php
