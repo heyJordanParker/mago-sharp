@@ -60,4 +60,4 @@ pub fn defaults_trait_name(interface: &[u8]) -> Word {
 }
 
 /// What [`defaults_trait_name`] adds to an interface's name.
-pub const DEFAULTS_TRAIT_SUFFIX: &[u8] = b"\\Defaults";
+pub(crate) const DEFAULTS_TRAIT_SUFFIX: &[u8] = b"\\Defaults";
