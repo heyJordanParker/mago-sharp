@@ -7068,6 +7068,41 @@ fn a_type_parameter_without_a_bound_is_mixed_alone_nullable_or_in_a_union() {
 }
 
 /// ```php
+/// /** @template T of object */
+/// public function keep(object $value): object { return $value; }
+/// ```
+///
+/// A type parameter bounded by `Object` is PHP's `object`, and a call from plain PHP gives it `Object`.
+#[test]
+fn a_type_parameter_bounded_by_object_is_php_object() {
+    let lowered = Lowered::new(indoc! {"
+        class Report
+        {
+            public T keep<T : Object>(T value) => value;
+        }
+    "});
+    let method = lowered.child(lowered.child(lowered.child(lowered.root(), 1), 2), 0);
+
+    assert_eq!(
+        format!("{}{}", lowered.render(lowered.child(method, 0)), lowered.render(lowered.child(method, 3))),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM
+                ZVAL [1] "Object"
+                ZVAL "value"
+                null
+                null
+                null
+                null
+              SHARP_TYPE_ARGS
+                ZVAL "Object"
+                null
+            ZVAL [1] "Object"
+        "#}
+    );
+}
+
+/// ```php
 /// /** @template TItem of \Lib\DatabaseEntity&\Lib\Shareable */
 /// public function share(\Lib\DatabaseEntity&\Lib\Shareable $item): (\Lib\DatabaseEntity&\Lib\Shareable)|null
 /// ```
@@ -8816,6 +8851,45 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs
         "STMT_LIST\n  RETURN\n    MATCH\n      ZVAL true\n      MATCH_ARM_LIST\n        MATCH_ARM\n          EXPR_LIST\n            SHARP_IS_TYPE\n              VAR\n                ZVAL \"value\"\n              ZVAL \"#0\"\n          ZVAL 1\n        MATCH_ARM\n          null\n          ZVAL 0\n"
     );
     assert_eq!(lowered.body_of("kind"), "STMT_LIST\n  RETURN\n    SHARP_TYPE_OF\n      ZVAL \"#0\"\n");
+}
+
+/// `typeof` of a type that is no class is a `SHARP_TYPE_OF` of its type text, as `typeof(T)` is when `T` runs as that
+/// type, so the engine gives its class value. `typeof(Self)` is PHP's `static::class`, and a static call through it is
+/// PHP's `static::method()`.
+#[test]
+fn typeof_of_a_type_that_is_no_class_spells_its_type() {
+    let lowered = Lowered::new(indoc! {"
+        namespace App;
+
+        public class Order
+        {
+            public static string defaultTag() => \"div\";
+
+            public static Any whole() => typeof(int);
+
+            public static Any orders() => typeof(List<Order>);
+
+            public static Any counts() => typeof(Map<string, int>);
+
+            public static Any numbers() => typeof(Set<int>);
+
+            public static Any own() => typeof(Self);
+
+            public static string tag() => typeof(Self).defaultTag();
+        }
+    "});
+    let type_of = |text: &str| format!("STMT_LIST\n  RETURN\n    SHARP_TYPE_OF\n      ZVAL \"{text}\"\n");
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert_eq!(lowered.body_of("whole"), type_of("int"));
+    assert_eq!(lowered.body_of("orders"), type_of("List<App.Order>"));
+    assert_eq!(lowered.body_of("counts"), type_of("Map<string, int>"));
+    assert_eq!(lowered.body_of("numbers"), type_of("Set<int>"));
+    assert_eq!(lowered.body_of("own"), "STMT_LIST\n  RETURN\n    CLASS_NAME\n      ZVAL [1] \"static\"\n");
+    assert_eq!(
+        lowered.body_of("tag"),
+        "STMT_LIST\n  RETURN\n    STATIC_CALL\n      ZVAL [1] \"static\"\n      ZVAL \"defaultTag\"\n      ARG_LIST\n"
+    );
 }
 
 /// `new TItem(…)` is a `NEW` that names no class under the `SHARP_TYPE_ARGS` of `TItem`'s text, so the engine creates

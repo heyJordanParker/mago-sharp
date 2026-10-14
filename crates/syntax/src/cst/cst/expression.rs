@@ -45,6 +45,7 @@ use crate::cst::cst::pipe::Pipe;
 use crate::cst::cst::string::CompositeString;
 use crate::cst::cst::string::StringPart;
 use crate::cst::cst::throw::Throw;
+use crate::cst::cst::type_hint::Hint;
 use crate::cst::cst::type_of::TypeOf;
 use crate::cst::cst::unary::UnaryPostfix;
 use crate::cst::cst::unary::UnaryPrefix;
@@ -126,8 +127,9 @@ impl<'arena> Expression<'arena> {
             Self::Literal(_) => true,
             Self::Identifier(_) => true,
             Self::MagicConstant(_) => true,
-            // A class value with type arguments is created while the code runs, spec section 25.
-            Self::TypeOf(type_of) => type_of.type_arguments.is_none(),
+            // `typeof(Order)` is PHP's `Order::class`. The class value of any other type, `Self` and a class with type
+            // arguments included, is created while the code runs, spec section 25.
+            Self::TypeOf(type_of) => matches!(type_of.r#type, Hint::Identifier(_)),
             Self::GenericClass(generic_class) => generic_class.class.is_constant(version, initialization),
             Self::ConstantAccess(_) => true,
             Self::Self_(_) => true,

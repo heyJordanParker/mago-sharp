@@ -96,6 +96,7 @@ use mago_syntax::cst::StringPart;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Terminator;
 use mago_syntax::cst::TryCatchClause;
+use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPostfix;
@@ -128,6 +129,9 @@ const SUPERGLOBALS: [&[u8]; 9] =
 /// How PHP# writes PHP's `mixed`. The parser reads both as `Hint::Mixed`, and only `Any` is PHP#.
 const ANY: &[u8] = b"Any";
 
+/// How PHP# writes PHP's `object`, spec section 24. The parser reads both as `Hint::Object`, and only `Object` is PHP#.
+const OBJECT: &[u8] = b"Object";
+
 /// Checks a PHP# file against the slice: the only constructs a `.sharp` file may use, and the contract the
 /// engine's lowering implements.
 ///
@@ -157,8 +161,8 @@ const ANY: &[u8] = b"Any";
 ///   `<out TItem : DatabaseEntity & Shareable, TKey>`. A name is `T`, or `T` and an uppercase ASCII letter, as in
 ///   `TItem`, and any other name is an error, as C# names them. A list that declares a name twice is an error. `in` and
 ///   `out` on a method's type parameter are errors, because only a class or an interface declares variance, spec
-///   section 11.1. A bound is a class or an interface, a generic class type, as in `Comparable<TItem>`, or several of
-///   them joined with `&`, and any other bound is an error. A type parameter is in scope in its class's or interface's
+///   section 11.1. A bound is `Object`, a class or an interface, a generic class type, as in `Comparable<TItem>`, or
+///   several classes and interfaces joined with `&`, and any other bound is an error. A type parameter is in scope in its class's or interface's
 ///   whole declaration, its header included, and in its method's signature and body, as the binder decides. A
 ///   constant uses none of its class's type parameters, because every `Box<…>` shares it. A static field, property or
 ///   method uses them, because each type argument has its own, as `Box<int>.count` reaches it. The analyzer checks
@@ -735,7 +739,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             let message = if matches!(bound.hint, Hint::Union(_)) {
                 "A bound can't be a union: join several bounds with `&`."
             } else {
-                "A bound is a class or an interface, as in `<TItem : DatabaseEntity>`."
+                "A bound is `Object`, a class or an interface, as in `<TItem : DatabaseEntity>`."
             };
             context.report(
                 Issue::error(message)
@@ -746,7 +750,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         // `is_slice_bound` decided the bound, and a generic class's type arguments in it are a parameter's types.
-        (Node::Hint(Hint::Identifier(_) | Hint::Intersection(_)) | Node::IntersectionHint(_), Place::TypeParameter) => {
+        (
+            Node::Hint(Hint::Object(_) | Hint::Identifier(_) | Hint::Intersection(_)) | Node::IntersectionHint(_),
+            Place::TypeParameter,
+        ) => {
             Some(Place::TypeParameter)
         }
         (Node::Hint(Hint::Generic(_)), Place::TypeParameter) => Some(Parameter),
@@ -1499,25 +1506,30 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         ) => Some(place),
         (Node::Expression(Expression::ArrayAccess(_)) | Node::ArrayAccess(_), Body) => Some(Body),
         (Node::ConstantAccess(_), Body) => Some(Body),
-        (Node::TypeOf(type_of), Body | Constant)
-            if context.names.is_type_parameter(&type_of.class)
-                && let Some(type_arguments) = &type_of.type_arguments =>
-        {
-            let name = BytesDisplay(type_of.class.value());
-            context.report(
-                Issue::error(format!("A type parameter takes no type arguments: write `typeof({name})`."))
-                    .with_annotation(Annotation::primary(type_arguments.span()).with_message("Written here.")),
+        // `typeof(Self)` is the class a static method is called on, as `Self` is in `new Self(…)`.
+        (Node::TypeOf(TypeOf { r#type: Hint::Self_(keyword), .. }), Body) if is_sharp_self(keyword) => None,
+        // A class value's type holds one type, so a nullable or union type has none.
+        (Node::TypeOf(TypeOf { r#type: r#type @ (Hint::Nullable(_) | Hint::Union(_) | Hint::Parenthesized(_)), .. }), _) => {
+            report_not_supported(
+                r#type.span(),
+                "type",
+                "`typeof` takes one type, as in `typeof(Order)`, `typeof(int)`, `typeof(List<Order>)` or `typeof(Self)`, and no nullable or union type.",
+                context,
             );
 
             None
         }
-        (Node::TypeOf(type_of), Constant) if context.names.is_type_parameter(&type_of.class) => {
-            report_type_argument_in_constant(type_of.span(), context);
+        (Node::TypeOf(TypeOf { r#type: Hint::Identifier(name), .. }), Constant)
+            if context.names.is_type_parameter(name) =>
+        {
+            report_type_argument_in_constant(node.span(), context);
 
             None
         }
-        // `typeof(X)` is `X::class`, which PHP takes as a constant expression too.
-        (Node::Expression(Expression::TypeOf(_)) | Node::TypeOf(_), Body | Constant) => Some(place),
+        // `typeof(X)` of a class is `X::class`, which PHP takes as a constant expression too. Its type is checked as a
+        // local's type is.
+        (Node::Expression(Expression::TypeOf(_)), Body | Constant) => Some(place),
+        (Node::TypeOf(_), Body | Constant) => Some(Body),
         // The parser builds a class with type arguments only before `.`, as `Counter<Order>.count`. Only a class takes
         // them, so a type parameter, a local or a constant written so is refused, as C# refuses it (CS0307).
         (Node::GenericClass(generic_class), Body)
@@ -2085,9 +2097,20 @@ fn check_struct_declaration(r#struct: &Struct, context: &mut Context<'_, '_, '_>
     }
 }
 
+/// Whether `hint` is a class value's type, `Class<T>`, nullable or not.
+fn is_class_value_type(hint: &Hint) -> bool {
+    match hint {
+        Hint::Generic(generic) => generic.name.value == b"Class",
+        Hint::Nullable(nullable) => is_class_value_type(nullable.hint),
+        _ => false,
+    }
+}
+
 /// Checks an extension block of a static class, spec section 26: one receiver, a parameter with no modifier, default
 /// or `...`, and members that are methods or computed properties of the receiver, each with only an access modifier,
-/// naming the receiver and never `this`. A static class has no constructor, in an extension either.
+/// naming the receiver and never `this`. A static class has no constructor, in an extension either. A class value's
+/// members are `Class`'s own and the statics of the class it holds, spec section 25, so only the standard library
+/// extends `Class`.
 fn check_extension(extension: &Extension, context: &mut Context<'_, '_, '_>) {
     let receivers = &extension.parameter_list.parameters;
     let refused_receiver = match receivers.as_slice() {
@@ -2107,6 +2130,18 @@ fn check_extension(extension: &Extension, context: &mut Context<'_, '_, '_>) {
     }
     if let Some(type_parameters) = extension.type_parameters {
         check_extension_type_parameters(extension, type_parameters, context);
+    }
+    if let [FunctionLikeParameter { hint: Some(hint), .. }] = receivers.as_slice()
+        && is_class_value_type(hint)
+        && !is_standard_library_namespace(context.program)
+    {
+        context.report(
+            Issue::error(
+                "An extension can't add members to `Class`: a class value's members are `Class`'s own and the statics of the class it holds.",
+            )
+            .with_annotation(Annotation::primary(hint.span()).with_message("Receiver written here."))
+            .with_help("Write a static method that takes the class value, as in `public static string describe<T>(Class<T> type)`."),
+        );
     }
 
     let receiver = receivers.first().map_or(b"value".as_slice(), |receiver| receiver.variable.name);
@@ -3420,10 +3455,11 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
     }
 }
 
-/// Whether a type parameter's bound is a class or an interface, a generic class type, or several of them joined with
-/// `&`, as spec section 11 writes it.
+/// Whether a type parameter's bound is `Object`, a class or an interface, a generic class type, or several of them
+/// joined with `&`, as spec section 11 writes it. Mago's own check of an intersection refuses `Object` in one.
 fn is_slice_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
     match hint {
+        Hint::Object(object) => object.value == OBJECT,
         Hint::Identifier(name @ Identifier::Local(_)) => !context.names.is_type_parameter(name),
         Hint::Generic(generic) => {
             built_in_generic_arity(generic.name.value).is_none() && !context.names.is_type_parameter(&generic.name)
@@ -4337,7 +4373,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# header names each base class and interface by its short name, as in `: DatabaseEntity, Linkable`, and a generic one with its type arguments, as in `: PaginatedList<Order>`."
         }
         Place::TypeParameter => {
-            "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
+            "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
         }
         Place::Event => {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."

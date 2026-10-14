@@ -15,6 +15,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
 use mago_codex::ttype::builder::get_class_strings_of;
+use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -271,6 +272,26 @@ where
     }
 
     classes
+}
+
+/// The classes a value of `class_value_type` holds when it is a PHP# class value, spec section 25, leaving out `null`,
+/// or none when part of it is no class value. A `Class<T>` value holds `T` or a subclass, which has the same kind of
+/// member, so `T` stands for it. Whatever expression gives the value, its members are `Class`'s and the statics of
+/// these classes.
+pub(crate) fn class_value_classes(class_value_type: &TUnion) -> Option<Vec<Word>> {
+    let classes = class_value_type
+        .types
+        .iter()
+        .filter(|atomic| !atomic.is_null())
+        .map(|atomic| match atomic {
+            TAtomic::Scalar(TScalar::ClassLikeString(class)) => {
+                class.literal_value().or_else(|| class.constraint()?.get_object_or_enum_name())
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    (!classes.is_empty()).then_some(classes)
 }
 
 /// The class with type arguments a PHP# class value holds, as `Counter<Order>` for a `Class<Counter<Order>>`, spec

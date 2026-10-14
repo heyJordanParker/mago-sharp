@@ -1267,7 +1267,8 @@ where
 /// this function would be used on parameter `$b` to infer that `B` is `int`. In PHP#,
 /// `List<Order> orders = cache.get("orders")` against `T get<T>(string key)` infers that `T` is `List<Order>`.
 ///
-/// Returns the templates `input_type` falls outside the bound of. They get no bound from it.
+/// Returns each template `input_type` falls outside the bound of, with the type it gives and the bound. They get no
+/// bound from it.
 ///
 /// # Arguments
 ///
@@ -1280,7 +1281,7 @@ pub fn infer_unfixed_templates<A>(
     container_type: &TUnion,
     input_type: &TUnion,
     template_result: &mut TemplateResult,
-) -> WordSet
+) -> Vec<TemplateInferenceViolation>
 where
     A: Arena,
 {
@@ -1294,7 +1295,7 @@ where
         &mut violations,
     );
 
-    violations.into_iter().map(|violation| violation.template_name).collect()
+    violations
 }
 
 /// Replaces unbound `GenericParameter` types with their constraint types.

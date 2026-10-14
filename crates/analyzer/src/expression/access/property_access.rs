@@ -24,8 +24,11 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::access::analyze_class_value_member;
+use crate::expression::access::analyze_through_class_value;
 use crate::expression::call::analyze_extension_access;
 use crate::expression::is_refused_type;
+use crate::resolver::class_name::class_value_classes;
 use crate::resolver::property::resolve_instance_properties;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_property_access_expression_id;
@@ -135,6 +138,25 @@ where
             None,
             is_null_safe,
             span,
+        );
+    }
+
+    // PHP# reads a member through a class value, `typeof(X).y` or `type.y`, as `Class.y` reads it on the class the
+    // value holds, which is PHP's `$type::y`, spec section 25.
+    if resolution_result.class_value
+        && let ClassLikeMemberSelector::Identifier(name) = property_selector
+        && let Some(classes) = artifacts.get_expression_type(object).and_then(class_value_classes)
+    {
+        return analyze_through_class_value(
+            context,
+            block_context,
+            artifacts,
+            object,
+            is_null_safe,
+            span,
+            |context, block_context, artifacts| {
+                analyze_class_value_member(context, block_context, artifacts, object, name, span, classes, true)
+            },
         );
     }
 

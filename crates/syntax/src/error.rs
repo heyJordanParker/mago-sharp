@@ -52,7 +52,7 @@ pub enum ParseError {
     RecursionLimitExceeded(Span),
     /// PHP syntax written in a PHP# file, such as `->` where PHP# writes `.`.
     PhpSyntaxInSharp(TokenKind, Span),
-    /// PHP's `Order::class` written in a PHP# file, with the name before `::`, at the `::`.
+    /// PHP's `Order::class` written in a PHP# file, with the name before `::` as written, at the `::`.
     ClassNameConstantInSharp(Box<str>, Span),
     /// A `\` name written in a PHP# file, such as `\Lib\Calc`, with the dotted name its `import` line takes.
     QualifiedNameInSharp(Box<str>, Span),
@@ -267,10 +267,12 @@ impl std::fmt::Display for ParseError {
                 }
                 kind => format!("`{kind}` is PHP syntax that PHP# does not have"),
             },
-            // Spec section 24 capitalizes every type but the built-in ones, so a lowercase name is a value.
+            // Spec section 24 capitalizes every type but the built-in ones, so a name whose last part is lowercase is a
+            // value, and a class is written by its short name.
             ParseError::ClassNameConstantInSharp(name, _) => {
-                if name.starts_with(|first: char| first.is_ascii_uppercase()) {
-                    format!("`{name}::class` is PHP syntax: PHP# writes `typeof({name})`")
+                let class = name.rsplit('.').next().unwrap_or(name);
+                if class.starts_with(|first: char| first.is_ascii_uppercase()) {
+                    format!("`{name}::class` is PHP syntax: PHP# writes `typeof({class})`")
                 } else {
                     format!("`{name}::class` is PHP syntax: PHP# writes `Class.of({name})`")
                 }

@@ -28,8 +28,11 @@ use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::get_written_literal_type;
+use crate::expression::assignment::static_property_assignment;
 use crate::resolver::method::get_declared_type;
 use crate::resolver::property::resolve_instance_properties;
+use crate::resolver::static_property::StaticProperty;
+use crate::resolver::static_property::StaticPropertyName;
 use crate::utils::expression::get_property_access_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::get_type_diff;
@@ -77,6 +80,29 @@ where
         true, // `for_assignment`
     )?;
     block_context.flags.set_inside_assignment(was_inside_assignment);
+
+    // A PHP# write through a class value, `type.count = 1`, writes the static of the class the value holds, as
+    // `Class.count = 1` does, spec section 25. The class value is analyzed by now.
+    if resolution_result.class_value
+        && let ClassLikeMemberSelector::Identifier(name) = &property_access.property
+    {
+        let written = StaticProperty {
+            class: property_access.object,
+            name: StaticPropertyName::Identifier(name),
+            span: property_access.span(),
+        };
+
+        return static_property_assignment::analyze(
+            context,
+            block_context,
+            artifacts,
+            written,
+            assigned_value_type,
+            assigned_value,
+            None,
+            true,
+        );
+    }
 
     // A property a PHP# class declares as a `List`, a `Map` or a `Set`, or a union of them, takes only a literal of a
     // collection it declares, from `=` and from `??=`, and keeps the collection its literal names when one empties it.

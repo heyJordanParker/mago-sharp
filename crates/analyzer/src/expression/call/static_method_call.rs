@@ -58,12 +58,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodCall<'arena> {
             span: self.span(),
         };
 
-        analyze_static_method_call(context, block_context, artifacts, call, None)
+        analyze_static_method_call(context, block_context, artifacts, call, None, false)
     }
 }
 
 /// Analyzes a static method call from its parts, whether PHP wrote it as `Class::m()` or PHP# as `Class.m()`, with
-/// the type arguments PHP# writes as `Class.m<A>()`.
+/// the type arguments PHP# writes as `Class.m<A>()`. A PHP# call through a class value, `type.m()`, analyzed its class
+/// value to find it is one, so it is `class_is_analyzed`.
 #[allow(clippy::expect_used)]
 pub(crate) fn analyze_static_method_call<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -71,6 +72,7 @@ pub(crate) fn analyze_static_method_call<'ctx, 'arena, A>(
     artifacts: &mut AnalysisArtifacts,
     call: StaticCall<'_, 'arena>,
     type_arguments: Option<&TypeArgumentList<'arena>>,
+    class_is_analyzed: bool,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
@@ -115,8 +117,15 @@ where
         }
     }
 
-    let mut method_resolution =
-        resolve_static_method_targets(context, block_context, artifacts, call.class, call.method, call.span)?;
+    let mut method_resolution = resolve_static_method_targets(
+        context,
+        block_context,
+        artifacts,
+        call.class,
+        call.method,
+        call.span,
+        class_is_analyzed,
+    )?;
     // A refused class, as `Missing<Order>`, reported itself, so the call reports nothing again.
     if artifacts.get_expression_type(call.class).is_some_and(is_refused_type) {
         artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));

@@ -107,6 +107,7 @@ use mago_syntax::cst::StringPart;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Try;
 use mago_syntax::cst::TryCatchClause;
+use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::UnaryPostfixOperator;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Variable;
@@ -2826,8 +2827,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_TYPE_UNION, 0, line, &nodes)
     }
 
-    /// The type PHP writes for a type that is not a union, with generics erased. A built-in type is its name, and `Any`
-    /// is `mixed`. A class is its full name. `Self` is `static`. A `List` is a PHP array, so its type is `array`, and a
+    /// The type PHP writes for a type that is not a union, with generics erased. A built-in type is its name, `Object`
+    /// included, which only a type parameter's bound writes, and `Any` is `mixed`. A class is its full name. `Self` is `static`. A `List` is a PHP array, so its type is `array`, and a
     /// `Map` or a `Set` is the engine's `\Sharp\Map` or `\Sharp\Set`. A generic class type is its class, and `Class<T>` is `string`, because plain PHP receives a class
     /// value as its class-name string (spec section 25). A function type runs as PHP's `\Closure`. A type parameter is
     /// its bound, or `mixed` without one, as the PHP twin written with `@template` declares it, and the classes a bound
@@ -2837,9 +2838,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         'arena: 'hint,
     {
         match hint {
-            Hint::Integer(name) | Hint::Float(name) | Hint::Bool(name) | Hint::String(name) | Hint::Void(name) => {
-                PhpType::Named(name.value)
-            }
+            Hint::Integer(name)
+            | Hint::Float(name)
+            | Hint::Bool(name)
+            | Hint::String(name)
+            | Hint::Void(name)
+            | Hint::Object(name) => PhpType::Named(name.value),
             Hint::Mixed(_) => PhpType::Mixed,
             Hint::Identifier(name) => match self.names.binding(name) {
                 Some(Binding::TypeParameter { declaration }) => {
@@ -3496,14 +3500,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.node(SHARP_AST_NULLSAFE_PROP, 0, line, &[object, member])
                 }
             }
-            // `typeof` of a type parameter reads its type argument while the code runs.
-            Expression::TypeOf(type_of) if let Some(tested) = self.types.tested_type(&type_of.class) => {
+            // `typeof` of a type the code runs with spells it then: a type parameter's type argument, a generic PHP#
+            // class with its type arguments, and every type that is no class, as `int` or `List<Order>`.
+            Expression::TypeOf(type_of) if let Some(tested) = self.types.tested_type(&type_of.r#type) => {
                 let tested = self.type_text(line, &tested);
 
                 self.node(SHARP_AST_SHARP_TYPE_OF, 0, line, &[tested])
             }
             Expression::TypeOf(type_of) => {
-                let class = self.string(ZEND_NAME_FQ, self.line(type_of.class), self.names.get(&type_of.class));
+                let class = self.type_of_class(type_of);
 
                 self.node(SHARP_AST_CLASS_NAME, 0, line, &[class])
             }
@@ -3585,15 +3590,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_DIM, 0, line, &[entry, member])
     }
 
+    /// The class name node of `typeof(X)` of a class `X`, which PHP writes `X::class`: the name `X`, without the type
+    /// arguments of a plain PHP class, which carries none, or `static` for `Self`, the class a static method is called on.
+    fn type_of_class(&mut self, type_of: &TypeOf) -> u32 {
+        match &type_of.r#type {
+            Hint::Identifier(class) => self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class)),
+            Hint::Generic(generic) => self.string(ZEND_NAME_FQ, self.line(generic.name), self.names.get(&generic.name)),
+            Hint::Self_(keyword) => self.string(ZEND_NAME_NOT_FQ, self.line(keyword), b"static"),
+            r#type => unreachable!("the analyzer records a tested type for `typeof({type})`"),
+        }
+    }
+
     /// The class node of a static member read or call through `object` and the classes it can be, when `object` is a
-    /// class value: `typeof(X)` is the name `X`, and any other class value is the value, as in PHP's `$type::y`.
+    /// class value: `typeof(X)` of a class is the name `X`, and any other class value is the value, as in PHP's
+    /// `$type::y`.
     fn class_value(&mut self, object: &Expression) -> Option<(u32, Vec<&'lowering [u8]>)> {
         let classes = class_value_classes(self.types.expression_type(object))?;
         let class = match object {
-            Expression::TypeOf(type_of)
-                if !self.names.is_type_parameter(&type_of.class) && type_of.type_arguments.is_none() =>
-            {
-                self.string(ZEND_NAME_FQ, self.line(type_of.class), self.names.get(&type_of.class))
+            Expression::TypeOf(type_of) if self.types.tested_type(&type_of.r#type).is_none() => {
+                self.type_of_class(type_of)
             }
             _ => self.expression(object),
         };

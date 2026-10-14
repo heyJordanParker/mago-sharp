@@ -455,7 +455,7 @@ where
             span: initializer.span(),
         };
 
-        return analyze_static_method_call(context, block_context, artifacts, call, None);
+        return analyze_static_method_call(context, block_context, artifacts, call, None, false);
     }
 
     if !initializer.argument_list.arguments.is_empty() {

@@ -34,8 +34,6 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::control_action::ControlAction;
 use crate::error::AnalysisError;
-use crate::expression::access::analyze_null_safe_class_value;
-use crate::expression::access::class_value_static_classes;
 use crate::expression::access::report_full_name;
 use crate::expression::access::report_member_of_mixed_kinds;
 use crate::invocation::Invocation;
@@ -143,25 +141,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                     artifacts,
                     static_call,
                     call.type_arguments.as_ref(),
-                )
-            }
-            // PHP# calls a static method through a class value, `type.m()`, as PHP's `$type::m()`.
-            Call::Method(call)
-                if class_value_static_classes(context, block_context, call.object, &call.method).is_some() =>
-            {
-                let static_call = StaticCall {
-                    class: call.object,
-                    method: &call.method,
-                    argument_list: &call.argument_list,
-                    span: call.span(),
-                };
-
-                static_method_call::analyze_static_method_call(
-                    context,
-                    block_context,
-                    artifacts,
-                    static_call,
-                    call.type_arguments.as_ref(),
+                    false,
                 )
             }
             Call::Method(call) => {
@@ -169,35 +149,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                 report_member_of_mixed_kinds(context, artifacts, call.object, &call.method, true);
 
                 Ok(())
-            }
-            // PHP# calls a static method through a class value that may be null, `type?.m()`, as PHP's `$type::m()`
-            // when `type` holds a class.
-            Call::NullSafeMethod(call)
-                if class_value_static_classes(context, block_context, call.object, &call.method).is_some() =>
-            {
-                let static_call = StaticCall {
-                    class: call.object,
-                    method: &call.method,
-                    argument_list: &call.argument_list,
-                    span: call.span(),
-                };
-
-                analyze_null_safe_class_value(
-                    context,
-                    block_context,
-                    artifacts,
-                    call.object,
-                    call.span(),
-                    |context, block_context, artifacts| {
-                        static_method_call::analyze_static_method_call(
-                            context,
-                            block_context,
-                            artifacts,
-                            static_call,
-                            call.type_arguments.as_ref(),
-                        )
-                    },
-                )
             }
             Call::NullSafeMethod(call) => {
                 call.analyze(context, block_context, artifacts)?;

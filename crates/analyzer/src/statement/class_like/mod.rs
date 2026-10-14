@@ -84,7 +84,7 @@ use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_statics;
 use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
-use crate::resolver::extension::is_class_member;
+use crate::resolver::extension::class_member;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
 use crate::statement::function_like::FunctionLikeBody;
@@ -1546,7 +1546,8 @@ where
 
 /// Reports each static of a PHP# class-like named like a member of `Class`, spec section 25, as TypeScript's error 2699
 /// refuses a static named like a member of `Function`: `type.y` through a class value reaches a static method, a
-/// static property, a constant and an enum case alike, and `Class`'s own member wins, so the static would never run.
+/// static property, a constant and an enum case alike, and `Class`'s own member wins, so the static would never run. A
+/// member name is compared ignoring case, as PHP calls a method, and the message quotes each name as written.
 fn report_statics_named_like_class_members<A>(context: &mut Context<'_, '_, A>, members: &[ClassLikeMember<'_>])
 where
     A: Arena,
@@ -1573,14 +1574,14 @@ where
     }
 
     for (name, span) in statics {
-        if !is_class_member(context.codebase, name) {
+        let Some(member) = class_member(context.codebase, name) else {
             continue;
-        }
-        let name = String::from_utf8_lossy(name);
+        };
+        let (name, member) = (BytesDisplay(name), member.original_name);
         context.collector.report_with_code(
             IssueCode::NameAlreadyInUse,
             Issue::error(format!(
-                "`{name}` is a member of `Class`, so `type.{name}` on a class value never reaches this static. Rename it."
+                "`type.{name}` on a class value reaches `Class`'s member `{member}`, never this static. Rename it."
             ))
             .with_annotation(Annotation::primary(span).with_message("Declared here.")),
         );
@@ -2909,6 +2910,9 @@ fn check_abstract_method_signatures<'ctx, A>(
                 continue;
             }
 
+            let declaring_class_name = required_constructor_class(context, class_like_metadata, *method_name_atom)
+                .unwrap_or(declaring_class_name);
+            let declaring_class_name_str = declaring_class_name.as_bytes();
             if !checked_signatures.insert((declaring_class_name, *method_name_atom)) {
                 continue;
             }
@@ -3645,10 +3649,37 @@ where
     true
 }
 
+/// The class whose own constructor is written `required` nearest above the PHP# class `class_like_metadata`, when
+/// `method_name` is the constructor, spec section 25: `new Self(…)` creates any class below it with the arguments that
+/// constructor takes, so each constructor below it is compared with that one, not with its parent's.
+fn required_constructor_class<A>(
+    context: &Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    method_name: Word,
+) -> Option<Word>
+where
+    A: Arena,
+{
+    if !class_like_metadata.flags.is_sharp() || method_name.as_bytes() != b"__construct" {
+        return None;
+    }
+
+    std::iter::successors(class_like_metadata.direct_parent_class, |class| {
+        context.codebase.get_class_like(class.as_bytes())?.direct_parent_class
+    })
+    .find(|class| {
+        context
+            .codebase
+            .get_method(class.as_bytes(), b"__construct")
+            .is_some_and(|constructor| constructor.flags.is_required())
+    })
+}
+
 /// Reports a PHP# constructor that `new Self(…)` cannot call, below a `required` one, by the rule of spec section 25 it
-/// breaks: it must start with the parameters of the constructor above it, and give each parameter it adds a default.
-/// The code stays the one the signature check found. A parameter without a type, which only a file the parser refused
-/// declares, reads as `Any?`.
+/// breaks: it must start with the parameters of the `required` constructor, and leave no parameter without a default
+/// that constructor leaves out, whether it adds one or drops the default the `required` constructor gives. The message
+/// names the shortest `new Self(…)`, and the code stays the one the signature check found. A parameter without a type,
+/// which only a file the parser refused declares, reads as `Any?`.
 fn report_required_constructor_mismatch<A>(
     context: &mut Context<'_, '_, A>,
     child_name: &Word,
@@ -3665,14 +3696,28 @@ fn report_required_constructor_mismatch<A>(
     let name = |parameter: &FunctionLikeParameterMetadata| {
         String::from_utf8_lossy(mago_bytes::trim_start_byte(parameter.name.0.as_bytes(), b'$')).into_owned()
     };
-    let arguments = parent_method.parameters.iter().map(name).collect::<Vec<_>>().join(", ");
+    let arguments = parent_method
+        .parameters
+        .iter()
+        .filter(|parameter| !parameter.flags.has_default())
+        .map(name)
+        .collect::<Vec<_>>()
+        .join(", ");
     let keeps_the_start = parent_method
         .parameters
         .iter()
         .enumerate()
         .all(|(index, parent)| child_method.parameters.get(index).is_some_and(|child| child.name == parent.name));
-    let added =
-        child_method.parameters.iter().skip(parent_method.parameters.len()).find(|child| !child.flags.has_default());
+    let without_default: Vec<Word> = child_method
+        .parameters
+        .iter()
+        .enumerate()
+        .filter(|(index, child)| {
+            !child.flags.has_default()
+                && parent_method.parameters.get(*index).is_none_or(|parent| parent.flags.has_default())
+        })
+        .map(|(_, child)| word(name(child)))
+        .collect();
 
     let code = match incompatibility {
         SignatureCompatibilityIssue::ParameterNameMismatch { .. } => IssueCode::IncompatibleParameterName,
@@ -3680,12 +3725,17 @@ fn report_required_constructor_mismatch<A>(
         _ => IssueCode::IncompatibleParameterCount,
     };
     let leading_type_differs = matches!(incompatibility, SignatureCompatibilityIssue::IncompatibleParameterType { .. });
-    let issue = match added {
-        Some(added) if keeps_the_start && !leading_type_differs => {
-            let added = name(added);
+    let issue = match without_default.as_slice() {
+        [first, ..] if keeps_the_start && !leading_type_differs => {
+            let fix = if without_default.len() == 1 {
+                format!("give `{first}` a default")
+            } else {
+                "give each a default".to_owned()
+            };
 
             Issue::error(format!(
-                "`{child_name}`'s constructor adds `{added}` with no default, so `new Self({arguments})` cannot call it: give `{added}` a default."
+                "`{child_name}`'s constructor gives {} no default, so `new Self({arguments})` cannot call it: {fix}.",
+                and_list(&without_default)
             ))
         }
         _ => {

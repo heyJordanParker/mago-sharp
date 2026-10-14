@@ -2462,6 +2462,10 @@ fn php_member_access_and_concatenating_assignment_are_parse_errors_that_name_the
         ("Calc::make()", "`::` is PHP syntax: PHP# writes static access with `.`"),
         ("Calc::class", "`Calc::class` is PHP syntax: PHP# writes `typeof(Calc)`"),
         ("calc::class", "`calc::class` is PHP syntax: PHP# writes `Class.of(calc)`"),
+        ("Self::class", "`Self::class` is PHP syntax: PHP# writes `typeof(Self)`"),
+        ("Demo.Calc::class", "`Demo.Calc::class` is PHP syntax: PHP# writes `typeof(Calc)`"),
+        ("this.calc::class", "`this.calc::class` is PHP syntax: PHP# writes `Class.of(this.calc)`"),
+        ("make()::class", "`::` is PHP syntax: PHP# writes static access with `.`"),
         ("label .= \"x\"", "`.=` is PHP syntax: in PHP# `.` is member access"),
     ] {
         let source = format!("class Report\n{{\n    void run()\n    {{\n        {code};\n    }}\n}}\n");
@@ -3125,14 +3129,21 @@ fn an_attribute_target_is_not_supported_yet() {
     assert_eq!(names, [&b"NotNull"[..]]);
 }
 
-/// `typeof` names a class by its short name, and a class value of a generic class may carry its type arguments, spec
-/// section 25.
+/// `typeof` takes any type, spec section 25: a class by its short name, a class value of a generic class with its type
+/// arguments, `Self`, a built-in type, whose name `int` is never a cast there, and a collection.
 #[test]
-fn typeof_names_a_class_by_its_short_name_with_any_type_arguments() {
-    for (written, class, type_arguments) in [
-        ("typeof(Order)", "Order", None),
-        ("typeof(PaginatedList<Order>)", "PaginatedList", Some("<Order>")),
-        ("typeof(Pair<int, List<Order>>)", "Pair", Some("<int, List<Order>>")),
+fn typeof_takes_any_type() {
+    for (written, r#type) in [
+        ("typeof(Order)", "Order"),
+        ("typeof(PaginatedList<Order>)", "PaginatedList<Order>"),
+        ("typeof(Pair<int, List<Order>>)", "Pair<int, List<Order>>"),
+        ("typeof(Self)", "Self"),
+        ("typeof(int)", "int"),
+        ("typeof( string )", "string"),
+        ("typeof (bool)", "bool"),
+        ("typeof(List<Order>)", "List<Order>"),
+        ("typeof(Map<string, int>)", "Map<string, int>"),
+        ("typeof(Set<int>)", "Set<int>"),
     ] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
@@ -3151,8 +3162,7 @@ fn typeof_names_a_class_by_its_short_name_with_any_type_arguments() {
         let Some(Expression::TypeOf(type_of)) = keep.argument_list.arguments.first().map(Argument::value) else {
             panic!("expected `{written}`, got {:#?}", keep.argument_list.arguments);
         };
-        assert_eq!(source(code, &type_of.class), class);
-        assert_eq!(type_of.type_arguments.as_ref().map(|list| source(code, list)), type_arguments);
+        assert_eq!(source(code, &type_of.r#type), r#type);
         assert_eq!(source(code, type_of), written);
     }
 }
@@ -4149,10 +4159,10 @@ fn a_capitalized_type_in_parentheses_is_a_class_name_and_not_a_cast() {
         panic!("expected five statements, got {:#?}", method_body(program));
     };
     for (statement, class) in [(int, "Int"), (float, "Float"), (bool, "Bool")] {
-        let Expression::TypeOf(type_of) = expression(statement) else {
+        let Expression::TypeOf(TypeOf { r#type: Hint::Identifier(name), .. }) = expression(statement) else {
             panic!("expected `typeof({class})`, got {statement:#?}");
         };
-        assert_eq!(type_of.class.value(), class.as_bytes());
+        assert_eq!(name.value(), class.as_bytes());
     }
     let Expression::Parenthesized(parenthesized) = expression(parsed) else {
         panic!("expected `(Int.parse(text))`, got {parsed:#?}");
@@ -4165,6 +4175,36 @@ fn a_capitalized_type_in_parentheses_is_a_class_name_and_not_a_cast() {
         ),
         "{cast:#?}"
     );
+}
+
+/// PHP# writes a scalar type in lowercase only, spec section 24, so a capitalized one is the standard library's class
+/// of that name, and PHP keeps reading a scalar type ignoring case.
+#[test]
+fn a_capitalized_scalar_type_is_a_class_name() {
+    for (dialect, written, class) in [
+        (Dialect::Sharp, "Int", true),
+        (Dialect::Sharp, "Float", true),
+        (Dialect::Sharp, "Bool", true),
+        (Dialect::Sharp, "String", true),
+        (Dialect::Sharp, "int", false),
+        (Dialect::Php, "Int", false),
+    ] {
+        let (name, code) = match dialect {
+            Dialect::Sharp => {
+                ("src/Report.sharp", format!("class Report\n{{\n    void run({written} value) {{ }}\n}}\n"))
+            }
+            Dialect::Php => ("src/Report.php", format!("<?php\nfunction run({written} $value) {{ }}\n")),
+        };
+        let arena = LocalArena::new();
+        let program = parse(&arena, name, Box::leak(code.into_boxed_str()));
+
+        let hints = Node::Program(program).filter_map(|node| match node {
+            Node::FunctionLikeParameter(parameter) => parameter.hint.as_ref(),
+            _ => None,
+        });
+        assert!(program.errors.is_empty(), "{written}: {:#?}", program.errors);
+        assert_eq!(matches!(hints.as_slice(), [Hint::Identifier(_)]), class, "{dialect:?} `{written}`: {hints:#?}");
+    }
 }
 
 /// PHP lexes its casts ignoring case, so a PHP file keeps reading `(Int) $x` as an int cast.

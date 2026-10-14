@@ -28,12 +28,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassConstantAccess<'arena> {
     where
         A: Arena,
     {
-        analyze_class_constant_access(context, block_context, artifacts, self.class, &self.constant, self.span())
+        analyze_class_constant_access(context, block_context, artifacts, self.class, &self.constant, self.span(), false)
     }
 }
 
 /// Analyzes the class constant or enum case `class::constant`, which spans `span`: PHP's `Class::NAME`, or PHP#'s
-/// `Class.name` when the class has a constant or enum case by that name.
+/// `Class.name` when the class has a constant or enum case by that name. A PHP# read through a class value, `type.name`,
+/// analyzed its class value to find it is one, so it is `class_is_analyzed`.
 pub(crate) fn analyze_class_constant_access<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -41,11 +42,12 @@ pub(crate) fn analyze_class_constant_access<'ctx, 'arena, A>(
     class: &Expression<'arena>,
     constant: &ClassLikeConstantSelector<'arena>,
     span: Span,
+    class_is_analyzed: bool,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
 {
-    let resolution = resolve_class_constants(context, block_context, artifacts, class, constant, false)?;
+    let resolution = resolve_class_constants(context, block_context, artifacts, class, constant, class_is_analyzed)?;
 
     let mut resulting_type = if resolution.has_ambiguous_path { Some(get_mixed()) } else { None };
     for resolved_constant in resolution.constants {

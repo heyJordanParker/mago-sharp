@@ -2891,10 +2891,7 @@ generate_ast_walker! {
 
     'arena TypeOf as type_of => {
         walker.walk_keyword(&type_of.r#typeof, context);
-        walker.walk_identifier(&type_of.class, context);
-        if let Some(type_arguments) = &type_of.type_arguments {
-            walker.walk_type_argument_list(type_arguments, context);
-        }
+        walker.walk_hint(&type_of.r#type, context);
     }
 
     'arena GenericClass as generic_class => {

@@ -963,7 +963,11 @@ where
         );
         let return_type = inferred_type_replacer::replace(&return_type, template_result, context.codebase);
 
-        violated_templates.extend(infer_unfixed_templates(context, &return_type, expected_type, template_result));
+        violated_templates.extend(
+            infer_unfixed_templates(context, &return_type, expected_type, template_result)
+                .into_iter()
+                .map(|violation| violation.template_name),
+        );
     }
 
     let mut unbound_templates = WordSet::default();

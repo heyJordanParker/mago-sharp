@@ -489,7 +489,8 @@ where
         Ok((span, refused))
     }
 
-    /// The bare name before `::class` in a PHP# file, as in `Order::class`, or `None` for any other `::`.
+    /// The name before `::class` in a PHP# file as it is written, as `Order` in `Order::class`, `Self` in `Self::class`
+    /// or `Demo.Order` in `Demo.Order::class`, or `None` for any other `::`.
     fn class_name_constant_name(
         &mut self,
         lhs: &Expression<'arena>,
@@ -498,11 +499,7 @@ where
             return Ok(None);
         }
 
-        Ok(match lhs {
-            Expression::Identifier(Identifier::Local(name)) => Some(String::from_utf8_lossy(name.value).into()),
-            Expression::ConstantAccess(access) => Some(String::from_utf8_lossy(access.name.value()).into()),
-            _ => None,
-        })
+        Ok(written_name(lhs).map(String::into_boxed_str))
     }
 
     fn parse_postfix_expression(
@@ -1086,5 +1083,21 @@ where
             })),
             _ => self.arena.alloc(Expression::Assignment(Assignment { lhs, operator, rhs })),
         }
+    }
+}
+
+/// The PHP# name `expression` writes, as `Order`, `this`, `Self`, or names joined with `.`, as `Demo.Order` and
+/// `this.kept`, or `None` for any other expression.
+fn written_name(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::Identifier(Identifier::Local(name)) => Some(String::from_utf8_lossy(name.value).into_owned()),
+        Expression::ConstantAccess(access) => Some(String::from_utf8_lossy(access.name.value()).into_owned()),
+        Expression::Self_(keyword) => Some(String::from_utf8_lossy(keyword.value).into_owned()),
+        Expression::Access(Access::Property(PropertyAccess {
+            object,
+            property: ClassLikeMemberSelector::Identifier(name),
+            ..
+        })) => Some(format!("{}.{}", written_name(object)?, String::from_utf8_lossy(name.value))),
+        _ => None,
     }
 }

@@ -2889,6 +2889,28 @@ fn an_extension_block_type_parameter_appears_in_its_receiver() {
     );
 }
 
+/// A class value's members are `Class`'s own and the statics of the class it holds, spec section 25, so only the
+/// standard library, under `Sharp`, declares an extension of `Class`, nullable or not, and a class value of another
+/// type is any other receiver's member, as `List<Class<Order>>` is.
+#[test]
+fn only_the_standard_library_extends_class() {
+    let refusal = "An extension can't add members to `Class`: a class value's members are `Class`'s own and the statics of the class it holds.";
+    for (namespace, receiver, expected) in [
+        ("App.Shared", "extension<T>(Class<T> type)", vec![format!("5:18 {refusal}")]),
+        ("App.Shared", "extension(Class<Order> type)", vec![format!("5:15 {refusal}")]),
+        ("App.Shared", "extension<T>(Class<T>? type)", vec![format!("5:18 {refusal}")]),
+        ("App.Shared", "extension<T>(List<Class<T>> types)", vec![]),
+        ("Sharp", "extension<T>(Class<T> type)", vec![]),
+        ("Sharp.Data", "extension<T>(Class<T> type)", vec![]),
+    ] {
+        let code = format!(
+            "namespace {namespace};\n\npublic static class Classes\n{{\n    {receiver}\n    {{\n        public string describe() => \"\";\n    }}\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), expected, "`{namespace}`: `{receiver}`");
+    }
+}
+
 /// An extension adds methods and computed properties to its receiver's type. A value of that type has no storage of
 /// the extension's, and the static class holds its constants, operators, laws and constructors.
 #[test]
@@ -4125,11 +4147,31 @@ fn new_through_a_class_value_calls_the_constructor_with_its_arguments() {
     );
 }
 
+/// `typeof` takes any one type in a method body, spec section 25: a class, a built-in type, a collection, and `Self`,
+/// the class a static method is called on. A class value holds one type, so a nullable or union type is not supported
+/// yet, and PHP's `self` is refused as it is everywhere.
 #[test]
-fn typeof_names_a_class_in_a_method_body() {
-    let code = leak(method("        Store.keep(typeof(Order));\n        return extra;\n"));
+fn typeof_takes_one_type_in_a_method_body() {
+    let refusal = "This type is not supported yet in PHP#.";
+    for (r#type, expected) in [
+        ("Order", vec![]),
+        ("int", vec![]),
+        ("List<Order>", vec![]),
+        ("Map<string, int>", vec![]),
+        ("Set<int>", vec![]),
+        ("Self", vec![]),
+        ("int?", vec![format!("7:27 {refusal}")]),
+        ("int|string", vec![format!("7:27 {refusal}")]),
+        ("(Order|Line)", vec![format!("7:27 {refusal}")]),
+        (
+            "self",
+            vec!["7:27 PHP# has no `self`: write the class's own name, `Report`, for the declaring class.".to_owned()],
+        ),
+    ] {
+        let code = leak(method(&format!("        Store.keep(typeof({type}));\n        return extra;\n")));
 
-    assert_eq!(issues(code), Vec::<String>::new());
+        assert_eq!(issues(code), expected, "`typeof({type})`");
+    }
 }
 
 /// A member of `typeof(X)` or of a local holding a class value is a static member of the class it holds, as `X.y` is,
@@ -4540,23 +4582,29 @@ fn in_or_out_is_an_error_only_on_a_method_type_parameter() {
     );
 }
 
-/// A bound is a class or an interface, a generic class type, or several of them joined with `&`, spec section 11. A
-/// union of classes names `&`, which joins several bounds.
+/// A bound is `Object`, a class or an interface, a generic class type, or several classes and interfaces joined with
+/// `&`, spec section 11. `Object` holds any object, as C#'s `where T : class` and TypeScript's `T extends object` do,
+/// and joins no other bound, as mago's own check of an intersection says. A union of classes names `&`, which joins
+/// several bounds.
 #[test]
-fn a_bound_that_is_not_a_class_an_interface_or_a_generic_class_type_is_an_error() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n}\n";
+fn a_bound_that_is_not_object_a_class_an_interface_or_a_generic_class_type_is_an_error() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable, TM : Object>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n    public void j<TN : object>() { }\n    public void k<TO : Object & Shareable>() { }\n    public void l<TP : Object?>() { }\n    public void m<TQ : Object>(TQ value) { }\n}\n";
 
     assert_eq!(
         issues(code),
-        (5..=13)
+        (5..=16)
             .map(|line| match line {
                 8 => "8:24 A bound can't be a union: join several bounds with `&`.".to_owned(),
-                line => format!("{line}:24 A bound is a class or an interface, as in `<TItem : DatabaseEntity>`."),
+                15 => "15:24 Type `Object` cannot be part of an intersection.".to_owned(),
+                line => format!(
+                    "{line}:24 A bound is `Object`, a class or an interface, as in `<TItem : DatabaseEntity>`."
+                ),
             })
             .collect::<Vec<_>>()
     );
-    assert!(check("src/Report.sharp", code).iter().all(|issue| issue.notes
-        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+    assert!(check("src/Report.sharp", code).iter().filter(|issue| issue.message.starts_with("A bound")).all(|issue| issue
+        .notes
+        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
 }
 
 /// A bound's type arguments are a parameter's types, so a `void` among them is refused as one, alone or joined with
@@ -4592,7 +4640,7 @@ fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_tak
             "8:31 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
             "9:27 A type argument cannot be `void`: `void` is only a return type.",
             "18:43 A type argument cannot be `void`: `void` is only a return type.",
-            "19:33 A type parameter takes no type arguments: write `typeof(TItem)`.",
+            "19:28 A type parameter takes no type arguments: write `TItem`.",
             "20:28 A type parameter takes no type arguments: write `TItem`.",
             "21:26 `type` is not a class, so it takes no type arguments.",
             "25:29 A type parameter takes no type arguments: write `TItem`.",

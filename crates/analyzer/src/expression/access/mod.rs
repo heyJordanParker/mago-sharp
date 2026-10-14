@@ -1,15 +1,12 @@
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_codex::ttype::add_optional_union_type;
-use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
-use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
-use std::rc::Rc;
 
 use mago_span::HasSpan;
 use mago_span::Span;
@@ -19,7 +16,6 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::LocalIdentifier;
-use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
 use mago_word::concat_word;
@@ -34,11 +30,9 @@ use crate::error::AnalysisError;
 use crate::expression::binary::logical::merge_short_circuited_assignments;
 use crate::expression::constant_access::analyze_namespace_constant;
 use crate::resolver::class_name::resolve_classnames_from_expression;
-use crate::resolver::extension::is_class_member;
 use crate::resolver::property::resolve_method_value;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
-use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::and_list;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::member_namespace;
@@ -91,40 +85,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                     name,
                     access.span(),
                     classes,
-                )
-            }
-            // PHP# reads a member through a class value, `typeof(X).y` or `type.y`, as `Class.y` reads it on the class
-            // the value holds, which is PHP's `$type::y`.
-            Access::Property(access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(name), .. })
-                if let Some(classes) =
-                    class_value_static_classes(context, block_context, access.object, &access.property) =>
-            {
-                analyze_class_value_member(
-                    context,
-                    block_context,
-                    artifacts,
-                    access.object,
-                    name,
-                    access.span(),
-                    classes,
-                )
-            }
-            Access::NullSafeProperty(
-                access @ NullSafePropertyAccess { property: ClassLikeMemberSelector::Identifier(name), .. },
-            ) if let Some(classes) =
-                class_value_static_classes(context, block_context, access.object, &access.property) =>
-            {
-                let (object, span) = (access.object, access.span());
-
-                analyze_null_safe_class_value(
-                    context,
-                    block_context,
-                    artifacts,
-                    object,
-                    span,
-                    |context, block_context, artifacts| {
-                        analyze_class_value_member(context, block_context, artifacts, object, name, span, classes)
-                    },
+                    false,
                 )
             }
             // PHP# writes both `Class::NAME` and `Class::$name` as `Class.name`, with a bare name bound to a class.
@@ -177,6 +138,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                         class,
                         &ClassLikeConstantSelector::Identifier(*name),
                         span,
+                        false,
                     )
                 }
                 Some(StaticProperty { name: StaticPropertyName::Identifier(name), span, .. })
@@ -208,6 +170,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                     block_context,
                     artifacts,
                     static_property,
+                    false,
                 ),
                 None => {
                     access.analyze(context, block_context, artifacts)?;
@@ -435,90 +398,11 @@ where
     String::from_utf8_lossy(&context.source_file.contents[object.span().to_range_usize()]).into_owned()
 }
 
-/// The classes `object` holds when it is a PHP# class value: `typeof(X)`, or a local holding the class-string of a
-/// class. A `Class<T>` value holds `T` or a subclass, which has the same kind of member, so `T` stands for it.
-pub(crate) fn class_value_classes<A>(
-    context: &Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    object: &Expression<'_>,
-) -> Option<Vec<Word>>
-where
-    A: Arena,
-{
-    if !context.dialect.is_sharp() {
-        return None;
-    }
-
-    match object {
-        Expression::TypeOf(type_of) => Some(vec![word(context.resolved_names.get(&type_of.class))]),
-        Expression::ConstantAccess(local) => {
-            let local = block_context.locals.get(&get_bare_name_variable_id(&local.name, context.resolved_names)?)?;
-            let classes = local
-                .types
-                .iter()
-                .filter(|atomic| !atomic.is_null())
-                .map(|atomic| match atomic {
-                    TAtomic::Scalar(TScalar::ClassLikeString(class)) => {
-                        class.literal_value().or_else(|| class.constraint()?.get_object_or_enum_name())
-                    }
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()?;
-
-            (!classes.is_empty()).then_some(classes)
-        }
-        _ => None,
-    }
-}
-
-/// The classes whose static `member` the class value `object` reaches, as [`class_value_classes`] gives them. None for
-/// a member of `Class`, which wins over the held class's static, spec section 25, so the access reaches the
-/// standard library extension that adds it to every class value.
-pub(crate) fn class_value_static_classes<A>(
-    context: &Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    object: &Expression<'_>,
-    member: &ClassLikeMemberSelector<'_>,
-) -> Option<Vec<Word>>
-where
-    A: Arena,
-{
-    if let ClassLikeMemberSelector::Identifier(name) = member
-        && is_class_member(context.codebase, name.value)
-    {
-        return None;
-    }
-
-    class_value_classes(context, block_context, object)
-}
-
-/// The static property a PHP# property access writes: `Class.name` on a class written by name, or `type.name` through a
-/// class value, which writes it on the class the value holds, as `Class.name` does.
-pub(crate) fn written_static_property<'ast, 'arena, A>(
-    context: &Context<'_, 'arena, A>,
-    block_context: &BlockContext<'_>,
-    access: &'ast PropertyAccess<'arena>,
-) -> Option<StaticProperty<'ast, 'arena>>
-where
-    A: Arena,
-{
-    StaticProperty::from_property_access(access, context.resolved_names).or_else(|| match &access.property {
-        ClassLikeMemberSelector::Identifier(name)
-            if class_value_classes(context, block_context, access.object).is_some() =>
-        {
-            Some(StaticProperty {
-                class: access.object,
-                name: StaticPropertyName::Identifier(name),
-                span: access.span(),
-            })
-        }
-        _ => None,
-    })
-}
-
 /// Analyzes PHP#'s `type.name` read through a class value as `Class.y` reads it on the classes the value holds: the
-/// constant or enum case, then the static method as a closure, then the static property, as PHP's `$type::name`.
-fn analyze_class_value_member<'ctx, 'ast, 'arena, A>(
+/// constant or enum case, then the static method as a closure, then the static property, as PHP's `$type::name`. A
+/// class value the read analyzed to find it is one is `object_is_analyzed`, and a type parameter, `TItem.name`, is not.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn analyze_class_value_member<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
@@ -526,6 +410,7 @@ fn analyze_class_value_member<'ctx, 'ast, 'arena, A>(
     name: &'ast LocalIdentifier<'arena>,
     span: Span,
     classes: Vec<Word>,
+    object_is_analyzed: bool,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
@@ -564,9 +449,12 @@ where
             object,
             &ClassLikeConstantSelector::Identifier(*name),
             span,
+            object_is_analyzed,
         ),
         STATIC_METHOD => {
-            object.analyze(context, block_context, artifacts)?;
+            if !object_is_analyzed {
+                object.analyze(context, block_context, artifacts)?;
+            }
             let mut method_type = None;
             for class in classes {
                 let class = TObject::new_named(class);
@@ -584,23 +472,23 @@ where
             block_context,
             artifacts,
             StaticProperty { class: object, name: StaticPropertyName::Identifier(name), span },
+            object_is_analyzed,
         ),
     }
 }
 
-/// Analyzes a PHP# null-safe read or call through the class value `object`, `type?.y` or `type?.m()`, with `analyze`.
-/// The member is read only when `object` holds a class, so `analyze` runs with the local narrowed to its class values,
-/// as `if (type !== null)` narrows it, and the result at `span` can also be the `null` the read stops at. Mago's
-/// null-safe property read leaves out a receiver's `null` while it resolves instance members, and has no path that
-/// resolves a class value's static members, so the narrowing is this local's.
-///
-/// A null receiver skips a call's arguments, so the locals afterwards are the ones from before, with each local an
-/// argument writes merged as the short-circuited right-hand side of `&&` merges it.
-pub(crate) fn analyze_null_safe_class_value<'ctx, 'arena, A>(
+/// Analyzes a PHP# read or call through the class value `object`, which is analyzed, with `analyze`. Through `?.`,
+/// `type?.y` or `type?.m()`, the member is reached only when `object` holds a class, so `analyze` runs with `object`
+/// typed as its class values, as `if (type !== null)` narrows a local, and the result at `span` can also be the `null`
+/// the access stops at. `object` keeps its own type afterwards. A null receiver skips a call's arguments, so the locals
+/// afterwards are the ones from before, with each local an argument writes merged as the short-circuited right-hand
+/// side of `&&` merges it.
+pub(crate) fn analyze_through_class_value<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     object: &Expression<'arena>,
+    is_null_safe: bool,
     span: Span,
     analyze: impl FnOnce(
         &mut Context<'ctx, 'arena, A>,
@@ -611,17 +499,21 @@ pub(crate) fn analyze_null_safe_class_value<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    if !is_null_safe {
+        return analyze(context, block_context, artifacts);
+    }
+
     let before = block_context.locals.clone();
     let assigned_before = std::mem::take(&mut block_context.assigned_variable_ids);
-    if let Expression::ConstantAccess(local) = object
-        && let Some(local) = get_bare_name_variable_id(&local.name, context.resolved_names)
-        && let Some(local_type) = block_context.locals.get(&local)
-    {
-        let class_values = local_type.to_non_nullable();
-        block_context.locals.insert(local, Rc::new(class_values));
+    let object_type = artifacts.get_rc_expression_type(object).cloned();
+    if let Some(object_type) = &object_type {
+        artifacts.set_expression_type(object, object_type.to_non_nullable());
     }
 
     analyze(context, block_context, artifacts)?;
+    if let Some(object_type) = object_type {
+        artifacts.set_rc_expression_type(object, object_type);
+    }
     let after = std::mem::replace(&mut block_context.locals, before.clone());
     let assigned = std::mem::replace(&mut block_context.assigned_variable_ids, assigned_before);
     merge_short_circuited_assignments(context, block_context, &before, &after, &assigned);
