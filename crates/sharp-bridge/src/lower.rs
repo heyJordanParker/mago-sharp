@@ -111,6 +111,7 @@ use mago_syntax::utils::pattern::php_shape;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_syntax_core::utils::parse_literal_integer_as_float;
 use mago_word::Word;
+use mago_word::word;
 
 use crate::Unit;
 use crate::kind::SHARP_T_FILE;
@@ -168,6 +169,7 @@ use crate::sharp_kind::SHARP_AST_MATCH_ARM;
 use crate::sharp_kind::SHARP_AST_MATCH_ARM_LIST;
 use crate::sharp_kind::SHARP_AST_METHOD;
 use crate::sharp_kind::SHARP_AST_METHOD_CALL;
+use crate::sharp_kind::SHARP_AST_METHOD_REFERENCE;
 use crate::sharp_kind::SHARP_AST_NAME_LIST;
 use crate::sharp_kind::SHARP_AST_NAMED_ARG;
 use crate::sharp_kind::SHARP_AST_NAMESPACE;
@@ -197,6 +199,8 @@ use crate::sharp_kind::SHARP_AST_STATIC_CALL;
 use crate::sharp_kind::SHARP_AST_STATIC_PROP;
 use crate::sharp_kind::SHARP_AST_STMT_LIST;
 use crate::sharp_kind::SHARP_AST_THROW;
+use crate::sharp_kind::SHARP_AST_TRAIT_ADAPTATIONS;
+use crate::sharp_kind::SHARP_AST_TRAIT_ALIAS;
 use crate::sharp_kind::SHARP_AST_TRY;
 use crate::sharp_kind::SHARP_AST_TYPE;
 use crate::sharp_kind::SHARP_AST_TYPE_INTERSECTION;
@@ -416,6 +420,9 @@ struct Lowering<'lowering, 'arena> {
     type_parameters: HashMap<u32, PhpType<'arena>>,
     /// Whether the file declares a test module, so each of its classes starts and ends its tests.
     tested: bool,
+    /// The default bodies the class being lowered calls with `super<HasLabel>.label()`, spec section 22, each the
+    /// interface that gives it and the method's name, which the class's `use` gives a private alias.
+    super_aliases: Vec<(Word, Word)>,
 }
 
 impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
@@ -444,6 +451,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             inlined: Vec::new(),
             type_parameters: HashMap::default(),
             tested: false,
+            super_aliases: Vec::new(),
         }
     }
 
@@ -712,7 +720,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             None => (NULL, NULL, None),
         };
         let mut members = Vec::new();
-        members.extend(self.trait_use(class.inheritance.as_ref(), self.line(class.left_brace)));
         let mut has_constructor = false;
         let keeps_statics = self.types.bounds(self.class).is_some();
         // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
@@ -788,6 +795,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.extend(self.statics_store(class));
         }
         members.extend(self.class_metadata(self.line(class.name)));
+        if let Some(trait_use) = self.trait_use(class.inheritance.as_ref(), self.line(class.left_brace)) {
+            members.insert(0, trait_use);
+        }
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
         let attributes = self.attributes(&class.attribute_lists, None, None);
 
@@ -971,7 +981,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The `use` a class, an enum or an event starts with, as php-src's grammar builds
     /// `use \Lib\HasSlug, \App\HasDesign\Defaults;`: the traits [`Types::used_traits`] lists, or null when it lists none.
+    /// It gives each default body the class calls with `super<HasLabel>.label()` a private alias, as
+    /// `\App\HasLabel\Defaults::label as private 'label@App\HasLabel';`, so it runs after the members are lowered.
     fn trait_use(&mut self, header: Option<&Inheritance>, line: u32) -> Option<u32> {
+        let aliases = std::mem::take(&mut self.super_aliases);
         let traits = self.types.used_traits(self.class, header);
         if traits.is_empty() {
             return None;
@@ -979,8 +992,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         let names: Vec<u32> = traits.iter().map(|name| self.string(ZEND_NAME_FQ, line, name.as_bytes())).collect();
         let names = self.node(SHARP_AST_NAME_LIST, 0, line, &names);
+        let mut adaptations = Vec::new();
+        for (interface, method) in aliases {
+            let defaults = self.string(ZEND_NAME_FQ, line, defaults_trait_name(interface.as_bytes()).as_bytes());
+            let name = self.string(0, line, method.as_bytes());
+            let reference = self.node(SHARP_AST_METHOD_REFERENCE, 0, line, &[defaults, name]);
+            let alias = self.string(0, line, &super_alias(interface, method));
+            adaptations.push(self.node(SHARP_AST_TRAIT_ALIAS, ZEND_ACC_PRIVATE, line, &[reference, alias]));
+        }
+        let adaptations =
+            if adaptations.is_empty() { NULL } else { self.node(SHARP_AST_TRAIT_ADAPTATIONS, 0, line, &adaptations) };
 
-        Some(self.node(SHARP_AST_USE_TRAIT, 0, line, &[names, NULL]))
+        Some(self.node(SHARP_AST_USE_TRAIT, 0, line, &[names, adaptations]))
     }
 
     /// An interface property is `public` with the abstract hook `get`, as php-src's grammar builds
@@ -1052,7 +1075,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn r#enum(&mut self, r#enum: &Enum) -> u32 {
         self.class = self.names.get(&r#enum.name);
         let mut members = Vec::new();
-        members.extend(self.trait_use(r#enum.inheritance.as_ref(), self.line(r#enum.left_brace)));
         // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
         for member in r#enum.members.iter().filter(|member| !matches!(member, ClassLikeMember::Law(_))) {
             members.push(match member {
@@ -1064,6 +1086,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         members.extend(self.class_metadata(self.line(r#enum.name)));
+        if let Some(trait_use) = self.trait_use(r#enum.inheritance.as_ref(), self.line(r#enum.left_brace)) {
+            members.insert(0, trait_use);
+        }
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
         let attributes = self.attributes(&r#enum.attribute_lists, None, None);
         let header = r#enum.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
@@ -4216,6 +4241,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// property, as spec section 14 calls one. A call of a standard library method with an inline form runs that form.
     /// `Pdf.render(html)` and `global.now()` call the plain PHP function the checker found, spec section 23.
     fn method_call(&mut self, expression: &Expression, call: &MethodCall) -> u32 {
+        if let Expression::SuperOf(_) = call.object {
+            return self.super_of_call(expression, call);
+        }
         if let Some(function) = self.types.namespace_function(expression) {
             let line = self.line(call);
             let function = self.string(ZEND_NAME_FQ, line, function.as_bytes());
@@ -4302,6 +4330,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let full_name = self.names.get(&class.name);
 
         (self.string(ZEND_NAME_FQ, line, full_name), vec![full_name])
+    }
+
+    /// `super<HasLabel>.label()`, spec section 22: a call on `$this` of the private alias of the `HasLabel\Defaults`
+    /// method that the class's `use` declares, `$this->{'label@App\HasLabel'}()`, as PHP runs a trait's method that the
+    /// class replaced only through an alias.
+    fn super_of_call(&mut self, expression: &Expression, call: &MethodCall) -> u32 {
+        let Expression::SuperOf(super_of) = call.object else {
+            unreachable!("`super_of_call` lowers a call on `super<…>`");
+        };
+        let line = self.line(call);
+        let interface = word(self.names.get(&super_of.interface));
+        let method = self.types.call_target(expression).name;
+        if !self.super_aliases.contains(&(interface, method)) {
+            self.super_aliases.push((interface, method));
+        }
+
+        let object = self.variable(super_of.span(), b"this");
+        let method = self.string(0, self.line(&call.method), &super_alias(interface, method));
+        let arguments = self.call_arguments(&call.argument_list, expression, &[]);
+
+        self.node(SHARP_AST_METHOD_CALL, 0, line, &[object, method, arguments])
     }
 
     /// The member `extension`, which an extension adds, spec section 26, called with `arguments` or read on `receiver`:
@@ -4593,6 +4642,12 @@ fn is_current_position(class: &[u8], call: &MethodCall) -> bool {
     class.eq_ignore_ascii_case(b"Sharp\\Position")
         && matches!(call.method, ClassLikeMemberSelector::Identifier(method) if method.value.eq_ignore_ascii_case(b"current"))
         && call.argument_list.arguments.is_empty()
+}
+
+/// The name of the private alias a class gives the default body of `method` that `interface` gives, spec section 22,
+/// as `label@App\HasLabel`. No PHP# member name holds `@`, so it can't clash with one.
+fn super_alias(interface: Word, method: Word) -> Vec<u8> {
+    [method.as_bytes(), b"@", interface.as_bytes()].concat()
 }
 
 /// The flags of a member's modifiers. Every modifier is named, so a new one does not compile until it is decided.

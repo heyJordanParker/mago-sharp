@@ -8661,6 +8661,79 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
 }
 
 /// ```php
+/// class Both implements \App\Described, \App\Told
+/// {
+///     use \App\Described\Defaults, \App\Told\Defaults {
+///         \App\Described\Defaults::describe as private `describe@App\Described`;
+///         \App\Told\Defaults::describe as private `describe@App\Told`;
+///     }
+///     public function describe(): string
+///     {
+///         return $this->{'describe@App\Described'}() . $this->{'describe@App\Told'}();
+///     }
+/// }
+/// ```
+///
+/// Spec section 22: `super<Described>.describe()` runs `Described`'s default body through a private alias of the
+/// trait's method, `[4]` `ZEND_ACC_PRIVATE`, that the class's `use` declares. Its name joins the method and the
+/// interface with `@`, which no PHP# member name holds, so it can't clash with one.
+#[test]
+fn super_of_an_interface_calls_a_private_alias_of_its_default_body() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic interface Described\n{\n    string describe() => \"described\";\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n    public override string describe() => super<Described>.describe() + super<Told>.describe();\n}\n",
+    );
+    let class = lowered
+        .nodes()
+        .iter()
+        .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == "Both")
+        .expect("the source declares `Both`");
+
+    assert_eq!(
+        lowered.render(lowered.child(class as u32, 2)),
+        indoc! {r#"
+            STMT_LIST
+              USE_TRAIT
+                NAME_LIST
+                  ZVAL "App\\Described\\Defaults"
+                  ZVAL "App\\Told\\Defaults"
+                TRAIT_ADAPTATIONS
+                  TRAIT_ALIAS [4]
+                    METHOD_REFERENCE
+                      ZVAL "App\\Described\\Defaults"
+                      ZVAL "describe"
+                    ZVAL "describe@App\\Described"
+                  TRAIT_ALIAS [4]
+                    METHOD_REFERENCE
+                      ZVAL "App\\Told\\Defaults"
+                      ZVAL "describe"
+                    ZVAL "describe@App\\Told"
+              METHOD [1] "describe" @15-15
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    BINARY_OP [8]
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "describe@App\\Described"
+                        ARG_LIST
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "describe@App\\Told"
+                        ARG_LIST
+                ZVAL [1] "string"
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Override"
+                      null
+        "#}
+    );
+}
+
+/// ```php
 /// namespace App;
 /// interface HasDesign {
 ///     public string $designColumn { get; }
