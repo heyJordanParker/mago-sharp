@@ -22,6 +22,7 @@ use mago_syntax::cst::Access;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Identifier;
+use mago_syntax::cst::SuperOf;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -229,6 +230,80 @@ where
     )
 }
 
+/// Resolves PHP# `super<HasLabel>`, spec section 22, to the interface as a parent: a call through it runs the
+/// interface's default body, which [`resolve_method_from_metadata`](crate::resolver::static_method) finds in the trait
+/// of its default bodies. The class must implement the interface and use that trait itself, so its own `use` can name
+/// the body. A class whose base class already uses it would use it a second time, which is not supported yet.
+fn resolve_super_of<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    super_of: &SuperOf<'_>,
+) -> ResolvedClassname
+where
+    A: Arena,
+{
+    let interface_name = word(context.resolved_names.get(&super_of.interface));
+    let interface = context.codebase.get_interface(interface_name.as_bytes());
+    let interface_display =
+        display_class_like_name(context, interface.map_or(interface_name, |interface| interface.original_name));
+    let span = super_of.span();
+
+    let class = block_context.scope.get_class_like().filter(|class| class.kind.is_class() || class.kind.is_enum());
+    let error = match (class, interface) {
+        (None, _) => Some((
+            IssueCode::ParentOutsideClassScope,
+            format!(
+                "`super<{interface_display}>` reuses a default body only in the methods of a class that implements `{interface_display}`."
+            ),
+        )),
+        (Some(class), interface)
+            if !interface.is_some_and(|interface| class.all_parent_interfaces.contains(&interface.name)) =>
+        {
+            let class_display = display_class_like_name(context, class.original_name);
+
+            Some((
+                IssueCode::InvalidParentType,
+                format!(
+                    "`{class_display}` does not implement `{interface_display}`, so `super<{interface_display}>` has no default body to reuse."
+                ),
+            ))
+        }
+        (Some(class), _)
+            if class
+                .direct_parent_class
+                .and_then(|parent| context.codebase.get_class_like(parent.as_bytes()))
+                .is_some_and(|parent| {
+                    parent.all_parent_interfaces.contains(&ascii_lowercase_word(interface_name.as_bytes()))
+                }) =>
+        {
+            let class_display = display_class_like_name(context, class.original_name);
+
+            Some((
+                IssueCode::NotSupportedYet,
+                format!(
+                    "`super<{interface_display}>` in `{class_display}`, whose base class already implements `{interface_display}`, is not supported yet in PHP#."
+                ),
+            ))
+        }
+        _ => None,
+    };
+    if let Some((code, message)) = error {
+        context.collector.report_with_code(
+            code,
+            Issue::error(message).with_annotation(Annotation::primary(span).with_message("Used here.")),
+        );
+    }
+
+    // After an error the call still runs the interface's default body, so its type is known.
+    interface.map_or_else(ResolvedClassname::invalid, |interface| {
+        ResolvedClassname::new(
+            Some(interface.original_name),
+            ResolutionOrigin::Named { is_parent: true, is_self: false },
+            false,
+        )
+    })
+}
+
 /// Resolves a CST `Expression` to one or more `ResolvedClassname` instances.
 ///
 /// This function analyzes various forms of expressions that can represent a class name
@@ -369,6 +444,9 @@ where
 
                 possible_types.push(ResolvedClassname::invalid());
             }
+        }
+        Expression::SuperOf(super_of) => {
+            possible_types.push(resolve_super_of(context, block_context, super_of));
         }
         expression => {
             // If the expression is not already analyzed, we analyze it now.

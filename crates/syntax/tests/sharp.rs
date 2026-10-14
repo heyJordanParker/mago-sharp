@@ -2608,6 +2608,34 @@ fn typeof_names_a_class_by_its_short_name() {
     assert_eq!(source(CODE, type_of), "typeof(Order)");
 }
 
+/// Spec section 22: `super<HasLabel>.label()` calls one interface's default body, so `super<HasLabel>` is the object of
+/// the call, and `super.label()` keeps calling the parent's.
+#[test]
+fn super_of_an_interface_is_the_object_of_a_call_of_its_default_body() {
+    const CODE: &str = "class Both\n{\n    string label()\n    {\n        super<HasLabel>.label();\n        super.label();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Both.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [interface_call, parent_call] = method_body(program) else {
+        panic!("expected two statements, got {:#?}", method_body(program));
+    };
+    let Expression::Call(Call::Method(MethodCall { object: Expression::SuperOf(super_of), .. })) =
+        expression(interface_call)
+    else {
+        panic!("expected `super<HasLabel>.label()`, got {interface_call:#?}");
+    };
+    assert_eq!(super_of.interface.value(), b"HasLabel");
+    assert_eq!(source(CODE, super_of), "super<HasLabel>");
+    assert!(
+        matches!(
+            expression(parent_call),
+            Expression::Call(Call::Method(MethodCall { object: Expression::Parent(_), .. }))
+        ),
+        "{parent_call:#?}"
+    );
+}
+
 #[test]
 fn a_class_or_an_interface_names_its_base_class_and_interfaces_after_a_colon() {
     const CODE: &str = "public class Page : Entity, Linkable\n{\n}\n\npublic interface Linkable : Named\n{\n}\n";

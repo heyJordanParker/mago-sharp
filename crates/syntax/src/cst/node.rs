@@ -227,6 +227,7 @@ use crate::cst::cst::StaticMethodCall;
 use crate::cst::cst::StaticMethodPartialApplication;
 use crate::cst::cst::StaticPropertyAccess;
 use crate::cst::cst::StringPart;
+use crate::cst::cst::SuperOf;
 use crate::cst::cst::Switch;
 use crate::cst::cst::SwitchBody;
 use crate::cst::cst::SwitchBraceDelimitedBody;
@@ -448,6 +449,7 @@ pub enum NodeKind {
     Literal,
     Pipe,
     TypeOf,
+    SuperOf,
     LiteralFloat,
     LiteralInteger,
     LiteralString,
@@ -839,6 +841,7 @@ pub enum Node<'ast, 'arena> {
     Variable(&'ast Variable<'arena>),
     Pipe(&'ast Pipe<'arena>),
     TypeOf(&'ast TypeOf<'arena>),
+    SuperOf(&'ast SuperOf<'arena>),
     Error(Span),
     MissingTerminator(Span),
     ClassLikeMemberMissingSelector(Span),
@@ -1210,6 +1213,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Variable(_) => NodeKind::Variable,
             Self::Pipe(_) => NodeKind::Pipe,
             Self::TypeOf(_) => NodeKind::TypeOf,
+            Self::SuperOf(_) => NodeKind::SuperOf,
             Self::Error(_) => NodeKind::Error,
             Self::MissingTerminator(_) => NodeKind::MissingTerminator,
             Self::ClassLikeMemberMissingSelector(_) => NodeKind::ClassLikeMemberMissingSelector,
@@ -2207,6 +2211,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     Expression::As(node) => Node::As(node),
                     Expression::PatternMatch(node) => Node::PatternMatch(node),
                     Expression::TypeOf(node) => Node::TypeOf(node),
+                    Expression::SuperOf(node) => Node::SuperOf(node),
                     Expression::Error(span) => Node::Error(*span),
                 };
                 f(child);
@@ -2951,6 +2956,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Expression(pipe.input));
                 f(Node::Expression(pipe.callable));
             }
+            Node::SuperOf(super_of) => {
+                f(Node::Keyword(&super_of.super_));
+                f(Node::Identifier(&super_of.interface));
+            }
             Node::TypeOf(type_of) => {
                 f(Node::Keyword(&type_of.r#typeof));
                 f(Node::Identifier(&type_of.class));
@@ -3247,6 +3256,7 @@ impl HasSpan for Node<'_, '_> {
             Self::Variable(node) => node.span(),
             Self::Pipe(node) => node.span(),
             Self::TypeOf(node) => node.span(),
+            Self::SuperOf(node) => node.span(),
             Self::Error(span)
             | Self::MissingTerminator(span)
             | Self::ClassLikeMemberMissingSelector(span)

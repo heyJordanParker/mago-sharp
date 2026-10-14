@@ -72,6 +72,7 @@ use mago_syntax::cst::Statement;
 use mago_syntax::cst::StaticMethodCall;
 use mago_syntax::cst::StaticMethodPartialApplication;
 use mago_syntax::cst::StaticPropertyAccess;
+use mago_syntax::cst::SuperOf;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUse;
 use mago_syntax::cst::TryCatchClause;
@@ -1377,6 +1378,12 @@ where
         let (name, imported) = self.resolve_class(context, type_of.class.value());
 
         self.resolved_names.insert_at(type_of.class.span(), name, imported);
+    }
+
+    fn walk_in_super_of(&mut self, super_of: &'ast SuperOf<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let (name, imported) = self.resolve_class(context, super_of.interface.value());
+
+        self.resolved_names.insert_at(super_of.interface.span(), name, imported);
     }
 
     fn walk_in_static_method_call(

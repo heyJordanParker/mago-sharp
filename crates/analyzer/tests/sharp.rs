@@ -1390,6 +1390,33 @@ fn a_class_that_gets_one_method_from_two_places_writes_it() {
     );
 }
 
+/// Spec section 22: inside its own methods, a class reuses one interface's default body with `super<HasLabel>`. It is
+/// an error when the class does not implement the interface, when the interface gives the method no default body, and
+/// outside a class. A class whose base class already implements the interface is not supported yet.
+#[test]
+fn super_of_an_interface_reuses_its_default_body_in_a_class_that_implements_it() {
+    let sharp = "namespace Demo;\n\npublic interface Described\n{\n    string describe() => \"described\";\n    string title();\n    string shout() => super<Told>.describe();\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n    public override string describe() => super<Described>.describe() + super<Told>.describe();\n    public string title() => super<Described>.title();\n}\n\npublic class Stranger\n{\n    public string describe() => super<Told>.describe();\n}\n\npublic class Base : Told\n{\n}\n\npublic class Child : Base\n{\n    public string again() => super<Told>.describe();\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Described.sharp", sharp), &[]),
+        [
+            "`super<Told>` reuses a default body only in the methods of a class that implements `Told`.",
+            "`Described.title` has no default body, so `super<Described>.title()` has nothing to run.",
+            "`Stranger` does not implement `Told`, so `super<Told>` has no default body to reuse.",
+            "`super<Told>` in `Child`, whose base class already implements `Told`, is not supported yet in PHP#.",
+        ]
+    );
+    assert_eq!(
+        issues(("src/Demo/Described.sharp", sharp), &[]),
+        [
+            "7:23 parent-outside-class-scope",
+            "18:30 abstract-super-call",
+            "23:33 invalid-parent-type",
+            "32:30 not-supported-yet",
+        ]
+    );
+}
+
 /// A method is closed unless it is `virtual`, and `override` is required to replace one, spec section 22. So PHP#
 /// reports what PHP reports for a `final` method and a missing or stray `#[\Override]`, without the
 /// `check-missing-override` setting. Implementing an interface method takes no `override`.

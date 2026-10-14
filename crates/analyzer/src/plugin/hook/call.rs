@@ -97,14 +97,16 @@ pub struct StaticCall<'ast, 'arena> {
 
 impl<'ast, 'arena> StaticCall<'ast, 'arena> {
     /// Returns the static call a PHP# method call writes, `Class.method()` when
-    /// [`ResolvedNames::static_call_class`] finds its class, `super.method()`, which PHP writes `parent::method()`, or
-    /// `Self.method()`, which PHP writes `static::method()`. Returns `None` for an instance call.
+    /// [`ResolvedNames::static_call_class`] finds its class, `super.method()`, which PHP writes `parent::method()`,
+    /// `super<HasLabel>.method()`, which calls an interface's default body, or `Self.method()`, which PHP writes
+    /// `static::method()`. Returns `None` for an instance call.
     ///
     /// Call it on a method call of a PHP# file only: the lexer reads PHP's `self` as the keyword `Self` is, and PHP's
     /// `Self->method()` is an instance call.
     #[must_use]
     pub fn from_method_call(call: &'ast MethodCall<'arena>, resolved_names: &ResolvedNames<'_>) -> Option<Self> {
-        let is_super = matches!(call.object, Expression::Parent(keyword) if keyword.value == b"super");
+        let is_super = matches!(call.object, Expression::Parent(keyword) if keyword.value == b"super")
+            || matches!(call.object, Expression::SuperOf(_));
         let is_self = matches!(call.object, Expression::Self_(keyword) if keyword.value == b"Self");
 
         (is_super || is_self || resolved_names.static_call_class(call).is_some()).then(|| Self {

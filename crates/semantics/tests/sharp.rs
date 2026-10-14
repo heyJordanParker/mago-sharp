@@ -1106,6 +1106,15 @@ fn super_calls_the_parent_method() {
     assert_eq!(issues(code), ["7:20 This expression is not supported yet in PHP#."]);
 }
 
+/// Spec section 22: `super<HasLabel>.label()` calls one interface's default body. As `super`, `super<HasLabel>` is only
+/// the object of a call.
+#[test]
+fn super_of_an_interface_calls_its_default_body() {
+    let code = "namespace App;\n\npublic class Both : HasLabel, HasTitle\n{\n    public override string label()\n    {\n        let held = super<HasLabel>;\n        return super<HasLabel>.label() + super<HasTitle>.label();\n    }\n}\n";
+
+    assert_eq!(issues(code), ["7:20 This expression is not supported yet in PHP#."]);
+}
+
 /// Spec section 9.1: the main constructor passes control to its base class with `: super(…)`, whose arguments are a
 /// method body's expressions without `this`. Only a named constructor calls `: this(…)`.
 #[test]

@@ -262,6 +262,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
 
                     Ok(())
                 }
+                // The semantics checker refuses `super<HasLabel>` anywhere but as the object of a call.
+                Expression::SuperOf(_) => {
+                    artifacts.set_expression_type(&self, get_never());
+
+                    Ok(())
+                }
                 Expression::Identifier(identifier) => {
                     if !identifier.is_local() {
                         unreachable!(

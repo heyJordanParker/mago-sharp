@@ -1512,8 +1512,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        // `super.label()` calls the parent's method, spec section 22. `super` is no value of its own.
-        (Node::MethodCall(call), Body) if matches!(call.object, Expression::Parent(_)) => Some(SuperCall),
+        // `super.label()` calls the parent's method, and `super<HasLabel>.label()` the interface `HasLabel`'s default
+        // body, spec section 22. Neither `super` is a value of its own.
+        (Node::MethodCall(call), Body) if matches!(call.object, Expression::Parent(_) | Expression::SuperOf(_)) => {
+            Some(SuperCall)
+        }
+        (Node::Expression(Expression::SuperOf(_)), SuperCall) => None,
         // `Self.make()` calls a static method of the class a static method is called on, spec section 25.
         (Node::MethodCall(call), Body) if let Expression::Self_(keyword) = call.object => {
             if !is_sharp_self(keyword) {

@@ -6,6 +6,7 @@ use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
+use mago_codex::defaults_trait_name;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
@@ -413,6 +414,18 @@ fn resolve_method_from_metadata<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    // Spec section 22: `super<HasLabel>.label()` runs the interface's default body, which the trait of its default
+    // bodies holds.
+    let defining_class_metadata = if classname.is_parent()
+        && defining_class_metadata.kind.is_interface()
+        && let Some(defaults) =
+            context.codebase.get_trait(defaults_trait_name(defining_class_metadata.original_name.as_bytes()).as_bytes())
+        && defaults.declaring_method_ids.contains_key(&ascii_lowercase_word(method_name.as_bytes()))
+    {
+        defaults
+    } else {
+        defining_class_metadata
+    };
     let method_id = MethodIdentifier::new(defining_class_metadata.original_name, method_name);
     let declaring_method_id = context.codebase.get_declaring_method_identifier(&method_id);
     let (declaring_method_id, function_like) = match context.codebase.get_method_by_id(&declaring_method_id) {
@@ -478,21 +491,25 @@ where
         }
     }
 
-    // Spec section 22: `super.m()` runs the parent's body, and an abstract method has none, so PHP would throw `Error`.
+    // Spec section 22: `super.m()` runs the parent's body, and `super<HasLabel>.m()` the interface's default body. An
+    // abstract method has none, so PHP would throw `Error`.
     if context.dialect.is_sharp()
         && classname.is_parent()
         && function_like.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
     {
-        let declaring_class = context
-            .codebase
-            .get_class_like(declaring_method_id.get_class_name().as_bytes())
-            .map_or(declaring_method_id.get_class_name(), |class| class.original_name);
-        let method = display_member(context, declaring_class, function_like.original_name);
+        let declaring_class = context.codebase.get_class_like(declaring_method_id.get_class_name().as_bytes());
+        let declaring_name = declaring_class.map_or(declaring_method_id.get_class_name(), |class| class.original_name);
+        let method = display_member(context, declaring_name, function_like.original_name);
         let name = function_like.original_name;
+        let message = if declaring_class.is_some_and(|class| class.kind.is_interface()) {
+            let interface = display_class_like_name(context, declaring_name);
+            format!("`{method}` has no default body, so `super<{interface}>.{name}()` has nothing to run.")
+        } else {
+            format!("`{method}` is abstract, so `super.{name}()` has no body to run.")
+        };
         context.collector.report_with_code(
             IssueCode::AbstractSuperCall,
-            Issue::error(format!("`{method}` is abstract, so `super.{name}()` has no body to run."))
-                .with_annotation(Annotation::primary(access_span).with_message("Called here.")),
+            Issue::error(message).with_annotation(Annotation::primary(access_span).with_message("Called here.")),
         );
     }
 

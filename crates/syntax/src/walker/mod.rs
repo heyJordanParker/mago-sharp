@@ -221,6 +221,7 @@ use crate::cst::cst::StaticMethodCall;
 use crate::cst::cst::StaticMethodPartialApplication;
 use crate::cst::cst::StaticPropertyAccess;
 use crate::cst::cst::StringPart;
+use crate::cst::cst::SuperOf;
 use crate::cst::cst::Switch;
 use crate::cst::cst::SwitchBody;
 use crate::cst::cst::SwitchBraceDelimitedBody;
@@ -2024,6 +2025,7 @@ generate_ast_walker! {
             Expression::As(r#as) => walker.walk_as(r#as, context),
             Expression::PatternMatch(pattern_match) => walker.walk_pattern_match(pattern_match, context),
             Expression::TypeOf(type_of) => walker.walk_type_of(type_of, context),
+            Expression::SuperOf(super_of) => walker.walk_super_of(super_of, context),
             Expression::Error(_) => {
                 // Nothing to walk for error expressions
             }
@@ -2829,6 +2831,11 @@ generate_ast_walker! {
     'arena TypeOf as type_of => {
         walker.walk_keyword(&type_of.r#typeof, context);
         walker.walk_identifier(&type_of.class, context);
+    }
+
+    'arena SuperOf as super_of => {
+        walker.walk_keyword(&super_of.super_, context);
+        walker.walk_identifier(&super_of.interface, context);
     }
 
     'arena Hint as hint => {
