@@ -52,6 +52,8 @@ pub enum ParseError {
     RecursionLimitExceeded(Span),
     /// PHP syntax written in a PHP# file, such as `->` where PHP# writes `.`.
     PhpSyntaxInSharp(TokenKind, Span),
+    /// PHP's `Order::class` written in a PHP# file, with the name before `::`, at the `::`.
+    ClassNameConstantInSharp(Box<str>, Span),
     /// A `\` name written in a PHP# file, such as `\Lib\Calc`, with the dotted name its `import` line takes.
     QualifiedNameInSharp(Box<str>, Span),
     /// A PHP# parameter written without its type, such as `run(extra)`, at its name.
@@ -121,6 +123,7 @@ impl HasFileId for ParseError {
             ParseError::UnclosedLiteralString(_, span) => span.file_id,
             ParseError::RecursionLimitExceeded(span) => span.file_id,
             ParseError::PhpSyntaxInSharp(_, span)
+            | ParseError::ClassNameConstantInSharp(_, span)
             | ParseError::QualifiedNameInSharp(_, span)
             | ParseError::UntypedParameterInSharp(span)
             | ParseError::UntypedFieldInSharp(span)
@@ -165,6 +168,7 @@ impl HasSpan for ParseError {
             ParseError::UnclosedLiteralString(_, span) => *span,
             ParseError::RecursionLimitExceeded(span) => *span,
             ParseError::PhpSyntaxInSharp(_, span)
+            | ParseError::ClassNameConstantInSharp(_, span)
             | ParseError::QualifiedNameInSharp(_, span)
             | ParseError::UntypedParameterInSharp(span)
             | ParseError::UntypedFieldInSharp(span)
@@ -252,6 +256,14 @@ impl std::fmt::Display for ParseError {
                 }
                 kind => format!("`{kind}` is PHP syntax that PHP# does not have"),
             },
+            // Spec section 24 capitalizes every type but the built-in ones, so a lowercase name is a value.
+            ParseError::ClassNameConstantInSharp(name, _) => {
+                if name.starts_with(|first: char| first.is_ascii_uppercase()) {
+                    format!("`{name}::class` is PHP syntax: PHP# writes `typeof({name})`")
+                } else {
+                    format!("`{name}::class` is PHP syntax: PHP# writes `Class.of({name})`")
+                }
+            }
             ParseError::QualifiedNameInSharp(name, _) => {
                 match ["null", "true", "false"].into_iter().find(|keyword| name.eq_ignore_ascii_case(keyword)) {
                     Some(keyword) => format!("A `\\` name is PHP syntax: write `{keyword}`"),
@@ -350,6 +362,7 @@ impl From<&ParseError> for Issue {
             ParseError::SyntaxError(syntax_error) => syntax_error.into(),
             // A PHP# parse error names the rule it breaks, so its message is the title.
             ParseError::PhpSyntaxInSharp(..)
+            | ParseError::ClassNameConstantInSharp(..)
             | ParseError::QualifiedNameInSharp(..)
             | ParseError::UntypedParameterInSharp(..)
             | ParseError::UntypedFieldInSharp(..)

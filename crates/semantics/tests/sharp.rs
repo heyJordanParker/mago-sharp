@@ -1244,7 +1244,7 @@ fn self_is_a_return_type_creates_with_a_required_constructor_and_calls_static_me
 
 #[test]
 fn self_is_only_a_return_type() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Self owner;\n    public Self? next { get; set; }\n    public const Self SAME = 1;\n\n    public required Report(Self other, int|Self either)\n    {\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Self owner;\n    public Self? next { get; set; }\n    public const Self SAME = 1;\n\n    public required Report(Self other, int|Self either)\n    {\n        Self copy = new Self(other, either);\n        Self? none = null;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -1254,6 +1254,8 @@ fn self_is_only_a_return_type() {
             "7:18 `Self` is only a return type in PHP#.",
             "9:28 `Self` is only a return type in PHP#.",
             "9:44 `Self` is only a return type in PHP#.",
+            "11:9 `Self` is only a return type in PHP#.",
+            "12:9 `Self` is only a return type in PHP#.",
         ]
     );
 }

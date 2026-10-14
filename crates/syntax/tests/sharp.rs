@@ -1925,6 +1925,8 @@ fn php_member_access_and_concatenating_assignment_are_parse_errors_that_name_the
         ("calc->add()", "`->` is PHP syntax: PHP# writes member access with `.`"),
         ("calc?->add()", "`?->` is PHP syntax: PHP# writes null-safe member access with `?.`"),
         ("Calc::make()", "`::` is PHP syntax: PHP# writes static access with `.`"),
+        ("Calc::class", "`Calc::class` is PHP syntax: PHP# writes `typeof(Calc)`"),
+        ("calc::class", "`calc::class` is PHP syntax: PHP# writes `Class.of(calc)`"),
         ("label .= \"x\"", "`.=` is PHP syntax: in PHP# `.` is member access"),
     ] {
         let source = format!("class Report\n{{\n    void run()\n    {{\n        {code};\n    }}\n}}\n");

@@ -95,7 +95,8 @@ where
             return Ok(hint.value.first().is_some_and(u8::is_ascii_uppercase));
         }
 
-        if hint.kind != T![Identifier] {
+        // `Self` reads as a local's type here, so the checker can say it is a return type only, spec section 25.
+        if hint.kind != T![Identifier] && hint.kind != T!["self"] {
             return Ok(false);
         }
 

@@ -452,6 +452,22 @@ where
         Ok((span, refused))
     }
 
+    /// The bare name before `::class` in a PHP# file, as in `Order::class`, or `None` for any other `::`.
+    fn class_name_constant_name(
+        &mut self,
+        lhs: &Expression<'arena>,
+    ) -> Result<Option<std::boxed::Box<str>>, ParseError> {
+        if !self.dialect.is_sharp() || self.stream.peek_kind(1)? != Some(T!["class"]) {
+            return Ok(None);
+        }
+
+        Ok(match lhs {
+            Expression::Identifier(Identifier::Local(name)) => Some(String::from_utf8_lossy(name.value).into()),
+            Expression::ConstantAccess(access) => Some(String::from_utf8_lossy(access.name.value()).into()),
+            _ => None,
+        })
+    }
+
     fn parse_postfix_expression(
         &mut self,
         lhs: &'arena Expression<'arena>,
@@ -506,7 +522,16 @@ where
                 }
             }
             T!["::"] => {
-                let (double_colon, operator_refused) = self.consume_operator_span()?;
+                let (double_colon, operator_refused) = match self.class_name_constant_name(lhs)? {
+                    // PHP's `Order::class`, which spec section 25 writes `typeof(Order)`.
+                    Some(name) => {
+                        let span = self.stream.eat_span(T!["::"])?;
+                        self.errors.push(ParseError::ClassNameConstantInSharp(name, span));
+
+                        (span, true)
+                    }
+                    None => self.consume_operator_span()?,
+                };
                 refused = operator_refused;
                 let selector = self.parse_classlike_member_selector()?;
                 let current = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;

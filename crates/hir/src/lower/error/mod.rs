@@ -20,6 +20,7 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         // declared inside another, or a keyword in another case, is a token the PHP# grammar does not expect there.
         ParseError::UnexpectedToken(..)
         | ParseError::PhpSyntaxInSharp(..)
+        | ParseError::ClassNameConstantInSharp(..)
         | ParseError::PhpLambdaInSharp(..)
         | ParseError::LambdaAfterOperatorInSharp(..)
         | ParseError::ConditionalInGuardInSharp(..)
