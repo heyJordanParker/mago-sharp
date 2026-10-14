@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -8,7 +7,6 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::scanner::get_union_from_hint;
-use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
@@ -21,8 +19,6 @@ use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
-use mago_codex::ttype::get_backing_key_type;
-use mago_codex::ttype::get_sole_backed_enum;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::union::populate_union_type;
 use mago_codex::ttype::wrap_atomic;
@@ -85,7 +81,6 @@ use crate::utils::expression::get_function_like_id_from_call;
 use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_sharp_type;
-use crate::utils::quoted_source;
 
 pub mod attributes;
 pub mod class_like;
@@ -250,6 +245,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                     Arc::make_mut(&mut context.scope).add(NameKind::Default, event_name, &None::<&str>);
 
                     event.analyze(context, block_context, artifacts)
+                }
+                Statement::Struct(r#struct) => {
+                    let struct_name = context.resolved_names.get(&r#struct.name);
+
+                    Arc::make_mut(&mut context.scope).add(NameKind::Default, struct_name, &None::<&str>);
+
+                    r#struct.analyze(context, block_context, artifacts)
                 }
                 Statement::Constant(constant) => {
                     for item in &constant.items {
@@ -576,97 +578,7 @@ where
         body: ForeachBody::Statement(for_of.body),
     });
 
-    foreach.analyze(context, block_context, artifacts)?;
-
-    if let ForOfTarget::KeyValue(pair) = &for_of.target
-        && artifacts
-            .get_expression_type(for_of.expression)
-            .is_some_and(|map_type| keys_mix_a_backed_enum(context, map_type))
-    {
-        report_keys_read_back(context, IssueCode::InvalidForeachKey, for_of.expression, "the loop", pair.key.span());
-    }
-
-    Ok(())
-}
-
-/// Whether the keys of the `Map`s that `map_type` may be, taken together, mix a backed enum with other types, as
-/// `Status|int` or `Status|Rank` do. The engine holds each key of a `Map` as its backing value, and reads it back as a
-/// case only through one enum.
-pub(crate) fn keys_mix_a_backed_enum<A>(context: &Context<'_, '_, A>, map_type: &TUnion) -> bool
-where
-    A: Arena,
-{
-    let key_type = map_type.types.iter().fold(None, |key_type, atomic| match atomic {
-        TAtomic::Array(map @ TArray::Keyed(_)) => {
-            let key = get_array_parameters(map, context.codebase).0;
-            Some(add_optional_union_type(key, key_type.as_ref(), context.codebase))
-        }
-        _ => key_type,
-    });
-
-    key_type.is_some_and(|key_type| key_type_mixes_a_backed_enum(context, &key_type))
-}
-
-/// Whether `key_type` mixes a backed enum with other types, as `Status|int` or `Status|Rank` do: its keys need their
-/// backing values, and no one backed enum, the one [`get_sole_backed_enum`] finds, reads them all back.
-pub(crate) fn key_type_mixes_a_backed_enum<A>(context: &Context<'_, '_, A>, key_type: &TUnion) -> bool
-where
-    A: Arena,
-{
-    matches!(get_backing_key_type(key_type, context.codebase, context.dialect), Cow::Owned(_))
-        && get_sole_backed_enum(key_type, context.codebase, context.dialect).is_none()
-}
-
-/// Reports the `Map` `collection`, whose keys mix a backed enum with other types, where `reader`, the loop or `keys()`,
-/// reads them back at `span`.
-pub(crate) fn report_keys_read_back<A>(
-    context: &mut Context<'_, '_, A>,
-    code: IssueCode,
-    collection: &Expression<'_>,
-    reader: &str,
-    span: Span,
-) where
-    A: Arena,
-{
-    let collection = quoted_source(context, collection.span());
-
-    context.collector.report_with_code(
-        code,
-        Issue::error(format!(
-            "The keys of `{collection}` mix a backed enum with other types, so {reader} cannot read them back."
-        ))
-        .with_annotation(Annotation::primary(span).with_message("Its key is read here."))
-        .with_note(
-            "The engine holds each key as its backing value, and reads it back as a case through one enum's `from`.",
-        )
-        .with_help("Key the `Map` by one backed enum alone."),
-    );
-}
-
-/// Reports the `Map` at `collection`, whose keys mix a backed enum with other types, where `finder`, such as `has`,
-/// an index or a literal, looks a key up or puts one in, as `annotation` marks it.
-pub(crate) fn report_keys_sharing_entries<A>(
-    context: &mut Context<'_, '_, A>,
-    code: IssueCode,
-    collection: Span,
-    finder: &str,
-    annotation: Annotation,
-) where
-    A: Arena,
-{
-    let collection = quoted_source(context, collection);
-
-    context.collector.report_with_code(
-        code,
-        Issue::error(format!(
-            "The keys of `{collection}` mix a backed enum with other types, so {finder} cannot tell them apart."
-        ))
-        .with_annotation(annotation)
-        .with_note(
-            "The engine holds each key as its backing value, so a case and the `int` or `string` key of its backing value share one entry.",
-        )
-        .with_help("Key the `Map` by one backed enum alone."),
-    );
+    foreach.analyze(context, block_context, artifacts)
 }
 
 /// Analyzes a PHP# `emit`, spec section 15: it raises an event, so its value's type is an event. A refused value is

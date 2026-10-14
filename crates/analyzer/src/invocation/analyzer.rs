@@ -29,6 +29,7 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_passed_type;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::template::TemplateResult;
@@ -60,6 +61,7 @@ use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::invocation::InvocationTargetParameter;
 use crate::invocation::arguments::analyze_and_store_argument_type;
+use crate::invocation::arguments::check_array_crossing;
 use crate::invocation::arguments::get_unpacked_argument_type;
 use crate::invocation::arguments::report_non_list_spread;
 use crate::invocation::arguments::verify_argument_type;
@@ -325,7 +327,6 @@ where
                     *argument_offset,
                     argument_type.1,
                     false,
-                    invocation.target.get_dialect(),
                 ));
             }
         }
@@ -472,7 +473,6 @@ where
                 *argument_offset,
                 argument_type.1,
                 true,
-                invocation.target.get_dialect(),
             ));
         }
     }
@@ -719,6 +719,7 @@ where
                 // whatever class the call goes through, of a function value whose signature PHP# wrote, or of a
                 // `Sharp\` collection method, which PHP# declares as a plain PHP stub only to carry its templates. A
                 // plain PHP method's or closure's parameter takes either literal, whatever its docblock says.
+                let mut refused_crossing = false;
                 if matches!(&invocation.target, InvocationTarget::Callable { signature, .. } if signature.effects.is_some())
                     || invocation.target.get_function_like_metadata().is_some_and(|function| function.flags.is_sharp())
                     || matches!(
@@ -727,17 +728,29 @@ where
                     )
                 {
                     check_sharp_literal_kind(context, argument_expression, &final_parameter_type);
+                } else if context.dialect.is_sharp() {
+                    refused_crossing = check_array_crossing(
+                        context,
+                        &argument_value_type,
+                        parameter_ref,
+                        &final_parameter_type,
+                        *argument_offset,
+                        argument_expression,
+                        &invocation.target,
+                    );
                 }
 
-                if verify_argument_type(
-                    context,
-                    artifacts,
-                    &argument_value_type,
-                    &final_parameter_type,
-                    *argument_offset,
-                    argument_expression,
-                    &invocation.target,
-                ) {
+                if !refused_crossing
+                    && verify_argument_type(
+                        context,
+                        artifacts,
+                        &argument_value_type,
+                        &final_parameter_type,
+                        *argument_offset,
+                        argument_expression,
+                        &invocation.target,
+                    )
+                {
                     record_function_values(
                         context,
                         artifacts,
@@ -862,13 +875,7 @@ where
             let default_type =
                 unused_parameter.get_default_type().map_or_else(|| Cow::Owned(get_mixed()), Cow::Borrowed);
 
-            infer_unfixed_templates(
-                context,
-                &parameter_type,
-                &default_type,
-                template_result,
-                invocation.target.get_dialect(),
-            );
+            infer_unfixed_templates(context, &parameter_type, &default_type, template_result);
 
             let Some(parameter_name) = unused_parameter.get_name() else {
                 continue;
@@ -934,7 +941,6 @@ where
                     last_parameter_offset,
                     argument_expression.span(),
                     false,
-                    invocation.target.get_dialect(),
                 ));
             }
         }
@@ -957,13 +963,7 @@ where
         );
         let return_type = inferred_type_replacer::replace(&return_type, template_result, context.codebase);
 
-        violated_templates.extend(infer_unfixed_templates(
-            context,
-            &return_type,
-            expected_type,
-            template_result,
-            invocation.target.get_dialect(),
-        ));
+        violated_templates.extend(infer_unfixed_templates(context, &return_type, expected_type, template_result));
     }
 
     let mut unbound_templates = WordSet::default();
@@ -1608,7 +1608,6 @@ fn infer_generic_callable_arguments<'ctx, 'arena, A>(
                         argument_offset,
                         *argument_span,
                         false,
-                        invocation.target.get_dialect(),
                     );
                 }
             }
@@ -1682,7 +1681,9 @@ where
     let parameter_type = if context.dialect.is_sharp() && keys_a_map_by_its_function(invocation_target) {
         without_method_template_bounds(&parameter_type)
     } else if invocation_target.get_function_like_metadata().is_some_and(|method| method.flags.is_sharp()) {
-        known_type_or_error(parameter_type)
+        // A plain PHP caller passes a `Map` or a `Set` as the object it runs as, or as a PHP array PHP# turns into one.
+        let parameter_type = known_type_or_error(parameter_type);
+        if context.dialect.is_sharp() { parameter_type } else { get_php_passed_type(&parameter_type, context.codebase) }
     } else {
         parameter_type
     };

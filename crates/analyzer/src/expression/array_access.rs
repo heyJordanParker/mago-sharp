@@ -22,8 +22,6 @@ use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::with_declared_kinds;
-use crate::statement::keys_mix_a_backed_enum;
-use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_array_access_id;
@@ -84,20 +82,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
             && container_type.as_ref().is_some_and(|container_type| {
                 container_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
             });
-
-        // The engine holds a `Map`'s key as its backing value, so a `Map` whose keys mix a backed enum with other types
-        // cannot tell a case from the key of its backing value where an index looks it up, as in `m[k] ?? 0`.
-        if context.dialect.is_sharp()
-            && container_type.as_ref().is_some_and(|container_type| keys_mix_a_backed_enum(context, container_type))
-        {
-            report_keys_sharing_entries(
-                context,
-                IssueCode::InvalidArrayAccess,
-                self.array.span(),
-                "the index",
-                Annotation::primary(self.index.span()).with_message("Its key is looked up here."),
-            );
-        }
 
         if !has_no_index
             && let Some(keyed_array_var_id) = &keyed_array_var_id

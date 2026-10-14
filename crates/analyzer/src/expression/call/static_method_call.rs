@@ -37,6 +37,7 @@ use crate::resolver::class_name::generic_class_type;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
 use crate::statement::class_like::listener::check_events_on;
+use crate::statement::class_like::r#struct::check_struct_parse;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_member;
 use crate::utils::quoted_source;
@@ -162,6 +163,15 @@ where
             resolved_method.method_identifier.get_method_name(),
         );
         crate::utils::availability::check_method_availability(context, method_metadata, &method_display, call.span);
+
+        let method_name = resolved_method.method_identifier.get_method_name();
+        if context.dialect.is_sharp()
+            && context.codebase.parses(metadata.name.as_bytes())
+            && (method_name.as_bytes().eq_ignore_ascii_case(b"parse")
+                || method_name.as_bytes().eq_ignore_ascii_case(b"tryParse"))
+        {
+            check_struct_parse(context, metadata, method_name.as_bytes().eq_ignore_ascii_case(b"parse"), call.span);
+        }
 
         // Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`. PHP calls the static
         // method it runs as.

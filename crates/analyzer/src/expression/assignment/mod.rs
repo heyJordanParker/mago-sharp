@@ -710,8 +710,8 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
                 &mut ComparisonResult::default(),
             )
         {
-            let assigned_type_str = assigned_type.get_id();
-            let constraint_type_str = constraint_type.get_id();
+            let assigned_type_str = display_type(context, &assigned_type);
+            let constraint_type_str = display_type(context, constraint_type);
             let primary_error_span = source_expression.map_or(variable_span, mago_span::HasSpan::span);
             let variable_id = display_variable_name(context, variable_id.as_bytes());
 

@@ -36,6 +36,7 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         | ParseError::ComputedParameterInSharp(..)
         | ParseError::ConstructorInitializerInSharp(..)
         | ParseError::EventBodyInSharp(..)
+        | ParseError::StructHeaderTypeInSharp(..)
         | ParseError::NestedTypeInSharp(..)
         | ParseError::NamedConstructorTypeParametersInSharp(..)
         | ParseError::MiscasedKeywordInSharp(..) => ErrorKind::UnexpectedToken,

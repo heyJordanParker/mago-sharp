@@ -36,8 +36,8 @@ use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_array_value_parameter;
-use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_iterable_parameters;
+use mago_codex::ttype::get_non_negative_int;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::definition_type_replacer::DefinitionReplacementOptions;
@@ -48,7 +48,6 @@ use mago_codex::ttype::wrap_atomic;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::Span;
-use mago_syntax::dialect::Dialect;
 
 use crate::code::IssueCode;
 use crate::context::Context;
@@ -60,13 +59,11 @@ pub struct InferenceOptions {
     pub infer_only_if_new: bool,
     pub argument_offset: Option<usize>,
     pub is_top_level: bool,
-    /// The dialect the container type is written in, the call target's.
-    pub dialect: Dialect,
 }
 
 impl Default for InferenceOptions {
     fn default() -> Self {
-        Self { infer_only_if_new: false, argument_offset: None, is_top_level: true, dialect: Dialect::Php }
+        Self { infer_only_if_new: false, argument_offset: None, is_top_level: true }
     }
 }
 
@@ -115,32 +112,6 @@ where
             .template_types
             .get(&parameter_name)
             .is_some_and(|templates| templates.iter().any(|template| template.defining_entity == *defining_entity))
-}
-
-/// The key types inference compares for `container_key_type`, which `container_dialect` code writes, and
-/// `input_key_type`. PHP# keys a `Map` by a backed enum's cases, which run as their backing values, spec section 12, so a
-/// key that holds the cases meets a key that holds none as its backing type: a PHP# `Map` reaches plain PHP as its
-/// backing values, and plain PHP's backing values, passed where PHP# takes the cases, bind no type parameter to a case.
-/// Two keys that hold the cases compare as written, so a `Map<Status, int>` binds the `TKey` of `Map<TKey, int>` to
-/// `Status`. A plain PHP container's key stays as written, as upstream Mago compares it.
-fn comparable_key_types<'key, A>(
-    context: &Context<'_, '_, A>,
-    container_key_type: &'key TUnion,
-    input_key_type: &'key TUnion,
-    container_dialect: Dialect,
-) -> (Cow<'key, TUnion>, Cow<'key, TUnion>)
-where
-    A: Arena,
-{
-    let input_backing_type = get_backing_key_type(input_key_type, context.codebase, context.dialect);
-    if !container_dialect.is_sharp() {
-        return (Cow::Borrowed(container_key_type), input_backing_type);
-    }
-
-    match (get_backing_key_type(container_key_type, context.codebase, container_dialect), input_backing_type) {
-        (Cow::Owned(_), Cow::Owned(_)) => (Cow::Borrowed(container_key_type), Cow::Borrowed(input_key_type)),
-        key_types => key_types,
-    }
 }
 
 /// Whether `input_object` is the very class the container is parameterizing, without carrying
@@ -396,16 +367,9 @@ fn infer_templates_from_input_and_container_types<A>(
                                     }
 
                                     if let Some(input_key_type) = input_key_type {
-                                        let (container_key_type, input_key_type) = comparable_key_types(
-                                            context,
-                                            &container_parameter.0,
-                                            &input_key_type,
-                                            options.dialect,
-                                        );
-
                                         infer_templates_from_input_and_container_types(
                                             context,
-                                            &container_key_type,
+                                            &container_parameter.0,
                                             &input_key_type,
                                             template_result,
                                             options,
@@ -612,13 +576,13 @@ fn infer_templates_from_input_and_container_types<A>(
                                     violations,
                                 );
                             }
-                            // Plain PHP reads a `Set` as the array it runs as, keyed by each element's backing value.
+                            // Plain PHP receives a `Set` as the list of its elements.
                             (TArray::Keyed(container_array), TArray::Set(input_element_type)) => {
                                 if let Some((container_key_type, container_value_type)) = &container_array.parameters {
                                     infer_templates_from_input_and_container_types(
                                         context,
                                         container_key_type,
-                                        &get_backing_key_type(input_element_type, context.codebase, Dialect::Sharp),
+                                        &get_non_negative_int(),
                                         template_result,
                                         options,
                                         violations,
@@ -644,17 +608,10 @@ fn infer_templates_from_input_and_container_types<A>(
                         return;
                     };
 
-                    let (container_key_type, input_key_type) = comparable_key_types(
+                    infer_templates_from_input_and_container_types(
                         context,
                         container_iterable.get_key_type(),
                         &input_params.0,
-                        options.dialect,
-                    );
-
-                    infer_templates_from_input_and_container_types(
-                        context,
-                        &container_key_type,
-                        &input_key_type,
                         template_result,
                         options,
                         violations,
@@ -1242,11 +1199,9 @@ pub fn infer_templates_for_method_call<'ctx, A>(
 /// * `argument_span`: The source code location of the argument, for error reporting.
 /// * `is_callable_argument`: A flag indicating if the argument is a callable, which
 ///   can influence inference strategy.
-/// * `target_dialect`: The dialect the call's target is declared in, which `parameter_type` is read in.
 ///
 /// Returns the templates the argument falls outside the constraint of. The argument fixes them, though it may add no
 /// bound for them.
-#[allow(clippy::too_many_arguments)]
 pub fn infer_parameter_templates_from_argument<A>(
     context: &mut Context<'_, '_, A>,
     parameter_type: &TUnion,
@@ -1255,7 +1210,6 @@ pub fn infer_parameter_templates_from_argument<A>(
     argument_offset: usize,
     argument_span: Span,
     is_callable_argument: bool,
-    target_dialect: Dialect,
 ) -> WordSet
 where
     A: Arena,
@@ -1269,7 +1223,6 @@ where
         InferenceOptions {
             infer_only_if_new: is_callable_argument,
             argument_offset: Some(argument_offset),
-            dialect: target_dialect,
             ..Default::default()
         },
         &mut violations,
@@ -1322,13 +1275,11 @@ where
 /// * `container_type`: The parameter's declared type, or the call's return type, which hold the templates.
 /// * `input_type`: The type of the parameter's default value, or the declared type the result goes into.
 /// * `template_result`: The map where inferred template types are stored.
-/// * `target_dialect`: The dialect the call's target is declared in, which `container_type` is read in.
 pub fn infer_unfixed_templates<A>(
     context: &Context<'_, '_, A>,
     container_type: &TUnion,
     input_type: &TUnion,
     template_result: &mut TemplateResult,
-    target_dialect: Dialect,
 ) -> WordSet
 where
     A: Arena,
@@ -1339,7 +1290,7 @@ where
         container_type,
         input_type,
         template_result,
-        InferenceOptions { infer_only_if_new: true, dialect: target_dialect, ..Default::default() },
+        InferenceOptions { infer_only_if_new: true, ..Default::default() },
         &mut violations,
     );
 

@@ -7,6 +7,8 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_passed_type;
+use mago_codex::ttype::get_php_received_type;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_reporting::Annotation;
@@ -439,6 +441,7 @@ where
             &resolution,
             class_expr.span(),
             Some(name_span),
+            false,
         )
     {
         result.has_error_path = true;
@@ -447,6 +450,15 @@ where
 
     let mut property_type =
         property_metadata.type_metadata.as_ref().map_or_else(get_mixed, |metadata| metadata.type_union.clone());
+    // Plain PHP reads a PHP# property's `Map` or `Set` as the object it runs as, and writes either the object or the
+    // PHP array PHP# turns into one.
+    if !context.dialect.is_sharp() && declaring_class_metadata.flags.is_sharp() {
+        property_type = if for_assignment {
+            get_php_passed_type(&property_type, context.codebase)
+        } else {
+            get_php_received_type(&property_type, context.codebase)
+        };
+    }
 
     expander::expand_union(
         context.codebase,

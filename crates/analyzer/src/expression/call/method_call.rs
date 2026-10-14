@@ -84,9 +84,6 @@ use crate::resolver::method::resolve_method_targets;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
-use crate::statement::keys_mix_a_backed_enum;
-use crate::statement::report_keys_read_back;
-use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_member;
@@ -390,16 +387,6 @@ where
                     .iter()
                     .any(|search| search.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
         });
-    let takes_map_key = context.dialect.is_sharp()
-        && !refused_on_object
-        && method_resolution.resolved_methods.iter().any(|method| {
-            let name = method.method_identifier.get_method_name();
-
-            sharp_collection_name(&TObject::new_named(method.classname)) == Some("Map")
-                && ["get", "has", "remove", "keys"]
-                    .iter()
-                    .any(|keyed| keyed.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
-        });
 
     let undocumented_template_result =
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
@@ -579,28 +566,6 @@ where
     {
         let method = String::from_utf8_lossy(method.value);
         check_element_equality(context, &method, object, value, &element_type, value_type, is_null_safe);
-    }
-
-    // The engine holds a `Map`'s key as its backing value, and reads it back as a case only through one enum. A `Map`
-    // whose keys mix a backed enum with other types cannot read them back in `keys()`, and its `get`, `has` and
-    // `remove` cannot tell a case from the key of its backing value.
-    if takes_map_key
-        && let ClassLikeMemberSelector::Identifier(method) = selector
-        && let Some(map_type) = artifacts.get_expression_type(object)
-        && keys_mix_a_backed_enum(context, map_type)
-    {
-        if method.value.eq_ignore_ascii_case(b"keys") {
-            report_keys_read_back(context, IssueCode::InvalidArrayAccess, object, "`keys()`", selector.span());
-        } else {
-            let finder = format!("`{}`", String::from_utf8_lossy(method.value));
-            report_keys_sharing_entries(
-                context,
-                IssueCode::InvalidArgument,
-                object.span(),
-                &finder,
-                Annotation::primary(method.span()).with_message("Its key is looked up here."),
-            );
-        }
     }
 
     if !method_resolution.undocumented_methods.is_empty() {

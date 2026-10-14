@@ -96,6 +96,9 @@ pub enum ParseError {
     /// class-like as a message names it, `A class`, and the type's name, at the whole type. Every type, events and
     /// interfaces included, is declared in its own file.
     NestedTypeInSharp(&'static str, Box<str>, Span),
+    /// A type other than an interface name in a PHP# struct's header, as in `struct Username : string`, at the type.
+    /// Spec section 10: a struct implements interfaces, and keys a `Map` by its whole value.
+    StructHeaderTypeInSharp(Span),
     /// Type parameters written on a PHP# named constructor, as in `Plain.of<T>(T value)`, with its class's name and the
     /// names of the type parameters its class declares, at the type parameters. A named constructor takes its class's
     /// type arguments, as Dart's does, and declares none.
@@ -142,6 +145,7 @@ impl HasFileId for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span) => span.file_id,
         }
@@ -187,6 +191,7 @@ impl HasSpan for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span) => *span,
         }
@@ -315,6 +320,10 @@ impl std::fmt::Display for ParseError {
             ParseError::NestedTypeInSharp(owner, name, _) => {
                 format!("{owner} can't declare a type inside it: declare `{name}` in its own file.")
             }
+            ParseError::StructHeaderTypeInSharp(_) => {
+                "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value."
+                    .to_string()
+            }
             ParseError::NamedConstructorTypeParametersInSharp(..) => {
                 "A named constructor takes its class's type arguments and declares none of its own.".to_string()
             }
@@ -374,6 +383,7 @@ impl From<&ParseError> for Issue {
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)
             | ParseError::NestedTypeInSharp(..)
+            | ParseError::StructHeaderTypeInSharp(..)
             | ParseError::MiscasedKeywordInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),

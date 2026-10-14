@@ -107,6 +107,7 @@ pub mod method;
 pub mod method_signature;
 pub mod override_attribute;
 pub mod property;
+pub mod r#struct;
 pub mod unused_members;
 
 /// Reports a duplicate definition issue for class-like types, naming the class-like as the analyzed file writes it.
@@ -517,6 +518,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
         if class_like_metadata.span != self.span() {
             report_duplicate_definition(context, "Class", "class", name, self.span(), class_like_metadata.span);
             return Ok(());
+        }
+        if context.codebase.parses(name) {
+            r#struct::report_keys_read_twice(context, class_like_metadata, self.name.span);
         }
 
         // Call plugin on_enter_class hooks
@@ -1520,6 +1524,7 @@ where
 
     if has_complete_hierarchy {
         crate::readonly::finalize_class_writes(context, artifacts, class_like_metadata);
+        initialization::check_get_only_initialization(context, class_like_metadata);
         initialization::check_property_initialization(
             context,
             artifacts,
@@ -1699,7 +1704,14 @@ fn check_class_like_extends<'ctx, 'arena, A>(
                 continue;
             }
 
-            if extended_class_metadata.flags.is_static() {
+            if extended_class_metadata.flags.is_struct() {
+                context.collector.report_with_code(
+                    IssueCode::InvalidStruct,
+                    Issue::error(format!("`{extended_name}` is a struct, which can't be inherited."))
+                        .with_annotation(Annotation::primary(extended_type.span()).with_message("Inherited here."))
+                        .with_note("A struct is a value, so no class extends it."),
+                );
+            } else if extended_class_metadata.flags.is_static() {
                 let written_name = BytesDisplay(extended_type.value());
 
                 context.collector.report_with_code(
@@ -1812,7 +1824,8 @@ fn check_class_like_implements<'ctx, 'arena, A>(
         return;
     }
 
-    let using_kind_str = class_like_metadata.kind.as_str();
+    let is_struct = class_like_metadata.flags.is_struct();
+    let using_kind_str = if is_struct { "struct" } else { class_like_metadata.kind.as_str() };
     let using_kind_capitalized =
         format!("{}{}", using_kind_str.chars().next().unwrap().to_uppercase(), &using_kind_str[1..]);
     let using_name = display_class_like_name(context, class_like_metadata.original_name);
@@ -1901,13 +1914,25 @@ fn check_class_like_implements<'ctx, 'arena, A>(
             check_interface_method_signatures(context, class_like_metadata, implemented_metadata, checked_signatures);
         } else {
             let implemented_name = BytesDisplay(implemented_type.value());
+            let (note, help) = if is_struct {
+                ("A struct's header lists the interfaces it implements.", "Check the interface's name and its import.")
+            } else {
+                (
+                    "Mago could not find a definition for this interface. The `implements` keyword is for interfaces only.",
+                    "Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable.",
+                )
+            };
 
             context.collector.report_with_code(
                 IssueCode::NonExistentClassLike,
-                Issue::error(format!("{using_kind_capitalized} `{using_name}` cannot implement unknown type `{implemented_name}`"))
-                    .with_annotation(Annotation::primary(implemented_type.span()).with_message("This type could not be found"))
-                    .with_note("Mago could not find a definition for this interface. The `implements` keyword is for interfaces only.")
-                    .with_help("Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable."),
+                Issue::error(format!(
+                    "{using_kind_capitalized} `{using_name}` cannot implement unknown type `{implemented_name}`"
+                ))
+                .with_annotation(
+                    Annotation::primary(implemented_type.span()).with_message("This type could not be found"),
+                )
+                .with_note(note)
+                .with_help(help),
             );
         }
     }
@@ -4763,17 +4788,27 @@ fn report_unfit_interface_property<A>(
         report(context, IssueCode::IncompatibleStaticModifier, given, "on each object".to_owned(), help);
     }
 
-    // PHP refuses a readonly, a `private(set)` or a get-only virtual property for one stated with `set`.
+    // PHP refuses a readonly, a `private(set)` or a get-only virtual property for one stated with `set`, and an `init`
+    // property is set only while its object is created.
     let set = word(b"set");
     let given_settable = !property.flags.is_readonly()
+        && !property.flags.is_init()
         && property.write_visibility == Visibility::Public
         && (!property.flags.is_virtual_property() || property.hooks.contains_key(&set));
     if stated.hooks.contains_key(&set) && !given_settable {
-        if owner.flags.is_event() {
+        let never_set_again = if owner.flags.is_event() {
+            Some("an event's properties are set once, by `new`")
+        } else if owner.flags.is_struct() {
+            Some("a struct never changes")
+        } else {
+            None
+        };
+
+        if let Some(reason) = never_set_again {
             context.collector.report_with_code(
                 IssueCode::IncompatiblePropertyAccess,
                 Issue::error(format!(
-                    "`{name}` cannot give `{property_name}`, which `{interface_name}` states with `set`: an event's properties are set once, by `new`."
+                    "`{name}` cannot give `{property_name}`, which `{interface_name}` states with `set`: {reason}."
                 ))
                 .with_annotation(Annotation::primary(property_span).with_message("Given here."))
                 .with_annotation(Annotation::secondary(stated_span).with_message("Stated here.")),

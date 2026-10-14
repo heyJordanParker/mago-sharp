@@ -37,6 +37,7 @@ use crate::cst::cst::module::Module;
 use crate::cst::cst::namespace::Namespace;
 use crate::cst::cst::r#return::Return;
 use crate::cst::cst::r#static::Static;
+use crate::cst::cst::r#struct::Struct;
 use crate::cst::cst::tag::ClosingTag;
 use crate::cst::cst::tag::OpeningTag;
 use crate::cst::cst::terminator::Terminator;
@@ -76,6 +77,7 @@ pub enum Statement<'arena> {
     Trait(Trait<'arena>),
     Enum(Enum<'arena>),
     Event(Event<'arena>),
+    Struct(Struct<'arena>),
     Block(Block<'arena>),
     Constant(Constant<'arena>),
     Function(Function<'arena>),
@@ -232,6 +234,7 @@ impl HasSpan for Statement<'_> {
             Statement::Trait(statement) => statement.span(),
             Statement::Enum(statement) => statement.span(),
             Statement::Event(statement) => statement.span(),
+            Statement::Struct(statement) => statement.span(),
             Statement::Block(statement) => statement.span(),
             Statement::Constant(statement) => statement.span(),
             Statement::Function(statement) => statement.span(),
