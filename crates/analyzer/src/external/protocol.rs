@@ -3413,9 +3413,101 @@ fn validate_provider_indices(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 pub(super) mod testing {
+    use std::sync::LazyLock;
+
+    use mago_allocator::LocalArena;
+    use mago_codex::populator::populate_codebase;
+    use mago_codex::scanner::scan_program;
     use mago_codex::ttype::get_php_received_type;
+    use mago_names::ResolvedNames;
+    use mago_names::resolver::NameResolver;
+    use mago_prelude::Prelude;
+    use mago_syntax::cst::Node;
+    use mago_syntax::cst::Program;
+    use mago_syntax::parser::parse_file;
 
     use super::*;
+    use crate::Analyzer;
+    use crate::analysis_result::AnalysisResult;
+    use crate::invocation::InvocationArgumentsSource;
+    use crate::invocation::InvocationTarget;
+    use crate::plugin::PluginRegistry;
+    use crate::settings::Settings;
+
+    static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
+
+    /// A PHP# file with an enum and a class whose `Map` and `Set` types an external analyzer reads, which calls a
+    /// plain PHP method with a `Map`.
+    pub const SHELF: (&str, &str) = (
+        "src/App/Shelf.sharp",
+        "namespace App;\n\nimport Lib.Sink;\n\npublic enum Level : int\n{\n    case Low = 1;\n}\n\npublic class Shelf\n{\n    public Map<string, int> stock { get; set; } = [:];\n\n    public Map<string, int> counts(Set<string> tags)\n    {\n        return this.stock;\n    }\n\n    public int total() => Sink.take(this.stock);\n}\n",
+    );
+
+    /// A plain PHP class with a template, a mixin, an attribute, a keyed array constant and a method that asserts its
+    /// parameter's type, and a constant.
+    pub const SINK: (&str, &str) = (
+        "src/Lib/Sink.php",
+        "<?php\n\nnamespace Lib;\n\n/**\n * @template T\n * @mixin \\ArrayObject<int, T>\n */\n#[\\Attribute(\\Attribute::TARGET_CLASS)]\nfinal class Sink\n{\n    public const LIMITS = ['shelf' => 1];\n\n    /**\n     * @param array<string, int> $items\n     * @psalm-assert array<string, int> $items\n     */\n    public static function take(array $items): int\n    {\n        return \\count($items);\n    }\n}\n\nconst LIMIT = 3;\n",
+    );
+
+    /// A plain PHP file whose method passes a keyed array to `Lib\Sink::take`.
+    pub const DESK: (&str, &str) = (
+        "src/App/Desk.php",
+        "<?php\n\nnamespace App;\n\nuse Lib\\Sink;\n\nfinal class Desk\n{\n    /** @var array<string, int> */\n    public array $stock = [];\n\n    public function total(): int\n    {\n        return Sink::take($this->stock);\n    }\n}\n",
+    );
+
+    /// One analyzed file and what an external analyzer reads of it.
+    pub struct Analysis<'analysis, 'arena> {
+        /// The analyzed file, then the files beside it.
+        pub files: &'analysis [Arc<File>],
+        pub program: &'arena Program<'arena>,
+        pub names: &'analysis ResolvedNames<'arena>,
+        pub artifacts: &'analysis AnalysisArtifacts,
+        pub codebase: &'analysis CodebaseMetadata,
+    }
+
+    impl Analysis<'_, '_> {
+        pub fn file(&self) -> &File {
+            &self.files[0]
+        }
+    }
+
+    /// Analyzes the first of `files` beside the rest, each a path and its code, which must analyze without an error,
+    /// and runs `check` on it.
+    pub fn analyzed<R>(files: &[(&'static str, &'static str)], check: impl FnOnce(&Analysis<'_, '_>) -> R) -> R {
+        let Prelude { mut metadata, mut symbol_references, .. } = PRELUDE.clone();
+        let settings = Settings::default();
+        let files: Vec<Arc<File>> = files
+            .iter()
+            .map(|(name, code)| {
+                Arc::new(File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes())))
+            })
+            .collect();
+        let arena = LocalArena::new();
+        let mut programs = Vec::new();
+        for file in &files {
+            let program = parse_file(&arena, file);
+            let names = NameResolver::new(&arena).resolve(program);
+            metadata.extend(scan_program(&arena, file, program, &names, settings.version));
+            programs.push((program, names));
+        }
+        populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());
+
+        let (program, names) = &programs[0];
+        let mut result = AnalysisResult::new(symbol_references);
+        let artifacts = Analyzer::new(&arena, &files[0], names, &metadata, &PluginRegistry::new(), settings)
+            .analyze_with_artifacts(program, &mut result)
+            .unwrap();
+        let errors: Vec<&Issue> = result.issues.iter().filter(|issue| issue.level == Level::Error).collect();
+        assert!(errors.is_empty(), "the fixture analyzes: {errors:#?}");
+
+        check(&Analysis { files: &files, program, names, artifacts: &artifacts, codebase: &metadata })
+    }
+
+    /// Whether `payload` names `class`.
+    pub fn names(payload: &[u8], class: &[u8]) -> bool {
+        payload.windows(class.len()).any(|window| window == class)
+    }
 
     #[test]
     fn complete_snapshots_accept_deep_inferred_types() {
@@ -3501,7 +3593,8 @@ pub(super) mod testing {
     }
 
     /// A type an external analyzer returns that names `Sharp\Map<K, V>` or `Sharp\Set<T>` is that `Map` or `Set`, as
-    /// the analyzer types one. A `Sharp\Map` without its two type parameters stays the object it names.
+    /// the analyzer types one, whether the analyzer builds the type or writes it whole. A `Sharp\Map` without its two
+    /// type parameters stays the object it names.
     #[test]
     fn a_returned_map_or_set_object_is_the_collection() {
         let object = |class: &[u8], parameters: Option<Vec<TUnion>>| {
@@ -3518,6 +3611,91 @@ pub(super) mod testing {
             TAtomic::Array(TArray::Set(element)) if element.is_int()
         ));
         assert!(matches!(into_collection(object(b"Sharp\\Map", None)), TAtomic::Object(TObject::Named(_))));
+        assert!(matches!(
+            into_collection(object(b"Sharp\\Map", Some(vec![get_int()]))),
+            TAtomic::Object(TObject::Named(_))
+        ));
+
+        // `Sharp\Map<string, int>` written whole: a named object with two type parameters, each a type of one scalar,
+        // and no variances, `static`, `$this`, intersection or remapped parameters.
+        let mut writer = message_writer(RETURN_TYPE_RESPONSE);
+        writer.write_bool(true);
+        writer.write_u8(TYPE_COMPLETE);
+        writer.write_u16(0);
+        writer.write_u32(1);
+        writer.write_u8(SNAPSHOT_OBJECT);
+        writer.write_u8(2);
+        writer.write_bytes(b"Sharp\\Map").unwrap();
+        writer.write_bool(true);
+        writer.write_u32(2);
+        for scalar in [&[7, 0, 0, 0][..], &[5, 5][..]] {
+            writer.write_u16(0);
+            writer.write_u32(1);
+            writer.write_u8(SNAPSHOT_SCALAR);
+            writer.write_raw(scalar);
+        }
+        for _ in 0..5 {
+            writer.write_bool(false);
+        }
+        let returned = decode_return_type_response(&writer.finish(), |_| None).unwrap().unwrap();
+
+        assert!(matches!(
+            returned.get_single(),
+            TAtomic::Array(TArray::Keyed(TKeyedArray { parameters: Some((key, value)), .. }))
+                if key.is_string() && value.is_int()
+        ));
+    }
+
+    /// A return type provider request sends each argument's type as the code of the calling file sees it: a `Map` a
+    /// PHP# file passes goes as the `Sharp\Map` object it runs as, and a keyed array plain PHP passes as an array.
+    #[test]
+    fn a_provider_request_sends_each_argument_as_the_calling_file_sees_it() {
+        for (files, sends_map) in [([SHELF, SINK], true), ([DESK, SINK], false)] {
+            let (typed_arguments, payload) = analyzed(&files, |analysis| {
+                let call = Node::Program(analysis.program).filter_map(|node| match node {
+                    Node::ArgumentList(list) => Some(*list),
+                    _ => None,
+                });
+                let sink = analysis.codebase.get_class_like(b"Lib\\Sink").unwrap();
+                let take = analysis.codebase.get_method(b"Lib\\Sink", b"take").unwrap();
+                let target = InvocationTarget::FunctionLike {
+                    identifier: FunctionLikeIdentifier::Method(sink.name, take.name),
+                    metadata: take,
+                    inferred_return_type: None,
+                    effective_signature: None,
+                    method_context: Some(MethodTargetContext {
+                        invocation_kind: MethodInvocationKind::Static,
+                        declaring_method_id: None,
+                        class_like_metadata: sink,
+                        class_type: StaticClassType::Name(sink.name),
+                        declaring_object_type: None,
+                    }),
+                    span: call[0].span(),
+                };
+                let invocation =
+                    Invocation::new(target, InvocationArgumentsSource::ArgumentList(call[0]), call[0].span());
+
+                let request = encode_provider_request(
+                    ProviderRequestKind::ReturnType,
+                    &[0],
+                    ProviderTarget::Method { class: b"Lib\\Sink", method: b"take" },
+                    &invocation,
+                    analysis.artifacts,
+                    analysis.file(),
+                    analysis.codebase,
+                    1,
+                    false,
+                    false,
+                    None,
+                )
+                .unwrap();
+
+                (request.typed_arguments, request.payload)
+            });
+
+            assert_eq!(typed_arguments, 1, "{files:?}");
+            assert_eq!(names(&payload, b"Sharp\\Map"), sends_map, "{files:?}");
+        }
     }
 
     #[test]
@@ -4008,6 +4186,58 @@ pub(super) mod testing {
         writer.write_bool(false);
         writer.write_bool(false);
         writer.write_bool(true);
+        writer.finish()
+    }
+
+    /// The registration of one plugin with a property type provider and a call forwarding provider, each for the
+    /// member `stock` of `Lib\Shelf`.
+    pub fn registration_response_with_property_providers() -> Vec<u8> {
+        let mut writer = message_writer(DESCRIBE_RESPONSE);
+        writer.write_u32(1);
+        writer.write_string("demo/extension").unwrap();
+        writer.write_string("Demo").unwrap();
+        writer.write_string("1.0.0").unwrap();
+        writer.write_bool(false);
+        writer.write_u32(1);
+        writer.write_string("demo").unwrap();
+        writer.write_string("Demo analyzer").unwrap();
+        writer.write_string("Test provider").unwrap();
+        writer.write_bool(true);
+        writer.write_u8(0);
+        // No alias, function provider or method provider, then the property type provider.
+        writer.write_u32(0);
+        writer.write_u32(0);
+        writer.write_u32(0);
+        write_stock_provider(&mut writer);
+        // No property initialization provider, class initializer provider, entry point, attributed entry point,
+        // issue filter, node, method call or class-like analysis hook, assertion provider or codebase scan hook.
+        for _ in 0..11 {
+            writer.write_u32(0);
+        }
+        write_stock_provider(&mut writer);
+        writer.finish()
+    }
+
+    /// A provider list of one provider, index 0, for the member `stock` of `Lib\Shelf`.
+    fn write_stock_provider(writer: &mut PayloadWriter) {
+        writer.write_u32(1);
+        writer.write_u16(0);
+        writer.write_u32(1);
+        writer.write_bytes(b"Lib\\Shelf").unwrap();
+        writer.write_bytes(b"stock").unwrap();
+    }
+
+    /// The response that declines `request`, a property type or call forwarding request, after the codebase reads
+    /// the worker made for it: none.
+    pub fn declined_response(request: &[u8]) -> Vec<u8> {
+        let kind = match message_kind(request).unwrap() {
+            PROPERTY_TYPE_REQUEST => PROPERTY_TYPE_RESPONSE,
+            CALL_FORWARDING_REQUEST => CALL_FORWARDING_RESPONSE,
+            kind => unreachable!("no test declines a request of kind {kind}"),
+        };
+        let mut writer = message_writer(kind);
+        writer.write_u32(0);
+        writer.write_bool(false);
         writer.finish()
     }
 }

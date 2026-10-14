@@ -1449,9 +1449,107 @@ fn variance(value: Variance) -> u8 {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use mago_codex::ttype::atomic::array::TArray;
+    use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+    use mago_codex::ttype::get_int;
+    use mago_codex::ttype::get_string;
+
     use super::*;
     use crate::external::protocol;
     use crate::external::protocol::NestedRequestKind;
+    use crate::external::protocol::testing::SHELF;
+    use crate::external::protocol::testing::SINK;
+    use crate::external::protocol::testing::analyzed;
+    use crate::external::protocol::testing::names;
+
+    /// A codebase query sends each declaration's types as the code of the file it is declared in sees them: a `Map`
+    /// and a `Set` a PHP# file declares go as the `Sharp\Map` and `Sharp\Set` objects they run as, and plain PHP's
+    /// keyed arrays as arrays. Each row is a query, a name its answer holds, and whether the answer names
+    /// `Sharp\Map` and `Sharp\Set`.
+    #[test]
+    fn a_declaration_goes_as_the_code_of_its_file_sees_it() {
+        analyzed(&[SHELF, SINK], |analysis| {
+            let session = ExternalAnalysisSession::from_files(analysis.files.iter().cloned());
+            let request = |operation: u8| {
+                let mut writer = protocol::message_writer(CODEBASE_QUERY_REQUEST);
+                writer.write_u64(session.generation());
+                writer.write_u8(operation);
+                writer
+            };
+            let member = |operation: u8, class: &[u8], member: &[u8]| {
+                let mut writer = request(operation);
+                writer.write_u32(1);
+                writer.write_bytes(class).expect("the class should fit in a frame");
+                writer.write_bytes(member).expect("the member should fit in a frame");
+                writer.finish()
+            };
+            let named = |operation: u8, name: &[u8]| {
+                let mut writer = request(operation);
+                if operation == GET_CLASS_LIKES {
+                    writer.write_u8(ANY_CLASS_LIKE);
+                }
+                writer.write_u32(1);
+                writer.write_bytes(name).expect("the name should fit in a frame");
+                writer.finish()
+            };
+            let found = |class: &[u8], pattern: &[u8]| {
+                let mut writer = request(FIND_METHODS);
+                writer.write_u8(METHOD_SEARCH_EXACT_CLASS);
+                writer.write_bytes(class).expect("the class should fit in a frame");
+                writer.write_bytes(pattern).expect("the pattern should fit in a frame");
+                writer.write_bool(false);
+                writer.write_u32(0);
+                writer.write_u32(METHOD_FIELDS_ALL);
+                writer.finish()
+            };
+            let rows: [(Vec<u8>, &[u8], bool, bool); 10] = [
+                (member(GET_METHODS, b"App\\Shelf", b"counts"), b"counts", true, true),
+                (member(GET_METHODS, b"Lib\\Sink", b"take"), b"take", false, false),
+                (found(b"App\\Shelf", b"counts"), b"counts", true, true),
+                (found(b"Lib\\Sink", b"take"), b"take", false, false),
+                (member(GET_PROPERTIES, b"App\\Shelf", b"$stock"), b"$stock", true, false),
+                (named(GET_CLASS_LIKES, b"Lib\\Sink"), b"Lib\\Sink", false, false),
+                (named(GET_CLASS_LIKES, b"App\\Level"), b"App\\Level", false, false),
+                (member(GET_ENUM_CASES, b"App\\Level", b"Low"), b"Low", false, false),
+                (member(GET_CLASS_CONSTANTS, b"Lib\\Sink", b"LIMITS"), b"LIMITS", false, false),
+                (named(GET_CONSTANTS, b"Lib\\LIMIT"), b"\\LIMIT", false, false),
+            ];
+
+            for (query, name, sends_map, sends_set) in rows {
+                let (_, answer) = protocol::handle_nested_request(&query, analysis.codebase, &session, |_| None)
+                    .expect("the codebase query should succeed");
+                let label = String::from_utf8_lossy(name);
+
+                assert!(names(&answer, name), "the answer holds `{label}`");
+                assert_eq!(names(&answer, b"Sharp\\Map"), sends_map, "`{label}` names `Sharp\\Map`");
+                assert_eq!(names(&answer, b"Sharp\\Set"), sends_set, "`{label}` names `Sharp\\Set`");
+            }
+        });
+    }
+
+    /// An assertion's type goes as the code of the file the assertion is written in sees it, as every other
+    /// declared type does.
+    #[test]
+    fn an_assertion_sends_its_type_as_its_file_sees_it() {
+        let codebase = CodebaseMetadata::new();
+        let map = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+            Arc::new(get_string()),
+            Arc::new(get_int()),
+        ))));
+        let rows = [
+            (Assertion::InArray(map.clone()), Dialect::Sharp, true),
+            (Assertion::InArray(map.clone()), Dialect::Php, false),
+            (Assertion::IsType(map.get_single().clone()), Dialect::Sharp, true),
+            (Assertion::IsType(map.get_single().clone()), Dialect::Php, false),
+        ];
+
+        for (assertion, dialect, sends_map) in rows {
+            let mut writer = PayloadWriter::new();
+            write_assertion(&mut writer, &assertion, &codebase, dialect).expect("the assertion should encode");
+
+            assert_eq!(names(&writer.finish(), b"Sharp\\Map"), sends_map, "{assertion:?} in {dialect:?}");
+        }
+    }
 
     fn session(generation: u64) -> ExternalAnalysisSession {
         ExternalAnalysisSession {

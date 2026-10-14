@@ -11950,6 +11950,427 @@ fn a_map_or_set_property_carries_the_plan_a_php_array_crosses_by() {
     );
 }
 
+/// `Lib\Calc`, a plain PHP class whose methods take and give PHP arrays and closures that take them.
+const ARRAYS: (&str, &str) = (
+    "src/Lib/Calc.php",
+    "<?php namespace Lib; final class Calc {
+        public static function total(?array $items): int { return 0; }
+        public static function sum(array ...$items): int { return 0; }
+        /** @param array<int, string> $items */
+        public static function sort(array &$items): void {}
+        /** @param-out array<int, string> $value */
+        public static function fill(&$value): void {}
+        /** @param-out int $value */
+        public static function bump(&$value): void {}
+        /** @return array<int, string> */
+        public static function names(): array { return []; }
+        /** @return \\Closure(array $items, array ...$rest): int */
+        public static function counter(): \\Closure { return fn (array $items, array ...$rest): int => 0; }
+        public static function plain(): \\Closure { return fn () => 0; }
+    }",
+);
+
+/// The statements of `run` at `positions` in `code`, lowered beside `ARRAYS` and the `library` files.
+fn statements_at(code: &str, library: &[(&str, &str)], positions: std::ops::Range<u32>) -> Vec<String> {
+    let files: Vec<(&str, &str)> = std::iter::once(ARRAYS).chain(library.iter().copied()).collect();
+    let lowered = Lowered::with(code, &files);
+    let body = lowered.child(lowered.method_named("run"), 2);
+
+    positions.map(|position| lowered.render(lowered.child(body, position))).collect()
+}
+
+/// ```php
+/// \Lib\Calc::total(\iterator_to_array($stock));
+/// \Lib\Calc::total(\iterator_to_array($tags, false));
+/// \Lib\Calc::total(\is_object($spare) ? \iterator_to_array($spare) : $spare);
+/// \Lib\Calc::sum(...\array_map(fn ($element#1) => \is_object($element#1) ? \iterator_to_array($element#1) : $element#1, $shelves));
+/// return \Lib\Calc::total(items: \iterator_to_array($stock));
+/// ```
+///
+/// A `Map` or a `Set` goes into a plain PHP parameter that takes `array` as its PHP array, spec section 12, and a `Set`
+/// without its positions. A value that may be null goes in as it is when it is null, and each `Map` of a spread `List`
+/// goes in as its PHP array.
+#[test]
+fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<string, int> stock = this.stock();\n        Set<string> tags = this.tags();\n        Map<string, int>? spare = this.spare();\n        List<Map<string, int>> shelves = this.shelves();\n        Calc.total(stock);\n        Calc.total(tags);\n        Calc.total(spare);\n        Calc.sum(...shelves);\n        return Calc.total(items: stock);\n    }\n\n    private Map<string, int> stock() => [:];\n\n    private Set<string> tags() => [];\n\n    private Map<string, int>? spare() => null;\n\n    private List<Map<string, int>> shelves() => [];\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[], 4..9),
+        [
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "total"
+                  ARG_LIST
+                    CALL
+                      ZVAL "iterator_to_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "stock"
+            "#},
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "total"
+                  ARG_LIST
+                    CALL
+                      ZVAL "iterator_to_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                        ZVAL false
+            "#},
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "total"
+                  ARG_LIST
+                    CONDITIONAL
+                      CALL
+                        ZVAL "is_object"
+                        ARG_LIST
+                          VAR
+                            ZVAL "spare"
+                      CALL
+                        ZVAL "iterator_to_array"
+                        ARG_LIST
+                          VAR
+                            ZVAL "spare"
+                      VAR
+                        ZVAL "spare"
+            "#},
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "sum"
+                  ARG_LIST
+                    UNPACK
+                      CALL
+                        ZVAL "array_map"
+                        ARG_LIST
+                          ARROW_FUNC "" @16-16
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "element#1"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            CONDITIONAL
+                              CALL
+                                ZVAL "is_object"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "element#1"
+                              CALL
+                                ZVAL "iterator_to_array"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "element#1"
+                              VAR
+                                ZVAL "element#1"
+                            null
+                            null
+                          VAR
+                            ZVAL "shelves"
+            "#},
+            indoc! {r#"
+                RETURN
+                  STATIC_CALL
+                    ZVAL "Lib\\Calc"
+                    ZVAL "total"
+                    ARG_LIST
+                      NAMED_ARG
+                        ZVAL "items"
+                        CALL
+                          ZVAL "iterator_to_array"
+                          ARG_LIST
+                            VAR
+                              ZVAL "stock"
+            "#},
+        ]
+    );
+}
+
+/// ```php
+/// [$sorted = \is_object($sorted) ? \iterator_to_array($sorted) : $sorted, \Lib\Calc::sort($sorted), $sorted = \is_array($sorted) ? \Sharp\Map::from($sorted) : $sorted][1];
+/// [\Lib\Calc::fill($filled), $filled = \is_array($filled) ? \Sharp\Map::from($filled) : $filled][0];
+/// \Lib\Calc::bump($count);
+/// ```
+///
+/// A typed local that holds a `Map` or a `Set` goes into a plain PHP reference parameter and comes back as the object
+/// of what plain PHP wrote there: as its PHP array first where the parameter takes `array`, and as itself otherwise.
+/// A local of any other type goes in as it is.
+#[test]
+fn a_typed_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<int, string> sorted = this.names();\n        Map<int, string> filled = this.names();\n        int count = 0;\n        Calc.sort(sorted);\n        Calc.fill(filled);\n        Calc.bump(count);\n        return count;\n    }\n\n    private Map<int, string> names() => [:];\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[], 3..6),
+        [
+            indoc! {r#"
+                DIM
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "sorted"
+                        CONDITIONAL
+                          CALL
+                            ZVAL "is_object"
+                            ARG_LIST
+                              VAR
+                                ZVAL "sorted"
+                          CALL
+                            ZVAL "iterator_to_array"
+                            ARG_LIST
+                              VAR
+                                ZVAL "sorted"
+                          VAR
+                            ZVAL "sorted"
+                      null
+                    ARRAY_ELEM
+                      STATIC_CALL
+                        ZVAL "Lib\\Calc"
+                        ZVAL "sort"
+                        ARG_LIST
+                          VAR
+                            ZVAL "sorted"
+                      null
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "sorted"
+                        CONDITIONAL
+                          CALL
+                            ZVAL "is_array"
+                            ARG_LIST
+                              VAR
+                                ZVAL "sorted"
+                          STATIC_CALL
+                            ZVAL "Sharp\\Map"
+                            ZVAL "from"
+                            ARG_LIST
+                              VAR
+                                ZVAL "sorted"
+                          VAR
+                            ZVAL "sorted"
+                      null
+                  ZVAL 1
+            "#},
+            indoc! {r#"
+                DIM
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      STATIC_CALL
+                        ZVAL "Lib\\Calc"
+                        ZVAL "fill"
+                        ARG_LIST
+                          VAR
+                            ZVAL "filled"
+                      null
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "filled"
+                        CONDITIONAL
+                          CALL
+                            ZVAL "is_array"
+                            ARG_LIST
+                              VAR
+                                ZVAL "filled"
+                          STATIC_CALL
+                            ZVAL "Sharp\\Map"
+                            ZVAL "from"
+                            ARG_LIST
+                              VAR
+                                ZVAL "filled"
+                          VAR
+                            ZVAL "filled"
+                      null
+                  ZVAL 0
+            "#},
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "bump"
+                  ARG_LIST
+                    VAR
+                      ZVAL "count"
+            "#},
+        ]
+    );
+}
+
+/// ```php
+/// $count(\iterator_to_array($names), \iterator_to_array($names), \iterator_to_array($names));
+/// $count(items: \iterator_to_array($names));
+/// $plain($names);
+/// $doubler(\iterator_to_array($names));
+/// ```
+///
+/// A call of a plain PHP closure a local holds crosses each `Map` by the parameters of the closure's signature, as a
+/// call of a plain PHP method does: by position, by name and into its variadic parameter. A closure whose signature
+/// its type doesn't give takes the object, and a plain PHP object a local holds crosses each by its `__invoke`.
+#[test]
+fn a_call_of_a_plain_php_callable_a_local_holds_crosses_each_map_by_its_parameters() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Doubler;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<int, string> names = this.names();\n        const count = Calc.counter();\n        const plain = Calc.plain();\n        const doubler = new Doubler();\n        count(names, names, names);\n        count(items: names);\n        plain(names);\n        doubler(names);\n        return 0;\n    }\n\n    private Map<int, string> names() => [:];\n}\n";
+    let doubler = (
+        "src/Lib/Doubler.php",
+        "<?php namespace Lib; final class Doubler { public function __invoke(array $items): int { return 0; } }",
+    );
+    let crossed = indoc! {r#"
+        CALL
+          ZVAL "iterator_to_array"
+          ARG_LIST
+            VAR
+              ZVAL "names"
+    "#};
+    let passed = "VAR\n  ZVAL \"names\"\n";
+    // The tree of `$local(…)` with `arguments`, each a rendered node, below its `ARG_LIST`.
+    let called = |local: &str, arguments: &[&str]| {
+        let mut call = format!("CALL\n  VAR\n    ZVAL \"{local}\"\n  ARG_LIST\n");
+        for argument in arguments {
+            call.push_str(&nested(argument, 2));
+        }
+
+        call
+    };
+    let named = format!("NAMED_ARG\n  ZVAL \"items\"\n{}", nested(crossed, 1));
+
+    assert_eq!(
+        statements_at(code, &[doubler], 4..8),
+        [
+            called("count", &[crossed, crossed, crossed]),
+            called("count", &[named.as_str()]),
+            called("plain", &[passed]),
+            called("doubler", &[crossed]),
+        ]
+    );
+}
+
+/// `tree`, a rendered node, as it renders `levels` below its parent.
+fn nested(tree: &str, levels: usize) -> String {
+    let mut nested = String::new();
+    for line in tree.lines() {
+        nested.push_str(&"  ".repeat(levels));
+        nested.push_str(line);
+        nested.push('\n');
+    }
+
+    nested
+}
+
+/// ```php
+/// $levels = \is_array($levels) ? new \Sharp\Map(\array_merge([], ...\array_map(fn ($key#1, $value#2) => [\Lib\Level::from($key#1), $value#2], \array_keys($levels), $levels))) : $levels;
+/// $names = \is_array(${'crossing#1'} = \Lib\Calc::names()) ? \Sharp\Map::from(${'crossing#1'}) : ${'crossing#1'};
+/// return \is_array(${'crossing#1'} = \Lib\Calc::names()) ? \Sharp\Map::from(${'crossing#1'}) : ${'crossing#1'};
+/// ```
+///
+/// A value plain PHP gives enters PHP# with each `Map` it holds made the object, spec section 12: a parameter, a typed
+/// local and a `return`. A `Map` keyed by an `int`-backed enum takes each backing value back as its case as it is,
+/// where a `string`-backed one casts it first, as `a_backed_enum_key_beside_a_map_spread_goes_in_as_its_case` shows.
+#[test]
+fn a_value_plain_php_gives_enters_php_sharp_as_the_object() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Level;\n\nclass Report\n{\n    public Map<int, string> run(Map<Level, int> levels)\n    {\n        Map<int, string> names = Calc.names();\n        return Calc.names();\n    }\n}\n";
+    let level = ("src/Lib/Level.php", "<?php namespace Lib; enum Level: int { case Low = 1; }");
+    let crossing = indoc! {r#"
+        CONDITIONAL
+          CALL
+            ZVAL "is_array"
+            ARG_LIST
+              ASSIGN
+                VAR
+                  ZVAL "crossing#1"
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "names"
+                  ARG_LIST
+          STATIC_CALL
+            ZVAL "Sharp\\Map"
+            ZVAL "from"
+            ARG_LIST
+              VAR
+                ZVAL "crossing#1"
+          VAR
+            ZVAL "crossing#1"
+    "#};
+
+    assert_eq!(
+        statements_at(code, &[level], 0..3),
+        [
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "levels"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "levels"
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @8-8
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
+                                        ZVAL "value#2"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        STATIC_CALL
+                                          ZVAL "Lib\\Level"
+                                          ZVAL "from"
+                                          ARG_LIST
+                                            VAR
+                                              ZVAL "key#1"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#2"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "levels"
+                                  VAR
+                                    ZVAL "levels"
+                    VAR
+                      ZVAL "levels"
+            "#}
+            .to_owned(),
+            format!("ASSIGN\n  VAR\n    ZVAL \"names\"\n{}", nested(crossing, 1)),
+            format!("RETURN\n{}", nested(crossing, 1)),
+        ]
+    );
+}
+
 /// ```php
 /// $a = $extra instanceof \Lib\Calc; $b = \is_int($extra); $c = \is_string($extra);
 /// $d = (${'match#1'} = $this->total()) instanceof \Lib\Calc;

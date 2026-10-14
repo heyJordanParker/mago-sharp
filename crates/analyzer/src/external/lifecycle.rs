@@ -353,6 +353,7 @@ impl FileAnalysisSnapshot {
         node_analysis_requirements: Option<&NodeAnalysisRequirements>,
         node_analysis: bool,
     ) -> Result<Self, ExternalAnalyzerError> {
+        let dialect = program.dialect;
         let node_analysis_plan = node_analysis_requirements
             .map(|requirements| build_node_analysis_plan(program, artifacts, resolved_names, codebase, requirements));
         let source = SourceSnapshot::complete_with_target_filter(program, resolved_names, |node| {
@@ -398,14 +399,7 @@ impl FileAnalysisSnapshot {
                     ))
                 })?;
                 let mut target_analysis_writer = PayloadWriter::new();
-                write_target_analysis(
-                    &mut target_analysis_writer,
-                    artifacts,
-                    codebase,
-                    program.dialect,
-                    plan,
-                    target_count,
-                )?;
+                write_target_analysis(&mut target_analysis_writer, artifacts, codebase, dialect, plan, target_count)?;
                 (
                     target_source_writer.finish().into_boxed_slice(),
                     target_analysis_writer.finish().into_boxed_slice(),
@@ -425,16 +419,14 @@ impl FileAnalysisSnapshot {
         for (span, union) in &artifacts.expression_types {
             expression_types.insert(
                 *span,
-                encode_snapshot_type(&mut writer, union, &mut type_handles, codebase, program.dialect).map_err(
-                    |error| {
-                        protocol(format!(
-                            "failed to retain expression type at {}:{} in `{}`: {error}",
-                            span.0,
-                            span.1,
-                            String::from_utf8_lossy(&file.name)
-                        ))
-                    },
-                )?,
+                encode_snapshot_type(&mut writer, union, &mut type_handles, codebase, dialect).map_err(|error| {
+                    protocol(format!(
+                        "failed to retain expression type at {}:{} in `{}`: {error}",
+                        span.0,
+                        span.1,
+                        String::from_utf8_lossy(&file.name)
+                    ))
+                })?,
             );
         }
 
@@ -443,21 +435,21 @@ impl FileAnalysisSnapshot {
             artifacts.inferred_return_types.iter().map(AsRef::as_ref),
             &mut type_handles,
             codebase,
-            program.dialect,
+            dialect,
         )?;
         let inferred_yield_key_types = encode_snapshot_types(
             &mut writer,
             &artifacts.inferred_yield_key_types,
             &mut type_handles,
             codebase,
-            program.dialect,
+            dialect,
         )?;
         let inferred_yield_value_types = encode_snapshot_types(
             &mut writer,
             &artifacts.inferred_yield_value_types,
             &mut type_handles,
             codebase,
-            program.dialect,
+            dialect,
         )?;
 
         Ok(Self {
@@ -1743,20 +1735,155 @@ fn read_level(reader: &mut PayloadReader<'_>) -> Result<Level, ExternalAnalyzerE
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
+    use std::rc::Rc;
+    use std::sync::Arc;
+
     use mago_codex::metadata::CodebaseMetadata;
     use mago_codex::metadata::class_like::ClassLikeMetadata;
     use mago_codex::metadata::flags::MetadataFlags;
     use mago_codex::reference::ReferenceOrigin;
+    use mago_codex::ttype::atomic::TAtomic;
+    use mago_codex::ttype::atomic::array::TArray;
+    use mago_codex::ttype::union::TUnion;
     use mago_extension::PayloadWriter;
     use mago_span::Span;
+    use mago_syntax::cst::NodeKind;
     use mago_word::empty_word;
     use mago_word::word;
 
+    use super::ANALYSIS_QUERY_REQUEST;
+    use super::AnalysisStore;
+    use super::FileAnalysisSnapshot;
+    use super::GET_ALL_EXPRESSION_TYPES;
+    use super::GET_EXPRESSION_TYPES;
+    use super::GET_INFERRED_RETURN_TYPES;
+    use super::GET_INFERRED_YIELD_KEY_TYPES;
+    use super::GET_INFERRED_YIELD_VALUE_TYPES;
     use super::class_like_matches_hook;
+    use super::encode_after_file_analysis_request;
+    use super::handle_analysis_query;
     use super::write_reference_origin;
     use super::write_symbol_identifier;
+    use crate::artifacts::AnalysisArtifacts;
     use crate::external::ClassLikeAnalysisHookRegistration;
+    use crate::external::ExternalAnalysisSession;
+    use crate::external::NODE_REQUIREMENTS_ALL;
+    use crate::external::NodeAnalysisRequirements;
+    use crate::external::protocol;
+    use crate::external::protocol::testing::Analysis;
+    use crate::external::protocol::testing::SHELF;
+    use crate::external::protocol::testing::SINK;
+    use crate::external::protocol::testing::analyzed;
+    use crate::external::protocol::testing::names;
+
+    /// The answer to the analysis query `operation` about the analyzed file, with `artifacts`, which asks for the
+    /// types of `spans`.
+    fn answer(
+        analysis: &Analysis<'_, '_>,
+        artifacts: &AnalysisArtifacts,
+        operation: u8,
+        spans: &[(u32, u32)],
+    ) -> Vec<u8> {
+        let session = ExternalAnalysisSession::from_files(analysis.files.iter().cloned());
+        let mut writer = protocol::message_writer(ANALYSIS_QUERY_REQUEST);
+        writer.write_u64(session.generation());
+        writer.write_u8(operation);
+        writer.write_bytes(&analysis.file().name).expect("the name should fit in a frame");
+        if operation == GET_EXPRESSION_TYPES {
+            writer.write_u32(spans.len() as u32);
+            for (start, end) in spans {
+                writer.write_u32(*start);
+                writer.write_u32(*end);
+            }
+        }
+        let store = AnalysisStore::File {
+            file: analysis.file(),
+            program: analysis.program,
+            resolved_names: analysis.names,
+            artifacts,
+            codebase: analysis.codebase,
+            node_analysis_targets: None,
+        };
+
+        handle_analysis_query(&writer.finish(), &session, &store).expect("the analysis query should succeed")
+    }
+
+    /// What an external analyzer reads of an analyzed PHP# file goes as the file's code sees it: each `Map` an
+    /// expression, a node-analysis target, an inferred return type or a yielded key or value holds goes as the
+    /// `Sharp\Map` object it runs as. The analyzer keeps the types a `return` and a `yield` give with their function,
+    /// not the file, so the file's inferred types are ones the test gives it.
+    #[test]
+    fn an_analyzed_file_sends_its_types_as_its_code_sees_them() {
+        analyzed(&[SHELF, SINK], |analysis| {
+            let mut targets = [false; NodeKind::COUNT];
+            let mut requirements = [0; NodeKind::COUNT];
+            for kind in [NodeKind::MethodCall, NodeKind::StaticMethodCall] {
+                targets[kind as usize] = true;
+                requirements[kind as usize] = NODE_REQUIREMENTS_ALL;
+            }
+            let requirements = NodeAnalysisRequirements::new(&targets, &requirements, Arc::from([]), Arc::from([]));
+            let snapshot = FileAnalysisSnapshot::new(
+                analysis.file(),
+                analysis.program,
+                analysis.names,
+                analysis.artifacts,
+                analysis.codebase,
+                Some(&requirements),
+                true,
+            )
+            .expect("the file should snapshot");
+            // An after-file request with the expression types alone, then with the node-analysis targets alone.
+            let after_file = [(true, None), (false, Some(&requirements))].map(|(expression_types, requirements)| {
+                encode_after_file_analysis_request(
+                    1,
+                    &[0],
+                    analysis.file(),
+                    analysis.program,
+                    analysis.names,
+                    analysis.artifacts,
+                    analysis.codebase,
+                    expression_types,
+                    requirements,
+                    0,
+                )
+                .expect("the request should encode")
+            });
+            let map = analysis
+                .artifacts
+                .expression_types
+                .iter()
+                .find(|(_, union)| union.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_)))))
+                .map(|(span, _)| *span)
+                .expect("an expression holds a `Map`");
+
+            assert!(snapshot.has_node_analysis_targets(), "the call of `take` is a node-analysis target");
+            assert!(names(&snapshot.encoded_types, b"Sharp\\Map"), "an expression's `Map`");
+            assert!(names(&snapshot.encoded_target_analysis, b"Sharp\\Map"), "the argument of `take`");
+            assert!(names(&after_file[0], b"Sharp\\Map"), "the after-file request's expression types");
+            assert!(names(&after_file[1], b"Sharp\\Map"), "the after-file request's node-analysis targets");
+            let map_type = &analysis.artifacts.expression_types[&map];
+            let mut inferred = analysis.artifacts.clone();
+            inferred.inferred_return_types.push(Rc::clone(map_type));
+            inferred.inferred_yield_key_types.push(TUnion::clone(map_type));
+            inferred.inferred_yield_value_types.push(TUnion::clone(map_type));
+            let rows = [
+                (GET_EXPRESSION_TYPES, analysis.artifacts),
+                (GET_ALL_EXPRESSION_TYPES, analysis.artifacts),
+                (GET_INFERRED_RETURN_TYPES, &inferred),
+                (GET_INFERRED_YIELD_KEY_TYPES, &inferred),
+                (GET_INFERRED_YIELD_VALUE_TYPES, &inferred),
+            ];
+
+            for (operation, artifacts) in rows {
+                assert!(
+                    names(&answer(analysis, artifacts, operation, &[map]), b"Sharp\\Map"),
+                    "analysis query {operation}"
+                );
+            }
+        });
+    }
 
     #[test]
     fn descendant_target_excludes_the_ancestor_declaration() {

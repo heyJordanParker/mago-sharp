@@ -486,7 +486,6 @@ where
         if for_assignment { PropertyAccessKind::Write } else { PropertyAccessKind::Read },
         &receiver_type,
         span,
-        context.dialect,
         context.external_analysis_session,
     ) else {
         return Ok(None);
@@ -825,7 +824,6 @@ pub(crate) fn resolve_property_for_external_access<'ctx>(
     }
 }
 
-/// Finds a property in a class, gets its type, and handles template localization.
 /// Whether `object_expr` is the object `new` with an object initializer or `with` creates, spec section 16, which
 /// they set properties of while it is created.
 fn is_created_object(object_expr: &Expression) -> bool {
@@ -856,6 +854,7 @@ where
         .map(|method| method.original_name.to_string())
 }
 
+/// Finds a property in a class, gets its type, and handles template localization.
 fn find_property_in_class<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,

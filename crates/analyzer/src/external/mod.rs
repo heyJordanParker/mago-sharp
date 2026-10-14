@@ -2871,7 +2871,6 @@ where
         receiver_type: &TUnion,
         span: Span,
         codebase: &CodebaseMetadata,
-        dialect: Dialect,
         session: &ExternalAnalysisSession,
     ) -> Result<Option<EffectivePropertyType>, ExternalAnalyzerError> {
         let _lookup_trace =
@@ -2913,7 +2912,7 @@ where
                 receiver_type,
                 span,
                 codebase,
-                dialect,
+                session.dialect(span),
                 session.generation(),
                 self.trace_enabled,
             )
@@ -3715,7 +3714,11 @@ mod tests {
     use mago_codex::ttype::TType;
     use mago_codex::ttype::atomic::TAtomic;
     use mago_codex::ttype::atomic::array::TArray;
+    use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+    use mago_codex::ttype::get_int;
+    use mago_codex::ttype::get_string;
     use mago_extension::WorkerError;
+    use mago_span::Position;
 
     use super::*;
 
@@ -3732,6 +3735,33 @@ mod tests {
 
     #[derive(Debug)]
     struct RegistrationTransport(Vec<u8>);
+
+    /// A worker with a property type provider and a call forwarding provider, which declines every request it gets
+    /// and keeps each one.
+    #[derive(Debug, Default)]
+    struct DecliningTransport {
+        requests: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl AnalyzerTransport for DecliningTransport {
+        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
+            Ok(vec![protocol::testing::registration_response_with_property_providers()])
+        }
+
+        fn request(&self, payload: Vec<u8>) -> Result<Vec<u8>, WorkerError> {
+            let response = protocol::testing::declined_response(&payload);
+            self.requests.lock().unwrap().push(payload);
+
+            Ok(response)
+        }
+
+        fn request_with_handler<H>(&self, payload: Vec<u8>, _handler: &mut H) -> Result<Vec<u8>, WorkerError>
+        where
+            H: WorkerRequestHandler,
+        {
+            self.request(payload)
+        }
+    }
 
     impl AnalyzerTransport for TestTransport {
         fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
@@ -3804,6 +3834,54 @@ mod tests {
         assert_eq!(analyzer.backends[0].registration.function_providers.len(), 1);
         assert!(analyzer.backends[0].matching_function_providers(b"demo_service", false).0.is_some());
         assert!(analyzer.backends[0].matching_function_signature_providers(b"demo_service", false).0.is_none());
+    }
+
+    /// A property type request and a call forwarding request send the receiver's type as the code of the file the
+    /// access is written in sees it: a `Map` in a PHP# file goes as the `Sharp\Map` object it runs as, and a keyed
+    /// array in plain PHP as an array.
+    #[test]
+    fn a_property_or_forwarded_call_request_sends_the_receiver_as_its_file_sees_it() {
+        let transport = Arc::new(DecliningTransport::default());
+        let analyzer = ExternalAnalyzer::initialize_transports([Arc::clone(&transport)], PHPVersion::PHP85, &[], false)
+            .expect("registration should succeed");
+        let sharp =
+            Arc::new(File::ephemeral(Cow::Borrowed(b"src/App/Report.sharp"), Cow::Borrowed(b"namespace App;\n")));
+        let php = Arc::new(File::ephemeral(Cow::Borrowed(b"src/App/Report.php"), Cow::Borrowed(b"<?php\n")));
+        let session = ExternalAnalysisSession::from_files([Arc::clone(&sharp), Arc::clone(&php)]);
+        let codebase = CodebaseMetadata::new();
+        let receiver = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+            Arc::new(get_string()),
+            Arc::new(get_int()),
+        ))));
+
+        for file in [&sharp, &php] {
+            let span = Span::new(file.id, Position::new(0), Position::new(1));
+            let property = analyzer
+                .get_property_type(
+                    b"Lib\\Shelf",
+                    b"stock",
+                    PropertyAccessKind::Read,
+                    &receiver,
+                    span,
+                    &codebase,
+                    &session,
+                )
+                .expect("the request should succeed");
+            let forwarded = analyzer
+                .get_forwarded_call(b"Lib\\Shelf", b"stock", true, &receiver, file, &codebase, &session)
+                .expect("the request should succeed");
+
+            assert_eq!((property, forwarded), (None, None));
+        }
+
+        let sent_maps: Vec<bool> = transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| protocol::testing::names(request, b"Sharp\\Map"))
+            .collect();
+        assert_eq!(sent_maps, [true, true, false, false]);
     }
 
     #[test]

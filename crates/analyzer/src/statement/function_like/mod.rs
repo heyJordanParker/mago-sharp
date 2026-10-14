@@ -1927,7 +1927,7 @@ where
         let (key_type, in_set) = match type_ref {
             TypeRef::Atomic(TAtomic::Array(TArray::Keyed(keyed_array))) => {
                 let Some((key_type, _)) = keyed_array.get_generic_parameters() else {
-                    continue;
+                    unreachable!("PHP# writes no array shape, so each `Map` type it writes has a key type");
                 };
 
                 (key_type, false)

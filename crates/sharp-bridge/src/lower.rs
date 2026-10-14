@@ -2965,11 +2965,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 argument_list,
             })) => {
                 // A local holds a function, so `f(x)` calls it as PHP's `$f($x)`, with the parameters of the closure
-                // it holds, and any other name is the global function's.
+                // it holds, or of the `__invoke` of the object it holds, and any other name is the global function's.
                 let (function, parameters) = match self.names.binding(function) {
-                    Some(Binding::Local(_)) => {
-                        (self.variable(function.span(), function.value()), self.types.closure_parameters(call_function))
-                    }
+                    Some(Binding::Local(_)) => (
+                        self.variable(function.span(), function.value()),
+                        self.types.closure_parameters(call_function).or_else(|| self.types.call_parameters(expression)),
+                    ),
                     _ => (
                         self.string(ZEND_NAME_FQ, self.line(function), function.value()),
                         self.types.call_parameters(expression),

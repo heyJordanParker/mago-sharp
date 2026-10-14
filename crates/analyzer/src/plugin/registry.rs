@@ -24,7 +24,6 @@ use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::Trait;
-use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
@@ -1496,7 +1495,6 @@ impl PluginRegistry {
         access: PropertyAccessKind,
         receiver_type: &TUnion,
         span: Span,
-        dialect: Dialect,
         external_session: Option<&ExternalAnalysisSession>,
     ) -> Option<EffectivePropertyType> {
         if !self.has_external_capability(|capabilities| capabilities.property_types) {
@@ -1507,7 +1505,7 @@ impl PluginRegistry {
             optional_external_hint(
                 "property type provider",
                 analyzer.with(|analyzer| {
-                    analyzer.get_property_type(class, property, access, receiver_type, span, codebase, dialect, session)
+                    analyzer.get_property_type(class, property, access, receiver_type, span, codebase, session)
                 }),
             )
         })

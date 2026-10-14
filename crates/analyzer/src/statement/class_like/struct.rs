@@ -208,7 +208,7 @@ pub(crate) fn check_struct_parse<A>(
 pub(crate) fn declares_equality(codebase: &CodebaseMetadata, name: Word) -> bool {
     // The `op_Equality` the codex writes for a struct that declares none spans the whole struct.
     let Some(r#struct) = codebase.get_class_like(name.as_bytes()) else {
-        return false;
+        unreachable!("each caller names a struct or a class the codebase declares, as `is_key_type` requires");
     };
 
     codebase.get_method(name.as_bytes(), b"op_Equality").is_some_and(|equality| equality.span != r#struct.span)

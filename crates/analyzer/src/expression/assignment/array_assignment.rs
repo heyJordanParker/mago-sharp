@@ -273,7 +273,7 @@ where
 
     // A PHP# `Class.name` names a static property, which the write updates as `Class::$name` does.
     if let Expression::Access(Access::Property(property_access)) = &root_array_expression {
-        match StaticProperty::from_property_access(property_access, context.resolved_names) {
+        let written = match StaticProperty::from_property_access(property_access, context.resolved_names) {
             Some(static_property) => static_property_assignment::analyze(
                 context,
                 block_context,
@@ -282,7 +282,7 @@ where
                 &root_array_type,
                 Some(root_array_expression),
                 root_var_id,
-            )?,
+            ),
             None => property_assignment::analyze(
                 context,
                 block_context,
@@ -296,8 +296,9 @@ where
                 } else {
                     PropertyWriteKind::Mutation
                 },
-            )?,
-        }
+            ),
+        };
+        written?;
     }
 
     let root_array_type = Rc::new(root_array_type);

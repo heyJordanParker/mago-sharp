@@ -430,14 +430,12 @@ impl<'analysis> Types<'analysis> {
 
     /// The parameters of the plain PHP closure a local holds, which the call `local(…)` runs, as the signature of the
     /// local's type gives them, as [`Self::call_parameters`] gives a call's. None for a function value whose signature
-    /// PHP# wrote, which takes the object.
+    /// PHP# wrote, which takes the object, and for a local of any other type, such as an object whose `__invoke` the
+    /// call runs, which [`Self::call_parameters`] finds.
     pub(crate) fn closure_parameters(&self, local: &Expression) -> Option<Vec<PlainParameter<'analysis>>> {
-        let mut signatures =
-            self.artifacts.get_expression_type(local)?.types.iter().filter_map(|atomic| match atomic {
-                TAtomic::Callable(TCallable::Signature(signature)) => Some(signature),
-                _ => None,
-            });
-        let (Some(signature), None) = (signatures.next(), signatures.next()) else {
+        let [TAtomic::Callable(TCallable::Signature(signature))] =
+            self.artifacts.get_expression_type(local)?.types.as_ref()
+        else {
             return None;
         };
 
