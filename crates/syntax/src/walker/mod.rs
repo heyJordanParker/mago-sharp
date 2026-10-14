@@ -81,6 +81,7 @@ use crate::cst::cst::ExpressionStatement;
 use crate::cst::cst::Extends;
 use crate::cst::cst::Extension;
 use crate::cst::cst::Extern;
+use crate::cst::cst::FieldsPattern;
 use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
 use crate::cst::cst::ForColonDelimitedBody;
@@ -2440,6 +2441,9 @@ generate_ast_walker! {
 
     'arena TypePattern as type_pattern => {
         walker.walk_hint(&type_pattern.hint, context);
+        if let Some(fields) = &type_pattern.fields {
+            walker.walk_fields_pattern(fields, context);
+        }
         if let Some(properties) = &type_pattern.properties {
             walker.walk_properties_pattern(properties, context);
         }
@@ -2468,6 +2472,12 @@ generate_ast_walker! {
         walker.walk_pattern(parenthesized_pattern.pattern, context);
     }
 
+    'arena FieldsPattern as fields_pattern => {
+        for field in &fields_pattern.fields {
+            walker.walk_pattern(field, context);
+        }
+    }
+
     'arena PropertiesPattern as properties_pattern => {
         for property_pattern in &properties_pattern.properties {
             walker.walk_property_pattern(property_pattern, context);
@@ -2493,8 +2503,12 @@ generate_ast_walker! {
     }
 
     'arena RestPattern as rest_pattern => {
-        walker.walk_hint(rest_pattern.hint, context);
-        walker.walk_local_identifier(&rest_pattern.variable, context);
+        if let Some(hint) = rest_pattern.hint {
+            walker.walk_hint(hint, context);
+        }
+        if let Some(variable) = &rest_pattern.variable {
+            walker.walk_local_identifier(variable, context);
+        }
     }
 
     'arena PatternMatch as pattern_match => {

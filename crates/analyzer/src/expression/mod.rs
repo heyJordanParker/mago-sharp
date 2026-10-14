@@ -4,6 +4,7 @@ use mago_algebra::clause::Clause;
 use mago_algebra::find_satisfying_assignments;
 use mago_algebra::saturate_clauses;
 use mago_allocator::Arena;
+use mago_bytes::BytesDisplay;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -38,6 +39,7 @@ use mago_syntax::cst::RestPattern;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::utils::pattern::PatternNames;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::called_functions;
 use mago_syntax::walker::Walker;
@@ -50,6 +52,7 @@ use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::context::assertion::CodebasePatternNames;
 use crate::context::block::BlockContext;
 use crate::context::scope::var_has_root;
 use crate::error::AnalysisError;
@@ -347,8 +350,11 @@ where
     let Some(PhpShape { php, temporaries, tests }) =
         context.get_assertion_context_from_block(block_context).php_shape(node)
     else {
+        // A refused form is the error type, so nothing that reads it reports again.
+        let refused = report_case_patterns_without_php(node, context);
         if let Node::Expression(expression) = node {
-            artifacts.set_expression_type(expression, get_mixed());
+            let refused_type = if refused { TUnion::from_atomic(TAtomic::Error) } else { get_mixed() };
+            artifacts.set_expression_type(expression, refused_type);
         }
 
         return Ok(());
@@ -443,6 +449,7 @@ where
                     || span.is_none_or(|span| Some(span.start.offset) != covering_list_arm))
                 && (!is_code(issue, IssueCode::ReplacedBySyntax) || called.is_none())
                 && (!always_true || called.is_none_or(|call| !is_shape(call)))
+                && (!always_true || span.is_none_or(|span| !pattern_calls.case_patterns.contains(&span.start.offset)))
                 && (!always_true
                     || span.is_none_or(|span| !last_arm_test.is_some_and(|test| test.contains(&span.start))))
         })
@@ -767,13 +774,56 @@ fn holds_list_pattern(pattern: &Pattern<'_>) -> bool {
     }
 }
 
+/// Reports each case pattern of a PHP# `is` or `match` that `php_shape` builds no PHP for, spec section 21: one whose
+/// type is no case of an enum with data, or whose fields are not the case's in number. Returns whether it reported one.
+fn report_case_patterns_without_php<A>(node: Node<'_, '_>, context: &mut Context<'_, '_, A>) -> bool
+where
+    A: Arena,
+{
+    let names = CodebasePatternNames { names: context.resolved_names, codebase: context.codebase };
+    let case_patterns = node.filter_map(|node| match node {
+        Node::TypePattern(TypePattern { hint, fields: Some(fields), .. }) => Some((hint.span(), *fields)),
+        _ => None,
+    });
+    let mut reported = false;
+    for (hint, fields) in case_patterns {
+        let written = BytesDisplay(&context.source_file.contents[hint.start.offset as usize..hint.end.offset as usize]);
+        let message = match names.case_fields(hint) {
+            None => format!("`{written}` is no case of an enum whose cases carry data, so it has no fields to unpack."),
+            Some(names) if names.len() != fields.fields.len() => {
+                let count = |count: usize, word: &str| {
+                    if count == 1 { format!("1 {word}") } else { format!("{count} {word}s") }
+                };
+
+                format!(
+                    "`{written}` has {}, and this pattern unpacks {}.",
+                    count(names.len(), "field"),
+                    fields.fields.len()
+                )
+            }
+            Some(_) => continue,
+        };
+
+        context.collector.report_with_code(
+            IssueCode::InvalidArgument,
+            Issue::error(message).with_annotation(Annotation::primary(fields.span()).with_message("Unpacked here.")),
+        );
+        reported = true;
+    }
+
+    reported
+}
+
 /// Each function a pattern's PHP calls to test a value, at the span `called_functions` gives it, the type a list
-/// pattern's element is tested against, and each list pattern with its `[`.
+/// pattern's element or a case pattern's field is tested against, each list pattern with its `[`, and the start of
+/// each case pattern with fields, whose tests the case's own field types can make always true, as
+/// `PaymentResult.Paid(string transactionId)` unpacks the field the case declares a `string`.
 #[derive(Default)]
 struct PatternCalls {
     calls: Vec<LocalIdentifier<'static>>,
     element_tests: Vec<Span>,
     lists: Vec<(Span, Span)>,
+    case_patterns: Vec<u32>,
 }
 
 /// Collects the `PatternCalls` of a PHP# `is`, `as` or `match`.
@@ -782,6 +832,13 @@ struct PatternCallWalker;
 impl<'ast, 'arena> Walker<'ast, 'arena, PatternCalls> for PatternCallWalker {
     fn walk_in_type_pattern(&self, type_pattern: &'ast TypePattern<'arena>, calls: &mut PatternCalls) {
         calls.calls.extend(called_functions(Node::TypePattern(type_pattern)));
+        if let Some(fields) = type_pattern.fields {
+            calls.case_patterns.push(type_pattern.hint.span().start.offset);
+            calls.element_tests.extend(fields.fields.iter().filter_map(|field| match field {
+                Pattern::Type(TypePattern { hint, .. }) => Some(hint.span()),
+                _ => None,
+            }));
+        }
     }
 
     fn walk_in_as(&self, r#as: &'ast As<'arena>, calls: &mut PatternCalls) {

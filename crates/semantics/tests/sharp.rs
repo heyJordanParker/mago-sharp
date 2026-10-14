@@ -4422,7 +4422,7 @@ fn an_enum_method_takes_collection_and_function_types_and_holds_lambdas_as_a_cla
 #[test]
 fn is_as_and_match_with_their_patterns_are_in_the_slice() {
     let code = leak(method(
-        "        if (extra is int count && count > 0) {\n            return count;\n        }\n        const small = extra is >= 1 and < 10 or 100 ? 1 : 0;\n        const report = this as Report;\n        const counted = this is { count: int total } && total > 0;\n        const big = this is Report { count: > 1000 } large && large.count > 0;\n        const plain = this is Report { count: 0 };\n        const empty = extra is [];\n        const pair = extra is [int only, not null];\n        const rest = extra is [> 0, ...List<int> others] && others.count() > 0;\n        match (extra) {\n            0 => {\n                return 0;\n            },\n            int n when n < 0 => this.run(n),\n            default => {},\n        }\n        return match (extra) {\n            < 0 => -1,\n            not (0 or 1) => 2,\n            default => small,\n        };\n",
+        "        if (extra is int count && count > 0) {\n            return count;\n        }\n        const small = extra is >= 1 and < 10 or 100 ? 1 : 0;\n        const report = this as Report;\n        const counted = this is { count: int total } && total > 0;\n        const big = this is Report { count: > 1000 } large && large.count > 0;\n        const plain = this is Report { count: 0 };\n        const empty = extra is [];\n        const pair = extra is [int only, not null];\n        const rest = extra is [> 0, ...List<int> others] && others.count() > 0;\n        const ends = extra is [int first, ..., int last] && first < last;\n        const paid = this is PaymentResult.Paid(string id) && id != \"\";\n        const declined = this is PaymentResult.Declined { reason: \"\" } declined;\n        match (extra) {\n            0 => {\n                return 0;\n            },\n            int n when n < 0 => this.run(n),\n            default => {},\n        }\n        return match (extra) {\n            < 0 => -1,\n            not (0 or 1) => 2,\n            default => small,\n        };\n",
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
@@ -4471,18 +4471,20 @@ fn a_leave_after_null_coalesce_is_in_the_slice_and_returns_as_its_method_does() 
     );
 }
 
-/// Spec section 21: a list pattern's rest is the `List` of the elements after the others.
+/// Spec section 21: a list pattern has one rest, anywhere, and a named rest is the `List` of the elements the others
+/// leave.
 #[test]
-fn a_list_pattern_rest_is_a_list() {
+fn a_list_pattern_has_one_rest_and_a_named_rest_is_a_list() {
     let code = leak(method(
-        "        const mapped = extra is [...Map<string, int> entries];\n        const set = extra is [1, ...Set<int> rest];\n        return extra;\n",
+        "        const mapped = extra is [...Map<string, int> entries];\n        const set = extra is [1, ...Set<int> rest];\n        const twice = extra is [..., 1, ...List<int> rest];\n        const fine = extra is [..., 1] || extra is [...List<int> before, 1] || extra is [1, ..., 2];\n        return extra;\n",
     ));
 
     assert_eq!(
         issues(code),
         [
-            "7:37 A rest is a `List` of the elements after the others, as in `...List<Line> rest`.",
-            "8:37 A rest is a `List` of the elements after the others, as in `...List<Line> rest`.",
+            "7:37 A rest is a `List` of the elements the others leave, as in `...List<Line> rest`.",
+            "8:37 A rest is a `List` of the elements the others leave, as in `...List<Line> rest`.",
+            "9:41 A list pattern has one rest: the elements its other patterns leave.",
         ]
     );
 }

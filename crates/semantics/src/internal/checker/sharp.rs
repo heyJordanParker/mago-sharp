@@ -309,12 +309,13 @@ const ANY: &[u8] = b"Any";
 ///   nullable or `void`, and `match`, whose arms are `pattern => value`, `pattern when condition => value` and one
 ///   `default => value`. A `match` needs `default` unless its arms name only `Class.y` values or `null`, as a `match`
 ///   on an enum does, and the analyzer reports the cases such a `match` misses. A `match` statement's arm may be a
-///   block. A pattern is a type with an optional name, as in `int count`, a value, a comparison such as `< 10`, a
-///   properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`. A type pattern is never
-///   nullable, and a name under `or` or `not` is an error, as C#'s CS8780, except under the `not` that starts the
-///   pattern of `is`. `not` beside `or` is an error that names both readings, as decision 045 decides, and `!x is T`,
-///   which reads as `(!x) is T`, is an error that writes `x is not T`, as decision 044 decides. The parser reports list
-///   patterns, and enum case patterns with fields or a name, as not supported yet.
+///   block. A pattern is a type with an optional name, as in `int count`, a case of an enum with data with its fields
+///   by position, as in `PaymentResult.Paid(string transactionId)`, a value, a comparison such as `< 10`, a
+///   properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...]`, or patterns joined by
+///   `and`, `or` and `not`. A type pattern is never nullable, and a name under `or` or `not` is an error, as C#'s
+///   CS8780, except under the `not` that starts the pattern of `is`. `not` beside `or` is an error that names both
+///   readings, as decision 045 decides, and `!x is T`, which reads as `(!x) is T`, is an error that writes
+///   `x is not T`, as decision 044 decides. A list pattern has one rest.
 /// - Casts: `(int)`, `(float)` and `(string)` in a method body, as spec section 24 writes them. PHP's other casts and
 ///   its cast aliases, such as `(bool)` and `(integer)`, are errors. A cast is lowercase only, so the lexer reads
 ///   `(Int)` as the class `Int` in parentheses, as in `typeof(Int)`.
@@ -1336,7 +1337,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // binder binds a bare name of a type pattern to the local of that name, so the name reports here.
         (
             Node::Pattern(
-                pattern @ Pattern::Type(TypePattern { hint: Hint::Identifier(name), properties: None, variable: None }),
+                pattern @ Pattern::Type(TypePattern { hint: Hint::Identifier(name), fields: None, properties: None, variable: None }),
             ),
             Body | Place::Pattern,
         ) if report_pattern_reads(Node::Identifier(name), pattern.span(), b"==", context) =>
@@ -1376,18 +1377,35 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        // Spec section 21: a list pattern's rest is a `List` of the elements after the others, whose type the walk checks
-        // as a method body's.
-        (Node::RestPattern(rest), Place::Pattern) => {
-            if !matches!(&rest.hint, Hint::Generic(generic) if generic.name.value == b"List") {
+        // Spec section 21: a list pattern has one rest, anywhere among its elements.
+        (Node::ListPattern(list), Place::Pattern) => {
+            let rests = list.elements.iter().filter_map(|element| match element {
+                ListPatternElement::Rest(rest) => Some(rest),
+                ListPatternElement::Pattern(_) => None,
+            });
+            for rest in rests.skip(1) {
                 context.report(
-                    Issue::error("A rest is a `List` of the elements after the others, as in `...List<Line> rest`.")
-                        .with_annotation(Annotation::primary(rest.hint.span()).with_message("Written here.")),
+                    Issue::error("A list pattern has one rest: the elements its other patterns leave.")
+                        .with_annotation(Annotation::primary(rest.span()).with_message("A second rest.")),
+                );
+            }
+
+            Some(Place::Pattern)
+        }
+        // A named rest is a `List` of the elements the others leave, whose type the walk checks as a method body's.
+        (Node::RestPattern(rest), Place::Pattern) => {
+            let (Some(hint), Some(variable)) = (rest.hint, rest.variable) else {
+                return None;
+            };
+            if !matches!(hint, Hint::Generic(generic) if generic.name.value == b"List") {
+                context.report(
+                    Issue::error("A rest is a `List` of the elements the others leave, as in `...List<Line> rest`.")
+                        .with_annotation(Annotation::primary(hint.span()).with_message("Written here.")),
                 );
 
                 return None;
             }
-            check_local_name(rest.variable.value, rest.variable.span, "pattern variable", context);
+            check_local_name(variable.value, variable.span, "pattern variable", context);
 
             Some(Body)
         }
@@ -1397,9 +1415,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::NotPattern(_)
             | Node::BinaryPattern(_)
             | Node::ParenthesizedPattern(_)
+            | Node::FieldsPattern(_)
             | Node::PropertiesPattern(_)
             | Node::PropertyPattern(_)
-            | Node::ListPattern(_)
             | Node::ListPatternElement(_)
             | Node::BinaryOperator(_),
             Place::Pattern,
@@ -2789,7 +2807,10 @@ fn report_chained_pattern(test: Span, pattern: &Pattern, context: &mut Context<'
                     values.push(value);
                 }
             }
-            Pattern::Type(TypePattern { properties, .. }) => {
+            Pattern::Type(TypePattern { fields, properties, .. }) => {
+                for field in fields.iter().flat_map(|fields| fields.fields.iter()) {
+                    chained_values(field, values);
+                }
                 for property in properties.iter().flat_map(|properties| properties.properties.iter()) {
                     chained_values(property.pattern, values);
                 }
@@ -3087,9 +3108,12 @@ fn report_hidden_pattern_variables(pattern: &Pattern, hidden: bool, context: &mu
     };
 
     match pattern {
-        Pattern::Type(TypePattern { properties, variable, .. }) => {
+        Pattern::Type(TypePattern { fields, properties, variable, .. }) => {
             if let Some(variable) = variable {
                 report_variable(variable, context);
+            }
+            for field in fields.iter().flat_map(|fields| fields.fields.iter()) {
+                report_hidden_pattern_variables(field, hidden, context);
             }
             if let Some(properties) = properties {
                 report_properties(properties, context);
@@ -3099,7 +3123,11 @@ fn report_hidden_pattern_variables(pattern: &Pattern, hidden: bool, context: &mu
             for element in &list.elements {
                 match element {
                     ListPatternElement::Pattern(pattern) => report_hidden_pattern_variables(pattern, hidden, context),
-                    ListPatternElement::Rest(rest) => report_variable(&rest.variable, context),
+                    ListPatternElement::Rest(rest) => {
+                        if let Some(variable) = &rest.variable {
+                            report_variable(variable, context);
+                        }
+                    }
                 }
             }
         }

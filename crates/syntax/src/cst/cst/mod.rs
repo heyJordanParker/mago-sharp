@@ -212,6 +212,7 @@ pub use crate::cst::cst::partial_application::StaticMethodPartialApplication;
 pub use crate::cst::cst::pattern::As;
 pub use crate::cst::cst::pattern::BinaryPattern;
 pub use crate::cst::cst::pattern::ComparisonPattern;
+pub use crate::cst::cst::pattern::FieldsPattern;
 pub use crate::cst::cst::pattern::Is;
 pub use crate::cst::cst::pattern::ListPattern;
 pub use crate::cst::cst::pattern::ListPatternElement;

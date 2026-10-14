@@ -8,6 +8,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Node;
 use mago_syntax::dialect::Dialect;
+use mago_syntax::utils::pattern::PatternNames;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::php_shape;
 
@@ -43,10 +44,40 @@ where
     where
         'arena: 'shape,
     {
-        let names = self.resolved_names;
-        let is_local = |span: Span| matches!(names.binding(&span), Some(Binding::Local(_)));
+        let names = CodebasePatternNames { names: self.resolved_names, codebase: self.codebase };
 
-        php_shape(self.arena, node, self.temporaries, &is_local)
+        php_shape(self.arena, node, self.temporaries, &names)
+    }
+}
+
+/// What the PHP of a PHP# pattern depends on, answered from a file's resolved names and the codebase, for the analyzer
+/// and the bridge alike.
+pub struct CodebasePatternNames<'names, 'arena> {
+    pub names: &'names ResolvedNames<'arena>,
+    pub codebase: &'names CodebaseMetadata,
+}
+
+impl PatternNames for CodebasePatternNames<'_, '_> {
+    fn is_local(&self, span: Span) -> bool {
+        matches!(self.names.binding(&span), Some(Binding::Local(_)))
+    }
+
+    fn case_fields(&self, span: Span) -> Option<Vec<Vec<u8>>> {
+        let class = self.codebase.get_class_like(self.names.resolve(&span)?)?;
+        if !class.flags.is_enum_case_class() {
+            return None;
+        }
+        let Some(constructor) = self.codebase.get_method(class.name.as_bytes(), b"__construct") else {
+            return Some(Vec::new());
+        };
+
+        Some(
+            constructor
+                .parameters
+                .iter()
+                .map(|parameter| parameter.get_name().0.as_bytes().strip_prefix(b"$").unwrap_or_default().to_vec())
+                .collect(),
+        )
     }
 }
 

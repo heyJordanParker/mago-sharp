@@ -1,7 +1,5 @@
 use mago_allocator::prelude::*;
-use mago_database::file::HasFileId;
 use mago_span::HasSpan;
-use mago_span::Span;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
 use crate::T;
@@ -11,6 +9,8 @@ use crate::cst::cst::BinaryPattern;
 use crate::cst::cst::ComparisonPattern;
 use crate::cst::cst::Conditional;
 use crate::cst::cst::Expression;
+use crate::cst::cst::FieldsPattern;
+use crate::cst::cst::Hint;
 use crate::cst::cst::Is;
 use crate::cst::cst::ListPattern;
 use crate::cst::cst::ListPatternElement;
@@ -134,10 +134,7 @@ where
             }
             T![Identifier] if self.stream.peek_kind(1)? == Some(T!["."]) => {
                 if self.is_at_case_with_data()? {
-                    let span = self.skip_case_pattern()?;
-                    self.errors.push(ParseError::NotSupportedYetInSharp("An enum case pattern", span));
-
-                    Pattern::Value(self.arena.alloc(Expression::Error(span)))
+                    Pattern::Type(self.parse_case_pattern()?)
                 } else {
                     // A case without fields or a name, as in `Status.Open`, is the value `Class.y` reads.
                     Pattern::Value(self.parse_expression_with_precedence(Precedence::SharpComparison)?)
@@ -145,6 +142,7 @@ where
             }
             _ => Pattern::Type(TypePattern {
                 hint: self.parse_type_hint_in_expression()?,
+                fields: None,
                 properties: if self.stream.is_at(T!["{"])? {
                     Some(self.arena.alloc(self.parse_properties_pattern()?))
                 } else {
@@ -157,29 +155,26 @@ where
         Ok(self.arena.alloc(pattern))
     }
 
-    /// Parses `[pattern, …, ...List<T> rest]`, the elements a matched list's must match. Spec section 21 shows the
-    /// rest last, and a rest anywhere else waits for its ruling, so it is not supported yet.
+    /// Parses `[pattern, …]`, the elements a matched list's must match, where a rest, `...List<T> rest` or a bare
+    /// `...`, stands for the elements the others leave, at its place among them. The semantic check refuses a second
+    /// rest.
     fn parse_list_pattern(&mut self) -> Result<ListPattern<'arena>, ParseError> {
         let elements = self.parse_comma_separated_sequence(T!["["], T!["]"], |parser| {
-            Ok(if parser.stream.is_at(T!["..."])? {
-                ListPatternElement::Rest(RestPattern {
-                    ellipsis: parser.stream.consume_span()?,
-                    hint: parser.arena.alloc(parser.parse_type_hint_in_expression()?),
-                    variable: parser.parse_local_identifier()?,
-                })
-            } else {
-                ListPatternElement::Pattern(parser.parse_pattern()?)
-            })
-        })?;
-        let last = elements.sequence.len().saturating_sub(1);
-        for (index, element) in elements.sequence.iter().enumerate() {
-            if let ListPatternElement::Rest(rest) = element
-                && index != last
-            {
-                self.errors
-                    .push(ParseError::NotSupportedYetInSharp("A rest before the end of a list pattern", rest.span()));
+            if !parser.stream.is_at(T!["..."])? {
+                return Ok(ListPatternElement::Pattern(parser.parse_pattern()?));
             }
-        }
+
+            let ellipsis = parser.stream.consume_span()?;
+            if matches!(parser.stream.peek_kind(0)?, Some(T!["," | "]"])) {
+                return Ok(ListPatternElement::Rest(RestPattern { ellipsis, hint: None, variable: None }));
+            }
+
+            Ok(ListPatternElement::Rest(RestPattern {
+                ellipsis,
+                hint: Some(parser.arena.alloc(parser.parse_type_hint_in_expression()?)),
+                variable: Some(parser.parse_local_identifier()?),
+            }))
+        })?;
 
         Ok(ListPattern { left_bracket: elements.open, elements: elements.sequence, right_bracket: elements.close })
     }
@@ -217,46 +212,35 @@ where
         if is_name { Ok(Some(self.parse_local_identifier()?)) } else { Ok(None) }
     }
 
-    /// Whether `Case.Name` is followed by its fields in parentheses or a name, as an enum with data writes it.
+    /// Whether `Case.Name` is followed by its fields in parentheses, its properties or a name, as a case of an enum with
+    /// data is matched.
     fn is_at_case_with_data(&mut self) -> Result<bool, ParseError> {
         Ok(match self.stream.lookahead(3)? {
-            Some(token) if token.kind == T!["("] => true,
+            Some(token) if matches!(token.kind, T!["(" | "{"]) => true,
             Some(token) => token.kind == T![Identifier] && !matches!(token.value, b"when" | b"is" | b"and" | b"or"),
             None => false,
         })
     }
 
-    /// Skips an enum case pattern, `Case.Name`, then its fields in parentheses or its name, and returns its span.
-    fn skip_case_pattern(&mut self) -> Result<Span, ParseError> {
-        let start = self.stream.consume_span()?;
-        self.stream.consume()?;
-        let mut end = self.parse_local_identifier()?.span;
-        if self.stream.is_at(T!["("])? {
-            end = self.skip_balanced()?;
-        }
-        if let Some(variable) = self.parse_pattern_variable()? {
-            end = variable.span;
-        }
+    /// Parses an enum case pattern, spec section 21: the case's type, `Case.Name`, then its fields in parentheses by
+    /// their position, its properties and its name, as in `PaymentResult.Paid(string transactionId)`.
+    fn parse_case_pattern(&mut self) -> Result<TypePattern<'arena>, ParseError> {
+        let hint = Hint::Identifier(self.parse_dotted_identifier()?);
+        let fields = if self.stream.is_at(T!["("])? {
+            let fields = self.parse_comma_separated_sequence(T!["("], T![")"], |parser| parser.parse_pattern())?;
 
-        Ok(start.join(end))
-    }
+            Some(&*self.arena.alloc(FieldsPattern {
+                left_parenthesis: fields.open,
+                fields: fields.sequence,
+                right_parenthesis: fields.close,
+            }))
+        } else {
+            None
+        };
+        let properties =
+            if self.stream.is_at(T!["{"])? { Some(&*self.arena.alloc(self.parse_properties_pattern()?)) } else { None };
 
-    /// Skips a bracketed group and everything nested in it, and returns its span.
-    fn skip_balanced(&mut self) -> Result<Span, ParseError> {
-        let open = self.stream.consume_span()?;
-        let mut depth = 1usize;
-        let mut end = open;
-        while depth > 0 {
-            let token = self.stream.consume()?;
-            match token.kind {
-                T!["(" | "[" | "{"] => depth += 1,
-                T![")" | "]" | "}"] => depth -= 1,
-                _ => {}
-            }
-            end = token.span_for(self.stream.file_id());
-        }
-
-        Ok(open.join(end))
+        Ok(TypePattern { hint, fields, properties, variable: self.parse_pattern_variable()? })
     }
 
     /// Parses a PHP# `match`. Its arms are written `pattern => value`, `pattern when condition => value` and

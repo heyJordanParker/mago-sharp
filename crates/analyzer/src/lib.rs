@@ -48,6 +48,9 @@ pub mod settings;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod telemetry;
 
+/// The engine's bridge lowers each PHP# pattern from the PHP the analyzer analyzed, so both build it with these names.
+pub use crate::context::assertion::CodebasePatternNames;
+
 mod analyzable;
 mod assertion;
 mod common;

@@ -87,6 +87,7 @@ use crate::cst::cst::ExpressionStatement;
 use crate::cst::cst::Extends;
 use crate::cst::cst::Extension;
 use crate::cst::cst::Extern;
+use crate::cst::cst::FieldsPattern;
 use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
 use crate::cst::cst::ForColonDelimitedBody;
@@ -552,6 +553,7 @@ pub enum NodeKind {
     BinaryPattern,
     ParenthesizedPattern,
     PropertiesPattern,
+    FieldsPattern,
     PropertyPattern,
     ListPattern,
     ListPatternElement,
@@ -841,6 +843,7 @@ pub enum Node<'ast, 'arena> {
     BinaryPattern(&'ast BinaryPattern<'arena>),
     ParenthesizedPattern(&'ast ParenthesizedPattern<'arena>),
     PropertiesPattern(&'ast PropertiesPattern<'arena>),
+    FieldsPattern(&'ast FieldsPattern<'arena>),
     PropertyPattern(&'ast PropertyPattern<'arena>),
     ListPattern(&'ast ListPattern<'arena>),
     ListPatternElement(&'ast ListPatternElement<'arena>),
@@ -1218,6 +1221,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::BinaryPattern(_) => NodeKind::BinaryPattern,
             Self::ParenthesizedPattern(_) => NodeKind::ParenthesizedPattern,
             Self::PropertiesPattern(_) => NodeKind::PropertiesPattern,
+            Self::FieldsPattern(_) => NodeKind::FieldsPattern,
             Self::PropertyPattern(_) => NodeKind::PropertyPattern,
             Self::ListPattern(_) => NodeKind::ListPattern,
             Self::ListPatternElement(_) => NodeKind::ListPatternElement,
@@ -2053,6 +2057,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             },
             Node::TypePattern(node) => {
                 f(Node::Hint(&node.hint));
+                if let Some(fields) = &node.fields {
+                    f(Node::FieldsPattern(fields));
+                }
                 if let Some(properties) = &node.properties {
                     f(Node::PropertiesPattern(properties));
                 }
@@ -2074,6 +2081,11 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Pattern(node.right));
             }
             Node::ParenthesizedPattern(node) => f(Node::Pattern(node.pattern)),
+            Node::FieldsPattern(node) => {
+                for field in node.fields.iter() {
+                    f(Node::Pattern(field));
+                }
+            }
             Node::PropertiesPattern(node) => {
                 for property in node.properties.iter() {
                     f(Node::PropertyPattern(property));
@@ -2093,8 +2105,12 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 ListPatternElement::Rest(rest) => f(Node::RestPattern(rest)),
             },
             Node::RestPattern(node) => {
-                f(Node::Hint(node.hint));
-                f(Node::LocalIdentifier(&node.variable));
+                if let Some(hint) = node.hint {
+                    f(Node::Hint(hint));
+                }
+                if let Some(variable) = &node.variable {
+                    f(Node::LocalIdentifier(variable));
+                }
             }
             Node::PatternMatch(node) => {
                 f(Node::Keyword(&node.r#match));
@@ -3290,6 +3306,7 @@ impl HasSpan for Node<'_, '_> {
             Self::BinaryPattern(node) => node.span(),
             Self::ParenthesizedPattern(node) => node.span(),
             Self::PropertiesPattern(node) => node.span(),
+            Self::FieldsPattern(node) => node.span(),
             Self::PropertyPattern(node) => node.span(),
             Self::ListPattern(node) => node.span(),
             Self::ListPatternElement(node) => node.span(),

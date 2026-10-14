@@ -75,6 +75,7 @@ use crate::cst::PatternMatchPatternArm;
 use crate::cst::PositionalArgument;
 use crate::cst::PropertiesPattern;
 use crate::cst::PropertyAccess;
+use crate::cst::RestPattern;
 use crate::cst::Statement;
 use crate::cst::Terminator;
 use crate::cst::TypePattern;
@@ -96,21 +97,33 @@ pub struct PhpShape<'arena> {
     pub tests: std::vec::Vec<(Span, &'arena Expression<'arena>)>,
 }
 
+/// What the PHP of a pattern depends on beyond its own text, which the analyzer and the bridge answer from the names
+/// and the codebase they hold.
+pub trait PatternNames {
+    /// Whether the bare name at `span` is a local or a parameter.
+    fn is_local(&self, span: Span) -> bool;
+
+    /// The names of the fields of the case of an enum with data, spec section 20, that the class name resolved at
+    /// `span` names, in the order the case declares them, none for a plain case. None when the name is no such case.
+    /// The binder resolves a case pattern's type at its start, and a value pattern `Enum.Case` at `Case`.
+    fn case_fields(&self, span: Span) -> Option<std::vec::Vec<std::vec::Vec<u8>>>;
+}
+
 /// Builds, in `arena`, the PHP a PHP# `is`, `as` or `match` runs as.
 ///
-/// Returns `None` for any other node, and for a form the slice refuses, such as a nullable type pattern.
-/// `is_local` says whether the bare name at a span is a local or a parameter. `temporaries` is how many hidden
-/// variables the forms around this one hold, so the new ones are numbered after them.
+/// Returns `None` for any other node, and for a form the slice refuses, such as a nullable type pattern or a case
+/// pattern whose fields are not the case's. `temporaries` is how many hidden variables the forms around this one hold,
+/// so the new ones are numbered after them.
 pub fn php_shape<'arena, A>(
     arena: &'arena A,
     node: Node<'_, 'arena>,
     temporaries: u32,
-    is_local: &dyn Fn(Span) -> bool,
+    names: &dyn PatternNames,
 ) -> Option<PhpShape<'arena>>
 where
     A: Arena,
 {
-    let mut shape = Shape { arena, is_local, temporaries, first: temporaries, tests: std::vec::Vec::new() };
+    let mut shape = Shape { arena, names, temporaries, first: temporaries, tests: std::vec::Vec::new() };
     let php = match node {
         Node::Expression(Expression::Is(is)) => Node::Expression(shape.is(is)?),
         Node::Expression(Expression::As(r#as)) => Node::Expression(shape.r#as(r#as)?),
@@ -126,8 +139,8 @@ where
 ///
 /// They are `is_int`, `is_float`, `is_string` or `is_bool` at a scalar type of a type pattern or `as`, `is_object` at
 /// the `{` of a properties pattern, `is_array` at the `[` and `count` at the `]` of a list pattern, and `is_array` at
-/// the `...` and `array_slice` at the type of a list pattern's rest. The binder records each as the name resolved at that span, as it records a
-/// call's name.
+/// the `...` and `array_slice` at the type of a list pattern's named rest. The binder records each as the name resolved
+/// at that span, as it records a call's name.
 pub fn called_functions(node: Node<'_, '_>) -> impl Iterator<Item = LocalIdentifier<'static>> {
     let called = |span, value: &'static [u8]| Some(LocalIdentifier { span, value });
     let functions = match node {
@@ -135,7 +148,9 @@ pub fn called_functions(node: Node<'_, '_>) -> impl Iterator<Item = LocalIdentif
         Node::As(r#as) => [scalar_test(r#as.hint), None],
         Node::PropertiesPattern(properties) => [called(properties.left_brace, b"is_object"), None],
         Node::ListPattern(list) => [called(list.left_bracket, b"is_array"), called(list.right_bracket, b"count")],
-        Node::RestPattern(rest) => [called(rest.ellipsis, b"is_array"), called(rest.hint.span(), b"array_slice")],
+        Node::RestPattern(RestPattern { ellipsis, hint: Some(hint), .. }) => {
+            [called(*ellipsis, b"is_array"), called(hint.span(), b"array_slice")]
+        }
         _ => [None, None],
     };
 
@@ -183,7 +198,7 @@ fn scalar_test(hint: &Hint<'_>) -> Option<LocalIdentifier<'static>> {
 
 struct Shape<'shape, 'arena, A> {
     arena: &'arena A,
-    is_local: &'shape dyn Fn(Span) -> bool,
+    names: &'shape dyn PatternNames,
     /// The number of the last hidden variable.
     temporaries: u32,
     first: u32,
@@ -396,8 +411,9 @@ where
         subject: &mut Subject<'arena>,
     ) -> Option<&'arena Expression<'arena>> {
         Some(match pattern {
-            // The properties read the name when there is one, and the subject otherwise.
-            Pattern::Type(TypePattern { hint, properties, variable }) => {
+            // The fields and the properties read the name when there is one, and the subject otherwise. A case's
+            // fields are read by the names the case declares them with, in their order.
+            Pattern::Type(TypePattern { hint, fields, properties, variable }) => {
                 let read = self.read(subject, pattern.span());
                 let (operand, mut named) = match variable {
                     Some(variable) => {
@@ -413,15 +429,46 @@ where
                     }
                     None => (read, None),
                 };
-                let test = self.type_test(hint, operand)?;
+                let mut test = self.type_test(hint, operand)?;
+                let target = named.as_mut().unwrap_or(subject);
+                if let Some(fields) = fields {
+                    let declared = self.names.case_fields(hint.span())?;
+                    if declared.len() != fields.fields.len() {
+                        return None;
+                    }
+
+                    for (index, (field, name)) in fields.fields.iter().zip(&declared).enumerate() {
+                        let follows = match index.checked_sub(1).and_then(|previous| fields.fields.tokens.get(previous))
+                        {
+                            Some(comma) => comma.span_for(fields.left_parenthesis.file_id),
+                            None => fields.left_parenthesis,
+                        };
+                        let name =
+                            LocalIdentifier { span: start_of(field.span()), value: self.arena.alloc_slice_copy(name) };
+                        let field_test = self.member_test(target, name, field, follows)?;
+
+                        test = self.binary(test, BinaryOperator::And(start_of(field.span())), field_test);
+                    }
+                }
 
                 match properties {
-                    Some(properties) => self.property_tests(test, properties, named.as_mut().unwrap_or(subject))?,
+                    Some(properties) => self.property_tests(test, properties, target)?,
                     None => test,
                 }
             }
-            // An enum case pattern, which the parser refuses as not supported yet.
-            Pattern::Value(Expression::Error(_)) => return None,
+            // `Enum.Case` names a case of an enum with data, which is an object of its class, as a type pattern does.
+            Pattern::Value(Expression::Access(Access::Property(PropertyAccess {
+                property: ClassLikeMemberSelector::Identifier(case),
+                ..
+            }))) if self.names.case_fields(case.span).is_some() => {
+                let read = self.read(subject, follows);
+
+                self.binary(
+                    read,
+                    BinaryOperator::Instanceof(Keyword { span: start_of(pattern.span()), value: b"instanceof" }),
+                    self.alloc(Expression::Identifier(Identifier::Local(*case))),
+                )
+            }
             Pattern::Value(value) => {
                 let read = self.read(subject, follows);
 
@@ -465,34 +512,30 @@ where
         })
     }
 
-    /// `\is_array(s) && \count(s) === n`, or `\count(s) >= n` before a rest, then `&&` each element's test on `s[i]`,
-    /// then the rest's `\is_array($rest = \array_slice(s, n))`, which is always true and assigns the rest. The first
-    /// `\is_array` is the null check of a `List?`, as `\is_object` is a properties pattern's. Element `i` reads `s[i]`
-    /// at the start of its pattern, so an issue at the read is never taken for the `\is_array` at the `[`. The parser
-    /// takes a rest only at the end, so each element's index is its position in the list.
+    /// `\is_array(s) && \count(s) === n`, or `\count(s) >= n` with a rest, then `&&` each element's test, then the
+    /// rest's `\is_array($rest = \array_slice(s, k, \count(s) - n))`, which is always true and assigns the rest of the
+    /// list from its place `k`, and is `\array_slice(s, k)` for a rest at the end. The first `\is_array` is the null
+    /// check of a `List?`, as `\is_object` is a properties pattern's. An element before the rest reads `s[i]` by its
+    /// place, and one after it `s[\count(s) - m]`, the `m`th from the end. Each element is read at the start of its
+    /// pattern, so an issue at the read is never taken for the `\is_array` at the `[`. The count each read calls is the
+    /// one the binder records at the `]`.
     fn list_test(
         &mut self,
         list: &'arena ListPattern<'arena>,
         subject: &mut Subject<'arena>,
     ) -> Option<&'arena Expression<'arena>> {
-        let patterns: std::vec::Vec<&'arena Pattern<'arena>> = list
-            .elements
-            .iter()
-            .filter_map(|element| match element {
-                ListPatternElement::Pattern(pattern) => Some(*pattern),
-                ListPatternElement::Rest(_) => None,
-            })
-            .collect();
-        let rest = list.elements.iter().find_map(|element| match element {
-            ListPatternElement::Rest(rest) => Some(rest),
+        let elements = list.elements.len();
+        let rest = list.elements.iter().enumerate().find_map(|(place, element)| match element {
+            ListPatternElement::Rest(rest) => Some((place, rest)),
             ListPatternElement::Pattern(_) => None,
         });
+        let patterns = elements - usize::from(rest.is_some());
 
         let mut functions = called_functions(Node::ListPattern(list));
         let (is_array, count) = (functions.next()?, functions.next()?);
         let read = self.read(subject, list.left_bracket);
         let array = self.call(is_array, read);
-        let length = self.integer(patterns.len(), start_of(list.right_bracket));
+        let length = self.integer(patterns, start_of(list.right_bracket));
         let operator = if rest.is_some() {
             BinaryOperator::GreaterThanOrEqual(start_of(list.right_bracket))
         } else {
@@ -503,19 +546,28 @@ where
         let counted = self.binary(counted, operator, length);
         let mut test = self.binary(array, BinaryOperator::And(start_of(list.right_bracket)), counted);
 
-        for (index, pattern) in patterns.iter().enumerate() {
-            let follows = match index.checked_sub(1).and_then(|previous| list.elements.tokens.get(previous)) {
+        for (place, element) in list.elements.iter().enumerate() {
+            let ListPatternElement::Pattern(pattern) = element else {
+                continue;
+            };
+            let follows = match place.checked_sub(1).and_then(|previous| list.elements.tokens.get(previous)) {
                 Some(comma) => comma.span_for(list.left_bracket.file_id),
                 None => list.left_bracket,
             };
             let at = start_of(pattern.span());
+            let index = match rest {
+                Some((rest_place, _)) if place > rest_place => {
+                    let read = self.read(subject, list.right_bracket);
+                    let counted = self.call(count, read);
+                    let from_end = self.integer(elements - place, end_of(list.right_bracket));
+
+                    self.binary(counted, BinaryOperator::Subtraction(end_of(list.right_bracket)), from_end)
+                }
+                _ => self.integer(place, at),
+            };
             let array = self.read(subject, at);
-            let value = self.alloc(Expression::ArrayAccess(ArrayAccess {
-                array,
-                left_bracket: at,
-                index: self.integer(index, at),
-                right_bracket: at,
-            }));
+            let value =
+                self.alloc(Expression::ArrayAccess(ArrayAccess { array, left_bracket: at, index, right_bracket: at }));
             // The count test makes the element there, so it is read without the `?? null` of a tested index.
             let mut element = if is_named(pattern) {
                 Subject { first: Some(value), variable: None }
@@ -527,13 +579,21 @@ where
             test = self.binary(test, BinaryOperator::And(start_of(follows)), element_test);
         }
 
-        if let Some(rest) = rest {
+        if let Some((place, rest)) = rest
+            && let (Some(hint), Some(variable)) = (rest.hint, rest.variable)
+        {
             let mut functions = called_functions(Node::RestPattern(rest));
             let (is_array, array_slice) = (functions.next()?, functions.next()?);
-            let array = self.read(subject, rest.hint.span());
-            let start = self.integer(patterns.len(), end_of(rest.hint.span()));
-            let slice = self.call_with(array_slice, &[array, start]);
-            let name = self.php_variable(rest.variable.value);
+            let array = self.read(subject, hint.span());
+            let mut arguments = vec![array, self.integer(place, end_of(hint.span()))];
+            if place + 1 < elements {
+                let read = self.read(subject, list.right_bracket);
+                let counted = self.call(count, read);
+                let length = self.integer(patterns, end_of(list.right_bracket));
+                arguments.push(self.binary(counted, BinaryOperator::Subtraction(end_of(list.right_bracket)), length));
+            }
+            let slice = self.call_with(array_slice, &arguments);
+            let name = self.php_variable(variable.value);
             let assignment = self.alloc(Expression::Assignment(Assignment {
                 lhs: self.variable(name, start_of(rest.ellipsis)),
                 operator: AssignmentOperator::Assign(start_of(rest.ellipsis)),
@@ -555,24 +615,33 @@ where
         subject: &mut Subject<'arena>,
     ) -> Option<&'arena Expression<'arena>> {
         for property in properties.properties.iter() {
-            let at = start_of(property.name.span);
-            let object = self.read(subject, property.name.span);
-            let value = self.alloc(Expression::Access(Access::Property(PropertyAccess {
-                object,
-                arrow: at,
-                property: ClassLikeMemberSelector::Identifier(property.name),
-            })));
-            let mut property_subject = if is_named(property.pattern) {
-                Subject { first: Some(value), variable: None }
-            } else {
-                self.subject(value)
-            };
-            let property_test = self.test(property.pattern, property.colon, &mut property_subject)?;
+            let property_test = self.member_test(subject, property.name, property.pattern, property.colon)?;
 
-            test = self.binary(test, BinaryOperator::And(at), property_test);
+            test = self.binary(test, BinaryOperator::And(start_of(property.name.span)), property_test);
         }
 
         Some(test)
+    }
+
+    /// The test of the property `name` of the object `subject` holds against `pattern`, which follows the token at
+    /// `follows`, reading the property once.
+    fn member_test(
+        &mut self,
+        subject: &mut Subject<'arena>,
+        name: LocalIdentifier<'arena>,
+        pattern: &'arena Pattern<'arena>,
+        follows: Span,
+    ) -> Option<&'arena Expression<'arena>> {
+        let object = self.read(subject, name.span);
+        let value = self.alloc(Expression::Access(Access::Property(PropertyAccess {
+            object,
+            arrow: start_of(name.span),
+            property: ClassLikeMemberSelector::Identifier(name),
+        })));
+        let mut member =
+            if is_named(pattern) { Subject { first: Some(value), variable: None } } else { self.subject(value) };
+
+        self.test(pattern, follows, &mut member)
     }
 
     /// `instanceof` for a class, and the scalar test for a scalar type.
@@ -609,7 +678,7 @@ where
     /// A tested value: itself when it is a local or a parameter, and a hidden `$<prefix>#N` otherwise.
     fn subject_named(&mut self, value: &'arena Expression<'arena>, prefix: &str) -> Subject<'arena> {
         if let Expression::ConstantAccess(access) = value
-            && (self.is_local)(access.name.span())
+            && self.names.is_local(access.name.span())
         {
             return Subject { first: Some(value), variable: Some(self.php_variable(access.name.value())) };
         }
@@ -662,7 +731,7 @@ where
 
     /// Whether a value is a bare name of a local or a parameter.
     fn is_local_value(&self, value: &Expression<'arena>) -> bool {
-        matches!(value, Expression::ConstantAccess(access) if (self.is_local)(access.name.span()))
+        matches!(value, Expression::ConstantAccess(access) if self.names.is_local(access.name.span()))
     }
 
     fn call(

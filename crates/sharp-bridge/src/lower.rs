@@ -3694,9 +3694,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// numbered after those of the forms around it, which may still hold their values.
     fn pattern(&mut self, node: Node<'_, '_>) -> u32 {
         let arena = LocalArena::new();
-        let names = self.names;
-        let is_local = |span: Span| matches!(names.binding(&span), Some(Binding::Local(_)));
-        let Some(PhpShape { php, temporaries, .. }) = php_shape(&arena, node, self.temporaries, &is_local) else {
+        let names = self.types.pattern_names();
+        let Some(PhpShape { php, temporaries, .. }) = php_shape(&arena, node, self.temporaries, &names) else {
             unreachable!("check_slice refuses the pattern forms that have no PHP");
         };
 

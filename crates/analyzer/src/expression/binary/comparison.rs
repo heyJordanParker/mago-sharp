@@ -1283,10 +1283,16 @@ fn written_words<'arena>(
             ListPatternElement::Pattern(pattern) => written_words(pattern, Vec::new(), value),
             ListPatternElement::Rest(_) => None,
         }),
-        Pattern::Type(TypePattern { properties, .. }) if pattern.span() != value => properties
+        Pattern::Type(TypePattern { fields, properties, .. }) if pattern.span() != value => fields
             .iter()
-            .flat_map(|properties| properties.properties.iter())
-            .find_map(|property| written_words(property.pattern, Vec::new(), value)),
+            .flat_map(|fields| fields.fields.iter())
+            .find_map(|field| written_words(field, Vec::new(), value))
+            .or_else(|| {
+                properties
+                    .iter()
+                    .flat_map(|properties| properties.properties.iter())
+                    .find_map(|property| written_words(property.pattern, Vec::new(), value))
+            }),
         Pattern::Type(_) | Pattern::Value(_) => (pattern.span() == value).then_some(leading),
         Pattern::Comparison(_) => None,
     }

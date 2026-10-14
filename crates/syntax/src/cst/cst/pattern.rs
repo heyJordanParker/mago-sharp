@@ -54,18 +54,31 @@ pub enum Pattern<'arena> {
     List(ListPattern<'arena>),
 }
 
-/// Represents a type pattern: a type, the properties the matched object's must match, and the name of a variable the
-/// matched value is assigned to.
+/// Represents a type pattern: a type, its fields, its properties and the name it assigns the matched value to.
 ///
-/// A bare name without a variable is a type, never a local's value: a pattern takes types and constants only.
+/// The fields are a case's that carries data, by their position. A bare name without a variable is a type, never a
+/// local's value: a pattern takes types and constants only.
 ///
-/// Example: `int`, `Paid paid`, `Paid { amount: > 1000 } big`
+/// Example: `int`, `Paid paid`, `Paid { amount: > 1000 } big`, `PaymentResult.Paid(string transactionId)`
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TypePattern<'arena> {
     pub hint: Hint<'arena>,
+    pub fields: Option<&'arena FieldsPattern<'arena>>,
     pub properties: Option<&'arena PropertiesPattern<'arena>>,
     pub variable: Option<LocalIdentifier<'arena>>,
+}
+
+/// Represents the fields of a case that carries data, spec section 20, in the order the case declares them, each with
+/// the pattern its value matches.
+///
+/// Example: `(string transactionId)`, `(> 1000, _)`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct FieldsPattern<'arena> {
+    pub left_parenthesis: Span,
+    pub fields: TokenSeparatedSequence<'arena, &'arena Pattern<'arena>>,
+    pub right_parenthesis: Span,
 }
 
 /// Represents a comparison pattern: `==`, `<`, `<=`, `>` or `>=` and the value the matched value is compared with.
@@ -143,15 +156,18 @@ pub enum ListPatternElement<'arena> {
     Rest(RestPattern<'arena>),
 }
 
-/// Represents the rest of a list pattern: the elements after the others, in a list of its type, and its name.
+/// Represents the rest of a list pattern: the elements the others leave, at its place among them.
 ///
-/// Example: `...List<Line> rest`
+/// A named rest holds them in a list of its type, and a bare one skips them. The parser gives a rest both a type and a
+/// name, or neither.
+///
+/// Example: `...List<Line> rest`, `...`
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct RestPattern<'arena> {
     pub ellipsis: Span,
-    pub hint: &'arena Hint<'arena>,
-    pub variable: LocalIdentifier<'arena>,
+    pub hint: Option<&'arena Hint<'arena>>,
+    pub variable: Option<LocalIdentifier<'arena>>,
 }
 
 impl BinaryPattern<'_> {
@@ -207,17 +223,24 @@ impl HasSpan for ListPatternElement<'_> {
 
 impl HasSpan for RestPattern<'_> {
     fn span(&self) -> Span {
-        self.ellipsis.join(self.variable.span)
+        self.variable.map_or(self.ellipsis, |variable| self.ellipsis.join(variable.span))
     }
 }
 
 impl HasSpan for TypePattern<'_> {
     fn span(&self) -> Span {
-        match (&self.properties, &self.variable) {
-            (_, Some(variable)) => self.hint.span().join(variable.span),
-            (Some(properties), None) => self.hint.span().join(properties.span()),
-            (None, None) => self.hint.span(),
+        match (&self.fields, &self.properties, &self.variable) {
+            (_, _, Some(variable)) => self.hint.span().join(variable.span),
+            (_, Some(properties), None) => self.hint.span().join(properties.span()),
+            (Some(fields), None, None) => self.hint.span().join(fields.span()),
+            (None, None, None) => self.hint.span(),
         }
+    }
+}
+
+impl HasSpan for FieldsPattern<'_> {
+    fn span(&self) -> Span {
+        self.left_parenthesis.join(self.right_parenthesis)
     }
 }
 

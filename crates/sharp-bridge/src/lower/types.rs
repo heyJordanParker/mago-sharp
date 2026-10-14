@@ -1,3 +1,4 @@
+use mago_analyzer::CodebasePatternNames;
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::artifacts::CallTarget;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
@@ -89,6 +90,11 @@ impl<'analysis> Types<'analysis> {
 
     pub(crate) fn names(&self) -> &ResolvedNames<'analysis> {
         &self.names
+    }
+
+    /// What the PHP of a pattern depends on, as the analysis answered it.
+    pub(crate) fn pattern_names(&self) -> CodebasePatternNames<'_, 'analysis> {
+        CodebasePatternNames { names: &self.names, codebase: self.codebase }
     }
 
     /// The type the analysis gave `expression`.

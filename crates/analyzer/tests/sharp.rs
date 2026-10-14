@@ -4207,6 +4207,23 @@ fn a_data_case_is_a_type_of_its_own() {
     );
 }
 
+/// Spec section 21: a case pattern tests the case's class, and its fields by position bind the case's fields, typed as
+/// the case declares them. A value pattern `Enum.Case` tests the case's class too.
+#[test]
+fn a_case_pattern_unpacks_the_fields_by_position() {
+    let code = "namespace App;\n\nclass Shop\n{\n    public string describe(PaymentResult result) => match (result) {\n        PaymentResult.Paid(string transactionId) => transactionId,\n        PaymentResult.Declined declined => declined.reason,\n        PaymentResult.RequiresAction { redirect: \"\" } => \"nowhere\",\n        default => \"other\",\n    };\n\n    public bool open(CheckoutState state) => state is CheckoutState.Open;\n\n    public int wrong(PaymentResult result) => result is PaymentResult.Paid(int id) ? id : 0;\n\n    public bool count(PaymentResult result) => result is PaymentResult.Paid(string a, string b);\n}\n";
+
+    assert_eq!(
+        refusals(("src/App/Shop.sharp", code), &[PAYMENT_RESULT, CHECKOUT_STATE]),
+        [
+            "14:76 impossible-type-comparison Impossible type assertion: `id` of type `string` can never be `int`. | Check that the correct variable is being passed, or update the assertion type.",
+            "14:47 redundant-logical-operation Redundant `&&` operation: left operand is evaluated and right operand is always `false`. | Consider simplifying this expression to `false`.",
+            "14:47 impossible-condition Redundant ternary operator: condition is always `false`. | Consider replacing the entire expression with just this `else` branch.",
+            "16:76 invalid-argument `PaymentResult.Paid` has 1 field, and this pattern unpacks 2. | ",
+        ]
+    );
+}
+
 /// A file that declares the class a case runs as clashes with the case, whichever is read first.
 #[test]
 fn a_class_named_as_a_case_is_an_error_that_names_the_case() {
@@ -4254,6 +4271,10 @@ fn list_patterns_test_the_count_and_each_element() {
     // A `List?` holds no list when it is null, and a nested list pattern tests an element.
     let nullable = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int>? values) => match (values) {\n        null => -1,\n        [] => 0,\n        [int, ...List<int> rest] => 1 + rest.count(),\n        default => 2,\n    };\n\n    public static bool nested(List<List<int>> rows) => rows is [[1, int two]];\n}\n";
     assert_eq!(issues(("src/Demo/Report.sharp", nullable), &[]), Vec::<String>::new());
+
+    // A rest stands anywhere: the elements after it are counted from the end, and a bare rest names nothing.
+    let anywhere = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static float last(List<Circle> circles) => match (circles) {\n        [...List<Circle> before, Circle last] => last.radius + before.count(),\n        default => 0.0,\n    };\n\n    public static int ends(List<int> values)\n    {\n        if (values is [int first, ..., int last]) {\n            return first + last;\n        }\n        return 0;\n    }\n\n    public static int middle(List<int> values) => match (values) {\n        [1, ...List<int> inner, int end] => inner.count() + end,\n        [..., > 9] => 9,\n        default => 0,\n    };\n}\n";
+    assert_eq!(issues(("src/Demo/Report.sharp", anywhere), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
 
     // A value that holds no `List` never matches, and one that may be another array waits for the type test of
     // `List<T>`.
@@ -4555,14 +4576,19 @@ fn an_arm_that_is_always_true_before_the_last_is_reported_with_the_arms_it_hides
     );
 }
 
+/// A pattern that unpacks fields of what is no case of an enum with data reports that alone, and the `match` around it
+/// reports nothing more.
 #[test]
-fn a_pattern_the_parser_refuses_reports_only_its_parse_error() {
+fn a_case_pattern_on_no_case_reports_only_that() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void count(int? count)\n    {\n        match (count) {\n            1 => {},\n            Shape.Circle(radius) => {},\n            default => {},\n        }\n    }\n}\n";
 
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
     let messages: Vec<&str> = issues.iter().map(|issue| issue.message.as_str()).collect();
 
-    assert_eq!(messages, ["An enum case pattern is not supported yet in PHP#."]);
+    assert_eq!(
+        messages,
+        ["`Shape.Circle` is no case of an enum whose cases carry data, so it has no fields to unpack."]
+    );
 }
 
 #[test]

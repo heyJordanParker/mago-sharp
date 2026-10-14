@@ -3767,7 +3767,8 @@ fn a_question_mark_before_the_name_an_is_pattern_declares_makes_the_type_nullabl
     };
     for is in [r#if.condition, expression(statement)] {
         let Expression::Is(Is {
-            pattern: Pattern::Type(TypePattern { hint: hint @ Hint::Nullable(_), properties: None, variable }),
+            pattern:
+                Pattern::Type(TypePattern { hint: hint @ Hint::Nullable(_), fields: None, properties: None, variable }),
             ..
         }) = is
         else {
@@ -3790,7 +3791,8 @@ fn a_question_mark_that_ends_an_is_pattern_makes_the_type_nullable() {
     };
     for is in [r#if.condition, expression(returned)] {
         let Expression::Is(Is {
-            pattern: Pattern::Type(TypePattern { hint: Hint::Nullable(_), properties: None, variable: None }),
+            pattern:
+                Pattern::Type(TypePattern { hint: Hint::Nullable(_), fields: None, properties: None, variable: None }),
             ..
         }) = is
         else {
@@ -3972,7 +3974,7 @@ fn a_type_with_properties_is_one_pattern_that_may_bind() {
     let written: Vec<(&str, Option<&str>, Option<&str>)> = patterns
         .iter()
         .map(|pattern| {
-            let Pattern::Type(TypePattern { hint, properties, variable }) = pattern else {
+            let Pattern::Type(TypePattern { hint, properties, variable, .. }) = pattern else {
                 panic!("expected a type pattern, got {pattern:#?}");
             };
 
@@ -4009,72 +4011,96 @@ fn a_type_with_properties_is_one_pattern_that_may_bind() {
     );
 }
 
-/// Spec section 21: a list pattern tests a list's elements, each against any pattern, and a trailing rest takes the
-/// elements after them. Each row is the elements and the rest. A rest before the end waits for its ruling.
+/// Spec section 21: a list pattern tests a list's elements, each against any pattern, and a rest anywhere among them
+/// takes the elements the others leave, named with its type or bare. Each row is the elements in order, a rest marked
+/// with whether it is named. The parser takes a second rest, which the semantic check refuses.
 #[test]
 fn a_list_pattern_tests_each_element_and_takes_the_rest() {
-    const CODE: &str = "class Report\n{\n    void run()\n    {\n        lines is [];\n        lines is [Line only];\n        lines is [Line first, ...List<Line> rest];\n        lines is [> 0, not null, { total: 1 }, ...List<int> others];\n        lines is [[1, int nested]];\n    }\n}\n";
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        lines is [];\n        lines is [Line only];\n        lines is [Line first, ...List<Line> rest];\n        lines is [> 0, not null, { total: 1 }, ...List<int> others];\n        lines is [[1, int nested]];\n        lines is [...List<Line> before, Line last];\n        lines is [Line first, ..., Line last];\n        lines is [..., Line middle, ...];\n    }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
     assert!(program.errors.is_empty(), "{:#?}", program.errors);
-    let lists: Vec<(Vec<&str>, Option<&str>)> = method_body(program)
+    let lists: Vec<Vec<String>> = method_body(program)
         .iter()
         .map(|statement| {
             let Expression::Is(Is { pattern: Pattern::List(list), .. }) = expression(statement) else {
                 panic!("expected a list pattern, got {statement:#?}");
             };
-            let elements = list
-                .elements
-                .iter()
-                .filter_map(|element| match element {
-                    ListPatternElement::Pattern(pattern) => Some(source(CODE, *pattern)),
-                    ListPatternElement::Rest(_) => None,
-                })
-                .collect();
-            let rest = list.elements.iter().find_map(|element| match element {
-                ListPatternElement::Rest(rest) => Some(source(CODE, rest)),
-                ListPatternElement::Pattern(_) => None,
-            });
 
-            (elements, rest)
+            list.elements
+                .iter()
+                .map(|element| match element {
+                    ListPatternElement::Pattern(pattern) => source(CODE, *pattern).to_owned(),
+                    ListPatternElement::Rest(rest) => {
+                        format!(
+                            "rest {}, named: {}",
+                            source(CODE, rest),
+                            rest.hint.is_some() && rest.variable.is_some()
+                        )
+                    }
+                })
+                .collect()
         })
         .collect();
     assert_eq!(
         lists,
         [
-            (vec![], None),
-            (vec!["Line only"], None),
-            (vec!["Line first"], Some("...List<Line> rest")),
-            (vec!["> 0", "not null", "{ total: 1 }"], Some("...List<int> others")),
-            (vec!["[1, int nested]"], None),
+            vec![],
+            vec!["Line only".to_owned()],
+            vec!["Line first".to_owned(), "rest ...List<Line> rest, named: true".to_owned()],
+            vec![
+                "> 0".to_owned(),
+                "not null".to_owned(),
+                "{ total: 1 }".to_owned(),
+                "rest ...List<int> others, named: true".to_owned()
+            ],
+            vec!["[1, int nested]".to_owned()],
+            vec!["rest ...List<Line> before, named: true".to_owned(), "Line last".to_owned()],
+            vec!["Line first".to_owned(), "rest ..., named: false".to_owned(), "Line last".to_owned()],
+            vec!["rest ..., named: false".to_owned(), "Line middle".to_owned(), "rest ..., named: false".to_owned()],
         ]
-    );
-
-    const MIDDLE: &str =
-        "class Report\n{\n    void run()\n    {\n        lines is [...List<Line> rest, Line last];\n    }\n}\n";
-    let middle = parse(&arena, "src/Report.sharp", MIDDLE);
-    let errors: Vec<(String, &str)> =
-        middle.errors.iter().map(|error| (error.to_string(), source(MIDDLE, error))).collect();
-    assert_eq!(
-        errors,
-        [("A rest before the end of a list pattern is not supported yet in PHP#.".to_owned(), "...List<Line> rest")]
     );
 }
 
+/// Spec section 21: a case of an enum with data is matched by its fields in parentheses, its properties or its name,
+/// as a type pattern whose type is the case.
 #[test]
-fn enum_case_patterns_are_not_supported_yet() {
-    const CODE: &str = "class Report\n{\n    void run()\n    {\n        result is PaymentResult.Paid(string id);\n        result is PaymentResult.Declined declined;\n    }\n}\n";
+fn an_enum_case_pattern_is_a_type_pattern_of_the_case() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        result is PaymentResult.Paid(string id);\n        result is PaymentResult.Declined declined;\n        result is PaymentResult.Paid(> 0, string note) { id: 1 } paid;\n    }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
-    let errors: Vec<(String, &str)> =
-        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    // Each row is the case, its fields, its properties and its name.
+    let patterns: Vec<String> = method_body(program)
+        .iter()
+        .map(|statement| {
+            let Expression::Is(Is { pattern: Pattern::Type(pattern), .. }) = expression(statement) else {
+                panic!("expected a type pattern, got {statement:#?}");
+            };
+            let fields: Vec<&str> = pattern
+                .fields
+                .iter()
+                .flat_map(|fields| fields.fields.iter())
+                .map(|field| source(CODE, *field))
+                .collect();
+
+            format!(
+                "{} | {} | {} | {}",
+                source(CODE, &pattern.hint),
+                fields.join(", "),
+                pattern.properties.map_or("", |properties| source(CODE, properties)),
+                pattern.variable.as_ref().map_or("", |variable| source(CODE, variable)),
+            )
+        })
+        .collect();
     assert_eq!(
-        errors,
+        patterns,
         [
-            ("An enum case pattern is not supported yet in PHP#.".to_owned(), "PaymentResult.Paid(string id)"),
-            ("An enum case pattern is not supported yet in PHP#.".to_owned(), "PaymentResult.Declined declined"),
+            "PaymentResult.Paid | string id |  | ",
+            "PaymentResult.Declined |  |  | declined",
+            "PaymentResult.Paid | > 0, string note | { id: 1 } | paid",
         ]
     );
 }

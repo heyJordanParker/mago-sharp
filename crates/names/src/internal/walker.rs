@@ -6,6 +6,7 @@ use std::hash::Hasher;
 use mago_allocator::prelude::*;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::As;
 use mago_syntax::cst::Assignment;
@@ -408,8 +409,11 @@ fn pattern_variables<'ast, 'arena>(
     variables: &mut std::vec::Vec<&'ast LocalIdentifier<'arena>>,
 ) {
     match pattern {
-        Pattern::Type(TypePattern { properties, variable, .. }) => {
+        Pattern::Type(TypePattern { fields, properties, variable, .. }) => {
             variables.extend(variable);
+            for field in fields.iter().flat_map(|fields| fields.fields.iter()) {
+                pattern_variables(field, variables);
+            }
             if let Some(properties) = properties {
                 property_variables(properties, variables);
             }
@@ -426,7 +430,7 @@ fn pattern_variables<'ast, 'arena>(
             for element in &list.elements {
                 match element {
                     ListPatternElement::Pattern(pattern) => pattern_variables(pattern, variables),
-                    ListPatternElement::Rest(rest) => variables.push(&rest.variable),
+                    ListPatternElement::Rest(rest) => variables.extend(&rest.variable),
                 }
             }
         }
@@ -1047,14 +1051,31 @@ where
         self.record_called_functions(Node::ListPattern(list));
     }
 
-    /// A list pattern's rest is declared as a type pattern's variable is.
+    /// A list pattern's named rest is declared as a type pattern's variable is.
     fn walk_in_rest_pattern(
         &mut self,
         rest: &'ast RestPattern<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
         self.record_called_functions(Node::RestPattern(rest));
-        self.declare_pattern_variable(&rest.variable);
+        if let Some(variable) = &rest.variable {
+            self.declare_pattern_variable(variable);
+        }
+    }
+
+    /// A value pattern `Enum.Case` may name a case of an enum with data, spec section 20, which `php_shape` tests with
+    /// `instanceof` the case's class, named at `Case`: the name there is the enum's full name and the case's.
+    fn walk_in_pattern(&mut self, pattern: &'ast Pattern<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        if let Pattern::Value(Expression::Access(Access::Property(PropertyAccess {
+            object: Expression::ConstantAccess(class),
+            property: ClassLikeMemberSelector::Identifier(case),
+            ..
+        }))) = pattern
+        {
+            let (enum_name, imported) = self.resolve_class(context, class.name.value());
+            let name = context.intern(&[enum_name, b"\\", case.value].concat());
+            self.resolved_names.insert_at(case.span, name, imported);
+        }
     }
 
     fn walk_in_is(&mut self, is: &'ast Is<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
