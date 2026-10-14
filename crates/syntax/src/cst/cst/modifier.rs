@@ -40,6 +40,8 @@ pub enum Modifier<'arena> {
     /// PHP#'s `internal`, spec section 5's access to a namespace and every namespace below it. PHP has no such access,
     /// so the visibility queries leave it out.
     Internal(Keyword<'arena>),
+    /// PHP#'s `foreign`, which marks a class whose objects carry an effect, spec section 29.
+    Foreign(Keyword<'arena>),
 }
 
 impl<'arena> Modifier<'arena> {
@@ -62,6 +64,7 @@ impl<'arena> Modifier<'arena> {
             Modifier::Extern(k) => k,
             Modifier::Lazy(k) => k,
             Modifier::Internal(k) => k,
+            Modifier::Foreign(k) => k,
         }
     }
 
@@ -170,7 +173,8 @@ impl HasSpan for Modifier<'_> {
             | Modifier::Required(value)
             | Modifier::Extern(value)
             | Modifier::Lazy(value)
-            | Modifier::Internal(value) => value.span(),
+            | Modifier::Internal(value)
+            | Modifier::Foreign(value) => value.span(),
         }
     }
 }

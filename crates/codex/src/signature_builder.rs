@@ -20,6 +20,7 @@ use mago_syntax::cst::PropertyItem;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::Trivia;
 use mago_syntax::walker::MutWalker;
+use mago_word::ascii_lowercase_constant_name_word;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
@@ -75,8 +76,11 @@ impl<'arena> SignatureBuilder<'arena> {
         hash: u64,
         signature_hash: u64,
     ) -> DefSignatureNode {
+        // A constant is named as the codebase keys it, with its namespace lowercased, so a reference to it names the
+        // node of the file that declares it. A class constant's name has no namespace, so it keeps its name.
         let atom_name = match (is_constant, is_property) {
-            (true, _) | (_, true) => word(name),
+            (true, _) => ascii_lowercase_constant_name_word(name),
+            (_, true) => word(name),
             _ => ascii_lowercase_word(name),
         };
 
@@ -170,7 +174,7 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for SignatureBuilder<'arena> {
         let signature_hash = hash;
 
         for item in &constant.items {
-            let name = item.name.value;
+            let name = self.resolved_names.get(&item.name);
             let node = self.create_node(name, false, true, false, hash, signature_hash);
             self.ast_nodes.push(node);
         }

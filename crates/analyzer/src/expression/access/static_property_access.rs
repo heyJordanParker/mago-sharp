@@ -2,9 +2,11 @@ use mago_allocator::Arena;
 use std::rc::Rc;
 
 use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_null;
+use mago_codex::ttype::union::TUnion;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::StaticPropertyAccess;
 use mago_word::word;
@@ -14,7 +16,9 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::resolver::static_property::StaticProperty;
+use crate::resolver::static_property::record_statics_type_arguments;
 use crate::resolver::static_property::resolve_static_properties;
 use crate::utils::expression::get_static_property_access_expression_id;
 
@@ -64,7 +68,13 @@ where
         return Ok(());
     }
 
-    let resolution_result = resolve_static_properties(context, block_context, artifacts, access, false)?;
+    let resolution_result = resolve_static_properties(context, block_context, artifacts, access, false, false)?;
+    // A refused class, as `Missing<Order>`, reported itself, so what its member gives reports nothing again.
+    if artifacts.get_expression_type(access.class).is_some_and(is_refused_type) {
+        artifacts.set_expression_type(&access.span, TUnion::from_atomic(TAtomic::Error));
+
+        return Ok(());
+    }
 
     let mut resulting_expression_type = None;
     if !resolution_result.has_error_path {
@@ -108,7 +118,8 @@ where
     Ok(())
 }
 
-/// Adds symbol reference for a memoized static property access.
+/// Adds symbol reference for a memoized static property access, and records the type arguments it reads a generic PHP#
+/// class's statics with, which the class it names gives, since an access with type arguments is never memoized.
 fn add_memoized_static_property_reference<'ctx, 'arena, A>(
     context: &Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
@@ -143,6 +154,7 @@ where
             declaring_class,
             property_name,
         );
+        record_statics_type_arguments(context, artifacts, access.span, class_name, declaring_class, None);
     }
 
     Ok(())

@@ -71,12 +71,14 @@ impl MetadataFlags {
     /// A PHP# extension's computed property, spec section 26: the public static method of a static class it runs as,
     /// which takes only the extension's receiver and is read as a property of the receiver.
     pub const EXTENSION_PROPERTY: MetadataFlags = MetadataFlags(1 << 50);
+    /// A PHP# `foreign` class, spec section 29: an effect, which code has by holding one of its objects.
+    pub const FOREIGN: MetadataFlags = MetadataFlags(1 << 51);
     /// A PHP# enum case that runs as a class, spec section 20: the final subclass of its enum, named in the enum's
     /// namespace, that a case of an enum with a case that carries data runs as.
-    pub const ENUM_CASE_CLASS: MetadataFlags = MetadataFlags(1 << 51);
+    pub const ENUM_CASE_CLASS: MetadataFlags = MetadataFlags(1 << 52);
     /// A PHP# sealed interface, spec section 20.1: its permitted inheritors are the classes of its namespace that
     /// implement it, which the populator gathers.
-    pub const SEALED: MetadataFlags = MetadataFlags(1 << 52);
+    pub const SEALED: MetadataFlags = MetadataFlags(1 << 53);
 }
 
 impl MetadataFlags {
@@ -189,6 +191,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_extension_property(self) -> bool {
         self.contains(Self::EXTENSION_PROPERTY)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_foreign(self) -> bool {
+        self.contains(Self::FOREIGN)
     }
 
     #[inline]
@@ -474,5 +482,72 @@ impl std::ops::BitXorAssign for MetadataFlags {
     #[inline]
     fn bitxor_assign(&mut self, rhs: Self) {
         self.0 ^= rhs.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MetadataFlags;
+
+    #[test]
+    fn each_flag_is_one_bit_that_no_other_flag_shares() {
+        let flags = [
+            ("ABSTRACT", MetadataFlags::ABSTRACT),
+            ("FINAL", MetadataFlags::FINAL),
+            ("READONLY", MetadataFlags::READONLY),
+            ("DEPRECATED", MetadataFlags::DEPRECATED),
+            ("ENUM_INTERFACE", MetadataFlags::ENUM_INTERFACE),
+            ("POPULATED", MetadataFlags::POPULATED),
+            ("INTERNAL", MetadataFlags::INTERNAL),
+            ("CONSISTENT_CONSTRUCTOR", MetadataFlags::CONSISTENT_CONSTRUCTOR),
+            ("CONSISTENT_TEMPLATES", MetadataFlags::CONSISTENT_TEMPLATES),
+            ("UNCHECKED", MetadataFlags::UNCHECKED),
+            ("USER_DEFINED", MetadataFlags::USER_DEFINED),
+            ("BUILTIN", MetadataFlags::BUILTIN),
+            ("HAS_YIELD", MetadataFlags::HAS_YIELD),
+            ("MUST_USE", MetadataFlags::MUST_USE),
+            ("HAS_THROW", MetadataFlags::HAS_THROW),
+            ("PURE", MetadataFlags::PURE),
+            ("IGNORE_NULLABLE_RETURN", MetadataFlags::IGNORE_NULLABLE_RETURN),
+            ("IGNORE_FALSABLE_RETURN", MetadataFlags::IGNORE_FALSABLE_RETURN),
+            ("INHERITS_DOCS", MetadataFlags::INHERITS_DOCS),
+            ("NO_NAMED_ARGUMENTS", MetadataFlags::NO_NAMED_ARGUMENTS),
+            ("BACKED_ENUM_CASE", MetadataFlags::BACKED_ENUM_CASE),
+            ("UNIT_ENUM_CASE", MetadataFlags::UNIT_ENUM_CASE),
+            ("BY_REFERENCE", MetadataFlags::BY_REFERENCE),
+            ("VARIADIC", MetadataFlags::VARIADIC),
+            ("PROMOTED_PROPERTY", MetadataFlags::PROMOTED_PROPERTY),
+            ("HAS_DEFAULT", MetadataFlags::HAS_DEFAULT),
+            ("VIRTUAL_PROPERTY", MetadataFlags::VIRTUAL_PROPERTY),
+            ("ASYMMETRIC_PROPERTY", MetadataFlags::ASYMMETRIC_PROPERTY),
+            ("STATIC", MetadataFlags::STATIC),
+            ("WRITEONLY", MetadataFlags::WRITEONLY),
+            ("MAGIC_METHOD", MetadataFlags::MAGIC_METHOD),
+            ("API", MetadataFlags::API),
+            ("MUTATION_FREE", MetadataFlags::MUTATION_FREE),
+            ("EXTERNAL_MUTATION_FREE", MetadataFlags::EXTERNAL_MUTATION_FREE),
+            ("SUSPENDS_FIBER", MetadataFlags::SUSPENDS_FIBER),
+            ("EXPERIMENTAL", MetadataFlags::EXPERIMENTAL),
+            ("POLYFILL", MetadataFlags::POLYFILL),
+            ("PATCH", MetadataFlags::PATCH),
+            ("EXTERNAL", MetadataFlags::EXTERNAL),
+            ("SHARP", MetadataFlags::SHARP),
+            ("MODULE", MetadataFlags::MODULE),
+            ("NAMED_CONSTRUCTOR", MetadataFlags::NAMED_CONSTRUCTOR),
+            ("INIT", MetadataFlags::INIT),
+            ("EVENT", MetadataFlags::EVENT),
+            ("EXTENSION_METHOD", MetadataFlags::EXTENSION_METHOD),
+            ("EXTENSION_PROPERTY", MetadataFlags::EXTENSION_PROPERTY),
+            ("FOREIGN", MetadataFlags::FOREIGN),
+            ("ENUM_CASE_CLASS", MetadataFlags::ENUM_CASE_CLASS),
+            ("SEALED", MetadataFlags::SEALED),
+        ];
+
+        let mut seen = MetadataFlags::empty();
+        for (name, flag) in flags {
+            assert_eq!(flag.bits().count_ones(), 1, "{name} is not one bit");
+            assert!((seen & flag).bits() == 0, "{name} shares a bit with an earlier flag");
+            seen |= flag;
+        }
     }
 }

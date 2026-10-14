@@ -123,12 +123,25 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
             Call::Method(call) if report_full_name(context, call.object, None) => {
                 call.argument_list.analyze(context, block_context, artifacts)
             }
+            // PHP# calls a plain PHP function through its namespace, `Pdf.render(html)` or `global.now()`.
+            Call::Method(call)
+                if context.dialect.is_sharp()
+                    && let Some(function) = function_call::namespace_function_name(context, call) =>
+            {
+                function_call::analyze_namespace_function_call(context, block_context, artifacts, call, function)
+            }
             // PHP# writes the static call `Class::m()` as `Class.m()`, with a bare name the binder bound to a class.
             Call::Method(call)
                 if context.dialect.is_sharp()
                     && let Some(static_call) = StaticCall::from_method_call(call, context.resolved_names) =>
             {
-                static_method_call::analyze_static_method_call(context, block_context, artifacts, static_call)
+                static_method_call::analyze_static_method_call(
+                    context,
+                    block_context,
+                    artifacts,
+                    static_call,
+                    call.type_arguments.as_ref(),
+                )
             }
             // PHP# calls a static method through a class value, `type.m()`, as PHP's `$type::m()`.
             Call::Method(call) if class_value_classes(context, block_context, call.object).is_some() => {
@@ -139,7 +152,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                     span: call.span(),
                 };
 
-                static_method_call::analyze_static_method_call(context, block_context, artifacts, static_call)
+                static_method_call::analyze_static_method_call(
+                    context,
+                    block_context,
+                    artifacts,
+                    static_call,
+                    call.type_arguments.as_ref(),
+                )
             }
             Call::Method(call) => {
                 call.analyze(context, block_context, artifacts)?;
@@ -164,7 +183,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                     call.object,
                     call.span(),
                     |context, block_context, artifacts| {
-                        static_method_call::analyze_static_method_call(context, block_context, artifacts, static_call)
+                        static_method_call::analyze_static_method_call(
+                            context,
+                            block_context,
+                            artifacts,
+                            static_call,
+                            call.type_arguments.as_ref(),
+                        )
                     },
                 )
             }
@@ -228,6 +253,16 @@ where
     let class_related_argument_variables = this_variable
         .map(|receiver| block_context.get_class_type_relation_sources(receiver))
         .filter(|variables| !variables.is_empty());
+
+    // A loop's first pass can infer `never` for a call that returns, so a call inferred as `never` ends no block inside
+    // a loop. A function declared to return `never`, as PHP's `exit` is, never returns in any pass, so in a `.sharp`
+    // file it ends its block inside a loop too, and spec section 7 refuses the code after it.
+    let declared_never = context.dialect.is_sharp()
+        && !invocation_targets.is_empty()
+        && invocation_targets.iter().all(|target| {
+            matches!(target, InvocationTarget::FunctionLike { metadata, .. }
+                if metadata.return_type_declaration_metadata.as_ref().is_some_and(|declared| declared.type_union.is_never()))
+        });
 
     let mut resulting_type = None;
     let mut all_targets_non_nullable_return = !invocation_targets.is_empty();
@@ -360,7 +395,7 @@ where
         resulting_type,
     );
 
-    if resulting_type.is_never() && !block_context.flags.inside_loop() {
+    if resulting_type.is_never() && (declared_never || !block_context.flags.inside_loop()) {
         artifacts.set_expression_type(&call_span, resulting_type);
 
         block_context.flags.set_has_returned(true);
@@ -573,20 +608,27 @@ where
         if !skip_error_on_not_found && context.dialect.is_sharp() {
             let title_str = function_like.title_kind_str();
             let kind_str = function_like.kind_str();
-            // A `.sharp` file calls a function by its bare name, the global name PHP's fallback tries.
-            let name_str = display_function_like_identifier(context, &alternative.unwrap_or(function_like));
+            let identifier = alternative.unwrap_or(function_like);
+            // A `.sharp` file calls a plain PHP function through its namespace, `global.now` or `Pdf.render`.
+            let name_str = display_function_like_identifier(context, &identifier);
+            let php_name = identifier.as_string();
+            let place = match php_name.rsplit_once('\\') {
+                Some((namespace, function)) => format!(
+                    "declare `function {function}()` in a `.php` file of the namespace `{}`",
+                    namespace.replace('\\', ".")
+                ),
+                None => format!("declare `function {php_name}()` in a `.php` file outside any namespace"),
+            };
 
             context.collector.report_with_code(
                 IssueCode::NonExistentFunction,
-                Issue::error(format!("{title_str} `{name_str}` could not be found."))
+                Issue::error(format!("{title_str} `{name_str}` does not exist."))
                     .with_annotation(
                         Annotation::primary(span)
                             .with_message(format!("Undefined {kind_str} `{name_str}` called here")),
                     )
                     .with_note(format!("This often means the {kind_str} is misspelled, or not defined or autoloaded."))
-                    .with_help(format!(
-                        "Check the spelling of `{name_str}`, or declare `function {name_str}()` in a `.php` file outside any namespace."
-                    )),
+                    .with_help(format!("Check the spelling of `{name_str}`, or {place}.")),
             );
         } else if !skip_error_on_not_found {
             let title_str = function_like.title_kind_str();

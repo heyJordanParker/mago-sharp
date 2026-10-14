@@ -24,6 +24,8 @@ pub struct LoopScope {
     pub final_actions: ControlActionSet,
     pub truthy_pre_conditions: bool,
     pub condition_always_false: bool,
+    /// Whether a condition of a `.sharp` loop never finishes, as `global.exit(1)` does, so the loop is never left.
+    pub condition_never_finishes: bool,
     pub parent_loop: Option<Box<LoopScope>>,
 }
 
@@ -45,6 +47,7 @@ impl LoopScope {
             parent_loop,
             truthy_pre_conditions: true,
             condition_always_false: false,
+            condition_never_finishes: false,
         }
     }
 

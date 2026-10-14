@@ -1,5 +1,6 @@
 use mago_phpdoc_syntax::cst::TemplateTagValueVariance;
 use mago_phpdoc_syntax::cst::r#type::GenericParameterVariance;
+use mago_syntax::cst::TypeParameter;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -25,6 +26,18 @@ impl From<TemplateTagValueVariance> for Variance {
             TemplateTagValueVariance::Invariant => Variance::Invariant,
             TemplateTagValueVariance::Covariant => Variance::Covariant,
             TemplateTagValueVariance::Contravariant => Variance::Contravariant,
+        }
+    }
+}
+
+/// A PHP# type parameter's variance, spec section 11.1: `out` is `@template-covariant`, `in` is
+/// `@template-contravariant`, and a type parameter without either is invariant.
+impl From<&TypeParameter<'_>> for Variance {
+    fn from(parameter: &TypeParameter<'_>) -> Self {
+        match parameter.variance.map(|variance| variance.value) {
+            Some(b"out") => Variance::Covariant,
+            Some(b"in") => Variance::Contravariant,
+            _ => Variance::Invariant,
         }
     }
 }

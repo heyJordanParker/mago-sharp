@@ -33,6 +33,7 @@ use crate::formula::get_formula;
 use crate::formula::negate_or_synthesize;
 use crate::reconciler::assertion_reconciler;
 use crate::reconciler::reconcile_keyed_types;
+use crate::statement::function_like::expect_type;
 use crate::utils::conditional;
 use crate::utils::expression::is_derived_access_path;
 use crate::utils::names::display_truth;
@@ -65,6 +66,8 @@ pub(super) fn analyze_conditional<'ctx, 'ast, 'arena, A>(
 where
     A: Arena,
 {
+    // Spec section 11: either branch's value is the value of `?:`, so either branch goes into its declared type.
+    let expected = artifacts.get_expected_type(&span).cloned();
     let mut if_scope = IfScope::new();
     let (if_conditional_scope, applied_block_context) =
         conditional::analyze(context, block_context.clone(), artifacts, &mut if_scope, condition, false)?;
@@ -223,6 +226,7 @@ where
     let mut else_block_context = block_context.clone();
 
     if let Some(then) = then.as_ref() {
+        expect_type(context, artifacts, then, expected.as_ref());
         then.analyze(context, &mut if_block_context, artifacts)?;
 
         block_context
@@ -268,6 +272,7 @@ where
 
     let was_inside_general_use = else_block_context.flags.inside_general_use();
     else_block_context.flags.set_inside_general_use(true);
+    expect_type(context, artifacts, r#else, expected.as_ref());
     r#else.analyze(context, &mut else_block_context, artifacts)?;
     else_block_context.flags.set_inside_general_use(was_inside_general_use);
 

@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use mago_word::Word;
 use mago_word::WordMap;
+use mago_word::word;
 
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
@@ -34,6 +35,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::TypeArgumentList;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
 use crate::analyzable::Analyzable;
@@ -42,7 +44,9 @@ use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::check::check_foreign_static_write;
 use crate::error::AnalysisError;
+use crate::expression::access::written_static_property;
 use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
@@ -54,6 +58,7 @@ use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
 use crate::expression::constant_access::field_storage;
+use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
@@ -67,6 +72,7 @@ use crate::invocation::return_type_fetcher::fetch_declared_invocation_return_typ
 use crate::invocation::return_type_fetcher::fetch_function_like_provider_return_type;
 use crate::invocation::return_type_fetcher::fetch_invocation_return_type;
 use crate::invocation::template_result::populate_template_result_from_invocation;
+use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::resolver::method::UndocumentedMethod;
@@ -77,6 +83,7 @@ use crate::resolver::method::report_non_existent_method;
 use crate::resolver::method::resolve_method_targets;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::resolver::static_property::StaticProperty;
+use crate::resolver::static_property::StaticPropertyName;
 use crate::statement::keys_mix_a_backed_enum;
 use crate::statement::report_keys_read_back;
 use crate::statement::report_keys_sharing_entries;
@@ -122,6 +129,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for MethodCall<'arena> {
             artifacts,
             self.object,
             &self.method,
+            self.type_arguments.as_ref(),
             &self.argument_list,
             false, // is_nullsafe
             self.span(),
@@ -174,6 +182,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NullSafeMethodCall<'arena> {
             artifacts,
             self.object,
             &self.method,
+            self.type_arguments.as_ref(),
             &self.argument_list,
             true, // is_nullsafe
             self.span(),
@@ -315,6 +324,7 @@ fn analyze_method_call<'ctx, 'ast, 'arena, A>(
     artifacts: &mut AnalysisArtifacts,
     object: &'ast Expression<'arena>,
     selector: &'ast ClassLikeMemberSelector<'arena>,
+    type_arguments: Option<&'ast TypeArgumentList<'arena>>,
     argument_list: &'ast ArgumentList<'arena>,
     is_null_safe: bool,
     span: Span,
@@ -508,6 +518,17 @@ where
             .push(vec![mago_codex::assertion::Assertion::IsNotType(mago_codex::ttype::atomic::TAtomic::Null)]);
     }
 
+    if let Some(type_arguments) = type_arguments {
+        seed_method_type_arguments(
+            context,
+            block_context,
+            artifacts,
+            type_arguments,
+            &invocation_targets,
+            &mut method_resolution.template_result,
+        );
+    }
+
     if has_resolved_methods || method_resolution.undocumented_methods.is_empty() {
         analyze_invocation_targets(
             context,
@@ -523,6 +544,11 @@ where
             is_null_safe && method_resolution.encountered_null,
             artifacts.get_expression_type(object).is_some_and(|t| t.has_nullsafe_null()),
         )?;
+    }
+
+    // The arguments a changing method stores have their types once the invocation is analyzed.
+    if context.dialect.is_sharp() && changes_collection {
+        check_stored_in_static(context, artifacts, object, argument_list);
     }
 
     // A search compares each element with the value as `==` does, so it runs once the value's type is known. A value
@@ -643,6 +669,36 @@ where
     true
 }
 
+/// A method that changes a static collection, as `Cache.all.add(this.store)`, stores its arguments in the static, which
+/// holds no `foreign` object, spec section 29.
+fn check_stored_in_static<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    collection: &Expression<'_>,
+    argument_list: &ArgumentList<'_>,
+) where
+    A: Arena,
+{
+    let Expression::Access(Access::Property(access)) = collection.unparenthesized() else {
+        return;
+    };
+    let Some(StaticProperty {
+        class: Expression::ConstantAccess(class),
+        name: StaticPropertyName::Identifier(name),
+        ..
+    }) = StaticProperty::from_property_access(access, context.resolved_names)
+    else {
+        return;
+    };
+
+    // An argument the analysis gave no type stores nothing the check can read.
+    let class = word(context.resolved_names.get(&class.name));
+    let stored = argument_list.arguments.iter().map(Argument::value);
+    for (value, stored) in stored.filter_map(|value| Some((value, artifacts.get_expression_type(value)?))) {
+        check_foreign_static_write(context, class, word(name.value), stored, value.span());
+    }
+}
+
 /// A method that changes a PHP# collection writes it back where it lives, as spec section 12 decides, so the
 /// collection is a place the caller can write: a local or a parameter, `field`, which its accessor writes as the
 /// storage, a property whose `set` the caller reaches, which the property write check decides as it does for an
@@ -679,7 +735,10 @@ where
             Ok(None)
         }
         Expression::Access(Access::Property(access)) => {
-            let written = match StaticProperty::from_property_access(access, context.resolved_names) {
+            let written = match written_static_property(context, block_context, access) {
+                // Reading `Counter.items` reported its missing type arguments, and the write back would again.
+                Some(static_property) if bare_generic_class(context, static_property.class).is_some() => Ok(()),
+                // The read of the collection analyzed its class.
                 Some(static_property) => static_property_assignment::analyze(
                     context,
                     block_context,
@@ -688,6 +747,7 @@ where
                     &changed_type,
                     None,
                     get_block_expression_id(collection, context, block_context),
+                    true,
                 ),
                 None => property_assignment::analyze(
                     context,

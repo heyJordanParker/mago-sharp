@@ -309,27 +309,71 @@ fn a_named_constructor_is_its_class_a_dot_its_name_parameters_this_and_a_body() 
     }
 }
 
-/// Spec section 9.1: `new Report.fromJson(…)` creates an object with the named constructor `fromJson`. PHP reads
-/// `new Report . fromJson(…)` as the new object joined to a function's result.
+/// A named constructor takes its class's type arguments, as Dart's does, so type parameters after its name are one
+/// error at the `<`, whose help names the two ways to write it, and the class parses on.
+#[test]
+fn a_named_constructor_with_type_parameters_is_one_parse_error() {
+    for member in ["public Report.of<T>(T value) : this(0) {}", "public Report.pair<TFirst, TSecond>(TFirst first) { }"]
+    {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Report\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            error.to_string(),
+            "A named constructor takes its class's type arguments and declares none of its own.",
+            "{member}"
+        );
+        assert!(source(code, error).starts_with('<') && source(code, error).ends_with('>'), "{member}");
+        assert_eq!(
+            Issue::from(error).help.as_deref(),
+            Some(
+                "Declare a generic static method, as in `public static Report of<T>(T value)`, or make the class generic, as in `class Report<T>`."
+            ),
+            "{member}"
+        );
+        let [ClassLikeMember::Method(run)] = class_members(program).as_slice() else {
+            panic!("expected only the method for `{member}`, got {:#?}", class_members(program));
+        };
+        assert_eq!(source(code, &run.name), "run", "{member}");
+    }
+}
+
+/// Spec section 9.1: `new Report.fromJson(…)` creates an object with the named constructor `fromJson`, and
+/// `new Box<int>.of(1)` one of a generic class with its type arguments. PHP reads `new Report . fromJson(…)` as the new
+/// object joined to a function's result.
 #[test]
 fn new_with_a_dot_names_a_named_constructor_and_php_keeps_its_concatenation() {
-    const SHARP: &str = "class Use\n{\n    public Report make() => new Report.fromJson(\"{}\");\n}\n";
+    const SHARP: &str = "class Use\n{\n    public Report make() => new Report.fromJson(\"{}\");\n\n    public Box<int> boxed() => new Box<int>.of(1);\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Use.sharp", SHARP);
 
     assert!(program.errors.is_empty(), "{:#?}", program.errors);
-    let Some(ClassLikeMember::Method(method)) = class_members(program).first() else {
-        panic!("expected a method, got {:#?}", class_members(program));
+    let instantiations: Vec<&Instantiation> = class_members(program)
+        .iter()
+        .map(|member| match member {
+            ClassLikeMember::Method(Method { body: MethodBody::Expression(body), .. }) => match body.expression {
+                Expression::Instantiation(instantiation) => instantiation,
+                expression => panic!("expected `new`, got {expression:#?}"),
+            },
+            member => panic!("expected a method with an expression body, got {member:#?}"),
+        })
+        .collect();
+    let [instantiation, boxed] = instantiations.as_slice() else {
+        panic!("expected two `new` expressions, got {instantiations:#?}");
     };
-    let MethodBody::Expression(body) = &method.body else {
-        panic!("expected an expression body, got {:#?}", method.body);
-    };
-    let Expression::Instantiation(instantiation) = body.expression else {
-        panic!("expected `new`, got {:#?}", body.expression);
-    };
-    assert_eq!(source(SHARP, instantiation), "new Report.fromJson(\"{}\")");
+    assert_eq!(source(SHARP, *instantiation), "new Report.fromJson(\"{}\")");
     assert_eq!(source(SHARP, instantiation.class), "Report");
     assert_eq!(instantiation.constructor.as_ref().map(|constructor| source(SHARP, constructor)), Some(".fromJson"));
+    assert_eq!(source(SHARP, *boxed), "new Box<int>.of(1)");
+    assert_eq!(source(SHARP, boxed.class), "Box");
+    assert_eq!(type_arguments(SHARP, boxed.type_arguments.as_ref()), ["int"]);
+    assert_eq!(boxed.constructor.as_ref().map(|constructor| source(SHARP, constructor)), Some(".of"));
 
     const PHP: &str = "<?php $made = new Report.fromJson('{}');";
     let program = parse(&arena, "src/use.php", PHP);
@@ -712,7 +756,7 @@ fn generic_type<'a>(code: &'a str, hint: &Hint) -> (&'a str, Vec<&'a str>) {
         panic!("expected a generic type, got {hint:#?}");
     };
 
-    (source(code, &generic.name), generic.arguments.iter().map(|argument| source(code, argument)).collect())
+    (source(code, &generic.name), type_arguments(code, Some(&generic.type_arguments)))
 }
 
 #[test]
@@ -783,7 +827,7 @@ fn a_function_type_writes_its_return_type_before_its_parameter_types() {
     let Hint::Generic(counters) = counters else {
         panic!("expected a generic type, got {counters:#?}");
     };
-    assert_eq!(function_type(CODE, &counters.arguments.as_slice()[1]), ("int", vec![]));
+    assert_eq!(function_type(CODE, &counters.type_arguments.arguments.as_slice()[1]), ("int", vec![]));
     assert_eq!(function_type(CODE, ids.hint.as_ref().expect("a type")), ("List<int>", vec!["List<Line>"]));
 }
 
@@ -885,7 +929,7 @@ fn a_function_type_argument_takes_every_effect_before_its_closing_angle() {
     let Hint::Generic(handlers) = handlers else {
         panic!("expected a generic type, got {handlers:#?}");
     };
-    assert_eq!(function_type_effects(CODE, &handlers.arguments.as_slice()[1]), ["Http", "Mail"]);
+    assert_eq!(function_type_effects(CODE, &handlers.type_arguments.arguments.as_slice()[1]), ["Http", "Mail"]);
 }
 
 #[test]
@@ -993,6 +1037,424 @@ fn a_nullable_type_argument_ends_a_collection_type() {
     };
     assert_eq!(generic_type(CODE, sizes.hint.as_ref().expect("a type")), ("List", vec!["int?"]));
     assert_eq!(generic_type(CODE, names.hint.as_ref().expect("a type")), ("Map", vec!["int", "List<string?>"]));
+}
+
+/// The type arguments of a list, as written.
+fn type_arguments<'a>(code: &'a str, list: Option<&TypeArgumentList>) -> Vec<&'a str> {
+    list.expect("a type argument list").arguments.iter().map(|argument| source(code, argument)).collect()
+}
+
+/// Each type parameter of a list as written: its variance, its name and its bound.
+fn type_parameters<'a>(
+    code: &'a str,
+    list: Option<&TypeParameterList>,
+) -> Vec<(Option<&'a str>, &'a str, Option<&'a str>)> {
+    list.expect("a type parameter list")
+        .parameters
+        .iter()
+        .map(|parameter| {
+            (
+                parameter.variance.as_ref().map(|variance| source(code, variance)),
+                source(code, &parameter.name),
+                parameter.bound.as_ref().map(|bound| source(code, &bound.hint)),
+            )
+        })
+        .collect()
+}
+
+/// Spec section 11 bounds a type parameter after a colon, and section 11.1 marks its variance with `in` or `out`. An
+/// `in` or `out` with no name after it is the name.
+#[test]
+fn a_class_and_an_interface_declare_type_parameters_with_variance_and_bounds() {
+    const CODE: &str = "public interface Validator<in TItem>\n{\n    bool validate(TItem item);\n}\n\npublic class PaginatedList<out TItem : DatabaseEntity & Shareable, TKey>\n{\n}\n\nclass Pair<in, out>\n{\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/PaginatedList.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [Statement::Interface(validator), Statement::Class(paginated), Statement::Class(pair)] =
+        program.statements.as_slice()
+    else {
+        panic!("expected an interface and two classes, got {:#?}", program.statements);
+    };
+    assert_eq!(source(CODE, validator.type_parameters.as_ref().expect("a type parameter list")), "<in TItem>");
+    assert_eq!(type_parameters(CODE, validator.type_parameters.as_ref()), [(Some("in"), "TItem", None)]);
+    assert_eq!(
+        type_parameters(CODE, paginated.type_parameters.as_ref()),
+        [(Some("out"), "TItem", Some("DatabaseEntity & Shareable")), (None, "TKey", None)]
+    );
+    assert_eq!(type_parameters(CODE, pair.type_parameters.as_ref()), [(None, "in", None), (None, "out", None)]);
+
+    let parameters: Vec<&TypeParameter> = [&validator.type_parameters, &paginated.type_parameters]
+        .into_iter()
+        .flat_map(|list| list.as_ref().expect("a type parameter list").parameters.iter())
+        .collect();
+    let variances: Vec<Option<&[u8]>> =
+        parameters.iter().map(|parameter| parameter.variance.map(|variance| variance.value)).collect();
+    assert_eq!(variances, [Some(&b"in"[..]), Some(b"out"), None]);
+    let bound = parameters[1].bound.as_ref().expect("a bound");
+    assert!(matches!(bound.hint, Hint::Intersection(_)), "{:#?}", bound.hint);
+    assert_eq!(source(CODE, bound), ": DatabaseEntity & Shareable");
+}
+
+/// Spec section 11 writes a method's type parameters after its name, as C# does.
+#[test]
+fn a_method_declares_type_parameters_after_its_name() {
+    const CODE: &str = "class Repository\n{\n    public PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query) { return query.page(); }\n\n    public T first<T>(List<T> items) => items[0];\n\n    public int count(List<int> items) => 0;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Repository.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Method(list), ClassLikeMember::Method(first), ClassLikeMember::Method(count)] =
+        class_members(program).as_slice()
+    else {
+        panic!("expected three methods, got {:#?}", class_members(program));
+    };
+    assert_eq!(list.name.value, b"list");
+    assert_eq!(type_parameters(CODE, list.type_parameters), [(None, "TItem", Some("DatabaseEntity"))]);
+    assert_eq!(source(CODE, &list.return_type_hint.as_ref().expect("a return type").hint), "PaginatedList<TItem>");
+    assert_eq!(source(CODE, &list.parameter_list), "(Query<TItem> query)");
+    assert_eq!(first.name.value, b"first");
+    assert_eq!(type_parameters(CODE, first.type_parameters), [(None, "T", None)]);
+    assert!(matches!(first.body, MethodBody::Expression(_)), "{:#?}", first.body);
+    assert!(count.type_parameters.is_none());
+}
+
+/// Spec section 11 names the type arguments of `new`, and a call names them after the method, as in C#.
+#[test]
+fn new_and_a_method_call_take_type_arguments_after_their_name() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        new PaginatedList<Order>(rows);\n        Json.decode<WebhookPayload>(body);\n        this.repository?.find<Map<string, List<int>>>(id);\n        new Report(rows);\n        calc.add(1);\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [paginated, decode, find, report, add] = method_body(program) else {
+        panic!("expected five statements, got {:#?}", method_body(program));
+    };
+
+    let Expression::Instantiation(paginated) = expression(paginated) else {
+        panic!("expected `new PaginatedList<Order>(rows)`, got {paginated:#?}");
+    };
+    assert_eq!(source(CODE, paginated.class), "PaginatedList");
+    assert_eq!(type_arguments(CODE, paginated.type_arguments.as_ref()), ["Order"]);
+    assert_eq!(source(CODE, paginated), "new PaginatedList<Order>(rows)");
+
+    let Expression::Call(Call::Method(decode)) = expression(decode) else {
+        panic!("expected `Json.decode<WebhookPayload>(body)`, got {decode:#?}");
+    };
+    assert_eq!(bare_name(decode.object), b"Json");
+    assert_eq!(source(CODE, &decode.method), "decode");
+    assert_eq!(type_arguments(CODE, decode.type_arguments.as_ref()), ["WebhookPayload"]);
+    assert_eq!(source(CODE, &decode.argument_list), "(body)");
+
+    let Expression::Call(Call::NullSafeMethod(find)) = expression(find) else {
+        panic!("expected `this.repository?.find<…>(id)`, got {find:#?}");
+    };
+    assert_eq!(source(CODE, find.object), "this.repository");
+    assert_eq!(source(CODE, find.type_arguments.as_ref().expect("type arguments")), "<Map<string, List<int>>>");
+    assert_eq!(type_arguments(CODE, find.type_arguments.as_ref()), ["Map<string, List<int>>"]);
+    assert_eq!(source(CODE, &find.argument_list), "(id)");
+
+    assert!(matches!(expression(report), Expression::Instantiation(Instantiation { type_arguments: None, .. })));
+    assert!(matches!(expression(add), Expression::Call(Call::Method(MethodCall { type_arguments: None, .. }))));
+}
+
+/// The class of a static member names its type arguments before the `.`, as in `Counter<Order>.count`, spec section
+/// 11: one `GenericClass` node holds the class and its list, whether a property, a call or a chain follows. A `<` after
+/// a bare name starts type arguments only when `.` follows its `>`, as C# decides, so a comparison stays one.
+#[test]
+fn a_class_with_type_arguments_before_a_dot_is_one_generic_class() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        Counter<Order>.count;\n        Counter<List<Order>>.items.add(x);\n        Pair<int, string?>.reset();\n        const less = low < high;\n        const both = low < high && high > other.size;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    // The class and the type arguments of a `GenericClass`, as written.
+    let generic = |object: &Expression| {
+        let Expression::GenericClass(generic) = object else {
+            panic!("expected a class with type arguments, got {object:#?}");
+        };
+
+        assert!(matches!(generic.class, Expression::ConstantAccess(_)), "{:#?}", generic.class);
+
+        (source(CODE, generic), source(CODE, generic.class), type_arguments(CODE, Some(&generic.type_arguments)))
+    };
+
+    let Expression::Access(Access::Property(count)) = statement_expression(program, 0) else {
+        panic!("expected `Counter<Order>.count`, got {:#?}", statement_expression(program, 0));
+    };
+    assert_eq!(generic(count.object), ("Counter<Order>", "Counter", vec!["Order"]));
+    assert_eq!(source(CODE, &count.property), "count");
+
+    let Expression::Call(Call::Method(add)) = statement_expression(program, 1) else {
+        panic!("expected `Counter<List<Order>>.items.add(x)`, got {:#?}", statement_expression(program, 1));
+    };
+    let Expression::Access(Access::Property(items)) = add.object else {
+        panic!("expected `Counter<List<Order>>.items`, got {:#?}", add.object);
+    };
+    assert_eq!(generic(items.object), ("Counter<List<Order>>", "Counter", vec!["List<Order>"]));
+
+    let Expression::Call(Call::Method(reset)) = statement_expression(program, 2) else {
+        panic!("expected `Pair<int, string?>.reset()`, got {:#?}", statement_expression(program, 2));
+    };
+    assert_eq!(generic(reset.object), ("Pair<int, string?>", "Pair", vec!["int", "string?"]));
+    assert!(reset.type_arguments.is_none());
+
+    assert!(
+        matches!(
+            statement_expression(program, 3),
+            Expression::Binary(Binary { operator: BinaryOperator::LessThan(_), .. })
+        ),
+        "{:#?}",
+        statement_expression(program, 3)
+    );
+    let Expression::Binary(Binary { lhs: Expression::Binary(less), operator: BinaryOperator::And(_), .. }) =
+        statement_expression(program, 4)
+    else {
+        panic!("expected `low < high && high > other.size`, got {:#?}", statement_expression(program, 4));
+    };
+    assert!(matches!(less.operator, BinaryOperator::LessThan(_)), "{:#?}", less.operator);
+}
+
+/// A `<` after a member starts type arguments only when the tokens up to its `>` can all be types and `(` follows the
+/// `>`, as C# decides. So a comparison stays a comparison, and `f(a.b<c, d>(e))` is one call with type arguments.
+#[test]
+fn a_less_than_after_a_member_is_a_comparison_unless_type_arguments_and_a_call_follow() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        const less = this.count < limit;\n        const both = a.b < c && d > e;\n        f(a.b<c, d>(e));\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Expression::Binary(Binary {
+        lhs: Expression::Access(Access::Property(count)),
+        operator: BinaryOperator::LessThan(_),
+        rhs: limit,
+    }) = statement_expression(program, 0)
+    else {
+        panic!("expected `this.count < limit`, got {:#?}", statement_expression(program, 0));
+    };
+    assert_eq!(source(CODE, count), "this.count");
+    assert_eq!(bare_name(limit), b"limit");
+
+    let Expression::Binary(Binary {
+        lhs: Expression::Binary(less),
+        operator: BinaryOperator::And(_),
+        rhs: Expression::Binary(greater),
+    }) = statement_expression(program, 1)
+    else {
+        panic!("expected `a.b < c && d > e`, got {:#?}", statement_expression(program, 1));
+    };
+    assert!(matches!(less.lhs, Expression::Access(Access::Property(_))), "{:#?}", less.lhs);
+    assert!(matches!(less.operator, BinaryOperator::LessThan(_)), "{:#?}", less.operator);
+    assert!(matches!(greater.operator, BinaryOperator::GreaterThan(_)), "{:#?}", greater.operator);
+
+    let Expression::Call(Call::Function(f)) = statement_expression(program, 2) else {
+        panic!("expected `f(…)`, got {:#?}", statement_expression(program, 2));
+    };
+    let [argument] = f.argument_list.arguments.as_slice() else {
+        panic!("expected one argument, got {:#?}", f.argument_list);
+    };
+    let Expression::Call(Call::Method(call)) = argument.value() else {
+        panic!("expected `a.b<c, d>(e)`, got {:#?}", argument.value());
+    };
+    assert_eq!(type_arguments(CODE, call.type_arguments.as_ref()), ["c", "d"]);
+    assert_eq!(source(CODE, &call.argument_list), "(e)");
+}
+
+/// A `>>` that closes more lists than are open ends the lookahead, so the `<` before it stays a comparison. The lexer
+/// reads `(string)` as a cast, which is still a function type's parentheses, so it does not end the lookahead.
+#[test]
+fn a_call_lookahead_counts_double_closing_angles_and_reads_a_cast_as_parentheses() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        const shifted = a.b < c >> (d);\n        handlers.apply<Function<int(string)>>(parse);\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Expression::Binary(Binary {
+        lhs: Expression::Access(Access::Property(_)),
+        operator: BinaryOperator::LessThan(_),
+        rhs: Expression::Binary(Binary { operator: BinaryOperator::RightShift(_), .. }),
+    }) = statement_expression(program, 0)
+    else {
+        panic!("expected `a.b < (c >> (d))`, got {:#?}", statement_expression(program, 0));
+    };
+
+    let Expression::Call(Call::Method(apply)) = statement_expression(program, 1) else {
+        panic!("expected `handlers.apply<…>(parse)`, got {:#?}", statement_expression(program, 1));
+    };
+    assert_eq!(type_arguments(CODE, apply.type_arguments.as_ref()), ["Function<int(string)>"]);
+}
+
+/// The lexer reads `Self` and `Class` as the keywords `self` and `class`, which a call's type arguments hold, as in
+/// `this.find<Self>(x)` and `Json.decode<Class<Order>>(body)`.
+#[test]
+fn a_call_type_argument_can_be_self_or_class_of_a_type() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        this.find<Self>(x);\n        Json.decode<Class<Order>>(body);\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [find, decode] = method_body(program) else {
+        panic!("expected two statements, got {:#?}", method_body(program));
+    };
+
+    let Expression::Call(Call::Method(find)) = expression(find) else {
+        panic!("expected `this.find<Self>(x)`, got {find:#?}");
+    };
+    assert_eq!(source(CODE, &find.method), "find");
+    assert_eq!(type_arguments(CODE, find.type_arguments.as_ref()), ["Self"]);
+    assert!(
+        matches!(find.type_arguments.as_ref().and_then(|list| list.arguments.first()), Some(Hint::Self_(_))),
+        "{:#?}",
+        find.type_arguments
+    );
+    assert_eq!(source(CODE, &find.argument_list), "(x)");
+
+    let Expression::Call(Call::Method(decode)) = expression(decode) else {
+        panic!("expected `Json.decode<Class<Order>>(body)`, got {decode:#?}");
+    };
+    assert_eq!(bare_name(decode.object), b"Json");
+    let [class] = decode.type_arguments.as_ref().expect("type arguments").arguments.as_slice() else {
+        panic!("expected one type argument, got {:#?}", decode.type_arguments);
+    };
+    assert_eq!(generic_type(CODE, class), ("Class", vec!["Order"]));
+    assert_eq!(source(CODE, &decode.argument_list), "(body)");
+}
+
+/// The lexer reads `From` and `Enum` as the keywords `from` and `enum`, which the type parser reads as class names, so a
+/// call's type arguments hold them, as in `finder.find<From>(x)`.
+#[test]
+fn a_call_type_argument_can_be_a_class_named_from_or_enum() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        finder.find<From>(x);\n        finder.find<Enum>(x);\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [from, r#enum] = method_body(program) else {
+        panic!("expected two statements, got {:#?}", method_body(program));
+    };
+
+    let Expression::Call(Call::Method(from)) = expression(from) else {
+        panic!("expected `finder.find<From>(x)`, got {from:#?}");
+    };
+    assert_eq!(type_arguments(CODE, from.type_arguments.as_ref()), ["From"]);
+    assert_eq!(source(CODE, &from.argument_list), "(x)");
+
+    let Expression::Call(Call::Method(r#enum)) = expression(r#enum) else {
+        panic!("expected `finder.find<Enum>(x)`, got {enum:#?}");
+    };
+    assert_eq!(type_arguments(CODE, r#enum.type_arguments.as_ref()), ["Enum"]);
+    assert_eq!(source(CODE, &r#enum.argument_list), "(x)");
+}
+
+/// PHP has no type parameters or type arguments, so its `<` stays a comparison and every PHP# field is `None`.
+#[test]
+fn php_has_no_type_parameters_or_type_arguments() {
+    let arena = LocalArena::new();
+    let program = parse(
+        &arena,
+        "src/Report.php",
+        "<?php $a->b < $c; new Foo($x < $y); $a->b($c); $a?->b($c); class Foo { public function bar() {} } interface Baz {}",
+    );
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [
+        _,
+        Statement::Expression(comparison),
+        Statement::Expression(new),
+        Statement::Expression(call),
+        Statement::Expression(null_safe_call),
+        Statement::Class(class),
+        Statement::Interface(interface),
+    ] = program.statements.as_slice()
+    else {
+        panic!("expected four expressions, a class and an interface, got {:#?}", program.statements);
+    };
+    assert!(matches!(
+        comparison.expression,
+        Expression::Binary(Binary {
+            lhs: Expression::Access(Access::Property(_)),
+            operator: BinaryOperator::LessThan(_),
+            ..
+        })
+    ));
+    let Expression::Instantiation(Instantiation { type_arguments: None, argument_list: Some(arguments), .. }) =
+        new.expression
+    else {
+        panic!("expected `new Foo(…)` without type arguments, got {:#?}", new.expression);
+    };
+    assert!(matches!(
+        arguments.arguments.as_slice(),
+        [Argument::Positional(PositionalArgument {
+            value: Expression::Binary(Binary { operator: BinaryOperator::LessThan(_), .. }),
+            ..
+        })]
+    ));
+    assert!(matches!(call.expression, Expression::Call(Call::Method(MethodCall { type_arguments: None, .. }))));
+    assert!(matches!(
+        null_safe_call.expression,
+        Expression::Call(Call::NullSafeMethod(NullSafeMethodCall { type_arguments: None, .. }))
+    ));
+    assert!(class.type_parameters.is_none());
+    let Some(ClassLikeMember::Method(bar)) = class.members.first() else {
+        panic!("expected a method, got {:#?}", class.members);
+    };
+    assert!(bar.type_parameters.is_none());
+    assert!(interface.type_parameters.is_none());
+}
+
+/// `Class<T>` is the type of a class value, as spec section 25 writes it. The lexer reads `Class` as PHP's `class`
+/// keyword, so it starts a type only before `<`, as `Function` does, also as the first word of a member, where `class`
+/// alone starts a nested class.
+#[test]
+fn class_of_a_type_is_a_generic_type_wherever_a_type_goes() {
+    const CODE: &str = "public class FormBuilder\n{\n    Map<string, Class<Element>> elements = [:];\n\n    public Model? load(Class<Model> type, int id) => type.find(id);\n\n    public string run(Class<Element> type)\n    {\n        Class<Element> local = type;\n        return \"\";\n    }\n\n    public Class<Element> kind() => typeof(Element);\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/FormBuilder.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [
+        ClassLikeMember::Property(Property::Plain(elements)),
+        ClassLikeMember::Method(load),
+        ClassLikeMember::Method(run),
+        ClassLikeMember::Method(kind),
+    ] = class_members(program).as_slice()
+    else {
+        panic!("expected a field and three methods, got {:#?}", class_members(program));
+    };
+    let Some(Hint::Generic(map)) = &elements.hint else {
+        panic!("expected a generic type, got {:#?}", elements.hint);
+    };
+    assert_eq!(source(CODE, &map.name), "Map");
+    let MethodBody::Concrete(body) = &run.body else {
+        panic!("expected a method body, got {:#?}", run.body);
+    };
+    let Some(Statement::LocalDeclaration(local)) = body.statements.first() else {
+        panic!("expected a local, got {:#?}", body.statements);
+    };
+    fn parameter_type<'ast, 'arena>(method: &'ast Method<'arena>) -> Option<&'ast Hint<'arena>> {
+        method.parameter_list.parameters.first().and_then(|first| first.hint.as_ref())
+    }
+    let class_types: Vec<(&str, Vec<&str>)> = [
+        map.type_arguments.arguments.get(1),
+        parameter_type(load),
+        parameter_type(run),
+        local.hint,
+        kind.return_type_hint.as_ref().map(|return_type| &return_type.hint),
+    ]
+    .into_iter()
+    .map(|hint| generic_type(CODE, hint.expect("a type")))
+    .collect();
+    assert_eq!(
+        class_types,
+        [
+            ("Class", vec!["Element"]),
+            ("Class", vec!["Model"]),
+            ("Class", vec!["Element"]),
+            ("Class", vec!["Element"]),
+            ("Class", vec!["Element"])
+        ]
+    );
+    assert_eq!(source(CODE, &load.return_type_hint.as_ref().expect("a return type").hint), "Model?");
 }
 
 /// A `.sharp` file has no `?>`, so a field written `= 0 ?><?php` is a parse error and never reaches the checker or
@@ -2608,24 +3070,41 @@ fn an_attribute_target_is_not_supported_yet() {
     assert_eq!(names, [&b"NotNull"[..]]);
 }
 
+/// `typeof` names a class by its short name, and a class value of a generic class may carry its type arguments, spec
+/// section 25.
 #[test]
-fn typeof_names_a_class_by_its_short_name() {
-    const CODE: &str = "class Report\n{\n    void run()\n    {\n        Store.keep(typeof(Order));\n    }\n}\n";
-    let arena = LocalArena::new();
-    let program = parse(&arena, "src/Report.sharp", CODE);
+fn typeof_names_a_class_by_its_short_name_with_any_type_arguments() {
+    for (written, class, type_arguments) in [
+        ("typeof(Order)", "Order", None),
+        ("typeof(PaginatedList<Order>)", "PaginatedList", Some("<Order>")),
+        ("typeof(Pair<int, List<Order>>)", "Pair", Some("<int, List<Order>>")),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Report\n{{\n    void run()\n    {{\n        Store.keep({written});\n    }}\n}}\n")
+                .into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Report.sharp", code);
 
-    assert!(program.errors.is_empty(), "{:#?}", program.errors);
-    let [statement] = method_body(program) else {
-        panic!("expected one statement, got {:#?}", method_body(program));
-    };
-    let Expression::Call(Call::Method(keep)) = expression(statement) else {
-        panic!("expected a method call, got {statement:#?}");
-    };
-    let Some(Expression::TypeOf(type_of)) = keep.argument_list.arguments.first().map(Argument::value) else {
-        panic!("expected `typeof(Order)`, got {:#?}", keep.argument_list.arguments);
-    };
-    assert_eq!(type_of.class.value(), b"Order");
-    assert_eq!(source(CODE, type_of), "typeof(Order)");
+        assert!(program.errors.is_empty(), "{written}: {:#?}", program.errors);
+        let [statement] = method_body(program) else {
+            panic!("expected one statement, got {:#?}", method_body(program));
+        };
+        let Expression::Call(Call::Method(keep)) = expression(statement) else {
+            panic!("expected a method call, got {statement:#?}");
+        };
+        let Some(Expression::TypeOf(type_of)) = keep.argument_list.arguments.first().map(Argument::value) else {
+            panic!("expected `{written}`, got {:#?}", keep.argument_list.arguments);
+        };
+        assert_eq!(source(code, &type_of.class), class);
+        assert_eq!(type_of.type_arguments.as_ref().map(|list| source(code, list)), type_arguments);
+        assert_eq!(source(code, type_of), written);
+    }
+}
+
+/// The names a header's entries are written with.
+fn header_names<'arena>(inheritance: &Inheritance<'arena>) -> Vec<&'arena [u8]> {
+    inheritance.names().map(|name| name.value()).collect()
 }
 
 #[test]
@@ -2642,11 +3121,50 @@ fn a_class_or_an_interface_names_its_base_class_and_interfaces_after_a_colon() {
         .into_iter()
         .map(|inheritance| {
             let inheritance = inheritance.as_ref().expect("a header");
-            (source(CODE, inheritance), inheritance.types.iter().map(Identifier::value).collect())
+            (source(CODE, inheritance), header_names(inheritance))
         })
         .collect();
     assert_eq!(headers, [(": Entity, Linkable", vec![&b"Entity"[..], b"Linkable"]), (": Named", vec![&b"Named"[..]])]);
     assert_eq!(source(CODE, class), "public class Page : Entity, Linkable\n{\n}");
+}
+
+/// A header lists types, as C#'s base list does, so it names a generic base class or interface with its type
+/// arguments.
+#[test]
+fn a_header_names_a_generic_type_with_its_type_arguments() {
+    const CODE: &str = "public class OrderPage : PaginatedList<Order>, Shareable { }\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/OrderPage.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [Statement::Class(class)] = program.statements.as_slice() else {
+        panic!("expected a class, got {:#?}", program.statements);
+    };
+    let inheritance = class.inheritance.as_ref().expect("a header");
+    let [paginated_list, shareable] = inheritance.types.as_slice() else {
+        panic!("expected two header types, got {:#?}", inheritance.types);
+    };
+    assert_eq!(generic_type(CODE, paginated_list), ("PaginatedList", vec!["Order"]));
+    let Hint::Identifier(shareable) = shareable else {
+        panic!("expected a name, got {shareable:#?}");
+    };
+    assert_eq!(shareable.value(), b"Shareable");
+    assert_eq!(header_names(inheritance), [&b"PaginatedList"[..], b"Shareable"]);
+    assert_eq!(source(CODE, inheritance), ": PaginatedList<Order>, Shareable");
+}
+
+/// A header entry that is neither a name nor a generic type, which the checker refuses, names nothing.
+#[test]
+fn a_header_entry_that_is_not_a_class_type_names_nothing() {
+    const CODE: &str = "public class Page : Entity, int, Map<string, int> { }\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Page.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [Statement::Class(class)] = program.statements.as_slice() else {
+        panic!("expected a class, got {:#?}", program.statements);
+    };
+    assert_eq!(header_names(class.inheritance.as_ref().expect("a header")), [&b"Entity"[..], b"Map"]);
 }
 
 /// An enum's header holds a backing type, `int` or `string`, first, and then its interfaces. After a backing type, the
@@ -2669,11 +3187,7 @@ fn an_enum_names_its_backing_type_then_its_interfaces_after_a_colon() {
             (
                 r#enum.backing_type_hint.as_ref().map(|backing_type| source(CODE, backing_type)),
                 r#enum.inheritance.as_ref().map(|inheritance| source(CODE, inheritance)),
-                r#enum
-                    .inheritance
-                    .iter()
-                    .flat_map(|inheritance| inheritance.types.iter().map(Identifier::value))
-                    .collect::<Vec<_>>(),
+                r#enum.inheritance.as_ref().map(header_names).unwrap_or_default(),
             )
         })
         .collect();
@@ -2699,6 +3213,28 @@ fn a_php_enum_keeps_its_implements_clause_and_has_no_header() {
     assert!(r#enum.backing_type_hint.is_some());
     assert!(r#enum.implements.is_some());
     assert!(r#enum.inheritance.is_none());
+}
+
+/// PHP keeps `class` a keyword everywhere, so `Class<…>` and the PHP# header never reach a PHP file.
+#[test]
+fn a_php_class_keeps_extends_and_implements_and_class_stays_a_keyword() {
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/A.php", "<?php class A extends B implements C {} $x = new class {};");
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [Statement::OpeningTag(_), Statement::Class(class), Statement::Expression(anonymous)] =
+        program.statements.as_slice()
+    else {
+        panic!("expected a class and an expression, got {:#?}", program.statements);
+    };
+    assert!(class.extends.is_some());
+    assert!(class.implements.is_some());
+    assert!(class.inheritance.is_none());
+    assert!(
+        matches!(anonymous.expression, Expression::Assignment(Assignment { rhs: Expression::AnonymousClass(_), .. })),
+        "{:#?}",
+        anonymous.expression
+    );
 }
 
 /// An enum or a trait takes `public` as a class does, so the checker refuses a trait where it starts.
@@ -2972,6 +3508,55 @@ fn static_starts_a_static_class_and_extern_a_method_without_a_body() {
     assert!(matches!(methods[0].body, MethodBody::Abstract(_)), "{:#?}", methods[0].body);
     assert_eq!(source(CODE, methods[0]), "public static extern string slug(string title);");
     assert_eq!(source(CODE, &methods[1].modifiers.as_slice()[0]), "extern");
+}
+
+/// `foreign` is among a class's modifiers, spec section 29, after an attribute too, and stays a name elsewhere, here
+/// a field's class type.
+#[test]
+fn foreign_is_a_class_modifier_and_stays_a_name_elsewhere() {
+    for code in [
+        "public foreign class Payments\n{\n    foreign gateway;\n}\n",
+        "[Audited]\nforeign class Payments\n{\n    foreign gateway;\n}\n",
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "app/Billing/Payments.sharp", code);
+
+        assert!(program.errors.is_empty(), "{code}: {:#?}", program.errors);
+        let Some(Statement::Class(class)) = program.statements.first() else {
+            panic!("expected a class, got {:#?}", program.statements);
+        };
+        let modifiers: Vec<String> = class.modifiers.iter().map(ToString::to_string).collect();
+        assert_eq!(modifiers.last().map(String::as_str), Some("Foreign"), "{code}");
+        let Some(ClassLikeMember::Property(field)) = class.members.first() else {
+            panic!("expected a field, got {:#?}", class.members);
+        };
+        assert_eq!(field.hint().map(|hint| source(code, hint)), Some("foreign"), "{code}");
+    }
+}
+
+/// A method without a body states the effects its implementations may have after `uses`, spec section 29: an
+/// interface's and an abstract class's.
+#[test]
+fn a_method_without_a_body_takes_uses() {
+    for code in [
+        "public interface Gateway\n{\n    int charge(int cents) uses Payments, Http;\n}\n",
+        "public abstract class Gateway\n{\n    public abstract int charge(int cents) uses Payments, Http;\n}\n",
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "app/Billing/Gateway.sharp", code);
+
+        assert!(program.errors.is_empty(), "{code}: {:#?}", program.errors);
+        let members = match program.statements.first() {
+            Some(Statement::Interface(interface)) => &interface.members,
+            Some(Statement::Class(class)) => &class.members,
+            _ => panic!("expected an interface or a class, got {:#?}", program.statements),
+        };
+        let Some(ClassLikeMember::Method(method)) = members.first() else {
+            panic!("expected a method, got {members:#?}");
+        };
+        let uses: Vec<&[u8]> = method.uses.iter().flat_map(|uses| uses.names.iter()).map(|name| name.value).collect();
+        assert_eq!(uses, [b"Payments".as_slice(), b"Http"], "{code}");
+    }
 }
 
 /// PHP has no `extern`, so a `.php` file keeps reading it as a name, here a property's class type.
@@ -4533,26 +5118,39 @@ fn an_event_declares_its_parameters_and_its_interfaces() {
     );
 }
 
-/// An event's parameters are its whole declaration, so a body after them is one error, and the file parses on.
+/// An event's parameters are its whole declaration, so a body after them is one error, and so are type parameters, not
+/// supported yet. The file parses on after either.
 #[test]
-fn an_event_with_a_body_is_one_parse_error_and_the_file_parses_on() {
-    const CODE: &str =
-        "public event OrderPaid(int orderId) { }\n\npublic class Order\n{\n    public int run() { return 1; }\n}\n";
-    let arena = LocalArena::new();
-    let program = parse(&arena, "src/OrderPaid.sharp", CODE);
+fn an_event_with_a_body_or_type_parameters_is_one_parse_error_and_the_file_parses_on() {
+    for (event, message, start) in [
+        (
+            "public event OrderPaid(int orderId) { }",
+            "An event declares no body: its parameters are its properties, as in `public event OrderPaid(int orderId);`.",
+            "{ }",
+        ),
+        ("public event Moved<TItem>(TItem item);", "A generic event is not supported yet in PHP#.", "<TItem>"),
+        (
+            "event Moved<TItem : Order>(TItem item) : Shipped;",
+            "A generic event is not supported yet in PHP#.",
+            "<TItem : Order>",
+        ),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("{event}\n\npublic class Order\n{{\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/OrderPaid.sharp", code);
 
-    let [error] = program.errors else {
-        panic!("expected one error, got {:#?}", program.errors);
-    };
-    assert_eq!(
-        error.to_string(),
-        "An event declares no body: its parameters are its properties, as in `public event OrderPaid(int orderId);`."
-    );
-    assert_eq!(source(CODE, error), "{ }");
-    let [.., Statement::Class(order)] = program.statements.as_slice() else {
-        panic!("expected the class `Order` last, got {:#?}", program.statements);
-    };
-    assert_eq!(order.name.value, b"Order");
+        let [error] = program.errors else {
+            panic!("expected one error for `{event}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), message, "{event}");
+        assert_eq!(source(code, error), start, "{event}");
+        let [.., Statement::Class(order)] = program.statements.as_slice() else {
+            panic!("expected the class `Order` last for `{event}`, got {:#?}", program.statements);
+        };
+        assert_eq!(order.name.value, b"Order", "{event}");
+    }
 }
 
 /// Spec section 15: a trailing `on` clause after a method's parameters lists the events the method listens to, before
@@ -4570,7 +5168,7 @@ fn an_on_clause_lists_events_after_the_parameters() {
             let ClassLikeMember::Method(method) = member else {
                 panic!("expected a method, got {member:#?}");
             };
-            let on = method.on.as_ref().map(|on| {
+            let on = method.on.map(|on| {
                 assert_eq!(on.on.value, b"on");
 
                 (source(CODE, on), on.events.iter().map(|event| source(CODE, event)).collect::<Vec<_>>())

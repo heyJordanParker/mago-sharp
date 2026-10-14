@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use foldhash::HashMap;
 use indexmap::IndexMap;
 use mago_allocator::Arena;
@@ -7,6 +9,7 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::flags::MetadataFlags;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
@@ -23,12 +26,15 @@ use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
-use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
+use mago_codex::ttype::expander::get_signature_of_function_like_metadata;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::template::TemplateBound;
 use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
+use mago_codex::ttype::wrap_atomic;
 use mago_names::ResolvedNames;
 use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
@@ -37,8 +43,10 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::dialect::Dialect;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
+use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
 use mago_word::word;
@@ -50,11 +58,15 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
 use crate::external::PropertyAccessKind;
+use crate::invocation::infer_parameter_templates_from_argument;
+use crate::invocation::rename_trait_objects;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
+use crate::statement::function_like::closure_parameter_types;
+use crate::statement::function_like::get_this_type;
 use crate::statement::function_like::known_type_or_error;
 use crate::utils::expression::analyze_member_object;
 use crate::utils::expression::is_this;
@@ -64,6 +76,8 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_type;
 use crate::utils::quoted_source;
+use crate::utils::template::check_private_method_reach;
+use crate::utils::template::check_private_property_reach;
 use crate::utils::template::get_template_types_for_class_member;
 use crate::visibility::check_method_visibility;
 use crate::visibility::check_resolved_property_read_visibility;
@@ -179,10 +193,10 @@ where
         }
     }
 
-    let mut object_atomics = object_type.types.iter().collect::<Vec<_>>();
-    while let Some(object_atomic) = object_atomics.pop() {
+    let mut object_atomics = object_type.types.iter().map(|atomic| (atomic, atomic)).collect::<Vec<_>>();
+    while let Some((object_atomic, written_atomic)) = object_atomics.pop() {
         if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = object_atomic {
-            object_atomics.extend(constraint.types.iter());
+            object_atomics.extend(constraint.types.iter().map(|bound| (bound, written_atomic)));
 
             continue;
         }
@@ -222,7 +236,13 @@ where
                 }
 
                 if !block_context.flags.inside_isset() || !object_atomic.is_mixed() {
-                    report_access_on_non_object(context, object_atomic, property_selector, object_expression.span());
+                    report_access_on_non_object(
+                        context,
+                        object_atomic,
+                        written_atomic,
+                        property_selector,
+                        object_expression.span(),
+                    );
                 }
 
                 continue;
@@ -395,6 +415,7 @@ where
                     property_selector,
                     object_expression,
                     object,
+                    written_atomic,
                     operator_span,
                     for_assignment,
                     &mut result,
@@ -819,7 +840,8 @@ pub(crate) fn resolve_property_for_external_access<'ctx>(
     }
 }
 
-/// Finds a property in a class, gets its type, and handles template localization.
+/// Finds a property in a class, gets its type, and handles template localization. `written_atomic` is the receiver as
+/// it is typed, which is `object`'s type parameter when `object` is that type parameter's bound.
 fn find_property_in_class<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
@@ -829,6 +851,7 @@ fn find_property_in_class<'ctx, 'ast, 'arena, A>(
     selector: &'ast ClassLikeMemberSelector<'arena>,
     object_expr: &'ast Expression<'arena>,
     object: &TObject,
+    written_atomic: &TAtomic,
     access_span: Span,
     for_assignment: bool,
     result: &mut PropertyResolutionResult,
@@ -853,16 +876,31 @@ where
 
     let Some(resolution) = resolution else {
         // A PHP# read of a declared method is its closure, ahead of anything the class serves through `__get`.
+        let method_name = word(trim_start_byte(prop_name.as_bytes(), b'$'));
+        let read_span = object_expr.span().join(selector.span());
+        let self_parameter = match written_atomic {
+            TAtomic::GenericParameter(parameter) => Some(parameter),
+            _ => None,
+        };
         if !for_assignment
             && let Some(method_type) = resolve_method_value(
                 context,
                 block_context,
                 artifacts,
-                class_id,
-                word(trim_start_byte(prop_name.as_bytes(), b'$')),
+                object,
+                self_parameter,
+                method_name,
                 access_span,
+                read_span,
             )
         {
+            check_private_method_reach(
+                context,
+                object_expr,
+                &MethodIdentifier::new(class_id, method_name),
+                selector.span(),
+            );
+
             return Some(ResolvedProperty {
                 property_span: None,
                 property_name: prop_name,
@@ -1086,22 +1124,7 @@ where
                 ..Default::default()
             },
         );
-
-        if !declaring_class_metadata.template_types.is_empty()
-            && let TObject::Named(named_object) = object
-        {
-            *ty = localize_property_type(
-                context,
-                ty,
-                named_object.get_type_parameters().unwrap_or_default(),
-                if class_id.as_bytes().eq_ignore_ascii_case(declaring_class_id.as_bytes()) {
-                    declaring_class_metadata
-                } else {
-                    context.codebase.get_class_like(class_id.as_bytes()).unwrap_or(declaring_class_metadata)
-                },
-                declaring_class_metadata,
-            );
-        }
+        localize_member_type(context, ty, object, declaring_class_metadata);
     };
 
     expand_and_localize(&mut property_type);
@@ -1161,6 +1184,15 @@ where
 
         return None;
     }
+
+    check_private_property_reach(
+        context,
+        object_expr,
+        declaring_class_metadata,
+        property_metadata,
+        for_assignment,
+        selector.span(),
+    );
 
     Some(ResolvedProperty {
         property_span: property_metadata.name_span.or(property_metadata.span),
@@ -1285,6 +1317,29 @@ where
     )
 }
 
+/// Localizes `member_type`, which `declaring_class` declares, for a read through `receiver`: the declaring class's type
+/// parameters become the receiver's type arguments, or the ones the receiver's class names in its header.
+pub(crate) fn localize_member_type<A>(
+    context: &Context<'_, '_, A>,
+    member_type: &mut TUnion,
+    receiver: &TObject,
+    declaring_class: &ClassLikeMetadata,
+) where
+    A: Arena,
+{
+    if !declaring_class.template_types.is_empty()
+        && let TObject::Named(receiver) = receiver
+    {
+        *member_type = localize_property_type(
+            context,
+            member_type,
+            receiver.get_type_parameters().unwrap_or_default(),
+            context.codebase.get_class_like(receiver.name.as_bytes()).unwrap_or(declaring_class),
+            declaring_class,
+        );
+    }
+}
+
 pub fn localize_property_type<A>(
     context: &Context<'_, '_, A>,
     class_property_type: &TUnion,
@@ -1295,20 +1350,10 @@ pub fn localize_property_type<A>(
 where
     A: Arena,
 {
-    let mut template_types = get_template_types_for_class_member(
+    let template_types = get_receiver_type_arguments(
         context,
-        Some(property_declaring_class_metadata),
-        Some(property_declaring_class_metadata.name),
-        Some(property_class_metadata),
-        &property_class_metadata.template_types,
-        &IndexMap::default(),
-    );
-
-    update_template_types(
-        context,
-        &mut template_types,
-        property_class_metadata,
         object_type_parameters,
+        property_class_metadata,
         property_declaring_class_metadata,
     );
 
@@ -1317,6 +1362,186 @@ where
         &TemplateResult::new(IndexMap::default(), template_types),
         context.codebase,
     )
+}
+
+/// The type arguments of `declaring_class`, a generic PHP# class, for its static member reached through `class`,
+/// spec section 11: its type parameters as the access gives them, written on the class, as in `Counter<Order>.count`,
+/// or by `class`'s header, as in `Orders.count` for `Orders : Counter<Order>`. Each type argument keeps its own
+/// statics, and a static method runs with them ahead of its own. None for a member of any other class.
+pub(crate) fn static_member_type_arguments<A>(
+    context: &Context<'_, '_, A>,
+    class: Word,
+    declaring_class: Word,
+    type_arguments: Option<&[TUnion]>,
+) -> Option<Vec<TUnion>>
+where
+    A: Arena,
+{
+    let class = context.codebase.get_class_like(class.as_bytes())?;
+    let declaring_class = context.codebase.get_class_like(declaring_class.as_bytes())?;
+    if !declaring_class.flags.is_sharp() || declaring_class.template_types.is_empty() {
+        return None;
+    }
+
+    Some(
+        declaring_class
+            .template_types
+            .iter()
+            .map(|(name, template)| {
+                let parameter = wrap_atomic(TAtomic::GenericParameter(TGenericParameter::new(
+                    *name,
+                    Arc::new(template.constraint.clone()),
+                    template.defining_entity,
+                )));
+
+                localize_property_type(context, &parameter, type_arguments.unwrap_or_default(), class, declaring_class)
+            })
+            .collect(),
+    )
+}
+
+/// The type arguments a receiver of `receiver_class` with `receiver_type_parameters` gives its class's type
+/// parameters and the ones of `declaring_class`, which declares the member it reads.
+fn get_receiver_type_arguments<A>(
+    context: &Context<'_, '_, A>,
+    receiver_type_parameters: &[TUnion],
+    receiver_class: &ClassLikeMetadata,
+    declaring_class: &ClassLikeMetadata,
+) -> HashMap<Word, HashMap<GenericParent, TUnion>>
+where
+    A: Arena,
+{
+    let mut template_types = get_template_types_for_class_member(
+        context,
+        Some(declaring_class),
+        Some(declaring_class.name),
+        Some(receiver_class),
+        &receiver_class.template_types,
+        &IndexMap::default(),
+    );
+
+    update_template_types(context, &mut template_types, receiver_class, receiver_type_parameters, declaring_class);
+
+    template_types
+}
+
+/// PHP#'s type of a member `declaring_class` declares, called or read as a method value through `receiver`, which finds
+/// the member on `calling_class`, spec section 11. `expand_member` expands the member's declared type with the options
+/// it is given, which bind `Self` to the receiver's class with its own type parameters, as `get_this_type` builds it,
+/// and the intersection parts the receiver carries, or to `self_parameter`, the type parameter a receiver typed by one
+/// is written as, whose bound `receiver` is, and keep a derived type over a type parameter. One replacement then
+/// gives the receiver's class's type parameters the receiver's type arguments, and the declaring class's the type
+/// arguments of the receiver, or of its intersection part that inherits `declaring_class`, beside a call's
+/// `type_arguments`. The last expansion binds no `Self`, so a `Self` that a receiver's type argument holds stays the
+/// class that wrote it, and evaluates the kept derived types against the replaced types. Where `declaring_class` is a
+/// PHP trait, its `self` in what the member gives, or in what its method value returns, is `calling_class`.
+pub(crate) fn specialize_member_type<A>(
+    context: &Context<'_, '_, A>,
+    receiver: &TObject,
+    self_parameter: Option<&TGenericParameter>,
+    declaring_class: &ClassLikeMetadata,
+    calling_class: Word,
+    type_arguments: &TemplateResult,
+    expand_member: impl FnOnce(&TypeExpansionOptions) -> TUnion,
+) -> TUnion
+where
+    A: Arena,
+{
+    let intersection_parts = receiver.get_intersection_types().unwrap_or_default();
+    let receiver_class = receiver
+        .get_name()
+        .and_then(|name| context.codebase.get_class_like(name.as_bytes()))
+        .unwrap_or(declaring_class);
+    let static_class_type = match self_parameter {
+        Some(parameter) => StaticClassType::Generic(parameter.clone()),
+        None => {
+            let mut this_type = get_this_type(context, receiver_class, None);
+            for part in intersection_parts {
+                this_type.add_intersection_type(part.clone());
+            }
+
+            StaticClassType::Object(this_type)
+        }
+    };
+
+    let member_type = expand_member(&TypeExpansionOptions {
+        self_class: Some(declaring_class.name),
+        static_class_type,
+        keep_generic_derived_types: true,
+        ..Default::default()
+    });
+
+    let receiver_type_arguments = receiver.get_type_parameters().unwrap_or_default();
+    let objects = intersection_parts.iter().filter_map(|part| match part {
+        TAtomic::Object(object) => Some(object),
+        _ => None,
+    });
+    let (inheriting_class, inheriting_type_arguments) = std::iter::once(receiver)
+        .chain(objects)
+        .find_map(|object| {
+            let class = context.codebase.get_class_like(object.get_name()?.as_bytes())?;
+            context
+                .codebase
+                .is_instance_of(class.name.as_bytes(), declaring_class.name.as_bytes())
+                .then(|| (class, object.get_type_parameters().unwrap_or_default()))
+        })
+        .unwrap_or((receiver_class, receiver_type_arguments));
+
+    let mut type_arguments = type_arguments.clone();
+    for (class, class_type_arguments, member_class) in [
+        (receiver_class, receiver_type_arguments, receiver_class),
+        (inheriting_class, inheriting_type_arguments, declaring_class),
+    ] {
+        for (name, bounds) in get_receiver_type_arguments(context, class_type_arguments, class, member_class) {
+            for (parent, bound) in bounds {
+                type_arguments
+                    .lower_bounds
+                    .entry(name)
+                    .or_default()
+                    .insert(parent, vec![TemplateBound::new(bound, 0, None)]);
+            }
+        }
+    }
+
+    let mut member_type = inferred_type_replacer::replace(&member_type, &type_arguments, context.codebase);
+    expander::expand_union(context.codebase, &mut member_type, &TypeExpansionOptions::default());
+
+    rename_trait_objects(declaring_class, calling_class, &mut member_type);
+    for atomic in member_type.types.to_mut() {
+        if let TAtomic::Callable(TCallable::Signature(signature)) = atomic
+            && let Some(return_type) = signature.get_return_type_mut()
+        {
+            rename_trait_objects(declaring_class, calling_class, return_type);
+        }
+    }
+
+    member_type
+}
+
+/// The declared type of the property `property_name` read through `receiver`, from its first object that declares it,
+/// localized by `localize_member_type`.
+pub(crate) fn get_localized_property_type<A>(
+    context: &Context<'_, '_, A>,
+    receiver: &TUnion,
+    property_name: Word,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    receiver.types.iter().find_map(|atomic| {
+        let TAtomic::Object(object) = atomic else {
+            return None;
+        };
+        let class_name = object.get_name()?;
+        let mut property_type =
+            context.codebase.get_property_type(class_name.as_bytes(), property_name.as_bytes())?.clone();
+        let declaring_class_name =
+            context.codebase.get_declaring_property_class(class_name.as_bytes(), property_name.as_bytes())?;
+        let declaring_class = context.codebase.get_class_like(declaring_class_name.as_bytes())?;
+        localize_member_type(context, &mut property_type, object, declaring_class);
+
+        Some(property_type)
+    })
 }
 
 fn update_template_types<A>(
@@ -1524,15 +1749,18 @@ pub(crate) fn check_redundant_nullsafe<'arena, A>(
     });
 }
 
+/// Reports a property access on `atomic_type`, which is not an object. A PHP# message names the type the code wrote,
+/// `written_type`, such as the type parameter whose bound `atomic_type` is.
 fn report_access_on_non_object<A>(
     context: &mut Context<'_, '_, A>,
     atomic_type: &TAtomic,
+    written_type: &TAtomic,
     selector: &ClassLikeMemberSelector,
     object_span: Span,
 ) where
     A: Arena,
 {
-    let type_str = display_atomic(context, atomic_type);
+    let type_str = display_atomic(context, if context.dialect.is_sharp() { written_type } else { atomic_type });
     context.collector.report_with_code(
         if atomic_type.is_mixed() { IssueCode::MixedPropertyAccess } else { IssueCode::InvalidPropertyAccess },
         Issue::error(format!("Attempting to access a property on a non-object type (`{type_str}`)."))
@@ -1592,21 +1820,34 @@ fn report_possibly_non_existent_property<A>(
 /// Spec section 14.3: a PHP# read `x.name` of a class with no property `name` gives its method `name` as a closure,
 /// as PHP's `$x->name(...)` does, and `Class.name` gives its static method, as `Class::name(...)` does. The engine
 /// runs both on the read's missing-member path. Reports a method the read cannot reach, as the call would. Returns
-/// the closure's type.
+/// the closure's type, as `specialize_member_type` gives a call of the method on `receiver`, or on the intersection
+/// part of it that has the method, with `Self` bound to `self_parameter` when the receiver is typed by that type
+/// parameter. A generic method's value has the type arguments [`fix_type_arguments`] gives the read at `read_span`.
 pub(crate) fn resolve_method_value<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
     artifacts: &mut AnalysisArtifacts,
-    class_id: Word,
+    receiver: &TObject,
+    self_parameter: Option<&TGenericParameter>,
     method_name: Word,
     access_span: Span,
+    read_span: Span,
 ) -> Option<TUnion>
 where
     A: Arena,
 {
-    if !context.dialect.is_sharp() || !context.codebase.method_exists(class_id.as_bytes(), method_name.as_bytes()) {
+    if !context.dialect.is_sharp() {
         return None;
     }
+
+    let parts = receiver.get_intersection_types().unwrap_or_default().iter().filter_map(|part| match part {
+        TAtomic::Object(object) => Some(object),
+        _ => None,
+    });
+    let class_id = std::iter::once(receiver)
+        .chain(parts)
+        .filter_map(TObject::get_name)
+        .find(|class_id| context.codebase.method_exists(class_id.as_bytes(), method_name.as_bytes()))?;
 
     let method = context.codebase.get_declaring_method_identifier(&MethodIdentifier::new(class_id, method_name));
     let class_name = method.get_class_name();
@@ -1640,15 +1881,125 @@ where
         false,
     );
 
-    // The signature's `source` names the class the value is read through, as a call of the method does, so an
-    // `extern` lookup starts there.
-    let mut signature = get_signature_of_function_like_identifier(
-        &FunctionLikeIdentifier::Method(class_id, method.get_method_name()),
-        context.codebase,
-    )?;
-    signature.is_closure = true;
+    let codebase = context.codebase;
+    let declaring_class = codebase.get_class_like(class_name.as_bytes())?;
+    let method_metadata = codebase.get_method_by_id(&method)?;
 
-    Some(TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature))))
+    let value = specialize_member_type(
+        context,
+        receiver,
+        self_parameter,
+        declaring_class,
+        class_id,
+        &TemplateResult::default(),
+        |options| {
+            // The signature's `source` names the class the value is read through, as a call of the method does, so
+            // an `extern` lookup starts there.
+            let mut signature = get_signature_of_function_like_metadata(
+                &FunctionLikeIdentifier::Method(class_id, method.get_method_name()),
+                method_metadata,
+                codebase,
+                options,
+            );
+            signature.is_closure = true;
+
+            TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature)))
+        },
+    );
+    if method_metadata.template_types.is_empty() {
+        return Some(value);
+    }
+
+    let method_name = display_sharp_member(display_class_like_name(context, class_name), method_metadata.original_name);
+
+    Some(fix_type_arguments(context, artifacts, value, method_metadata, &method_name, read_span))
+}
+
+/// Spec section 14.3: a generic method's `value`, one closure signature, takes its type arguments from the parameter
+/// types of the function type the read at `span` goes into, as C#'s method group conversion does. Returns `value` with
+/// them. A PHP# method's are recorded at `span` for the lowering, and one nothing fixes is refused, as C#'s CS0411,
+/// while one a parameter type fixes outside its bound is left to the bound's own issue. A plain PHP method's
+/// `@template` types never reach the engine, so its value stays PHP's first-class callable, and none is recorded.
+fn fix_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    value: TUnion,
+    method: &FunctionLikeMetadata,
+    method_name: &str,
+    span: Span,
+) -> TUnion
+where
+    A: Arena,
+{
+    let templates = &method.template_types;
+    let mut template_result = TemplateResult::new(
+        templates.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
+        HashMap::default(),
+    );
+    let mut violated_templates = WordSet::default();
+    if let Some(function_type) =
+        artifacts.get_expected_type(&span).map(|expected| closure_parameter_types(context, expected))
+        && let TAtomic::Callable(TCallable::Signature(signature)) = value.get_single()
+    {
+        for (index, parameter) in signature.get_parameters().iter().enumerate() {
+            if let (Some(parameter_type), Some(function_parameter_type)) =
+                (parameter.get_type_signature(), function_type.get(&index))
+            {
+                violated_templates.extend(infer_parameter_templates_from_argument(
+                    context,
+                    parameter_type,
+                    function_parameter_type,
+                    &mut template_result,
+                    index,
+                    span,
+                    false,
+                    Dialect::Sharp,
+                ));
+            }
+        }
+    }
+    if !method.flags.is_sharp() {
+        return inferred_type_replacer::replace(&value, &template_result, context.codebase);
+    }
+
+    let type_arguments: Vec<Option<TUnion>> = templates
+        .iter()
+        .map(|(name, template)| {
+            template_result
+                .lower_bounds
+                .get(name)
+                .and_then(|bounds| bounds.get(&template.defining_entity))
+                .filter(|bounds| !bounds.is_empty())
+                .map(|bounds| get_most_specific_type_from_bounds(bounds, context.codebase))
+        })
+        .collect();
+    let unfixed: Vec<String> = templates
+        .iter()
+        .zip(&type_arguments)
+        .filter(|((name, _), type_argument)| type_argument.is_none() && !violated_templates.contains(name))
+        .map(|((name, _), _)| format!("`{name}`"))
+        .collect();
+    if !unfixed.is_empty() {
+        let arguments = if unfixed.len() == 1 { "argument" } else { "arguments" };
+        context.collector.report_with_code(
+            IssueCode::MissingTemplateParameter,
+            Issue::error(format!(
+                "Nothing fixes the type {arguments} {} of the method value `{method_name}`.",
+                unfixed.join(", ")
+            ))
+            .with_annotation(Annotation::primary(span).with_message(format!("`{method_name}` is read as a value here")))
+            .with_note(
+                "A method value takes its type arguments from the parameter types of the function type it goes into.",
+            )
+            .with_help("Give the value a function type, as a typed local or a parameter has, or call the method."),
+        );
+
+        return value;
+    }
+
+    artifacts.record_type_arguments(span, type_arguments.into_iter(), context.codebase);
+
+    inferred_type_replacer::replace(&value, &template_result, context.codebase)
 }
 
 fn report_non_existent_property<A>(

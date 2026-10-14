@@ -7,16 +7,21 @@ use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Extension;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::FunctionLikeReturnTypeHint;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Keyword;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::MethodExpressionBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::NamedConstructor;
+use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::TokenSeparatedSequence;
+use mago_syntax::cst::TypeParameterList;
+use mago_syntax::cst::Uses;
 use mago_word::Word;
 use mago_word::concat_word;
 use mago_word::word;
@@ -68,10 +73,14 @@ pub struct MethodParts<'ast, 'arena> {
     pub span: Span,
     pub attribute_lists: &'ast Sequence<'arena, AttributeList<'arena>>,
     pub modifiers: &'ast Sequence<'arena, Modifier<'arena>>,
+    /// The method's PHP# type parameters. An operator and a named constructor declare none.
+    pub type_parameters: Option<&'ast TypeParameterList<'arena>>,
     pub parameter_list: &'ast FunctionLikeParameterList<'arena>,
     pub return_type_hint: Option<&'ast FunctionLikeReturnTypeHint<'arena>>,
     /// The events a method listens to. An operator and a named constructor listen to none.
     pub on: Option<&'ast On<'arena>>,
+    /// The effects a method without a body allows, spec section 29. An operator and a named constructor have a body.
+    pub uses: Option<&'ast Uses<'arena>>,
     pub body: &'ast MethodBody<'arena>,
     pub returns_value: bool,
     pub returns_by_reference: bool,
@@ -86,13 +95,32 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: method.span(),
             attribute_lists: &method.attribute_lists,
             modifiers: &method.modifiers,
+            type_parameters: method.type_parameters,
             parameter_list: &method.parameter_list,
             return_type_hint: method.return_type_hint.as_ref(),
-            on: method.on.as_ref(),
+            on: method.on,
+            uses: method.uses,
             body: &method.body,
             returns_value: method.returns_value(),
             returns_by_reference: method.ampersand.is_some(),
         }
+    }
+
+    /// The effects the method's `uses` names, spec section 29: every name but one of its function-typed parameters,
+    /// nullable or not, as `f` in `apply(Function<int(int)> f) uses f`, whose effects a call takes from the function
+    /// it passes.
+    pub fn uses_effects(&self) -> impl Iterator<Item = &'ast LocalIdentifier<'arena>> + '_ {
+        let parameters = self.parameter_list;
+
+        self.uses.into_iter().flat_map(|uses| uses.names.iter()).filter(move |name| {
+            !parameters.parameters.iter().any(|parameter| {
+                parameter.variable.name == name.value
+                    && matches!(
+                        parameter.hint,
+                        Some(Hint::Function(_) | Hint::Nullable(NullableHint { hint: Hint::Function(_), .. }))
+                    )
+            })
+        })
     }
 
     /// The parts of an operator, named at its symbol, or none for an operator a class cannot declare, which semantics
@@ -105,9 +133,11 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: operator.span(),
             attribute_lists: &operator.attribute_lists,
             modifiers: &operator.modifiers,
+            type_parameters: None,
             parameter_list: &operator.parameter_list,
             return_type_hint: Some(&operator.return_type_hint),
             on: None,
+            uses: None,
             body: &operator.body,
             returns_value: true,
             returns_by_reference: false,
@@ -124,9 +154,11 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: named_constructor.span(),
             attribute_lists: &named_constructor.attribute_lists,
             modifiers: &named_constructor.modifiers,
+            type_parameters: None,
             parameter_list: &named_constructor.parameter_list,
             return_type_hint: None,
             on: None,
+            uses: None,
             body: &named_constructor.body,
             returns_value: false,
             returns_by_reference: false,
@@ -152,9 +184,11 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: method.span(),
             attribute_lists: &method.attribute_lists,
             modifiers: static_modifiers(arena, extension, &method.modifiers),
+            type_parameters: method.type_parameters,
             parameter_list: receiver_first(arena, extension, &method.parameter_list)?,
             return_type_hint: method.return_type_hint.as_ref(),
-            on: method.on.as_ref(),
+            on: method.on,
+            uses: method.uses,
             body: &method.body,
             returns_value: method.returns_value(),
             returns_by_reference: method.ampersand.is_some(),
@@ -186,12 +220,14 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: property.span(),
             attribute_lists: &property.attribute_lists,
             modifiers: static_modifiers(arena, extension, &property.modifiers),
+            type_parameters: None,
             parameter_list: receiver_first(arena, extension, own)?,
             return_type_hint: property
                 .hint
                 .as_ref()
                 .map(|hint| &*arena.alloc(FunctionLikeReturnTypeHint { colon: None, hint: hint.clone() })),
             on: None,
+            uses: None,
             body: arena.alloc(MethodBody::Expression(MethodExpressionBody {
                 arrow: body.arrow,
                 expression: body.expression,
@@ -238,7 +274,7 @@ where
     }))
 }
 
-/// What a bare PHP# name refers to.
+/// What a bare PHP# name, or a type name that names a type parameter, refers to.
 ///
 /// The parser reads `x`, `x.y` and `x.y()` the same way whatever `x` is. The binder then decides,
 /// from the scopes of the file alone, what each bare name means.
@@ -258,6 +294,12 @@ pub enum Binding {
     Member,
     /// `field` in an accessor body: the storage of the property the accessor belongs to.
     Field,
+    /// A type parameter of the enclosing method, class or interface, written as a type. Its resolved name is the name
+    /// as written, as in `TItem`.
+    TypeParameter {
+        /// The name in the type parameter's declaration, as `TItem` in `<TItem : DatabaseEntity>`.
+        declaration: Span,
+    },
 }
 
 /// A PHP# scope rule a bare name breaks. The name still has its [`Binding`].

@@ -1,3 +1,4 @@
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 
 use crate::ttype::atomic::TAtomic;
@@ -28,9 +29,12 @@ pub struct ComparisonResult {
     pub replacement_atomic_type: Option<TAtomic>,
     pub type_variable_lower_bounds: Vec<(Word, TemplateBound)>,
     pub type_variable_upper_bounds: Vec<(Word, TemplateBound)>,
-    /// Whether the comparison follows PHP#'s rules: a `nonnull` container refuses a value that may be null, as PHP#'s
-    /// `Any` does, and a `float` container refuses an `int`. The caller sets it for a `.sharp` file. A PHP file keeps
-    /// upstream's rules, which let any `mixed` into `nonnull` and an `int` into a `float`.
+    /// Whether the comparison follows PHP#'s rules, set for a `.sharp` file: a `nonnull` container refuses a value that
+    /// may be null, as PHP#'s `Any` does, a `float` container refuses an `int`, and a type parameter is opaque, as C#'s
+    /// `T` is, so it takes only itself or `never`, and passes only as itself, as `Any?`, or as a type that holds its
+    /// whole bound, such as a class its bound reaches or the `int` that `is int n` narrows it to. A PHP file keeps
+    /// upstream's rules, which let any `mixed` into `nonnull`, an `int` into a `float`, and any value into a template
+    /// bounded by `mixed`.
     pub sharp_rules: bool,
     /// Whether a failed comparison refused an `int` only because a `float` was expected, under `sharp_rules`.
     pub int_for_float: bool,
@@ -58,10 +62,16 @@ impl ComparisonResult {
         }
     }
 
-    /// A result whose comparison follows PHP#'s rules when `sharp_rules` is set.
+    /// A result whose comparison follows the rules of `dialect`.
     #[must_use]
-    pub fn with_sharp_rules(sharp_rules: bool) -> Self {
-        Self { sharp_rules, ..Self::new() }
+    pub fn for_dialect(dialect: Dialect) -> Self {
+        Self { sharp_rules: dialect.is_sharp(), ..Self::new() }
+    }
+
+    /// An empty result for a comparison nested in this one, which follows the same rules.
+    #[must_use]
+    pub fn nested(&self) -> Self {
+        Self { sharp_rules: self.sharp_rules, ..Self::new() }
     }
 }
 
@@ -76,6 +86,7 @@ mod tests {
     use mago_database::DatabaseReader;
     use mago_database::file::File;
     use mago_names::resolver::NameResolver;
+    use mago_syntax::dialect::Dialect;
     use mago_syntax::parser::parse_file;
     use mago_word::WordSet;
     use mago_word::word;
@@ -330,12 +341,12 @@ mod tests {
         let string = get_string().get_single().clone();
         let int = get_int().get_single().clone();
 
-        let mut int_result = ComparisonResult::with_sharp_rules(true);
+        let mut int_result = ComparisonResult::for_dialect(Dialect::Sharp);
         assert_is_contained_by(&codebase, &template(get_int()), &get_float(), false, &mut int_result);
         assert!(int_result.int_for_float, "an `int` constraint is refused only for its `int`");
 
         for constraint in [vec![string.clone(), int.clone()], vec![int, string]] {
-            let mut result = ComparisonResult::with_sharp_rules(true);
+            let mut result = ComparisonResult::for_dialect(Dialect::Sharp);
             assert_is_contained_by(
                 &codebase,
                 &template(TUnion::new(Cow::Owned(constraint))),

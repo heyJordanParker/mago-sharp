@@ -58,6 +58,8 @@ pub enum ModifierKind {
     Lazy,
     /// PHP#'s `internal`.
     Internal,
+    /// PHP#'s `foreign`.
+    Foreign,
 }
 
 impl CopyInto for Visibility {

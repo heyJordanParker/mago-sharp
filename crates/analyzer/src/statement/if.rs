@@ -50,6 +50,7 @@ use crate::formula;
 use crate::formula::negate_or_synthesize;
 use crate::reconciler::reconcile_keyed_types;
 use crate::statement::analyze_statements;
+use crate::statement::refuse_condition_that_never_finishes;
 use crate::utils::conditional;
 use crate::utils::expression::is_derived_access_path;
 use crate::utils::misc::check_for_paradox;
@@ -583,7 +584,9 @@ where
     let assigned_variable_ids = std::mem::take(&mut if_block_context.assigned_variable_ids);
     let possibly_assigned_variable_ids = std::mem::take(&mut if_block_context.possibly_assigned_variable_ids);
 
-    analyze_statements(if_statement.body.statements(), context, &mut if_block_context, artifacts)?;
+    if !refuse_condition_that_never_finishes(context, &if_block_context, if_statement.condition, "if") {
+        analyze_statements(if_statement.body.statements(), context, &mut if_block_context, artifacts)?;
+    }
 
     for variable_id in &if_block_context.parent_conflicting_clause_variables {
         outer_block_context.remove_variable_from_conflicting_clauses(context, *variable_id, None);
@@ -1173,7 +1176,10 @@ where
     let pre_assigned_variable_ids = std::mem::take(&mut else_block_context.assigned_variable_ids);
     let pre_possibly_assigned_variable_ids = std::mem::take(&mut else_block_context.possibly_assigned_variable_ids);
 
-    if let Some(statements) = else_statements {
+    // In a `.sharp` file, an `if` condition that never finishes was refused, and its `else` never runs either.
+    if let Some(statements) = else_statements
+        && !(context.dialect.is_sharp() && else_block_context.flags.has_returned())
+    {
         analyze_statements(statements, context, else_block_context, artifacts)?;
     }
 

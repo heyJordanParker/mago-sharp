@@ -908,17 +908,6 @@ impl IncrementalAnalysisService {
             return self.analyze();
         }
 
-        let wrapped_functions_changed = new_file_scans
-            .iter()
-            .any(|(file_id, metadata)| wrappers_in(metadata, *file_id) != wrappers_in(&self.codebase, *file_id))
-            || self.file_states.keys().any(|file_id| {
-                !current_file_ids.contains(file_id) && !wrappers_in(&self.codebase, *file_id).is_empty()
-            });
-
-        if wrapped_functions_changed {
-            return self.analyze();
-        }
-
         let externs_changed = new_file_scans
             .iter()
             .any(|(file_id, metadata)| externs_in(metadata, *file_id) != externs_in(&self.codebase, *file_id))
@@ -1619,6 +1608,11 @@ impl IncrementalAnalysisService {
         let references_changed = before.references != self.external_symbol_references;
         let external_symbol_references = before.references;
         let effective_skip_files = if references_changed { HashSet::default() } else { skip_files.clone() };
+        // Changed references analyze every file again, the ones the pass meant to skip too, so no class stays safe.
+        if references_changed {
+            codebase.safe_symbols.clear();
+            codebase.safe_symbol_members.clear();
+        }
         let host_files: Vec<_> = self
             .database
             .files()
@@ -1949,6 +1943,11 @@ impl IncrementalAnalysisService {
             snapshots.clear();
         }
 
+        // The safe marks tell this pass which code its skipped files' cached results stand for. An analysis of one file
+        // after it, as the compile step runs, analyzes and types the whole file.
+        codebase.safe_symbols.clear();
+        codebase.safe_symbol_members.clear();
+
         Ok(SelectiveAnalysisOutput {
             result: aggregated_result,
             native_symbol_references,
@@ -2011,20 +2010,6 @@ fn externs_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ExternMetada
 /// and the namespaces above it, so a change to them changes files that the signature diff cannot see.
 fn modules_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ModuleMetadata> {
     codebase.modules.iter().filter(|module| module.span.file_id == file_id).collect()
-}
-
-/// The functions `file_id`'s `[Replaces]` attributes wrap, each with its wrapping methods in the codebase's order. A
-/// change to them changes the issues of every file that calls a wrapped function, which the signature diff cannot see.
-fn wrappers_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<(Word, MethodIdentifier)> {
-    let mut wrappers: Vec<(Word, MethodIdentifier)> = codebase
-        .wrapped_functions
-        .iter()
-        .flat_map(|(function, wrappers)| {
-            wrappers.iter().filter(|(_, span, _)| span.file_id == file_id).map(|(_, _, method)| (*function, *method))
-        })
-        .collect();
-    wrappers.sort_by_key(|(function, _)| *function);
-    wrappers
 }
 
 /// The extension members `file_id` declares, spec section 26, each with its method and its receiver's type as written,
@@ -3369,7 +3354,9 @@ mod tests {
         service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
         assert_eq!(
             impure_getters(&service),
-            ["Getter `total` reaches `Order.price`, which calls `now` with the effect `Clock`. Getters must be pure."]
+            [
+                "Getter `total` reaches `Order.price`, which calls `global.now` with the effect `Clock`. Getters must be pure."
+            ]
         );
         assert_eq!(service.analyzed_files, HashSet::from_iter([order_id]));
         assert_matches_full(&service, &db, "Order.price calls now");
@@ -3507,32 +3494,30 @@ mod tests {
         assert_matches_full(&service, &db, "Order gains discount");
     }
 
-    /// A library edit that adds or drops a `[Replaces]` changes the diagnostics of a project file that calls the
-    /// function, though nothing in the project file changed.
+    /// A library edit that adds or drops the member the checker names in place of a PHP function changes the
+    /// diagnostics of a project file that calls the function, though nothing in the project file changed.
     #[test]
-    fn test_watch_library_replaces_change_reaches_a_project_caller() {
-        let replaces = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_METHOD)]\npublic class Replaces\n{\n    public Replaces(string ...functions)\n    {\n    }\n}\n";
-        let date = |attribute: &str| {
+    fn test_watch_library_member_change_reaches_a_project_caller() {
+        let date = |member: &str| {
             format!(
-                "namespace Sharp.Time;\n\npublic static class Date\n{{\n    {attribute}\n    public static string format(string pattern) => stamp(pattern);\n}}\n"
+                "namespace Sharp.Time;\n\npublic static class Date\n{{\n    {member}\n    public static int? parse(string text) => null;\n}}\n"
             )
         };
-        let stamp = "<?php\nfunction stamp(string $pattern): string { return $pattern; }\n";
-        let clock = "namespace App;\n\npublic class Clock\n{\n    public string year() => stamp(\"Y\");\n}\n";
+        let format = "public static string format(int timestamp, string pattern) => global.date(pattern, timestamp);";
+        let clock = "namespace App;\n\npublic class Clock\n{\n    public string year() => date(\"Y\");\n}\n";
+        // The test codebase has no PHP stubs, so it declares the PHP function the project calls.
+        let php_date =
+            "<?php\n\nfunction date(string $format, ?int $timestamp = null): string\n{\n    return $format;\n}\n";
 
-        let mut db = make_database(vec![("src/stamp.php", stamp), ("src/Clock.sharp", clock)]);
-        for (name, contents) in
-            [("library/Sharp/Replaces.sharp", replaces.to_owned()), ("library/Sharp/Time/Date.sharp", date(""))]
-        {
-            let mut file = File::new(
-                Cow::Owned(name.as_bytes().to_vec()),
-                FileType::Host,
-                None,
-                Cow::Owned(contents.into_bytes()),
-            );
-            file.is_standard_library = true;
-            db.add(file);
-        }
+        let mut db = make_database(vec![("src/Clock.sharp", clock), ("src/date.php", php_date)]);
+        let mut file = File::new(
+            Cow::Borrowed(&b"library/Sharp/Time/Date.sharp"[..]),
+            FileType::Host,
+            None,
+            Cow::Owned(date("").into_bytes()),
+        );
+        file.is_standard_library = true;
+        db.add(file);
         let wrapped = |service: &IncrementalAnalysisService| {
             service
                 .collect_all_issues()
@@ -3544,20 +3529,17 @@ mod tests {
         service.analyze().expect("Initial analysis failed.");
         assert_eq!(wrapped(&service), 0);
 
-        db.update(
-            FileId::new(b"library/Sharp/Time/Date.sharp"),
-            Cow::Owned(date("[Replaces(\"stamp\")]").into_bytes()),
-        );
+        db.update(FileId::new(b"library/Sharp/Time/Date.sharp"), Cow::Owned(date(format).into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
         assert_eq!(wrapped(&service), 1);
-        assert_matches_full(&service, &db, "added replaces");
+        assert_matches_full(&service, &db, "added member");
 
         db.update(FileId::new(b"library/Sharp/Time/Date.sharp"), Cow::Owned(date("").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
         assert_eq!(wrapped(&service), 0);
-        assert_matches_full(&service, &db, "removed replaces");
+        assert_matches_full(&service, &db, "removed member");
     }
 
     /// Parent changes return type making child's override incompatible.
@@ -3763,6 +3745,35 @@ mod tests {
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
         assert_matches_full(&service, &db, "body change in unrelated file");
+    }
+
+    /// After a body-only change in an unrelated file with diff=true, an editor's analysis of the unchanged `Child`
+    /// reports what it reports after a full analysis, though the warm run skipped `Child`'s class.
+    #[test]
+    fn test_watch_one_file_analysis_after_a_body_change_in_an_unrelated_file() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n    private function unused(): void {}\n}\n";
+        let unrelated_v1 = "<?php\nclass Unrelated {\n    public function greet(): string { return 'hello'; }\n}\n";
+        let unrelated_v2 = "<?php\nclass Unrelated {\n    public function greet(): string { return 'hi'; }\n}\n";
+        let child_file = FileId::new(b"src/Child.php");
+
+        let mut db =
+            make_database(vec![("src/Base.php", base), ("src/Child.php", child), ("src/Unrelated.php", unrelated_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        db.update(FileId::new(b"src/Unrelated.php"), Cow::Owned(unrelated_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        let mut fresh = make_watch_service(&db);
+        fresh.analyze().expect("Full analysis failed.");
+
+        let full = fresh.analyze_file(child_file);
+        assert!(!full.is_empty(), "Child's return type and unused method are reported");
+        let (only_warm, only_full) = diff_issues(&service.analyze_file(child_file), &full);
+        assert!(
+            only_warm.is_empty() && only_full.is_empty(),
+            "Only after the warm run: {only_warm:?}\n  Only after the full analysis: {only_full:?}"
+        );
     }
 
     /// Add a method to one class in a multi-class file — other class's issues preserved.
