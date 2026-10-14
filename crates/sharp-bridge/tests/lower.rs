@@ -1096,7 +1096,8 @@ fn a_method_is_a_public_function_with_its_return_type_after_its_parameters() {
 /// protected \Lib\Calc $calc;
 /// ```
 ///
-/// `[4]` and `[2]` are `ZEND_ACC_PRIVATE` and `ZEND_ACC_PROTECTED`.
+/// `[8196]` and `[8194]` are `ZEND_ACC_PRIVATE` and `ZEND_ACC_PROTECTED` with `ZEND_ACC_FIELD`, `1 << 13`, which
+/// `ReflectionProperty::isField()` reads.
 #[test]
 fn a_field_is_a_property_group_of_one_property() {
     let lowered = Lowered::with(
@@ -1109,7 +1110,7 @@ fn a_field_is_a_property_group_of_one_property() {
         lowered.render(lowered.child(class, 2)),
         indoc! {r#"
             STMT_LIST
-              PROP_GROUP [4]
+              PROP_GROUP [8196]
                 ZVAL [1] "int"
                 PROP_DECL
                   PROP_ELEM
@@ -1118,7 +1119,7 @@ fn a_field_is_a_property_group_of_one_property() {
                     null
                     null
                 null
-              PROP_GROUP [2]
+              PROP_GROUP [8194]
                 ZVAL "Lib\\Calc"
                 PROP_DECL
                   PROP_ELEM
@@ -1137,8 +1138,8 @@ fn a_field_is_a_property_group_of_one_property() {
 /// private \Closure $charge;
 /// ```
 ///
-/// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, `[4]`,
-/// while PHP makes a member with no modifier `public`.
+/// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, `[8196]`
+/// with `ZEND_ACC_FIELD`, while PHP makes a member with no modifier `public`.
 #[test]
 fn a_field_without_an_access_modifier_is_a_private_property() {
     let lowered = Lowered::with(
@@ -1157,7 +1158,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
         lowered.render(lowered.child(class, 2)),
         indoc! {r#"
             STMT_LIST
-              PROP_GROUP [4]
+              PROP_GROUP [8196]
                 TYPE [7]
                 PROP_DECL
                   PROP_ELEM
@@ -1166,7 +1167,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                     null
                     null
                 null
-              PROP_GROUP [4]
+              PROP_GROUP [8196]
                 ZVAL "Closure"
                 PROP_DECL
                   PROP_ELEM
@@ -1175,7 +1176,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                     null
                     null
                 null
-              PROP_GROUP [4]
+              PROP_GROUP [8196]
                 ZVAL "Closure"
                 PROP_DECL
                   PROP_ELEM
@@ -1930,8 +1931,9 @@ fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
 /// public function __construct(private int $count, public readonly int $id, protected string $name, int $extra) {}
 /// ```
 ///
-/// A parameter that declares a member carries the member's flags: `[4]` is `ZEND_ACC_PRIVATE`, `[129]` is
-/// `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, and `[2]` is `ZEND_ACC_PROTECTED`.
+/// A parameter that declares a member carries the member's flags: `[8196]` is `ZEND_ACC_PRIVATE | ZEND_ACC_FIELD`,
+/// because a parameter without accessors is a field, `[129]` is `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, and `[2]` is
+/// `ZEND_ACC_PROTECTED`.
 #[test]
 fn a_constructor_parameter_with_an_access_modifier_is_a_promoted_parameter() {
     let lowered = Lowered::new(
@@ -1951,7 +1953,7 @@ fn a_constructor_parameter_with_an_access_modifier_is_a_promoted_parameter() {
 
     assert_eq!(
         parameters,
-        [("count".to_owned(), 4), ("id".to_owned(), 129), ("name".to_owned(), 2), ("extra".to_owned(), 0)]
+        [("count".to_owned(), 8196), ("id".to_owned(), 129), ("name".to_owned(), 2), ("extra".to_owned(), 0)]
     );
 }
 
@@ -1978,7 +1980,7 @@ fn a_non_constant_initial_value_runs_at_the_start_of_the_constructor() {
         lowered.render(lowered.child(class, 2)),
         indoc! {r#"
             STMT_LIST
-              PROP_GROUP [4]
+              PROP_GROUP [8196]
                 ZVAL "Lib\\Calc"
                 PROP_DECL
                   PROP_ELEM
@@ -2052,7 +2054,7 @@ fn a_class_with_a_non_constant_initial_value_and_no_constructor_gets_one() {
         lowered.render(lowered.child(class, 2)),
         indoc! {r#"
             STMT_LIST
-              PROP_GROUP [4]
+              PROP_GROUP [8196]
                 ZVAL "Lib\\Calc"
                 PROP_DECL
                   PROP_ELEM
@@ -2485,7 +2487,7 @@ fn a_nullable_field_or_settable_auto_property_without_an_initial_value_defaults_
         lowered.render(lowered.child(class, 2)),
         indoc! {r#"
             STMT_LIST
-              PROP_GROUP [4]
+              PROP_GROUP [8196]
                 ZVAL [257] "int"
                 PROP_DECL
                   PROP_ELEM
@@ -2503,7 +2505,7 @@ fn a_nullable_field_or_settable_auto_property_without_an_initial_value_defaults_
                     null
                     null
                 null
-              PROP_GROUP [4]
+              PROP_GROUP [8196]
                 TYPE_UNION
                   ZVAL [1] "int"
                   ZVAL [1] "string"
@@ -2515,7 +2517,7 @@ fn a_nullable_field_or_settable_auto_property_without_an_initial_value_defaults_
                     null
                     null
                 null
-              PROP_GROUP [4]
+              PROP_GROUP [8196]
                 ZVAL [257] "int"
                 PROP_DECL
                   PROP_ELEM
@@ -3251,7 +3253,7 @@ fn a_list_literal_initial_value_of_a_set_property_is_a_set() {
     assert_eq!(
         property_groups(&Lowered::new("class Report\n{\n    private Set<string> tags = [\"a\"];\n}\n")),
         [indoc! {r#"
-            PROP_GROUP [4]
+            PROP_GROUP [8196]
               TYPE [7]
               PROP_DECL
                 PROP_ELEM
@@ -7592,8 +7594,8 @@ fn a_union_typed_class_constant_has_its_type_union() {
 /// public private(set) static string $last = "none";
 /// ```
 ///
-/// A static member's initial value is constant, so it is the default. `[20]` is `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`,
-/// and `[4113]` is `ZEND_ACC_PUBLIC | ZEND_ACC_STATIC | ZEND_ACC_PRIVATE_SET`.
+/// A static member's initial value is constant, so it is the default. `[8212]` is `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC
+/// | ZEND_ACC_FIELD`, and `[4113]` is `ZEND_ACC_PUBLIC | ZEND_ACC_STATIC | ZEND_ACC_PRIVATE_SET`.
 #[test]
 fn a_static_field_or_property_is_a_static_property_group() {
     let lowered = Lowered::new(
@@ -7610,7 +7612,7 @@ fn a_static_field_or_property_is_a_static_property_group() {
     assert_eq!(
         groups,
         [
-            (20, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"made\"\n    ZVAL 0\n    null\n    null\n".to_owned()),
+            (8212, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"made\"\n    ZVAL 0\n    null\n    null\n".to_owned()),
             (4113, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"last\"\n    ZVAL \"none\"\n    null\n    null\n".to_owned()),
         ]
     );
@@ -11303,7 +11305,7 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
               null
               null
               STMT_LIST
-                PROP_GROUP [4]
+                PROP_GROUP [8196]
                   ZVAL [1] "int"
                   PROP_DECL
                     PROP_ELEM

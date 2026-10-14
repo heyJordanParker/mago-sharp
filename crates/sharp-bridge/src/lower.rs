@@ -233,6 +233,7 @@ const ZEND_ACC_INTERFACE: u32 = 1 << 0;
 const ZEND_ACC_READONLY: u32 = 1 << 7;
 const ZEND_ACC_PROTECTED_SET: u32 = 1 << 11;
 const ZEND_ACC_PRIVATE_SET: u32 = 1 << 12;
+const ZEND_ACC_FIELD: u32 = 1 << 13;
 const ZEND_ACC_ENUM: u32 = 1 << 28;
 const ZEND_TYPE_NULLABLE: u32 = 1 << 8;
 const IS_STATIC: u32 = 15;
@@ -1312,12 +1313,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The flags of the property a constructor parameter promotes, or none for any other parameter. Spec section 9
-    /// gives such a property access levels and no accessor bodies, so it has no hooks.
+    /// gives such a property access levels and no accessor bodies, so it has no hooks. One without accessors is a
+    /// field, which reflection tells from a property by its flag.
     fn member_flags(&self, parameter: &FunctionLikeParameter) -> u32 {
-        let accessor_flags =
-            parameter.hooks.as_ref().map_or(0, |accessors| accessor_flags(&parameter.modifiers, accessors, self.names));
+        let flags = modifier_flags(&parameter.modifiers);
+        let accessor_flags = match &parameter.hooks {
+            Some(accessors) => accessor_flags(&parameter.modifiers, accessors, self.names),
+            None if flags != 0 => ZEND_ACC_FIELD,
+            None => 0,
+        };
 
-        modifier_flags(&parameter.modifiers) | accessor_flags
+        flags | accessor_flags
     }
 
     /// The property a promoted `Set` parameter declares, with the visibility, accessors and attributes it is written
@@ -1348,7 +1354,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// a property of `parent` whose root declaration has no type has none either, down the whole chain (decision 028).
     fn property(&mut self, property: &Property, parent: Option<&[u8]>) -> u32 {
         let (accessor_flags, attribute_lists, hooks) = match property {
-            Property::Plain(field) => (0, &field.attribute_lists, NULL),
+            // Reflection tells a field from a property by its flag, spec section 6.1.
+            Property::Plain(field) => (ZEND_ACC_FIELD, &field.attribute_lists, NULL),
             // An abstract property runs as PHP's, with abstract hooks and no `readonly`, as an interface property does.
             Property::Hooked(hooked) if hooked.modifiers.contains_abstract() => {
                 let flags = accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names) & !ZEND_ACC_READONLY;
