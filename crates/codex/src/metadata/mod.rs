@@ -103,11 +103,6 @@ pub struct CodebaseMetadata {
     pub symbols: Symbols,
     /// Map from global constant FQN (`Word`) to its metadata (`ConstantMetadata`).
     pub constants: WordMap<ConstantMetadata>,
-    /// Map from the lowercase name of a PHP function the standard library wraps, decision 040, to the library methods
-    /// whose `[Replaces]` names it. Each entry is the name of the library file that declares the method, the method's
-    /// span and the method, and the entries come in the order the library declares them: by the path of their file,
-    /// then by source order. Only a file `File::is_standard_library` marks adds entries.
-    pub wrapped_functions: WordMap<Vec<(Word, Span, MethodIdentifier)>>,
     /// Map from the target of a PHP# `extern` declaration, keyed as [`ExternMetadata::target`], to every declaration
     /// of it in the order [`ExternMetadata`] sorts them. The first one declares the target, and each later one is a
     /// duplicate.
@@ -846,16 +841,25 @@ impl CodebaseMetadata {
     /// `receiver`, spec section 26, sorted: the member of that name that a class the value can be declares or
     /// inherits, a method or property, or one a docblock declares with `@method` or `@property`. `__call` and `__get`
     /// declare none. A `List`, `Map` or `Set` has the methods of `Sharp\ListMethods`, `Sharp\MapMethods` or
-    /// `Sharp\SetMethods`. A class below the type competes with no extension, which is chosen from the type the code
-    /// shows.
+    /// `Sharp\SetMethods`. A type parameter shows its bound, so it has the members its bound's classes have. A class
+    /// below the type competes with no extension, which is chosen from the type the code shows.
     #[must_use]
     pub fn get_classes_hidden_by_extension(&self, receiver: &TUnion, name: &[u8]) -> Vec<Word> {
+        /// The types a value of type `atomic` shows: a type parameter's bound's, at any depth, or `atomic` itself.
+        fn shown(atomic: &TAtomic) -> Vec<&TAtomic> {
+            match atomic {
+                TAtomic::GenericParameter(parameter) => parameter.constraint.types.iter().flat_map(shown).collect(),
+                _ => vec![atomic],
+            }
+        }
+
         let method_name = ascii_lowercase_word(name);
         let property_name = concat_word!(b"$", name);
 
         let mut classes: Vec<Word> = receiver
             .types
             .iter()
+            .flat_map(shown)
             .filter_map(|atomic| match atomic {
                 TAtomic::Object(object) => object.get_name(),
                 TAtomic::Array(TArray::List(_)) => Some(word("Sharp\\ListMethods")),
@@ -1235,7 +1239,6 @@ impl CodebaseMetadata {
         }
 
         self.symbols.extend(other.symbols);
-        self.merge_wrapped_functions(other.wrapped_functions);
         self.merge_externs(other.externs);
         self.merge_modules(other.modules);
         self.merge_extensions(other.extensions);
@@ -1324,9 +1327,6 @@ impl CodebaseMetadata {
         }
 
         self.symbols.extend_ref(&other.symbols);
-        self.merge_wrapped_functions(
-            other.wrapped_functions.iter().map(|(function, wrappers)| (*function, wrappers.clone())),
-        );
         self.merge_externs(other.externs.iter().map(|(target, declarations)| (*target, declarations.clone())));
         self.merge_modules(other.modules.iter().cloned());
         self.merge_extensions(other.extensions.iter().map(|(name, members)| (*name, members.clone())));
@@ -1356,20 +1356,6 @@ impl CodebaseMetadata {
     ) {
         for (alias, (target, span, flags)) in declarations {
             self.add_class_like_alias(alias, target, span, flags);
-        }
-    }
-
-    /// Adds another codebase's wrapping methods, keeping each function's methods in the order the library declares
-    /// them, whatever order the files merge in.
-    fn merge_wrapped_functions(
-        &mut self,
-        incoming: impl IntoIterator<Item = (Word, Vec<(Word, Span, MethodIdentifier)>)>,
-    ) {
-        for (function, wrappers) in incoming {
-            let merged = self.wrapped_functions.entry(function).or_default();
-            merged.extend(wrappers);
-            merged.sort_unstable();
-            merged.dedup();
         }
     }
 
@@ -1670,10 +1656,6 @@ impl CodebaseMetadata {
         self.patch_class_likes.retain(|_, m| !removed_files.contains(&m.span.file_id));
         self.patch_function_likes.retain(|_, m| !removed_files.contains(&m.span.file_id));
         self.patch_constants.retain(|_, m| !removed_files.contains(&m.span.file_id));
-        for wrappers in self.wrapped_functions.values_mut() {
-            wrappers.retain(|(_, span, _)| !removed_files.contains(&span.file_id));
-        }
-        self.wrapped_functions.retain(|_, wrappers| !wrappers.is_empty());
         for declarations in self.externs.values_mut() {
             declarations.retain(|declaration| !removed_files.contains(&declaration.span.file_id));
         }

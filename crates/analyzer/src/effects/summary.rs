@@ -556,10 +556,12 @@ where
             return Some(lambda);
         }
 
-        let Expression::ConstantAccess(name) = callee.unparenthesized() else {
-            return None;
+        let name = match callee.unparenthesized() {
+            Expression::ConstantAccess(name) => &name.name,
+            Expression::Identifier(name) => name,
+            _ => return None,
         };
-        let Some(Binding::Local(local)) = self.context.resolved_names.binding(&name.name) else {
+        let Some(Binding::Local(local)) = self.context.resolved_names.binding(name) else {
             return None;
         };
 
@@ -664,13 +666,20 @@ where
         for target in targets {
             match *target {
                 CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function_name), .. } => {
-                    let cause = self
+                    let name = self
                         .codebase()
                         .get_function(function_name.as_bytes())
                         .map_or(function_name, |metadata| metadata.original_name);
+                    // A function of PHP's root namespace is named as the file calls it, `global.now`, spec section 23.
+                    let cause = if name.as_bytes().contains(&b'\\') {
+                        name
+                    } else {
+                        word([b"global.", name.as_bytes()].concat())
+                    };
                     let declaration =
                         extern_of(self.codebase(), empty_word(), ascii_lowercase_word(function_name.as_bytes()));
-                    self.plain_php(declaration, span, (empty_word(), sharp_name(cause)));
+                    self.plain_php(declaration, span, (empty_word(), cause));
+                    self.callbacks(arguments);
                 }
                 CallTarget::FunctionLike {
                     callee: FunctionLikeIdentifier::Method(declaring_class, method_name),
@@ -797,6 +806,33 @@ where
         } else {
             let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
+        }
+        self.callbacks(arguments);
+    }
+
+    /// Records the function values plain PHP is given, as `global.array_map(x => …, list)` gives one, since plain PHP
+    /// may run each: a lambda runs here, a method value calls its method, and any other function value has the effects
+    /// its function type lists.
+    fn callbacks(&mut self, arguments: &'ast ArgumentList<'arena>) {
+        for argument in arguments.arguments.iter() {
+            let value = argument.value();
+            if let Some(lambda) = self.lambda(value) {
+                self.inline(lambda, |_| Roots::new());
+
+                continue;
+            }
+
+            let span = value.span();
+            if let Expression::Access(Access::Property(access)) = value.unparenthesized() {
+                self.method_value(access, span, &Roots::new());
+            }
+
+            // A value the analysis gave no type passes no function type's effects.
+            let effects = self.artifacts.get_expression_type(value).map(declared_effects).unwrap_or_default();
+            let cause = (empty_word(), self.text(span));
+            for effect in effects {
+                self.summary.effects.push((Effect::Foreign(effect), span, cause));
+            }
         }
     }
 
@@ -1094,11 +1130,17 @@ where
 }
 
 /// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)
-/// falls under: the member's, then the class's, then the same for each parent class, nearest first.
+/// falls under: the member's, then the class's, then the same for each parent class, nearest first. A function in a
+/// namespace is declared as `extern Pdf.render`, which the binder reads as a class and its member, spec section 23.
 fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) -> Option<&ExternMetadata> {
     let declared = |key: (Word, Word)| codebase.externs.get(&key).and_then(|declarations| declarations.first());
     if class.is_empty() {
-        return declared((empty_word(), member));
+        return declared((empty_word(), member)).or_else(|| {
+            let name = member.as_bytes();
+            let separator = name.iter().rposition(|byte| *byte == b'\\')?;
+
+            declared((word(&name[..separator]), word(&name[separator + 1..])))
+        });
     }
 
     let mut current = Some(ascii_lowercase_word(class.as_bytes()));
@@ -1169,11 +1211,4 @@ fn declared_effects(value_type: &TUnion) -> Vec<Word> {
     }
 
     effects
-}
-
-/// A plain PHP name as PHP# writes it: `App\now` as `App.now`.
-fn sharp_name(name: Word) -> Word {
-    let bytes: Vec<u8> = name.as_bytes().iter().map(|&byte| if byte == b'\\' { b'.' } else { byte }).collect();
-
-    word(&bytes)
 }

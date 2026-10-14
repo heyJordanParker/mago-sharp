@@ -55,6 +55,7 @@ use crate::context::scope::var_has_root;
 use crate::context::scope::var_references_dynamic;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
+use crate::expression::access::written_static_property;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_empty_literal_type;
 use crate::expression::array::get_set_literal_type;
@@ -62,8 +63,9 @@ use crate::expression::constant_access::field_storage;
 use crate::expression::find_expression_logic_issues;
 use crate::formula::get_formula;
 use crate::resolver::method::get_declared_type;
+use crate::resolver::property::get_localized_property_type;
 use crate::resolver::static_property::StaticProperty;
-use crate::statement::function_like::expect_function_type;
+use crate::statement::function_like::expect_type;
 use crate::utils::docblock::check_docblock_type_incompatibility;
 use crate::utils::docblock::get_type_from_var_docblock;
 use crate::utils::expression::array::get_array_target_type_given_index;
@@ -79,6 +81,7 @@ use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::report_int_for_float;
+use crate::utils::template::explain_blocked_substitution;
 
 mod array_assignment;
 pub(crate) mod property_assignment;
@@ -243,7 +246,7 @@ where
             None => {
                 let declared_type =
                     declared_target_type(target_expression, target_variable_id.as_ref(), context, block_context);
-                expect_function_type(context, artifacts, source_expression, declared_type.as_deref());
+                expect_type(context, artifacts, source_expression, declared_type.as_deref());
 
                 source_expression.analyze(context, block_context, artifacts)?;
             }
@@ -561,7 +564,7 @@ where
             );
         }
         Expression::Access(Access::Property(property_access)) => {
-            match StaticProperty::from_property_access(property_access, context.resolved_names) {
+            match written_static_property(context, block_context, property_access) {
                 Some(static_property) => static_property_assignment::analyze(
                     context,
                     block_context,
@@ -570,6 +573,7 @@ where
                     &source_type,
                     source_expression,
                     target_expression_id,
+                    false,
                 )?,
                 None => property_assignment::analyze(
                     context,
@@ -591,6 +595,7 @@ where
             &source_type,
             source_expression,
             target_expression_id,
+            false,
         )?,
         Expression::ArrayAccess(array_access) => {
             array_assignment::analyze(
@@ -789,7 +794,7 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
         }
     }
 
-    let mut comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
+    let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
     if let Some((local_type, local_type_span)) = block_context.local_types.get(&variable_id).cloned()
         && !union_comparator::is_contained_by(
             context.codebase,
@@ -811,24 +816,27 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
             let local_type_str = display_type(context, &local_type);
             let assigned_type_str = display_value_type(context, &assigned_type, &local_type);
 
-            context.collector.report_with_code(
+            let issue = Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{local_type_str}`."))
+                .with_annotation(
+                    Annotation::primary(value_span).with_message(format!("This value has type `{assigned_type_str}`.")),
+                )
+                .with_annotation(
+                    Annotation::secondary(local_type_span)
+                        .with_message(format!("`{name}` is declared as `{local_type_str}` here.")),
+                )
+                .with_help(format!("Assign a `{local_type_str}` value, or change the type `{name}` is declared with."));
+
+            let (code, issue) = explain_blocked_substitution(
+                context,
+                &assigned_type,
+                &local_type,
                 IssueCode::InvalidLocalAssignmentValue,
-                Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{local_type_str}`."))
-                    .with_annotation(
-                        Annotation::primary(value_span)
-                            .with_message(format!("This value has type `{assigned_type_str}`.")),
-                    )
-                    .with_annotation(
-                        Annotation::secondary(local_type_span)
-                            .with_message(format!("`{name}` is declared as `{local_type_str}` here.")),
-                    )
-                    .with_help(format!(
-                        "Assign a `{local_type_str}` value, or change the type `{name}` is declared with."
-                    )),
+                (IssueCode::InvalidLocalAssignmentValue, issue),
             );
+            context.collector.report_with_code(code, issue);
         }
 
-        // The local keeps its written type, as the engine never checks it.
+        // The local keeps its written type.
         assigned_type = local_type;
     }
 
@@ -1502,7 +1510,8 @@ fn handle_assignment_with_boolean_logic<'ctx, 'arena, A>(
     );
 }
 
-/// The type an assignment's target declares: a typed PHP# local's type, or the type of a property of `this`.
+/// The type an assignment's target declares: a typed PHP# local's type, or the type of a property of `this` as `this`
+/// reads it, with the type arguments its class's header names.
 fn declared_target_type<A>(
     target_expression: &Expression<'_>,
     target_variable_id: Option<&Word>,
@@ -1532,11 +1541,8 @@ where
         return None;
     }
 
-    let class_name = block_context.scope.get_class_like_name()?;
-    let property_type =
-        context.codebase.get_property_type(class_name.as_bytes(), php_variable_name(property.value).as_bytes())?;
-
-    Some(Rc::new(property_type.clone()))
+    let property_name = php_variable_name(property.value);
+    get_localized_property_type(context, block_context.locals.get(&Word::from("$this"))?, property_name).map(Rc::new)
 }
 
 fn is_closure_expression<'arena>(expression: &'arena Expression<'arena>) -> bool {

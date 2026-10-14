@@ -7,6 +7,7 @@ use foldhash::HashMap;
 
 use foldhash::HashSet;
 use mago_word::Word;
+use mago_word::WordSet;
 use mago_word::word;
 
 use mago_codex::metadata::CodebaseMetadata;
@@ -47,6 +48,7 @@ use mago_codex::ttype::wrap_atomic;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::Span;
+use mago_syntax::dialect::Dialect;
 
 use crate::code::IssueCode;
 use crate::context::Context;
@@ -58,11 +60,13 @@ pub struct InferenceOptions {
     pub infer_only_if_new: bool,
     pub argument_offset: Option<usize>,
     pub is_top_level: bool,
+    /// The dialect the container type is written in, the call target's.
+    pub dialect: Dialect,
 }
 
 impl Default for InferenceOptions {
     fn default() -> Self {
-        Self { infer_only_if_new: false, argument_offset: None, is_top_level: true }
+        Self { infer_only_if_new: false, argument_offset: None, is_top_level: true, dialect: Dialect::Php }
     }
 }
 
@@ -93,6 +97,50 @@ fn expand_template_constraint<'ty>(
     let mut expanded = constraint.clone();
     expand_union(codebase, &mut expanded, &TypeExpansionOptions { self_class, ..Default::default() });
     Cow::Owned(expanded)
+}
+
+/// Whether inference may bind the template `parameter_name` of `defining_entity`. PHP# infers only the templates of
+/// the call's target, which `template_result` registers, and never a type parameter of the caller, which is opaque.
+fn is_inferable<A>(
+    context: &Context<'_, '_, A>,
+    template_result: &TemplateResult,
+    parameter_name: Word,
+    defining_entity: &GenericParent,
+) -> bool
+where
+    A: Arena,
+{
+    !context.dialect.is_sharp()
+        || template_result
+            .template_types
+            .get(&parameter_name)
+            .is_some_and(|templates| templates.iter().any(|template| template.defining_entity == *defining_entity))
+}
+
+/// The key types inference compares for `container_key_type`, which `container_dialect` code writes, and
+/// `input_key_type`. PHP# keys a `Map` by a backed enum's cases, which run as their backing values, spec section 12, so a
+/// key that holds the cases meets a key that holds none as its backing type: a PHP# `Map` reaches plain PHP as its
+/// backing values, and plain PHP's backing values, passed where PHP# takes the cases, bind no type parameter to a case.
+/// Two keys that hold the cases compare as written, so a `Map<Status, int>` binds the `TKey` of `Map<TKey, int>` to
+/// `Status`. A plain PHP container's key stays as written, as upstream Mago compares it.
+fn comparable_key_types<'key, A>(
+    context: &Context<'_, '_, A>,
+    container_key_type: &'key TUnion,
+    input_key_type: &'key TUnion,
+    container_dialect: Dialect,
+) -> (Cow<'key, TUnion>, Cow<'key, TUnion>)
+where
+    A: Arena,
+{
+    let input_backing_type = get_backing_key_type(input_key_type, context.codebase, context.dialect);
+    if !container_dialect.is_sharp() {
+        return (Cow::Borrowed(container_key_type), input_backing_type);
+    }
+
+    match (get_backing_key_type(container_key_type, context.codebase, container_dialect), input_backing_type) {
+        (Cow::Owned(_), Cow::Owned(_)) => (Cow::Borrowed(container_key_type), Cow::Borrowed(input_key_type)),
+        key_types => key_types,
+    }
 }
 
 /// Whether `input_object` is the very class the container is parameterizing, without carrying
@@ -157,7 +205,8 @@ fn infer_templates_from_input_and_container_types<A>(
     let top_level = options.is_top_level;
     let options = InferenceOptions { is_top_level: false, ..options };
 
-    if input_type.is_mixed() && !container_type.is_generic_parameter() {
+    // PHP# writes `mixed` as `Any?`, a type that binds a template as any other argument's type does.
+    if input_type.is_mixed() && !container_type.is_generic_parameter() && !context.dialect.is_sharp() {
         return;
     }
 
@@ -346,12 +395,18 @@ fn infer_templates_from_input_and_container_types<A>(
                                         }
                                     }
 
-                                    // A PHP# `Map` keyed by a backed enum reaches plain PHP as its backing values.
                                     if let Some(input_key_type) = input_key_type {
-                                        infer_templates_from_input_and_container_types(
+                                        let (container_key_type, input_key_type) = comparable_key_types(
                                             context,
                                             &container_parameter.0,
-                                            &get_backing_key_type(&input_key_type, context.codebase),
+                                            &input_key_type,
+                                            options.dialect,
+                                        );
+
+                                        infer_templates_from_input_and_container_types(
+                                            context,
+                                            &container_key_type,
+                                            &input_key_type,
                                             template_result,
                                             options,
                                             violations,
@@ -563,7 +618,7 @@ fn infer_templates_from_input_and_container_types<A>(
                                     infer_templates_from_input_and_container_types(
                                         context,
                                         container_key_type,
-                                        &get_backing_key_type(input_element_type, context.codebase),
+                                        &get_backing_key_type(input_element_type, context.codebase, Dialect::Sharp),
                                         template_result,
                                         options,
                                         violations,
@@ -589,10 +644,17 @@ fn infer_templates_from_input_and_container_types<A>(
                         return;
                     };
 
-                    infer_templates_from_input_and_container_types(
+                    let (container_key_type, input_key_type) = comparable_key_types(
                         context,
                         container_iterable.get_key_type(),
-                        &get_backing_key_type(&input_params.0, context.codebase),
+                        &input_params.0,
+                        options.dialect,
+                    );
+
+                    infer_templates_from_input_and_container_types(
+                        context,
+                        &container_key_type,
+                        &input_key_type,
                         template_result,
                         options,
                         violations,
@@ -757,6 +819,15 @@ fn infer_templates_from_input_and_container_types<A>(
                         let mut has_direct_generic = false;
                         for generic_parameter in generic_parameters {
                             has_direct_generic = true;
+
+                            if !is_inferable(
+                                context,
+                                template_result,
+                                generic_parameter.parameter_name,
+                                &generic_parameter.defining_entity,
+                            ) {
+                                continue;
+                            }
 
                             let Some((template_name, _)) = container_meta.template_types.get_index(index) else {
                                 continue;
@@ -936,6 +1007,11 @@ fn infer_templates_from_input_and_container_types<A>(
             continue;
         };
 
+        if !is_inferable(context, template_result, container_generic.parameter_name, &container_generic.defining_entity)
+        {
+            continue;
+        }
+
         let template_parameter_name = &container_generic.parameter_name;
 
         let should_add_bound = !options.infer_only_if_new
@@ -1113,26 +1189,6 @@ pub fn infer_templates_for_method_call<'ctx, A>(
 ) where
     A: Arena,
 {
-    if declaring_class_like_metadata.name != method_target_context.class_like_metadata.name {
-        for (template_name, _) in &declaring_class_like_metadata.template_types {
-            let template_type = get_specialized_template_type(
-                context.codebase,
-                *template_name,
-                declaring_class_like_metadata.name,
-                method_target_context.class_like_metadata,
-                object_type.get_type_parameters(),
-            );
-
-            if let Some(template_type) = template_type {
-                template_result.add_lower_bound(
-                    *template_name,
-                    GenericParent::ClassLike(declaring_class_like_metadata.name),
-                    template_type,
-                );
-            }
-        }
-    }
-
     for (template_name, where_constraint) in &method_metadata.where_constraints {
         let Some(actual_type) = get_specialized_template_type(
             context.codebase,
@@ -1186,6 +1242,11 @@ pub fn infer_templates_for_method_call<'ctx, A>(
 /// * `argument_span`: The source code location of the argument, for error reporting.
 /// * `is_callable_argument`: A flag indicating if the argument is a callable, which
 ///   can influence inference strategy.
+/// * `target_dialect`: The dialect the call's target is declared in, which `parameter_type` is read in.
+///
+/// Returns the templates the argument falls outside the constraint of. The argument fixes them, though it may add no
+/// bound for them.
+#[allow(clippy::too_many_arguments)]
 pub fn infer_parameter_templates_from_argument<A>(
     context: &mut Context<'_, '_, A>,
     parameter_type: &TUnion,
@@ -1194,7 +1255,9 @@ pub fn infer_parameter_templates_from_argument<A>(
     argument_offset: usize,
     argument_span: Span,
     is_callable_argument: bool,
-) where
+    target_dialect: Dialect,
+) -> WordSet
+where
     A: Arena,
 {
     let mut violations = vec![];
@@ -1206,62 +1269,81 @@ pub fn infer_parameter_templates_from_argument<A>(
         InferenceOptions {
             infer_only_if_new: is_callable_argument,
             argument_offset: Some(argument_offset),
+            dialect: target_dialect,
             ..Default::default()
         },
         &mut violations,
     );
 
+    let (kind, sentence_kind, constrained, constraint_kind) = if context.dialect.is_sharp() {
+        ("type parameter", "Type parameter", "is bounded by", "bound")
+    } else {
+        ("template", "Template parameter", "is constrained with", "template constraint")
+    };
+    let mut violated_templates = WordSet::default();
     for violation in violations {
+        let template_name = violation.template_name;
+        violated_templates.insert(template_name);
         let inferred_bound = display_type(context, &violation.inferred_bound);
         let constraint = display_type(context, &violation.constraint);
+        // PHP# reports the argument once, here, so the message names the bound, as C#'s CS0311 does.
+        let message = if context.dialect.is_sharp() {
+            format!("`{inferred_bound}` does not satisfy the bound `{constraint}` of type parameter `{template_name}`.")
+        } else {
+            format!("Argument type mismatch for {kind} `{template_name}`.")
+        };
 
         context.collector.report_with_code(
             IssueCode::TemplateConstraintViolation,
-            Issue::error(format!("Argument type mismatch for template `{}`.", violation.template_name,))
+            Issue::error(message)
                 .with_annotation(Annotation::primary(argument_span).with_message(format!(
-                    "This argument has type `{inferred_bound}`, which is not compatible with the required template constraint `{constraint}`."
+                    "This argument has type `{inferred_bound}`, which is not compatible with the required {constraint_kind} `{constraint}`."
                 )))
-                .with_note(format!(
-                    "Template parameter `{}` is constrained with `{constraint}`.",
-                    violation.template_name
-                ))
-                .with_help("Ensure the argument's type satisfies the template constraint."),
+                .with_note(format!("{sentence_kind} `{template_name}` {constrained} `{constraint}`."))
+                .with_help(format!("Ensure the argument's type satisfies the {constraint_kind}.")),
         );
     }
+
+    violated_templates
 }
 
-/// Infers template types for a parameter based on its **default value**.
-///
-/// This function is used when an argument for a generic parameter is omitted in a
-/// function call. It reconciles the parameter's declared type (which contains
-/// templates) with the known type of its default value to determine what the
-/// templates should resolve to.
+/// Infers the templates no argument fixed from a type that holds no argument: a parameter's **default value**, or the
+/// **declared type** a call's result goes into. A template that already has a bound keeps it.
 ///
 /// For example, if a function `add<A, B>(A $a, B $b = 1): A|B` is called as `add(2)`,
-/// this function would be used on parameter `$b` to infer that `T` is `int`.
+/// this function would be used on parameter `$b` to infer that `B` is `int`. In PHP#,
+/// `List<Order> orders = cache.get("orders")` against `T get<T>(string key)` infers that `T` is `List<Order>`.
+///
+/// Returns the templates `input_type` falls outside the bound of. They get no bound from it.
 ///
 /// # Arguments
 ///
 /// * `context`: The analysis context.
-/// * `parameter_type`: The declared type of the parameter (the "container").
-/// * `default_type`: The type of the parameter's default value (the "input").
+/// * `container_type`: The parameter's declared type, or the call's return type, which hold the templates.
+/// * `input_type`: The type of the parameter's default value, or the declared type the result goes into.
 /// * `template_result`: The map where inferred template types are stored.
-pub fn infer_parameter_templates_from_default<A>(
+/// * `target_dialect`: The dialect the call's target is declared in, which `container_type` is read in.
+pub fn infer_unfixed_templates<A>(
     context: &Context<'_, '_, A>,
-    parameter_type: &TUnion,
-    default_type: &TUnion,
+    container_type: &TUnion,
+    input_type: &TUnion,
     template_result: &mut TemplateResult,
-) where
+    target_dialect: Dialect,
+) -> WordSet
+where
     A: Arena,
 {
+    let mut violations = Vec::new();
     infer_templates_from_input_and_container_types(
         context,
-        parameter_type,
-        default_type,
+        container_type,
+        input_type,
         template_result,
-        InferenceOptions { infer_only_if_new: true, ..Default::default() },
-        &mut Vec::new(),
+        InferenceOptions { infer_only_if_new: true, dialect: target_dialect, ..Default::default() },
+        &mut violations,
     );
+
+    violations.into_iter().map(|violation| violation.template_name).collect()
 }
 
 /// Replaces unbound `GenericParameter` types with their constraint types.

@@ -208,10 +208,10 @@ where
                     false,
                     false,
                     false,
-                    &mut ComparisonResult::with_sharp_rules(true),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 );
 
-                let mut element_result = ComparisonResult::with_sharp_rules(true);
+                let mut element_result = ComparisonResult::for_dialect(context.dialect);
                 if !union_comparator::is_contained_by(
                     context.codebase,
                     &written_element,
@@ -227,8 +227,10 @@ where
             }
         }
         if !fits {
-            let comparison_result =
-                ComparisonResult { int_for_float: !refused_otherwise, ..ComparisonResult::with_sharp_rules(true) };
+            let comparison_result = ComparisonResult {
+                int_for_float: !refused_otherwise,
+                ..ComparisonResult::for_dialect(context.dialect)
+            };
             let local = match root_array_expression.unparenthesized() {
                 Expression::ConstantAccess(access) => Some(access),
                 _ => None,
