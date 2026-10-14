@@ -733,6 +733,22 @@ fn a_by_reference_write_that_can_never_fit_the_written_type_of_a_local_is_report
     assert_eq!(issues(("src/Demo/Response.php", php), &[]), ["13:16 invalid-return-statement"]);
 }
 
+/// A local plain PHP holds by reference keeps the type the first reference parameter gives it, so a later write that
+/// may not fit that type is reported in PHP#'s words: each type as PHP# writes it, `Any?` for plain PHP's `mixed`.
+#[test]
+fn a_write_that_may_break_a_by_reference_constraint_is_reported_in_php_sharp_words() {
+    let sorter = "<?php\n\nnamespace Lib;\n\nfinal class Sorter\n{\n    /** @param array<int, string> $items */\n    public static function sort(array &$items): void\n    {\n    }\n\n    public static function keep(&$value): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Sorter;\n\nclass Report\n{\n    public static void run()\n    {\n        let names = [1: \"a\"];\n        Sorter.sort(names);\n        Sorter.keep(names);\n    }\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[("src/Lib/Sorter.php", sorter)]),
+        [
+            "11:21 reference-constraint-violation Potentially invalid assignment to referenced variable `names`. | This assignment to type `Any?` may violate a reference constraint. | Variable was passed as a by-reference argument here, constraining it to type `Map<int, string>`. | An object may still hold a reference to this variable. Changing its type can lead to a `TypeError` at runtime. | Ensure this variable's type remains compatible, or refactor to avoid holding onto the external reference.",
+            "11:21 invalid-local-assignment-value Invalid assignment to `names`: it is declared as `Map<int, string>`. | This value has type `Any?`. | `names` is declared as `Map<int, string>` here. | Assign a `Map<int, string>` value, or change the type `names` is declared with.",
+        ]
+    );
+}
+
 #[test]
 fn the_nullable_return_help_writes_the_nullable_type_as_the_file_does() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int total(int? extra)\n    {\n        return extra;\n    }\n}\n";
