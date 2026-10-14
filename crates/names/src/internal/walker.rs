@@ -1349,10 +1349,19 @@ where
         }
     }
 
+    /// `typeof` takes a type only, spec section 25, so a local in scope named in it is an error, and the name binds as
+    /// that local. It still resolves as a class name, which a `.sharp` file with an error never runs.
     fn walk_in_type_of(&mut self, type_of: &'ast TypeOf<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         let (name, imported) = self.resolve_class(context, type_of.class.value());
 
         self.resolved_names.insert_at(type_of.class.span(), name, imported);
+        if self.sharp
+            && let Some(local) = self.locals.lookup(type_of.class.value())
+        {
+            let span = type_of.class.span();
+            self.resolved_names.report_binding_error(BindingError::LocalAsType { name: span, local });
+            self.resolved_names.bind(span, Binding::Local(local));
+        }
     }
 
     fn walk_in_static_method_call(

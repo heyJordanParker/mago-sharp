@@ -84,11 +84,11 @@ pub(crate) fn shadowable_default_classes() -> impl Iterator<Item = &'static str>
 }
 
 /// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`. PHP
-/// reserves `Int`, `Float`, `Bool` and `List` as class names, so no other class-like has them. A lowercase `int` is the
-/// built-in type, so the name is compared exactly.
+/// reserves `Int`, `Float`, `Bool`, `List` and `Class` as class names, so no other class-like has them. A lowercase
+/// `int` is the built-in type, so the name is compared exactly.
 pub(crate) fn default_class(name: &[u8]) -> Option<&'static [u8]> {
     shadowable_default_classes()
-        .chain(["Sharp\\Int", "Sharp\\Float", "Sharp\\Bool", "Sharp\\List"])
+        .chain(["Sharp\\Int", "Sharp\\Float", "Sharp\\Bool", "Sharp\\List", "Sharp\\Class"])
         .find(|class| class.as_bytes()[b"Sharp\\".len()..] == *name)
         .map(str::as_bytes)
 }

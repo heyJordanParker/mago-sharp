@@ -38,6 +38,21 @@ final class List
     public static function wrap(mixed $value): array {}
 }
 
+final class Class
+{
+    /**
+     * The class of the object `$value` holds, which may be a subclass of its type. PHP# writes this instead of PHP's
+     * `$value::class`, because `typeof` takes a type only. Plain PHP receives it as the class name.
+     *
+     * @template T of object
+     *
+     * @param T $value
+     *
+     * @return class-string<T>
+     */
+    public static function of(object $value): string {}
+}
+
 /**
  * The methods a PHP# `List<T>` has. The analyzer checks a call on a list against them, and the engine runs them on
  * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which the bridge lowers from

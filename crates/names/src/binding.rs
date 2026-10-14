@@ -307,6 +307,13 @@ pub enum BindingError {
         /// The declaration still open in an enclosing block.
         earlier: Local,
     },
+    /// A local written where only a type goes, as in `typeof(order)`, spec section 25. The name binds as no class.
+    LocalAsType {
+        /// The name where it is written.
+        name: Span,
+        /// The local it names.
+        local: Local,
+    },
 }
 
 /// A local of a PHP# method: where it is declared, and how.

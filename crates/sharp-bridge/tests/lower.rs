@@ -9035,14 +9035,15 @@ fn a_file_lowers_to_the_same_bytes_from_any_workspace_root_and_names_no_path() {
 /// ```php
 /// $settings = new \Sharp\Environment();
 /// $lines = \Sharp\List::wrap($extra);
+/// $type = \Sharp\Class::of($this);
 /// return 1;
 /// ```
 #[test]
-fn environment_and_list_are_the_classes_of_the_sharp_namespace() {
+fn environment_list_and_class_are_the_classes_of_the_sharp_namespace() {
     assert_eq!(
         body_in(
             RUN,
-            "        const settings = new Environment();\n        const lines = List.wrap(extra);\n        return 1;\n",
+            "        const settings = new Environment();\n        const lines = List.wrap(extra);\n        const type = Class.of(this);\n        return 1;\n",
             &[common::ENVIRONMENT]
         ),
         indoc! {r#"
@@ -9062,6 +9063,15 @@ fn environment_and_list_are_the_classes_of_the_sharp_namespace() {
                   ARG_LIST
                     VAR
                       ZVAL "extra"
+              ASSIGN
+                VAR
+                  ZVAL "type"
+                STATIC_CALL
+                  ZVAL "Sharp\\Class"
+                  ZVAL "of"
+                  ARG_LIST
+                    VAR
+                      ZVAL "this"
               RETURN
                 ZVAL 1
         "#}

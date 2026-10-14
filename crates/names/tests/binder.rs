@@ -347,7 +347,7 @@ fn an_imported_int_is_the_imported_class() {
 
 #[test]
 fn a_bare_standard_library_name_is_the_class_in_the_sharp_namespace_wherever_a_class_is_named() {
-    const CODE: &str = "namespace App.Tenant.Store;\n\nclass Report\n{\n    public void run(Position here, Environment settings, string text)\n    {\n        Position.current();\n        Environment.current();\n        List.wrap(text);\n        new Int();\n        new Float();\n        new Bool();\n        new Position();\n        new Environment();\n        new List;\n        typeof(Position);\n        typeof(Environment);\n        typeof(List);\n        typeof(Int);\n        typeof(Bool);\n    }\n}\n";
+    const CODE: &str = "namespace App.Tenant.Store;\n\nclass Report\n{\n    public void run(Position here, Environment settings, string text)\n    {\n        Position.current();\n        Environment.current();\n        List.wrap(text);\n        Class.of(here);\n        new Int();\n        new Float();\n        new Bool();\n        new Position();\n        new Environment();\n        new List;\n        typeof(Position);\n        typeof(Environment);\n        typeof(List);\n        typeof(Int);\n        typeof(Bool);\n    }\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
@@ -357,6 +357,7 @@ fn a_bare_standard_library_name_is_the_class_in_the_sharp_namespace_wherever_a_c
         ("Position.current", "Sharp\\Position"),
         ("Environment.current", "Sharp\\Environment"),
         ("List.wrap", "Sharp\\List"),
+        ("Class.of", "Sharp\\Class"),
         ("Int()", "Sharp\\Int"),
         ("Float()", "Sharp\\Float"),
         ("Bool()", "Sharp\\Bool"),
@@ -372,6 +373,7 @@ fn a_bare_standard_library_name_is_the_class_in_the_sharp_namespace_wherever_a_c
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, 0)), class, "`{needle}`");
     }
     assert_eq!(binding(&names, CODE, "List.wrap", 0), Some(Binding::Class));
+    assert_eq!(binding(&names, CODE, "Class.of", 0), Some(Binding::Class));
 }
 
 #[test]

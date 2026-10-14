@@ -3112,6 +3112,25 @@ fn list_wrap_of_a_list_is_refused_with_the_is_form_that_decides_it() {
     );
 }
 
+/// `Class.of(value)` is the class of the object a value holds, spec section 25, so it is a class value of the value's
+/// type: it reaches the static of the class it holds, and goes where plain PHP takes a class name. It takes an object
+/// only, since a class is what it gives.
+#[test]
+fn class_of_a_value_is_a_class_value_of_its_type() {
+    let factory = "<?php\n\nnamespace Lib;\n\nfinal class Factory\n{\n    /**\n     * @template T of object\n     * @param class-string<T> $class\n     * @return T\n     */\n    public static function make(string $class): object\n    {\n        return new $class();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Factory;\n\nclass Badge\n{\n    public static string tag() => \"badge\";\n\n    public string tagOf(Badge badge)\n    {\n        const type = Class.of(badge);\n        return type.tag();\n    }\n\n    public Badge remade(Badge badge) => Factory.make(Class.of(badge));\n\n    public string named(Badge badge) => Class.of(badge);\n\n    public int wrong(Badge badge) => Class.of(badge);\n\n    public void count() { Class.of(5); }\n}\n";
+    let others = [("src/Lib/Factory.php", factory)];
+
+    assert_eq!(
+        issues(("src/Demo/Badge.sharp", sharp), &others),
+        ["19:38 invalid-return-statement", "21:36 template-constraint-violation", "21:36 invalid-argument"]
+    );
+    assert_eq!(
+        messages(("src/Demo/Badge.sharp", sharp), &others)[0],
+        "Invalid return type for method `Badge.wrong`: expected `int`, but found `Class<Badge>`."
+    );
+}
+
 /// A value from plain PHP typed `mixed` arrives as `Any?`, which could hold a list.
 #[test]
 fn list_wrap_of_a_value_of_any_type_is_refused() {

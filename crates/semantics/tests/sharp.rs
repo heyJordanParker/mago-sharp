@@ -630,6 +630,24 @@ fn using_a_local_after_its_block_closes_is_an_error() {
     assert_eq!(issues(code), ["10:16 `inner` is used after the block that declares it closes."]);
 }
 
+/// `typeof` takes a type, spec section 25, so a local in scope named in it is an error that names `Class.of`, as each
+/// kind of local declares it. A class of the same name doesn't matter: the local wins, as it does everywhere else.
+#[test]
+fn typeof_of_a_local_is_an_error_that_names_class_of() {
+    let code = leak(method(
+        "        const parameter = typeof(extra);\n        const report = 1;\n        const local = typeof(report);\n        if (extra is int count) {\n            const pattern = typeof(count);\n        }\n        const type = typeof(Report);\n        return 1;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:34 `typeof` takes a type, and `extra` is a local: write `Class.of(extra)`.",
+            "9:30 `typeof` takes a type, and `report` is a local: write `Class.of(report)`.",
+            "11:36 `typeof` takes a type, and `count` is a local: write `Class.of(count)`.",
+        ]
+    );
+}
+
 #[test]
 fn writing_a_const_local_after_its_block_closes_reports_only_the_scope_error() {
     let code =

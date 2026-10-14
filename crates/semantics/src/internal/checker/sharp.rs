@@ -3849,6 +3849,14 @@ pub fn check_binding_errors(context: &mut Context<'_, '_, '_>) {
                     .with_annotation(Annotation::secondary(earlier.declaration).with_message("First declared here."))
                     .with_help("Rename one of the two locals. A block cannot redeclare a name its enclosing blocks declare, as in C#'s rule CS0136.")
             }
+            BindingError::LocalAsType { name, local } => {
+                let name_text = BytesDisplay(context.get_code_snippet(name));
+
+                Issue::error(format!("`typeof` takes a type, and `{name_text}` is a local: write `Class.of({name_text})`."))
+                    .with_annotation(Annotation::primary(name).with_message("Written here."))
+                    .with_annotation(Annotation::secondary(local.declaration).with_message("Declared here."))
+                    .with_note("`Class.of(value)` gives the class of the object a value holds, which may be a subclass of its type.")
+            }
         };
 
         context.report(issue);
