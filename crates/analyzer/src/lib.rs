@@ -239,6 +239,9 @@ where
         #[cfg(not(target_arch = "wasm32"))]
         let statements_start = trace_enabled.then(std::time::Instant::now);
         analyze_statements(statements, &mut context, &mut block_context, &mut artifacts)?;
+        if program.dialect.is_sharp() {
+            effects::check::check_uses(&mut context, &block_context, &mut artifacts, program);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(start) = statements_start {
             telemetry::record_statements(start.elapsed());

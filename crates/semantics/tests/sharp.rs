@@ -90,29 +90,6 @@ fn extern_is_a_declaration_of_the_file_and_of_no_method_body() {
     assert_eq!(issues(code), ["13:9 This statement is not supported yet in PHP#."]);
 }
 
-const NOT_AN_EFFECT: &str = "is not an effect: `uses` takes Database, Http, Files, Console, Process, Clock, Random, Cache, Mail, Environment or Events.";
-
-/// Spec section 29: a function type's `uses` names effects, so a name that is no effect is refused, whether it names
-/// nothing or a class.
-#[test]
-fn a_function_type_uses_only_effects() {
-    let typo = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Htp>? charge = null;\n}\n";
-    let class = "namespace App.Shop;\n\nimport App.Orders.Order;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Order>? charge = null;\n}\n";
-
-    assert_eq!(issues(typo), [format!("5:32 `Htp` {NOT_AN_EFFECT}")]);
-    assert_eq!(issues(class), [format!("7:32 `Order` {NOT_AN_EFFECT}")]);
-}
-
-/// An `extern`'s `uses` takes the same effects as a function type's.
-#[test]
-fn an_extern_uses_only_effects() {
-    let typo = "namespace App.Stubs;\n\nimport Lib.Foo;\n\nextern Foo.bar uses Htp;\n";
-    let class = "namespace App.Stubs;\n\nimport App.Orders.Order;\nimport Lib.Foo;\n\nextern Foo.baz uses Order;\n";
-
-    assert_eq!(issues(typo), [format!("5:21 `Htp` {NOT_AN_EFFECT}")]);
-    assert_eq!(issues(class), [format!("6:21 `Order` {NOT_AN_EFFECT}")]);
-}
-
 /// `extern event` marks a plain PHP class as an event, spec section 15, so it names a class, with or without the
 /// effects its `uses` lists.
 #[test]
@@ -158,35 +135,6 @@ fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
         ]]
     );
-}
-
-/// Spec section 29: a standard effect's name in a `uses` is that effect, even where the file imports or declares a
-/// class under the name, as a file that calls Laravel's `Http` facade still writes `uses Http`.
-#[test]
-fn a_uses_takes_a_standard_effect_where_a_class_has_its_name() {
-    for name in mago_names::STANDARD_EFFECTS.map(mago_names::short_name) {
-        for code in [
-            format!("namespace App.Stubs;\n\nimport Lib.{name};\n\nextern {name}.now uses {name};\n"),
-            format!(
-                "namespace App.Shop;\n\nimport Lib.{name};\n\nclass Checkout\n{{\n    Function<{name}(Cart) uses {name}>? charge = null;\n}}\n"
-            ),
-            format!("namespace App.Shop;\n\nclass {name}\n{{\n    Function<int() uses {name}>? tick = null;\n}}\n"),
-        ] {
-            assert_eq!(issues(leak(code.clone())), Vec::<String>::new(), "{code}");
-        }
-    }
-}
-
-/// Every standard effect passes a `uses`, `Events` too, written bare or through an import of its class.
-#[test]
-fn a_uses_takes_every_standard_effect_bare_or_imported() {
-    let function_type = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http, Mail, Events>? charge = null;\n    Function<int() uses Database, Files, Console, Process, Clock, Random, Cache, Environment>? all = null;\n}\n";
-    let extern_ = "namespace App.Stubs;\n\nimport Lib.Foo;\n\nextern Foo.bar uses Http, Events;\n";
-    let imported = "namespace App.Stubs;\n\nimport Lib.Foo;\nimport Sharp.Http;\n\nextern Foo.bar uses Http;\n";
-
-    assert_eq!(issues(function_type), Vec::<String>::new());
-    assert_eq!(issues(extern_), Vec::<String>::new());
-    assert_eq!(issues(imported), Vec::<String>::new());
 }
 
 /// Spec section 28: a law states a fact about the values of a class or an enum, and an interface has no values.
@@ -2960,13 +2908,14 @@ fn a_static_class_cannot_extend_a_class_or_implement_an_interface() {
 
 #[test]
 fn a_static_class_takes_only_public_and_static() {
-    let code = "namespace App.Tenant;\n\nabstract static class Text\n{\n}\n\nfinal static class Slug\n{\n}\n";
+    let code = "namespace App.Tenant;\n\nabstract static class Text\n{\n}\n\nfinal static class Slug\n{\n}\n\nforeign static class Clock\n{\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "3:1 A static class takes only `public` and `static`: remove `abstract`.",
             "7:1 A static class takes only `public` and `static`: remove `final`.",
+            "11:1 A static class takes only `public` and `static`: remove `foreign`.",
         ]
     );
     assert_eq!(
@@ -2987,23 +2936,63 @@ fn an_extern_method_outside_the_sharp_namespace_is_left_to_the_analyzer() {
     }
 }
 
+/// A `foreign` class takes a native body for what plain PHP cannot reach, as `Environment` reads the command line, so
+/// a `static` one is accepted there as in a static class, whatever its access.
 #[test]
-fn an_extern_method_is_public_static_in_a_static_class_with_no_body_in_any_namespace() {
+fn an_extern_method_is_static_in_a_static_or_foreign_class_with_no_body_in_any_namespace() {
     for namespace in ["Sharp.Text", "App"] {
         let code = leak(format!(
-            "namespace {namespace};\n\npublic class Plain\n{{\n    public static extern string slug(string title);\n}}\n\npublic static class Text\n{{\n    private static extern string trim(string title);\n    public static extern string pad(string title) => title;\n    public extern string cut(string title);\n}}\n"
+            "namespace {namespace};\n\npublic class Plain\n{{\n    public static extern string slug(string title);\n}}\n\npublic static class Text\n{{\n    private static extern string trim(string title);\n    public static extern string pad(string title) => title;\n    public extern string cut(string title);\n}}\n\npublic foreign class Shell\n{{\n    private static extern List<string> lines();\n    public extern string name();\n}}\n"
         ));
 
         assert_eq!(
             issues(code),
             [
-                "5:33 An `extern` method is `public static`, in a static class, with no body.",
-                "10:34 An `extern` method is `public static`, in a static class, with no body.",
-                "11:33 An `extern` method is `public static`, in a static class, with no body.",
-                "12:26 An `extern` method is `public static`, in a static class, with no body.",
+                "5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
+                "11:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
+                "12:26 An `extern` method is `static`, in a static or `foreign` class, with no body.",
+                "18:26 An `extern` method is `static`, in a static or `foreign` class, with no body.",
             ],
             "{namespace}"
         );
+    }
+}
+
+/// Spec section 29 works a body's effects out from its code, so only a method without a body, an interface's or an
+/// abstract class's, names effects in `uses`. A method with a body names only its function parameters there, as in
+/// `charge(…) uses prepare => …`.
+#[test]
+fn a_method_with_a_body_names_only_its_function_parameters_in_uses() {
+    let refused = |name: &str| {
+        format!("A method with a body takes no effect in `uses`, and `{name}` is not one of its function parameters.")
+    };
+    for (code, expected) in [
+        (
+            "public class Gateway\n{\n    public int charge(int cents) uses Http => cents;\n}\n",
+            vec![format!("5:39 {}", refused("Http"))],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents) uses Http\n    {\n        return cents;\n    }\n}\n",
+            vec![format!("5:39 {}", refused("Http"))],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
+            vec![],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)>? prepare) uses prepare => cents;\n}\n",
+            vec![],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare, cents, Http => cents;\n}\n",
+            vec![format!("5:76 {}", refused("cents")), format!("5:83 {}", refused("Http"))],
+        ),
+        ("public interface Gateway\n{\n    int charge(int cents) uses Http;\n}\n", vec![]),
+        ("public abstract class Gateway\n{\n    public abstract int charge(int cents) uses Http;\n}\n", vec![]),
+    ] {
+        let code = leak(format!("namespace App;\n\n{code}"));
+
+        assert_eq!(issues(code), expected, "{code}");
     }
 }
 
@@ -3015,7 +3004,7 @@ fn an_extern_method_with_a_body_has_its_body_checked() {
     assert_eq!(
         issues(code),
         [
-            "5:33 An `extern` method is `public static`, in a static class, with no body.",
+            "5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
             "7:9 PHP# has no `echo`: write `printf` or `fwrite`.",
         ]
     );

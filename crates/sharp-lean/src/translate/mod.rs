@@ -369,7 +369,7 @@ impl Translator<'_, '_> {
     }
 
     /// An interface as a type Lean knows nothing about, `Interface "App.Shop.Payment"`, so a proof holds for every class
-    /// that implements it. A call of its methods is not translated, since an implementation can have effects.
+    /// that implements it. A call of its methods is not translated, since the implementation that runs is chosen at run time.
     fn interface(&mut self, interface: &Interface) {
         let full = self.checked.names().get(&interface.name);
         self.name_module(full, interface.name.span);

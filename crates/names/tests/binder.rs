@@ -664,11 +664,24 @@ fn a_file_records_each_default_class_its_short_name_no_longer_names() {
         let arena = LocalArena::new();
         let names = NameResolver::new(&arena).resolve_in(parse_file(&arena, &file), &namespace_classes);
 
-        let mut recorded: Vec<&str> = mago_names::STANDARD_EFFECTS
-            .into_iter()
-            .chain(["Sharp\\Position", "Sharp\\Replaces"])
-            .filter(|class| names.shadows_default_class(class.as_bytes()))
-            .collect();
+        let mut recorded: Vec<&str> = [
+            "Sharp\\Database",
+            "Sharp\\Http",
+            "Sharp\\Files",
+            "Sharp\\Console",
+            "Sharp\\Process",
+            "Sharp\\Clock",
+            "Sharp\\Random",
+            "Sharp\\Cache",
+            "Sharp\\Mail",
+            "Sharp\\Environment",
+            "Sharp\\Events",
+            "Sharp\\Position",
+            "Sharp\\Replaces",
+        ]
+        .into_iter()
+        .filter(|class| names.shadows_default_class(class.as_bytes()))
+        .collect();
         recorded.sort_unstable();
         assert_eq!(recorded, shadowed, "{code}");
         assert_eq!(names.namespace_classes().count(), 0, "{code}");
