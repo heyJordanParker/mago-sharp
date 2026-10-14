@@ -10474,7 +10474,7 @@ fn a_call_is_checked_by_the_class_that_declares_the_member_not_the_class_it_goes
     let through_coin = "<?php\n\nnamespace App;\n\nfinal class Check\n{\n    public function run(Coin $coin): bool\n    {\n        return Coin::op_Equality($coin, null);\n    }\n}\n";
     let shelf = (
         "src/App/Shelf.sharp",
-        "namespace App;\n\nimport Demo.Rows;\nimport Lib.Store;\n\npublic class Shelf\n{\n    public Store store => new Store();\n\n    public Rows rows => new Rows();\n\n    public Money money => new Money(5);\n\n    public Coin coin => new Coin(5);\n}\n",
+        "namespace App;\n\nimport Demo.Rows;\nimport Lib.Store;\n\npublic class Shelf\n{\n    public Store store => new Store();\n\n    public Rows rows => new Rows();\n\n    public Money money => new Money(5);\n\n    public Coin coin => new Coin(5);\n\n    law stored(Shelf shelf) => shelf.store is Store;\n\n    law rowed(Shelf shelf) => shelf.rows is Rows;\n\n    law paid(Shelf shelf) => shelf.money is Money && shelf.coin is Coin;\n}\n",
     );
 
     assert_eq!(
@@ -10500,8 +10500,8 @@ fn a_call_is_checked_by_the_class_that_declares_the_member_not_the_class_it_goes
     assert_eq!(
         effect_issues(&[shelf, store, rows, MONEY_OPERATORS, coin]),
         [
-            "src/App/Shelf.sharp:8:27 impure-getter: Getter `store` calls `Store`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
-            "src/App/Shelf.sharp:10:25 impure-getter: Getter `rows` calls `Store`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
+            "src/App/Shelf.sharp:16:32 impure-law: Law `stored` reaches `Shelf.store`, which calls `Store` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
+            "src/App/Shelf.sharp:18:31 impure-law: Law `rowed` reaches `Shelf.rows`, which calls `Store` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
         ]
     );
 }
@@ -10694,7 +10694,7 @@ fn an_extern_event_gives_its_class_the_effects_it_lists() {
     );
     let failure = (
         "app/Shop/Failure.sharp",
-        "namespace App.Shop;\n\nimport Illuminate.Queue.Events.JobFailed;\n\npublic class Failure\n{\n    public JobFailed last => new JobFailed(1);\n}\n",
+        "namespace App.Shop;\n\nimport Illuminate.Queue.Events.JobFailed;\n\npublic class Failure\n{\n    public JobFailed last => new JobFailed(1);\n\n    law failed(Failure failure) => failure.last is JobFailed;\n}\n",
     );
     let pure = (
         "app/Stubs/Queue.sharp",
@@ -10710,7 +10710,7 @@ fn an_extern_event_gives_its_class_the_effects_it_lists() {
     assert_eq!(
         effect_issues(&[failure, events, database]),
         [
-            "app/Shop/Failure.sharp:7:30 impure-getter: Getter `last` calls `JobFailed`, which has the effect `Database`. Getters must be pure."
+            "app/Shop/Failure.sharp:9:36 impure-law: Law `failed` reaches `Failure.last`, which calls `JobFailed` with the effect `Database`. Laws hold only over pure code."
         ]
     );
 }
@@ -10941,7 +10941,7 @@ fn a_listener_class_takes_services_its_namespace_modules_bind() {
 
 const LABEL: (&str, &str) = (
     "app/Shop/Label.sharp",
-    "namespace App.Shop;\n\npublic class Label\n{\n    public Label(private string name) { }\n\n    public string text => trim(this.name);\n}\n",
+    "namespace App.Shop;\n\npublic class Label\n{\n    public Label(private string name) { }\n\n    public string text => trim(this.name);\n\n    law named(Label label) => label.text != \"\";\n}\n",
 );
 
 #[test]
@@ -10951,12 +10951,14 @@ fn a_getter_calling_a_function_an_extern_declares_pure_passes() {
     assert_eq!(effect_issues(&[LABEL, stub]), Vec::<String>::new());
 }
 
+/// A getter may call anything, spec section 6, and a read of it carries what it calls, so a law reading it is held to
+/// the getter's call.
 #[test]
-fn a_getter_calling_a_function_with_no_extern_is_refused_and_names_the_missing_declaration() {
+fn a_law_reading_a_getter_that_calls_a_function_with_no_extern_is_refused_and_names_the_missing_declaration() {
     assert_eq!(
         effect_issues(&[LABEL]),
         [
-            "app/Shop/Label.sharp:7:27 impure-getter: Getter `text` calls `trim`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern trim;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Label.sharp:9:31 impure-law: Law `named` reaches `Label.text`, which calls `trim` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern trim;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
@@ -10968,13 +10970,14 @@ const MAGIC: (&str, &str) = (
 
 const SHELF: (&str, &str) = (
     "app/Shop/Shelf.sharp",
-    "namespace App.Shop;\n\nimport Lib.Bag;\nimport Lib.Codes;\n\npublic class Shelf\n{\n    public Shelf(private Bag bag) { }\n\n    public int count => this.bag.size();\n\n    public int code => Codes.next();\n}\n",
+    "namespace App.Shop;\n\nimport Lib.Bag;\nimport Lib.Codes;\n\npublic class Shelf\n{\n    public Shelf(private Bag bag) { }\n\n    public int count => this.bag.size();\n\n    public int code => Codes.next();\n\n    law counted(Shelf shelf) => shelf.count > 0;\n\n    law coded(Shelf shelf) => shelf.code > 0;\n}\n",
 );
 
 /// A method no class declares runs the class's `__call` or `__callStatic`, so its call has the effects the `extern` on
-/// that magic method declares, and an unknown effect without one, as any call of a plain PHP method does.
+/// that magic method declares, and an unknown effect without one, as any call of a plain PHP method does. A law
+/// reading a getter that makes the call has them too.
 #[test]
-fn a_getter_calling_a_method_a_magic_method_serves_has_the_effects_of_the_magic_method() {
+fn a_call_of_a_method_a_magic_method_serves_has_the_effects_of_the_magic_method() {
     let pure = (
         "app/Stubs/Magic.sharp",
         "namespace App.Stubs;\n\nimport Lib.Bag;\nimport Lib.Codes;\n\nextern Bag.__call;\nextern Codes.__callStatic;\n",
@@ -10987,8 +10990,8 @@ fn a_getter_calling_a_method_a_magic_method_serves_has_the_effects_of_the_magic_
     assert_eq!(
         effect_issues(&[SHELF, MAGIC]),
         [
-            "app/Shop/Shelf.sharp:10:25 impure-getter: Getter `count` calls `Bag.__call`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Bag.__call;` when it has no effect, or name its effects after `uses`.",
-            "app/Shop/Shelf.sharp:12:24 impure-getter: Getter `code` calls `Codes.__callStatic`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Codes.__callStatic;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Shelf.sharp:14:33 impure-law: Law `counted` reaches `Shelf.count`, which calls `Bag.__call` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Bag.__call;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Shelf.sharp:16:31 impure-law: Law `coded` reaches `Shelf.code`, which calls `Codes.__callStatic` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Codes.__callStatic;` when it has no effect, or name its effects after `uses`.",
         ]
     );
     assert_eq!(issues(pure, &[MAGIC]), Vec::<String>::new());
@@ -10996,7 +10999,7 @@ fn a_getter_calling_a_method_a_magic_method_serves_has_the_effects_of_the_magic_
     assert_eq!(
         effect_issues(&[SHELF, MAGIC, timed]),
         [
-            "app/Shop/Shelf.sharp:10:25 impure-getter: Getter `count` calls `Bag.__call`, which has the effect `Clock`. Getters must be pure."
+            "app/Shop/Shelf.sharp:14:33 impure-law: Law `counted` reaches `Shelf.count`, which calls `Bag.__call` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
 }
@@ -11019,21 +11022,22 @@ const FETCH: (&str, &str) = ("src/fetch.php", "<?php\n\nfunction fetch(int $id):
 const FETCH_STUB: (&str, &str) = ("app/Stubs/Fetch.sharp", "namespace App.Stubs;\n\nextern fetch uses Http;\n");
 
 /// Spec section 29: a call through a function value has the effects its function type lists, whether the value is a
-/// field, a parameter or a local, so a getter calling one that uses `Database` is refused and names `Database`.
+/// field, a parameter or a local. A getter may call one that uses `Database`, spec section 6, and a law reading the
+/// getter is refused naming `Database`.
 #[test]
-fn a_getter_calling_a_function_value_with_an_effect_is_refused_naming_the_effect() {
+fn a_law_reading_a_getter_that_calls_a_function_value_with_an_effect_is_refused_naming_the_effect() {
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Function<int(int) uses Database> rate) { }\n\n    public int price => this.rate(2);\n\n    public int total => this.apply(this.rate);\n\n    public int stored\n    {\n        get\n        {\n            Function<int(int) uses Database> lookup = this.rate;\n            return lookup(3);\n        }\n    }\n\n    public int apply(Function<int(int) uses Database> step) => step(1);\n}\n",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Function<int(int) uses Database> rate) { }\n\n    public int price => this.rate(2);\n\n    public int total => this.apply(this.rate);\n\n    public int stored\n    {\n        get\n        {\n            Function<int(int) uses Database> lookup = this.rate;\n            return lookup(3);\n        }\n    }\n\n    public int apply(Function<int(int) uses Database> step) => step(1);\n\n    law priced(Pricing pricing) => pricing.price > 0;\n\n    law totaled(Pricing pricing) => pricing.total > 0;\n\n    law kept(Pricing pricing) => pricing.stored > 0;\n}\n",
     );
 
     assert_eq!(issues(pricing, &[]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing]),
         [
-            "app/Shop/Pricing.sharp:7:25 impure-getter: Getter `price` calls `Pricing.rate`, which has the effect `Database`. Getters must be pure.",
-            "app/Shop/Pricing.sharp:9:25 impure-getter: Getter `total` reaches `Pricing.apply`, which calls `step` with the effect `Database`. Getters must be pure.",
-            "app/Shop/Pricing.sharp:16:20 impure-getter: Getter `stored` calls `lookup`, which has the effect `Database`. Getters must be pure.",
+            "app/Shop/Pricing.sharp:22:36 impure-law: Law `priced` reaches `Pricing.price`, which calls `Pricing.rate` with the effect `Database`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:24:37 impure-law: Law `totaled` reaches `Pricing.apply`, which calls `step` with the effect `Database`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:26:34 impure-law: Law `kept` reaches `Pricing.stored`, which calls `lookup` with the effect `Database`. Laws hold only over pure code.",
         ]
     );
 }
@@ -11185,9 +11189,6 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect(
             effect_issues(&files),
             [
                 format!(
-                    "app/Shop/Checkout.sharp:18:24 impure-getter: Getter `size` calls `Client.get`, which has the effect `{name}`. Getters must be pure."
-                ),
-                format!(
                     "app/Shop/Checkout.sharp:24:36 impure-law: Law `positive` calls `Client.get`, which has the effect `{name}`. Laws hold only over pure code."
                 ),
                 format!(
@@ -11250,7 +11251,7 @@ fn a_plain_php_method_value_read_through_a_subclass_is_held_to_the_subclass_exte
     );
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed, private QuietChild quiet) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get) + Pricing.apply((this.feed.get));\n\n    public int viaLocal()\n    {\n        let step = this.feed.get;\n        return Pricing.apply(step);\n    }\n\n    public int price => this.feed.get(1);\n\n    public int stepped\n    {\n        get\n        {\n            let step = this.feed.get;\n            return step(1);\n        }\n    }\n\n    public int calm() => Pricing.apply(this.quiet.get) + Pricing.apply((this.quiet.get));\n\n    public int calmViaLocal()\n    {\n        let step = this.quiet.get;\n        return Pricing.apply(step);\n    }\n\n    public int quietly\n    {\n        get\n        {\n            let step = this.quiet.get;\n            return step(1);\n        }\n    }\n}\n",
+        "namespace App.Shop;\n\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed, private QuietChild quiet) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get) + Pricing.apply((this.feed.get));\n\n    public int viaLocal()\n    {\n        let step = this.feed.get;\n        return Pricing.apply(step);\n    }\n\n    public int price => this.feed.get(1);\n\n    public int stepped\n    {\n        get\n        {\n            let step = this.feed.get;\n            return step(1);\n        }\n    }\n\n    public int calm() => Pricing.apply(this.quiet.get) + Pricing.apply((this.quiet.get));\n\n    public int calmViaLocal()\n    {\n        let step = this.quiet.get;\n        return Pricing.apply(step);\n    }\n\n    public int quietly\n    {\n        get\n        {\n            let step = this.quiet.get;\n            return step(1);\n        }\n    }\n\n    law priced(Pricing pricing) => pricing.price > 0;\n\n    law stepping(Pricing pricing) => pricing.stepped > 0;\n\n    law quiets(Pricing pricing) => pricing.quietly > 0;\n}\n",
     );
 
     assert_eq!(issues(pricing, &[feeds, stub]), Vec::<String>::new());
@@ -11258,8 +11259,8 @@ fn a_plain_php_method_value_read_through_a_subclass_is_held_to_the_subclass_exte
     assert_eq!(
         effect_issues(&[pricing, feeds, stub]),
         [
-            "app/Shop/Pricing.sharp:20:25 impure-getter: Getter `price` calls `RemoteFeed.get`, which has the effect `Http`. Getters must be pure.".to_owned(),
-            "app/Shop/Pricing.sharp:27:20 impure-getter: Getter `stepped` calls `RemoteFeed.get`, which has the effect `Http`. Getters must be pure.".to_owned(),
+            "app/Shop/Pricing.sharp:48:36 impure-law: Law `priced` reaches `Pricing.price`, which calls `RemoteFeed.get` with the effect `Http`. Laws hold only over pure code.".to_owned(),
+            "app/Shop/Pricing.sharp:50:38 impure-law: Law `stepping` reaches `Pricing.stepped`, which calls `RemoteFeed.get` with the effect `Http`. Laws hold only over pure code.".to_owned(),
             format!("app/Shop/Pricing.sharp:12:39 {message}"),
             format!("app/Shop/Pricing.sharp:12:70 {message}"),
             format!("app/Shop/Pricing.sharp:17:30 {message}"),
@@ -11348,19 +11349,19 @@ const HOLDER: (&str, &str) = (
 
 /// A plain PHP property holding a closure or a callable declares no effect, and an `extern` on its class declares the
 /// class's own members, not the code the property holds, so calling it always has an unknown effect. An object with
-/// `__invoke` has the effects of its `__invoke`.
+/// `__invoke` has the effects of its `__invoke`. A law reading a getter that makes such a call has them too.
 #[test]
-fn a_getter_calling_a_plain_php_property_holding_a_function_has_an_unknown_effect() {
+fn a_call_of_a_plain_php_property_holding_a_function_has_an_unknown_effect() {
     let holder = HOLDER;
     let till = (
         "app/Shop/Till.sharp",
-        "namespace App.Shop;\n\nimport Lib.Holder;\n\npublic class Till\n{\n    public Till(private Holder holder) { }\n\n    public int closed => this.holder.closure(2);\n\n    public int called => this.holder.callback(2);\n\n    public int formatted => this.holder.format(2);\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Holder;\n\npublic class Till\n{\n    public Till(private Holder holder) { }\n\n    public int closed => this.holder.closure(2);\n\n    public int called => this.holder.callback(2);\n\n    public int formatted => this.holder.format(2);\n\n    law closes(Till till) => till.closed > 0;\n\n    law calls(Till till) => till.called > 0;\n\n    law formats(Till till) => till.formatted > 0;\n}\n",
     );
     let class_extern = ("app/Stubs/Holder.sharp", "namespace App.Stubs;\n\nimport Lib.Holder;\n\nextern Holder;\n");
     let refused = [
-        "app/Shop/Till.sharp:9:26 impure-getter: Getter `closed` calls `Holder.closure`, which has no `extern` declaration. Getters must be pure. Help: Property `Holder.closure` holds plain PHP code, which no `extern` can declare. Call it outside the getter, or through a method of `Holder` that an `extern` declares.",
-        "app/Shop/Till.sharp:11:26 impure-getter: Getter `called` calls `Holder.callback`, which has no `extern` declaration. Getters must be pure. Help: Property `Holder.callback` holds plain PHP code, which no `extern` can declare. Call it outside the getter, or through a method of `Holder` that an `extern` declares.",
-        "app/Shop/Till.sharp:13:29 impure-getter: Getter `formatted` calls `Formatter.__invoke`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Formatter.__invoke;` when it has no effect, or name its effects after `uses`. Add `import Lib.Formatter;` to the file.",
+        "app/Shop/Till.sharp:15:30 impure-law: Law `closes` reaches `Till.closed`, which calls `Holder.closure` with no `extern` declaration. Laws hold only over pure code. Help: Property `Holder.closure` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Holder` that an `extern` declares.",
+        "app/Shop/Till.sharp:17:29 impure-law: Law `calls` reaches `Till.called`, which calls `Holder.callback` with no `extern` declaration. Laws hold only over pure code. Help: Property `Holder.callback` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Holder` that an `extern` declares.",
+        "app/Shop/Till.sharp:19:31 impure-law: Law `formats` reaches `Till.formatted`, which calls `Formatter.__invoke` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Formatter.__invoke;` when it has no effect, or name its effects after `uses`. Add `import Lib.Formatter;` to the file.",
     ];
 
     assert_eq!(effect_issues(&[till, holder]), refused);
@@ -11383,33 +11384,85 @@ fn a_law_calling_a_plain_php_property_holding_a_closure_has_an_unknown_effect() 
     );
 }
 
+/// Spec section 6: a getter may run anything, as a method does, so one reaching a method in another file that calls an
+/// `extern` with the effect `Clock` compiles. A read of it carries `Clock`, so a law reading it, which must be pure, is
+/// refused naming the call.
 #[test]
-fn a_getter_reaching_a_method_that_calls_an_extern_with_an_effect_in_another_file_is_refused() {
+fn a_getter_with_an_effect_compiles_and_a_law_reading_it_is_refused() {
     let order =
         ("app/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order\n{\n    public int price() => now();\n}\n");
     let cart = (
         "app/Shop/Cart.sharp",
         "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n}\n",
     );
+    let checked = (
+        "app/Shop/Cart.sharp",
+        "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n\n    law totaled(Cart cart) => cart.total > 0;\n}\n",
+    );
 
+    assert_eq!(effect_issues(&[cart, order, CLOCK_STUB, NOW]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[cart, order, CLOCK_STUB, NOW]),
+        effect_issues(&[checked, order, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Cart.sharp:7:25 impure-getter: Getter `total` reaches `Order.price`, which calls `now` with the effect `Clock`. Getters must be pure."
+            "app/Shop/Cart.sharp:9:31 impure-law: Law `totaled` reaches `Order.price`, which calls `now` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
 }
 
+/// Spec section 6.5: a `lazy` body may have any effect, so one calling a method with the effect `Database` compiles. A
+/// read of it carries `Database`, so a law reading it is refused. The value the property keeps is the language's write,
+/// so it is no write of `this`, but a `lazy` body that writes `this` itself is refused as any getter is.
 #[test]
-fn a_getter_writing_a_field_of_this_is_refused() {
+fn a_lazy_body_with_an_effect_compiles_and_a_read_of_it_has_the_effect() {
+    let rows = (
+        "src/Lib/Rows.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Rows\n{\n    public function find(int $id): int\n    {\n        return $id;\n    }\n}\n",
+    );
+    let stub = ("app/Stubs/Rows.sharp", "namespace App.Stubs;\n\nimport Lib.Rows;\n\nextern Rows uses Database;\n");
+    let plan = (
+        "app/Shop/Plan.sharp",
+        "namespace App.Shop;\n\nimport Lib.Rows;\n\npublic class Plan\n{\n    public Plan(private Rows rows) { }\n\n    public lazy int tier => this.rows.find(1);\n}\n",
+    );
+    let checked = (
+        "app/Shop/Plan.sharp",
+        "namespace App.Shop;\n\nimport Lib.Rows;\n\npublic class Plan\n{\n    public Plan(private Rows rows) { }\n\n    public lazy int tier => this.rows.find(1);\n\n    law tiered(Plan plan) => plan.tier > 0;\n}\n",
+    );
+    let counting = (
+        "app/Shop/Plan.sharp",
+        "namespace App.Shop;\n\npublic class Plan\n{\n    private int reads = 0;\n\n    public lazy int tier => this.count();\n\n    public int count()\n    {\n        this.reads = this.reads + 1;\n        return this.reads;\n    }\n}\n",
+    );
+
+    assert_eq!(issues(plan, &[rows, stub]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[plan, rows, stub]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[checked, rows, stub]),
+        [
+            "app/Shop/Plan.sharp:11:30 impure-law: Law `tiered` reaches `Plan.tier`, which calls `Rows.find` with the effect `Database`. Laws hold only over pure code."
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[counting]),
+        [
+            "app/Shop/Plan.sharp:7:29 getter-writes-this: Getter `tier` reaches `Plan.count`, which changes `this.reads`. A getter never writes `this`. Help: Write the change in a method, and call it before the read."
+        ]
+    );
+}
+
+/// Spec section 6: a getter never writes `this`, as a method marked `readonly` does not, so a getter that writes a
+/// field of `this`, or calls a method of `this` that writes one, is refused naming the write.
+#[test]
+fn a_getter_writing_this_or_calling_a_method_that_writes_it_is_refused() {
     let counter = (
         "app/Shop/Counter.sharp",
-        "namespace App.Shop;\n\npublic class Counter\n{\n    private int count = 0;\n\n    public int next { get { this.count = this.count + 1; return this.count; } }\n}\n",
+        "namespace App.Shop;\n\npublic class Counter\n{\n    private int count = 0;\n\n    public int next { get { this.count = this.count + 1; return this.count; } }\n\n    public int bumped => this.bump();\n\n    public int bump()\n    {\n        this.count = this.count + 1;\n        return this.count;\n    }\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[counter]),
-        ["app/Shop/Counter.sharp:7:29 impure-getter: Getter `next` changes `this.count`. Getters must be pure."]
+        [
+            "app/Shop/Counter.sharp:7:29 getter-writes-this: Getter `next` changes `this.count`. A getter never writes `this`. Help: Write the change in a method, and call it before the read.",
+            "app/Shop/Counter.sharp:9:26 getter-writes-this: Getter `bumped` reaches `Counter.bump`, which changes `this.count`. A getter never writes `this`. Help: Write the change in a method, and call it before the read.",
+        ]
     );
 }
 
@@ -11437,40 +11490,41 @@ fn a_getter_building_and_changing_a_new_object_passes() {
 /// `: super(…)` runs in the constructor, so `new` reaches the effects of its arguments and of the base class's
 /// constructor, as it reaches the constructor body's.
 #[test]
-fn a_getter_creating_an_object_whose_super_call_has_an_effect_is_refused() {
+fn creating_an_object_whose_super_call_has_an_effect_has_that_effect() {
     let stamps = (
         "app/Shop/Stamp.sharp",
-        "namespace App.Shop;\n\npublic class Stamp\n{\n    public Stamp(public int at { get; }) { }\n}\n\npublic class Late : Stamp\n{\n    public Late() : super(now()) { }\n}\n\npublic class Timed\n{\n    public Timed() { now(); }\n}\n\npublic class Child : Timed\n{\n    public Child() : super() { }\n}\n\npublic class Card\n{\n    public int late => new Late().at;\n\n    public bool child => new Child() != null;\n}\n",
+        "namespace App.Shop;\n\npublic class Stamp\n{\n    public Stamp(public int at { get; }) { }\n}\n\npublic class Late : Stamp\n{\n    public Late() : super(now()) { }\n}\n\npublic class Timed\n{\n    public Timed() { now(); }\n}\n\npublic class Child : Timed\n{\n    public Child() : super() { }\n}\n\npublic class Card\n{\n    public int late => new Late().at;\n\n    public bool child => new Child() != null;\n\n    law dated(Card card) => card.late > 0;\n\n    law born(Card card) => card.child;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[stamps, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Stamp.sharp:25:24 impure-getter: Getter `late` reaches `Late.Late`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Stamp.sharp:27:26 impure-getter: Getter `child` reaches `Timed.Timed`, which calls `now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Stamp.sharp:29:29 impure-law: Law `dated` reaches `Late.Late`, which calls `now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Stamp.sharp:31:28 impure-law: Law `born` reaches `Timed.Timed`, which calls `now` with the effect `Clock`. Laws hold only over pure code.",
         ]
     );
 }
 
 /// `new Stamp.now()` runs the named constructor's body, so a getter reaches its effects, and those of its `: this(…)`.
 #[test]
-fn a_getter_creating_an_object_whose_named_constructor_has_an_effect_is_refused() {
+fn creating_an_object_whose_named_constructor_has_an_effect_has_that_effect() {
     let stamps = (
         "app/Shop/Stamp.sharp",
-        "namespace App.Shop;\n\npublic class Stamp\n{\n    public Stamp(public int at { get; }) { }\n\n    public Stamp.zero() : this(0) { }\n    public Stamp.current() : this(now()) { }\n    public Stamp.logged() : this(0) { now(); }\n}\n\npublic class Card\n{\n    public int zero => new Stamp.zero().at;\n\n    public int current => new Stamp.current().at;\n\n    public int logged => new Stamp.logged().at;\n}\n",
+        "namespace App.Shop;\n\npublic class Stamp\n{\n    public Stamp(public int at { get; }) { }\n\n    public Stamp.zero() : this(0) { }\n    public Stamp.current() : this(now()) { }\n    public Stamp.logged() : this(0) { now(); }\n}\n\npublic class Card\n{\n    public int zero => new Stamp.zero().at;\n\n    public int current => new Stamp.current().at;\n\n    public int logged => new Stamp.logged().at;\n\n    law zeroed(Card card) => card.zero == 0;\n\n    law dated(Card card) => card.current > 0;\n\n    law noted(Card card) => card.logged == 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[stamps, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Stamp.sharp:16:27 impure-getter: Getter `current` reaches `Stamp.current`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Stamp.sharp:18:26 impure-getter: Getter `logged` reaches `Stamp.logged`, which calls `now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Stamp.sharp:22:29 impure-law: Law `dated` reaches `Stamp.current`, which calls `now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Stamp.sharp:24:29 impure-law: Law `noted` reaches `Stamp.logged`, which calls `now` with the effect `Clock`. Laws hold only over pure code.",
         ]
     );
 }
 
 /// A write runs the property's `set` or `init` body with the written value as `value`, so a body that changes `value`
-/// changes the object the caller wrote.
+/// changes the object the caller wrote. Here that object is a field of the getter's `this`, which a getter never
+/// writes.
 #[test]
 fn a_getter_whose_new_object_changes_the_value_its_init_accessor_is_given_is_refused() {
     let builder = (
@@ -11485,58 +11539,58 @@ fn a_getter_whose_new_object_changes_the_value_its_init_accessor_is_given_is_ref
     assert_eq!(
         effect_issues(&[page, builder]),
         [
-            "app/Shop/Page.sharp:17:26 impure-getter: Getter `boxed` reaches `Builder.add`, which changes `this.text`. Getters must be pure."
+            "app/Shop/Page.sharp:17:26 getter-writes-this: Getter `boxed` reaches `Builder.add`, which changes `this.text`. A getter never writes `this`. Help: Write the change in a method, and call it before the read."
         ]
     );
 }
 
 #[test]
-fn a_getter_calling_a_virtual_method_whose_override_has_an_effect_is_refused() {
+fn a_call_of_a_virtual_method_has_the_effects_of_its_overrides() {
     let rates = (
         "app/Shop/Rate.sharp",
         "namespace App.Shop;\n\npublic class Rate\n{\n    public virtual int value() => 1;\n}\n\npublic class LiveRate : Rate\n{\n    public override int value() => now();\n}\n",
     );
     let quote = (
         "app/Shop/Quote.sharp",
-        "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rate rate) { }\n\n    public int amount => this.rate.value();\n}\n",
+        "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rate rate) { }\n\n    public int amount => this.rate.value();\n\n    law priced(Quote quote) => quote.amount > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[quote, rates, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Quote.sharp:7:26 impure-getter: Getter `amount` reaches `LiveRate.value`, which calls `now` with the effect `Clock`. Getters must be pure."
+            "app/Shop/Quote.sharp:9:32 impure-law: Law `priced` reaches `LiveRate.value`, which calls `now` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
 }
 
 /// A collection method has the effects of the lambda passed to it, as `uses f` will declare, and the lambda is part of
-/// the getter, so the error points into it.
+/// the law, so the error points into it.
 #[test]
-fn a_getter_whose_list_map_lambda_calls_an_undeclared_function_is_refused() {
+fn a_law_whose_list_map_lambda_calls_an_undeclared_function_is_refused() {
     let names = (
         "app/Shop/Names.sharp",
-        "namespace App.Shop;\n\npublic class Names\n{\n    public Names(private List<string> all) { }\n\n    public List<string> loud => this.all.map(name => strtoupper(name));\n}\n",
+        "namespace App.Shop;\n\npublic class Names\n{\n    law loud(List<string> all) => all.map(name => strtoupper(name)).count() == all.count();\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[names]),
         [
-            "app/Shop/Names.sharp:7:54 impure-getter: Getter `loud` calls `strtoupper`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern strtoupper;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Names.sharp:5:51 impure-law: Law `loud` calls `strtoupper`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern strtoupper;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
 
 #[test]
-fn a_getter_reading_the_environment_is_refused_with_the_effect_environment() {
+fn reading_the_environment_has_the_effect_environment() {
     let deploy = (
         "app/Ops/Deploy.sharp",
-        "namespace App.Ops;\n\npublic class Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string region => this.environment.variable(\"AWS_REGION\") ?? \"us-east-1\";\n}\n",
+        "namespace App.Ops;\n\npublic class Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string region => this.environment.variable(\"AWS_REGION\") ?? \"us-east-1\";\n\n    law regional(Deploy deploy) => deploy.region != \"\";\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[deploy]),
         [
-            "app/Ops/Deploy.sharp:7:29 impure-getter: Getter `region` calls `Environment.variable`, which has the effect `Environment`. Getters must be pure."
+            "app/Ops/Deploy.sharp:9:36 impure-law: Law `regional` reaches `Deploy.region`, which calls `Environment.variable` with the effect `Environment`. Laws hold only over pure code."
         ]
     );
 }
@@ -11547,14 +11601,14 @@ fn a_getter_reading_the_environment_is_refused_with_the_effect_environment() {
 fn a_recursive_pair_of_methods_solves_without_looping() {
     let tree = (
         "app/Shop/Tree.sharp",
-        "namespace App.Shop;\n\npublic class Tree\n{\n    public int even(int n) => n == 0 ? 0 : this.odd(n - 1);\n\n    public int odd(int n) => n == 0 ? now() : this.even(n - 1);\n\n    public int depth => this.even(4);\n}\n",
+        "namespace App.Shop;\n\npublic class Tree\n{\n    public int even(int n) => n == 0 ? 0 : this.odd(n - 1);\n\n    public int odd(int n) => n == 0 ? now() : this.even(n - 1);\n\n    public int depth => this.even(4);\n\n    law deep(Tree tree) => tree.depth >= 0;\n}\n",
     );
     let files = [tree, CLOCK_STUB, NOW];
 
     assert_eq!(
         effect_issues(&files),
         [
-            "app/Shop/Tree.sharp:9:25 impure-getter: Getter `depth` reaches `Tree.odd`, which calls `now` with the effect `Clock`. Getters must be pure."
+            "app/Shop/Tree.sharp:11:28 impure-law: Law `deep` reaches `Tree.odd`, which calls `now` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
     let (codebase, summaries) = summarized(&files);
@@ -11569,24 +11623,24 @@ fn a_recursive_pair_of_methods_solves_without_looping() {
 /// An operator on an instance runs the operator its class declares (spec section 19), so a getter that applies one
 /// reaches that operator's body, as a getter that calls a method reaches the method's.
 #[test]
-fn a_getter_applying_an_operator_whose_body_has_an_effect_is_refused() {
+fn applying_an_operator_has_the_effects_of_its_body() {
     let money = (
         "app/Shop/Money.sharp",
         "namespace App.Shop;\n\npublic class Money\n{\n    public Money(public int cents) { }\n\n    public int hash() => this.cents;\n\n    public static Money operator +(Money a, Money b) => new Money(a.cents + b.cents + now());\n\n    public static Money operator -(Money a) => new Money(now() - a.cents);\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents + now();\n\n    public static int operator <=>(Money a, Money b) => a.cents - b.cents + now();\n}\n",
     );
     let cart = (
         "app/Shop/Cart.sharp",
-        "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Money price, private Money tax) { }\n\n    public Money total => this.price + this.tax;\n\n    public Money refund => -this.price;\n\n    public bool even => this.price == this.tax;\n\n    public bool cheaper => this.price < this.tax;\n\n    public Money doubled\n    {\n        get\n        {\n            let sum = this.price;\n            sum += this.price;\n            return sum;\n        }\n    }\n}\n",
+        "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Money price, private Money tax) { }\n\n    public Money total => this.price + this.tax;\n\n    public Money refund => -this.price;\n\n    public bool even => this.price == this.tax;\n\n    public bool cheaper => this.price < this.tax;\n\n    public Money doubled\n    {\n        get\n        {\n            let sum = this.price;\n            sum += this.price;\n            return sum;\n        }\n    }\n\n    law totals(Cart cart) => cart.total.cents > 0;\n\n    law refunds(Cart cart) => cart.refund.cents > 0;\n\n    law evens(Cart cart) => cart.even;\n\n    law cheapens(Cart cart) => cart.cheaper;\n\n    law doubles(Cart cart) => cart.doubled.cents > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[cart, money, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Cart.sharp:7:27 impure-getter: Getter `total` reaches `Money.operator +`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:9:28 impure-getter: Getter `refund` reaches `Money.operator -`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:11:25 impure-getter: Getter `even` reaches `Money.operator ==`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:13:28 impure-getter: Getter `cheaper` reaches `Money.operator <=>`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:20:13 impure-getter: Getter `doubled` reaches `Money.operator +`, which calls `now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Cart.sharp:25:30 impure-law: Law `totals` reaches `Money.operator +`, which calls `now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Cart.sharp:27:31 impure-law: Law `refunds` reaches `Money.operator -`, which calls `now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Cart.sharp:29:29 impure-law: Law `evens` reaches `Money.operator ==`, which calls `now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Cart.sharp:31:32 impure-law: Law `cheapens` reaches `Money.operator <=>`, which calls `now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Cart.sharp:33:31 impure-law: Law `doubles` reaches `Money.operator +`, which calls `now` with the effect `Clock`. Laws hold only over pure code.",
         ]
     );
 }
@@ -11705,7 +11759,7 @@ const VENDOR_CLOCK: (&str, &str) = (
     "<?php\n\nnamespace Vendor;\n\nfinal class Clock\n{\n    /** @var \\Closure(int): int */\n    public \\Closure $tick;\n\n    public function now(): int\n    {\n        return time();\n    }\n}\n",
 );
 
-/// A PHP# class that hands out a `Vendor\Clock`, so a getter in its namespace reaches the clock with no import.
+/// A PHP# class that hands out a `Vendor\Clock`, so code in its namespace reaches the clock with no import.
 const CLOCK_SOURCE: (&str, &str) = (
     "app/Shop/Source.sharp",
     "namespace App.Shop;\n\nimport Vendor.Clock;\n\npublic class Source\n{\n    public Source(private Clock time) { }\n\n    public Clock clock() => this.time;\n}\n",
@@ -11714,55 +11768,55 @@ const CLOCK_SOURCE: (&str, &str) = (
 /// An effects message names a class as every other message does: by its full name when another class shares its short
 /// name.
 #[test]
-fn a_getter_calling_a_method_of_a_class_that_shares_its_short_name_names_the_class_in_full() {
+fn a_call_of_a_method_of_a_class_that_shares_its_short_name_names_the_class_in_full() {
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\npublic class Timer\n{\n    public Timer(private Source source) { }\n\n    public int started => this.source.clock().now();\n}\n",
+        "namespace App.Shop;\n\npublic class Timer\n{\n    public Timer(private Source source) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:7:27 impure-getter: Getter `started` calls `Vendor.Clock.now`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Clock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
+            "app/Shop/Timer.sharp:9:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
 
 /// The help for a plain PHP property names its class by the same rule as the message.
 #[test]
-fn a_getter_calling_a_plain_php_property_of_a_class_that_shares_its_short_name_names_the_class_in_full() {
+fn a_call_of_a_plain_php_property_of_a_class_that_shares_its_short_name_names_the_class_in_full() {
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\npublic class Timer\n{\n    public Timer(private Source source) { }\n\n    public int ticked => this.source.clock().tick(2);\n}\n",
+        "namespace App.Shop;\n\npublic class Timer\n{\n    public Timer(private Source source) { }\n\n    public int ticked => this.source.clock().tick(2);\n\n    law begins(Timer timer) => timer.ticked > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:7:26 impure-getter: Getter `ticked` calls `Vendor.Clock.tick`, which has no `extern` declaration. Getters must be pure. Help: Property `Vendor.Clock.tick` holds plain PHP code, which no `extern` can declare. Call it outside the getter, or through a method of `Vendor.Clock` that an `extern` declares."
+            "app/Shop/Timer.sharp:9:32 impure-law: Law `begins` reaches `Timer.ticked`, which calls `Vendor.Clock.tick` with no `extern` declaration. Laws hold only over pure code. Help: Property `Vendor.Clock.tick` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Vendor.Clock` that an `extern` declares."
         ]
     );
 }
 
 /// An effects message names a class the file imports by the name its import gives it.
 #[test]
-fn a_getter_calling_a_method_of_a_class_imported_under_another_name_names_the_class_by_that_name() {
+fn a_call_of_a_method_of_a_class_imported_under_another_name_names_the_class_by_that_name() {
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\nimport Vendor.Clock as VendorClock;\n\npublic class Timer\n{\n    public Timer(private VendorClock clock) { }\n\n    public int started => this.clock.now();\n}\n",
+        "namespace App.Shop;\n\nimport Vendor.Clock as VendorClock;\n\npublic class Timer\n{\n    public Timer(private VendorClock clock) { }\n\n    public int started => this.clock.now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:27 impure-getter: Getter `started` calls `VendorClock.now`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `VendorClock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
 
-/// The PHP# method a getter reaches is named by the same rule as a plain PHP class.
+/// The PHP# method a law reaches is named by the same rule as a plain PHP class.
 #[test]
-fn a_getter_reaching_a_method_of_a_php_sharp_class_that_shares_its_short_name_names_the_class_in_full() {
+fn reaching_a_method_of_a_php_sharp_class_that_shares_its_short_name_names_the_class_in_full() {
     let shop_order = ("app/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order\n{\n}\n");
     let billing_order = (
         "app/Billing/Order.sharp",
@@ -11770,34 +11824,34 @@ fn a_getter_reaching_a_method_of_a_php_sharp_class_that_shares_its_short_name_na
     );
     let cart = (
         "app/Billing/Cart.sharp",
-        "namespace App.Billing;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n}\n",
+        "namespace App.Billing;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n\n    law totals(Cart cart) => cart.total > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[cart, billing_order, shop_order, CLOCK_STUB, NOW]),
         [
-            "app/Billing/Cart.sharp:7:25 impure-getter: Getter `total` reaches `App.Billing.Order.price`, which calls `now` with the effect `Clock`. Getters must be pure."
+            "app/Billing/Cart.sharp:9:30 impure-law: Law `totals` reaches `App.Billing.Order.price`, which calls `now` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
 }
 
-/// The message is the getter's, so it names a class as the getter's file does, whatever the file of the method that
+/// The message is the law's, so it names a class as the law's file does, whatever the file of the method that
 /// makes the call imports.
 #[test]
-fn a_getter_reaching_a_call_in_another_file_names_the_class_as_the_getter_file_does() {
+fn a_law_reaching_a_call_in_another_file_names_the_class_as_the_law_file_does() {
     let order = (
         "app/Shop/Order.sharp",
         "namespace App.Shop;\n\nimport Vendor.Clock as VendorClock;\n\npublic class Order\n{\n    public Order(private VendorClock clock) { }\n\n    public int stamp() => this.clock.now();\n}\n",
     );
     let cart = (
         "app/Shop/Cart.sharp",
-        "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int stamped => this.order.stamp();\n}\n",
+        "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int stamped => this.order.stamp();\n\n    law stamps(Cart cart) => cart.stamped > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[cart, order, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Cart.sharp:7:27 impure-getter: Getter `stamped` reaches `Order.stamp`, which calls `Vendor.Clock.now` with no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Clock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
+            "app/Shop/Cart.sharp:9:30 impure-law: Law `stamps` reaches `Order.stamp`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
@@ -11810,40 +11864,40 @@ const METER: (&str, &str) = (
 /// The `extern` the help writes compiles only where its class is bound, so the help names the import a class from
 /// another namespace needs, even when no other class shares its short name.
 #[test]
-fn a_getter_calling_a_class_its_file_does_not_import_names_the_import_the_extern_needs() {
+fn a_call_of_a_class_its_file_does_not_import_names_the_import_the_extern_needs() {
     let gauge = (
         "app/Shop/Gauge.sharp",
         "namespace App.Shop;\n\nimport Lib.Meter;\n\npublic class Gauge\n{\n    public Gauge(private Meter source) { }\n\n    public Meter meter() => this.source;\n}\n",
     );
     let panel = (
         "app/Shop/Panel.sharp",
-        "namespace App.Shop;\n\npublic class Panel\n{\n    public Panel(private Gauge gauge) { }\n\n    public int level => this.gauge.meter().read();\n}\n",
+        "namespace App.Shop;\n\npublic class Panel\n{\n    public Panel(private Gauge gauge) { }\n\n    public int level => this.gauge.meter().read();\n\n    law levels(Panel panel) => panel.level > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[panel, gauge, METER]),
         [
-            "app/Shop/Panel.sharp:7:25 impure-getter: Getter `level` calls `Meter.read`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Meter.read;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
+            "app/Shop/Panel.sharp:9:32 impure-law: Law `levels` reaches `Panel.level`, which calls `Meter.read` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Meter.read;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
         ]
     );
 }
 
 /// A class of the file's own namespace is bound without an import, so the help names none.
 #[test]
-fn a_getter_calling_a_class_of_its_own_namespace_names_no_import() {
+fn a_call_of_a_class_of_its_own_namespace_names_no_import() {
     let printer = (
         "src/App/Shop/Printer.php",
         "<?php\n\nnamespace App\\Shop;\n\nfinal class Printer\n{\n    public function print(): int\n    {\n        return 0;\n    }\n}\n",
     );
     let kiosk = (
         "app/Shop/Kiosk.sharp",
-        "namespace App.Shop;\n\npublic class Kiosk\n{\n    public Kiosk(private Printer printer) { }\n\n    public int printed => this.printer.print();\n}\n",
+        "namespace App.Shop;\n\npublic class Kiosk\n{\n    public Kiosk(private Printer printer) { }\n\n    public int printed => this.printer.print();\n\n    law prints(Kiosk kiosk) => kiosk.printed > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[kiosk, printer]),
         [
-            "app/Shop/Kiosk.sharp:7:27 impure-getter: Getter `printed` calls `Printer.print`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Printer.print;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Kiosk.sharp:9:32 impure-law: Law `prints` reaches `Kiosk.printed`, which calls `Printer.print` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Printer.print;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
@@ -11852,20 +11906,20 @@ fn a_getter_calling_a_class_of_its_own_namespace_names_no_import() {
 /// `extern` would name that other class. So the help imports the class under the alias its full name gives, and the
 /// `extern` uses the alias. Following the help clears the error.
 #[test]
-fn a_getter_calling_a_class_whose_short_name_its_file_imports_names_an_aliased_import() {
+fn a_call_of_a_class_whose_short_name_its_file_imports_names_an_aliased_import() {
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\nimport App.Clock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n}\n",
+        "namespace App.Shop;\n\nimport App.Clock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
     let declared = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\nimport App.Clock;\nimport Vendor.Clock as VendorClock;\n\nextern VendorClock.now;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n}\n",
+        "namespace App.Shop;\n\nimport App.Clock;\nimport Vendor.Clock as VendorClock;\n\nextern VendorClock.now;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:27 impure-getter: Getter `started` calls `Vendor.Clock.now`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock;` to the file."
         ]
     );
     assert_eq!(effect_issues(&[declared, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]), Vec::<String>::new());
@@ -11885,13 +11939,13 @@ fn an_aliased_import_capitalizes_each_part_of_a_lowercase_namespace() {
     );
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\nimport App.Clock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n}\n",
+        "namespace App.Shop;\n\nimport App.Clock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, source, clock, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:27 impure-getter: Getter `started` calls `vendor.Clock.now`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`. Add `import vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`. Add `import vendor.Clock as VendorClock;` to the file."
         ]
     );
 }
@@ -11902,13 +11956,13 @@ fn an_aliased_import_capitalizes_each_part_of_a_lowercase_namespace() {
 fn an_aliased_import_whose_alias_the_file_binds_takes_the_first_free_number() {
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\nimport App.Clock;\nimport Lib.VendorClock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n}\n",
+        "namespace App.Shop;\n\nimport App.Clock;\nimport Lib.VendorClock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:10:27 impure-getter: Getter `started` calls `Vendor.Clock.now`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern VendorClock1.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock1;` to the file."
+            "app/Shop/Timer.sharp:12:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock1.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock1;` to the file."
         ]
     );
 }
@@ -12414,24 +12468,23 @@ fn emit_takes_an_event() {
     );
 }
 
-/// Spec section 15: `emit` has the effect `Events`, whatever its listeners do, so a getter or a law that emits, or
-/// reaches a method that does, is refused naming the event, and a lambda that emits fits only a function type that
-/// lists `Events`.
+/// Spec section 15: `emit` has the effect `Events`, whatever its listeners do. A getter may emit, spec section 6, and a
+/// law that reaches a getter or a method that emits is refused naming the event. A lambda that emits fits only a
+/// function type that lists `Events`.
 #[test]
 fn emit_has_the_effect_events() {
     let [order_event, order_paid] = ORDER_EVENTS;
     let checkout = (
         "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<void() uses Events> announce = () => { emit new OrderPaid(1); };\n\n    private Function<void()> silent = () => { emit new OrderPaid(2); };\n\n    public int paid\n    {\n        get\n        {\n            emit new OrderPaid(3);\n            return 3;\n        }\n    }\n\n    public int total => this.complete();\n\n    law completes(Checkout checkout) => checkout.complete() > 0;\n\n    public int complete()\n    {\n        emit new OrderPaid(4);\n        return 4;\n    }\n\n    public void run()\n    {\n        this.announce();\n        this.silent();\n    }\n}\n",
+        "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<void() uses Events> announce = () => { emit new OrderPaid(1); };\n\n    private Function<void()> silent = () => { emit new OrderPaid(2); };\n\n    public int paid\n    {\n        get\n        {\n            emit new OrderPaid(3);\n            return 3;\n        }\n    }\n\n    public int total => this.complete();\n\n    law completes(Checkout checkout) => checkout.complete() > 0;\n\n    law announces(Checkout checkout) => checkout.paid > 0;\n\n    public int complete()\n    {\n        emit new OrderPaid(4);\n        return 4;\n    }\n\n    public void run()\n    {\n        this.announce();\n        this.silent();\n    }\n}\n",
     );
 
     assert_eq!(issues(checkout, &ORDER_EVENTS), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[checkout, order_event, order_paid]),
         [
-            "app/Shop/Checkout.sharp:13:13 impure-getter: Getter `paid` emits `OrderPaid`, which has the effect `Events`. Getters must be pure.",
-            "app/Shop/Checkout.sharp:18:25 impure-getter: Getter `total` reaches `Checkout.complete`, which emits `OrderPaid` with the effect `Events`. Getters must be pure.",
             "app/Shop/Checkout.sharp:20:41 impure-law: Law `completes` reaches `Checkout.complete`, which emits `OrderPaid` with the effect `Events`. Laws hold only over pure code.",
+            "app/Shop/Checkout.sharp:22:41 impure-law: Law `announces` reaches `Checkout.paid`, which emits `OrderPaid` with the effect `Events`. Laws hold only over pure code.",
             "app/Shop/Checkout.sharp:7:39 invalid-property-default-value: This lambda emits `OrderPaid`, which has the effect `Events`, so a `Function<void()>` cannot hold it.",
         ]
     );

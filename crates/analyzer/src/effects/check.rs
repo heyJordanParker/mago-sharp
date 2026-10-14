@@ -26,31 +26,29 @@ use crate::utils::names::sharp_code_class_name;
 use crate::utils::names::sharp_effect_name;
 use crate::utils::names::sharp_missing_imports;
 
-/// Spec section 29: a getter reads, so it has no effect and changes nothing.
-pub(crate) fn getters_must_be_pure(
+/// Spec section 6: a `get` body may run anything, and a read carries its effects, but it never writes `this`, as a
+/// method marked `readonly` does not (section 13): neither a write of a field of `this` nor a call of a method that
+/// writes one. A `lazy` property keeps its value through the bridge's write, which is the language's, not the body's.
+pub(crate) fn getters_never_write_this(
     effects: &Effects,
     codebase: &CodebaseMetadata,
     short_name_counts: &OnceCell<HashMap<String, u32>>,
 ) -> IssueCollection {
     effects
-        .impure_bodies()
+        .bodies_changing_this()
         .filter(|(body, ..)| matches!(body, Body::Accessor(_, _, accessor) if accessor.as_bytes() == b"get"))
-        .map(|(_, member, imports, scope, impurity)| {
+        .map(|(_, member, imports, _, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
             let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
-            let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
-            let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
 
-            impure(
-                IssueCode::ImpureGetter,
-                format!("Getter `{member}` {}. Getters must be pure.", impurity.describe(&class_name, &effect_name)),
-                impurity.span,
-                "getter",
-                &impurity,
-                &class_name,
-                &code_class_name,
-                &missing_import,
-            )
+            Issue::error(format!(
+                "Getter `{member}` {}. A getter never writes `this`.",
+                impurity.describe(&class_name, &effect_name)
+            ))
+            .with_code(IssueCode::GetterWritesThis.as_str())
+            .with_annotation(Annotation::primary(impurity.span))
+            .with_note("A getter reads, as a method marked `readonly` does: it may run anything, but it never changes its object.")
+            .with_help("Write the change in a method, and call it before the read.")
         })
         .collect()
 }

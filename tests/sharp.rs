@@ -1546,23 +1546,22 @@ fn analyze_reports_only_the_second_extern_of_a_class() {
     );
 }
 
+/// Spec section 6: a getter never writes `this`, and `compile` refuses the file that breaks the rule, while it still
+/// compiles the others.
 #[test]
-fn compile_refuses_a_file_whose_getter_calls_plain_php_without_an_extern() {
+fn compile_refuses_a_file_whose_getter_writes_this() {
     let directory = extern_workspace(&stripe_stub(""));
     write(
         directory.path(),
         "app/Shop/Label.sharp",
-        "namespace App.Shop;\n\npublic class Label\n{\n    public Label(private string name) { }\n\n    public string text => trim(this.name);\n}\n",
+        "namespace App.Shop;\n\npublic class Label\n{\n    private int reads = 0;\n\n    public int read { get { this.reads = this.reads + 1; return this.reads; } }\n}\n",
     );
 
     let output = run(directory.path(), "compile", &[]);
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(
-        printed.contains("Getter `text` calls `trim`, which has no `extern` declaration. Getters must be pure."),
-        "{printed}"
-    );
+    assert!(printed.contains("Getter `read` changes `this.reads`. A getter never writes `this`."), "{printed}");
     assert!(!directory.path().join(".sharp/app/Shop/Label.sharpc").exists());
     assert!(directory.path().join(".sharp/app/Stubs/Stripe.sharpc").exists(), "{printed}");
 }

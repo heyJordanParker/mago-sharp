@@ -359,7 +359,7 @@ final class AnalyzerCodeModuleGenerator
         'replaced-by-syntax',
         'duplicate-extern',
         'extern-on-sharp',
-        'impure-getter',
+        'getter-writes-this',
         'impure-law',
         'unproven-law',
         'non-existent-law',

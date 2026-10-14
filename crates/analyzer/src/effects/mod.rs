@@ -345,7 +345,7 @@ impl Effects {
     #[must_use]
     pub fn issues(&self, codebase: &CodebaseMetadata) -> IssueCollection {
         let short_name_counts = OnceCell::new();
-        let mut issues = check::getters_must_be_pure(self, codebase, &short_name_counts);
+        let mut issues = check::getters_never_write_this(self, codebase, &short_name_counts);
         issues.extend(check::laws_must_be_pure(self, codebase, &short_name_counts));
         issues.extend(check::function_values_must_fit_their_types(self, codebase, &short_name_counts));
 
@@ -419,15 +419,33 @@ impl Effects {
         })
     }
 
-    /// Each body with its member as messages name it, the imports and the scope of its file, and why it is impure.
-    fn impure_bodies(&self) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
+    /// Each body that `find` gives a reason for, with its member as messages name it, the imports and the scope of its
+    /// file, and that reason.
+    fn bodies_with<'effects>(
+        &'effects self,
+        find: impl Fn(&Self, Body) -> Option<Impurity> + 'effects,
+    ) -> impl Iterator<Item = (Body, Word, &'effects WordMap<Word>, &'effects NamespaceScope, Impurity)> + 'effects
+    {
         self.bodies.iter().enumerate().filter(|(position, body)| self.index.get(body) == Some(position)).filter_map(
-            |(position, body)| {
-                self.body_impurity(*body).map(|impurity| {
+            move |(position, body)| {
+                find(self, *body).map(|impurity| {
                     (*body, self.names[position].1, &*self.imports[position], &*self.scopes[position], impurity)
                 })
             },
         )
+    }
+
+    /// Each body that is impure, and why, as [`Self::bodies_with`] gives them.
+    fn impure_bodies(&self) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
+        self.bodies_with(Self::body_impurity)
+    }
+
+    /// Each body that changes the object it runs on, and the write that leads to it, as [`Self::bodies_with`] gives
+    /// them: a `get` body never writes `this`, as a method marked `readonly` does not, spec sections 6 and 13.
+    fn bodies_changing_this(
+        &self,
+    ) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
+        self.bodies_with(|effects, body| effects.first_item(body, |item| item == Item::Changed(Changed::This)))
     }
 }
 

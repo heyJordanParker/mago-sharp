@@ -3355,12 +3355,13 @@ mod tests {
     }
 
     /// A body edit changes what every caller's body reaches, so the warm run re-analyzes only the edited file and
-    /// the solve over every cached summary reports the getter in the unchanged file.
+    /// the solve over every cached summary reports the law in the unchanged file, which reaches the edit through a
+    /// getter.
     #[test]
-    fn test_watch_body_edit_reaches_an_unchanged_files_getter() {
+    fn test_watch_body_edit_reaches_an_unchanged_files_law() {
         let order =
             |price: &str| format!("namespace App;\n\npublic class Order\n{{\n    public int price() => {price};\n}}\n");
-        let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n}\n";
+        let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n\n    law totaled(Cart cart) => cart.total > 0;\n}\n";
         let clock = "namespace App.Stubs;\n\nextern now uses Clock;\n";
         let now = "<?php\nfunction now(): int { return time(); }\n";
         let order_id = FileId::new(b"src/Order.sharp");
@@ -3370,25 +3371,27 @@ mod tests {
             ("src/Clock.sharp", clock),
             ("src/now.php", now),
         ]);
-        let impure_getters = |service: &IncrementalAnalysisService| {
+        let impure_laws = |service: &IncrementalAnalysisService| {
             service
                 .collect_all_issues()
                 .iter()
-                .filter(|issue| issue.code.as_deref() == Some("impure-getter"))
+                .filter(|issue| issue.code.as_deref() == Some("impure-law"))
                 .map(|issue| issue.message.clone())
                 .collect::<Vec<_>>()
         };
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
-        assert_eq!(impure_getters(&service), Vec::<String>::new());
+        assert_eq!(impure_laws(&service), Vec::<String>::new());
 
         db.update(order_id, Cow::Owned(order("now()").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
         assert_eq!(
-            impure_getters(&service),
-            ["Getter `total` reaches `Order.price`, which calls `now` with the effect `Clock`. Getters must be pure."]
+            impure_laws(&service),
+            [
+                "Law `totaled` reaches `Order.price`, which calls `now` with the effect `Clock`. Laws hold only over pure code."
+            ]
         );
         assert_eq!(service.analyzed_files, HashSet::from_iter([order_id]));
         assert_matches_full(&service, &db, "Order.price calls now");
@@ -3396,7 +3399,7 @@ mod tests {
         db.update(order_id, Cow::Owned(order("1").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
-        assert_eq!(impure_getters(&service), Vec::<String>::new());
+        assert_eq!(impure_laws(&service), Vec::<String>::new());
         assert_eq!(service.analyzed_files, HashSet::from_iter([order_id]));
         assert_matches_full(&service, &db, "Order.price returns 1 again");
     }
@@ -3466,7 +3469,7 @@ mod tests {
     #[test]
     fn test_watch_extern_edit_reaches_every_caller() {
         let clock = |uses: &str| format!("namespace App.Stubs;\n\nextern now{uses};\n");
-        let report = "namespace App;\n\npublic class Report\n{\n    public int stamp => now();\n}\n";
+        let report = "namespace App;\n\npublic class Report\n{\n    law stamped() => now() > 0;\n}\n";
         let now = "<?php\nfunction now(): int { return time(); }\n";
         let clock_id = FileId::new(b"src/Clock.sharp");
         let mut db = make_database(vec![
@@ -3474,24 +3477,24 @@ mod tests {
             ("src/Report.sharp", report),
             ("src/now.php", now),
         ]);
-        let impure_getters = |service: &IncrementalAnalysisService| {
-            service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-getter")).count()
+        let impure_laws = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-law")).count()
         };
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
-        assert_eq!(impure_getters(&service), 0);
+        assert_eq!(impure_laws(&service), 0);
 
         db.update(clock_id, Cow::Owned(clock(" uses Clock").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[clock_id])).expect("Incremental analysis failed.");
-        assert_eq!(impure_getters(&service), 1);
+        assert_eq!(impure_laws(&service), 1);
         assert_matches_full(&service, &db, "now uses Clock");
 
         db.update(clock_id, Cow::Owned(clock("").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[clock_id])).expect("Incremental analysis failed.");
-        assert_eq!(impure_getters(&service), 0);
+        assert_eq!(impure_laws(&service), 0);
         assert_matches_full(&service, &db, "now is pure again");
     }
 
@@ -3561,7 +3564,7 @@ mod tests {
         let order = |extra: &str| {
             format!("namespace App;\n\npublic class Order\n{{\n    public int price() => now();\n{extra}}}\n")
         };
-        let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n}\n";
+        let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n\n    law totaled(Cart cart) => cart.total > 0;\n}\n";
         let clock = "namespace App.Stubs;\n\nextern now uses Clock;\n";
         let now = "<?php\nfunction now(): int { return time(); }\n";
         let order_id = FileId::new(b"src/Order.sharp");
@@ -3571,18 +3574,18 @@ mod tests {
             ("src/Clock.sharp", clock),
             ("src/now.php", now),
         ]);
-        let impure_getters = |service: &IncrementalAnalysisService| {
-            service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-getter")).count()
+        let impure_laws = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-law")).count()
         };
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
-        assert_eq!(impure_getters(&service), 1);
+        assert_eq!(impure_laws(&service), 1);
 
         db.update(order_id, Cow::Owned(order("\n    public int discount() => 0;\n").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
-        assert_eq!(impure_getters(&service), 1);
+        assert_eq!(impure_laws(&service), 1);
         assert_matches_full(&service, &db, "Order gains discount");
     }
 
