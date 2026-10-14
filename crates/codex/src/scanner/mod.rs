@@ -31,6 +31,7 @@ use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Method;
+use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::NamedConstructor;
@@ -58,8 +59,10 @@ use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 use mago_word::word;
 
+use crate::defaults_trait_name;
 use crate::identifier::method::MethodIdentifier;
 use crate::metadata::CodebaseMetadata;
+use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::r#extern::ExternMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
@@ -81,6 +84,7 @@ use crate::scanner::function_like::scan_function;
 use crate::scanner::function_like::scan_initial_values_constructor;
 use crate::scanner::function_like::scan_method;
 use crate::scanner::property::scan_promoted_property;
+use crate::symbol::SymbolKind;
 use crate::ttype::get_named_object;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
@@ -397,6 +401,63 @@ impl Scanner {
 
         self.codebase.class_likes.entry(current_class).or_insert(class_like_metadata);
         self.codebase.function_likes.entry(method_id).or_insert(function_like_metadata);
+    }
+
+    /// Registers the trait that holds a PHP# interface's default bodies, spec section 22, named by
+    /// [`defaults_trait_name`], with each method of the interface that has a body. The interface's own methods stay
+    /// abstract, as the PHP interface's are, so a class gets a default body only through the trait: the populator gives
+    /// it to each PHP# class that implements the interface, and a plain PHP class writes `use HasDesign\Defaults;`.
+    fn register_defaults_trait<'arena, A>(&mut self, interface: &Interface<'arena>, context: &Context<'_, 'arena, A>)
+    where
+        A: Arena,
+    {
+        let Some(interface_metadata) = self.stack.last().and_then(|interface| self.codebase.class_likes.get(interface))
+        else {
+            return;
+        };
+        let interface_name = interface_metadata.name;
+        let original_name = defaults_trait_name(interface_metadata.original_name.as_bytes());
+        let name = ascii_lowercase_word(original_name.as_bytes());
+        let mut defaults = ClassLikeMetadata::new(
+            name,
+            original_name,
+            interface_metadata.span,
+            interface_metadata.name_span,
+            MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,
+        );
+        defaults.kind = SymbolKind::Trait;
+
+        for member in &interface.members {
+            let ClassLikeMember::Method(method) = member else {
+                continue;
+            };
+            if matches!(method.body, MethodBody::Abstract(_)) {
+                continue;
+            }
+
+            let method_name = ascii_lowercase_word(method.name.value);
+            let Some(signature) = self.codebase.function_likes.get_mut(&(interface_name, method_name)) else {
+                continue;
+            };
+            let mut body = signature.clone();
+            if let Some(method_metadata) = &mut signature.method_metadata {
+                method_metadata.is_abstract = true;
+            }
+            if let Some(method_metadata) = &mut body.method_metadata {
+                method_metadata.is_abstract = false;
+            }
+
+            let method_identifier = MethodIdentifier::new(name, method_name);
+            defaults.methods.insert(method_name);
+            defaults.add_declaring_method_id(method_name, method_identifier);
+            defaults.inheritable_method_ids.insert(method_name, method_identifier);
+            self.codebase.function_likes.insert((name, method_name), body);
+        }
+
+        if !defaults.methods.is_empty() {
+            self.codebase.symbols.add_symbol_name(name, SymbolKind::Trait);
+            self.codebase.class_likes.insert(name, defaults);
+        }
     }
 
     /// Registers an extension member as the static method it runs as, marked with `flag`, spec section 26. A member of
@@ -1013,7 +1074,11 @@ where
     }
 
     #[inline]
-    fn walk_out_interface(&mut self, _interface: &'arena Interface<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+    fn walk_out_interface(&mut self, interface: &'arena Interface<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if context.program.dialect.is_sharp() {
+            self.register_defaults_trait(interface, context);
+        }
+
         finalize_class_like(self, context);
     }
 }

@@ -378,6 +378,8 @@ final class AnalyzerCodeModuleGenerator
         'missing-service',
         'service-cycle',
         'captive-service',
+        'ambiguous-inherited-member',
+        'abstract-super-call',
     ];
 
     /**

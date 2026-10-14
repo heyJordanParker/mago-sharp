@@ -478,6 +478,24 @@ where
         }
     }
 
+    // Spec section 22: `super.m()` runs the parent's body, and an abstract method has none, so PHP would throw `Error`.
+    if context.dialect.is_sharp()
+        && classname.is_parent()
+        && function_like.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
+    {
+        let declaring_class = context
+            .codebase
+            .get_class_like(declaring_method_id.get_class_name().as_bytes())
+            .map_or(declaring_method_id.get_class_name(), |class| class.original_name);
+        let method = display_member(context, declaring_class, function_like.original_name);
+        let name = function_like.original_name;
+        context.collector.report_with_code(
+            IssueCode::AbstractSuperCall,
+            Issue::error(format!("`{method}` is abstract, so `super.{name}()` has no body to run."))
+                .with_annotation(Annotation::primary(access_span).with_message("Called here.")),
+        );
+    }
+
     let static_class_type =
         get_static_class_type(context, current_class_metadata, classname, fq_class_id, defining_class_metadata);
 

@@ -12,8 +12,10 @@
 pub enum IssueCode {
     AbstractClassUsedAsAttribute,
     AbstractInstantiation,
+    AbstractSuperCall,
     AlwaysMatchingSwitchCase,
     AmbiguousClassLikeConstantAccess,
+    AmbiguousInheritedMember,
     AmbiguousInstantiationTarget,
     AmbiguousObjectMethodAccess,
     AmbiguousObjectPropertyAccess,
@@ -374,8 +376,10 @@ impl IssueCode {
         match self {
             Self::AbstractClassUsedAsAttribute => "abstract-class-used-as-attribute",
             Self::AbstractInstantiation => "abstract-instantiation",
+            Self::AbstractSuperCall => "abstract-super-call",
             Self::AlwaysMatchingSwitchCase => "always-matching-switch-case",
             Self::AmbiguousClassLikeConstantAccess => "ambiguous-class-like-constant-access",
+            Self::AmbiguousInheritedMember => "ambiguous-inherited-member",
             Self::AmbiguousInstantiationTarget => "ambiguous-instantiation-target",
             Self::AmbiguousObjectMethodAccess => "ambiguous-object-method-access",
             Self::AmbiguousObjectPropertyAccess => "ambiguous-object-property-access",
@@ -741,8 +745,10 @@ impl IssueCode {
         &[
             Self::AbstractClassUsedAsAttribute,
             Self::AbstractInstantiation,
+            Self::AbstractSuperCall,
             Self::AlwaysMatchingSwitchCase,
             Self::AmbiguousClassLikeConstantAccess,
+            Self::AmbiguousInheritedMember,
             Self::AmbiguousInstantiationTarget,
             Self::AmbiguousObjectMethodAccess,
             Self::AmbiguousObjectPropertyAccess,
@@ -1106,8 +1112,10 @@ impl std::str::FromStr for IssueCode {
         match s {
             "abstract-class-used-as-attribute" => Ok(Self::AbstractClassUsedAsAttribute),
             "abstract-instantiation" => Ok(Self::AbstractInstantiation),
+            "abstract-super-call" => Ok(Self::AbstractSuperCall),
             "always-matching-switch-case" => Ok(Self::AlwaysMatchingSwitchCase),
             "ambiguous-class-like-constant-access" => Ok(Self::AmbiguousClassLikeConstantAccess),
+            "ambiguous-inherited-member" => Ok(Self::AmbiguousInheritedMember),
             "ambiguous-instantiation-target" => Ok(Self::AmbiguousInstantiationTarget),
             "ambiguous-object-method-access" => Ok(Self::AmbiguousObjectMethodAccess),
             "ambiguous-object-property-access" => Ok(Self::AmbiguousObjectPropertyAccess),

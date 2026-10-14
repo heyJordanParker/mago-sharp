@@ -55,11 +55,13 @@ pub fn inherit_methods_from_parent(
             if parent_is_trait {
                 let declaring_class = declaring_method_id.get_class_name();
 
-                if codebase
-                    .function_likes
-                    .get(&(declaring_class, *method_name_lc))
-                    .and_then(|meta| meta.method_metadata.as_ref())
-                    .is_some_and(|method| method.is_abstract)
+                // A PHP# class's own method replaces a trait's body, spec section 22, so it overrides it.
+                if (metadata.flags.is_sharp() && metadata.methods.contains(method_name_lc))
+                    || codebase
+                        .function_likes
+                        .get(&(declaring_class, *method_name_lc))
+                        .and_then(|meta| meta.method_metadata.as_ref())
+                        .is_some_and(|method| method.is_abstract)
                 {
                     metadata.add_overridden_method_parent(*method_name_lc, *declaring_method_id);
                 }

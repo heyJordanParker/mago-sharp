@@ -50,3 +50,14 @@ pub fn build_synthetic_name(prefix: &str, file: &File, span: Span) -> Word {
 pub fn get_anonymous_class_name(file: &File, span: Span) -> Word {
     build_synthetic_name("anonymous-class", file, span)
 }
+
+/// The name of the trait that holds a PHP# interface's default bodies, spec section 22: `App\HasDesign\Defaults` for
+/// `App\HasDesign`. The engine declares it in the interface's compiled file, and a plain PHP class that implements the
+/// interface writes `use HasDesign\Defaults;` to get the bodies.
+#[must_use]
+pub fn defaults_trait_name(interface: &[u8]) -> Word {
+    concat_word!(interface, DEFAULTS_TRAIT_SUFFIX)
+}
+
+/// What [`defaults_trait_name`] adds to an interface's name.
+pub const DEFAULTS_TRAIT_SUFFIX: &[u8] = b"\\Defaults";

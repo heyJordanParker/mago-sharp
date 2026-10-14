@@ -137,6 +137,42 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             continue;
         };
 
+        // Spec section 22: implementing an abstract interface method replaces no body, so it takes no `override`.
+        if is_sharp
+            && let Some(override_span) = override_span
+            && let Some(interface_method) = parent_class_names.values().find(|parent_method_id| {
+                context
+                    .codebase
+                    .get_class_like(parent_method_id.get_class_name().as_bytes())
+                    .is_some_and(|parent| parent.kind.is_interface())
+            })
+            && parent_class_names.values().all(|parent_method_id| {
+                context
+                    .codebase
+                    .get_class_like(parent_method_id.get_class_name().as_bytes())
+                    .is_some_and(|parent| parent.kind.is_interface())
+            })
+        {
+            let method_display = display_member(context, class_name, mago_bytes::BytesDisplay(method.name.value));
+            let interface = context
+                .codebase
+                .get_class_like(interface_method.get_class_name().as_bytes())
+                .map_or(interface_method.get_class_name(), |interface| interface.original_name);
+            let interface_display = display_member(context, interface, mago_bytes::BytesDisplay(method.name.value));
+            context.collector.report(
+                Issue::error(format!(
+                    "`{method_display}` implements `{interface_display}`, which takes no `override`."
+                ))
+                .with_code(IssueCode::InvalidOverrideAttribute)
+                .with_annotation(Annotation::primary(override_span).with_message("Remove `override`."))
+                .with_note(
+                    "`override` marks a method that replaces a body: a base class's, or an interface's default body.",
+                ),
+            );
+
+            continue;
+        }
+
         if override_span.is_some() || metadata.kind.is_trait() {
             continue;
         }
@@ -169,11 +205,27 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             continue;
         }
 
+        // A closed PHP# method's replacement already reports that no subclass replaces it, which `override` can't fix.
+        if is_sharp
+            && parent_class_names.values().any(|parent_method_id| {
+                overridden_class(parent_method_id).is_some()
+                    && context
+                        .codebase
+                        .get_method_by_id(parent_method_id)
+                        .and_then(|parent_method| parent_method.method_metadata.as_ref())
+                        .is_some_and(|parent_method| parent_method.is_final)
+            })
+        {
+            continue;
+        }
+
         let Some(parents_metadata) = parent_class_names.values().find_map(overridden_class) else {
             continue;
         };
 
-        let parent_classname = parents_metadata.original_name;
+        // An interface's trait of default bodies is named as its interface, which PHP# code writes.
+        let parent_classname =
+            context.codebase.get_defaults_interface(parents_metadata).unwrap_or(parents_metadata).original_name;
 
         let original_method_name = mago_bytes::BytesDisplay(method.name.value);
         let method_display = display_member(context, class_name, original_method_name);

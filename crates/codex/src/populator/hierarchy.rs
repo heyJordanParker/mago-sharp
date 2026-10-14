@@ -132,22 +132,34 @@ pub fn populate_class_like_metadata_iterative(
         metadata.declaring_method_ids.insert(*method_name, method_id);
     }
 
-    for trait_name in sorted_atoms(metadata.used_traits.iter().copied()) {
-        merge_metadata_from_trait(&mut metadata, codebase, trait_name, symbol_references);
+    // A PHP# header lists a class's base class and an enum's or a class's traits among the interfaces. PHP links the one
+    // class there as the parent and uses every trait there, as `extends` and `use` do. A PHP# class-like also uses the
+    // trait of default bodies of each interface it implements before its parent class does, spec section 22.
+    if metadata.flags.is_sharp() && (metadata.kind.is_class() || metadata.kind.is_enum()) {
+        for name in sorted_atoms(metadata.direct_parent_interfaces.iter().copied()) {
+            let Some(kind) = codebase.get_class_like_by_word(name).map(|header_type| header_type.kind) else {
+                continue;
+            };
+
+            if kind.is_trait() {
+                metadata.direct_parent_interfaces.remove(&name);
+                metadata.all_parent_interfaces.remove(&name);
+                metadata.add_used_trait(name);
+            } else if kind.is_class() && metadata.kind.is_class() && metadata.direct_parent_class.is_none() {
+                metadata.direct_parent_interfaces.remove(&name);
+                metadata.all_parent_interfaces.remove(&name);
+                metadata.direct_parent_class = Some(name);
+                metadata.all_parent_classes.insert(name);
+            }
+        }
+
+        let defaults: Vec<Word> =
+            codebase.get_defaults_traits(&metadata).iter().map(|defaults| defaults.name).collect();
+        metadata.add_used_traits(defaults);
     }
 
-    // A PHP# header lists the base class among the interfaces, so the one class there is the parent, as PHP links it.
-    if metadata.flags.is_sharp()
-        && metadata.kind.is_class()
-        && metadata.direct_parent_class.is_none()
-        && let Some(parent_classname) = sorted_atoms(metadata.direct_parent_interfaces.iter().copied())
-            .into_iter()
-            .find(|name| codebase.get_class_like_by_word(*name).is_some_and(|parent| parent.kind.is_class()))
-    {
-        metadata.direct_parent_interfaces.remove(&parent_classname);
-        metadata.all_parent_interfaces.remove(&parent_classname);
-        metadata.direct_parent_class = Some(parent_classname);
-        metadata.all_parent_classes.insert(parent_classname);
+    for trait_name in sorted_atoms(metadata.used_traits.iter().copied()) {
+        merge_metadata_from_trait(&mut metadata, codebase, trait_name, symbol_references);
     }
 
     if let Some(parent_classname) = metadata.direct_parent_class {
