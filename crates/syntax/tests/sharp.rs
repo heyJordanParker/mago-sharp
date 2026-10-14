@@ -3948,6 +3948,52 @@ fn an_extension_is_its_receiver_and_its_members_in_braces() {
     );
 }
 
+/// An extension block declares its own type parameters after `extension`, as in C# 14: one, several, or one with a
+/// bound, before its receiver.
+#[test]
+fn an_extension_declares_its_type_parameters_before_its_receiver() {
+    let rows: [(&str, &'static str, &[&str], &str); 3] = [
+        (
+            "extension<T>(List<T> items)",
+            "public static class Lists\n{\n    extension<T>(List<T> items)\n    {\n        public int size() => 0;\n    }\n}\n",
+            &["T"],
+            "List<T> items",
+        ),
+        (
+            "extension<K, V>(Map<K, List<V>> groups)",
+            "public static class Lists\n{\n    extension<K, V>(Map<K, List<V>> groups)\n    {\n        public int size() => 0;\n    }\n}\n",
+            &["K", "V"],
+            "Map<K, List<V>> groups",
+        ),
+        (
+            "extension<T : Order>(List<T> orders)",
+            "public static class Lists\n{\n    extension<T : Order>(List<T> orders)\n    {\n        public int size() => 0;\n    }\n}\n",
+            &["T : Order"],
+            "List<T> orders",
+        ),
+    ];
+
+    for (header, code, expected_parameters, expected_receiver) in rows {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "app/Lists.sharp", code);
+
+        assert!(program.errors.is_empty(), "{header}: {:#?}", program.errors);
+        let [ClassLikeMember::Extension(extension)] = class_members(program).as_slice() else {
+            panic!("{header}: expected an extension, got {:#?}", class_members(program));
+        };
+        let Some(type_parameters) = extension.type_parameters else {
+            panic!("{header}: expected type parameters");
+        };
+        let parameters: Vec<&str> =
+            type_parameters.parameters.iter().map(|parameter| source(code, parameter)).collect();
+        let receivers: Vec<&str> =
+            extension.parameter_list.parameters.iter().map(|parameter| source(code, parameter)).collect();
+        assert_eq!(parameters, expected_parameters, "{header}");
+        assert_eq!(receivers, [expected_receiver], "{header}");
+        assert_eq!(source(code, extension).lines().next(), Some(header));
+    }
+}
+
 /// `extension` starts an extension only at the start of a member, before `(`. After a modifier it is a return type,
 /// before a name a member's type, and in a body a call.
 #[test]

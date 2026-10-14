@@ -132,6 +132,7 @@ where
             extension,
             object,
             None,
+            None,
             is_null_safe,
             span,
         );

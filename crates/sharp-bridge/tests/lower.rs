@@ -16457,6 +16457,91 @@ fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
     );
 }
 
+/// Spec section 26: a member of `extension<T>(List<T> items)` runs as a generic static method whose type parameters
+/// are the block's and then its own, so its parameter list ends with their metadata, as any generic method's does. A
+/// call passes the type arguments the checker inferred from the receiver, and those the member names after them.
+#[test]
+fn a_generic_extension_member_takes_the_type_arguments_of_its_block_and_its_own() {
+    let lowered = Lowered::with(
+        indoc! {"
+        namespace App;
+
+        import App.Lists.ListExtensions;
+
+        public class Report
+        {
+            public List<string> twice(List<string> names) => names.twice();
+
+            public List<string> converted(List<Order> orders) => orders.converted<string>(order => \"order\");
+        }
+    "},
+        &[
+            ("src/App/Order.sharp", "namespace App;\n\npublic class Order\n{\n}\n"),
+            (
+                "src/App/Lists/ListExtensions.sharp",
+                "namespace App.Lists;\n\npublic static class ListExtensions\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> twice() => items;\n\n        public List<TOut> converted<TOut>(Function<TOut(T)> convert) => [];\n    }\n}\n",
+            ),
+        ],
+    );
+
+    assert_eq!(
+        lowered.body_of("twice"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL "App\\Lists\\ListExtensions"
+                  ZVAL "twice"
+                  ARG_LIST
+                    VAR
+                      ZVAL "names"
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "string"
+        "#}
+    );
+    let converted = lowered.body_of("converted");
+    assert!(
+        converted.ends_with("        SHARP_TYPE_ARGS\n          null\n          ZVAL \"App.Order, string\"\n"),
+        "{converted}"
+    );
+
+    let extensions = Lowered::with(
+        "namespace App.Lists;\n\nimport App.Order;\n\npublic static class ListExtensions\n{\n    extension<T : Order>(List<T> items)\n    {\n        public List<TOut> converted<TOut>(Function<TOut(T)> convert) => [];\n    }\n}\n",
+        &[("src/App/Order.sharp", "namespace App;\n\npublic class Order\n{\n}\n")],
+    );
+    assert_eq!(
+        extensions.declared("converted"),
+        indoc! {r#"
+            METHOD [17] "converted" @9-9
+              PARAM_LIST
+                PARAM
+                  TYPE [7]
+                  ZVAL "items"
+                  null
+                  null
+                  null
+                  null
+                PARAM
+                  ZVAL "Closure"
+                  ZVAL "convert"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  ZVAL "App.Order, Any?"
+                  null
+              null
+              STMT_LIST
+                RETURN
+                  ARRAY [3]
+              TYPE [7]
+              null
+        "#}
+    );
+}
+
 /// `App\Order`, a PHP class, `App\RushOrder`, its subclass with its own `total`, and `App\Receipt`, a final class.
 const ORDERS: (&str, &str) = (
     "src/App/Order.php",

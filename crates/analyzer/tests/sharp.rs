@@ -5505,6 +5505,43 @@ fn an_extension_member_reads_its_receiver_as_a_parameter_of_its_type() {
     );
 }
 
+/// Spec section 26: an extension block's type parameters are inferred from the receiver, as C# 14 infers them, one or
+/// several, and a member's own type parameters come after them, so `orders.blank<string>()` names only the member's,
+/// and a count that doesn't fit them is refused as on any method. A receiver outside a bound has no such member. Each
+/// wrong return shows the type the access gives.
+#[test]
+fn an_extension_block_infers_its_type_parameters_from_the_receiver() {
+    let orders = "namespace App;\n\npublic class Order\n{\n}\n";
+    let rush = "namespace App;\n\npublic class RushOrder : Order\n{\n}\n";
+    let pair = "namespace App;\n\npublic class Pair<TLeft, TRight>\n{\n}\n";
+    let lists = "namespace App.Lists;\n\nimport App.Order;\nimport App.Pair;\n\npublic static class ListExtensions\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> twice() => items;\n        public List<TOut> converted<TOut>(Function<TOut(T)> convert) => [];\n        public List<TOut> blank<TOut>() => [];\n        public bool isEmpty => items.count() == 0;\n    }\n\n    extension<TValue>(Map<string, List<TValue>> groups)\n    {\n        public TValue? firstOf(string key) => null;\n    }\n\n    extension<TLeft, TRight>(Pair<TLeft, TRight> pair)\n    {\n        public Pair<TRight, TLeft> swapped() => new Pair<TRight, TLeft>();\n    }\n\n    extension<T : Order>(List<T> orders)\n    {\n        public T? newest() => null;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Lists.ListExtensions;\nimport App.Order;\nimport App.Pair;\nimport App.RushOrder;\n\npublic class Report\n{\n    public List<int> twice(List<string> names) => names.twice();\n    public List<int> converted(List<Order> orders) => orders.converted<string>(order => \"order\");\n    public bool empty(List<Order> orders) => orders.isEmpty;\n    public int firstOf(Map<string, List<Order>> groups) => groups.firstOf(\"a\");\n    public int swapped(Pair<int, Order> pair) => pair.swapped();\n    public int newest(List<RushOrder> orders) => orders.newest();\n    public Any? numbers(List<int> numbers) => numbers.newest();\n    public List<int> blank(List<Order> orders) => orders.blank<string>();\n    public Any? many(List<Order> orders) => orders.blank<string, int>();\n}\n";
+    let others = [
+        ("src/App/Order.sharp", orders),
+        ("src/App/RushOrder.sharp", rush),
+        ("src/App/Pair.sharp", pair),
+        ("src/App/Lists/ListExtensions.sharp", lists),
+    ];
+
+    assert_eq!(issues(("src/App/Lists/ListExtensions.sharp", lists), &others[..3]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &others),
+        [
+            "Invalid return type for method `Report.twice`: expected `List<int>`, but found `List<string>`.",
+            "Invalid return type for method `Report.converted`: expected `List<int>`, but found `List<string>`.",
+            "Method `Report.firstOf` is declared to return `int` but possibly returns a nullable value (inferred as `Order?`).",
+            "Invalid return type for method `Report.firstOf`: expected `int`, but found `Order?`.",
+            "Invalid return type for method `Report.swapped`: expected `int`, but found `Pair<Order, int>`.",
+            "Method `Report.newest` is declared to return `int` but possibly returns a nullable value (inferred as `RushOrder?`).",
+            "Invalid return type for method `Report.newest`: expected `int`, but found `RushOrder?`.",
+            "Method `newest` does not exist on `List<int>`.",
+            "Invalid return type for method `Report.blank`: expected `List<int>`, but found `List<string>`.",
+            "Too many type arguments for `ListExtensions.blank`: expected 1, but found 2.",
+            "Nothing fixes the type argument `TOut` of the call to `ListExtensions.blank`.",
+        ]
+    );
+}
+
 /// Spec section 26: an extension holds methods and computed properties. Semantics refuses any other member and a
 /// member declared twice, so the analyzer checks neither: only the first `label` runs.
 #[test]

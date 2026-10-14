@@ -230,6 +230,16 @@ impl<'analysis> Types<'analysis> {
         Some(self.argument_texts(arguments))
     }
 
+    /// The type arguments the access `access` of a generic extension member gives the static method it runs as, spec
+    /// section 26: those the checker inferred from the receiver for the extension block's type parameters, then the
+    /// member's own, written as [`Self::type_arguments`] writes those of a `new`. None for a member that isn't generic.
+    pub(crate) fn extension_type_arguments(&self, access: &Expression) -> Option<String> {
+        let span = access.span();
+        let arguments = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?;
+
+        Some(self.argument_texts(arguments))
+    }
+
     /// The type arguments the method value `value` of a PHP# generic method takes from the function type it goes
     /// into, as the checker found them, written as [`Self::type_arguments`] writes those of a `new`. None for the value
     /// of a method that isn't generic.

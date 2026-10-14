@@ -4231,7 +4231,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The member `extension`, which an extension adds, spec section 26, called with `arguments` or read on `receiver`:
     /// the call of the static method it runs as, `\App\TextExtensions::slug($title, '-')`, or the library's inline
     /// form of it, as `trim($name)` for `name.trim()`. The checker chose it from the type the code shows, so it runs
-    /// on any value of that type, an object of a subclass with its own member of that name too.
+    /// on any value of that type, an object of a subclass with its own member of that name too. A generic member's
+    /// call ends with its type arguments, as any generic call does.
     fn extension_access(
         &mut self,
         access: &Expression,
@@ -4250,6 +4251,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Argument::Positional(positional) => self.positional_argument(positional),
                 Argument::Named(named) => self.named_argument(named, false),
             });
+        }
+        if let Some(type_arguments) = self.types.extension_type_arguments(access) {
+            let text = self.type_text(line, &type_arguments);
+            values.push(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text]));
         }
 
         self.operator_call(line, extension.class, extension.name.as_bytes(), &values)

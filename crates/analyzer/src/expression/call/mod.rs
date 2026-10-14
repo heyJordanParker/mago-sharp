@@ -19,6 +19,7 @@ use mago_span::Span;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::TypeArgumentList;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
@@ -45,6 +46,7 @@ use crate::invocation::MethodTargetContext;
 use crate::invocation::analyzer::analyze_invocation;
 use crate::invocation::post_process::post_invocation_process;
 use crate::invocation::return_type_fetcher::fetch_invocation_return_type;
+use crate::invocation::template_result::seed_extension_type_arguments;
 use crate::plugin::hook::StaticCall;
 use crate::reconciler::assertion_reconciler;
 use crate::utils::names::display_function_like_identifier;
@@ -405,8 +407,9 @@ where
 }
 
 /// Analyzes a member a PHP# extension adds to its receiver's type, spec section 26, as the call of the static method
-/// `extension` it runs as with `arguments`, whose first argument is the receiver. Through `?.`, a `null` receiver
-/// skips the call, so the result may be `null` too, as it may below a `?.` earlier in the chain.
+/// `extension` it runs as with `arguments`, whose first argument is the receiver. `type_arguments` are the member's
+/// own, written after its name. Through `?.`, a `null` receiver skips the call, so the result may be `null` too, as it
+/// may below a `?.` earlier in the chain.
 #[allow(clippy::expect_used)]
 pub(crate) fn analyze_extension_access<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -414,6 +417,7 @@ pub(crate) fn analyze_extension_access<'ctx, 'ast, 'arena, A>(
     artifacts: &mut AnalysisArtifacts,
     extension: MethodIdentifier,
     receiver: &'ast Expression<'arena>,
+    type_arguments: Option<&'ast TypeArgumentList<'arena>>,
     arguments: Option<&'ast ArgumentList<'arena>>,
     is_null_safe: bool,
     span: Span,
@@ -423,6 +427,18 @@ where
 {
     let class = extension.get_class_name();
     let metadata = context.codebase.get_method_by_id(&extension).expect("an extension is a method of its class");
+    let mut template_result = TemplateResult::default();
+    if let Some(type_arguments) = type_arguments {
+        seed_extension_type_arguments(
+            context,
+            block_context,
+            artifacts,
+            type_arguments,
+            class,
+            metadata,
+            &mut template_result,
+        );
+    }
     let class_like_metadata =
         context.codebase.get_class_like(class.as_bytes()).expect("an extension's class is a class-like");
     let target = InvocationTarget::FunctionLike {
@@ -446,7 +462,7 @@ where
         context,
         block_context,
         artifacts,
-        TemplateResult::default(),
+        template_result,
         vec![target],
         InvocationArgumentsSource::ExtensionReceiver(receiver, arguments),
         span,

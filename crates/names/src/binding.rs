@@ -184,7 +184,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: method.span(),
             attribute_lists: &method.attribute_lists,
             modifiers: static_modifiers(arena, extension, &method.modifiers),
-            type_parameters: method.type_parameters,
+            type_parameters: block_type_parameters_first(arena, extension, method.type_parameters),
             parameter_list: receiver_first(arena, extension, &method.parameter_list)?,
             return_type_hint: method.return_type_hint.as_ref(),
             on: method.on,
@@ -220,7 +220,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: property.span(),
             attribute_lists: &property.attribute_lists,
             modifiers: static_modifiers(arena, extension, &property.modifiers),
-            type_parameters: None,
+            type_parameters: extension.type_parameters,
             parameter_list: receiver_first(arena, extension, own)?,
             return_type_hint: property
                 .hint
@@ -251,6 +251,29 @@ where
     let r#static = Modifier::Static(Keyword { span: extension.extension.span, value: b"static" });
 
     arena.alloc(Sequence::from_slice(arena.alloc_slice_fill_iter(modifiers.iter().cloned().chain([r#static]))))
+}
+
+/// An extension member's type parameters after the extension block's, as C# 14 compiles `extension<T>(List<T> items)`:
+/// the static method it runs as takes the block's first, which a call infers from its receiver.
+fn block_type_parameters_first<'ast, 'arena, A>(
+    arena: &'arena A,
+    extension: &'ast Extension<'arena>,
+    own: Option<&'ast TypeParameterList<'arena>>,
+) -> Option<&'ast TypeParameterList<'arena>>
+where
+    A: Arena,
+    'arena: 'ast,
+{
+    let (Some(block), Some(own)) = (extension.type_parameters, own) else {
+        return extension.type_parameters.or(own);
+    };
+    let parameters = arena.alloc_slice_fill_iter(block.parameters.iter().chain(own.parameters.iter()).cloned());
+
+    Some(arena.alloc(TypeParameterList {
+        less_than: block.less_than,
+        parameters: TokenSeparatedSequence::from_slices(parameters, own.parameters.tokens),
+        greater_than: own.greater_than,
+    }))
 }
 
 /// An extension member's parameters after the extension's receiver, or none for an extension without one receiver.

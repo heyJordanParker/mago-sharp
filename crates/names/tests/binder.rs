@@ -643,6 +643,36 @@ fn an_extension_member_binds_its_receiver_as_a_parameter() {
     );
 }
 
+/// An extension block's type parameters are in scope in its receiver, its bounds and every member, a member's own
+/// type parameters beside them, spec section 26. Past the block the name is a class name again.
+#[test]
+fn an_extension_block_binds_its_type_parameters_in_its_receiver_and_members() {
+    const CODE: &str = "namespace App;\n\npublic static class Groups\n{\n    extension<K, V : Order>(Map<K, List<V>> groups)\n    {\n        public List<V> of(K key) => groups[key];\n        public List<TOut> mapped<TOut>(Function<TOut(V)> map) => [];\n    }\n\n    public static V first() => null;\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+    let k = Some(Binding::TypeParameter { declaration: span(CODE, "K", 0) });
+    let v = Some(Binding::TypeParameter { declaration: span(CODE, "V", 0) });
+
+    for nth in [1, 2] {
+        assert_eq!(binding(&names, CODE, "K", nth), k, "`K` #{nth}");
+    }
+    for nth in [1, 2, 3] {
+        assert_eq!(binding(&names, CODE, "V", nth), v, "`V` #{nth}");
+        assert_eq!(resolved(&names, CODE, "V", nth), b"V", "`V` #{nth}");
+    }
+    for nth in [0, 2] {
+        assert_eq!(
+            binding(&names, CODE, "TOut", nth),
+            Some(Binding::TypeParameter { declaration: span(CODE, "TOut", 1) }),
+            "`TOut` #{nth}"
+        );
+    }
+    assert_eq!(resolved(&names, CODE, "Order", 0), b"App\\Order");
+    assert_eq!(binding(&names, CODE, "V", 4), None);
+    assert_eq!(resolved(&names, CODE, "V", 4), b"App\\V");
+    assert_eq!(names.binding_errors(), []);
+}
+
 /// A named constructor binds as a constructor does, spec section 9.1: its parameters are locals of that constructor
 /// alone, in its `: this(…)` as in its body, its body reads `this`, and `new` names its class as any class name.
 #[test]

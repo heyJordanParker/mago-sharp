@@ -1579,6 +1579,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }
             Node::Extension(node) => {
                 f(Node::Keyword(&node.extension));
+                for item in node.type_parameters.iter() {
+                    f(Node::TypeParameterList(item));
+                }
                 f(Node::FunctionLikeParameterList(&node.parameter_list));
                 for item in node.members.iter() {
                     f(Node::ClassLikeMember(item));

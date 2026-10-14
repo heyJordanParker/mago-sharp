@@ -993,6 +993,9 @@ generate_ast_walker! {
 
     'arena Extension as extension => {
         walker.walk_keyword(&extension.extension, context);
+        if let Some(type_parameters) = &extension.type_parameters {
+            walker.walk_type_parameter_list(type_parameters, context);
+        }
         walker.walk_function_like_parameter_list(&extension.parameter_list, context);
 
         for member in &extension.members {

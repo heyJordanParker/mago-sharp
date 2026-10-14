@@ -357,6 +357,7 @@ where
             artifacts,
             extension,
             object,
+            type_arguments,
             Some(argument_list),
             is_null_safe,
             span,

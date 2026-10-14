@@ -1,25 +1,31 @@
 //! The members PHP# extensions add to a receiver's type, spec section 26.
 
+use std::borrow::Cow;
+
+use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::identifier::method::MethodIdentifier;
-use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::LocalIdentifier;
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::invocation::infer_unfixed_templates;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
@@ -71,7 +77,7 @@ where
     let fitting: Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)> = extensions
         .iter()
         .filter_map(|(_, method)| Some((*method, codebase.get_method_by_id(method)?)))
-        .filter(|(_, metadata)| fits(codebase, receiver, metadata))
+        .filter(|(_, metadata)| fits(context, receiver, metadata))
         .collect();
     let (own, others): (Vec<_>, Vec<_>) =
         fitting.iter().partition(|(method, _)| is_imported_or_in_namespace(context, method.get_class_name()));
@@ -81,7 +87,7 @@ where
     let in_scope = if own.is_empty() { default } else { own };
     let (in_scope, other_kind): (Vec<_>, Vec<_>) =
         in_scope.into_iter().partition(|(_, metadata)| metadata.flags.contains(flag));
-    let in_scope = most_specific(codebase, in_scope);
+    let in_scope = most_specific(context, in_scope);
     let elsewhere = elsewhere.into_iter().find(|(_, metadata)| metadata.flags.contains(flag));
     let receiver = display_type(context, receiver);
     let (code, access) = if flag == MetadataFlags::EXTENSION_METHOD {
@@ -144,28 +150,54 @@ where
     }
 }
 
-/// Whether a value of type `receiver` fits the receiver of the extension member `metadata`, its first parameter.
-fn fits(codebase: &CodebaseMetadata, receiver: &TUnion, metadata: &FunctionLikeMetadata) -> bool {
-    metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()).is_some_and(|parameter| {
-        union_comparator::is_contained_by(
-            codebase,
-            receiver,
-            &parameter.type_union,
-            false,
-            false,
-            false,
-            &mut ComparisonResult::new(),
-        )
-    })
+/// Whether a value of type `receiver` fits the receiver of the extension member `metadata`, its first parameter. The
+/// type parameters of an extension block, `T` in `extension<T>(List<T> items)`, are first inferred from `receiver`, as
+/// a call infers them from its argument, so a `List<Order>` fits as a `List<Order>`. A receiver outside a type
+/// parameter's bound fits none.
+fn fits<A>(context: &Context<'_, '_, A>, receiver: &TUnion, metadata: &FunctionLikeMetadata) -> bool
+where
+    A: Arena,
+{
+    let Some(parameter) = metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()) else {
+        return false;
+    };
+    let parameter = if metadata.template_types.is_empty() {
+        Cow::Borrowed(&parameter.type_union)
+    } else {
+        let mut template_result = TemplateResult::new(
+            metadata.template_types.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
+            HashMap::default(),
+        );
+        if !infer_unfixed_templates(context, &parameter.type_union, receiver, &mut template_result, Dialect::Sharp)
+            .is_empty()
+        {
+            return false;
+        }
+
+        Cow::Owned(inferred_type_replacer::replace(&parameter.type_union, &template_result, context.codebase))
+    };
+
+    union_comparator::is_contained_by(
+        context.codebase,
+        receiver,
+        &parameter,
+        false,
+        false,
+        false,
+        &mut ComparisonResult::new(),
+    )
 }
 
 /// The members of `candidates` whose receiver fits inside every other candidate's, as C# overload resolution and
 /// Kotlin pick the most specific receiver, spec section 26: an extension on `AuditedWallet` over one on `Wallet`. All
 /// of `candidates` when none does, so they stay ambiguous.
-fn most_specific<'ctx>(
-    codebase: &CodebaseMetadata,
+fn most_specific<'ctx, A>(
+    context: &Context<'_, '_, A>,
     candidates: Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)>,
-) -> Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)> {
+) -> Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)>
+where
+    A: Arena,
+{
     let specific: Vec<_> = candidates
         .iter()
         .filter(|(_, metadata)| {
@@ -173,7 +205,7 @@ fn most_specific<'ctx>(
                 .parameters
                 .first()
                 .and_then(|parameter| parameter.get_type_metadata())
-                .is_some_and(|own| candidates.iter().all(|(_, other)| fits(codebase, &own.type_union, other)))
+                .is_some_and(|own| candidates.iter().all(|(_, other)| fits(context, &own.type_union, other)))
         })
         .copied()
         .collect();

@@ -299,7 +299,8 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         }
     }
 
-    /// Brings the type parameters of a class, an interface or a method into scope until `exit_type_parameters`.
+    /// Brings the type parameters of a class, an interface, an extension block or a method into scope until
+    /// `exit_type_parameters`.
     fn enter_type_parameters(&mut self, list: Option<&TypeParameterList<'arena>>) {
         if self.sharp {
             self.type_parameters.push(list.map_or_else(std::vec::Vec::new, |list| {
@@ -825,12 +826,14 @@ where
     }
 
     /// An extension block's receiver is the first parameter of each member, spec section 26. The block's own frame
-    /// holds the receiver while its parameter list is walked, so no other member sees it.
+    /// holds the receiver while its parameter list is walked, so no other member sees it. The block's type parameters
+    /// are in scope in its receiver and in every member, as a class's are.
     fn walk_in_extension(
         &mut self,
         extension: &'ast Extension<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
+        self.enter_type_parameters(extension.type_parameters);
         self.locals.enter_method();
         self.extension = extension.parameter_list.parameters.first().map(|receiver| ExtensionReceiver {
             name: receiver.variable.name,
@@ -846,6 +849,7 @@ where
     ) {
         self.extension = None;
         self.locals.exit_method();
+        self.exit_type_parameters();
     }
 
     /// An extension's computed property runs as a static method too, so its expression sees the receiver.

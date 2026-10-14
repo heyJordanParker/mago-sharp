@@ -2759,6 +2759,52 @@ fn an_extension_receiver_is_one_plain_parameter() {
     }
 }
 
+/// An extension block declares type parameters as a method does, spec section 26, and a call infers them from its
+/// receiver, so each one appears in the receiver's type, as C#'s CS9295 requires. A member's own type parameters are
+/// written on the member.
+#[test]
+fn an_extension_block_type_parameter_appears_in_its_receiver() {
+    for (header, expected) in [
+        ("extension<T>(List<T> items)", vec![]),
+        ("extension<TLeft, TRight>(Map<string, Function<TRight(TLeft)>> items)", vec![]),
+        ("extension<T : Order>(List<T> items)", vec![]),
+        (
+            "extension<T, TOther>(List<T> items)",
+            vec![
+                "5:18 The receiver `List<T>` doesn't use `TOther`: a call infers an extension block's type parameters from its receiver, so each one appears there.",
+            ],
+        ),
+        (
+            "extension<T>(string items)",
+            vec![
+                "5:15 The receiver `string` doesn't use `T`: a call infers an extension block's type parameters from its receiver, so each one appears there.",
+            ],
+        ),
+        (
+            "extension<out T>(List<T> items)",
+            vec![
+                "5:15 An extension block's type parameter takes no `out`: only a class or an interface declares variance, so remove it.",
+            ],
+        ),
+        (
+            "extension<K>(List<K> items)",
+            vec!["5:15 A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`."],
+        ),
+    ] {
+        let code = format!(
+            "namespace App.Shared;\n\npublic static class Lists\n{{\n    {header}\n    {{\n        public int size() => 0;\n    }}\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), expected, "`{header}`");
+    }
+
+    let shadowed = "namespace App.Shared;\n\npublic static class Lists\n{\n    extension<T>(List<T> items)\n    {\n        public T? first<T>() => null;\n        public List<TOut> converted<TOut>() => [];\n    }\n}\n";
+    assert_eq!(
+        issues(shadowed),
+        ["7:25 `T` is already a type parameter of the extension block: give the member's another name."]
+    );
+}
+
 /// An extension adds methods and computed properties to its receiver's type. A value of that type has no storage of
 /// the extension's, and the static class holds its constants, operators, laws and constructors.
 #[test]

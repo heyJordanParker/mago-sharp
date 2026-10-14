@@ -811,6 +811,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // The receiver is checked as a method's parameter, and a method or a computed property as a member of the
         // static class. `check_extension` reported every other member.
         (Node::Extension(_), Class) => Some(Place::Extension),
+        (Node::TypeParameterList(list), Place::Extension) => {
+            check_type_parameters(list, Place::Extension, context);
+
+            Some(Place::TypeParameter)
+        }
         (Node::FunctionLikeParameterList(_), Place::Extension) => Some(Method),
         (
             Node::ClassLikeMember(ClassLikeMember::Method(_) | ClassLikeMember::Property(Property::Computed(_))),
@@ -1929,6 +1934,60 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
     }
 }
 
+/// Checks an extension block's type parameters, spec section 26. A call infers them from its receiver, so each one
+/// appears in the receiver's type, as C#'s CS9295 requires. Each member runs as a static method whose type parameters
+/// are the block's and then its own, so a member can't declare one of the block's names again.
+fn check_extension_type_parameters(
+    extension: &Extension,
+    type_parameters: &TypeParameterList,
+    context: &mut Context<'_, '_, '_>,
+) {
+    if let [receiver] = extension.parameter_list.parameters.as_slice() {
+        let receiver_type = receiver.hint.as_ref();
+        let used: Vec<Span> = receiver_type.map_or_else(Vec::new, |hint| {
+            Node::Hint(hint).filter_map(|node| match node {
+                Node::Identifier(name) => match context.names.binding(*name) {
+                    Some(Binding::TypeParameter { declaration }) => Some(declaration),
+                    _ => None,
+                },
+                _ => None,
+            })
+        });
+        let written = receiver_type.map_or(&b""[..], |hint| context.get_code_snippet(hint));
+        for parameter in type_parameters.parameters.iter().filter(|parameter| !used.contains(&parameter.name.span)) {
+            context.report(
+                Issue::error(format!(
+                    "The receiver `{}` doesn't use `{}`: a call infers an extension block's type parameters from its receiver, so each one appears there.",
+                    BytesDisplay(written),
+                    BytesDisplay(parameter.name.value)
+                ))
+                .with_annotation(Annotation::primary(parameter.name.span).with_message("Declared here."))
+                .with_help("Declare it on the member that uses it, as in `public List<TOut> converted<TOut>(…)`."),
+            );
+        }
+    }
+
+    for member in &extension.members {
+        let ClassLikeMember::Method(Method { type_parameters: Some(own), .. }) = member else {
+            continue;
+        };
+        for parameter in own.parameters.iter() {
+            let Some(block) = type_parameters.parameters.iter().find(|block| block.name.value == parameter.name.value)
+            else {
+                continue;
+            };
+            context.report(
+                Issue::error(format!(
+                    "`{}` is already a type parameter of the extension block: give the member's another name.",
+                    BytesDisplay(parameter.name.value)
+                ))
+                .with_annotation(Annotation::primary(parameter.name.span).with_message("Declared again here."))
+                .with_annotation(Annotation::secondary(block.name.span).with_message("Declared by the block here.")),
+            );
+        }
+    }
+}
+
 /// Checks an extension block of a static class, spec section 26: one receiver, a parameter with no modifier, default
 /// or `...`, and members that are methods or computed properties of the receiver, each with only an access modifier,
 /// naming the receiver and never `this`. A static class has no constructor, in an extension either.
@@ -1948,6 +2007,9 @@ fn check_extension(extension: &Extension, context: &mut Context<'_, '_, '_>) {
             )
             .with_annotation(Annotation::primary(span).with_message("Written here.")),
         );
+    }
+    if let Some(type_parameters) = extension.type_parameters {
+        check_extension_type_parameters(extension, type_parameters, context);
     }
 
     let receiver = receivers.first().map_or(b"value".as_slice(), |receiver| receiver.variable.name);
@@ -3227,12 +3289,13 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
             );
         }
 
-        if matches!(place, Place::Method | Place::Signature)
+        if matches!(place, Place::Method | Place::Signature | Place::Extension)
             && let Some(variance) = parameter.variance
         {
+            let owner = if place == Place::Extension { "An extension block's" } else { "A method's" };
             context.report(
                 Issue::error(format!(
-                    "A method's type parameter takes no `{}`: only a class or an interface declares variance, so remove it.",
+                    "{owner} type parameter takes no `{}`: only a class or an interface declares variance, so remove it.",
                     BytesDisplay(variance.value)
                 ))
                 .with_annotation(Annotation::primary(variance.span).with_message("Written here.")),
