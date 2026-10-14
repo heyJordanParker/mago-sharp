@@ -54,6 +54,7 @@ where
         return Ok(fetch_set_filter_return_type(context, invocation, template_result, parameters));
     }
 
+    // `sortedBy` orders by the key its function returns, and `groupBy` and `associateBy` key the `Map` they return by it.
     if context.dialect.is_sharp()
         && let Some(argument) = invocation.arguments_source.get_argument(0).filter(|argument| !argument.is_unpacked())
         && let Some(selector) = argument.value()

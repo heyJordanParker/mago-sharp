@@ -340,10 +340,11 @@ fn with_binding<'arena>(
 }
 
 /// The byte a resolved-name record carries for its binding: `0` for a PHP name, then `1` for a class, `2` for a
-/// constant and `3` for a member. Locals, `this` and `field` have no resolved name, so no record carries them.
+/// constant and `3` for a member. Locals, `this` and `field` have no resolved name, so no record carries them. A PHP#
+/// type parameter's record carries `0`, because the SDK has no binding for one.
 const fn binding_code(binding: Option<Binding>) -> u8 {
     match binding {
-        None | Some(Binding::Local(_) | Binding::This | Binding::Field) => 0,
+        None | Some(Binding::Local(_) | Binding::This | Binding::Field | Binding::TypeParameter { .. }) => 0,
         Some(Binding::Class) => 1,
         Some(Binding::Constant) => 2,
         Some(Binding::Member) => 3,

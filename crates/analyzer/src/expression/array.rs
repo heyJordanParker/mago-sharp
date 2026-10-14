@@ -1022,8 +1022,11 @@ fn handle_variadic_array_element<'arena, A>(
             // A PHP# `Map` spread may hold any key a `Map` literal takes. Plain PHP spreads into a PHP array, whose
             // keys are `int` or `string` alone.
             let is_sharp = context.dialect.is_sharp();
-            let stored_key_type =
-                if is_sharp { get_backing_key_type(&key_type, context.codebase) } else { Cow::Borrowed(&*key_type) };
+            let stored_key_type = if is_sharp {
+                get_backing_key_type(&key_type, context.codebase, context.dialect)
+            } else {
+                Cow::Borrowed(&*key_type)
+            };
             let is_contained = |container: &TUnion| {
                 union_comparator::is_contained_by(
                     context.codebase,

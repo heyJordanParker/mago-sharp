@@ -34,6 +34,7 @@ use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::TokenSeparatedSequence;
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
@@ -624,7 +625,7 @@ where
     }
 
     let value = get_named_object(metadata.name, None);
-    let mut comparison = ComparisonResult::with_sharp_rules(true);
+    let mut comparison = ComparisonResult::for_dialect(Dialect::Sharp);
     if !union_comparator::is_contained_by(context.codebase, &value, service, false, false, false, &mut comparison) {
         context.collector.report_with_code(
             IssueCode::InvalidBinding,

@@ -59,7 +59,7 @@ where
         }
         let inheritance = self.parse_struct_header()?;
         let left_brace = self.stream.eat_span(T!["{"])?;
-        let members = self.parse_class_like_members("A struct")?;
+        let members = self.parse_class_like_members("A struct", None)?;
 
         Ok(Struct {
             attribute_lists: attributes,
@@ -73,8 +73,8 @@ where
         })
     }
 
-    /// A struct's header, `: Interface, Other`. A type that names no interface, such as `string`, is refused where it
-    /// stands, and the interfaces after it still parse.
+    /// A struct's header, `: Interface, Other`, each a class name with or without type arguments. A type that names no
+    /// interface, such as `string`, is refused where it stands, and the interfaces after it still parse.
     fn parse_struct_header(&mut self) -> Result<Option<Inheritance<'arena>>, ParseError> {
         if !self.stream.is_at(T![":"])? {
             return Ok(None);
@@ -83,7 +83,9 @@ where
         let mut separator = self.stream.eat_span(T![":"])?;
         loop {
             match self.parse_type_hint()? {
-                Hint::Identifier(first) => return Ok(Some(self.parse_inheritance_from(separator, first)?)),
+                first @ (Hint::Identifier(_) | Hint::Generic(_)) => {
+                    return Ok(Some(self.parse_inheritance_from(separator, first)?));
+                }
                 hint => self.errors.push(ParseError::StructHeaderTypeInSharp(hint.span())),
             }
             if !self.stream.is_at(T![","])? {

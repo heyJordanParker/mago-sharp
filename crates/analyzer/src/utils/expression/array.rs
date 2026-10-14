@@ -1019,7 +1019,7 @@ where
     let key_parameter = if in_assignment || (block_context.flags.inside_isset() && !is_sharp_read) {
         // A PHP# write takes a key of the `Map`'s key type, as a read does, and an empty literal takes the backed enum
         // or the struct its first key gives it.
-        let is_backed_enum_key = |key_type: &TUnion| matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(backing) if backing.is_always_array_key(true));
+        let is_backed_enum_key = |key_type: &TUnion| matches!(get_backing_key_type(key_type, context.codebase, context.dialect), Cow::Owned(backing) if backing.is_always_array_key(true));
         match keyed_array.get_generic_parameters() {
             Some(parameters) if is_sharp => Cow::Owned(parameters.0.clone()),
             None if is_sharp && is_backed_enum_key(index_type) => Cow::Owned(index_type.clone()),

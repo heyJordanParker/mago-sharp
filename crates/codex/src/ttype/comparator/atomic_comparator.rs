@@ -139,12 +139,21 @@ pub fn is_contained_by(
         && let TAtomic::GenericParameter(input_generic) = input_type_part
     {
         // Different template parameters are not contained by each other during assertion reconciliation
-        if (input_generic.parameter_name != container_generic.parameter_name
-            || input_generic.defining_entity != container_generic.defining_entity)
+        if !is_same_type_parameter(input_generic, container_generic)
             && !is_forwarded_template_parameter(codebase, input_generic, container_generic)
         {
             return false;
         }
+    }
+
+    if atomic_comparison_result.sharp_rules
+        && let TAtomic::GenericParameter(container_generic) = container_type_part
+    {
+        return match input_type_part {
+            TAtomic::GenericParameter(input_generic) => is_same_type_parameter(input_generic, container_generic),
+            TAtomic::Never => true,
+            _ => false,
+        };
     }
 
     let container_refuses_null = atomic_comparison_result.sharp_rules
@@ -158,7 +167,9 @@ pub fn is_contained_by(
     if container_type_part.is_mixed() || container_type_part.is_templated_as_mixed() {
         if matches!(container_type_part, TAtomic::Mixed(mixed) if mixed.is_non_null())
             && (matches!(input_type_part, TAtomic::Null)
-                || matches!(input_type_part, TAtomic::Mixed(mixed) if !mixed.is_non_null()))
+                || matches!(input_type_part, TAtomic::Mixed(mixed) if !mixed.is_non_null())
+                || (atomic_comparison_result.sharp_rules
+                    && matches!(input_type_part, TAtomic::GenericParameter(parameter) if parameter.constraint.accepts_null())))
         {
             return false;
         }
@@ -189,7 +200,7 @@ pub fn is_contained_by(
             input_type_part,
             container_type_part,
             inside_assertion,
-            &mut ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules),
+            &mut atomic_comparison_result.nested(),
         );
     }
 
@@ -211,6 +222,19 @@ pub fn is_contained_by(
 
     if matches!(container_type_part, TAtomic::Placeholder) || matches!(input_type_part, TAtomic::Placeholder) {
         return true;
+    }
+
+    if atomic_comparison_result.sharp_rules
+        && let TAtomic::GenericParameter(input_generic) = input_type_part
+    {
+        return union_comparator::are_parts_contained_by(
+            input_generic.constraint.types.iter(),
+            atomic_comparison_result,
+            |input_bound, result| {
+                !input_bound.is_mixed()
+                    && is_contained_by(codebase, input_bound, container_type_part, inside_assertion, result)
+            },
+        );
     }
 
     if matches!(input_type_part, TAtomic::Never) {
@@ -542,6 +566,13 @@ pub fn is_contained_by(
     }
 
     false
+}
+
+/// Whether both name one type parameter, by its name and the class or method that declares it. A bound that names its
+/// own list, as `TItem : Comparable<TItem>` does, holds a copy of `TItem` read before its bound, so the bounds may differ.
+fn is_same_type_parameter(input_generic: &TGenericParameter, container_generic: &TGenericParameter) -> bool {
+    input_generic.parameter_name == container_generic.parameter_name
+        && input_generic.defining_entity == container_generic.defining_entity
 }
 
 fn is_forwarded_template_parameter(

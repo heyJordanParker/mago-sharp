@@ -7,6 +7,7 @@ use foldhash::HashMap;
 
 use foldhash::HashSet;
 use mago_word::Word;
+use mago_word::WordSet;
 use mago_word::word;
 
 use mago_codex::metadata::CodebaseMetadata;
@@ -95,6 +96,24 @@ fn expand_template_constraint<'ty>(
     Cow::Owned(expanded)
 }
 
+/// Whether inference may bind the template `parameter_name` of `defining_entity`. PHP# infers only the templates of
+/// the call's target, which `template_result` registers, and never a type parameter of the caller, which is opaque.
+fn is_inferable<A>(
+    context: &Context<'_, '_, A>,
+    template_result: &TemplateResult,
+    parameter_name: Word,
+    defining_entity: &GenericParent,
+) -> bool
+where
+    A: Arena,
+{
+    !context.dialect.is_sharp()
+        || template_result
+            .template_types
+            .get(&parameter_name)
+            .is_some_and(|templates| templates.iter().any(|template| template.defining_entity == *defining_entity))
+}
+
 /// Whether `input_object` is the very class the container is parameterizing, without carrying
 /// type parameters of its own — in which case it cannot specialize anything.
 fn names_the_same_unspecialized_class(container_constraint: &TAtomic, input_object: &TAtomic) -> bool {
@@ -157,7 +176,8 @@ fn infer_templates_from_input_and_container_types<A>(
     let top_level = options.is_top_level;
     let options = InferenceOptions { is_top_level: false, ..options };
 
-    if input_type.is_mixed() && !container_type.is_generic_parameter() {
+    // PHP# writes `mixed` as `Any?`, a type that binds a template as any other argument's type does.
+    if input_type.is_mixed() && !container_type.is_generic_parameter() && !context.dialect.is_sharp() {
         return;
     }
 
@@ -757,6 +777,15 @@ fn infer_templates_from_input_and_container_types<A>(
                         for generic_parameter in generic_parameters {
                             has_direct_generic = true;
 
+                            if !is_inferable(
+                                context,
+                                template_result,
+                                generic_parameter.parameter_name,
+                                &generic_parameter.defining_entity,
+                            ) {
+                                continue;
+                            }
+
                             let Some((template_name, _)) = container_meta.template_types.get_index(index) else {
                                 continue;
                             };
@@ -935,6 +964,11 @@ fn infer_templates_from_input_and_container_types<A>(
             continue;
         };
 
+        if !is_inferable(context, template_result, container_generic.parameter_name, &container_generic.defining_entity)
+        {
+            continue;
+        }
+
         let template_parameter_name = &container_generic.parameter_name;
 
         let should_add_bound = !options.infer_only_if_new
@@ -1112,26 +1146,6 @@ pub fn infer_templates_for_method_call<'ctx, A>(
 ) where
     A: Arena,
 {
-    if declaring_class_like_metadata.name != method_target_context.class_like_metadata.name {
-        for (template_name, _) in &declaring_class_like_metadata.template_types {
-            let template_type = get_specialized_template_type(
-                context.codebase,
-                *template_name,
-                declaring_class_like_metadata.name,
-                method_target_context.class_like_metadata,
-                object_type.get_type_parameters(),
-            );
-
-            if let Some(template_type) = template_type {
-                template_result.add_lower_bound(
-                    *template_name,
-                    GenericParent::ClassLike(declaring_class_like_metadata.name),
-                    template_type,
-                );
-            }
-        }
-    }
-
     for (template_name, where_constraint) in &method_metadata.where_constraints {
         let Some(actual_type) = get_specialized_template_type(
             context.codebase,
@@ -1185,6 +1199,9 @@ pub fn infer_templates_for_method_call<'ctx, A>(
 /// * `argument_span`: The source code location of the argument, for error reporting.
 /// * `is_callable_argument`: A flag indicating if the argument is a callable, which
 ///   can influence inference strategy.
+///
+/// Returns the templates the argument falls outside the constraint of. The argument fixes them, though it may add no
+/// bound for them.
 pub fn infer_parameter_templates_from_argument<A>(
     context: &mut Context<'_, '_, A>,
     parameter_type: &TUnion,
@@ -1193,7 +1210,8 @@ pub fn infer_parameter_templates_from_argument<A>(
     argument_offset: usize,
     argument_span: Span,
     is_callable_argument: bool,
-) where
+) -> WordSet
+where
     A: Arena,
 {
     let mut violations = vec![];
@@ -1210,57 +1228,73 @@ pub fn infer_parameter_templates_from_argument<A>(
         &mut violations,
     );
 
+    let (kind, sentence_kind, constrained, constraint_kind) = if context.dialect.is_sharp() {
+        ("type parameter", "Type parameter", "is bounded by", "bound")
+    } else {
+        ("template", "Template parameter", "is constrained with", "template constraint")
+    };
+    let mut violated_templates = WordSet::default();
     for violation in violations {
+        let template_name = violation.template_name;
+        violated_templates.insert(template_name);
         let inferred_bound = display_type(context, &violation.inferred_bound);
         let constraint = display_type(context, &violation.constraint);
+        // PHP# reports the argument once, here, so the message names the bound, as C#'s CS0311 does.
+        let message = if context.dialect.is_sharp() {
+            format!("`{inferred_bound}` does not satisfy the bound `{constraint}` of type parameter `{template_name}`.")
+        } else {
+            format!("Argument type mismatch for {kind} `{template_name}`.")
+        };
 
         context.collector.report_with_code(
             IssueCode::TemplateConstraintViolation,
-            Issue::error(format!("Argument type mismatch for template `{}`.", violation.template_name,))
+            Issue::error(message)
                 .with_annotation(Annotation::primary(argument_span).with_message(format!(
-                    "This argument has type `{inferred_bound}`, which is not compatible with the required template constraint `{constraint}`."
+                    "This argument has type `{inferred_bound}`, which is not compatible with the required {constraint_kind} `{constraint}`."
                 )))
-                .with_note(format!(
-                    "Template parameter `{}` is constrained with `{constraint}`.",
-                    violation.template_name
-                ))
-                .with_help("Ensure the argument's type satisfies the template constraint."),
+                .with_note(format!("{sentence_kind} `{template_name}` {constrained} `{constraint}`."))
+                .with_help(format!("Ensure the argument's type satisfies the {constraint_kind}.")),
         );
     }
+
+    violated_templates
 }
 
-/// Infers template types for a parameter based on its **default value**.
-///
-/// This function is used when an argument for a generic parameter is omitted in a
-/// function call. It reconciles the parameter's declared type (which contains
-/// templates) with the known type of its default value to determine what the
-/// templates should resolve to.
+/// Infers the templates no argument fixed from a type that holds no argument: a parameter's **default value**, or the
+/// **declared type** a call's result goes into. A template that already has a bound keeps it.
 ///
 /// For example, if a function `add<A, B>(A $a, B $b = 1): A|B` is called as `add(2)`,
-/// this function would be used on parameter `$b` to infer that `T` is `int`.
+/// this function would be used on parameter `$b` to infer that `B` is `int`. In PHP#,
+/// `List<Order> orders = cache.get("orders")` against `T get<T>(string key)` infers that `T` is `List<Order>`.
+///
+/// Returns the templates `input_type` falls outside the bound of. They get no bound from it.
 ///
 /// # Arguments
 ///
 /// * `context`: The analysis context.
-/// * `parameter_type`: The declared type of the parameter (the "container").
-/// * `default_type`: The type of the parameter's default value (the "input").
+/// * `container_type`: The parameter's declared type, or the call's return type, which hold the templates.
+/// * `input_type`: The type of the parameter's default value, or the declared type the result goes into.
 /// * `template_result`: The map where inferred template types are stored.
-pub fn infer_parameter_templates_from_default<A>(
+pub fn infer_unfixed_templates<A>(
     context: &Context<'_, '_, A>,
-    parameter_type: &TUnion,
-    default_type: &TUnion,
+    container_type: &TUnion,
+    input_type: &TUnion,
     template_result: &mut TemplateResult,
-) where
+) -> WordSet
+where
     A: Arena,
 {
+    let mut violations = Vec::new();
     infer_templates_from_input_and_container_types(
         context,
-        parameter_type,
-        default_type,
+        container_type,
+        input_type,
         template_result,
         InferenceOptions { infer_only_if_new: true, ..Default::default() },
-        &mut Vec::new(),
+        &mut violations,
     );
+
+    violations.into_iter().map(|violation| violation.template_name).collect()
 }
 
 /// Replaces unbound `GenericParameter` types with their constraint types.

@@ -136,7 +136,8 @@ pub fn populate_class_like_metadata_iterative(
         merge_metadata_from_trait(&mut metadata, codebase, trait_name, symbol_references);
     }
 
-    // A PHP# header lists the base class among the interfaces, so the one class there is the parent, as PHP links it.
+    // A PHP# header lists the base class among the interfaces, so the one class there is the parent, as PHP links it,
+    // and its type arguments are the parent's, as `@extends` gives them.
     if metadata.flags.is_sharp()
         && metadata.kind.is_class()
         && metadata.direct_parent_class.is_none()
@@ -146,6 +147,9 @@ pub fn populate_class_like_metadata_iterative(
     {
         metadata.direct_parent_interfaces.remove(&parent_classname);
         metadata.all_parent_interfaces.remove(&parent_classname);
+        if let Some(count) = metadata.template_type_implements_count.remove(&parent_classname) {
+            metadata.template_type_extends_count.insert(parent_classname, count);
+        }
         metadata.direct_parent_class = Some(parent_classname);
         metadata.all_parent_classes.insert(parent_classname);
     }

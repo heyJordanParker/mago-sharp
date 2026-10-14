@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 use mago_word::word;
 
@@ -13,6 +14,7 @@ use crate::ttype::atomic::array::TArray;
 use crate::ttype::atomic::array::keyed::TKeyedArray;
 use crate::ttype::atomic::array::list::TList;
 use crate::ttype::atomic::callable::TCallable;
+use crate::ttype::atomic::callable::TCallableSignature;
 use crate::ttype::atomic::generic::TGenericParameter;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
@@ -1416,26 +1418,30 @@ pub fn get_iterable_parameters(atomic: &TAtomic, codebase: &CodebaseMetadata) ->
     None
 }
 
-/// Returns `key_type` with each backed enum in it replaced by its backing type, and each struct and each class that
-/// declares or inherits `operator ==` by `string`.
+/// Returns the key type `key_type` of `dialect` code as a PHP array holds it.
 ///
-/// A PHP# `Map` keeps each such key as itself and finds it by its `==` and `hash()`, which a struct has with nothing
+/// Each backed enum in it, as [`get_backed_enum`] finds it, is its backing type, and each struct and each class that
+/// declares or inherits `operator ==` is `string`. A PHP# `Map` keeps each such key as itself and finds it by its `==` and `hash()`, which a struct has with nothing
 /// declared and a class has when it declares `operator ==`, as the checker requires `hash()` beside it. A plain PHP
 /// array that crosses into a `Map` keyed by a backed enum holds each case's backing value, which this result types.
 /// `is_key_type` says which key types a `Map` takes.
 #[must_use]
-pub fn get_backing_key_type<'key>(key_type: &'key TUnion, codebase: &CodebaseMetadata) -> Cow<'key, TUnion> {
-    let backing_type = |atomic: &TAtomic| match atomic {
-        TAtomic::Object(TObject::Enum(enum_object)) => {
-            codebase.get_class_like(enum_object.name.as_bytes())?.enum_type.clone()
+pub fn get_backing_key_type<'key>(
+    key_type: &'key TUnion,
+    codebase: &CodebaseMetadata,
+    dialect: Dialect,
+) -> Cow<'key, TUnion> {
+    let backing_type = |atomic: &TAtomic| {
+        if let Some(backed_enum) = get_backed_enum(atomic, codebase, dialect) {
+            return backed_enum.enum_type.clone();
         }
-        TAtomic::Object(TObject::Named(named_object)) => {
-            let name = named_object.name.as_bytes();
-            let is_struct = codebase.get_class_like(name).is_some_and(|class_like| class_like.flags.is_struct());
+        let TAtomic::Object(TObject::Named(named_object)) = atomic else {
+            return None;
+        };
+        let name = named_object.name.as_bytes();
+        let is_struct = codebase.get_class_like(name).is_some_and(|class_like| class_like.flags.is_struct());
 
-            (is_struct || codebase.get_declaring_method(name, b"op_Equality").is_some()).then(|| STRING_ATOMIC.clone())
-        }
-        _ => None,
+        (is_struct || codebase.get_declaring_method(name, b"op_Equality").is_some()).then(|| STRING_ATOMIC.clone())
     };
 
     if !key_type.types.iter().any(|atomic| backing_type(atomic).is_some()) {
@@ -1451,11 +1457,26 @@ pub fn get_backing_key_type<'key>(key_type: &'key TUnion, codebase: &CodebaseMet
 ///
 /// Spec section 12 keys a `Map` by anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`
 /// and an enum case, which section 19 gives `==` with no code, a struct, and a class that declares or inherits
-/// `operator ==`, which the checker requires `hash()` beside.
+/// `operator ==`, which the checker requires `hash()` beside. An intersection keys one when any of its members does,
+/// since each of its values is a value of every member. A class value keys none: it compares by its whole type, type
+/// arguments included, and runs as its plain class name, which `Class<Box<Order>>` and `Class<Box<Invoice>>` share.
 #[must_use]
 pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    let is_key_object = |member: &TAtomic| match member {
+        TAtomic::Object(TObject::Enum(_)) => true,
+        TAtomic::Object(TObject::Named(named_object)) => {
+            let name = named_object.name.as_bytes();
+
+            codebase
+                .get_class_like(name)
+                .is_some_and(|class_like| class_like.kind.is_enum() || class_like.flags.is_struct())
+                || codebase.get_declaring_method(name, b"op_Equality").is_some()
+        }
+        _ => false,
+    };
+
     key_type.types.iter().all(|atomic| match atomic {
-        TAtomic::Never | TAtomic::Error | TAtomic::Null | TAtomic::Object(TObject::Enum(_)) => true,
+        TAtomic::Never | TAtomic::Error | TAtomic::Null => true,
         TAtomic::Scalar(scalar) => matches!(
             scalar,
             TScalar::ArrayKey
@@ -1464,13 +1485,9 @@ pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
                 | TScalar::Float(_)
                 | TScalar::String(_)
                 | TScalar::Bool(_)
-                | TScalar::ClassLikeString(_)
         ),
-        TAtomic::Object(TObject::Named(named_object)) => {
-            let name = named_object.name.as_bytes();
-
-            codebase.get_class_like(name).is_some_and(|class_like| class_like.flags.is_struct())
-                || codebase.get_declaring_method(name, b"op_Equality").is_some()
+        TAtomic::Object(_) => {
+            std::iter::once(atomic).chain(atomic.get_intersection_types().unwrap_or_default()).any(is_key_object)
         }
         TAtomic::GenericParameter(parameter) => is_key_type(&parameter.constraint, codebase),
         _ => false,
@@ -1557,7 +1574,7 @@ pub fn get_php_passed_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUni
     let arrays = r#type.types.iter().filter_map(|atomic| match atomic {
         TAtomic::Array(map @ TArray::Keyed(_)) => {
             let (key_type, value_type) = get_array_parameters(map, codebase);
-            let mut held_key_type = get_backing_key_type(&key_type, codebase).into_owned();
+            let mut held_key_type = get_backing_key_type(&key_type, codebase, Dialect::Sharp).into_owned();
             if held_key_type.has_string() && !held_key_type.has_int() {
                 held_key_type = TUnion::from_vec(held_key_type.types.iter().chain([INT_ATOMIC]).cloned().collect());
             }
@@ -1576,6 +1593,120 @@ pub fn get_php_passed_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUni
     let received = get_php_received_type(r#type, codebase);
 
     received.clone_with_types(received.types.iter().cloned().chain(arrays).collect())
+}
+
+/// The backed enum whose cases every value of `atomic` is.
+///
+/// In plain PHP that is the enum an enum type names, as upstream Mago reads it. In PHP# it is the backed enum among the
+/// members of `atomic`, or of a type parameter's bound, whichever member the type writes first.
+#[must_use]
+pub fn get_backed_enum<'codebase>(
+    atomic: &TAtomic,
+    codebase: &'codebase CodebaseMetadata,
+    dialect: Dialect,
+) -> Option<&'codebase ClassLikeMetadata> {
+    let backed_enum = |name: Word| {
+        codebase
+            .get_class_like(name.as_bytes())
+            .filter(|class_like| class_like.kind.is_enum() && class_like.enum_type.is_some())
+    };
+
+    if !dialect.is_sharp() {
+        return match atomic {
+            TAtomic::Object(TObject::Enum(object)) => backed_enum(object.name),
+            _ => None,
+        };
+    }
+
+    let bound = match atomic {
+        TAtomic::GenericParameter(parameter) => match parameter.constraint.types.as_ref() {
+            [bound] => bound,
+            _ => return None,
+        },
+        _ => atomic,
+    };
+
+    std::iter::once(bound).chain(bound.get_intersection_types().unwrap_or_default()).find_map(|member| match member {
+        TAtomic::Object(object) => backed_enum(object.get_name()?),
+        _ => None,
+    })
+}
+
+/// A type PHP# can write, by the form its spelling takes. A PHP docblock refinement of one, such as `positive-int`,
+/// `non-empty-string` or `list<int>`, is that type.
+#[derive(Debug, Clone, Copy)]
+pub enum SharpType<'atomic> {
+    Int,
+    Float,
+    Bool,
+    String,
+    Void,
+    /// `Object`, any object.
+    Object,
+    Enum(Word),
+    /// A class with its type arguments, none for a class that takes none.
+    Class(Word, &'atomic [TUnion]),
+    List(&'atomic TUnion),
+    Set(&'atomic TUnion),
+    Map(&'atomic TUnion, &'atomic TUnion),
+    Iterable(&'atomic TUnion),
+    Parameter(&'atomic TGenericParameter),
+    ClassValue(&'atomic TClassLikeString),
+    Function(&'atomic TCallableSignature),
+}
+
+/// `atomic` as PHP# writes it, or `None` for a type only a PHP docblock writes, such as `array-key`, `scalar`,
+/// `numeric`, `resource` or an `array{…}` shape.
+#[must_use]
+pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
+    Some(match atomic {
+        TAtomic::Scalar(TScalar::Integer(_)) => SharpType::Int,
+        TAtomic::Scalar(TScalar::Float(_)) => SharpType::Float,
+        TAtomic::Scalar(TScalar::Bool(_)) => SharpType::Bool,
+        TAtomic::Scalar(TScalar::String(_)) => SharpType::String,
+        TAtomic::Scalar(TScalar::ClassLikeString(class_value)) => SharpType::ClassValue(class_value),
+        TAtomic::Void => SharpType::Void,
+        TAtomic::Object(TObject::Any) => SharpType::Object,
+        TAtomic::Object(TObject::Enum(object)) => SharpType::Enum(object.name),
+        TAtomic::Object(TObject::Named(object)) => {
+            SharpType::Class(object.name, object.get_type_parameters().unwrap_or_default())
+        }
+        TAtomic::Array(TArray::List(list)) => SharpType::List(&list.element_type),
+        TAtomic::Array(TArray::Set(element_type)) => SharpType::Set(element_type),
+        TAtomic::Array(TArray::Keyed(TKeyedArray { parameters: Some((key, value)), .. })) => SharpType::Map(key, value),
+        TAtomic::Iterable(iterable) => SharpType::Iterable(iterable.get_value_type()),
+        TAtomic::GenericParameter(parameter) => SharpType::Parameter(parameter),
+        TAtomic::Callable(TCallable::Signature(signature)) => SharpType::Function(signature),
+        _ => return None,
+    })
+}
+
+/// Whether PHP# can write `union`, each member, each type it intersects and each type inside them, as
+/// [`get_sharp_type`] reads them. `mixed` is `Any?`.
+#[must_use]
+pub fn is_written_in_sharp(union: &TUnion) -> bool {
+    union.types.iter().all(|atomic| {
+        atomic.is_null()
+            || atomic.is_mixed()
+            || std::iter::once(atomic).chain(atomic.get_intersection_types().unwrap_or_default()).all(|member| {
+                match get_sharp_type(member) {
+                    None => false,
+                    Some(SharpType::Class(_, inner)) => inner.iter().all(is_written_in_sharp),
+                    Some(SharpType::List(inner) | SharpType::Set(inner) | SharpType::Iterable(inner)) => {
+                        is_written_in_sharp(inner)
+                    }
+                    Some(SharpType::Map(key, value)) => is_written_in_sharp(key) && is_written_in_sharp(value),
+                    Some(SharpType::Function(signature)) => {
+                        signature.get_return_type().is_none_or(is_written_in_sharp)
+                            && signature
+                                .get_parameters()
+                                .iter()
+                                .all(|parameter| parameter.get_type_signature().is_none_or(is_written_in_sharp))
+                    }
+                    Some(_) => true,
+                }
+            })
+    })
 }
 
 #[must_use]

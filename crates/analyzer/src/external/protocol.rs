@@ -138,7 +138,7 @@ use crate::invocation::MethodTargetContext;
 
 pub const ANALYZER_PROTOCOL_MAGIC: [u8; 4] = *b"MANA";
 pub const ANALYZER_PROTOCOL_MAJOR: u16 = 1;
-pub const ANALYZER_PROTOCOL_MINOR: u16 = 10;
+pub const ANALYZER_PROTOCOL_MINOR: u16 = 11;
 
 const HEADER_LENGTH: usize = 12;
 const INITIAL_MESSAGE_CAPACITY: usize = 256;
@@ -3695,6 +3695,35 @@ pub(super) mod testing {
 
             assert_eq!(typed_arguments, 1, "{files:?}");
             assert_eq!(names(&payload, b"Sharp\\Map"), sends_map, "{files:?}");
+        }
+    }
+
+    /// A `Map`'s key and a `Set`'s element, which a snapshot encodes as a type argument of the `Sharp\Map` or `Sharp\Set`
+    /// they run as, nest as deep as a `List`'s element and a `Map`'s value do: each level of each passes three levels of
+    /// the maximum depth, so 86 levels of any of them are refused.
+    #[test]
+    fn a_map_key_and_a_set_element_nest_as_deep_as_a_list_element() {
+        let levels = MAXIMUM_TYPE_DEPTH / 3 + 1;
+        let array = |array: TArray| TUnion::from_atomic(TAtomic::Array(array));
+        let (mut list, mut key, mut value, mut set) = (get_int(), get_int(), get_int(), get_int());
+        for _ in 0..levels {
+            list = get_list(list);
+            key = array(TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(key), Arc::new(get_int()))));
+            value = array(TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(get_int()), Arc::new(value))));
+            set = array(TArray::Set(Arc::new(set)));
+        }
+
+        for nested in [list, key, value, set] {
+            let refusal = encode_union_snapshot(
+                &mut PayloadWriter::new(),
+                &nested,
+                &mut Vec::new(),
+                &CodebaseMetadata::new(),
+                Dialect::Sharp,
+                0,
+            );
+
+            assert!(matches!(refusal, Err(error) if error.to_string().contains("maximum nesting depth")));
         }
     }
 

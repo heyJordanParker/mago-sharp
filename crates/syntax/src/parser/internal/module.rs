@@ -51,6 +51,7 @@ where
                 self.errors.push(ParseError::OtherMemberInSharpModule(statement.span()));
             } else {
                 self.state.members_of = "A module";
+                self.state.type_parameters_of = None;
                 match self.parse_classlike_member() {
                     Ok(ClassLikeMember::Law(law)) => members.push(ModuleMember::Law(law)),
                     Ok(member) => self.errors.push(ParseError::OtherMemberInSharpModule(member.span())),

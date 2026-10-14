@@ -154,7 +154,8 @@ where
         value.analyze(context, block_context, artifacts)?;
     }
 
-    // A PHP# type holds null only when it is written with `?`, so its `Any` and its null defaults are checked too.
+    // A PHP# type holds null only when it is written with `?`, so its `Any`, its type parameters and its null defaults
+    // are checked too.
     let is_sharp = context.dialect.is_sharp();
 
     if let Some(class_metadata) = block_context.scope.get_class_like()
@@ -163,9 +164,9 @@ where
     {
         check_sharp_literal_kind(context, value, &declared_type_metadata.type_union);
 
-        if (is_sharp || !declared_type_metadata.type_union.is_mixed())
-            && !declared_type_metadata.type_union.has_template_types()
-            && !declared_type_metadata.type_union.is_generic_parameter()
+        if (is_sharp
+            || !(declared_type_metadata.type_union.is_mixed()
+                || declared_type_metadata.type_union.has_template_types()))
             && let Some(value_type) = artifacts.get_expression_type(value).cloned()
             && !value_type.is_never()
         {
@@ -184,7 +185,7 @@ where
             }
             let value_type = get_set_literal_type(context, artifacts, value, &declared_type).unwrap_or(value_type);
 
-            let mut comparison_result = ComparisonResult::with_sharp_rules(is_sharp);
+            let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
             if union_comparator::is_contained_by(
                 context.codebase,
                 &value_type,
