@@ -21325,8 +21325,10 @@ fn a_null_safe_extension_member_runs_only_on_a_receiver_that_is_not_null() {
 /// readonly `Set` parameter still makes its `Set` before the body runs.
 #[test]
 fn readonly_lowers_to_the_same_php_as_without_it() {
-    let order =
-        ("src/Order.sharp", "namespace App;\n\npublic class Order\n{\n    public int paid { get; set; } = 0;\n\n    public static bool operator ==(Order a, Order b) => a.paid == b.paid;\n\n    public int hash() => this.paid;\n}\n");
+    let order = (
+        "src/Order.sharp",
+        "namespace App;\n\npublic class Order\n{\n    public int paid { get; set; } = 0;\n\n    public static bool operator ==(Order a, Order b) => a.paid == b.paid;\n\n    public int hash() => this.paid;\n}\n",
+    );
     let shop = |readonly: &str, marker: &str| {
         format!(
             "namespace App;\n\npublic class Shop\n{{\n    private Order kept = new Order();\n\n    public Shop({readonly}Order order, {readonly}List<Order> orders) {{ }}\n\n    public {readonly}Order customer => this.kept;\n\n    public {readonly}Order? pick({readonly}Order order, {readonly}Set<Order> ids, Function<int({readonly}Order)> paid){marker}\n    {{\n        {readonly}Order held = order;\n        const count = ({readonly}Order o) => o.paid;\n        return ids.contains(held) && count(held) > 0 ? held : null;\n    }}\n}}\n"

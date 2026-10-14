@@ -85,10 +85,10 @@ use crate::utils::report_dropped_readonly;
 /// The type `parameter` of a PHP# function declares, when that type names a type parameter of the function itself,
 /// spec section 11. Such a type parameter takes a readonly value only where the parameter writes `readonly`, spec
 /// section 13, so the declared type is what an argument meets. A class's type parameter is filled by the receiver.
-fn own_type_parameter_type<'a>(
+fn own_type_parameter_type<'parameter>(
     invocation: &Invocation<'_, '_, '_>,
-    parameter: &InvocationTargetParameter<'a>,
-) -> Option<&'a TUnion> {
+    parameter: &InvocationTargetParameter<'parameter>,
+) -> Option<&'parameter TUnion> {
     invocation.target.get_function_like_metadata().filter(|function| function.flags.is_sharp())?;
 
     parameter.get_type().filter(|declared| {
