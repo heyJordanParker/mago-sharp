@@ -945,15 +945,17 @@ where
         };
         self.register_method(&parts, context);
 
-        // `operator ==` runs as `op_Equality(?Money $a, ?Money $b)`, which lifts `null` itself, so the PHP method
-        // takes `null`. Its body and PHP# callers keep the types the operator declares.
-        if matches!(operator.symbol, BinaryOperator::Equal(_))
-            && let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
+        if let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
             && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, ascii_lowercase_word(parts.name)))
         {
-            for parameter in &mut method.parameters {
-                if let Some(declaration) = &mut parameter.type_declaration_metadata {
-                    declaration.type_union = declaration.type_union.clone().as_nullable();
+            method.flags |= MetadataFlags::OPERATOR;
+            // `operator ==` runs as `op_Equality(?Money $a, ?Money $b)`, which lifts `null` itself, so the PHP method
+            // takes `null`. Its body and PHP# callers keep the types the operator declares.
+            if matches!(operator.symbol, BinaryOperator::Equal(_)) {
+                for parameter in &mut method.parameters {
+                    if let Some(declaration) = &mut parameter.type_declaration_metadata {
+                        declaration.type_union = declaration.type_union.clone().as_nullable();
+                    }
                 }
             }
         }

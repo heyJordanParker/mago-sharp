@@ -1514,9 +1514,11 @@ pub fn get_collection_object(array: &TArray, codebase: &CodebaseMetadata) -> Opt
 /// The type plain PHP code receives where a PHP# declaration gives `r#type`.
 ///
 /// It is a return, a property or a callback's argument. Each `Map` and `Set` in it, also inside a collection and in a
-/// function's parameters and return, is the object it runs as. A `List` stays a PHP array.
+/// function's parameters and return, is the object it runs as. A `List` stays a PHP array. A readonly value is the
+/// value it runs as, spec section 13: PHP# checks `readonly` in PHP# code only.
 #[must_use]
 pub fn get_php_received_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    let r#type = r#type.clone().without_readonly();
     let convert = |inner: &TUnion| get_php_received_type(inner, codebase);
     let mut types = Vec::with_capacity(r#type.types.len());
     for atomic in r#type.types.iter() {

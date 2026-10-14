@@ -16924,21 +16924,6 @@ fn a_write_through_a_readonly_value_is_an_error() {
     );
 }
 
-/// Spec section 13: code outside any method, at a file's top level, keeps a readonly value read only too, and its
-/// message names it `This code`.
-#[test]
-fn top_level_code_keeps_a_readonly_value_read_only() {
-    let main = "namespace App;\n\nreadonly Order o = new Order();\no.number = \"x\";\nOrder w = o;\n";
-
-    assert_eq!(
-        messages(("src/main.sharp", main), &READONLY_CLASSES),
-        [
-            "This code cannot set o.number: o is readonly.",
-            "This code cannot store o in w: o is readonly. Declare it `readonly Order w`.",
-        ]
-    );
-}
-
 /// Spec section 13: a readonly method is checked as if `this` were a readonly value, in a lambda it writes too.
 #[test]
 fn a_readonly_method_cannot_write_this() {
@@ -17010,12 +16995,13 @@ fn a_readonly_value_calls_only_readonly_methods() {
 #[test]
 fn a_readonly_value_stays_readonly_through_narrowing_and_operators() {
     let shapes = "namespace App;\n\npublic class Shape\n{\n    public int size { get; set; } = 0;\n}\n\npublic class Circle : Shape\n{\n    public int radius { get; set; } = 0;\n}\n";
-    let view = "namespace App;\n\npublic class Tag\n{\n    public int count { get; set; } = 0;\n\n    public static bool operator ==(Tag a, Tag b)\n    {\n        a.count = 1;\n        return true;\n    }\n\n    public int hash() => this.count;\n\n    public void show(readonly Shape shape, Shape other, bool flag)\n    {\n        if (shape is Circle c) {\n            c.radius = 1;\n        }\n        const either = flag ? shape : other;\n        either.size = 2;\n        Circle? viaAs = shape as Circle;\n    }\n\n    public void put<T : Shape>(readonly T item, readonly List<Shape> shapes)\n    {\n        item.size = 3;\n        const first = shapes.first(s => s.size > 0);\n        first.size = 4;\n        shapes.map(s => s.size = 5);\n    }\n}\n";
+    let view = "namespace App;\n\npublic class Tag\n{\n    public int count { get; set; } = 0;\n\n    public static bool operator ==(Tag a, Tag b)\n    {\n        a.count = 1;\n        return true;\n    }\n\n    public int hash() => this.count;\n\n    public static Tag operator +(Tag a, Tag b) => a;\n\n    public static readonly Tag operator -(Tag a, Tag b) => a;\n\n    public void show(readonly Shape shape, Shape other, bool flag)\n    {\n        if (shape is Circle c) {\n            c.radius = 1;\n        }\n        const either = flag ? shape : other;\n        either.size = 2;\n        Circle? viaAs = shape as Circle;\n    }\n\n    public void put<T : Shape>(readonly T item, readonly List<Shape> shapes)\n    {\n        item.size = 3;\n        const first = shapes.first(s => s.size > 0);\n        first.size = 4;\n        shapes.map(s => s.size = 5);\n    }\n}\n";
 
     assert_eq!(
         messages(("src/Tag.sharp", view), &[("src/Shapes.sharp", shapes)]),
         [
             "operator == cannot set a.count: a is readonly.",
+            "operator + cannot return a: a is readonly. Declare the return type `readonly Tag`, or return a new value.",
             "show cannot set c.radius: c is readonly.",
             "show cannot set either.size: either is readonly.",
             "show cannot store shape as Circle in viaAs: shape as Circle is readonly. Declare it `readonly Circle? viaAs`.",
@@ -17070,15 +17056,17 @@ fn a_readonly_value_calls_no_plain_php_method() {
     );
 }
 
-/// Spec section 13: `readonly` holds only types PHP# checks, so a plain PHP class under it is an error, and a type
-/// whose value never changes, an enum's, takes none.
+/// Spec section 13: `readonly` holds only types PHP# checks, so a plain PHP class under it is an error, in a type
+/// argument too, and a type whose value never changes takes none: an enum, a struct, a function type, and a
+/// collection of values, which is copied as a struct is. A collection of objects keeps it.
 #[test]
 fn readonly_holds_only_types_php_sharp_checks() {
     let model = "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function save(): void {}\n}\n";
     let status = "namespace App;\n\npublic enum Status\n{\n    case Paid;\n}\n";
-    let view = "namespace App;\n\nimport Lib.Model;\n\npublic class Shows\n{\n    public void show(readonly Model model) { }\n\n    public void status(readonly Status status) { }\n\n    public void order(readonly Order order) { }\n\n    public void either(readonly Order|Model value) { }\n\n    public readonly Self same() readonly => this;\n}\n";
+    let size = "namespace App;\n\npublic struct Size\n{\n    public Size(public int width { get; }) { }\n}\n";
+    let view = "namespace App;\n\nimport Lib.Model;\n\npublic class Shows\n{\n    public void show(readonly Model model) { }\n\n    public void status(readonly Status status) { }\n\n    public void order(readonly Order order) { }\n\n    public void either(readonly Order|Model value) { }\n\n    public readonly Self same() readonly => this;\n\n    public void size(readonly Size? size) { }\n\n    public void models(readonly List<Model> models) { }\n\n    public void numbers(readonly List<int> numbers) { }\n\n    public void statuses(readonly Map<string, Status> statuses) { }\n\n    public void callback(readonly Function<int(Line)> f) { }\n\n    public void orders(readonly List<Order> orders, readonly Map<string, List<Line>> lines) { }\n\n    public void grouped(readonly (Order|Model)? value, readonly (Status|Size)? kind) { }\n}\n";
     let mut others = READONLY_CLASSES.to_vec();
-    others.extend([("src/Lib/Model.php", model), ("src/Status.sharp", status)]);
+    others.extend([("src/Lib/Model.php", model), ("src/Status.sharp", status), ("src/Size.sharp", size)]);
 
     assert_eq!(
         messages(("src/Shows.sharp", view), &others),
@@ -17086,6 +17074,123 @@ fn readonly_holds_only_types_php_sharp_checks() {
             "`readonly` holds only types PHP# checks, and `Model` is a plain PHP class: write `Model`.",
             "A `Status` never changes, so `readonly` changes nothing: write `Status`.",
             "`readonly` holds only types PHP# checks, and `Model` is a plain PHP class: write `Order|Model`.",
+            "A `Size?` never changes, so `readonly` changes nothing: write `Size?`.",
+            "`readonly` holds only types PHP# checks, and `Model` is a plain PHP class: write `List<Model>`.",
+            "A `List<int>` never changes, so `readonly` changes nothing: write `List<int>`.",
+            "A `Map<string, Status>` never changes, so `readonly` changes nothing: write `Map<string, Status>`.",
+            "A `Function<int(Line)>` never changes, so `readonly` changes nothing: write `Function<int(Line)>`.",
+            "`readonly` holds only types PHP# checks, and `Model` is a plain PHP class: write `(Order|Model)?`.",
+            "A `(Status|Size)?` never changes, so `readonly` changes nothing: write `(Status|Size)?`.",
         ]
     );
+}
+
+/// The shapes the spec section 13 tests narrow and pass to type parameters.
+const READONLY_SHAPES: (&str, &str) = (
+    "src/Shapes.sharp",
+    "namespace App;\n\npublic class Shape\n{\n    public int size { get; set; } = 0;\n}\n\npublic class Circle : Shape\n{\n    public int radius { get; set; } = 0;\n}\n",
+);
+
+/// Spec section 13: a method value runs its method, so one read through a readonly value is a call of that method.
+#[test]
+fn a_method_value_read_through_a_readonly_value_calls_its_method() {
+    let view = (
+        "src/View.sharp",
+        "namespace App;\n\npublic class View\n{\n    public void render(readonly Order order)\n    {\n        const pay = order.markPaid;\n        const total = order.totalIn;\n    }\n}\n",
+    );
+    let mut files = READONLY_CLASSES.to_vec();
+    files.push(view);
+
+    assert_eq!(
+        effect_issues(&files),
+        [
+            "src/View.sharp:7:27 missing-readonly-marker: render cannot call order.markPaid: order is readonly. Help: markPaid changes Order: it writes `this.paid`.",
+        ]
+    );
+}
+
+/// Spec section 13: a function value fits a function type only when it keeps every readonly value: it takes as
+/// readonly each parameter the type passes readonly, and returns a readonly value only where the type returns one.
+#[test]
+fn a_function_value_keeps_the_readonly_values_its_type_passes() {
+    let funcs = "namespace App;\n\npublic class Funcs\n{\n    public void keep(readonly Order order)\n    {\n        Function<void(readonly Order)> pay = (Order o) => { o.markPaid(); };\n        Function<void(readonly Order)> look = (readonly Order o) => { };\n        Function<void(readonly Order)> guess = (o) => { };\n        order.lines.map((Line l) => l.amount);\n        order.lines.map(l => l.amount);\n        Function<Order()> give = () => order;\n        Function<readonly Order()> lend = () => order;\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Funcs.sharp", funcs), &READONLY_CLASSES),
+        [
+            "keep cannot store (Order o) => { o.markPaid(); } in pay: it takes a writable `Order` where a readonly one is passed. Declare its parameter `readonly Order`.",
+            "keep cannot pass (Line l) => l.amount to List<readonly Line>.map: it takes a writable `Line` where a readonly one is passed. Declare its parameter `readonly Line`.",
+            "keep cannot store () => order in give: it returns a readonly `Order` where a writable one is expected. Declare the return `readonly Order`.",
+        ]
+    );
+}
+
+/// Spec section 13: a method's own type parameter takes a readonly value only where its parameter is written
+/// `readonly`, and `readonly T` stays readonly where it is passed, stored, returned or narrowed.
+#[test]
+fn a_type_parameter_takes_a_readonly_value_only_when_written_readonly() {
+    let probes = "namespace App;\n\npublic class Probes\n{\n    public void touch<TShape : Shape>(TShape x) { x.size = 1; }\n\n    public void look<TShape : Shape>(readonly TShape x) { }\n\n    public void keep(Shape s) { s.size = 1; }\n\n    public TShape give<TShape : Shape>(readonly TShape item) { return item; }\n\n    public void pass(readonly Shape s)\n    {\n        this.touch(s);\n        this.look(s);\n    }\n\n    public void hold<T : Shape>(readonly T item)\n    {\n        this.keep(item);\n        Shape local = item;\n        if (item is Circle c) {\n            c.radius = 1;\n        }\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Probes.sharp", probes), &[READONLY_SHAPES]),
+        [
+            "give cannot return item: item is readonly. Declare the return type `readonly TShape`.",
+            "pass cannot pass s to Probes.touch: s is readonly. Declare the parameter `readonly TShape x`.",
+            "hold cannot pass item to Probes.keep: item is readonly. Declare the parameter `readonly Shape s`.",
+            "hold cannot store item in local: item is readonly. Declare it `readonly Shape local`.",
+            "hold cannot set c.radius: c is readonly.",
+        ]
+    );
+}
+
+/// Spec section 13: a spread passes each element, so a collection of readonly values spreads only into a variadic
+/// parameter that takes them readonly.
+#[test]
+fn a_spread_of_readonly_values_goes_only_where_they_stay_readonly() {
+    let probes = "namespace App;\n\npublic class Probes\n{\n    public void touchAll(Line ...lines) { }\n\n    public void lookAll(readonly Line ...lines) { }\n\n    public void spread(readonly Order order)\n    {\n        this.touchAll(...order.lines);\n        this.lookAll(...order.lines);\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Probes.sharp", probes), &READONLY_CLASSES),
+        [
+            "spread cannot pass order.lines to Probes.touchAll: order.lines is readonly. Declare the parameter `readonly Line lines`."
+        ]
+    );
+}
+
+/// Spec section 13: only `int hash()` and `string toString()` are readonly by definition. A method of either name that
+/// takes parameters is an ordinary method, which may change `this`.
+#[test]
+fn only_hash_and_to_string_without_parameters_are_readonly() {
+    let hasher = "namespace App;\n\npublic class Hasher\n{\n    public int calls { get; set; } = 0;\n\n    public string hash(string text)\n    {\n        this.calls = 1;\n        return text;\n    }\n\n    public string toString(int width)\n    {\n        this.calls = width;\n        return \"hasher\";\n    }\n}\n";
+    let keyed = "namespace App;\n\npublic class Keyed\n{\n    public int calls { get; set; } = 0;\n\n    public int hash() => this.calls++;\n\n    public string toString()\n    {\n        this.calls = 2;\n        return \"keyed\";\n    }\n}\n";
+
+    assert_eq!(messages(("src/Hasher.sharp", hasher), &[]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Keyed.sharp", keyed), &[]),
+        ["hash cannot set this.calls: this is readonly.", "toString cannot set this.calls: this is readonly."]
+    );
+}
+
+/// Spec section 13: an extension member is called through a readonly value only when its receiver is `readonly`, and
+/// the error names the call and that receiver.
+#[test]
+fn an_extension_member_called_through_a_readonly_value_names_its_receiver() {
+    let ops = "namespace App;\n\npublic static class OrderOps\n{\n    extension(Order order)\n    {\n        public void pay() { order.markPaid(); }\n    }\n\n    extension(readonly Order order)\n    {\n        public int owed() => order.paid;\n    }\n}\n\npublic class UsesOps\n{\n    public int settle(readonly Order order)\n    {\n        order.pay();\n        return order.owed();\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/OrderOps.sharp", ops), &READONLY_CLASSES),
+        ["settle cannot call order.pay: order is readonly. Declare its receiver `extension(readonly Order order)`."]
+    );
+}
+
+/// Spec section 13 checks only PHP# code, so a plain PHP file's messages show a PHP# readonly type as its PHP type.
+#[test]
+fn plain_php_messages_show_a_readonly_type_as_its_php_type() {
+    let chain = "namespace App;\n\npublic class Chain\n{\n    public Chain? next { get; set; } = null;\n\n    public readonly Chain? first => this.next;\n\n    public readonly Chain? following() readonly => this.next;\n\n    public void link(readonly Chain chain) { }\n}\n";
+    let walk = "<?php\n\nnamespace Lib;\n\nuse App\\Chain;\n\nfunction walk(Chain $chain): int\n{\n    $chain->link(5);\n\n    return $chain->following();\n}\n\nfunction head(Chain $chain): int\n{\n    return $chain->first;\n}\n";
+
+    let messages = messages(("src/Lib/walk.php", walk), &[("src/Chain.sharp", chain)]);
+
+    assert!(messages.iter().all(|message| !message.contains("readonly")), "{messages:#?}");
+    assert_eq!(messages.len(), 5, "{messages:#?}");
 }

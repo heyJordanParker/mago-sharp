@@ -18,6 +18,7 @@ use crate::ttype::TypeRef;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::array::TArray;
 use crate::ttype::atomic::array::key::ArrayKey;
+use crate::ttype::atomic::callable::TCallable;
 use crate::ttype::atomic::generic::TGenericParameter;
 use crate::ttype::atomic::mixed::truthiness::TMixedTruthiness;
 use crate::ttype::atomic::object::TObject;
@@ -409,19 +410,21 @@ impl TUnion {
     }
 
     /// Whether a value of `input` placed where this declared type goes would lose its readonly, spec section 13: a
-    /// readonly object where this type takes a writable object or any value, and a collection or a type argument of
-    /// readonly objects where this type's takes writable ones. A type parameter takes the readonly with the value.
+    /// readonly value where this type takes a writable object, a type parameter not written `readonly`, or any value,
+    /// a collection or a type argument of readonly values where this type's takes writable ones, and a function value
+    /// that [`TCallableSignature::drops_readonly_of`] refuses where this type is a function type.
     #[must_use]
     pub fn drops_readonly_of(&self, input: &TUnion) -> bool {
-        input.types.iter().filter(|atomic| atomic_holds_readonly_object(atomic)).any(|atomic| match atomic {
-            TAtomic::Object(TObject::Named(named)) if named.is_readonly => {
-                !self.types.iter().any(|declared| matches!(declared, TAtomic::GenericParameter(_)))
-                    && self.types.iter().any(|declared| match declared {
-                        TAtomic::Object(TObject::Named(declared)) => !declared.is_readonly,
-                        TAtomic::Object(_) | TAtomic::Mixed(_) => true,
-                        _ => false,
-                    })
-            }
+        input.types.iter().any(|atomic| match atomic {
+            TAtomic::Callable(TCallable::Signature(given)) => self.types.iter().any(|declared| {
+                matches!(declared, TAtomic::Callable(TCallable::Signature(declared)) if declared.drops_readonly_of(given).is_some())
+            }),
+            atomic if atomic.is_readonly_value() => self.types.iter().any(|declared| match declared {
+                TAtomic::Object(TObject::Named(_)) | TAtomic::GenericParameter(_) => !declared.is_readonly_value(),
+                TAtomic::Object(_) | TAtomic::Mixed(_) => true,
+                _ => false,
+            }),
+            atomic if !atomic_holds_readonly_object(atomic) => false,
             _ => {
                 let reached = readonly_reach(atomic);
                 self.types.iter().any(|declared| match (atomic, declared) {

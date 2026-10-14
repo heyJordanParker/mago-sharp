@@ -56,6 +56,7 @@ mod expression;
 mod formula;
 mod invocation;
 mod readonly;
+mod readonly_types;
 mod reconciler;
 mod resolver;
 mod statement;
@@ -241,7 +242,7 @@ where
         analyze_statements(statements, &mut context, &mut block_context, &mut artifacts)?;
         if program.dialect.is_sharp() {
             effects::check::check_uses(&mut context, &block_context, &mut artifacts, program);
-            readonly::check_readonly_types(&mut context, program);
+            readonly_types::check_readonly_types(&mut context, program);
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(start) = statements_start {

@@ -101,7 +101,6 @@ use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
-use crate::utils::names::operator_symbol;
 use crate::utils::report_int_for_float;
 
 pub mod function;
@@ -551,7 +550,7 @@ where
             context.codebase.method_is_overriding(class_name.as_bytes(), function_like_metadata.name.as_bytes())
         });
 
-    let is_operator = operator_symbol(context, function_like_metadata).is_some();
+    let is_operator = function_like_metadata.flags.is_operator();
     for (i, parameter_metadata) in function_like_metadata.parameters.iter().enumerate() {
         let parameter_variable_str = parameter_metadata.get_name().0;
 

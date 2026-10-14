@@ -152,6 +152,7 @@ where
                 block_context,
                 IssueCode::InvalidPropertyAssignmentValue,
                 value,
+                (&resolved_property.property_type, assigned_value_type),
                 &action,
                 ", and a field or property keeps only a writable value.",
             );

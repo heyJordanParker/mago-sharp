@@ -67,6 +67,7 @@ use crate::invocation::rename_trait_objects;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
+use crate::resolver::method::check_call_through_readonly;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
 use crate::statement::function_like::closure_parameter_types;
@@ -503,7 +504,7 @@ fn report_readonly_write<A>(
 {
     let receiver = quoted_source(context, object.span());
     let written = quoted_source(context, object.span().join(property.span()));
-    let writer = readonly_writer(context, block_context.scope.get_function_like());
+    let writer = readonly_writer(block_context.scope.get_function_like());
     context.collector.report_with_code(
         IssueCode::InvalidPropertyWrite,
         Issue::error(format!("{writer} cannot set {written}: {receiver} is readonly."))
@@ -964,12 +965,19 @@ where
                 read_span,
             )
         {
-            check_private_method_reach(
-                context,
-                object_expr,
-                &MethodIdentifier::new(class_id, method_name),
-                selector.span(),
-            );
+            let method = MethodIdentifier::new(class_id, method_name);
+            check_private_method_reach(context, object_expr, &method, selector.span());
+            // Spec section 13: a method value runs its method, so through a readonly value it is a call of it.
+            if context.dialect.is_sharp() && matches!(object, TObject::Named(named) if named.is_readonly) {
+                check_call_through_readonly(
+                    context,
+                    block_context,
+                    &mut artifacts.readonly_calls,
+                    (object_expr, selector),
+                    &method,
+                    class_id,
+                );
+            }
 
             return Some(ResolvedProperty {
                 property_span: None,

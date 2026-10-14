@@ -18,6 +18,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
+use mago_names::binding::sharp_operator_symbol;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
@@ -549,6 +550,9 @@ where
 
             format!("{readonly}{name}")
         }
+        TAtomic::GenericParameter(parameter) if atomic.is_readonly_value() => {
+            format!("readonly {}", parameter.parameter_name)
+        }
         TAtomic::GenericParameter(parameter) => parameter.parameter_name.to_string(),
         TAtomic::Callable(TCallable::Signature(signature)) => {
             let written = |union: Option<&TUnion>| {
@@ -625,39 +629,22 @@ where
 }
 
 /// The code a spec section 13 message names as the one that writes, passes or calls through a readonly value: the
-/// method or accessor `function` of the analyzed file runs, by the name it declares, `operator ==` for an operator,
-/// which declares a symbol, or `This lambda`.
+/// method or accessor `function` runs, by the name it declares, `operator ==` for an operator, or `This lambda`.
 #[must_use]
-pub(crate) fn readonly_writer<A>(context: &Context<'_, '_, A>, function: Option<&FunctionLikeMetadata>) -> String
-where
-    A: Arena,
-{
-    match function {
-        Some(function) if matches!(function.kind, FunctionLikeKind::Closure | FunctionLikeKind::ArrowFunction) => {
-            "This lambda".to_owned()
-        }
-        Some(function) => match operator_symbol(context, function) {
-            Some(symbol) => format!("operator {}", String::from_utf8_lossy(symbol)),
-            None => function.original_name.to_string(),
-        },
-        None => "This code".to_owned(),
+pub(crate) fn readonly_writer(function: Option<&FunctionLikeMetadata>) -> String {
+    let Some(function) = function else {
+        unreachable!("semantics refuses a statement at file level in a PHP# file, so only a body is analyzed");
+    };
+
+    if matches!(function.kind, FunctionLikeKind::Closure | FunctionLikeKind::ArrowFunction) {
+        "This lambda".to_owned()
+    } else if function.flags.is_operator()
+        && let Some(symbol) = sharp_operator_symbol(function.original_name.as_bytes())
+    {
+        format!("operator {symbol}")
+    } else {
+        function.original_name.to_string()
     }
-}
-
-/// The symbol of the PHP# operator `function` of the analyzed file declares, as `==`, or `None` for any other function.
-/// An operator's name is its symbol, which no other declaration's name can be.
-#[must_use]
-pub(crate) fn operator_symbol<'ctx, A>(
-    context: &Context<'ctx, '_, A>,
-    function: &FunctionLikeMetadata,
-) -> Option<&'ctx [u8]>
-where
-    A: Arena,
-{
-    let name = function.name_span.filter(|span| span.file_id == context.source_file.id)?;
-    let written = &context.source_file.contents[name.to_range_usize()];
-
-    (context.dialect.is_sharp() && !written.first().is_some_and(is_part_of_identifier)).then_some(written)
 }
 
 /// A PHP# method's declaration up to its parameters, as the analyzed file writes it: `totalIn(string currency)`.

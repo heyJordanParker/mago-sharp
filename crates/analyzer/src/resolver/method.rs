@@ -476,7 +476,16 @@ where
                     // A method no class declares runs the class's `__call`.
                     let called =
                         if resolved_methods.is_empty() { &resolved_magic_call_method } else { &resolved_methods };
-                    check_calls_through_readonly(context, block_context, &mut readonly_calls, object, selector, called);
+                    for resolved in called {
+                        check_call_through_readonly(
+                            context,
+                            block_context,
+                            &mut readonly_calls,
+                            (object, selector),
+                            &resolved.method_identifier,
+                            resolved.classname,
+                        );
+                    }
                 }
 
                 for resolved_method in &mut resolved_methods {
@@ -508,63 +517,60 @@ where
     Ok(result)
 }
 
-/// Spec section 13: through a readonly `object`, only methods marked `readonly` run. A PHP# method without the marker
-/// is recorded for the error the effects solve words, because only the solve knows whether it changes `this`. A plain
-/// PHP method is an error here, since PHP# does not check it. A collection's methods are checked as the writes they
-/// make.
-fn check_calls_through_readonly<A>(
+/// Spec section 13: through a readonly `object`, only methods marked `readonly` run, called or read as a method value
+/// of the class `classname`. A PHP# method without the marker is recorded for the error the effects solve words,
+/// because only the solve knows whether it changes `this`. A plain PHP method is an error here, since PHP# does not
+/// check it. A collection's methods are checked as the writes they make.
+pub(crate) fn check_call_through_readonly<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
     readonly_calls: &mut Vec<ReadonlyCall>,
-    object: &Expression<'_>,
-    selector: &ClassLikeMemberSelector<'_>,
-    resolved_methods: &[ResolvedMethod],
+    (object, selector): (&Expression<'_>, &ClassLikeMemberSelector<'_>),
+    method: &MethodIdentifier,
+    classname: Word,
 ) where
     A: Arena,
 {
-    for resolved in resolved_methods {
-        let identifier = context.codebase.get_declaring_method_identifier(&resolved.method_identifier);
-        let declaring_class = identifier.get_class_name();
-        let (Some(method), Some(declaring)) = (
-            context.codebase.get_method_by_id(&identifier),
-            context.codebase.get_class_like(declaring_class.as_bytes()),
-        ) else {
-            unreachable!("a resolved method's declaring identifier names a method of a class the codebase holds");
-        };
-        if resolved.is_static || method.flags.is_readonly() || is_prelude_stub(declaring.name) {
-            continue;
-        }
-
-        let caller = readonly_writer(context, block_context.scope.get_function_like());
-        let call = quoted_source(context, object.span().join(selector.span()));
-        let receiver = quoted_source(context, object.span());
-        let class = display_class_like_name(context, resolved.classname);
-        if !declaring.flags.is_sharp() {
-            context.collector.report_with_code(
-                IssueCode::MissingReadonlyMarker,
-                Issue::error(format!("{caller} cannot call {call}: {receiver} is readonly."))
-                    .with_annotation(Annotation::primary(selector.span()))
-                    .with_help(format!(
-                        "{} is a plain PHP method of {}, which PHP# does not check.",
-                        quoted_source(context, selector.span()),
-                        display_class_like_name(context, declaring.original_name)
-                    )),
-            );
-
-            continue;
-        }
-
-        readonly_calls.push(ReadonlyCall {
-            callee: Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), identifier.get_method_name()),
-            span: selector.span(),
-            caller,
-            call,
-            receiver,
-            method: method.original_name.to_string(),
-            class: class.to_string(),
-            declaration: sharp_method_declaration(context, method),
-        });
+    let identifier = context.codebase.get_declaring_method_identifier(method);
+    let declaring_class = identifier.get_class_name();
+    let (Some(method), Some(declaring)) =
+        (context.codebase.get_method_by_id(&identifier), context.codebase.get_class_like(declaring_class.as_bytes()))
+    else {
+        unreachable!("a resolved method's declaring identifier names a method of a class the codebase holds");
+    };
+    let is_static = method.method_metadata.as_ref().is_some_and(|method| method.is_static);
+    if is_static || method.flags.is_readonly() || is_prelude_stub(declaring.name) {
+        return;
     }
+
+    let caller = readonly_writer(block_context.scope.get_function_like());
+    let call = quoted_source(context, object.span().join(selector.span()));
+    let receiver = quoted_source(context, object.span());
+    if !declaring.flags.is_sharp() {
+        context.collector.report_with_code(
+            IssueCode::MissingReadonlyMarker,
+            Issue::error(format!("{caller} cannot call {call}: {receiver} is readonly."))
+                .with_annotation(Annotation::primary(selector.span()))
+                .with_help(format!(
+                    "{} is a plain PHP method of {}, which PHP# does not check.",
+                    quoted_source(context, selector.span()),
+                    display_class_like_name(context, declaring.original_name)
+                )),
+        );
+
+        return;
+    }
+
+    readonly_calls.push(ReadonlyCall {
+        callee: Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), identifier.get_method_name()),
+        span: selector.span(),
+        caller,
+        call,
+        receiver,
+        method: method.original_name.to_string(),
+        class: display_class_like_name(context, classname).to_string(),
+        declaration: sharp_method_declaration(context, method),
+    });
 }
 
 /// Spec section 14 calls a property that holds a function as a method: the PHP# call `x.priceOf(line)` of a class
@@ -1279,7 +1285,14 @@ where
         .cloned()
         .collect();
 
-    (!collections.is_empty()).then(|| TUnion::from_vec(collections))
+    let collections = (!collections.is_empty()).then(|| TUnion::from_vec(collections))?;
+
+    // Spec section 13: a collection read through a readonly value holds readonly values, whatever its place declares.
+    Some(if artifacts.get_expression_type(object).is_some_and(TUnion::holds_readonly_object) {
+        collections.to_readonly()
+    } else {
+        collections
+    })
 }
 
 /// The type an index on the PHP# place `object` is judged by: `value_type`, the value it holds, with every collection
@@ -1426,7 +1439,6 @@ fn get_collection_methods(array: &TArray, codebase: &CodebaseMetadata) -> TObjec
     let (mut key, mut value) = get_array_parameters(array, codebase);
     key.widen_scalars();
     value.widen_scalars();
-
     TObject::Named(match array {
         TArray::List(_) => TNamedObject::new_with_type_parameters(word("Sharp\\ListMethods"), Some(vec![value])),
         TArray::Keyed(_) => TNamedObject::new_with_type_parameters(word("Sharp\\MapMethods"), Some(vec![key, value])),

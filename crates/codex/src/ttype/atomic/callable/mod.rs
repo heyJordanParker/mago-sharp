@@ -74,7 +74,37 @@ pub enum TCallable {
     Alias(FunctionLikeIdentifier),
 }
 
+/// Where a function value of a [`TCallableSignature`] would lose a readonly value, spec section 13.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DroppedReadonly<'signature> {
+    /// The function type passes `passed`, a readonly value, to a parameter that takes `taken`, a writable one.
+    Parameter { passed: &'signature TUnion, taken: &'signature TUnion },
+    /// The function value returns `returned`, a readonly value, where the function type returns `expected`.
+    Return { returned: &'signature TUnion, expected: &'signature TUnion },
+}
+
 impl TCallableSignature {
+    /// Where a function value of `given` placed where this function type goes would lose a readonly value, spec
+    /// section 13: a parameter takes writable a value this type passes readonly, compared in reverse as a parameter
+    /// is, or it returns a readonly value where this type returns a writable one. `None` when it keeps every one.
+    #[must_use]
+    pub fn drops_readonly_of<'signature>(
+        &'signature self,
+        given: &'signature TCallableSignature,
+    ) -> Option<DroppedReadonly<'signature>> {
+        let parameter = self.parameters.iter().zip(&given.parameters).find_map(|(declared, given)| {
+            let (passed, taken) = (declared.get_type_signature()?, given.get_type_signature()?);
+
+            taken.drops_readonly_of(passed).then_some(DroppedReadonly::Parameter { passed, taken })
+        });
+
+        parameter.or_else(|| {
+            let (expected, returned) = (self.get_return_type()?, given.get_return_type()?);
+
+            expected.drops_readonly_of(returned).then_some(DroppedReadonly::Return { returned, expected })
+        })
+    }
+
     /// Creates a new `CallableSignature` with the specified purity and closure status.
     #[inline]
     #[must_use]

@@ -141,14 +141,10 @@ where
             scan_function_like_parameter(p, Some(class_like_metadata.original_name), &type_context, context, scope)
         })
         .collect();
-    // Spec section 13: a method marked `readonly` keeps `this` readonly, and so do `hash()` and `toString()`, which the
-    // language calls for the user. The analysis of an operator's body reads its operands readonly.
-    if context.program.dialect.is_sharp() {
-        let called_for_the_user = !method.modifiers.contains_static()
-            && (method_name_str.eq_ignore_ascii_case(b"hash") || method_name_str.eq_ignore_ascii_case(b"toString"));
-        if method.readonly.is_some() || called_for_the_user {
-            metadata.flags |= MetadataFlags::READONLY;
-        }
+    // Spec section 13: a method marked `readonly` keeps `this` readonly, and so do `int hash()` and `string toString()`,
+    // which the language calls for the user. The analysis of an operator's body reads its operands readonly.
+    if context.program.dialect.is_sharp() && (method.readonly.is_some() || method.is_hash_or_to_string()) {
+        metadata.flags |= MetadataFlags::READONLY;
     }
     metadata.listens =
         method.on.iter().flat_map(|on| on.events.iter()).map(|event| word(context.resolved_names.get(event))).collect();

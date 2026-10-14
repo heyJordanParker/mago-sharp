@@ -69,13 +69,8 @@ where
 {
     let narrowed = narrow(context, assertion, existing_var_type, key, inside_loop, span, can_report_issues, negated);
 
-    // Spec section 13: a value narrowed from a readonly object, as `shape is Circle c`, is readonly too.
-    if existing_var_type.is_some_and(|existing| {
-        existing
-            .types
-            .iter()
-            .any(|atomic| matches!(atomic, TAtomic::Object(TObject::Named(named)) if named.is_readonly))
-    }) {
+    // Spec section 13: a value narrowed from a readonly value, as `shape is Circle c`, is readonly too.
+    if existing_var_type.is_some_and(|existing| existing.types.iter().any(TAtomic::is_readonly_value)) {
         narrowed.to_readonly()
     } else {
         narrowed

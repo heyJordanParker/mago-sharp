@@ -5378,8 +5378,8 @@ fn needless_readonly_marker(method: &Method<'_>, place: Place) -> Option<&'stati
     }
 
     match method.name.value {
+        _ if !MethodParts::of_method(method).is_hash_or_to_string() => None,
         b"hash" => Some("`hash()` is readonly by definition: remove `readonly`."),
-        b"toString" => Some("`toString()` is readonly by definition: remove `readonly`."),
-        _ => None,
+        _ => Some("`toString()` is readonly by definition: remove `readonly`."),
     }
 }

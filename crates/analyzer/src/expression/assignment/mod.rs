@@ -807,7 +807,15 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
         let fix =
             format!(". Declare it `{} {name}`.", display_type(context, &local_type.as_ref().clone().to_readonly()));
         let action = format!("store {} in {name}", quoted_source(context, value.span()));
-        report_dropped_readonly(context, block_context, IssueCode::InvalidLocalAssignmentValue, value, &action, &fix);
+        report_dropped_readonly(
+            context,
+            block_context,
+            IssueCode::InvalidLocalAssignmentValue,
+            value,
+            (&local_type, &assigned_type),
+            &action,
+            &fix,
+        );
 
         assigned_type = local_type;
     }

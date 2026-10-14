@@ -14,6 +14,7 @@ use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::MethodExpressionBody;
 use mago_syntax::cst::Modifier;
+use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::On;
@@ -64,6 +65,24 @@ pub fn php_operator_name(symbol: &BinaryOperator<'_>, operands: usize) -> Option
     })
 }
 
+/// Returns the symbol of the PHP# operator the PHP static method `php_name` runs as, the reverse of
+/// [`php_operator_name`]: `+` for `op_Addition`, and `-` for `op_UnaryNegation` and `op_Subtraction`.
+#[inline]
+#[must_use]
+pub fn sharp_operator_symbol(php_name: &[u8]) -> Option<&'static str> {
+    Some(match php_name {
+        b"op_Equality" => "==",
+        b"op_Comparison" => "<=>",
+        b"op_Addition" => "+",
+        b"op_UnaryNegation" | b"op_Subtraction" => "-",
+        b"op_Multiply" => "*",
+        b"op_Division" => "/",
+        b"op_Modulus" => "%",
+        b"op_Exponent" => "**",
+        _ => return None,
+    })
+}
+
 /// The parts a method and a PHP# operator share, as the PHP method they run as: a PHP# operator is a static method.
 pub struct MethodParts<'ast, 'arena> {
     /// The PHP method's name: `__construct` for the PHP# constructor, and `op_Addition` for `operator +`.
@@ -108,6 +127,21 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             returns_value: method.returns_value(),
             returns_by_reference: method.ampersand.is_some(),
         }
+    }
+
+    /// Whether this is `int hash()` or `string toString()`, which the language calls on a readonly value, so they are
+    /// readonly by definition, spec section 13. A method of either name that takes parameters is an ordinary method.
+    #[must_use]
+    pub fn is_hash_or_to_string(&self) -> bool {
+        let returns = |keyword: fn(&Hint<'_>) -> bool| self.return_type_hint.is_some_and(|hint| keyword(&hint.hint));
+
+        !self.modifiers.contains_static()
+            && self.parameter_list.parameters.is_empty()
+            && match self.name {
+                b"hash" => returns(|hint| matches!(hint, Hint::Integer(_))),
+                b"toString" => returns(|hint| matches!(hint, Hint::String(_))),
+                _ => false,
+            }
     }
 
     /// The effects the method's `uses` names, spec section 29: every name but one of its function-typed parameters,

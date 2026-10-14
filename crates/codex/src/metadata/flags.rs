@@ -79,6 +79,9 @@ impl MetadataFlags {
     /// struct's public `init` property with no initial value that its main constructor does not take. What a
     /// constructor assigns is its own `MethodMetadata::assigned_properties`.
     pub const REQUIRED: MetadataFlags = MetadataFlags(1 << 53);
+    /// A PHP# operator, spec section 19: the public static method it runs as, named after .NET's operator method, as
+    /// `op_Addition` for `operator +`. It is readonly by definition, spec section 13.
+    pub const OPERATOR: MetadataFlags = MetadataFlags(1 << 54);
 }
 
 impl MetadataFlags {
@@ -155,6 +158,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_named_constructor(self) -> bool {
         self.contains(Self::NAMED_CONSTRUCTOR)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_operator(self) -> bool {
+        self.contains(Self::OPERATOR)
     }
 
     #[inline]
@@ -539,6 +548,9 @@ mod tests {
             ("EXTENSION_METHOD", MetadataFlags::EXTENSION_METHOD),
             ("EXTENSION_PROPERTY", MetadataFlags::EXTENSION_PROPERTY),
             ("FOREIGN", MetadataFlags::FOREIGN),
+            ("STRUCT", MetadataFlags::STRUCT),
+            ("REQUIRED", MetadataFlags::REQUIRED),
+            ("OPERATOR", MetadataFlags::OPERATOR),
         ];
 
         let mut seen = MetadataFlags::empty();
