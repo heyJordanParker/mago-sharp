@@ -63,27 +63,7 @@ where
 
         let next = self.stream.peek_kind(0)?;
         if matches!(next, Some(T!["{"])) {
-            let hook_list = self.parse_property_hook_list()?;
-            self.skip_via_clause(false)?;
-            let initial_value = if self.dialect.is_sharp() && self.stream.is_at(T!["="])? {
-                Some(PropertyInitialValue {
-                    equals: self.stream.eat_span(T!["="])?,
-                    value: self.parse_expression()?,
-                    semicolon: self.stream.eat_span(T![";"])?,
-                })
-            } else {
-                None
-            };
-
-            return Ok(Property::Hooked(HookedProperty {
-                attribute_lists: attributes,
-                modifiers,
-                var,
-                hint,
-                item,
-                hook_list,
-                initial_value,
-            }));
+            return self.parse_hooked_property(attributes, modifiers, var, hint, item);
         }
 
         Ok(Property::Plain(PlainProperty {
@@ -143,6 +123,52 @@ where
             hint: None,
             items: TokenSeparatedSequence::new(self.new_vec_of(item), self.new_vec()),
             terminator: self.parse_terminator()?,
+        }))
+    }
+
+    /// Parses the rest of a PHP# property written without its type, whose name the caller parsed as a type.
+    pub(crate) fn parse_untyped_property(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+        name: LocalIdentifier<'arena>,
+    ) -> Result<Property<'arena>, ParseError> {
+        let item = PropertyItem::Abstract(PropertyAbstractItem {
+            variable: DirectVariable { span: name.span, name: name.value },
+        });
+
+        self.parse_hooked_property(attributes, modifiers, None, None, item)
+    }
+
+    /// Parses a property's accessors, from its `{`, and the PHP# initial value after them.
+    fn parse_hooked_property(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+        var: Option<Keyword<'arena>>,
+        hint: Option<Hint<'arena>>,
+        item: PropertyItem<'arena>,
+    ) -> Result<Property<'arena>, ParseError> {
+        let hook_list = self.parse_property_hook_list()?;
+        self.skip_via_clause(false)?;
+        let initial_value = if self.dialect.is_sharp() && self.stream.is_at(T!["="])? {
+            Some(PropertyInitialValue {
+                equals: self.stream.eat_span(T!["="])?,
+                value: self.parse_expression()?,
+                semicolon: self.stream.eat_span(T![";"])?,
+            })
+        } else {
+            None
+        };
+
+        Ok(Property::Hooked(HookedProperty {
+            attribute_lists: attributes,
+            modifiers,
+            var,
+            hint,
+            item,
+            hook_list,
+            initial_value,
         }))
     }
 

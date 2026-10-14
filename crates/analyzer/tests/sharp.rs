@@ -1064,30 +1064,20 @@ fn a_get_block_with_a_path_that_ends_without_returning_is_reported() {
     );
 }
 
-/// A property with accessors that redeclares a plain PHP parent's untyped property is refused as a field that does
-/// is, because PHP refuses a type the parent property does not have. The refusal names it a property.
+/// A property, with accessor bodies or without, overrides a plain PHP parent's untyped property: it writes its type,
+/// and the engine drops it as decision 028 does, so PHP runs the hooks untyped. Without `override` it names the fix.
+/// A PHP twin that keeps the type is what PHP refuses.
 #[test]
-fn a_property_with_accessors_over_a_php_parents_untyped_property_is_not_supported_yet() {
+fn a_property_with_accessors_overrides_a_php_parents_untyped_property() {
     let parent = "<?php\n\nnamespace Lib;\n\nclass Record\n{\n    public $label;\n    public $code;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Record;\n\nclass Order : Record\n{\n    public string label { get => field; set => field = value; } = \"\";\n    public string code { get; set; } = \"\";\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Record;\n\nclass Order : Record\n{\n    public override string label { get => field; set => field = value; } = \"\";\n    public override string code { get; set; } = \"\";\n}\n";
+    let missing = "namespace Demo;\n\nimport Lib.Record;\n\nclass Order : Record\n{\n    public string label { get => field; set => field = value; } = \"\";\n    public string code { get; set; } = \"\";\n}\n";
     let others = [("src/Lib/Record.php", parent)];
 
-    assert_eq!(issues(("src/Demo/Order.sharp", sharp), &others), ["7:12 not-supported-yet", "8:12 not-supported-yet"]);
+    assert_eq!(issues(("src/Demo/Order.sharp", sharp), &others), Vec::<String>::new());
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Order.sharp", sharp), &others)
-            .into_iter()
-            .map(|issue| (issue.message, issue.help.unwrap_or_default()))
-            .collect::<Vec<_>>(),
-        [
-            (
-                "A property that replaces the untyped PHP property `Record.label` is not supported yet.".to_owned(),
-                "Rename the property, or give the PHP property a type.".to_owned()
-            ),
-            (
-                "A property that replaces the untyped PHP property `Record.code` is not supported yet.".to_owned(),
-                "Rename the property, or give the PHP property a type.".to_owned()
-            ),
-        ]
+        issues(("src/Demo/Order.sharp", missing), &others),
+        ["7:19 missing-override-attribute", "8:19 missing-override-attribute"]
     );
 
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Record;\n\nclass Order extends Record\n{\n    public string $label = '' {\n        get => $this->label;\n        set => $value;\n    }\n    public string $code = '';\n}\n";
@@ -1287,18 +1277,18 @@ const MODEL: &str = "<?php\n\nnamespace Lib;\n\ntrait HasTimestamps\n{\n    /** 
 /// An override of a plain PHP parent's property writes a type that fits the parent's `@var`, or any type when the
 /// parent has none, and the type of a typed parent, with the parent's access level, spec section 6.1.
 #[test]
-fn a_field_overrides_a_plain_php_property_with_a_type_that_fits_the_parent() {
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table = \"orders\";\n    protected override List<string> fillable = [\"number\", \"total\"];\n    protected override List<string> with = [\"customer\"];\n    public override bool timestamps = false;\n    protected override int perPage = 20;\n}\n";
+fn a_property_overrides_a_plain_php_property_with_a_type_that_fits_the_parent() {
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table { get; set; } = \"orders\";\n    protected override List<string> fillable { get; set; } = [\"number\", \"total\"];\n    protected override List<string> with { get => field; set => field = value; } = [\"customer\"];\n    public override bool timestamps { get; set; } = false;\n    protected override int perPage { get; set => field = value > 0 ? value : 15; } = 20;\n}\n";
     let others = [("src/Lib/Model.php", MODEL)];
 
     assert_eq!(issues(("src/Demo/Order.sharp", sharp), &others), Vec::<String>::new());
 }
 
-/// An override whose type does not fit the parent's, whose access level differs, that overrides nothing, or a field
-/// that replaces a parent's property without `override`, is an error, spec section 6.1.
+/// An override whose type does not fit the parent's, whose access level differs, that overrides nothing, or a property
+/// or field that replaces a parent's property without `override`, is an error, spec section 6.1.
 #[test]
 fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override List<string> fillable = [\"number\"];\n    protected override string? table = 5;\n    public override int timestamps = 0;\n    protected override List<string> appends = [];\n    protected string with = \"customer\";\n    protected override string missing = \"none\";\n    protected override string secret = \"order\";\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override List<string> fillable { get; set; } = [\"number\"];\n    protected override string? table { get; set; } = 5;\n    public override int timestamps { get; set; } = 0;\n    protected override List<string> appends { get; set; } = [];\n    protected string with { get; set; } = \"customer\";\n    protected override string missing { get; set; } = \"none\";\n    protected override string secret { get; set; } = \"order\";\n    protected int perPage = 20;\n}\n";
 
     let issues =
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Order.sharp", sharp), &[("src/Lib/Model.php", MODEL)]);
@@ -1319,13 +1309,17 @@ fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
             "The override `Order.timestamps` has type `int`, which does not fit `bool`, the type of `Model.timestamps`.",
         ),
         ("incompatible-property-type", "Property `Order.appends` has an incompatible type declaration."),
-        ("missing-override-attribute", "Missing `override` modifier on overriding field `Order.with`."),
+        ("missing-override-attribute", "Missing `override` modifier on overriding property `Order.with`."),
         ("invalid-override-attribute", "Invalid `override` modifier on `Order.missing`."),
         ("invalid-override-attribute", "Invalid `override` modifier on `Order.secret`."),
+        (
+            "missing-override-attribute",
+            "The field `Order.perPage` replaces `Model.perPage`: an override is a property marked `override`.",
+        ),
     ] {
         assert!(reported.contains(&expected), "{expected:?} is missing from {reported:#?}");
     }
-    assert_eq!(reported.len(), 7, "{reported:#?}");
+    assert_eq!(reported.len(), 8, "{reported:#?}");
 
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    #[\\Override]\n    public $fillable = ['number'];\n    #[\\Override]\n    protected $table = 5;\n    #[\\Override]\n    public $timestamps = 0;\n    #[\\Override]\n    protected array $appends = [];\n    protected $with = 'customer';\n    #[\\Override]\n    protected $missing = 'none';\n    #[\\Override]\n    protected $secret = 'order';\n}\n";
     assert_eq!(
@@ -1341,7 +1335,7 @@ fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
 /// one issue, not a second one for its initial value against the inherited type.
 #[test]
 fn an_override_whose_type_does_not_fit_the_parent_is_reported_once() {
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override int table = 5;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override int table { get; set; } = 5;\n}\n";
 
     let issues =
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Order.sharp", sharp), &[("src/Lib/Model.php", MODEL)]);
@@ -1368,17 +1362,17 @@ fn an_override_whose_type_does_not_fit_the_parent_is_reported_once() {
 }
 
 /// A PHP# class that overrides a plain PHP parent's property, for a subclass to override it again.
-const ORDER: &str = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table = \"orders\";\n}\n";
+const ORDER: &str = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table { get; set; } = \"orders\";\n}\n";
 
 /// A plain PHP base class that types the property `ORDER` overrides.
 const TYPED_MODEL: &str =
     "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    protected ?string $table = null;\n}\n";
 
-/// A field overrides a PHP# parent's field as it overrides a plain PHP parent's property, spec section 6.1, whether the
-/// plain PHP root of the chain leaves the property untyped or types it.
+/// A property overrides a PHP# parent's override as it overrides a plain PHP parent's property, spec section 6.1,
+/// whether the plain PHP root of the chain leaves the property untyped or types it. An override stays open.
 #[test]
-fn a_field_overrides_a_sharp_field_with_its_type_and_access_level() {
-    let sharp = "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override string? table = \"rush_orders\";\n}\n";
+fn a_property_overrides_a_sharp_override_with_its_type_and_access_level() {
+    let sharp = "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override string? table { get; set; } = \"rush_orders\";\n}\n";
 
     for model in [MODEL, TYPED_MODEL] {
         let others = [("src/Demo/Order.sharp", ORDER), ("src/Lib/Model.php", model)];
@@ -1387,11 +1381,10 @@ fn a_field_overrides_a_sharp_field_with_its_type_and_access_level() {
     }
 }
 
-/// An override of a PHP# parent's field writes `override`, the parent's written type and its access level, spec section
-/// 6.1, measured against that field alone, so each break is one error. A property with accessors keeps its type, so it
-/// cannot replace the field while the plain PHP root of the chain leaves the property untyped.
+/// An override of a PHP# parent's override writes `override`, the parent's written type and its access level, spec
+/// section 6.1, measured against that override alone, so each break is one error. A field can't replace it.
 #[test]
-fn an_override_that_does_not_match_the_sharp_field_is_an_error() {
+fn an_override_that_does_not_match_the_sharp_override_is_an_error() {
     let reported = |sharp: &'static str| {
         analyze(
             &PLUGIN_REGISTRY,
@@ -1407,17 +1400,19 @@ fn an_override_that_does_not_match_the_sharp_field_is_an_error() {
 
     assert_eq!(
         reported(
-            "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override string table = \"rush_orders\";\n}\n"
+            "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override string table { get; set; } = \"rush_orders\";\n}\n"
         ),
         error("incompatible-property-type", "Property `RushOrder.table` has an incompatible type declaration.")
     );
     assert_eq!(
-        reported("namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override int table = 5;\n}\n"),
+        reported(
+            "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override int table { get; set; } = 5;\n}\n"
+        ),
         error("incompatible-property-type", "Property `RushOrder.table` has an incompatible type declaration.")
     );
     assert_eq!(
         reported(
-            "namespace Demo;\n\npublic class RushOrder : Order\n{\n    public override string? table = \"rush_orders\";\n}\n"
+            "namespace Demo;\n\npublic class RushOrder : Order\n{\n    public override string? table { get; set; } = \"rush_orders\";\n}\n"
         ),
         error(
             "incompatible-property-access",
@@ -1428,25 +1423,26 @@ fn an_override_that_does_not_match_the_sharp_field_is_an_error() {
         reported(
             "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected string? table = \"rush_orders\";\n}\n"
         ),
-        error("missing-override-attribute", "Missing `override` modifier on overriding field `RushOrder.table`.")
+        error(
+            "missing-override-attribute",
+            "The field `RushOrder.table` replaces `Order.table`: an override is a property marked `override`."
+        )
     );
     assert_eq!(
         reported(
             "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected string? table { get; set; } = \"rush_orders\";\n}\n"
         ),
-        error(
-            "not-supported-yet",
-            "A property that replaces the untyped PHP property `Model.table` is not supported yet."
-        )
+        error("missing-override-attribute", "Missing `override` modifier on overriding property `RushOrder.table`.")
     );
 }
 
-/// PHP makes a property whose `set` is private final, so a field cannot override one, whether a PHP# parent writes it
-/// `{ get; private set; }` or a plain PHP parent writes `private(set)`, as the engine refuses the class when it links.
+/// PHP makes a property whose `set` is private final, so nothing overrides one, whether a PHP# parent writes it
+/// `{ get; private set; }`, `virtual` or not, or a plain PHP parent writes `private(set)`, as the engine refuses the
+/// class when it links.
 #[test]
-fn a_field_cannot_override_a_property_whose_set_is_private() {
+fn an_override_of_a_property_whose_set_is_private_is_an_error() {
     let php = "<?php\n\nnamespace Lib;\n\nclass Tally\n{\n    public private(set) int $views = 0;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Tally;\n\npublic class Counter\n{\n    public int views { get; private set; } = 0;\n    public int likes { get; set; } = 0;\n}\n\npublic class PageCounter : Counter\n{\n    public override int views = 1;\n    public override int likes = 1;\n}\n\npublic class PageTally : Tally\n{\n    public override int views = 1;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Tally;\n\npublic class Counter\n{\n    public virtual int views { get; private set; } = 0;\n    public virtual int likes { get; set; } = 0;\n}\n\npublic class PageCounter : Counter\n{\n    public override int views { get; private set; } = 1;\n    public override int likes { get; set; } = 1;\n}\n\npublic class PageTally : Tally\n{\n    public override int views { get; private set; } = 1;\n}\n";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counter.sharp", sharp), &[("src/Lib/Tally.php", php)])
@@ -1460,18 +1456,70 @@ fn a_field_cannot_override_a_property_whose_set_is_private() {
     );
 }
 
-/// A field cannot override a PHP# parent's property with accessor bodies yet: spec section 6.1 overrides it as a
-/// property, and PHP would keep the parent's accessors on the field.
+/// Spec sections 6.1 and 22: a PHP# property is closed unless it is `virtual` or `abstract`, and an override of one
+/// is a property with accessor bodies or a computed one too. A `protected` field is open (line 289).
 #[test]
-fn overriding_a_sharp_property_with_accessor_bodies_is_not_supported_yet() {
-    let sharp = "namespace Demo;\n\npublic class Base\n{\n    public string slug => \"base\";\n    protected string label = \"base\";\n}\n\npublic class Child : Base\n{\n    public override string slug = \"child\";\n    protected override string label = \"child\";\n}\n";
+fn a_property_overrides_a_sharp_property_only_when_it_is_open() {
+    let sharp = "namespace Demo;\n\npublic abstract class Base\n{\n    public virtual string slug => \"base\";\n    protected string label = \"base\";\n    public abstract int count { get; }\n    public string closed => \"base\";\n    public int total { get; set; } = 0;\n}\n\npublic class Child : Base\n{\n    public override string slug => \"child\";\n    protected override string label { get => field; set => field = value; } = \"child\";\n    public override int count => 1;\n    public override string closed => \"child\";\n    public override int total { get; set; } = 1;\n}\n";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Base.sharp", sharp), &[])
             .into_iter()
             .map(|issue| (issue.code.unwrap_or_default(), issue.message))
             .collect::<Vec<_>>(),
-        [("not-supported-yet".to_owned(), "Overriding the PHP# property `Base.slug` is not supported yet.".to_owned())]
+        [
+            (
+                "override-final-property".to_owned(),
+                "Cannot override `Base.total`: a PHP# property is closed unless it is `virtual` or `abstract`."
+                    .to_owned()
+            ),
+            (
+                "override-final-property".to_owned(),
+                "Cannot override `Base.closed`: a PHP# property is closed unless it is `virtual` or `abstract`."
+                    .to_owned()
+            ),
+        ]
+    );
+}
+
+/// Spec section 6.1: a plain PHP parent's own code writes its property at any time, so an override of it has `set`,
+/// never `init`, and its access level matches the parent's, `set` included (line 287).
+#[test]
+fn an_override_of_a_plain_php_property_keeps_its_set_and_its_level() {
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table { get; } = \"orders\";\n    public override bool timestamps { get; protected set; } = false;\n    protected override List<string> fillable => [];\n    protected override int perPage { get; private set; } = 20;\n    protected override List<string> with { get; init; } = [];\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Order.sharp", sharp), &[("src/Lib/Model.php", MODEL)])
+            .into_iter()
+            .map(|issue| (issue.code.unwrap_or_default(), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "incompatible-property-access".to_owned(),
+                "`Model.timestamps` is set at `public`, so its override `Order.timestamps` is set at `public` too."
+                    .to_owned()
+            ),
+            (
+                "incompatible-property-access".to_owned(),
+                "`Model.perPage` is set at `protected`, so its override `Order.perPage` is set at `protected` too."
+                    .to_owned()
+            ),
+            (
+                "incompatible-property-access".to_owned(),
+                "`Model.with` is settable, and `Model`'s own code writes it, so its override `Order.with` has `set`, not `init`."
+                    .to_owned()
+            ),
+            (
+                "incompatible-property-access".to_owned(),
+                "`Model.table` is settable, and `Model`'s own code writes it, so its override `Order.table` has `set`."
+                    .to_owned()
+            ),
+            (
+                "incompatible-property-access".to_owned(),
+                "`Model.fillable` is settable, and `Model`'s own code writes it, so its override `Order.fillable` has `set`."
+                    .to_owned()
+            ),
+        ]
     );
 }
 
@@ -4216,7 +4264,7 @@ fn an_accessor_of_any_gives_no_null_and_of_any_nullable_does() {
 #[test]
 fn an_override_of_a_plain_php_mixed_property_writes_any() {
     let library = "<?php\n\nnamespace Lib;\n\nabstract class Message\n{\n    /** @var mixed */\n    protected $payload;\n\n    protected mixed $data = null;\n\n    protected $raw;\n\n    protected mixed $body = 1;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Message;\n\npublic class Mail : Message\n{\n    protected override Any? payload = null;\n    protected override Any? data = null;\n    protected override Any raw = 1;\n    protected override Any body = \"text\";\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Message;\n\npublic class Mail : Message\n{\n    protected override Any? payload { get; set; } = null;\n    protected override Any? data { get; set; } = null;\n    protected override Any raw { get; set; } = 1;\n    protected override Any body { get; set; } = \"text\";\n}\n";
 
     assert_eq!(issues(("src/Demo/Mail.sharp", sharp), &[("src/Lib/Message.php", library)]), Vec::<String>::new());
 }
@@ -8984,7 +9032,7 @@ fn a_refused_value_names_its_types_as_sharp_writes_them() {
 /// PHP twin keeps Mago's text.
 #[test]
 fn an_override_names_its_members_and_types_as_sharp_writes_them() {
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic class Base\n{\n    public Order? item = null;\n\n    public virtual void put(Order item)\n    {\n    }\n\n    public virtual Order get(Order item) => item;\n}\n\npublic class OrderBase : Base\n{\n    public override Line? item = null;\n\n    public override void put(Line item)\n    {\n    }\n\n    public override Line get(Order item) => new Line();\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic class Base\n{\n    public virtual Order? item { get; set; }\n\n    public virtual void put(Order item)\n    {\n    }\n\n    public virtual Order get(Order item) => item;\n}\n\npublic class OrderBase : Base\n{\n    public override Line? item { get; set; } = null;\n\n    public override void put(Line item)\n    {\n    }\n\n    public override Line get(Order item) => new Line();\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\nclass Line\n{\n}\n\nclass Base\n{\n    public ?Order $item = null;\n\n    public function put(Order $item): void\n    {\n    }\n\n    public function get(Order $item): Order\n    {\n        return $item;\n    }\n}\n\nclass OrderBase extends Base\n{\n    public ?Line $item = null;\n\n    public function put(Line $item): void\n    {\n    }\n\n    public function get(Order $item): Line\n    {\n        return new Line();\n    }\n}\n";
 
     assert_eq!(
@@ -9039,7 +9087,7 @@ fn a_message_names_an_accessor_as_sharp_writes_it() {
 #[test]
 fn a_message_names_an_inherited_accessor_as_sharp_writes_it() {
     let library = "<?php\n\nnamespace Lib;\n\ninterface Priced\n{\n    public int $total { get; }\n}\n\nclass Counter\n{\n    public int $count = 0 {\n        final get => $this->count;\n    }\n}\n\ninterface Shared\n{\n    public array $items { &get; }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Counter;\nimport Lib.Priced;\nimport Lib.Shared;\n\npublic class Order : Priced\n{\n}\n\npublic class Tally : Counter\n{\n    public override int count { get => 1; }\n}\n\npublic class Bag : Shared\n{\n    public List<int> items { get => []; }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Counter;\nimport Lib.Priced;\nimport Lib.Shared;\n\npublic class Order : Priced\n{\n}\n\npublic class Tally : Counter\n{\n    public override int count { get => 1; set; }\n}\n\npublic class Bag : Shared\n{\n    public List<int> items { get => []; }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Counter;\nuse Lib\\Priced;\nuse Lib\\Shared;\n\nclass Order implements Priced\n{\n}\n\nclass Tally extends Counter\n{\n    public int $count {\n        get => 1;\n    }\n}\n\nclass Bag implements Shared\n{\n    public array $items {\n        get => [];\n    }\n}\n";
     let others = [("src/Lib/Library.php", library)];
 

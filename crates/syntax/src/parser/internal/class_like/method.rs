@@ -142,6 +142,14 @@ where
 
             return Ok(ClassLikeMember::Property(self.parse_untyped_field(attributes, modifiers, name)?));
         }
+        // A bare name before `{` is a property written without its type: it is the name.
+        if let Hint::Identifier(Identifier::Local(name)) = hint
+            && matches!(self.stream.peek_kind(0)?, Some(T!["{"]))
+        {
+            self.errors.push(ParseError::UntypedPropertyInSharp(name.span));
+
+            return Ok(ClassLikeMember::Property(self.parse_untyped_property(attributes, modifiers, name)?));
+        }
         if !matches!(self.stream.peek_kind(1)?, Some(T!["("])) {
             return Ok(ClassLikeMember::Property(self.parse_property_with_hint(
                 attributes,

@@ -300,7 +300,8 @@ where
                     type_metadata
                 });
             }
-            if is_sharp && !has_default && !hooked_property.hook_list.is_get_only() {
+            let is_abstract = hooked_property.modifiers.contains_abstract();
+            if is_sharp && !has_default && !is_abstract && !hooked_property.hook_list.is_get_only() {
                 default_type = sharp_null_default(hooked_property.hint.as_ref(), name_span);
                 has_default = default_type.is_some();
             }
@@ -320,8 +321,12 @@ where
                 flags |= MetadataFlags::HAS_DEFAULT;
             }
 
-            if is_sharp && is_sharp_get_only(&hooked_property.hook_list, context) {
+            if is_sharp && !is_abstract && is_sharp_get_only(&hooked_property.hook_list, context) {
                 flags |= MetadataFlags::READONLY;
+            }
+
+            if is_sharp && is_sharp_closed(&hooked_property.modifiers, read_visibility, class_like_metadata) {
+                flags |= MetadataFlags::FINAL;
             }
 
             if is_sharp && is_sharp_init(&hooked_property.hook_list) {
@@ -383,6 +388,10 @@ where
                 Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
                 None => Visibility::Public,
             };
+
+            if is_sharp && is_sharp_closed(&computed_property.modifiers, read_visibility, class_like_metadata) {
+                flags |= MetadataFlags::FINAL;
+            }
 
             let mut metadata =
                 PropertyMetadata::new(VariableIdentifier(php_variable_name(computed_property.variable.name)), flags);
@@ -451,6 +460,22 @@ fn sharp_write_visibility(accessors: &PropertyHookList, read_visibility: Visibil
     }
 }
 
+/// Whether a PHP# property is closed: spec sections 6.1 and 22 open a property only with `virtual`, `abstract` or
+/// `override`, as a method is opened, so the analyzer reads a closed one as final. A private property is never
+/// inherited, and an interface's is always open. A field is open, line 289 of section 6.1. The engine still runs every
+/// property as an open PHP property.
+fn is_sharp_closed(
+    modifiers: &Sequence<'_, Modifier<'_>>,
+    read_visibility: Visibility,
+    class_like_metadata: &ClassLikeMetadata,
+) -> bool {
+    !class_like_metadata.kind.is_interface()
+        && read_visibility != Visibility::Private
+        && !modifiers
+            .iter()
+            .any(|modifier| matches!(modifier, Modifier::Abstract(_) | Modifier::Virtual(_) | Modifier::Override(_)))
+}
+
 /// Whether a PHP# property is written by an `init` accessor, which sets it only while the object is created.
 fn is_sharp_init(accessors: &PropertyHookList) -> bool {
     accessors.setter().is_some_and(|setter| setter.name.value == b"init")
@@ -459,7 +484,7 @@ fn is_sharp_init(accessors: &PropertyHookList) -> bool {
 /// Scans a property's hooks and whether it is virtual. A PHP# accessor without a body is storage, as an
 /// auto-property's is, so only its bodies are hooks. A PHP# property is virtual when no accessor is auto and no body
 /// uses `field`, as the engine lowers it, and a PHP one when no hook reaches `$this->name`. A PHP# interface property
-/// runs as PHP's, so its accessors are abstract hooks.
+/// and an abstract one run as PHP's, so their accessors are abstract hooks.
 fn scan_hooks<'arena, A>(
     hook_list: &'arena PropertyHookList<'arena>,
     property: &mut PropertyMetadata,
@@ -469,7 +494,8 @@ fn scan_hooks<'arena, A>(
 ) where
     A: Arena,
 {
-    let is_sharp = context.program.dialect.is_sharp() && !class_like_metadata.kind.is_interface();
+    let is_sharp =
+        context.program.dialect.is_sharp() && !class_like_metadata.kind.is_interface() && !property.flags.is_abstract();
     for hook in &hook_list.hooks {
         if is_sharp && matches!(hook.body, PropertyHookBody::Abstract(_)) {
             continue;

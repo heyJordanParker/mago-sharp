@@ -6824,13 +6824,13 @@ fn virtual_lowers_to_nothing_and_override_to_the_override_attribute() {
 /// #[\Override] public bool $timestamps = false;
 /// ```
 ///
-/// An override is a field with `#[\Override]`, so PHP checks at link time that the parent has the property. PHP
-/// refuses a type on a property whose parent's has none, so an override of a property with no type has none either,
-/// as decision 028 writes. An override of a typed property keeps its written type.
+/// An override is a property with `#[\Override]`, and an auto-property lowers as a field does, so PHP checks at link
+/// time that the parent has the property. PHP refuses a type on a property whose parent's has none, so an override of
+/// a property with no type has none either, as decision 028 writes. An override of a typed property keeps its type.
 #[test]
 fn an_override_of_a_property_with_no_type_has_no_type() {
     let lowered = Lowered::with(
-        "class Order : Model\n{\n    protected override string table = \"orders\";\n    public override bool timestamps = false;\n}\n",
+        "class Order : Model\n{\n    protected override string table { get; set; } = \"orders\";\n    public override bool timestamps { get; set; } = false;\n}\n",
         &[("src/Model.php", "<?php class Model { protected $table = ''; public bool $timestamps = true; }")],
     );
     let class = lowered.child(lowered.root(), 1);
@@ -6869,16 +6869,83 @@ fn an_override_of_a_property_with_no_type_has_no_type() {
     );
 }
 
+/// ```php
+/// #[\Override] protected $table = 'orders' { set { $this->table = \trim($value); } }
+/// abstract public string $kind { get; }
+/// ```
+///
+/// An override with accessor bodies runs as PHP's hooks over the parent's property, untyped when the parent's is, and
+/// an abstract property runs as PHP's, with a hook that has no body and no `readonly`.
+#[test]
+fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks() {
+    let lowered = Lowered::with(
+        "abstract class Order : Model\n{\n    protected override string table { get; set => field = trim(value); } = \"orders\";\n    public abstract string kind { get; }\n}\n",
+        &[("src/Model.php", "<?php class Model { protected $table = ''; }")],
+    );
+    let class = lowered.child(lowered.root(), 1);
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 2)),
+        indoc! {r#"
+            STMT_LIST
+              PROP_GROUP [2]
+                null
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "table"
+                    ZVAL "orders"
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "set" @3-3
+                        null
+                        null
+                        STMT_LIST
+                          ASSIGN
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "table"
+                            CALL
+                              ZVAL "trim"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "value"
+                        null
+                        null
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Override"
+                      null
+              PROP_GROUP [65]
+                ZVAL [1] "string"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "kind"
+                    null
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "get" @4-4
+                        null
+                        null
+                        null
+                        null
+                        null
+                null
+        "#}
+    );
+}
+
 /// The members of `RushOrder : Order : Model`, where the PHP# class `Order` overrides `table` with `string?` and
 /// `model` is the plain PHP class `Model`.
 fn rush_order_members(model: &str) -> String {
     let lowered = Lowered::with(
-        "class RushOrder : Order\n{\n    protected override string? table = \"rush_orders\";\n}\n",
+        "class RushOrder : Order\n{\n    protected override string? table { get; set; } = \"rush_orders\";\n}\n",
         &[
             ("src/Model.php", model),
             (
                 "src/Order.sharp",
-                "public class Order : Model\n{\n    protected override string? table = \"orders\";\n}\n",
+                "public class Order : Model\n{\n    protected override string? table { get; set; } = \"orders\";\n}\n",
             ),
         ],
     );

@@ -645,6 +645,40 @@ fn a_field_without_a_type_is_a_parse_error_that_names_the_rule() {
     }
 }
 
+/// A property always has a type, an override of a plain PHP parent's property too, spec section 6.1. A bare name
+/// before `{` is the property's name, its accessors and initial value parse, and the class keeps parsing.
+#[test]
+fn a_property_without_a_type_is_a_parse_error_that_names_the_rule() {
+    for (property, name) in [
+        ("protected override table { get; set; } = \"orders\";", "table"),
+        ("public views { get; private set; }", "views"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Order\n{{\n    {property}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Order.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{property}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            error.to_string(),
+            "A PHP# property needs a type, as in `public int views { get; set; }`.",
+            "{property}"
+        );
+        assert_eq!(source(code, error), name, "{property}");
+        let [ClassLikeMember::Property(Property::Hooked(untyped)), ClassLikeMember::Method(run)] =
+            class_members(program).as_slice()
+        else {
+            panic!("expected a property and a method for `{property}`, got {:#?}", class_members(program));
+        };
+        assert!(untyped.hint.is_none(), "{property}");
+        assert_eq!(untyped.item.variable().name, name.as_bytes(), "{property}");
+        assert_eq!(run.name.value, b"run", "{property}");
+    }
+}
+
 #[test]
 fn a_parameter_with_a_dnf_type_parses() {
     const CODE: &str = "class Report\n{\n    public void fill((A&B)|null both) {}\n}\n";

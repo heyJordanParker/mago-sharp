@@ -825,12 +825,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(variable);
         let hint = property.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
         let name = self.string(0, line, variable.name);
-        let mut hooks = Vec::new();
-        for accessor in &property.hook_list.hooks {
-            hooks.push(self.hook(accessor.name.value, accessor.name, accessor, NULL));
-        }
-
-        let hooks = self.node(SHARP_AST_STMT_LIST, 0, self.line(&property.hook_list), &hooks);
+        let hooks = self.abstract_hooks(&property.hook_list);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
 
@@ -1339,11 +1334,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// modifier is `private`, while PHP makes it `public`. A constant initial value is its default, unless the property
     /// is `readonly`. A member that starts as null without an initial value
     /// takes the default `null` on the line of its name, as php-src builds `private ?int $total = null;`. An override is
-    /// a field with `#[\Override]`. PHP refuses a type on a property whose parent's property has none, so an override of
+    /// a property with `#[\Override]`, and an auto-property override lowers as a field does. PHP refuses a type on a property whose parent's property has none, so an override of
     /// a property of `parent` whose root declaration has no type has none either, down the whole chain (decision 028).
     fn property(&mut self, property: &Property, parent: Option<&[u8]>) -> u32 {
         let (accessor_flags, attribute_lists, hooks) = match property {
             Property::Plain(field) => (0, &field.attribute_lists, NULL),
+            // An abstract property runs as PHP's, with abstract hooks and no `readonly`, as an interface property does.
+            Property::Hooked(hooked) if hooked.modifiers.contains_abstract() => {
+                let flags = accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names) & !ZEND_ACC_READONLY;
+
+                (flags, &hooked.attribute_lists, self.abstract_hooks(&hooked.hook_list))
+            }
             Property::Hooked(hooked) => (
                 accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
                 &hooked.attribute_lists,
@@ -1420,6 +1421,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &hooks)
         })
+    }
+
+    /// The hooks of an interface property or an abstract one: each accessor is a hook with no body, as php-src's
+    /// grammar builds `{ get; set; }`. An `init` is the `set` hook, as it is on a property with a body.
+    fn abstract_hooks(&mut self, accessors: &PropertyHookList) -> u32 {
+        let mut hooks = Vec::new();
+        for accessor in &accessors.hooks {
+            let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
+            hooks.push(self.hook(name, accessor.name, accessor, NULL));
+        }
+
+        self.node(SHARP_AST_STMT_LIST, 0, self.line(accessors), &hooks)
     }
 
     /// Lowers a property's accessor bodies, in which `field` is the property's storage and `Position.current()` names
@@ -3948,7 +3961,11 @@ fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
     matches!(property.hint(), Some(Hint::Nullable(_)))
         && match property {
             Property::Plain(_) => true,
-            Property::Hooked(hooked) => !hooked.hook_list.is_get_only() && names.has_storage(&hooked.hook_list),
+            Property::Hooked(hooked) => {
+                !hooked.modifiers.contains_abstract()
+                    && !hooked.hook_list.is_get_only()
+                    && names.has_storage(&hooked.hook_list)
+            }
             Property::Computed(_) => false,
         }
 }

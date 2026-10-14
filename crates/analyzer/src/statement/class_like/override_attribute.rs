@@ -44,7 +44,7 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
     }
 
     if is_sharp {
-        check_override_modifier_on_fields(metadata, members, context);
+        check_override_modifier_on_properties(metadata, members, context);
     }
 
     // PHP# writes `#[\Override]` as the `override` modifier, so its messages name the modifier and propose no edit.
@@ -208,9 +208,11 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
     }
 }
 
-/// Checks PHP#'s `override` on fields. Spec section 6.1 requires it on a field that replaces a parent's property, plain
-/// PHP or PHP#, and `check_class_like_properties` checks the type and access level against the parent's declaration.
-fn check_override_modifier_on_fields<'ctx, 'arena, A>(
+/// Checks PHP#'s `override` on properties. Spec section 6.1 requires it on a property that replaces a parent's
+/// property or field, plain PHP or PHP#, and `check_class_like_properties` checks the type and access level against
+/// the parent's declaration. An override is a property, so a field that replaces one names the property to write,
+/// and semantics refuses `override` on a field.
+fn check_override_modifier_on_properties<'ctx, 'arena, A>(
     metadata: &'ctx ClassLikeMetadata,
     members: &[ClassLikeMember<'arena>],
     context: &mut Context<'ctx, 'arena, A>,
@@ -219,57 +221,46 @@ fn check_override_modifier_on_fields<'ctx, 'arena, A>(
 {
     let class_name = display_class_like_name(context, metadata.original_name);
     for member in members {
-        let ClassLikeMember::Property(property @ Property::Plain(field)) = member else {
+        let ClassLikeMember::Property(property) = member else {
             continue;
         };
 
         let variable = property.first_variable();
         let name = php_variable_name(variable.name);
-        let field_name = mago_bytes::BytesDisplay(mago_bytes::trim_start_byte(variable.name, b'$'));
-        let field_display = display_sharp_member(class_name, name);
-        let override_modifier = field.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
+        let property_name = mago_bytes::BytesDisplay(mago_bytes::trim_start_byte(variable.name, b'$'));
+        let property_display = display_sharp_member(class_name, name);
+        let is_field = matches!(property, Property::Plain(_));
+        let override_modifier = property.modifiers().iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
 
         match (overridden_properties(metadata, name, context.codebase).next(), override_modifier) {
-            (None, Some(override_modifier)) if !metadata.has_incomplete_hierarchy() => {
+            (None, Some(override_modifier)) if !is_field && !metadata.has_incomplete_hierarchy() => {
                 context.collector.report(
-                    Issue::error(format!("Invalid `override` modifier on `{field_display}`."))
+                    Issue::error(format!("Invalid `override` modifier on `{property_display}`."))
                         .with_code(IssueCode::InvalidOverrideAttribute)
                         .with_annotation(
                             Annotation::primary(override_modifier.span())
-                                .with_message("This field doesn't override any parent property."),
+                                .with_message("This property doesn't override any parent property."),
                         )
                         .with_help(format!(
-                            "Remove the `override` modifier from `{field_name}` or verify inheritance."
+                            "Remove the `override` modifier from `{property_name}` or verify inheritance."
                         )),
-                );
-            }
-            (Some((parent, parent_property)), Some(override_modifier))
-                if parent.flags.is_sharp() && !parent_property.hooks.is_empty() =>
-            {
-                let parent_display = display_sharp_member(display_class_like_name(context, parent.original_name), name);
-
-                context.collector.report(
-                    Issue::error(format!("Overriding the PHP# property `{parent_display}` is not supported yet."))
-                        .with_code(IssueCode::NotSupportedYet)
-                        .with_annotation(
-                            Annotation::primary(override_modifier.span()).with_message("Not supported yet."),
-                        )
-                        .with_note("A PHP# parent's property is overridden as a property.")
-                        .with_note("PHP keeps the parent's accessors on a field that overrides it."),
                 );
             }
             (Some((parent, _)), None) => {
                 let parent_display = display_sharp_member(display_class_like_name(context, parent.original_name), name);
+                let issue = if is_field {
+                    Issue::error(format!(
+                        "The field `{property_display}` replaces `{parent_display}`: an override is a property marked `override`."
+                    ))
+                    .with_help(format!("Declare `{property_name}` as a property, as in `override {property_name} {{ get; set; }}`."))
+                } else {
+                    Issue::error(format!("Missing `override` modifier on overriding property `{property_display}`."))
+                        .with_help("Add the `override` modifier to the property declaration.")
+                };
 
-                context.collector.report(
-                    Issue::error(format!("Missing `override` modifier on overriding field `{field_display}`."))
-                        .with_code(IssueCode::MissingOverrideAttribute)
-                        .with_annotation(
-                            Annotation::primary(variable.span)
-                                .with_message(format!("This field overrides `{parent_display}`.")),
-                        )
-                        .with_help("Add the `override` modifier to the field declaration."),
-                );
+                context.collector.report(issue.with_code(IssueCode::MissingOverrideAttribute).with_annotation(
+                    Annotation::primary(variable.span).with_message(format!("This overrides `{parent_display}`.")),
+                ));
             }
             _ => {}
         }

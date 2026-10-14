@@ -58,6 +58,8 @@ pub enum ParseError {
     UntypedParameterInSharp(Span),
     /// A PHP# field written without its type, such as `protected override table = "orders";`, at its name.
     UntypedFieldInSharp(Span),
+    /// A PHP# property written without its type, such as `protected override table { get; set; }`, at its name.
+    UntypedPropertyInSharp(Span),
     /// A PHP# statement, expression or type nested more than [`MAX_RECURSION_DEPTH`] levels deep, at the innermost one.
     NestingTooDeepInSharp(Span),
     /// TypeScript's `in` written in a PHP# `for … of` loop, at the `in`.
@@ -124,6 +126,7 @@ impl HasFileId for ParseError {
             | ParseError::QualifiedNameInSharp(_, span)
             | ParseError::UntypedParameterInSharp(span)
             | ParseError::UntypedFieldInSharp(span)
+            | ParseError::UntypedPropertyInSharp(span)
             | ParseError::NestingTooDeepInSharp(span)
             | ParseError::ForInInSharp(span)
             | ParseError::NotSupportedYetInSharp(_, span)
@@ -168,6 +171,7 @@ impl HasSpan for ParseError {
             | ParseError::QualifiedNameInSharp(_, span)
             | ParseError::UntypedParameterInSharp(span)
             | ParseError::UntypedFieldInSharp(span)
+            | ParseError::UntypedPropertyInSharp(span)
             | ParseError::NestingTooDeepInSharp(span)
             | ParseError::ForInInSharp(span)
             | ParseError::NotSupportedYetInSharp(_, span)
@@ -266,6 +270,9 @@ impl std::fmt::Display for ParseError {
             ParseError::UntypedFieldInSharp(_) => {
                 "A PHP# field needs a type, as in `private int count = 0;`.".to_string()
             }
+            ParseError::UntypedPropertyInSharp(_) => {
+                "A PHP# property needs a type, as in `public int views { get; set; }`.".to_string()
+            }
             ParseError::NestingTooDeepInSharp(_) => {
                 format!("PHP# nests statements, expressions and types at most {MAX_RECURSION_DEPTH} levels deep.")
             }
@@ -353,6 +360,7 @@ impl From<&ParseError> for Issue {
             | ParseError::QualifiedNameInSharp(..)
             | ParseError::UntypedParameterInSharp(..)
             | ParseError::UntypedFieldInSharp(..)
+            | ParseError::UntypedPropertyInSharp(..)
             | ParseError::ForInInSharp(..)
             | ParseError::InvalidTemplateEscapeInSharp(..)
             | ParseError::PhpLambdaInSharp(..)

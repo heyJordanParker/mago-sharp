@@ -1138,7 +1138,10 @@ fn a_class_or_an_interface_names_its_base_class_and_interfaces_after_a_colon() {
 fn a_method_opens_with_virtual_and_replaces_with_override() {
     let code = "namespace App.Tenant;\n\npublic class Image\n{\n    public virtual int size()\n    {\n        return 1;\n    }\n}\n\npublic class Thumbnail : Image\n{\n    public override int size()\n    {\n        return 2;\n    }\n\n    private virtual int cached;\n}\n";
 
-    assert_eq!(issues(code), ["18:13 This modifier is not supported yet in PHP#."]);
+    assert_eq!(
+        issues(code),
+        ["18:13 A field takes no `virtual`: a subclass overrides a `protected` field with a property already."]
+    );
 }
 
 #[test]
@@ -3030,53 +3033,58 @@ fn a_public_field_is_an_error() {
     assert_eq!(issues(code), ["5:5 A PHP# field cannot be `public`: a field is `private` or `protected`."]);
 }
 
-/// A field written `override` replaces a plain PHP parent's property, spec section 6.1, with the parent's access
-/// level, `public` included. The analyzer checks it against the parent.
+/// Spec section 6.1: an override is a property, an auto-property, one with accessor bodies or a computed one, with an
+/// initial value that may be any expression without `this`. The analyzer checks it against the parent.
 #[test]
-fn a_field_may_override_a_parent_property_with_its_access_level_and_a_constant_value() {
-    let code = "namespace App.Store;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override List<string> fillable = [\"number\", \"total\"];\n    public override bool timestamps = false;\n    protected override string table = \"orders\";\n    protected static override int count = 1 + 2;\n}\n";
+fn a_property_overrides_a_parent_property() {
+    let code = "namespace App.Store;\n\nimport Lib.Calc;\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override List<string> fillable { get; set; } = [\"number\", \"total\"];\n    public override bool timestamps { get; set; } = false;\n    protected override string? table { get; set; }\n    protected override int perPage { get; set; } = Calc.make();\n    public override string status { get => field; set => field = value; }\n    public override string slug => \"order\";\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// An override replaces the default of the parent's property, so it writes one: without it, the engine would give the
-/// property PHP's default for an untyped one, `null`, which its written type may not hold.
+/// Spec section 6.1 lines 281 and 289: PHP# has no public fields, and every override is a property, over a plain PHP
+/// parent and over a PHP# parent's field alike, `static` too. The help names the property to write.
 #[test]
-fn an_override_without_an_initial_value_is_an_error() {
-    let code = "namespace App.Store;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override List<string> hidden;\n}\n";
-
-    assert_eq!(
-        issues(code),
-        ["7:37 An override needs an initial value: it replaces the default of the parent's property."]
-    );
-}
-
-/// The parent's constructor may read an overridden property before this class's code runs, so an override's initial
-/// value is constant, which PHP stores as the default.
-#[test]
-fn an_override_whose_initial_value_is_not_constant_is_an_error() {
-    let code = "namespace App.Store;\n\nimport Lib.Calc;\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override List<string> fillable = this.columns();\n    protected override int perPage = Calc.make();\n\n    public List<string> columns() => [\"number\"];\n}\n";
+fn a_field_cannot_override() {
+    let code = "namespace App.Store;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override bool timestamps = false;\n    protected override string table = \"orders\";\n    protected static override int count = 1;\n}\n";
+    let message =
+        |name: &str| format!("An override is a property: give `{name}` accessors, as in `{name} {{ get; set; }}`.");
 
     assert_eq!(
         issues(code),
         [
-            "8:48 The initial value of an override must be constant: the parent's constructor may read it before this class's code runs.",
-            "9:38 The initial value of an override must be constant: the parent's constructor may read it before this class's code runs.",
+            format!("7:12 {}", message("timestamps")),
+            format!("8:15 {}", message("table")),
+            format!("9:22 {}", message("count"))
         ]
     );
 }
 
-/// `override` takes a field, the one member that replaces a plain PHP parent's property. A PHP# parent's property is
-/// overridden as a property, spec section 6.1, which is not supported yet.
+/// Spec sections 6.1 and 22: a PHP# property is closed unless it is `virtual` or `abstract`. An abstract property
+/// declares accessors with no bodies and no initial value, in an abstract class.
 #[test]
-fn an_overriding_property_is_not_supported_yet() {
-    let code = "namespace App.Store;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override int views { get; set; } = 0;\n    public override string slug => \"order\";\n}\n";
+fn a_property_opens_with_virtual_or_abstract() {
+    let code = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    public abstract string kind { get; }\n    public abstract int? sides { get; set; }\n    public virtual string label => \"shape\";\n    public virtual int count { get; set; } = 0;\n    public virtual string title { get => field; set => field = value.trim(); } = \"\";\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A field is storage, so it is neither `virtual` nor `abstract`: a subclass already overrides a `protected` field with
+/// a property (spec section 6.1 line 289). An abstract property has no accessor bodies and no initial value.
+#[test]
+fn virtual_and_abstract_take_a_property_without_a_body() {
+    let code = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    protected virtual int cached = 0;\n    protected abstract int sides;\n    public abstract string kind => \"shape\";\n    public abstract string name { get => \"shape\"; }\n    public abstract int count { get; set; } = 0;\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "7:25 Overriding a property is not supported yet in PHP#.",
-            "8:28 Overriding a property is not supported yet in PHP#.",
+            "6:15 Property `Shape.sides` cannot be declared abstract",
+            "7:12 Property `Shape.kind` cannot be declared abstract",
+            "5:15 A field takes no `virtual`: a subclass overrides a `protected` field with a property already.",
+            "6:15 A field cannot be `abstract`: declare an abstract property, as in `public abstract int total { get; }`.",
+            "7:12 An abstract property has no body: write its accessors with none, as in `{ get; }`.",
+            "8:12 An abstract property has no body: write its accessors with none, as in `{ get; }`.",
+            "9:12 An abstract property has no initial value: the class that implements it gives one.",
         ]
     );
 }
@@ -3344,8 +3352,6 @@ fn properties_outside_the_slice_are_not_supported_yet() {
             "5:9 A property without `public`, `protected` or `private` is not supported yet in PHP#.",
             "6:23 A get-only static property is not supported yet in PHP#.",
             "7:20 This accessor is not supported yet in PHP#.",
-            "8:12 This modifier is not supported yet in PHP#.",
-            "9:25 Overriding a property is not supported yet in PHP#.",
             "10:16 An initial value before the accessors is not supported yet in PHP#.",
             "11:25 This accessor is not supported yet in PHP#.",
         ]
@@ -3434,14 +3440,6 @@ fn field_in_a_nested_block_gives_storage_and_field_only_in_a_lambda_does_not() {
             "6:73 The property `b` has no storage for its initial value: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
         ]
     );
-}
-
-/// Overriding a parent's property, a plain PHP one included, is outside the slice, with or without accessor bodies.
-#[test]
-fn a_property_with_accessor_bodies_that_overrides_a_parent_property_is_not_supported_yet() {
-    let code = "namespace App.Store;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public override string status { get => field; set => field = value; }\n}\n";
-
-    assert_eq!(issues(code), ["7:28 Overriding a property is not supported yet in PHP#."]);
 }
 
 /// A property whose accessors all have bodies and never use `field` has no storage, as PHP's virtual property, so an

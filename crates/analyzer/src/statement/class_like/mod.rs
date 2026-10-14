@@ -1366,7 +1366,7 @@ where
     if has_complete_hierarchy {
         check_unused_template_parameters(context, class_like_metadata);
     }
-    check_class_like_properties(context, class_like_metadata, members);
+    check_class_like_properties(context, class_like_metadata);
     check_docblock_declared_members(context, class_like_metadata, declaration_span);
 
     let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, mago_word::empty_word())));
@@ -3681,30 +3681,58 @@ fn check_docblock_declared_members<A>(
     }
 }
 
-/// Whether the PHP# member named `property`, with its `$`, declares accessors, which make it a property, as a
-/// constructor parameter's can. A member without them is a field.
-fn has_accessors(members: &[ClassLikeMember<'_>], property: Word) -> bool {
-    members.iter().any(|member| match member {
-        ClassLikeMember::Property(Property::Hooked(hooked)) => {
-            php_variable_name(hooked.item.variable().name) == property
-        }
-        ClassLikeMember::Property(Property::Computed(computed)) => {
-            php_variable_name(computed.variable.name) == property
-        }
-        ClassLikeMember::Method(method) => method
-            .parameter_list
-            .parameters
-            .iter()
-            .any(|parameter| parameter.hooks.is_some() && php_variable_name(parameter.variable.name) == property),
-        _ => false,
-    })
+/// Reports a PHP# override of a plain PHP property that has no `set`, an `init`, or a `set` at another level than the
+/// parent's, spec section 6.1. The parent's own code writes the property at any time, which a get-only or an `init`
+/// property promises no code does, and line 287 makes the override's access level the parent's.
+fn report_plain_php_override_set<A>(
+    context: &mut Context<'_, '_, A>,
+    property: &PropertyMetadata,
+    parent: &PropertyMetadata,
+    (child_display, parent_display, parent_class): (&str, &str, Word),
+    (span, parent_span): (Span, Span),
+) where
+    A: Arena,
+{
+    let settable = |property: &PropertyMetadata| {
+        !property.flags.is_readonly()
+            && !property.flags.is_init()
+            && (!property.flags.is_virtual_property() || property.hooks.contains_key(&word("set")))
+    };
+
+    let issue = if settable(parent) && !settable(property) {
+        let accessor = if property.flags.is_init() { "`set`, not `init`" } else { "`set`" };
+
+        Issue::error(format!(
+            "`{parent_display}` is settable, and `{parent_class}`'s own code writes it, so its override `{child_display}` has {accessor}."
+        ))
+        .with_help("Give the override `set`, as in `{ get; set; }`.")
+    } else if settable(property)
+        // A read level that differs is its own error, which also fixes the set level.
+        && property.read_visibility == parent.read_visibility
+        && property.write_visibility != parent.write_visibility
+    {
+        let level = parent.write_visibility;
+
+        Issue::error(format!(
+            "`{parent_display}` is set at `{level}`, so its override `{child_display}` is set at `{level}` too."
+        ))
+        .with_help("Write `set` with no access modifier: an override keeps its parent's access level.")
+    } else {
+        return;
+    };
+
+    context.collector.report_with_code(
+        IssueCode::IncompatiblePropertyAccess,
+        issue
+            .with_annotation(Annotation::primary(span).with_message("Overridden here."))
+            .with_annotation(Annotation::secondary(parent_span).with_message("The parent's property.")),
+    );
 }
 
 #[allow(clippy::similar_names)]
 fn check_class_like_properties<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    members: &[ClassLikeMember<'_>],
 ) where
     A: Arena,
 {
@@ -3820,8 +3848,23 @@ fn check_class_like_properties<'ctx, A>(
             let parent_display = display_member(context, parent_class_name, property_name);
             let property = display_property_name(context, *property_name);
 
-            // PHP makes a property whose `set` is private final, so the engine refuses a PHP# override of one.
-            if parent_property.flags.is_final()
+            // A PHP# property is closed unless it is `virtual` or `abstract`, spec sections 6.1 and 22, so the codex reads
+            // it as final. PHP# writes no `final` on a property, so a final PHP# property is a closed one.
+            let sharp_parent = context.dialect.is_sharp() && parent_metadata.flags.is_sharp();
+            if sharp_parent && parent_property.flags.is_final() && !parent_property.write_visibility.is_private() {
+                let parent_class = display_class_like_name(context, parent_class_name);
+
+                context.collector.report_with_code(
+                    IssueCode::OverrideFinalProperty,
+                    Issue::error(format!(
+                        "Cannot override `{parent_display}`: a PHP# property is closed unless it is `virtual` or `abstract`."
+                    ))
+                    .with_annotation(Annotation::primary(property_span).with_message("Overridden here."))
+                    .with_annotation(Annotation::secondary(parent_property_span).with_message("Declared closed here."))
+                    .with_help(format!("Declare `{property}` `virtual` in `{parent_class}` to let a subclass override it.")),
+                );
+            } else if parent_property.flags.is_final()
+                // PHP makes a property whose `set` is private final, so the engine refuses a PHP# override of one.
                 || (context.dialect.is_sharp() && parent_property.write_visibility.is_private())
             {
                 context.collector.report_with_code(
@@ -3932,8 +3975,22 @@ fn check_class_like_properties<'ctx, A>(
                 );
             }
 
-            if (property_metadata.write_visibility != property_metadata.read_visibility
-                || parent_property.write_visibility != parent_property.read_visibility)
+            // Spec section 6.1: a plain PHP parent's own code writes its property, so its override has `set`, at the
+            // parent's level (line 287). PHP refuses a `readonly` or a set level the parent lacks as the class links.
+            let plain_php_parent = context.dialect.is_sharp() && !parent_metadata.flags.is_sharp();
+            if plain_php_parent {
+                report_plain_php_override_set(
+                    context,
+                    property_metadata,
+                    parent_property,
+                    (&child_display, &parent_display, display_class_like_name(context, parent_class_name)),
+                    (property_span, parent_property_span),
+                );
+            }
+
+            if !plain_php_parent
+                && (property_metadata.write_visibility != property_metadata.read_visibility
+                    || parent_property.write_visibility != parent_property.read_visibility)
                 && property_metadata.write_visibility > parent_property.write_visibility
             {
                 context.collector.report_with_code(
@@ -3981,7 +4038,7 @@ fn check_class_like_properties<'ctx, A>(
             }
 
             // Check readonly modifier consistency
-            if property_metadata.flags.is_readonly() != parent_property.flags.is_readonly() {
+            if !plain_php_parent && property_metadata.flags.is_readonly() != parent_property.flags.is_readonly() {
                 let (child_modifier, parent_modifier) = if property_metadata.flags.is_readonly() {
                     ("readonly", "non-readonly")
                 } else {
@@ -4017,30 +4074,6 @@ fn check_class_like_properties<'ctx, A>(
             let parent_has_set_hook = parent_property.hooks.contains_key(&word("set"));
             let parent_only_get = parent_is_virtual && parent_has_get_hook && !parent_has_set_hook;
             let parent_only_set = parent_is_virtual && parent_has_set_hook && !parent_has_get_hook;
-
-            // A property keeps its written type, which PHP refuses over a property that runs untyped, so it cannot replace
-            // a property that a declaration up to the root leaves untyped yet.
-            if let Some(declaring_type) = property_metadata.type_declaration_metadata.as_ref()
-                && let Some((untyped_parent, _)) =
-                    overridden.iter().find(|(_, overridden)| overridden.type_declaration_metadata.is_none())
-                && has_accessors(members, property_metadata.name.0)
-            {
-                let untyped_parent = display_member(context, untyped_parent.original_name, property_name);
-
-                context.collector.report_with_code(
-                    IssueCode::NotSupportedYet,
-                    Issue::error(format!(
-                        "A property that replaces the untyped PHP property `{untyped_parent}` is not supported yet."
-                    ))
-                    .with_annotation(
-                        Annotation::primary(declaring_type.span)
-                            .with_message("PHP refuses a type the parent property does not have."),
-                    )
-                    .with_help("Rename the property, or give the PHP property a type."),
-                );
-
-                continue;
-            }
 
             let mut has_type_incompatibility = false;
             match (

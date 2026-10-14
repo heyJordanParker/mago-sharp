@@ -877,12 +877,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::PropertyAbstractItem(_)
             | Node::PropertyConcreteItem(_)
             | Node::DirectVariable(_)
-            // `is_slice_property` refuses `override` on a member that is not a field.
+            // `is_slice_property` refuses `override`, `virtual` and `abstract` on a field.
             | Node::Modifier(
                 Modifier::Public(_)
                 | Modifier::Protected(_)
                 | Modifier::Private(_)
                 | Modifier::Static(_)
+                | Modifier::Abstract(_)
+                | Modifier::Virtual(_)
                 | Modifier::Override(_),
             ),
             FieldOrProperty,
@@ -2066,9 +2068,9 @@ fn report_optional_before_required(parameters: &FunctionLikeParameterList, conte
 /// A static member takes only a constant initial value, which PHP stores as its default, because any other runs in
 /// the constructor. A static property has `set`, because PHP has no `readonly` static property.
 ///
-/// A field written `override` replaces a plain PHP parent's property, spec section 6.1. It takes the parent's access
-/// level, which may be `public` and which the analyzer checks, and a constant initial value, its new default, because
-/// the parent's constructor may read the property before this class's constructor sets any other.
+/// An override is a property, spec section 6.1, so a field takes no `override`, and no `virtual` or `abstract` either:
+/// a subclass overrides a `protected` field with a property already. An abstract property declares accessors with no
+/// body and no initial value. The analyzer checks an override against its parent.
 fn is_slice_property(property: &Property, version: &PHPVersion, names: &ResolvedNames) -> Result<(), Box<Issue>> {
     let not_supported = |span: Span, message: &str, note: &str| {
         Issue::error(message)
@@ -2119,46 +2121,64 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
         }
     }
 
-    let is_override = property.modifiers().iter().any(|modifier| matches!(modifier, Modifier::Override(_)));
-    if is_override && !matches!(property, Property::Plain(_)) {
-        return Err(Box::new(not_supported(
-            property.first_variable().span,
-            "Overriding a property is not supported yet in PHP#.",
-            "`override` takes a field that replaces a plain PHP parent's property, as in `protected override string table = \"orders\";`.",
-        )));
+    let name = BytesDisplay(property.first_variable().name);
+    let modifier = |found: fn(&Modifier) -> bool| property.modifiers().iter().find(|modifier| found(modifier));
+    if let Property::Plain(_) = property {
+        if let Some(r#override) = modifier(|modifier| matches!(modifier, Modifier::Override(_))) {
+            return Err(Box::new(
+                Issue::error(format!(
+                    "An override is a property: give `{name}` accessors, as in `{name} {{ get; set; }}`."
+                ))
+                .with_annotation(Annotation::primary(r#override.span()).with_message("A field written `override`."))
+                .with_note(
+                    "PHP# has no public fields, and a subclass replaces a parent's property or field with a property.",
+                ),
+            ));
+        }
+        if let Some(r#virtual) = modifier(|modifier| matches!(modifier, Modifier::Virtual(_))) {
+            return Err(Box::new(
+                Issue::error(
+                    "A field takes no `virtual`: a subclass overrides a `protected` field with a property already.",
+                )
+                .with_annotation(Annotation::primary(r#virtual.span()).with_message("Written here.")),
+            ));
+        }
+        if let Some(r#abstract) = modifier(|modifier| matches!(modifier, Modifier::Abstract(_))) {
+            return Err(Box::new(
+                Issue::error(
+                    "A field cannot be `abstract`: declare an abstract property, as in `public abstract int total { get; }`.",
+                )
+                .with_annotation(Annotation::primary(r#abstract.span()).with_message("Written here.")),
+            ));
+        }
+    } else if let Some(r#abstract) = modifier(|modifier| matches!(modifier, Modifier::Abstract(_))) {
+        let has_body = match property {
+            Property::Hooked(hooked) => {
+                hooked.hook_list.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
+            }
+            _ => true,
+        };
+        if has_body {
+            return Err(Box::new(
+                Issue::error("An abstract property has no body: write its accessors with none, as in `{ get; }`.")
+                    .with_annotation(Annotation::primary(r#abstract.span()).with_message("Declared `abstract` here.")),
+            ));
+        }
+        if property.initial_value().is_some() {
+            return Err(Box::new(
+                Issue::error("An abstract property has no initial value: the class that implements it gives one.")
+                    .with_annotation(Annotation::primary(r#abstract.span()).with_message("Declared `abstract` here.")),
+            ));
+        }
     }
 
     match property {
         Property::Plain(field) => {
-            if let Some(public) = field.modifiers.get_public()
-                && !is_override
-            {
+            if let Some(public) = field.modifiers.get_public() {
                 Err(Box::new(
                     Issue::error("A PHP# field cannot be `public`: a field is `private` or `protected`.")
                         .with_annotation(Annotation::primary(public.span()).with_message("Declared `public` here."))
                         .with_help("Declare a property, as in `public int views { get; set; }`, to make it public."),
-                ))
-            } else if is_override && property.initial_value().is_none() {
-                Err(Box::new(
-                    Issue::error(
-                        "An override needs an initial value: it replaces the default of the parent's property.",
-                    )
-                    .with_annotation(
-                        Annotation::primary(property.first_variable().span)
-                            .with_message("Declared without a value here."),
-                    )
-                    .with_help("Write the new default, as in `protected override string table = \"orders\";`."),
-                ))
-            } else if is_override
-                && let Some(value) = property.initial_value()
-                && !value.is_constant(version, false)
-            {
-                Err(Box::new(
-                    Issue::error(
-                        "The initial value of an override must be constant: the parent's constructor may read it before this class's code runs.",
-                    )
-                    .with_annotation(Annotation::primary(value.span()).with_message("Not constant."))
-                    .with_help("Write a constant value, such as a literal or a list of literals."),
                 ))
             } else if field.items.len() > 1 {
                 Err(Box::new(not_supported(
@@ -2202,6 +2222,7 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
                     ),
                 )))
             } else if auto_property.initial_value.is_none()
+                && auto_property.modifiers.get_abstract().is_none()
                 && matches!(auto_property.hint, Some(Hint::Nullable(_)))
                 && auto_property.hook_list.is_get_only()
                 && names.has_storage(&auto_property.hook_list)
