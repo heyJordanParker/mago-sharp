@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use foldhash::HashMap;
@@ -19,7 +18,6 @@ use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_ide
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
 use mago_codex::ttype::get_array_parameters;
-use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
@@ -367,12 +365,6 @@ where
         }
     }
 
-    // Spec section 11 checks a value from plain PHP where it enters PHP#, so a plain PHP caller passes the backing
-    // values where PHP# takes a `Map` keyed by a backed enum.
-    let backing_parameter_type =
-        if context.dialect.is_sharp() { None } else { get_backing_array_type(parameter_type, context.codebase) };
-    let parameter_type = backing_parameter_type.as_ref().unwrap_or(parameter_type);
-
     // Spec section 12 converts a list passed where a `Set` is expected: a PHP# method or lambda makes a `Set` of each
     // parameter it declares `Set` before its body runs, so that parameter takes a `List` of its elements too. A call
     // through a `Function` value, of plain PHP, or of a parameter whose `Set` comes from a template runs no such body.
@@ -581,32 +573,6 @@ fn can_argument_be_identical(codebase: &CodebaseMetadata, input_type: &TUnion, p
                 false,
             )
     })
-}
-
-/// Returns `parameter_type` with each `Map` keyed by a backed enum keyed by the backing type instead, or `None` when
-/// it has no such `Map`.
-fn get_backing_array_type(parameter_type: &TUnion, codebase: &CodebaseMetadata) -> Option<TUnion> {
-    let backing_atomic = |atomic: &TAtomic| {
-        let TAtomic::Array(TArray::Keyed(keyed_array)) = atomic else {
-            return None;
-        };
-        let (key_type, value_type) = keyed_array.parameters.as_ref()?;
-        let Cow::Owned(backing_key_type) = get_backing_key_type(key_type, codebase) else {
-            return None;
-        };
-
-        let mut backing_array = keyed_array.clone();
-        backing_array.parameters = Some((Arc::new(backing_key_type), Arc::clone(value_type)));
-        Some(TAtomic::Array(TArray::Keyed(backing_array)))
-    };
-
-    if !parameter_type.types.iter().any(|atomic| backing_atomic(atomic).is_some()) {
-        return None;
-    }
-
-    Some(TUnion::from_vec(
-        parameter_type.types.iter().map(|atomic| backing_atomic(atomic).unwrap_or_else(|| atomic.clone())).collect(),
-    ))
 }
 
 /// Whether a parameter declared `declared_type` is written `Set<T>` or `Set<T>?`, the parameters the lowering converts.

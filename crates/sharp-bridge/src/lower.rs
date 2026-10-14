@@ -405,6 +405,17 @@ impl Place {
     }
 }
 
+/// How a `Map` takes back a key plain PHP's array holds, spec section 12.
+#[derive(Clone, Copy)]
+enum KeyCrossing<'class> {
+    /// The key as PHP holds it.
+    AsHeld,
+    /// An `int` key back as its `string`, for a key type that holds `string` and no `int`.
+    Text,
+    /// A backing value back as its case of this backed enum.
+    Case(&'class [u8]),
+}
+
 /// A part of the path a problem of `parse` is recorded under: text, or the key a hidden variable holds.
 #[derive(Clone)]
 enum PathPart {
@@ -561,7 +572,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.class_members(&class.members, parent_name, class.class.span, class.left_brace, class.right_brace);
         members.extend(self.parse_methods(&class.members, class.name.span));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
-        let attributes = self.attributes(&class.attribute_lists, None);
+        let attributes = self.attributes(&class.attribute_lists, None, None);
 
         self.declaration(
             SHARP_AST_CLASS,
@@ -596,7 +607,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
-        let attributes = self.attributes(&r#struct.attribute_lists, None);
+        let attributes = self.attributes(&r#struct.attribute_lists, None, None);
         let mut interfaces = Vec::new();
         for name in r#struct.inheritance.iter().flat_map(|inheritance| inheritance.types.iter()) {
             interfaces.push(self.string(ZEND_NAME_FQ, self.line(name), self.names.get(name)));
@@ -1255,7 +1266,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     has_constructor = true;
                     let promoted =
                         || method.parameter_list.parameters.iter().filter(|parameter| parameter.is_promoted_property());
-                    self.promoted_beside = promoted().any(|parameter| collection_parameter(parameter).is_some());
+                    self.promoted_beside =
+                        promoted().any(|parameter| collection_hint(parameter.hint.as_ref()).is_some());
                     if self.promoted_beside {
                         for parameter in promoted() {
                             members.push(self.promoted_property(parameter));
@@ -1389,7 +1401,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let name = self.string(0, line, variable.name);
         let mut hooks = Vec::new();
         for accessor in &property.hook_list.hooks {
-            hooks.push(self.hook(accessor.name.value, accessor.name, accessor, NULL));
+            hooks.push(self.hook(accessor.name.value, accessor.name, accessor, NULL, NULL));
         }
 
         let hooks = self.node(SHARP_AST_STMT_LIST, 0, self.line(&property.hook_list), &hooks);
@@ -1454,7 +1466,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
-        let attributes = self.attributes(&r#enum.attribute_lists, None);
+        let attributes = self.attributes(&r#enum.attribute_lists, None, None);
         let header = r#enum.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
         let backing_type = r#enum.backing_type_hint.as_ref().map_or(NULL, |backing_type| self.hint(&backing_type.hint));
 
@@ -1478,7 +1490,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             EnumCaseItem::Unit(_) => NULL,
             EnumCaseItem::Backed(item) => self.expression(item.value),
         };
-        let attributes = self.attributes(&case.attribute_lists, None);
+        let attributes = self.attributes(&case.attribute_lists, None, None);
 
         self.node(SHARP_AST_ENUM_CASE, 0, line, &[name, value, NULL, attributes])
     }
@@ -1525,7 +1537,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             None => (method.name.span, NULL),
         };
         let r#override = method.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
-        let attributes = self.attributes(&method.attribute_lists, r#override);
+        let attributes = self.attributes(&method.attribute_lists, r#override, None);
 
         self.declaration(
             SHARP_AST_METHOD,
@@ -1606,7 +1618,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         let body = self.method_body(&operator.body, true, prologue);
         let return_type = self.hint(&operator.return_type_hint.hint);
-        let attributes = self.attributes(&operator.attribute_lists, None);
+        let attributes = self.attributes(&operator.attribute_lists, None, None);
 
         self.declaration(
             SHARP_AST_METHOD,
@@ -1681,7 +1693,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements.push(self.node(SHARP_AST_RETURN, 0, end, &[object]));
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let return_type = self.string(ZEND_NAME_FQ, self.line(constructor.class), self.class);
-        let attributes = self.attributes(&constructor.attribute_lists, None);
+        let attributes = self.attributes(&constructor.attribute_lists, None, None);
 
         self.declaration(
             SHARP_AST_METHOD,
@@ -1892,17 +1904,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// [`Self::collection_parameters`] turns into the object. A promoted one is a plain parameter, beside the property
     /// [`Self::promoted_property`] declares, when [`Self::promoted_beside`] holds.
     fn parameter_of_type(&mut self, parameter: &FunctionLikeParameter, hint: u32) -> u32 {
-        let hint = match collection_parameter(parameter) {
-            Some(nullable) if hint != NULL => {
-                self.nodes[hint as usize].attr &= !ZEND_TYPE_NULLABLE;
-                let line = self.nodes[hint as usize].line;
-                let mut types = vec![hint, self.node(SHARP_AST_TYPE, IS_ARRAY, line, &[])];
-                if nullable {
-                    types.push(self.string(ZEND_NAME_NOT_FQ, line, b"null"));
-                }
-
-                self.node(SHARP_AST_TYPE_UNION, 0, line, &types)
-            }
+        let hint = match collection_hint(parameter.hint.as_ref()) {
+            Some(nullable) if hint != NULL => self.table_or_array(hint, nullable),
             _ => hint,
         };
         let name = self.string(0, self.line(parameter.variable.span), parameter.variable.name);
@@ -1913,7 +1916,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.member_flags_and_hooks(parameter)
         };
         let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
-        let attributes = self.attributes(&parameter.attribute_lists, None);
+        let attributes = self.attributes(&parameter.attribute_lists, None, None);
 
         self.node(
             SHARP_AST_PARAM,
@@ -1923,12 +1926,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
+    /// `\Sharp\Map|array`, or `\Sharp\Set|array`, of the lowered `Map` or `Set` type `hint`, with `null` when it is
+    /// nullable: what a parameter takes where plain PHP passes a PHP array.
+    fn table_or_array(&mut self, hint: u32, nullable: bool) -> u32 {
+        self.nodes[hint as usize].attr &= !ZEND_TYPE_NULLABLE;
+        let line = self.nodes[hint as usize].line;
+        let mut types = vec![hint, self.node(SHARP_AST_TYPE, IS_ARRAY, line, &[])];
+        if nullable {
+            types.push(self.string(ZEND_NAME_NOT_FQ, line, b"null"));
+        }
+
+        self.node(SHARP_AST_TYPE_UNION, 0, line, &types)
+    }
+
     /// The flags and the hooks of the property a constructor parameter promotes, or none for any other parameter.
     fn member_flags_and_hooks(&mut self, parameter: &FunctionLikeParameter) -> (u32, u32) {
         let (accessor_flags, hooks) = match &parameter.hooks {
             Some(accessors) => (
                 accessor_flags(&parameter.modifiers, accessors, self.names),
-                self.hooks(parameter.variable.name, accessors),
+                self.hooks(parameter.variable.name, accessors, parameter.hint.as_ref()),
             ),
             None => (0, NULL),
         };
@@ -1950,7 +1966,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let (flags, hooks) = self.member_flags_and_hooks(parameter);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
-        let attributes = self.attributes(&parameter.attribute_lists, None);
+        let attributes = self.attributes(&parameter.attribute_lists, None, parameter.hint.as_ref());
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(parameter), &[hint, declaration, attributes])
     }
@@ -1969,13 +1985,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Property::Hooked(hooked) => (
                 accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
                 &hooked.attribute_lists,
-                self.hooks(hooked.item.variable().name, &hooked.hook_list),
+                self.hooks(hooked.item.variable().name, &hooked.hook_list, property.hint()),
             ),
             Property::Computed(computed) => {
                 let hook = self.accessor_bodies(computed.variable.name, |lowering| {
                     let body = lowering.short_body(b"get", &computed.body);
 
-                    lowering.hook(b"get", computed.body.arrow, &computed.body, body)
+                    lowering.hook(b"get", computed.body.arrow, &computed.body, NULL, body)
                 });
 
                 (
@@ -2010,15 +2026,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
         let access = if property.modifiers().contains_visibility() { 0 } else { ZEND_ACC_PRIVATE };
         let flags = modifier_flags(property.modifiers()) | access | accessor_flags;
-        let attributes = self.attributes(attribute_lists, r#override);
+        let attributes = self.attributes(attribute_lists, r#override, property.hint());
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])
     }
 
     /// A property's hook list, or null when no accessor has a body: an auto-property is plain storage. Each body is a
     /// hook. An auto accessor beside a body that uses `field` is PHP's backing store, so it is no hook, and beside
-    /// bodies that never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does.
-    fn hooks(&mut self, property: &[u8], accessors: &PropertyHookList) -> u32 {
+    /// bodies that never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does. The
+    /// `set` hook of a `Map` or a `Set`, whose type `holds` names, also takes the PHP array plain PHP writes, and the
+    /// body first crosses it, as a parameter's is.
+    fn hooks(&mut self, property: &[u8], accessors: &PropertyHookList, holds: Option<&Hint>) -> u32 {
         if !accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_))) {
             return NULL;
         }
@@ -2027,7 +2045,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.accessor_bodies(property, |lowering| {
             let mut hooks = Vec::new();
             for accessor in &accessors.hooks {
-                let body = match &accessor.body {
+                let mut body = match &accessor.body {
                     PropertyHookBody::Concrete(PropertyHookConcreteBody::Block(block)) => lowering.block(block),
                     PropertyHookBody::Concrete(PropertyHookConcreteBody::Expression(body)) => {
                         lowering.short_body(accessor.name.value, body)
@@ -2035,9 +2053,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     PropertyHookBody::Abstract(_) if uses_field => continue,
                     PropertyHookBody::Abstract(_) => lowering.storage_body(accessor),
                 };
+                let mut parameters = NULL;
+                if accessor.is_setter()
+                    && let Some(hint) = holds
+                    && let Some(nullable) = collection_hint(holds)
+                {
+                    let (span, line) = (accessor.name.span, lowering.line(accessor));
+                    let lowered = lowering.hint(hint);
+                    let accepted = lowering.table_or_array(lowered, nullable);
+                    let value = lowering.string(0, line, b"value");
+                    let parameter = lowering.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, NULL, NULL, NULL]);
+                    parameters = lowering.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
+                    let r#type = lowering.hint_type(hint);
+                    let first = lowering.variable(span, b"value");
+                    let crossed = lowering.crossed(span, &r#type, b"value", first);
+                    let place = lowering.variable(span, b"value");
+                    let crossing = lowering.node(SHARP_AST_ASSIGN, 0, line, &[place, crossed]);
+                    body = lowering.node(SHARP_AST_STMT_LIST, 0, line, &[crossing, body]);
+                }
                 // An `init` body is the `set` hook, and the property's set visibility keeps it to object creation.
                 let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
-                hooks.push(lowering.hook(name, accessor.name, accessor, body));
+                hooks.push(lowering.hook(name, accessor.name, accessor, parameters, body));
             }
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &hooks)
@@ -2057,9 +2093,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         index
     }
 
-    /// A hook named `get` or `set` with its body, as php-src's grammar declares every hook.
-    fn hook(&mut self, name: &[u8], start: impl HasSpan, end: impl HasSpan, body: u32) -> u32 {
-        self.declaration(SHARP_AST_PROPERTY_HOOK, 0, start, end, name, &[NULL, NULL, body, NULL, NULL])
+    /// A hook named `get` or `set` with its parameters, null for the one PHP gives it, and its body, as php-src's grammar
+    /// declares every hook.
+    fn hook(&mut self, name: &[u8], start: impl HasSpan, end: impl HasSpan, parameters: u32, body: u32) -> u32 {
+        self.declaration(SHARP_AST_PROPERTY_HOOK, 0, start, end, name, &[parameters, NULL, body, NULL, NULL])
     }
 
     /// The body of `get => expr;`, the short body php-src's grammar builds, on the arrow's line. A `set` with an
@@ -2099,12 +2136,29 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A declaration's attributes are one `ATTRIBUTE_LIST` with an `ATTRIBUTE_GROUP` per `[...]`, as php-src's grammar
     /// builds `#[...]`, or null without attributes. Each attribute names its class by its full name. A method's or a
-    /// field's `override` adds a last group of `#[\Override]`.
-    fn attributes(&mut self, lists: &Sequence<AttributeList>, r#override: Option<&Modifier>) -> u32 {
-        let line = match (lists.first(), r#override) {
-            (Some(first), _) => self.line(first),
-            (None, Some(r#override)) => self.line(r#override),
-            (None, None) => return NULL,
+    /// field's `override` adds a group of `#[\Override]`, and a property of a `Map` or a `Set`, whose type `holds`
+    /// names, a last group of the `#[\Sharp\Crossing]` [`Self::crossing_plan`] gives it.
+    fn attributes(
+        &mut self,
+        lists: &Sequence<AttributeList>,
+        r#override: Option<&Modifier>,
+        holds: Option<&Hint>,
+    ) -> u32 {
+        let crossing = holds.filter(|hint| collection_hint(Some(hint)).is_some()).map(|hint| {
+            let r#type = self.hint_type(hint);
+            let line = self.line(hint);
+            let plan = self.crossing_plan(line, &r#type);
+            let plan = self.node(SHARP_AST_ARG_LIST, 0, line, &[plan]);
+            let name = self.string(ZEND_NAME_FQ, line, b"Sharp\\Crossing");
+            let attribute = self.node(SHARP_AST_ATTRIBUTE, 0, line, &[name, plan]);
+
+            self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, line, &[attribute])
+        });
+        let line = match (lists.first(), r#override, crossing) {
+            (Some(first), _, _) => self.line(first),
+            (None, Some(r#override), _) => self.line(r#override),
+            (None, None, Some(crossing)) => self.nodes[crossing as usize].line,
+            (None, None, None) => return NULL,
         };
 
         let mut groups = Vec::new();
@@ -2127,6 +2181,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let attribute = self.node(SHARP_AST_ATTRIBUTE, 0, line, &[name, NULL]);
             groups.push(self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, line, &[attribute]));
         }
+        groups.extend(crossing);
 
         self.node(SHARP_AST_ATTRIBUTE_LIST, 0, line, &groups)
     }
@@ -3667,17 +3722,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let each = self.hidden_arrow_function(span, &[&element], each);
             values = self.global_call(line, b"array_map", &[each, values]);
         }
-        let built = match array {
-            TArray::List(_) => values,
-            TArray::Set(_) => self.collection_new(line, b"Sharp\\Set", Some(values)),
-            TArray::Keyed(_)
-                if key_type.has_string() && !key_type.has_int() || self.backed_enum(&key_type).is_some() =>
-            {
+        let built = match (array, self.key_crossing(&key_type)) {
+            (TArray::List(_), _) => values,
+            (TArray::Set(_), _) => self.collection_new(line, b"Sharp\\Set", Some(values)),
+            (TArray::Keyed(_), crossing @ (KeyCrossing::Text | KeyCrossing::Case(_))) => {
                 let [key, value] = ["key", "value"].map(|base| self.hidden(base));
                 let key_read = self.variable(span, &key);
-                let key_text = match self.backed_enum(&key_type) {
-                    Some(class) => self.backed_case(line, class, key_read),
-                    None => self.node(SHARP_AST_CAST, IS_STRING, line, &[key_read]),
+                let key_text = match crossing {
+                    KeyCrossing::Case(class) => self.backed_case(line, class, key_read),
+                    _ => self.node(SHARP_AST_CAST, IS_STRING, line, &[key_read]),
                 };
                 let key_text = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[key_text, NULL]);
                 let value_read = self.variable(span, &value);
@@ -3693,7 +3746,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.collection_new(line, b"Sharp\\Map", Some(keys_and_values))
             }
-            TArray::Keyed(_) => {
+            (TArray::Keyed(_), KeyCrossing::AsHeld) => {
                 let class = self.string(ZEND_NAME_FQ, line, b"Sharp\\Map");
                 let from = self.string(0, line, b"from");
                 let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[values]);
@@ -3706,6 +3759,48 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let itself = self.variable(span, name);
 
         self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_array, built, itself])
+    }
+
+    /// How a `Map` keyed by `key_type` takes back a key plain PHP's array holds, as [`Self::crossed`] and
+    /// [`Self::crossing_plan`] both cross it.
+    fn key_crossing<'r#type>(&self, key_type: &'r#type TUnion) -> KeyCrossing<'r#type> {
+        match self.backed_enum(key_type) {
+            Some(class) => KeyCrossing::Case(class),
+            None if key_type.has_string() && !key_type.has_int() => KeyCrossing::Text,
+            None => KeyCrossing::AsHeld,
+        }
+    }
+
+    /// The plan `#[\Sharp\Crossing]` gives the engine, so a PHP array plain PHP writes to a `Map` or `Set` property of
+    /// `r#type` crosses as [`Self::crossed`] crosses a parameter: `['map', key, values]`, `['set', elements]` or
+    /// `['list', elements]`. The key is null for a key as PHP holds it, `'string'` for an `int` key back as its
+    /// `string`, or the backed enum whose case each backing value is, and an inner plan is null where that part holds
+    /// no `Map` or `Set`.
+    fn crossing_plan(&mut self, line: u32, r#type: &TUnion) -> u32 {
+        let Some(array) = self.crossing_array(r#type) else {
+            return self.zval(line, sharp_value::SHARP_NULL, |_| {});
+        };
+        let (key_type, element_type) = self.types.array_parameters(array);
+        let inner = self.crossing_plan(line, &element_type);
+        let mut parts = match array {
+            TArray::List(_) => vec![self.string(0, line, b"list")],
+            TArray::Set(_) => vec![self.string(0, line, b"set")],
+            TArray::Keyed(_) => {
+                let kind = self.string(0, line, b"map");
+                let key = match self.key_crossing(&key_type) {
+                    KeyCrossing::AsHeld => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
+                    KeyCrossing::Text => self.string(0, line, b"string"),
+                    KeyCrossing::Case(class) => self.string(0, line, class),
+                };
+
+                vec![kind, key]
+            }
+        };
+        parts.push(inner);
+        let elements: Vec<u32> =
+            parts.into_iter().map(|part| self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[part, NULL])).collect();
+
+        self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &elements)
     }
 
     /// Where `parameter` holds its value in the body: its variable, or its property when it is promoted.
@@ -4797,10 +4892,10 @@ fn table_kind(r#type: &TUnion) -> Option<bool> {
     })
 }
 
-/// Whether `parameter` is a `Map` or a `Set`, which plain PHP passes as a PHP array, as `Some` of whether it is
-/// nullable.
-fn collection_parameter(parameter: &FunctionLikeParameter) -> Option<bool> {
-    let (generic, nullable) = match &parameter.hint {
+/// Whether `hint`, a parameter's or a property's type, is a `Map` or a `Set`, which plain PHP gives as a PHP array, as
+/// `Some` of whether it is nullable.
+fn collection_hint(hint: Option<&Hint>) -> Option<bool> {
+    let (generic, nullable) = match hint {
         Some(Hint::Generic(generic)) => (generic, false),
         Some(Hint::Nullable(NullableHint { hint: Hint::Generic(generic), .. })) => (generic, true),
         _ => return None,

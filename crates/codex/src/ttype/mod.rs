@@ -1548,16 +1548,22 @@ pub fn get_php_received_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TU
 /// The type plain PHP code may pass where a PHP# declaration takes `r#type`.
 ///
 /// It is an argument or a property write. It takes what plain PHP receives, and where `r#type` itself is a `Map` or a
-/// `Set`, the PHP array PHP# turns into one there, a `List` for a `Set`.
+/// `Set`, the PHP array PHP# turns into one there, a `List` for a `Set`. That array's keys are the ones PHP holds: a
+/// backed enum's backing values, and an `int` beside a `string`, as PHP holds an all-digit `string` key as an `int`,
+/// which PHP# turns back into the `string`.
 #[must_use]
 pub fn get_php_passed_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
     let convert = |inner: &TUnion| Arc::new(get_php_received_type(inner, codebase));
     let arrays = r#type.types.iter().filter_map(|atomic| match atomic {
         TAtomic::Array(map @ TArray::Keyed(_)) => {
             let (key_type, value_type) = get_array_parameters(map, codebase);
+            let mut held_key_type = get_backing_key_type(&key_type, codebase).into_owned();
+            if held_key_type.has_string() && !held_key_type.has_int() {
+                held_key_type = TUnion::from_vec(held_key_type.types.iter().chain([INT_ATOMIC]).cloned().collect());
+            }
 
             Some(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
-                convert(&key_type),
+                Arc::new(held_key_type),
                 convert(&value_type),
             ))))
         }

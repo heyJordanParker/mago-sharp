@@ -7338,17 +7338,20 @@ fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
     );
 }
 
-/// Spec section 11 checks a value from plain PHP where it enters PHP#, so a plain PHP caller passes the backing
-/// values where PHP# takes a `Map<Status, int>`, and only those. That border check does not look inside a
-/// collection yet, so a key that is no case fails when PHP# reads it back as `Status`.
+/// Spec sections 11 and 12 check a value from plain PHP where it enters PHP#. So where PHP# takes a `Map`, as a
+/// parameter or a property, instance or static, plain PHP passes or writes the keys a PHP array holds there: a
+/// backed enum's backing values, and an `int` beside a `string`, as PHP holds the key `'5'` as `5`, which PHP# turns
+/// back into the `string`. An index write through the property keeps it such an array. A `Map<Size, int>` of an
+/// `int`-backed enum refuses a `string` key. That border check does not look inside a collection yet, so a key that is
+/// no case fails when PHP# reads it back as `Status`.
 #[test]
-fn a_plain_php_caller_passes_the_backing_values_where_php_sharp_takes_a_map_keyed_by_a_backed_enum() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts)\n    {\n        return count(counts);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function run(Tally $tally): int\n    {\n        return $tally->total(['active' => 1]) + $tally->total([1 => 1]);\n    }\n}\n";
+fn a_plain_php_caller_passes_and_writes_the_keys_a_php_array_holds_where_php_sharp_takes_a_map() {
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\npublic class Tally\n{\n    public Map<string, int> named { get; set; } = [:];\n    public static Map<string, int> shared { get; set; } = [:];\n    public Map<Status, int> counts { get; set; } = [:];\n    public Map<Size, int> sizes { get; set; } = [:];\n\n    public int total(Map<Status, int> counts) => counts.count();\n\n    public int name(Map<string, int> named) => named.count();\n\n    public int size(Map<Size, int> sizes) => sizes.count();\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function run(Tally $tally): int\n    {\n        $tally->named = ['5' => 1, 'a' => 2];\n        $tally->named['6'] = 3;\n        Tally::$shared = ['5' => 1];\n        Tally::$shared['6'] = 2;\n        $tally->counts = ['active' => 1, '5' => 2];\n        $tally->sizes = [1 => 1];\n        $tally->sizes = ['small' => 1];\n        return $tally->total(['active' => 1]) + $tally->total([1 => 1]) + $tally->name(['5' => 1]) + $tally->size([1 => 1]) + $tally->size(['small' => 1]);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Caller.php", php), &[("src/Demo/Tally.sharp", sharp), ("src/Lib/Status.php", STATUS)]),
-        ["9:63 possibly-invalid-argument"]
+        ["15:25 invalid-property-assignment-value", "16:140 possibly-invalid-argument"]
     );
 }
 
@@ -10224,7 +10227,7 @@ fn a_php_caller_keeps_the_element_types_of_a_sharp_methods_collection_parameters
         messages(("src/Demo/Report.php", php), &[tally]),
         [
             "Possible argument type mismatch for argument #1 of `Demo\\Tally::total`: expected `list<int>`, but possibly received `list{string('a')}`.",
-            "Possible argument type mismatch for argument #2 of `Demo\\Tally::total`: expected `Sharp\\Map<string, int>|array<string, int>`, but possibly received `array{1: string('x')}`.",
+            "Possible argument type mismatch for argument #2 of `Demo\\Tally::total`: expected `Sharp\\Map<string, int>|array<int|string, int>`, but possibly received `array{1: string('x')}`.",
         ]
     );
 }

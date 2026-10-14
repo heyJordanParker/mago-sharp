@@ -928,6 +928,7 @@ fn a_field_is_a_property_group_of_one_property() {
 }
 
 /// ```php
+/// #[\Sharp\Crossing(['map', 'string', null])]
 /// private \Sharp\Map $cache = new \Sharp\Map();
 /// private \Closure $priceOf;
 /// private \Closure $charge;
@@ -963,7 +964,21 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                       ARG_LIST
                     null
                     null
-                null
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Sharp\\Crossing"
+                      ARG_LIST
+                        ARRAY [3]
+                          ARRAY_ELEM
+                            ZVAL "map"
+                            null
+                          ARRAY_ELEM
+                            ZVAL "string"
+                            null
+                          ARRAY_ELEM
+                            ZVAL null
+                            null
               PROP_GROUP [4]
                 ZVAL "Closure"
                 PROP_DECL
@@ -3260,6 +3275,7 @@ fn a_list_literal_that_coalescing_assigns_to_a_nullable_set_is_a_set() {
 }
 
 /// ```php
+/// #[\Sharp\Crossing(['set', null])]
 /// private \Sharp\Set $tags = new \Sharp\Set(["a"]);
 /// ```
 ///
@@ -3284,7 +3300,18 @@ fn a_list_literal_initial_value_of_a_set_property_is_a_set() {
                           null
                   null
                   null
-              null
+              ATTRIBUTE_LIST
+                ATTRIBUTE_GROUP
+                  ATTRIBUTE
+                    ZVAL "Sharp\\Crossing"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "set"
+                          null
+                        ARRAY_ELEM
+                          ZVAL null
+                          null
         "#}]
     );
 }
@@ -5496,6 +5523,7 @@ fn a_null_safe_set_method_tests_its_receiver_first() {
 }
 
 /// ```php
+/// #[\Sharp\Crossing(['set', null])]
 /// public readonly \Sharp\Set $tags;
 /// public function __construct(\Sharp\Set|array $tags, \Sharp\Set|array $ids)
 /// {
@@ -5527,7 +5555,18 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
                   null
                   null
                   null
-              null
+              ATTRIBUTE_LIST
+                ATTRIBUTE_GROUP
+                  ATTRIBUTE
+                    ZVAL "Sharp\\Crossing"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "set"
+                          null
+                        ARRAY_ELEM
+                          ZVAL null
+                          null
         "#}]
     );
     assert_eq!(
@@ -11490,6 +11529,125 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
                       ZVAL null
               null
         "#}
+    );
+}
+
+/// ```php
+/// public \Sharp\Map $stock;    #[\Sharp\Crossing(['map', 'string', null])]
+/// public \Sharp\Map $names;    #[\Sharp\Crossing(['map', null, null])]
+/// public \Sharp\Map $counts;   #[\Sharp\Crossing(['map', 'App\Tenant\Status', null])]
+/// public ?\Sharp\Map $spare;   #[\Sharp\Crossing(['map', 'string', null])]
+/// public static \Sharp\Set $tags;   #[\Sharp\Crossing(['set', null])]
+/// public \Sharp\Map $shelves;  #[\Sharp\Crossing(['map', 'string', ['list', ['set', null]]])]
+/// public int $count;           no attribute
+/// ```
+///
+/// A property PHP# declares a `Map` or a `Set` carries `#[\Sharp\Crossing]`, the plan the engine crosses a PHP array
+/// plain PHP writes there by: an `int` key back as a `string` for a key type of `string`, a backing value back as its
+/// case, and each `Map` or `Set` it holds, at any depth, crossed too.
+#[test]
+fn a_map_or_set_property_carries_the_plan_a_php_array_crosses_by() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Ledger\n{\n    public Map<string, int> stock { get; set; } = [:];\n    public Map<int, string> names { get; set; } = [:];\n    public Map<Status, int> counts { get; set; } = [:];\n    public Map<string, int>? spare { get; set; }\n    public static Set<string> tags { get; set; } = [];\n    public Map<string, List<Set<int>>> shelves { get; set; } = [:];\n    public int count { get; set; } = 0;\n}\n",
+    );
+    // The attribute list of `#[\Sharp\Crossing(plan)]`, with the plan's rendering indented under its `ARG_LIST`.
+    let crossing = |plan: &str| {
+        let mut attribute = String::from(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Sharp\\\\Crossing\"\n      ARG_LIST\n",
+        );
+        for line in plan.lines() {
+            attribute.push_str("        ");
+            attribute.push_str(line);
+            attribute.push('\n');
+        }
+
+        attribute
+    };
+    let map_by_string = indoc! {r#"
+        ARRAY [3]
+          ARRAY_ELEM
+            ZVAL "map"
+            null
+          ARRAY_ELEM
+            ZVAL "string"
+            null
+          ARRAY_ELEM
+            ZVAL null
+            null
+    "#};
+    let attributes: Vec<String> = lowered
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_PROP_GROUP)
+        .map(|(index, _)| lowered.render(lowered.child(index as u32, 2)))
+        .collect();
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "the source lowers");
+    assert_eq!(
+        attributes,
+        [
+            crossing(map_by_string),
+            crossing(indoc! {r#"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "map"
+                    null
+                  ARRAY_ELEM
+                    ZVAL null
+                    null
+                  ARRAY_ELEM
+                    ZVAL null
+                    null
+            "#}),
+            crossing(indoc! {r#"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "map"
+                    null
+                  ARRAY_ELEM
+                    ZVAL "App\\Tenant\\Status"
+                    null
+                  ARRAY_ELEM
+                    ZVAL null
+                    null
+            "#}),
+            crossing(map_by_string),
+            crossing(indoc! {r#"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "set"
+                    null
+                  ARRAY_ELEM
+                    ZVAL null
+                    null
+            "#}),
+            crossing(indoc! {r#"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "map"
+                    null
+                  ARRAY_ELEM
+                    ZVAL "string"
+                    null
+                  ARRAY_ELEM
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL "list"
+                        null
+                      ARRAY_ELEM
+                        ARRAY [3]
+                          ARRAY_ELEM
+                            ZVAL "set"
+                            null
+                          ARRAY_ELEM
+                            ZVAL null
+                            null
+                        null
+                    null
+            "#}),
+            "null\n".to_string(),
+        ]
     );
 }
 
