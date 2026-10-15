@@ -54,7 +54,10 @@ where
                 context,
                 readonly,
                 readonly.hint.span(),
-                format!("{} `{fix}` never changes, so `readonly` changes nothing: write `{fix}`.", sentence_article(&fix)),
+                format!(
+                    "{} `{fix}` never changes, so `readonly` changes nothing: write `{fix}`.",
+                    sentence_article(&fix)
+                ),
             );
         }
     }

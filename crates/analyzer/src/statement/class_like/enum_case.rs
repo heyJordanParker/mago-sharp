@@ -125,7 +125,7 @@ where
         return Ok(());
     };
     let Some(constructor) = context.codebase.get_method(&class_name, b"__construct") else {
-        return Ok(());
+        unreachable!("a case's class has a constructor")
     };
 
     let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((case_metadata.name, constructor.name)));

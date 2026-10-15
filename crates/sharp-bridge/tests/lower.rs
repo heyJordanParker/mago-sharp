@@ -28,6 +28,7 @@ use mago_sharp_bridge::sharp_node;
 use mago_sharp_bridge::sharp_str;
 use mago_sharp_bridge::sharp_value;
 use mago_sharp_bridge::unit::encode;
+use xxhash_rust::xxh3::xxh3_64;
 
 /// A file the checker accepted and its lowered unit, or the checker's refusal.
 struct Lowered(Result<Unit, Vec<String>>);
@@ -17331,6 +17332,35 @@ fn an_enum_returns_self_and_holds_a_union_typed_constant() {
     );
 }
 
+/// ```php
+/// abstract class Shape { public const int Sides = 4; }
+/// ```
+///
+/// A constant of an enum whose cases carry data is a constant of the abstract class the enum runs as, first among its
+/// members, as a class's constant is.
+#[test]
+fn an_enum_with_data_holds_its_constant_as_a_class_does() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nenum Shape\n{\n    public const int Sides = 4;\n\n    case Square(int side);\n}\n",
+    );
+    let class = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_CLASS).expect("the enum");
+    let members = lowered.child(class as u32, 2);
+
+    assert_eq!(
+        lowered.render(lowered.child(members, 0)),
+        indoc! {r#"
+            CLASS_CONST_GROUP [1]
+              CLASS_CONST_DECL
+                CONST_ELEM
+                  ZVAL "Sides"
+                  ZVAL 4
+                  null
+              null
+              ZVAL [1] "int"
+        "#}
+    );
+}
+
 /// The child count `zend_ast_get_num_children` gives a fixed-size kind, or 5 for a declaration. `None` for a list.
 fn fixed_child_count(kind: sharp_kind) -> Option<u32> {
     const IS_LIST: u32 = 1 << 7;
@@ -17793,6 +17823,23 @@ fn the_unit_names_each_form_it_inlines_with_its_fingerprint() {
         .collect();
 
     assert_eq!(inlined, [("sharp\\text::shout".to_owned(), shout.fingerprint())]);
+}
+
+/// The unit names the function type of each method its file declares with the xxh3-64 of the type text `is` tests a
+/// closure of it by, which `Reads::function_types` takes, since the effects the text lists come from other files.
+#[test]
+fn the_unit_names_each_function_type_with_the_hash_of_its_text() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int twice(int x) => x * 2;\n}\n";
+    let lowered = Lowered::new(code);
+    let function_types: Vec<(String, u64)> = lowered
+        .unit()
+        .expect("the source lowers")
+        .function_types()
+        .iter()
+        .map(|read| (String::from_utf8_lossy(&read.name).into_owned(), read.fingerprint))
+        .collect();
+
+    assert_eq!(function_types, [("App\\Tenant\\Report::twice".to_owned(), xxh3_64(b"Function<int(int)>"))]);
 }
 
 /// Each node an inlined form copies takes the line of its call, as the call's own nodes would, and each value keeps

@@ -405,11 +405,7 @@ where
         continue_context = loop_context.clone();
 
         loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
-            for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
-                let Some(clauses) = pre_condition_clauses.get(condition_offset) else {
-                    continue;
-                };
-
+            for (pre_condition, clauses) in pre_conditions.iter().zip(&pre_condition_clauses) {
                 apply_pre_condition_to_loop_context(
                     context,
                     pre_condition,

@@ -5012,11 +5012,13 @@ fn a_match_without_a_default_arm_is_an_error() {
     assert_eq!(issues(code), ["7:9 A `match` needs a `default` arm."]);
 }
 
+/// Arms that name `Class.y` values, `null` or a class, as a case of an enum with data or an implementer of a sealed
+/// interface, may cover every value, so only the analyzer, which knows the value's type, can ask for `default`.
 #[test]
 fn a_match_whose_arms_name_class_values_leaves_its_default_to_the_analyzer() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Status;\n\nclass Report\n{\n    public string label(Status? status)\n    {\n        match (status) {\n            Status.Open when status !== null => {},\n            Status.Closed or null => {},\n        }\n        return match (status) {\n            Status.Open => \"open\",\n            0 => \"zero\",\n        };\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Status;\n\nclass Report\n{\n    public string label(Status? status)\n    {\n        match (status) {\n            Status.Open when status !== null => {},\n            Status.Closed or null => {},\n            Status other => {},\n        }\n        return match (status) {\n            Status.Open => \"open\",\n            0 => \"zero\",\n        };\n    }\n}\n";
 
-    assert_eq!(issues(code), ["13:16 A `match` needs a `default` arm."]);
+    assert_eq!(issues(code), ["14:16 A `match` needs a `default` arm."]);
 }
 
 #[test]

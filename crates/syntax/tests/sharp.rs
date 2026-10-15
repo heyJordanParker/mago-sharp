@@ -4838,7 +4838,8 @@ fn a_type_with_properties_is_one_pattern_that_may_bind() {
     const UNTYPED: &str = "class Report\n{\n    void run()\n    {\n        response is { status: 200 } ok;\n    }\n}\n";
     let untyped = parse(&arena, "src/Report.sharp", UNTYPED);
     assert!(untyped.errors.is_empty(), "{:#?}", untyped.errors);
-    let Expression::Is(Is { pattern: Pattern::Properties(properties), .. }) = expression(&method_body(untyped)[0]) else {
+    let Expression::Is(Is { pattern: Pattern::Properties(properties), .. }) = expression(&method_body(untyped)[0])
+    else {
         panic!("expected `is` with a properties pattern");
     };
     assert_eq!(

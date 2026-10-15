@@ -68,7 +68,7 @@ impl PatternNames for CodebasePatternNames<'_, '_> {
             return None;
         }
         let Some(constructor) = self.codebase.get_method(class.name.as_bytes(), b"__construct") else {
-            return Some(Vec::new());
+            unreachable!("a case's class has a constructor, which takes no field for a plain case")
         };
 
         Some(

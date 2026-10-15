@@ -59,10 +59,10 @@ use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Keyword;
+use mago_syntax::cst::Leave;
 use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalDeclaration;
-use mago_syntax::cst::Leave;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::Method;
@@ -4692,9 +4692,7 @@ fn supported(place: Place) -> &'static str {
         Place::Enum => {
             "A PHP# enum has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."
         }
-        Place::Case => {
-            "A PHP# case that carries data has fields, each a type and a name with an optional default, as in `case Paid(string transactionId);`."
-        }
+        Place::Case => unreachable!("`enter` takes a case's name, its field list and each of its fields"),
         Place::Header => {
             "A PHP# header names each base class and interface by its short name, as in `: DatabaseEntity, Linkable`, and a generic one with its type arguments, as in `: PaginatedList<Order>`."
         }

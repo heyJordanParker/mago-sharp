@@ -337,11 +337,9 @@ impl<'analysis> Types<'analysis> {
     /// The whole type of the lambda written at `lambda`, which `is` tests a closure of it by: [`Self::function_type`] of
     /// the parameter and result types the analysis gave it, written or inferred.
     pub(crate) fn lambda_type(&self, lambda: Span) -> FunctionType {
-        let signature = self.artifacts.get_expression_type(&lambda).and_then(|r#type| match r#type.types.first() {
-            Some(TAtomic::Callable(TCallable::Signature(signature))) => Some(signature),
-            _ => None,
-        });
-        let Some(signature) = signature else {
+        let Some(TAtomic::Callable(TCallable::Signature(signature))) =
+            self.artifacts.get_expression_type(&lambda).and_then(|r#type| r#type.types.first())
+        else {
             unreachable!("the analysis types a lambda as its signature, not the lambda at {lambda:?}");
         };
         let parameters: Vec<Option<&TUnion>> =

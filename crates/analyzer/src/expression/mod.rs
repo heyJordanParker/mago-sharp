@@ -97,8 +97,8 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_enum_case;
 use crate::utils::names::display_member;
-use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_missing_imports;
+use crate::utils::names::display_sharp_type;
 use crate::utils::quoted_source;
 
 pub mod access;
@@ -579,7 +579,8 @@ where
                 && (!(is_code(issue, IssueCode::ReplacedBySyntax) || is_code(issue, IssueCode::BareFunctionCall))
                     || called.is_none())
                 && (!always_true || called.is_none_or(|call| !is_shape(call)))
-                && (!always_true || span.is_none_or(|span| !list_reads.iter().any(|(_, read)| read.span().start == span.start)))
+                && (!always_true
+                    || span.is_none_or(|span| !list_reads.iter().any(|(_, read)| read.span().start == span.start)))
                 && (!always_true || span.is_none_or(|span| !pattern_calls.case_patterns.contains(&span.start.offset)))
                 && (!always_true
                     || span.is_none_or(|span| {
@@ -592,7 +593,15 @@ where
         })
         .collect();
 
-    if let Some((value, hint, test)) = redundant_test {
+    // Spec section 21: a function value from plain PHP keeps no PHP# type while the code runs, so a function-type test
+    // of a value whose source declares none, such as the `Closure` a plain PHP method returns, is an error, and never
+    // always true.
+    let tested = tested_value(node);
+    let tests_unknown_function =
+        tests_function_type && artifacts.get_expression_type(tested).is_some_and(has_undeclared_function);
+    if let Some((value, hint, test)) = redundant_test
+        && !tests_unknown_function
+    {
         let value_text = quoted_source(context, value.span());
         let hint_text = quoted_source(context, hint);
         let article = article(&hint_text);
@@ -613,19 +622,14 @@ where
         );
     }
 
-    // Spec section 21: a function value from plain PHP keeps no PHP# type while the code runs, so a function-type test
-    // of a value whose source declares none, such as the `Closure` a plain PHP method returns, is an error.
-    if tests_function_type
-        && let Some(value) = tested_value(node)
-        && artifacts.get_expression_type(value).is_some_and(|value_type| has_undeclared_function(value_type, context))
-    {
-        let value_text = quoted_source(context, value.span());
+    if tests_unknown_function {
+        let tested_text = quoted_source(context, tested.span());
         context.collector.report_with_code(
             IssueCode::UnknownFunctionType,
             Issue::error(format!(
-                "The type of `{value_text}`'s function is unknown: its source declares no parameter or result types."
+                "The type of `{tested_text}`'s function is unknown: its source declares no parameter or result types."
             ))
-            .with_annotation(Annotation::primary(value.span()).with_message("Tested here."))
+            .with_annotation(Annotation::primary(tested.span()).with_message("Tested here."))
             .with_help("Call it from a PHP# lambda that declares its types, and test the lambda."),
         );
     }
@@ -915,7 +919,8 @@ where
     A: Arena,
 {
     // Each arm's case, the types its fields declare, and the type each field's pattern holds every value of. A case
-    // pattern's PHP exists only for a case of an enum with data, so its hint names one.
+    // pattern's PHP exists only for a case of an enum with data, so its hint names one, and the case's class has a
+    // constructor, which takes no field for a plain case.
     let unpacking = pattern_match.arms.iter().filter_map(|arm| match arm {
         PatternMatchArm::Pattern(PatternMatchPatternArm {
             pattern: Pattern::Type(TypePattern { hint, fields: Some(fields), properties: None, .. }),
@@ -928,15 +933,18 @@ where
     for (hint, fields) in unpacking {
         let case = context.resolved_names.resolve(hint).and_then(|name| context.codebase.get_class_like(name));
         let constructor = case.and_then(|case| context.codebase.get_method(case.name.as_bytes(), b"__construct"));
-        if let (Some(case), Some(constructor)) = (case, constructor) {
-            let declared = constructor
-                .parameters
-                .iter()
-                .map(|parameter| parameter.get_type_metadata().map_or_else(get_mixed, |declared| declared.type_union.clone()))
-                .collect();
-            let held = fields.fields.iter().map(|field| held_type(field, context, block_context, artifacts)).collect();
-            arms.push((case.name, declared, held));
-        }
+        let (Some(case), Some(constructor)) = (case, constructor) else {
+            unreachable!("a case pattern with PHP names a case's class, which has a constructor")
+        };
+        let declared = constructor
+            .parameters
+            .iter()
+            .map(|parameter| {
+                parameter.get_type_metadata().map_or_else(get_mixed, |declared| declared.type_union.clone())
+            })
+            .collect();
+        let held = fields.fields.iter().map(|field| held_type(field, context, block_context, artifacts)).collect();
+        arms.push((case.name, declared, held));
     }
 
     let holds = |held: &Option<TUnion>, declared: &TUnion| {
@@ -958,7 +966,10 @@ where
             arms.iter().filter(|(other, _, _)| other == case).map(|(_, _, held)| held).collect();
         let handles_case = (0..declared.len()).any(|varying| {
             let others_hold = case_arms.iter().all(|held| {
-                held.iter().zip(declared).enumerate().all(|(field, (held, declared))| field == varying || holds(held, declared))
+                held.iter()
+                    .zip(declared)
+                    .enumerate()
+                    .all(|(field, (held, declared))| field == varying || holds(held, declared))
             });
             let varying_held = case_arms.iter().map(|held| held[varying].clone()).reduce(|left, right| {
                 Some(combine_union_types(&left?, &right?, context.codebase, CombinerOptions::default()))
@@ -1046,13 +1057,17 @@ fn list_reads<'ast, 'arena>(php: Node<'ast, 'arena>, lists: &[(Span, Span)]) -> 
     match php {
         Node::Expression(expression) => ListReadWalker.walk_expression(expression, &mut reads),
         Node::Statement(statement) => ListReadWalker.walk_statement(statement, &mut reads),
-        _ => {}
+        _ => unreachable!("the PHP of a pattern is an expression or a statement"),
     }
 
     lists
         .iter()
         .filter_map(|&(list, left_bracket)| {
-            reads.0.iter().find(|(class, _)| class.start.offset == left_bracket.start.offset).map(|&(_, read)| (list, read))
+            reads
+                .0
+                .iter()
+                .find(|(class, _)| class.start.offset == left_bracket.start.offset)
+                .map(|&(_, read)| (list, read))
         })
         .collect()
 }
@@ -1068,10 +1083,8 @@ fn refuse_list_patterns_on_other_values(
     let mut refused = Vec::new();
     let mut refusals = Vec::new();
     for &(list, read) in list_reads {
-        let Some(read_type) = artifacts.get_expression_type(read) else {
-            continue;
-        };
-        if read_type.types.iter().any(may_be_list) {
+        // A read the analysis gave no type has no type to refuse.
+        if artifacts.get_expression_type(read).is_none_or(|read_type| read_type.types.iter().any(may_be_list)) {
             continue;
         }
 
@@ -1147,18 +1160,17 @@ where
             fields: None,
             properties: None,
             variable: None,
-        })) => Some((Node::Identifier(name), None, "==".to_owned())),
-        Node::Pattern(Pattern::Value(value)) => Some((Node::Expression(value), Some(*value), "==".to_owned())),
+        })) => Some((Node::Identifier(name), "==".to_owned())),
+        Node::Pattern(Pattern::Value(value)) => Some((Node::Expression(value), "==".to_owned())),
         Node::ComparisonPattern(comparison) => Some((
             Node::Expression(comparison.value),
-            Some(comparison.value),
             String::from_utf8_lossy(comparison.operator.as_bytes()).into_owned(),
         )),
         _ => None,
     });
 
     let mut reported = false;
-    for (value, expression, operator) in compared {
+    for (value, operator) in compared {
         let reads = value.filter_map(|node| match node {
             Node::Identifier(name) => match context.resolved_names.binding(*name) {
                 Some(Binding::Local(Local { kind: LocalKind::Parameter, .. })) => Some((*name, "a parameter")),
@@ -1174,17 +1186,17 @@ where
 
         // The value's own type, as the pattern's binding of it would be typed. The value is read where `when` would
         // read it, and its issues wait until the pattern is written so.
-        let compared_type = match (expression, value) {
-            (Some(expression), _) => {
+        let compared_type = match value {
+            Node::Expression(expression) => {
                 let mut value_context = block_context.clone();
                 let _ = context.record(|context| expression.analyze(context, &mut value_context, artifacts));
 
                 artifacts.get_expression_type(expression).cloned()
             }
-            (None, Node::Identifier(name)) => get_bare_name_variable_id(name, context.resolved_names)
+            Node::Identifier(name) => get_bare_name_variable_id(name, context.resolved_names)
                 .and_then(|id| block_context.locals.get(&id))
                 .map(|local| (**local).clone()),
-            (None, _) => None,
+            _ => unreachable!("a pattern compares a bare name or a value"),
         };
         let mut compared_type = compared_type.unwrap_or_else(get_mixed).to_non_nullable();
         compared_type.widen_literals();
@@ -1222,6 +1234,16 @@ where
     for (hint, fields) in case_patterns {
         let written = BytesDisplay(&context.source_file.contents[hint.start.offset as usize..hint.end.offset as usize]);
         let message = match names.case_fields(hint) {
+            // A dotted name of a class that is no case has the error `report_dotted_types` gives where it is read.
+            None if context
+                .resolved_names
+                .resolve(&hint)
+                .and_then(|class| context.codebase.get_class_like(class))
+                .is_some() =>
+            {
+                reported = true;
+                continue;
+            }
             None => format!("`{written}` is no case of an enum whose cases carry data, so it has no fields to unpack."),
             Some(names) if names.len() != fields.fields.len() => {
                 let count = |count: usize, word: &str| {
@@ -1364,27 +1386,21 @@ fn names_function_type(hint: &Hint<'_>) -> bool {
 }
 
 /// The value a PHP# `is`, `as` or `match` tests.
-fn tested_value<'ast, 'arena>(node: Node<'ast, 'arena>) -> Option<&'ast Expression<'arena>> {
+fn tested_value<'ast, 'arena>(node: Node<'ast, 'arena>) -> &'ast Expression<'arena> {
     match node {
-        Node::Expression(Expression::Is(is)) => Some(is.value),
-        Node::Expression(Expression::As(r#as)) => Some(r#as.value),
+        Node::Expression(Expression::Is(is)) => is.value,
+        Node::Expression(Expression::As(r#as)) => r#as.value,
         Node::Expression(Expression::PatternMatch(pattern_match))
-        | Node::Statement(Statement::PatternMatch(pattern_match)) => Some(pattern_match.expression),
-        _ => None,
+        | Node::Statement(Statement::PatternMatch(pattern_match)) => pattern_match.expression,
+        _ => unreachable!("only an `is`, an `as` and a `match` have the PHP of a pattern"),
     }
 }
 
-/// Whether `value_type` has a function whose source declares no PHP# type: a `Closure` or a function signature plain
-/// PHP wrote, or a plain PHP function or method named as a value. The engine finds no type on such a function.
-fn has_undeclared_function<A>(value_type: &TUnion, context: &Context<'_, '_, A>) -> bool
-where
-    A: Arena,
-{
+/// Whether `value_type` has a function whose source declares no PHP# type: a `Closure`, or the signature of a function
+/// plain PHP wrote, as a plain PHP method named as a value. The engine finds no type on such a function.
+fn has_undeclared_function(value_type: &TUnion) -> bool {
     value_type.types.iter().any(|atomic| match atomic {
         TAtomic::Callable(TCallable::Signature(signature)) => signature.effects.is_none(),
-        TAtomic::Callable(TCallable::Alias(identifier)) => {
-            context.codebase.get_function_like(identifier).is_none_or(|function| !function.flags.is_sharp())
-        }
         TAtomic::Object(TObject::Named(object)) => object.name.as_bytes().eq_ignore_ascii_case(b"Closure"),
         _ => false,
     })

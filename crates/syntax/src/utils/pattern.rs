@@ -564,7 +564,8 @@ where
 
         let count = called_functions(Node::ListPattern(list)).next()?;
         let read = self.read(subject, list.left_bracket);
-        let array = self.instance_of(read, Identifier::Local(LocalIdentifier { span: list.left_bracket, value: b"List" }));
+        let array =
+            self.instance_of(read, Identifier::Local(LocalIdentifier { span: list.left_bracket, value: b"List" }));
         let length = self.integer(patterns, start_of(list.right_bracket));
         let operator = if rest.is_some() {
             BinaryOperator::GreaterThanOrEqual(start_of(list.right_bracket))
