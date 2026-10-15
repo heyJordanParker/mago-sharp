@@ -91,6 +91,9 @@ pub struct AnalysisArtifacts {
     /// The declared type the value of the expression at the span goes into: a parameter type, and in PHP# a typed
     /// local or property or a return type too. Read through [`Self::get_expected_type`].
     pub(crate) expected_type: Option<(Span, TUnion)>,
+    /// The result type of the function type a PHP# lambda goes into, when these are its body's artifacts and it writes
+    /// no result type: its expression body and each `return` take it as their declared type, spec section 11.
+    pub(crate) lambda_result: Option<TUnion>,
     pub method_initialized_properties: HashMap<(Word, Word), WordSet>,
     pub method_calls_this_methods: HashMap<(Word, Word), HashSet<Word>>,
     pub method_calls_parent_constructor: HashMap<(Word, Word), bool>,
@@ -152,6 +155,7 @@ impl AnalysisArtifacts {
             loop_scope: None,
             fully_matched_switch_offsets: HashSet::default(),
             expected_type: None,
+            lambda_result: None,
             method_initialized_properties: HashMap::default(),
             method_calls_this_methods: HashMap::default(),
             method_calls_parent_constructor: HashMap::default(),

@@ -98,7 +98,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
 
         let inferred_return_type = if let Some(return_value) = self.value.as_ref() {
             let return_type = block_context.scope.get_function_like().and_then(body_return_type);
-            expect_type(context, artifacts, return_value, return_type.map(|return_type| &return_type.type_union));
+            let declared = return_type
+                .map(|return_type| return_type.type_union.clone())
+                .or_else(|| artifacts.lambda_result.clone());
+            expect_type(context, artifacts, return_value, declared.as_ref());
             if let Some(return_type) = return_type {
                 check_sharp_literal_kind(context, return_value, &return_type.type_union);
             }

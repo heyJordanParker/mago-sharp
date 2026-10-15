@@ -272,6 +272,26 @@ where
     parameter_types
 }
 
+/// The result type a lambda takes from the callable types it is written for, as its parameters take theirs.
+fn closure_result_type<A>(context: &Context<'_, '_, A>, expected: &TUnion) -> Option<TUnion>
+where
+    A: Arena,
+{
+    expected
+        .types
+        .iter()
+        .filter_map(|atomic| match atomic {
+            TAtomic::Callable(TCallable::Signature(signature)) => signature.get_return_type(),
+            _ => None,
+        })
+        .fold(None, |joined, result| {
+            Some(match joined {
+                Some(joined) => add_union_type(joined, result, context.codebase, CombinerOptions::default()),
+                None => result.clone(),
+            })
+        })
+}
+
 /// Gives `expression` the declared type `expected` its value goes into, such as a typed local's or property's, or a
 /// return type, as a call gives an argument its parameter's type. Spec section 14.2: a PHP# lambda takes its parameter
 /// types from it. A member read takes them too, because a method value of a generic method infers its type arguments
@@ -293,8 +313,8 @@ pub fn expect_type<A>(
     }
 }
 
-/// Whether `expression` takes the declared type its value goes into: a lambda, a call, a member read, or `??` and `?:`,
-/// which give it to their sides.
+/// Whether `expression` takes the declared type its value goes into: a lambda, a call, a member read, or `??`, `?:` and
+/// `match`, which give it to their sides and arms.
 pub fn takes_declared_type(expression: &Expression<'_>) -> bool {
     matches!(
         expression.unparenthesized(),
@@ -302,6 +322,7 @@ pub fn takes_declared_type(expression: &Expression<'_>) -> bool {
             | Expression::Closure(_)
             | Expression::Call(_)
             | Expression::Conditional(_)
+            | Expression::PatternMatch(_)
             | Expression::Binary(Binary { operator: BinaryOperator::NullCoalesce(_), .. })
     ) || is_member_read(expression)
 }
@@ -360,6 +381,14 @@ where
 
     let mut artifacts =
         AnalysisArtifacts::new().with_variable_definedness_targets(parent_artifacts.variable_definedness_targets());
+    if context.dialect.is_sharp()
+        && (function_like_metadata.kind.is_closure() || function_like_metadata.kind.is_arrow_function())
+        && function_like_metadata.return_type_metadata.is_none()
+    {
+        artifacts.lambda_result = parent_artifacts
+            .get_expected_type(&function_like_metadata.span)
+            .and_then(|expected| closure_result_type(context, expected));
+    }
 
     if let Some(return_type) = &function_like_metadata.return_type_metadata {
         report_undefined_type_references(context, return_type);
@@ -479,7 +508,10 @@ where
             }
             FunctionLikeBody::Expression(value) => {
                 let return_type = function_like_metadata.return_type_metadata.as_ref();
-                expect_type(context, &mut artifacts, value, return_type.map(|return_type| &return_type.type_union));
+                let declared = return_type
+                    .map(|return_type| return_type.type_union.clone())
+                    .or_else(|| artifacts.lambda_result.clone());
+                expect_type(context, &mut artifacts, value, declared.as_ref());
                 if let Some(return_type) = return_type {
                     check_sharp_literal_kind(context, value, &return_type.type_union);
                 }
