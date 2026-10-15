@@ -4894,7 +4894,7 @@ fn a_class_named_as_a_case_is_an_error_that_names_the_case() {
 /// that leaves only through `?? break` still ends.
 #[test]
 fn leave_on_null_leaves_the_method_or_the_loop() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int price(Map<string, int> prices, string plan)\n    {\n        int price = prices[plan] ?? return -1;\n        return price + 1;\n    }\n\n    public static int total(List<int?> values)\n    {\n        let total = 0;\n        for (int i = 0; i < values.count(); i++) {\n            int value = values[i] ?? continue;\n            total = total + value;\n        }\n        return total;\n    }\n\n    public static int first(List<int?> values)\n    {\n        let found = 0;\n        let i = 0;\n        while (true) {\n            found = values[i] ?? break;\n            i = i + 1;\n        }\n        return found + i;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int price(Map<string, int> prices, string plan)\n    {\n        int price = prices[plan] ?? return -1;\n        return price + 1;\n    }\n\n    public static int total(List<int?> values)\n    {\n        let total = 0;\n        for (int i = 0; i < values.count(); i++) {\n            int value = values.getOrNull(i) ?? continue;\n            total = total + value;\n        }\n        return total;\n    }\n\n    public static int first(List<int?> values)\n    {\n        let found = 0;\n        let i = 0;\n        while (true) {\n            found = values.getOrNull(i) ?? break;\n            i = i + 1;\n        }\n        return found + i;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 
@@ -4913,7 +4913,7 @@ fn leave_on_null_leaves_the_method_or_the_loop() {
 
     // A loop's condition or increment leaves that loop, as the engine runs it: its `?? break` ends the loop, and its
     // `?? continue` starts the loop's next round.
-    let condition = "namespace Demo;\n\nclass Report\n{\n    public static int counted(List<List<int?>> rows)\n    {\n        let total = 0;\n        for (const values of rows) {\n            for (let i = 0; i < 10 && (values[i] ?? break) > 0; i += 1) {\n                total += 1;\n            }\n        }\n        return total;\n    }\n\n    public static int read(List<int?> values)\n    {\n        let i = 0;\n        while (i < 3 && (values[i] ?? break) > 0) {\n            i += 1;\n        }\n        return i;\n    }\n\n    public static int skipped(List<int?> values)\n    {\n        let i = 0;\n        for (; i < 3 && (values[i] ?? continue) > 0; i += 1) {\n        }\n        return i;\n    }\n\n    public static int stepped(List<int?> values)\n    {\n        let i = 0;\n        for (; i < 3; i = values[i] ?? break) {\n        }\n        return i;\n    }\n\n    public static int after(List<int?> values)\n    {\n        let i = 0;\n        do {\n            i += 1;\n        } while ((values[i] ?? break) > 0);\n        return i;\n    }\n}\n";
+    let condition = "namespace Demo;\n\nclass Report\n{\n    public static int counted(List<List<int?>> rows)\n    {\n        let total = 0;\n        for (const values of rows) {\n            for (let i = 0; i < 10 && (values.getOrNull(i) ?? break) > 0; i += 1) {\n                total += 1;\n            }\n        }\n        return total;\n    }\n\n    public static int read(List<int?> values)\n    {\n        let i = 0;\n        while (i < 3 && (values.getOrNull(i) ?? break) > 0) {\n            i += 1;\n        }\n        return i;\n    }\n\n    public static int skipped(List<int?> values)\n    {\n        let i = 0;\n        for (; i < 3 && (values.getOrNull(i) ?? continue) > 0; i += 1) {\n        }\n        return i;\n    }\n\n    public static int stepped(List<int?> values)\n    {\n        let i = 0;\n        for (; i < 3; i = values.getOrNull(i) ?? break) {\n        }\n        return i;\n    }\n\n    public static int after(List<int?> values)\n    {\n        let i = 0;\n        do {\n            i += 1;\n        } while ((values.getOrNull(i) ?? break) > 0);\n        return i;\n    }\n}\n";
     assert_eq!(refusals(("src/Demo/Report.sharp", condition), &[]), Vec::<String>::new());
 
     // A loop whose body always breaks still checks its increment. A lambda runs apart from the loop around it, so its
@@ -5465,8 +5465,8 @@ fn a_lambda_with_union_and_variadic_parameters_is_checked_as_its_php_twin() {
 /// typed constant, as in PHP.
 #[test]
 fn an_enum_returning_self_with_a_union_constant_is_checked_as_its_php_twin() {
-    let sharp = "namespace Demo;\n\nenum Status : string\n{\n    public const int|string Key = 1;\n\n    case Active = \"a\";\n\n    public static Self first() => Status.Active;\n\n    public static List<Self> all() => Self.cases();\n\n    public static Self? find(string ...codes) => Status.tryFrom(codes[0] ?? \"a\");\n\n    public static Self wrong() => \"a\";\n\n    public static int|string key() => Status.Key;\n}\n";
-    let php = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nenum Status: string\n{\n    public const int|string Key = 1;\n\n    case Active = \"a\";\n\n    public static function first(): static { return Status::Active; }\n\n    /** @return list<static> */\n    public static function all(): array { return static::cases(); }\n\n    public static function find(string ...$codes): ?static { return Status::tryFrom($codes[0] ?? \"a\"); }\n\n    public static function wrong(): static { return \"a\"; }\n\n    public static function key(): int|string { return Status::Key; }\n}\n";
+    let sharp = "namespace Demo;\n\nenum Status : string\n{\n    public const int|string Key = 1;\n\n    case Active = \"a\";\n\n    public static Self first() => Status.Active;\n\n    public static List<Self> all() => Self.cases();\n\n    public static Self? find(string ...codes) => Status.tryFrom(codes.getOrNull(0) ?? \"a\");\n\n    public static Self wrong() => \"a\";\n\n    public static int|string key() => Status.Key;\n}\n";
+    let php ="<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nenum Status: string\n{\n    public const int|string Key = 1;\n\n    case Active = \"a\";\n\n    public static function first(): static { return Status::Active; }\n\n    /** @return list<static> */\n    public static function all(): array { return static::cases(); }\n\n    public static function find(string ...$codes): ?static { return Status::tryFrom($codes[0] ?? \"a\"); }\n\n    public static function wrong(): static { return \"a\"; }\n\n    public static function key(): int|string { return Status::Key; }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Status.sharp", sharp), &[]);
     let php_issues = issues_with(Settings { check_throws: false, ..settings() }, ("src/Demo/Status.php", php), &[]);
@@ -6814,21 +6814,32 @@ fn a_map_read_handled_by_a_null_safe_read_reports_nothing() {
     assert_eq!(worded(("src/Demo/Tally.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// Spec section 12 handles a `List` index read with `?.` as it handles a `Map` read, so a missing index reads as null
-/// and `rows[9]?.count()` is `int?`, a call and a property read alike. Only the index directly before `?.` is
-/// nullable: `cube[9]` in `cube[9][0]?.count()` is a bare read.
+/// Spec section 12: a `List` index read is bare before `?.` too, and throws on a missing index, so `rows[9]?.count()`
+/// on a `List<List<int>>` is an `int`, a call and a property read alike, and its `?.` is section 14.4's needless null
+/// check. On a `List<List<int>?>` the `?.` skips a null element, and the read is `int?`.
 #[test]
-fn a_null_safe_read_through_a_list_index_is_nullable() {
-    let sharp = "namespace Demo;\n\nclass Plan\n{\n    public Plan(public int price) { }\n}\n\nclass Tally\n{\n    public int count(List<List<int>> rows) => rows[9]?.count();\n\n    public int local(List<List<int>> rows)\n    {\n        int n = rows[9]?.count();\n        return n;\n    }\n\n    public int price(List<Plan> plans) => plans[9]?.price;\n\n    public int? maybeCount(List<List<int>> rows) => rows[9]?.count();\n\n    public bool? maybeContains(List<List<int>> rows) => rows[9]?.contains(1);\n\n    public int? maybePrice(List<Plan> plans) => plans[9]?.price;\n\n    public int? nested(List<List<List<int>>> cube) => cube[9][0]?.count();\n}\n";
+fn a_null_safe_read_through_a_list_index_reads_the_index_bare() {
+    let sharp = "namespace Demo;\n\nclass Plan\n{\n    public Plan(public int price) { }\n}\n\nclass Tally\n{\n    public int count(List<List<int>> rows) => rows[9]?.count();\n\n    public int local(List<List<int>> rows)\n    {\n        int n = rows[9]?.count();\n        return n;\n    }\n\n    public int price(List<Plan> plans) => plans[9]?.price;\n\n    public int? maybeCount(List<List<int>?> rows) => rows[9]?.count();\n\n    public bool? maybeContains(List<List<int>?> rows) => rows[9]?.contains(1);\n\n    public int? maybePrice(List<Plan?> plans) => plans[9]?.price;\n\n    public int? nested(List<List<List<int>?>> cube) => cube[9][0]?.count();\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[]),
+        ["10:54 redundant-nullsafe-operator", "14:24 redundant-nullsafe-operator", "18:51 redundant-nullsafe-operator"]
+    );
+}
+
+/// Spec section 12: "`x[i] ?? fallback` is a compile error that names `getOrNull`", for every element type, because
+/// a `List` index throws past either end and never reads null for a missing index. `??=` reads the index first, so it
+/// is refused too. A `Map` read and `getOrNull` take `??`.
+#[test]
+fn a_list_index_before_coalesce_is_an_error_that_names_get_or_null() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int run(List<int> sizes, List<int?> maybe, Map<string, int> counts, int i)\n    {\n        let a = sizes[i] ?? 0;\n        let b = maybe[i] ?? 0;\n        sizes[i] ??= 1;\n        let c = sizes.getOrNull(i) ?? 0;\n        let d = counts[\"a\"] ?? 0;\n        counts[\"b\"] ??= 2;\n        return a + b + c + d;\n    }\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Tally.sharp", sharp), &[]),
         [
-            "10:47 nullable-return-statement",
-            "10:47 invalid-return-statement",
-            "14:17 invalid-local-assignment-value",
-            "18:43 nullable-return-statement",
-            "18:43 invalid-return-statement",
+            "7:17 invalid-array-access A `List` index never reads null: it throws past either end, so `??` never reads a missing index. | This index throws when it is missing. | Read it with `list.getOrNull(i)`, which gives null past either end.",
+            "8:17 invalid-array-access A `List` index never reads null: it throws past either end, so `??` never reads a missing index. | This index throws when it is missing. | Read it with `list.getOrNull(i)`, which gives null past either end.",
+            "9:9 invalid-array-access A `List` index never reads null: it throws past either end, so `??` never reads a missing index. | This index throws when it is missing. | Read it with `list.getOrNull(i)`, which gives null past either end.",
         ]
     );
 }
@@ -6895,13 +6906,17 @@ fn an_isset_test_before_a_type_test_of_a_php_array_entry_keeps_its_php_report() 
     );
 }
 
-/// An index a pattern tests reads a missing key as null on every collection, as `??` and `?.` do, so a `List` read
-/// that `is` tests may not match.
+/// Spec section 12: a `List` index a pattern tests is a bare read, which throws on a missing index, as `x[i]` is
+/// everywhere, so `is` on it tests the element: on a `List<int?>` it may not match, and on a `List<int>` it is always
+/// true, as it is on an `int` local.
 #[test]
-fn a_list_read_tested_by_is_may_not_match() {
-    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int first(List<int> sizes, int i)\n    {\n        if (sizes[i] is int n) {\n            return n;\n        }\n        if (sizes[0] is not int m) {\n            return 0;\n        }\n        return m;\n    }\n}\n";
+fn a_list_read_tested_by_is_tests_the_element() {
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int first(List<int?> maybe, List<int> sizes, int i)\n    {\n        if (maybe[i] is int n) {\n            return n;\n        }\n        if (maybe[0] is not int m) {\n            return 0;\n        }\n        return sizes[i] is int ? m : 0;\n    }\n}\n";
 
-    assert_eq!(worded(("src/Demo/Sizes.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(
+        issues(("src/Demo/Sizes.sharp", sharp), &[]),
+        ["13:25 redundant-type-comparison", "13:16 redundant-condition"]
+    );
 }
 
 #[test]
@@ -7091,11 +7106,11 @@ fn a_list_read_with_an_index_that_may_not_be_an_int_is_an_error() {
     );
 }
 
-/// An index of a type `int` contains, such as an `int` literal or a loop counter, reads a `List` as `int` does. A
-/// handled read takes an `int` index too.
+/// An index of a type `int` contains, such as an `int` literal or a loop counter, reads a `List` as `int` does, and an
+/// index of any other type is refused.
 #[test]
-fn a_list_read_with_an_index_of_a_type_int_contains_is_accepted_and_a_handled_read_checks_its_index_too() {
-    let sharp = "namespace Demo;\n\nclass Lookup\n{\n    public int read(List<int> items, int index, int|string either)\n    {\n        let total = items[index] + items[0] + (items[index] ?? 0);\n        for (let i = 0; i < items.count(); i++) {\n            total += items[i];\n        }\n        return total + (items[either] ?? 0);\n    }\n}\n";
+fn a_list_read_with_an_index_of_a_type_int_contains_is_accepted_and_another_index_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Lookup\n{\n    public int read(List<int> items, int index, int|string either)\n    {\n        let total = items[index] + items[0];\n        for (let i = 0; i < items.count(); i++) {\n            total += items[i];\n        }\n        return total + (items[either]);\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Lookup\n{\n    /**\n     * @param list<int> $items\n     */\n    public function read(array $items, int $index, int|string $either): int\n    {\n        $total = $items[$index] + $items[0] + ($items[$index] ?? 0);\n        for ($i = 0; $i < count($items); $i++) {\n            $total += $items[$i];\n        }\n        return $total + ($items[$either] ?? 0);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Lookup.php", php), &[]), Vec::<String>::new());
@@ -7522,8 +7537,8 @@ fn an_index_of_a_local_that_may_be_a_set_or_a_map_is_refused_once_by_the_set() {
     );
 }
 
-/// A local that may be a `List` or a `Map` has an index, so it is read as the `Map`: a bare read is refused and a read
-/// handled with `??` compiles.
+/// A local that may be a `List` or a `Map` has an index, read as both: a bare read is refused as the `Map`'s, and a
+/// read with `??` as the `List`'s, which throws past either end.
 #[test]
 fn a_bare_index_read_of_a_local_that_may_be_a_list_or_a_map_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int run(bool ready, List<int> sizes, Map<int, int> counts)\n    {\n        let rows = ready ? sizes : counts;\n        int handled = rows[1] ?? 0;\n        return rows[0] + handled;\n    }\n}\n";
@@ -7531,6 +7546,7 @@ fn a_bare_index_read_of_a_local_that_may_be_a_list_or_a_map_is_an_error() {
     assert_eq!(
         refusals(("src/Demo/Sizes.sharp", sharp), &[]),
         [
+            "8:23 invalid-array-access A `List` index never reads null: it throws past either end, so `??` never reads a missing index. | Read it with `list.getOrNull(i)`, which gives null past either end.",
             "9:16 possibly-undefined-array-index A `Map` is not read by a bare index, because its key may be missing. | Read it with `??`, as in `map[key] ?? fallback`, or with `map.get(key)`, which gives null for a missing key. `+=`, `++` and `--` read first, so write `m[k] = (m[k] ?? 0) + 1`."
         ]
     );

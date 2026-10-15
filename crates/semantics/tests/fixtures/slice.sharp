@@ -274,11 +274,11 @@ public class Report
         sizes["a"] = (sizes["a"] ?? 0) + numbers[1];
         this.sizes["b"] = global.array_sum(numbers);
         const nested = [["a": items[1].rate]];
-        nested[0]["a"] = items[0]?.rate ?? items[1].rate;
+        nested[0]["a"] = items.getOrNull(0)?.rate ?? items[1].rate;
         for (const [string name, size] of sizes) {
             this.sizes[name] = size;
         }
-        return items[0]?.rate == null ? null : ["all": numbers];
+        return items.getOrNull(0)?.rate == null ? null : ["all": numbers];
     }
 
     public Function<int(int)> lambdas(int extra, Function<bool(string, int)> check)

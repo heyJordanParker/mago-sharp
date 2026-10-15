@@ -5,6 +5,9 @@ use mago_word::Word;
 
 use mago_allocator::Arena;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_syntax::cst::ArrayAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Node;
 use mago_syntax::dialect::Dialect;
@@ -12,6 +15,7 @@ use mago_syntax::utils::pattern::PatternNames;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::php_shape;
 
+use crate::artifacts::AnalysisArtifacts;
 use crate::utils::expression::get_expression_id;
 
 #[derive(Debug)]
@@ -39,25 +43,32 @@ where
     A: Arena,
 {
     /// The PHP a PHP# `is`, `as` or `match` runs as, which the analyzer analyzes and narrows on. `None` for any other
-    /// node, and for a form the slice refuses.
-    pub fn php_shape<'shape>(&self, node: Node<'_, 'shape>) -> Option<PhpShape<'shape>>
+    /// node, and for a form the slice refuses. `artifacts` hold the type of the value an index it tests reads.
+    pub fn php_shape<'shape>(&self, node: Node<'_, 'shape>, artifacts: &AnalysisArtifacts) -> Option<PhpShape<'shape>>
     where
         'arena: 'shape,
     {
-        let names = CodebasePatternNames { names: self.resolved_names, codebase: self.codebase };
+        let names = CodebasePatternNames { names: self.resolved_names, codebase: self.codebase, artifacts };
 
         php_shape(self.arena, node, self.temporaries, &names)
     }
 }
 
-/// What the PHP of a PHP# pattern depends on, answered from a file's resolved names and the codebase, for the analyzer
-/// and the bridge alike.
+/// What the PHP of a PHP# pattern depends on, answered from a file's resolved names, the codebase and the types the
+/// analysis gave, for the analyzer and the bridge alike.
 pub struct CodebasePatternNames<'names, 'arena> {
     pub names: &'names ResolvedNames<'arena>,
     pub codebase: &'names CodebaseMetadata,
+    pub artifacts: &'names AnalysisArtifacts,
 }
 
 impl PatternNames for CodebasePatternNames<'_, '_> {
+    fn reads_quietly(&self, access: &ArrayAccess<'_>) -> bool {
+        !self.artifacts.get_expression_type(access.array).is_some_and(|indexed| {
+            indexed.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)) | TAtomic::Null))
+        })
+    }
+
     fn is_local(&self, span: Span) -> bool {
         matches!(self.names.binding(&span), Some(Binding::Local(_)))
     }

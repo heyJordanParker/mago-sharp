@@ -81,7 +81,7 @@ where
     // A PHP# `is` asserts what the PHP it runs as asserts.
     if let Expression::Is(_) = expression
         && let Some(PhpShape { php: Node::Expression(php), .. }) =
-            assertion_context.php_shape(Node::Expression(expression))
+            assertion_context.php_shape(Node::Expression(expression), artifacts)
     {
         return scrape_assertions(php, artifacts, assertion_context);
     }

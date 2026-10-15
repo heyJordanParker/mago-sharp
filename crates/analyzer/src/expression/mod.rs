@@ -453,11 +453,19 @@ where
         artifacts.record_tested_type(&left_bracket, get_mixed_list());
     }
 
+    // Whether the index a pattern tests reads quietly depends on what it indexes, as the analysis types it, so that
+    // value is typed first, in a copy of the block whose issues the analysis of the PHP reports.
+    if let Expression::ArrayAccess(access) = tested_value(node).unparenthesized() {
+        let mut typing = block_context.clone();
+        let (typed, _) = context.record(|context| access.array.analyze(context, &mut typing, artifacts));
+        typed?;
+    }
+
     let Some(PhpShape { php, temporaries, tests }) =
-        context.get_assertion_context_from_block(block_context).php_shape(node)
+        context.get_assertion_context_from_block(block_context).php_shape(node, artifacts)
     else {
         // A refused form is the error type, so nothing that reads it reports again.
-        let refused = report_case_patterns_without_php(node, context);
+        let refused = report_case_patterns_without_php(node, context, artifacts);
         if let Node::Expression(expression) = node {
             let refused_type = if refused { TUnion::from_atomic(TAtomic::Error) } else { get_mixed() };
             artifacts.set_expression_type(expression, refused_type);
@@ -1221,11 +1229,15 @@ where
 
 /// Reports each case pattern of a PHP# `is` or `match` that `php_shape` builds no PHP for, spec section 21: one whose
 /// type is no case of an enum with data, or whose fields are not the case's in number. Returns whether it reported one.
-fn report_case_patterns_without_php<A>(node: Node<'_, '_>, context: &mut Context<'_, '_, A>) -> bool
+fn report_case_patterns_without_php<A>(
+    node: Node<'_, '_>,
+    context: &mut Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+) -> bool
 where
     A: Arena,
 {
-    let names = CodebasePatternNames { names: context.resolved_names, codebase: context.codebase };
+    let names = CodebasePatternNames { names: context.resolved_names, codebase: context.codebase, artifacts };
     let case_patterns = node.filter_map(|node| match node {
         Node::TypePattern(TypePattern { hint, fields: Some(fields), .. }) => Some((hint.span(), *fields)),
         _ => None,

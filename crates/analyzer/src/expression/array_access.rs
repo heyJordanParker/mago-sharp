@@ -164,8 +164,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
 /// key, so a `Map` is read only where the read is handled: `??` and `?.` read a missing key as null, as `isset`
 /// does, and so do `is`, `as` and `match`, whose PHP reads the index they test with `??`. A refused bare read keeps
 /// the type `V` it would have when it runs, so it is reported once. A bare `List` read is allowed, because a `List`'s
-/// keys run without gaps, and keeps its element type. `analyze_member_object` types the `List` index directly before
-/// `?.` nullable, as a missing index reads as null there. A place is the collections it is declared as, whatever
+/// keys run without gaps, and keeps its element type, before `?.` too. A place is the collections it is declared as, whatever
 /// literal it holds, and a place that may be a `Map` is read as one. A place that may be a `Set` has no index at all,
 /// which the `Set`'s own rule refuses, so this rule adds no second report to its bare read.
 pub(crate) fn check_sharp_map_read<'arena, A>(
@@ -176,8 +175,8 @@ pub(crate) fn check_sharp_map_read<'arena, A>(
 ) where
     A: Arena,
 {
-    let (may_be_map, may_be_set) = get_indexed_kinds(access, context, block_context, artifacts);
-    if !may_be_map {
+    let kinds = get_indexed_kinds(access, context, block_context, artifacts);
+    if !kinds.map {
         return;
     }
 
@@ -185,7 +184,7 @@ pub(crate) fn check_sharp_map_read<'arena, A>(
         if let Some(read) = artifacts.get_expression_type(access).cloned() {
             artifacts.set_expression_type(access, read.as_nullable());
         }
-    } else if !may_be_set {
+    } else if !kinds.set {
         context.collector.report_with_code(
             IssueCode::PossiblyUndefinedArrayIndex,
             Issue::error("A `Map` is not read by a bare index, because its key may be missing.")
@@ -208,8 +207,8 @@ pub(crate) fn check_change_through_index<'arena, A>(
 where
     A: Arena,
 {
-    let (may_be_map, may_be_set) = get_indexed_kinds(access, context, block_context, artifacts);
-    if may_be_map && !may_be_set {
+    let kinds = get_indexed_kinds(access, context, block_context, artifacts);
+    if kinds.map && !kinds.set {
         context.collector.report_with_code(
             IssueCode::InvalidPassByReference,
             Issue::error("A `Map` read is a copy: read it, change it, and store it back.")
@@ -221,30 +220,72 @@ where
         );
     }
 
-    !may_be_map && !may_be_set
+    !kinds.map && !kinds.set
 }
 
-/// Whether the collection `access` indexes may be a `Map` and whether it may be a `Set`. A place is the collections
-/// it is declared as, whatever literal it holds.
+/// Spec section 12: "`x[i] ?? fallback` is a compile error that names `getOrNull`", whatever the element type, since a
+/// `List` index throws past either end and never reads null for a missing index. `??=` reads the index first, so its
+/// left side is refused too. Gives whether `lhs`, the left side of `??`, is such an index.
+pub(crate) fn check_sharp_list_coalesce<'arena, A>(
+    lhs: &Expression<'arena>,
+    context: &mut Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+) -> bool
+where
+    A: Arena,
+{
+    let Expression::ArrayAccess(access) = lhs.unparenthesized() else {
+        return false;
+    };
+    if !context.dialect.is_sharp() || !get_indexed_kinds(access, context, block_context, artifacts).list {
+        return false;
+    }
+
+    context.collector.report_with_code(
+        IssueCode::InvalidArrayAccess,
+        Issue::error("A `List` index never reads null: it throws past either end, so `??` never reads a missing index.")
+            .with_annotation(Annotation::primary(access.span()).with_message("This index throws when it is missing."))
+            .with_help("Read it with `list.getOrNull(i)`, which gives null past either end."),
+    );
+
+    true
+}
+
+/// The collections a place or a value an index reads may be.
+struct IndexedKinds {
+    list: bool,
+    map: bool,
+    set: bool,
+}
+
+/// The collections `access` indexes may be. A place is the collections it is declared as, whatever literal it holds.
 fn get_indexed_kinds<'arena, A>(
     access: &ArrayAccess<'arena>,
     context: &Context<'_, 'arena, A>,
     block_context: &BlockContext<'_>,
     artifacts: &AnalysisArtifacts,
-) -> (bool, bool)
+) -> IndexedKinds
 where
     A: Arena,
 {
-    let has_map =
-        |container: &TUnion| container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
-    let has_set =
-        |container: &TUnion| container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))));
+    let kinds = |container: &TUnion| {
+        let has = |kind: fn(&TArray) -> bool| {
+            container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(array) if kind(array)))
+        };
+
+        IndexedKinds {
+            list: has(|array| matches!(array, TArray::List(_))),
+            map: has(|array| matches!(array, TArray::Keyed(_))),
+            set: has(|array| matches!(array, TArray::Set(_))),
+        }
+    };
 
     match get_declared_collection(context, block_context, artifacts, access.array) {
-        Some(declared) => (has_map(&declared), has_set(&declared)),
+        Some(declared) => kinds(&declared),
         None => artifacts
             .get_expression_type(access.array)
-            .map_or((false, false), |container| (has_map(container), has_set(container))),
+            .map_or(IndexedKinds { list: false, map: false, set: false }, kinds),
     }
 }
 

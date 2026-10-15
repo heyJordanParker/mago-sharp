@@ -114,7 +114,7 @@ impl<'analysis> Types<'analysis> {
 
     /// What the PHP of a pattern depends on, as the analysis answered it.
     pub(crate) fn pattern_names(&self) -> CodebasePatternNames<'_, 'analysis> {
-        CodebasePatternNames { names: &self.names, codebase: self.codebase }
+        CodebasePatternNames { names: &self.names, codebase: self.codebase, artifacts: self.artifacts }
     }
 
     /// The type the analysis gave `expression`.

@@ -27,6 +27,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::if_scope::IfScope;
 use crate::error::AnalysisError;
+use crate::expression::array_access::check_sharp_list_coalesce;
 use crate::expression::is_refused_type;
 use crate::formula::get_formula;
 use crate::reconciler::reconcile_keyed_types;
@@ -69,6 +70,8 @@ where
     binary.lhs.analyze(context, block_context, artifacts)?;
     block_context.flags.set_inside_isset(was_inside_isset);
     expect_type(context, artifacts, binary.rhs, expected.as_ref());
+    // A refused `List` index reports no second, needless null check.
+    let reads_list_index = check_sharp_list_coalesce(binary.lhs, context, block_context, artifacts);
 
     let lhs_type_option = artifacts.get_rc_expression_type(&binary.lhs);
 
@@ -111,6 +114,7 @@ where
         && !lhs_type.possibly_undefined_from_try()
         && !is_static_var
         && !is_refused_type(lhs_type)
+        && !reads_list_index
     {
         let lhs_type_str = display_type(context, lhs_type);
         let issue = context.as_null_check_error(

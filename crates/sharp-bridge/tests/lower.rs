@@ -5791,7 +5791,7 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
 }
 
 /// ```php
-/// $rows[0]?->add(5); // every index before ?-> carries ZEND_DIM_IS
+/// $rows[0]?->add(5);
 /// $maybe[1]?->insert(0, 6);
 /// $this->held[0]?->add(7);
 /// $maybe[0]?->entries();
@@ -5800,22 +5800,21 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
 /// ```
 ///
 /// Spec section 12 makes a `List` index a place, so a change after `?.` on one runs on the index itself, as a change
-/// without `?.` does, and reaches the element the list stores, here a local's, a nullable element's and a hooked
-/// property's. A `List` index read with `?.` is handled where it is read, as a `Map` read is, so `?.` skips a missing
-/// index as it skips a null element. The index carries `ZEND_DIM_IS` on every path, so a missing index reads as null:
-/// a change, a method that changes nothing, and the test an inlined method runs first.
+/// without `?.` does, and reaches the element the list stores, here a local's, a parameter's and a hooked property's.
+/// The index is a bare read on every path, which throws on a missing index, so `?.` skips only a null element: a
+/// change, a method that changes nothing, and the test an inlined method runs first.
 #[test]
 fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
     assert_eq!(
         child_body(
-            "bool? run(List<List<int>> rows, List<List<int>?> maybe)",
+            "bool? run(List<List<int>?> rows, List<List<int>?> maybe)",
             "        rows[0]?.add(5);\n        maybe[1]?.insert(0, 6);\n        this.held[0]?.add(7);\n        maybe[0]?.entries();\n        maybe[2]?.clear();\n        return maybe[3]?.contains(4);\n",
-            "<?php namespace App\\Tenant; class Base { /** @var list<list<int>> */ public array $held = [[1]] { set { $this->held = $value; } } }"
+            "<?php namespace App\\Tenant; class Base { /** @var list<list<int>|null> */ public array $held = [[1]] { set { $this->held = $value; } } }"
         ),
         indoc! {r#"
             STMT_LIST
               NULLSAFE_METHOD_CALL
-                DIM [1]
+                DIM
                   VAR
                     ZVAL "rows"
                   ZVAL 0
@@ -5823,7 +5822,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                 ARG_LIST
                   ZVAL 5
               NULLSAFE_METHOD_CALL
-                DIM [1]
+                DIM
                   VAR
                     ZVAL "maybe"
                   ZVAL 1
@@ -5832,7 +5831,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                   ZVAL 0
                   ZVAL 6
               NULLSAFE_METHOD_CALL
-                DIM [1]
+                DIM
                   PROP
                     VAR
                       ZVAL "this"
@@ -5842,7 +5841,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                 ARG_LIST
                   ZVAL 7
               NULLSAFE_METHOD_CALL
-                DIM [1]
+                DIM
                   VAR
                     ZVAL "maybe"
                   ZVAL 0
@@ -5850,7 +5849,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                 ARG_LIST
               CONDITIONAL [1]
                 BINARY_OP [16]
-                  DIM [1]
+                  DIM
                     VAR
                       ZVAL "maybe"
                     ZVAL 2
@@ -5866,7 +5865,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
               RETURN
                 CONDITIONAL [1]
                   BINARY_OP [16]
-                    DIM [1]
+                    DIM
                       VAR
                         ZVAL "maybe"
                       ZVAL 3
@@ -5881,154 +5880,6 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                           ZVAL "maybe"
                         ZVAL 3
                       ZVAL true
-        "#}
-    );
-}
-
-/// ```php
-/// $cube[9][0]?->add(1); // only [0] carries ZEND_DIM_IS
-/// ($cube[9][0] === null) ? null : $cube[9][0]->clear();
-/// …
-/// ```
-///
-/// Only the index directly before `?.` reads a missing key as null (spec section 12). The indexes before it stay bare
-/// reads, so `cube[9][0]?.add(1)` throws on `cube[9]`, as a bare `cube[9]` does, on every path a method takes.
-#[test]
-fn a_null_safe_call_through_nested_list_indexes_marks_only_the_last() {
-    assert_eq!(
-        body_in(
-            "List<Any?> run(List<List<List<int>>> cube)",
-            "        cube[9][0]?.add(1);\n        cube[9][0]?.clear();\n        cube[9][0]?.remove(1);\n        return [cube[9][0]?.count(), cube[9][0]?.contains(1), cube[9][0]?.entries()];\n",
-            &[]
-        ),
-        indoc! {r#"
-            STMT_LIST
-              NULLSAFE_METHOD_CALL
-                DIM [1]
-                  DIM
-                    VAR
-                      ZVAL "cube"
-                    ZVAL 9
-                  ZVAL 0
-                ZVAL "add"
-                ARG_LIST
-                  ZVAL 1
-              CONDITIONAL [1]
-                BINARY_OP [16]
-                  DIM [1]
-                    DIM
-                      VAR
-                        ZVAL "cube"
-                      ZVAL 9
-                    ZVAL 0
-                  ZVAL null
-                ZVAL null
-                METHOD_CALL
-                  DIM
-                    DIM
-                      VAR
-                        ZVAL "cube"
-                      ZVAL 9
-                    ZVAL 0
-                  ZVAL "clear"
-                  ARG_LIST
-              CONDITIONAL [1]
-                BINARY_OP [16]
-                  DIM [1]
-                    DIM
-                      VAR
-                        ZVAL "cube"
-                      ZVAL 9
-                    ZVAL 0
-                  ZVAL null
-                ZVAL null
-                AND
-                  BINARY_OP [17]
-                    ASSIGN
-                      VAR
-                        ZVAL "index#1"
-                      CALL
-                        ZVAL "array_search"
-                        ARG_LIST
-                          ZVAL 1
-                          DIM
-                            DIM
-                              VAR
-                                ZVAL "cube"
-                              ZVAL 9
-                            ZVAL 0
-                          ZVAL true
-                    ZVAL false
-                  BINARY_OP [16]
-                    METHOD_CALL
-                      DIM
-                        DIM
-                          VAR
-                            ZVAL "cube"
-                          ZVAL 9
-                        ZVAL 0
-                      ZVAL "removeAt"
-                      ARG_LIST
-                        VAR
-                          ZVAL "index#1"
-                    ZVAL null
-              RETURN
-                ARRAY [3]
-                  ARRAY_ELEM
-                    CONDITIONAL [1]
-                      BINARY_OP [16]
-                        DIM [1]
-                          DIM
-                            VAR
-                              ZVAL "cube"
-                            ZVAL 9
-                          ZVAL 0
-                        ZVAL null
-                      ZVAL null
-                      CALL
-                        ZVAL "count"
-                        ARG_LIST
-                          DIM
-                            DIM
-                              VAR
-                                ZVAL "cube"
-                              ZVAL 9
-                            ZVAL 0
-                    null
-                  ARRAY_ELEM
-                    CONDITIONAL [1]
-                      BINARY_OP [16]
-                        DIM [1]
-                          DIM
-                            VAR
-                              ZVAL "cube"
-                            ZVAL 9
-                          ZVAL 0
-                        ZVAL null
-                      ZVAL null
-                      CALL
-                        ZVAL "in_array"
-                        ARG_LIST
-                          ZVAL 1
-                          DIM
-                            DIM
-                              VAR
-                                ZVAL "cube"
-                              ZVAL 9
-                            ZVAL 0
-                          ZVAL true
-                    null
-                  ARRAY_ELEM
-                    NULLSAFE_METHOD_CALL
-                      DIM [1]
-                        DIM
-                          VAR
-                            ZVAL "cube"
-                          ZVAL 9
-                        ZVAL 0
-                      ZVAL "entries"
-                      ARG_LIST
-                    null
         "#}
     );
 }
@@ -14034,14 +13885,60 @@ fn null_safe_calls_and_reads_are_nullsafe_kinds() {
 }
 
 /// ```php
-/// return $extra[0]?->value ?? $extra[1]?->total() ?? ($named['a'] ?? null)?->value; // the List indexes carry ZEND_DIM_IS
+/// return \is_int(${'match#1'} = $sizes[0]) && \is_int(${'match#1'} = $counts['a'] ?? null);
 /// ```
 ///
-/// `?.` reads a missing key of the index directly before it as null, as `??` does (spec section 12). A `List` index is
-/// the index itself, marked with `ZEND_DIM_IS`, so the engine reads only that index quietly. A `Map` index is the left
-/// side of a `COALESCE`.
+/// Spec section 12: a `List` index a pattern tests is a bare read, which throws on a missing index, and a `Map` index
+/// reads a missing key as null, as `??` does.
 #[test]
-fn null_safe_access_reads_a_missing_index_as_null() {
+fn a_tested_list_index_is_read_bare_and_a_tested_map_key_quietly() {
+    assert_eq!(
+        body_in(
+            "bool run(List<int?> sizes, Map<string, int> counts)",
+            "        return sizes[0] is int && counts[\"a\"] is int;\n",
+            &[]
+        )
+        .lines()
+        .skip_while(|line| line.trim() != "RETURN")
+        .map(str::trim_start)
+        .collect::<Vec<_>>(),
+        [
+            "RETURN",
+            "AND",
+            "CALL",
+            "ZVAL \"is_int\"",
+            "ARG_LIST",
+            "ASSIGN",
+            "VAR",
+            "ZVAL \"match#1\"",
+            "DIM",
+            "VAR",
+            "ZVAL \"sizes\"",
+            "ZVAL 0",
+            "CALL",
+            "ZVAL \"is_int\"",
+            "ARG_LIST",
+            "ASSIGN",
+            "VAR",
+            "ZVAL \"match#1\"",
+            "COALESCE",
+            "DIM",
+            "VAR",
+            "ZVAL \"counts\"",
+            "ZVAL \"a\"",
+            "ZVAL null",
+        ]
+    );
+}
+
+/// ```php
+/// return $extra[0]?->value ?? $extra[1]?->total() ?? ($named['a'] ?? null)?->value;
+/// ```
+///
+/// `?.` reads a missing key of the `Map` index directly before it as null, as `??` does (spec section 12), so that
+/// index is the left side of a `COALESCE`. A `List` index is the bare index itself, which throws on a missing index.
+#[test]
+fn null_safe_access_reads_a_missing_map_key_as_null_and_a_list_index_bare() {
     assert_eq!(
         body_in(
             "int? run(List<Calc?> extra, Map<string, Calc?> named)",
@@ -14114,14 +14011,14 @@ fn null_safe_access_reads_a_missing_index_as_null() {
               RETURN
                 COALESCE
                   NULLSAFE_PROP
-                    DIM [1]
+                    DIM
                       VAR
                         ZVAL "extra"
                       ZVAL 0
                     ZVAL "value"
                   COALESCE
                     NULLSAFE_METHOD_CALL
-                      DIM [1]
+                      DIM
                         VAR
                           ZVAL "extra"
                         ZVAL 1
@@ -16484,12 +16381,29 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
 fn a_leave_after_null_coalesce_is_its_statement_inside_the_expression() {
     assert_eq!(
         body_in(
-            "int run(List<int?> values)",
+            "int run(Map<int, int> values)",
             "        const a = values[0] ?? return -1;\n        for (int i = 0; i < 2; i++) {\n            const b = values[i] ?? continue;\n            const c = values[i + 1] ?? break;\n        }\n        return a;\n",
             &[]
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "values"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "values"
+                  STATIC_CALL
+                    ZVAL "Sharp\\Map"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "values"
+                  VAR
+                    ZVAL "values"
               ASSIGN
                 VAR
                   ZVAL "a"
