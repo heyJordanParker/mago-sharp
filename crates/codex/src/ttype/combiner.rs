@@ -641,6 +641,15 @@ fn scrape_type_properties(
     }
 
     if let TAtomic::Array(array) = atomic {
+        // A PHP# tuple is no list shape: its type gives its length and the names of its elements, spec section 30, so
+        // each tuple type stays a member of the union, untouched, as a `Set` does.
+        if matches!(&array, TArray::List(list) if list.tuple_names.is_some()) {
+            let tuple = TAtomic::Array(array);
+            combination.value_types.insert(tuple.get_id(), tuple);
+
+            return;
+        }
+
         if options.overwrite_empty_array && array.is_empty() {
             combination.flags.insert(CombinationFlags::HAS_EMPTY_ARRAY);
 

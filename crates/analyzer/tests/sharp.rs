@@ -10234,6 +10234,24 @@ fn an_unpacked_tuple_gives_each_local_its_element_type() {
     assert_eq!(issues(("src/Demo/Order.sharp", sharp), &[]), ["14:24 invalid-local-assignment-value"]);
 }
 
+/// A nullable tuple is the tuple or `null`, so it keeps the tuple's names and length: `[5, 6, 7]` is no
+/// `[Item first, int count]?`, and `maybe?.count` reads the element named `count`.
+#[test]
+fn a_nullable_tuple_keeps_its_element_names() {
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public static [Item first, int count]? wrong() { return [5, 6, 7]; }\n\n    public static int run([Item first, int count]? given)\n    {\n        [Item first, int count]? maybe = [5, 6, 7];\n        int kept = given?.count ?? 0;\n        Item? item = given?.first;\n        return kept;\n    }\n}\n\nclass Item\n{\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Store.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            "5:61 invalid-return-statement Invalid return type for method `Store.wrong`: expected `[Item first, int count]?`, but found `List<int>`.",
+            "9:42 invalid-local-assignment-value Invalid assignment to `maybe`: it is declared as `[Item first, int count]?`.",
+        ]
+    );
+}
+
 /// Spec section 30: a named element reads by its name, as in C#, as `summary.total`, and a name the tuple does not
 /// write is an error that lists the names it does. A tuple never changes, so writing an element is an error too.
 #[test]
