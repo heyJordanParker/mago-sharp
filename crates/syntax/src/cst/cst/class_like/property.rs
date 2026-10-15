@@ -348,8 +348,9 @@ impl<'arena> Property<'arena> {
             || matches!(self, Property::Hooked(hooked) if hooked.behaviors.is_some())
     }
 
-    /// Returns `true` when a PHP# static member's initial value runs once, after its class is declared, instead of
-    /// being PHP's default: a value that is not a constant expression, or any value of a property with an observer.
+    /// Returns `true` when a PHP# static member's initial value runs once, when a request first uses its class's
+    /// statics, instead of being PHP's default: a value that is not a constant expression, or any value of a property
+    /// with an observer.
     #[must_use]
     pub fn initial_value_runs_after_class(&self) -> bool {
         self.modifiers().contains_static()

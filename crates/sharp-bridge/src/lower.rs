@@ -76,7 +76,6 @@ use mago_syntax::cst::InterpolatedString;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LiteralStringPart;
 use mago_syntax::cst::LocalDeclaration;
-use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MatchArm;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -626,7 +625,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::Use(_) | Statement::Extern(_) | Statement::Module(_) => {}
             Statement::Class(class) => {
                 statements.push(self.class(class));
-                statements.extend(self.static_initial_values(&class.members, &class.name));
             }
             Statement::Interface(interface) => statements.push(self.interface(interface)),
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
@@ -1592,6 +1590,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             ));
         }
         members.extend(self.copy_resets(class_members, parent_name.is_some(), keyword, right_brace));
+        members.extend(self.static_initial_values(class_members));
 
         members
     }
@@ -3074,12 +3073,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// `$this->name = value;` on the line of the member's name.
-    /// The statement that sets each static member of the class named `name` whose initial value runs once after the
-    /// class is declared, as PHP gives a static only a constant default:
-    /// `\Closure::bind(static function () { self::$a = …; }, null, \App\Report::class)();`. The closure runs in the
-    /// class's scope, so it writes a `private(set)` static too. None when each static's initial value is its default.
-    fn static_initial_values(&mut self, members: &Sequence<ClassLikeMember>, name: &LocalIdentifier) -> Option<u32> {
+    /// The hidden method that sets each static whose initial value isn't constant, as PHP gives a static only a constant
+    /// default: `private static function #statics(): void { self::$a = …; }`. The engine runs it once each request,
+    /// when it first builds the class's statics, after their constant defaults (`zend_class_init_sharp_statics`), so a
+    /// preloaded class gets the values too. None when each static's initial value is its default.
+    fn static_initial_values(&mut self, members: &Sequence<ClassLikeMember>) -> Option<u32> {
         let properties: Vec<&Property> = members
             .iter()
             .filter_map(|member| match member {
@@ -3113,26 +3111,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let void = self.string(ZEND_NAME_NOT_FQ, line, b"void");
         let span = first.span();
-        let closure = self.declaration(
-            SHARP_AST_CLOSURE,
-            ZEND_ACC_STATIC,
+
+        Some(self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PRIVATE | ZEND_ACC_STATIC,
             span,
             span,
-            b"",
-            &[parameters, NULL, body, NULL, NULL],
-        );
-
-        let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
-        let class = self.string(ZEND_NAME_FQ, line, self.names.get(name));
-        let class = self.node(SHARP_AST_CLASS_NAME, 0, line, &[class]);
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[closure, null, class]);
-        let closure_class = self.string(ZEND_NAME_FQ, line, b"Closure");
-        let bind = self.string(0, line, b"bind");
-        let bound = self.node(SHARP_AST_STATIC_CALL, 0, line, &[closure_class, bind, arguments]);
-        let no_arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
-
-        Some(self.node(SHARP_AST_CALL, 0, line, &[bound, no_arguments]))
+            b"#statics",
+            &[parameters, NULL, body, void, NULL],
+        ))
     }
 
     /// The members a static property with accessors runs as, decision 3: PHP has no hooks on a static, so its storage,
@@ -3341,6 +3330,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
+    /// `$this->name = value;` on the line of the member's name.
     fn initial_value(&mut self, variable: &DirectVariable, value: &Expression) -> u32 {
         let line = self.line(variable);
         let this = self.variable(variable.span, b"this");

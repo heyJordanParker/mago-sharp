@@ -1828,14 +1828,14 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 /// Meter::{'note#get'}() ?? (Meter::{'note#set'}($value#1 = "n") ?? $value#1);
 /// Meter::{'label#set'}($value#1 = Meter::{'label#get'}() . "l") ?? $value#1;
 ///
-/// \Closure::bind(static function () { self::{'hits#set'}(0); self::{'label#set'}(strval(1)); … }, null, Meter::class)();
+/// private static function #statics(): void { self::{'hits#set'}(0); self::{'label#set'}(strval(1)); … }
 /// ```
 ///
 /// Decision 3, for each form a static property's accessors take: a `get` body of either form, `set;` and a narrower
 /// `protected set`, and `willSet` before and `didSet` after the write. Prefix `++` and `--` give the value written and
 /// postfix `--` the value read, `??=` writes only when the read is null, and `+=` on a string appends. An observed
-/// static's initial value, constant or not, is a write through `name#set` once its class is declared, so its observers
-/// run on it, spec section 6.2.
+/// static's initial value, constant or not, is a write through `name#set` in `#statics`, which runs when a request
+/// first builds the class's statics, so its observers run on it, spec section 6.2.
 #[test]
 fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_methods() {
     let lowered = Lowered::new(
@@ -1844,7 +1844,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
 
     assert_eq!(
         lowered.tree(),
-        indoc! {r#"
+        indoc! {r##"
             STMT_LIST
               DECLARE
                 CONST_DECL
@@ -2111,42 +2111,33 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                           ZVAL "value#1"
                     ZVAL [1] "void"
                     null
+                  METHOD [20] "#statics" @5-5
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      STATIC_CALL
+                        ZVAL [1] "self"
+                        ZVAL "hits#set"
+                        ARG_LIST
+                          ZVAL 0
+                      STATIC_CALL
+                        ZVAL [1] "self"
+                        ZVAL "label#set"
+                        ARG_LIST
+                          CALL
+                            ZVAL "strval"
+                            ARG_LIST
+                              ZVAL 1
+                      STATIC_CALL
+                        ZVAL [1] "self"
+                        ZVAL "note#set"
+                        ARG_LIST
+                          ZVAL null
+                    ZVAL [1] "void"
+                    null
                 null
                 null
-              CALL
-                STATIC_CALL
-                  ZVAL "Closure"
-                  ZVAL "bind"
-                  ARG_LIST
-                    CLOSURE [16] "" @5-5
-                      PARAM_LIST
-                      null
-                      STMT_LIST
-                        STATIC_CALL
-                          ZVAL [1] "self"
-                          ZVAL "hits#set"
-                          ARG_LIST
-                            ZVAL 0
-                        STATIC_CALL
-                          ZVAL [1] "self"
-                          ZVAL "label#set"
-                          ARG_LIST
-                            CALL
-                              ZVAL "strval"
-                              ARG_LIST
-                                ZVAL 1
-                        STATIC_CALL
-                          ZVAL [1] "self"
-                          ZVAL "note#set"
-                          ARG_LIST
-                            ZVAL null
-                      null
-                      null
-                    ZVAL null
-                    CLASS_NAME
-                      ZVAL "Meter"
-                ARG_LIST
-        "#}
+        "##}
     );
 }
 
@@ -2320,17 +2311,18 @@ fn a_static_lazy_property_keeps_its_value_for_a_singleton_s_lifetime() {
 ///     public private(set) static int $size = 3;
 ///     public private(set) static \Lib\Calc $calc;
 ///     private static string $name;
-/// }
 ///
-/// \Closure::bind(static function () { self::$calc = new \Lib\Calc(1); self::$name = trim(' a '); }, null, \App\Tenant\Report::class)();
+///     private static function #statics(): void { self::$calc = new \Lib\Calc(1); self::$name = trim(' a '); }
+/// }
 /// ```
 ///
 /// Spec section 6: PHP has no `readonly` static, so a get-only static is `private(set)`, `[4113]` being
 /// `ZEND_ACC_PRIVATE_SET | ZEND_ACC_STATIC | ZEND_ACC_PUBLIC`, and the analyzer refuses every write of it. PHP gives a
-/// static only a constant default, so an initial value that isn't constant runs once, right after the class is
-/// declared, in a closure bound to the class's scope, which writes a `private(set)` static too.
+/// static only a constant default, so an initial value that isn't constant runs in the class's hidden method
+/// `#statics`, `[20]` being `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`, which the engine runs once each request, when the
+/// request first builds the class's statics.
 #[test]
-fn a_static_initial_value_that_is_not_constant_runs_once_after_its_class() {
+fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_statics_are_built() {
     let lowered = Lowered::with(
         "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int size { get; } = 3;\n    public static Calc calc { get; } = new Calc(1);\n    private static string name = global.trim(\" a \");\n}\n",
         &[CALC_CLASS],
@@ -2338,7 +2330,7 @@ fn a_static_initial_value_that_is_not_constant_runs_once_after_its_class() {
 
     assert_eq!(
         lowered.render(lowered.root()),
-        indoc! {r#"
+        indoc! {r##"
             STMT_LIST
               DECLARE
                 CONST_DECL
@@ -2381,40 +2373,31 @@ fn a_static_initial_value_that_is_not_constant_runs_once_after_its_class() {
                         null
                         null
                     null
+                  METHOD [20] "#statics" @8-8
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      ASSIGN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "calc"
+                        NEW
+                          ZVAL "Lib\\Calc"
+                          ARG_LIST
+                            ZVAL 1
+                      ASSIGN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "name"
+                        CALL
+                          ZVAL "trim"
+                          ARG_LIST
+                            ZVAL " a "
+                    ZVAL [1] "void"
+                    null
                 null
                 null
-              CALL
-                STATIC_CALL
-                  ZVAL "Closure"
-                  ZVAL "bind"
-                  ARG_LIST
-                    CLOSURE [16] "" @8-8
-                      PARAM_LIST
-                      null
-                      STMT_LIST
-                        ASSIGN
-                          STATIC_PROP
-                            ZVAL [1] "self"
-                            ZVAL "calc"
-                          NEW
-                            ZVAL "Lib\\Calc"
-                            ARG_LIST
-                              ZVAL 1
-                        ASSIGN
-                          STATIC_PROP
-                            ZVAL [1] "self"
-                            ZVAL "name"
-                          CALL
-                            ZVAL "trim"
-                            ARG_LIST
-                              ZVAL " a "
-                      null
-                      null
-                    ZVAL null
-                    CLASS_NAME
-                      ZVAL "App\\Tenant\\Report"
-                ARG_LIST
-        "#}
+        "##}
     );
 }
 
