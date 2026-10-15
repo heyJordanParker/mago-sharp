@@ -2475,6 +2475,20 @@ fn for_in_is_a_parse_error_that_names_of() {
     assert_eq!(messages, ["PHP# loops over a collection with `of`, as in `for (const line of lines)`."]);
 }
 
+/// TypeScript's `for (x in y)` declares no loop variable, and it is the same one error that names `of`, while the
+/// statements after it still parse.
+#[test]
+fn for_in_without_const_is_the_parse_error_that_names_of() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        for (line in lines) {\n            const kept = 1;\n        }\n        const after = 2;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(errors, [("PHP# loops over a collection with `of`, as in `for (const line of lines)`.".to_owned(), "in")]);
+    assert_eq!(method_body(program).len(), 2, "{:#?}", method_body(program));
+}
+
 #[test]
 fn foreach_is_a_php_syntax_error() {
     let arena = LocalArena::new();
