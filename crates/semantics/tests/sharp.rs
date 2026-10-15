@@ -1091,19 +1091,22 @@ fn an_interface_declares_methods_without_an_access_modifier_or_a_body() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// Spec section 22: an interface method gives a default body, as a block or an expression, and the body is checked as
-/// a class method's body is. A plain PHP interface method with a body is still PHP's error.
+/// Spec section 22: an interface method gives a default body, as a block or an expression, and so does a computed
+/// property, which runs on each read and so takes no `static` or `lazy`. The body is checked as a class member's body
+/// is. A plain PHP interface method with a body is still PHP's error.
 #[test]
-fn an_interface_method_gives_a_default_body_checked_as_a_class_method_body() {
-    let code = "namespace App;\n\npublic interface HasDesign\n{\n    string designColumn { get; }\n    string designKey() => `design:${this.designColumn}`;\n    string designName()\n    {\n        return this.designColumn;\n    }\n}\n";
+fn an_interface_member_gives_a_default_body_checked_as_a_class_member_body() {
+    let code = "namespace App;\n\npublic interface HasDesign\n{\n    string designColumn { get; }\n    string designKey() => `design:${this.designColumn}`;\n    string designName()\n    {\n        return this.designColumn;\n    }\n    string designTag => `tag:${this.designColumn}`;\n}\n";
     assert_eq!(issues(code), Vec::<String>::new());
 
-    let refused = "namespace App;\n\ninterface HasDesign\n{\n    string designColumn { get; }\n    string designKey()\n    {\n        return designColumn;\n    }\n    string designLabel() => $label;\n}\n";
+    let refused = "namespace App;\n\ninterface HasDesign\n{\n    string designColumn { get; }\n    string designKey()\n    {\n        return designColumn;\n    }\n    string designLabel() => $label;\n    string designTag => designColumn;\n    static string designKind => \"kind\";\n}\n";
     assert_eq!(
         issues(refused),
         [
             "8:16 Write `this.designColumn`: members of the same object are always written with `this.`.",
-            "10:29 PHP# variables have no `$`: write `label`."
+            "10:29 PHP# variables have no `$`: write `label`.",
+            "11:25 Write `this.designColumn`: members of the same object are always written with `this.`.",
+            "12:5 An interface property takes no modifier: its default body runs on each read."
         ]
     );
 

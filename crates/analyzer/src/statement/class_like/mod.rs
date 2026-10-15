@@ -1215,7 +1215,7 @@ where
     if context.dialect.is_sharp() && (class_like_metadata.kind.is_class() || class_like_metadata.kind.is_enum()) {
         let header_traits: Vec<Word> =
             header_traits.iter().map(|header_trait| word(context.resolved_names.get(header_trait))).collect();
-        check_methods_given_twice(context, class_like_metadata, &header_traits, name_span.unwrap_or(declaration_span));
+        check_members_given_twice(context, class_like_metadata, &header_traits, name_span.unwrap_or(declaration_span));
     }
 
     let has_complete_hierarchy = !class_like_metadata.has_incomplete_hierarchy();
@@ -5558,8 +5558,9 @@ fn check_readonly_class_trait_properties<'ctx, 'arena, A>(
 /// Spec section 22 gives a class one method per name. Reports each method that two places give a PHP# class-like a
 /// body for, among its header traits, the traits of its interfaces' default bodies and its base class, unless the
 /// class writes the method itself. PHP refuses two traits' bodies for one method, and runs a trait's body over the base
-/// class's, so neither can stand for the class's one method.
-fn check_methods_given_twice<A>(
+/// class's, so neither can stand for the class's one method. A computed property two places give a body for, two
+/// interfaces' default bodies or one and the base class's property, is reported alike.
+fn check_members_given_twice<A>(
     context: &mut Context<'_, '_, A>,
     class_like_metadata: &ClassLikeMetadata,
     header_traits: &[Word],
@@ -5618,6 +5619,45 @@ fn check_methods_given_twice<A>(
             ))
             .with_annotation(Annotation::primary(name_span).with_message(format!("`{class_name}` has one `{original_name}`.")))
             .with_help(format!("Declare `{original_name}` in `{class_name}`, and call `super<{second}>.{original_name}()` in it to reuse one body.")),
+        );
+    }
+
+    // A computed property's default body is a body too, and the base class's property is one.
+    let mut properties: Vec<(Word, Word)> = traits
+        .iter()
+        .filter_map(|defaults| context.codebase.get_defaults_interface(defaults))
+        .flat_map(|interface| {
+            interface
+                .properties
+                .iter()
+                .filter(|(_, property)| property.hooks.values().any(|accessor| !accessor.is_abstract))
+                .map(|(name, _)| (*name, interface.original_name))
+        })
+        .collect();
+    properties.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    for given in properties.chunk_by(|left, right| left.0 == right.0) {
+        let name = given[0].0;
+        if class_like_metadata.declaring_property_ids.get(&name) == Some(&class_like_metadata.name) {
+            continue;
+        }
+        let givers: Vec<Word> = parent
+            .filter(|parent| parent.properties.contains_key(&name))
+            .map(|parent| parent.original_name)
+            .into_iter()
+            .chain(given.iter().map(|(_, interface)| *interface))
+            .collect();
+        let [first, second, ..] = givers.as_slice() else {
+            continue;
+        };
+        let property = mago_bytes::BytesDisplay(mago_bytes::trim_start_byte(name.as_bytes(), b'$'));
+        let (first, second) = (display_class_like_name(context, *first), display_class_like_name(context, *second));
+        context.collector.report_with_code(
+            IssueCode::AmbiguousInheritedMember,
+            Issue::error(format!(
+                "`{class_name}` gets `{property}` from both `{first}` and `{second}`: write `{property}` in `{class_name}`."
+            ))
+            .with_annotation(Annotation::primary(name_span).with_message(format!("`{class_name}` has one `{property}`.")))
+            .with_help(format!("Declare `{property}` in `{class_name}`.")),
         );
     }
 }

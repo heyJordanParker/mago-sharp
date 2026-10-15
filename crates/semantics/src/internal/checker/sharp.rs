@@ -810,6 +810,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         (Node::ClassLikeMember(ClassLikeMember::Method(_)), Interface) => Some(Interface),
+        // Spec section 22: a computed property's expression is its default body, as a method's body is, and runs on
+        // each read of the object it is read on, so an interface property takes no `static` or `lazy`.
+        (Node::ClassLikeMember(ClassLikeMember::Property(Property::Computed(property))), Interface) => {
+            for modifier in property.modifiers.iter().filter(|modifier| !modifier.is_visibility()) {
+                context.report(
+                    Issue::error("An interface property takes no modifier: its default body runs on each read.")
+                        .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier.")),
+                );
+            }
+            check_declared_name(property.variable.name, property.variable.span, context);
+
+            Some(FieldOrProperty)
+        }
         // An interface states a property its classes give, as `OrderEvent` states `orderId`, spec section 15.
         (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
             if is_interface_property(property) =>

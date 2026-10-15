@@ -284,7 +284,12 @@ fn check_override_modifier_on_properties<'ctx, 'arena, A>(
         let is_field = matches!(property, Property::Plain(_));
         let override_modifier = property.modifiers().iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
 
-        match (overridden_properties(metadata, name, context.codebase).next(), override_modifier) {
+        // Spec section 22: an interface's computed property is a default body, which a class replaces with `override`,
+        // as it replaces a base class's property.
+        let replaced = overridden_properties(metadata, name, context.codebase)
+            .next()
+            .or_else(|| defaulted_properties(metadata, name, context.codebase).next());
+        match (replaced, override_modifier) {
             (None, Some(override_modifier)) if !is_field && !metadata.has_incomplete_hierarchy() => {
                 context.collector.report(
                     Issue::error(format!("Invalid `override` modifier on `{property_display}`."))
@@ -333,6 +338,21 @@ pub(super) fn overridden_properties<'ctx>(
     std::iter::successors(parent_of(metadata), move |parent| parent_of(parent))
         .filter_map(move |parent| Some((parent, parent.properties.get(&name)?)))
         .take_while(|(_, property)| !property.read_visibility.is_private())
+}
+
+/// The interfaces `metadata` implements that give the property named `name` a default body, spec section 22, with
+/// their declarations: a computed property, whose `get` is not abstract.
+fn defaulted_properties<'ctx>(
+    metadata: &ClassLikeMetadata,
+    name: Word,
+    codebase: &'ctx CodebaseMetadata,
+) -> impl Iterator<Item = (&'ctx ClassLikeMetadata, &'ctx PropertyMetadata)> {
+    metadata
+        .all_parent_interfaces
+        .iter()
+        .filter_map(move |interface| codebase.get_interface(interface.as_bytes()))
+        .filter_map(move |interface| Some((interface, interface.properties.get(&name)?)))
+        .filter(|(_, property)| property.hooks.values().any(|accessor| !accessor.is_abstract))
 }
 
 /// Reports `issue` about a stray override marker, with the edit that deletes a PHP `#[Override]` attribute.

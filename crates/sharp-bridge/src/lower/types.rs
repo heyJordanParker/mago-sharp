@@ -29,6 +29,7 @@ use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
 use mago_names::ResolvedNames;
+use mago_names::binding::php_variable_name;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -166,6 +167,79 @@ impl<'analysis> Types<'analysis> {
         }
 
         traits
+    }
+
+    /// The computed properties with a default body, spec section 22, that the fully qualified class-like name `class`
+    /// gives itself: each one an interface whose trait [`CodebaseMetadata::get_defaults_traits`] gives it declares and
+    /// the class does not, by its name with `$` and its interface's full name.
+    #[must_use]
+    pub fn default_properties(&self, class: &[u8]) -> Vec<(Word, Word)> {
+        let Some(metadata) = self.codebase.get_class_like(class) else {
+            return Vec::new();
+        };
+
+        let mut properties = Vec::new();
+        for interface in self
+            .codebase
+            .get_defaults_traits(metadata)
+            .into_iter()
+            .filter_map(|defaults| self.codebase.get_defaults_interface(defaults))
+        {
+            for (name, property) in &interface.properties {
+                if property.hooks.values().any(|accessor| !accessor.is_abstract)
+                    && metadata.declaring_property_ids.get(name) != Some(&metadata.name)
+                {
+                    properties.push((*name, interface.original_name));
+                }
+            }
+        }
+
+        properties
+    }
+
+    /// Whether an interface the fully qualified class-like name `class` implements gives the property `name`, with `$`
+    /// or without, a default body, spec section 22, which runs as a property with no PHP type.
+    #[must_use]
+    pub fn has_default_property(&self, class: &[u8], name: &[u8]) -> bool {
+        let name = php_variable_name(name);
+
+        self.codebase.get_class_like(class).is_some_and(|metadata| {
+            metadata
+                .all_parent_interfaces
+                .iter()
+                .filter_map(|interface| self.codebase.get_interface(interface.as_bytes()))
+                .any(|interface| {
+                    interface
+                        .properties
+                        .get(&name)
+                        .is_some_and(|property| property.hooks.values().any(|accessor| !accessor.is_abstract))
+                })
+        })
+    }
+
+    /// The default bodies the fully qualified class-like name `class` uses itself, spec section 22: each method of the
+    /// traits [`CodebaseMetadata::get_defaults_traits`] gives it, with its trait and its interface's full name, in
+    /// declaration order.
+    #[must_use]
+    pub fn default_bodies(&self, class: &[u8]) -> Vec<(Word, Word, Word)> {
+        let Some(metadata) = self.codebase.get_class_like(class) else {
+            return Vec::new();
+        };
+
+        self.codebase
+            .get_defaults_traits(metadata)
+            .into_iter()
+            .flat_map(|defaults| {
+                let interface =
+                    self.codebase.get_defaults_interface(defaults).map_or(defaults.name, |i| i.original_name);
+                // A computed property's default body is already the protected `designKey@App\HasDesign`.
+                defaults.methods.iter().filter(|method| !method.as_bytes().contains(&b'@')).filter_map(move |method| {
+                    let method = self.codebase.get_method(defaults.name.as_bytes(), method.as_bytes())?;
+
+                    Some((defaults.original_name, interface, method.original_name))
+                })
+            })
+            .collect()
     }
 
     /// The bounds of the fully qualified class name `class` when it is a PHP# generic class, whose objects carry their

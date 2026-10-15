@@ -691,6 +691,9 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                             }
                         }
                     }
+                    // A PHP# interface's computed property is its default body, as a method's body is, and `check_slice`
+                    // checks it.
+                    Property::Computed(_) if context.program.dialect.is_sharp() => {}
                     Property::Computed(computed_property) => {
                         let property_display =
                             context.display_member(interface_name_bytes, BytesDisplay(computed_property.variable.name));

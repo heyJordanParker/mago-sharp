@@ -237,10 +237,24 @@ where
     )
 }
 
+/// The class in `class`'s chain that implements `interface` first, `class` itself or the farthest base class that does,
+/// which uses the trait of `interface`'s default bodies, spec section 22.
+fn defaults_user<'ctx>(
+    codebase: &'ctx CodebaseMetadata,
+    class: &'ctx ClassLikeMetadata,
+    interface: Word,
+) -> Option<&'ctx ClassLikeMetadata> {
+    std::iter::successors(Some(class), |class| {
+        class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+    })
+    .take_while(|class| class.all_parent_interfaces.contains(&interface))
+    .last()
+}
+
 /// Resolves PHP# `super<HasLabel>`, spec section 22, to the interface as a parent: a call through it runs the
 /// interface's default body, which [`resolve_method_from_metadata`](crate::resolver::static_method) finds in the trait
-/// of its default bodies. The class must implement the interface and use that trait itself, so its own `use` can name
-/// the body. A class whose base class already uses it would use it a second time, which is not supported yet.
+/// of its default bodies. The class must implement the interface. The PHP# class that uses the trait keeps each body
+/// under a protected name its subclasses call too, which a plain PHP class that uses it gives none.
 fn resolve_super_of<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -276,19 +290,16 @@ where
             ))
         }
         (Some(class), _)
-            if class
-                .direct_parent_class
-                .and_then(|parent| context.codebase.get_class_like(parent.as_bytes()))
-                .is_some_and(|parent| {
-                    parent.all_parent_interfaces.contains(&ascii_lowercase_word(interface_name.as_bytes()))
-                }) =>
+            if let Some(user) =
+                defaults_user(context.codebase, class, ascii_lowercase_word(interface_name.as_bytes()))
+                && !user.flags.is_sharp() =>
         {
-            let class_display = display_class_like_name(context, class.original_name);
+            let user_display = display_class_like_name(context, user.original_name);
 
             Some((
-                IssueCode::NotSupportedYet,
+                IssueCode::InvalidParentType,
                 format!(
-                    "`super<{interface_display}>` in `{class_display}`, whose base class already implements `{interface_display}`, is not supported yet in PHP#."
+                    "`super<{interface_display}>` reuses a default body a PHP# class keeps, and `{user_display}`, which implements `{interface_display}`, is plain PHP."
                 ),
             ))
         }

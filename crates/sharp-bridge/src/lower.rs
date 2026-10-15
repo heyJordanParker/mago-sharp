@@ -519,9 +519,6 @@ struct Lowering<'lowering, 'arena> {
     type_parameters: HashMap<u32, PhpType<'arena>>,
     /// Whether the file declares a test module, so each of its classes starts and ends its tests.
     tested: bool,
-    /// The default bodies the class being lowered calls with `super<HasLabel>.label()`, spec section 22, each the
-    /// interface that gives it and the method's name, which the class's `use` gives a private alias.
-    super_aliases: Vec<(Word, Word)>,
 }
 
 impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
@@ -554,7 +551,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             promoted_beside: false,
             type_parameters: HashMap::default(),
             tested: false,
-            super_aliases: Vec::new(),
         }
     }
 
@@ -832,9 +828,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.extend(self.statics_store(class));
         }
         members.extend(self.class_metadata(self.line(class.name)));
-        if let Some(trait_use) = self.trait_use(class.inheritance.as_ref(), self.line(class.left_brace)) {
-            members.insert(0, trait_use);
-        }
+        members.splice(0..0, self.trait_members(class.inheritance.as_ref(), class.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
         let attributes = self.attributes(&class.attribute_lists, None, None);
 
@@ -871,9 +865,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
         members.extend(self.class_metadata(self.line(r#struct.name.span)));
-        if let Some(trait_use) = self.trait_use(r#struct.inheritance.as_ref(), self.line(r#struct.left_brace)) {
-            members.insert(0, trait_use);
-        }
+        members.splice(0..0, self.trait_members(r#struct.inheritance.as_ref(), r#struct.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
         let attributes = self.attributes(&r#struct.attribute_lists, None, None);
         let mut interfaces = Vec::new();
@@ -1811,6 +1803,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 members.push(self.interface_property(property));
                 continue;
             }
+            if let ClassLikeMember::Property(Property::Computed(computed)) = member {
+                members.push(self.defaulted_property(computed.variable.name, computed.span(), NULL));
+                continue;
+            }
             let ClassLikeMember::Method(method) = member else {
                 unreachable!("check_slice refuses the interface member `{member}`");
             };
@@ -1835,15 +1831,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The trait that holds an interface's default bodies, spec section 22, on the interface's lines, as php-src's
     /// grammar builds `trait Defaults { … }`. It is named `HasDesign\Defaults` for the interface `HasDesign`, and the
     /// engine declares it in the file's namespace, so every name in a body resolves as it does in the interface. Each
-    /// default body is a `public` method, in source order. An interface without a default body has no trait.
+    /// default body is a method, in source order: a method's is `public`, and a computed property's is
+    /// `protected function 'designKey@App\HasDesign'(): string`, which the property of each class that gets it runs. An
+    /// interface without a default body has no trait.
     fn defaults(&mut self, interface: &Interface) -> Option<u32> {
         self.class = self.names.get(&interface.name);
         let mut members = Vec::new();
+        let interface_name = word(self.class);
         for member in &interface.members {
-            if let ClassLikeMember::Method(method) = member
-                && !matches!(method.body, MethodBody::Abstract(_))
-            {
-                members.push(self.method(method, ZEND_ACC_PUBLIC, &[]));
+            match member {
+                ClassLikeMember::Method(method) if !matches!(method.body, MethodBody::Abstract(_)) => {
+                    members.push(self.method(method, ZEND_ACC_PUBLIC, &[]));
+                }
+                ClassLikeMember::Property(Property::Computed(computed)) => {
+                    let line = self.line(&computed.body);
+                    let value = self.accessor_bodies(computed.variable.name, |lowering| {
+                        lowering.expression(computed.body.expression)
+                    });
+                    let value = self.node(SHARP_AST_RETURN, 0, line, &[value]);
+                    let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[value]);
+                    let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+                    let return_type = computed.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
+                    let name = super_alias(interface_name, word(computed.variable.name));
+                    members.push(self.declaration(
+                        SHARP_AST_METHOD,
+                        ZEND_ACC_PROTECTED,
+                        computed.span(),
+                        &computed.body,
+                        &name,
+                        &[parameters, NULL, body, return_type, NULL],
+                    ));
+                }
+                _ => {}
             }
         }
 
@@ -1866,29 +1885,40 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The `use` a class, a struct, an enum or an event starts with, as php-src's grammar builds
     /// `use \Lib\HasSlug, \App\HasDesign\Defaults;`: the traits [`Types::used_traits`] lists, or null when it lists none.
-    /// It gives each default body the class calls with `super<HasLabel>.label()` a private alias, as
-    /// `\App\HasLabel\Defaults::label as private 'label@App\HasLabel';`, so it runs after the members are lowered.
-    fn trait_use(&mut self, header: Option<&Inheritance>, line: u32) -> Option<u32> {
-        let aliases = std::mem::take(&mut self.super_aliases);
+    /// It gives each default body a protected alias, as `\App\HasLabel\Defaults::label as protected 'label@App\HasLabel';`,
+    /// which `super<HasLabel>.label()` calls in the class and in each subclass, whose own override replaces only
+    /// `label`. The property of each computed property with a default body the class does not declare follows it.
+    fn trait_members(&mut self, header: Option<&Inheritance>, span: Span) -> Vec<u32> {
+        let line = self.line(span);
         let traits = self.types.used_traits(self.class, header);
         if traits.is_empty() {
-            return None;
+            return Vec::new();
         }
 
         let names: Vec<u32> = traits.iter().map(|name| self.string(ZEND_NAME_FQ, line, name.as_bytes())).collect();
         let names = self.node(SHARP_AST_NAME_LIST, 0, line, &names);
         let mut adaptations = Vec::new();
-        for (interface, method) in aliases {
-            let defaults = self.string(ZEND_NAME_FQ, line, defaults_trait_name(interface.as_bytes()).as_bytes());
+        for (defaults, interface, method) in self.types.default_bodies(self.class) {
+            let defaults = self.string(ZEND_NAME_FQ, line, defaults.as_bytes());
             let name = self.string(0, line, method.as_bytes());
             let reference = self.node(SHARP_AST_METHOD_REFERENCE, 0, line, &[defaults, name]);
             let alias = self.string(0, line, &super_alias(interface, method));
-            adaptations.push(self.node(SHARP_AST_TRAIT_ALIAS, ZEND_ACC_PRIVATE, line, &[reference, alias]));
+            adaptations.push(self.node(SHARP_AST_TRAIT_ALIAS, ZEND_ACC_PROTECTED, line, &[reference, alias]));
         }
         let adaptations =
             if adaptations.is_empty() { NULL } else { self.node(SHARP_AST_TRAIT_ADAPTATIONS, 0, line, &adaptations) };
+        let mut members = vec![self.node(SHARP_AST_USE_TRAIT, 0, line, &[names, adaptations])];
+        for (property, interface) in self.types.default_properties(self.class) {
+            let name = property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes());
+            let this = self.variable(span, b"this");
+            let method = self.string(0, line, &super_alias(interface, word(name)));
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+            let call = self.node(SHARP_AST_METHOD_CALL, 0, line, &[this, method, arguments]);
+            let body = self.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[call]);
+            members.push(self.defaulted_property(name, span, body));
+        }
 
-        Some(self.node(SHARP_AST_USE_TRAIT, 0, line, &[names, adaptations]))
+        members
     }
 
     /// An interface property is `public` with the abstract hook `get`, as php-src's grammar builds
@@ -1906,6 +1936,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
     }
 
+    /// A computed property with a default body, spec section 22: in its interface, `public $designKey { get; }`, and in
+    /// a class that gets the body, `body`, `public $designKey { get => $this->{'designKey@App\HasDesign'}(); }`, which
+    /// runs the trait's method that holds it. It has no PHP type, since the class's file has none to write, so an
+    /// override of either may write any, and the trait's method checks the value the body gives.
+    fn defaulted_property(&mut self, name: &[u8], span: Span, body: u32) -> u32 {
+        let line = self.line(span);
+        let name = self.string(0, line, name);
+        let hook = self.hook(b"get", span, span, NULL, body);
+        let hooks = self.node(SHARP_AST_STMT_LIST, 0, line, &[hook]);
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
+        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+
+        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[NULL, declaration, NULL])
+    }
+
     /// An event is a final class, whose constructor promotes each parameter to a `public readonly` property, with its
     /// header as its interface list, as php-src's grammar builds
     /// `final class OrderPaid implements \App\OrderEvent { public function __construct(public readonly int $orderId) {} }`.
@@ -1913,7 +1958,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn event(&mut self, event: &Event) -> u32 {
         self.class = self.names.get(&event.name);
         let line = self.line(&event.parameter_list);
-        let mut members: Vec<u32> = self.trait_use(event.inheritance.as_ref(), line).into_iter().collect();
+        let mut members = self.trait_members(event.inheritance.as_ref(), event.parameter_list.span());
         members.push(self.promoted_constructor(event.name.span, &event.parameter_list));
         members.extend(self.class_metadata(self.line(event.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
@@ -1989,9 +2034,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             .collect();
         let cases: Vec<&[u8]> = cases.iter().map(Vec::as_slice).collect();
         members.push(self.value_equality(r#enum.name.span, &cases));
-        if let Some(trait_use) = self.trait_use(r#enum.inheritance.as_ref(), self.line(r#enum.left_brace)) {
-            members.insert(0, trait_use);
-        }
+        members.splice(0..0, self.trait_members(r#enum.inheritance.as_ref(), r#enum.left_brace));
 
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
         let attributes = self.attributes(&r#enum.attribute_lists, None, None);
@@ -2096,9 +2139,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         members.extend(self.class_metadata(self.line(r#enum.name)));
-        if let Some(trait_use) = self.trait_use(r#enum.inheritance.as_ref(), self.line(r#enum.left_brace)) {
-            members.insert(0, trait_use);
-        }
+        members.splice(0..0, self.trait_members(r#enum.inheritance.as_ref(), r#enum.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
         let attributes = self.attributes(&r#enum.attribute_lists, None, None);
         let header = r#enum.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
@@ -2913,6 +2954,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             {
                 NULL
             }
+            // A computed property's default body runs as a property with no PHP type, spec section 22.
+            (Some(_), _) if self.types.has_default_property(self.class, variable.name) => NULL,
             _ => self.hint(hint),
         };
         let line = self.line(variable);
@@ -6344,10 +6387,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(call);
         let interface = word(self.names.get(&super_of.interface));
         let method = self.types.call_target(expression).name;
-        if !self.super_aliases.contains(&(interface, method)) {
-            self.super_aliases.push((interface, method));
-        }
-
         let object = self.variable(super_of.span(), b"this");
         let method = self.string(0, self.line(&call.method), &super_alias(interface, method));
         let type_arguments = self.types.call_type_arguments(expression);

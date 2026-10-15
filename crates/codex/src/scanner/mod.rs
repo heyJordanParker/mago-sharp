@@ -40,6 +40,7 @@ use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Program;
+use mago_syntax::cst::Property;
 use mago_syntax::cst::Return;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
@@ -421,7 +422,8 @@ impl Scanner {
     }
 
     /// Registers the trait that holds a PHP# interface's default bodies, spec section 22, named by
-    /// [`defaults_trait_name`], with each method of the interface that has a body. The interface's own methods stay
+    /// [`defaults_trait_name`], with each method of the interface that has a body, when the interface gives a method or
+    /// a computed property one. The interface's own methods stay
     /// abstract, as the PHP interface's are, so a class gets a default body only through the trait: the populator gives
     /// it to each PHP# class that implements the interface, and a plain PHP class writes `use HasDesign\Defaults;`.
     fn register_defaults_trait<'arena, A>(&mut self, interface: &Interface<'arena>, context: &Context<'_, 'arena, A>)
@@ -504,7 +506,10 @@ impl Scanner {
             self.codebase.function_likes.insert((name, method_name), body);
         }
 
-        if !defaults.methods.is_empty() {
+        // A computed property's default body runs as a method of the trait too, which the analysis never calls.
+        let gives_property =
+            interface.members.iter().any(|member| matches!(member, ClassLikeMember::Property(Property::Computed(_))));
+        if !defaults.methods.is_empty() || gives_property {
             self.codebase.symbols.add_symbol_name(name, SymbolKind::Trait);
             self.codebase.class_likes.insert(name, defaults);
         }

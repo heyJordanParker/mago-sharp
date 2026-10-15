@@ -10525,8 +10525,8 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
 /// class Both implements \App\Described, \App\Told
 /// {
 ///     use \App\Described\Defaults, \App\Told\Defaults {
-///         \App\Described\Defaults::describe as private `describe@App\Described`;
-///         \App\Told\Defaults::describe as private `describe@App\Told`;
+///         \App\Described\Defaults::describe as protected `describe@App\Described`;
+///         \App\Told\Defaults::describe as protected `describe@App\Told`;
 ///     }
 ///     public function describe(): string
 ///     {
@@ -10535,11 +10535,12 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
 /// }
 /// ```
 ///
-/// Spec section 22: `super<Described>.describe()` runs `Described`'s default body through a private alias of the
-/// trait's method, `[4]` `ZEND_ACC_PRIVATE`, that the class's `use` declares. Its name joins the method and the
-/// interface with `@`, which no PHP# member name holds, so it can't clash with one.
+/// Spec section 22: `super<Described>.describe()` runs `Described`'s default body through a protected alias of the
+/// trait's method, `[2]` `ZEND_ACC_PROTECTED`, that the `use` of each class that uses the trait declares, so a
+/// subclass calls it too. Its name joins the method and the interface with `@`, which no PHP# member name holds, so it
+/// can't clash with one.
 #[test]
-fn super_of_an_interface_calls_a_private_alias_of_its_default_body() {
+fn super_of_an_interface_calls_a_protected_alias_of_its_default_body() {
     let lowered = Lowered::new(
         "namespace App;\n\npublic interface Described\n{\n    string describe() => \"described\";\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n    public override string describe() => super<Described>.describe() + super<Told>.describe();\n}\n",
     );
@@ -10558,12 +10559,12 @@ fn super_of_an_interface_calls_a_private_alias_of_its_default_body() {
                   ZVAL "App\\Described\\Defaults"
                   ZVAL "App\\Told\\Defaults"
                 TRAIT_ADAPTATIONS
-                  TRAIT_ALIAS [4]
+                  TRAIT_ALIAS [2]
                     METHOD_REFERENCE
                       ZVAL "App\\Described\\Defaults"
                       ZVAL "describe"
                     ZVAL "describe@App\\Described"
-                  TRAIT_ALIAS [4]
+                  TRAIT_ALIAS [2]
                     METHOD_REFERENCE
                       ZVAL "App\\Told\\Defaults"
                       ZVAL "describe"
@@ -10618,8 +10619,9 @@ fn super_of_an_interface_calls_a_private_alias_of_its_default_body() {
 /// `ZEND_ACC_INTERFACE`, then the trait `[2]` `ZEND_ACC_TRAIT` named `HasDesign\Defaults`, which the engine declares in
 /// the file's namespace and which holds each default body as a public method. A class's header traits and the traits of
 /// the default bodies of the interfaces it implements first are one `use`, its first member, and a subclass of a class
-/// that already uses them uses none. An enum, an event, a struct and the class of an enum with a case that carries data
-/// use them too.
+/// that already uses them uses none. The `use` gives each default body the protected alias `super<Labeled>` calls,
+/// `[2]` `ZEND_ACC_PROTECTED`. An enum, an event, a struct and the class of an enum with a case that carries data use
+/// them too.
 #[test]
 fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interface_and_its_trait() {
     let lowered = Lowered::with(
@@ -10737,7 +10739,12 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     NAME_LIST
                       ZVAL "Lib\\HasSlug"
                       ZVAL "App\\HasDesign\\Defaults"
-                    null
+                    TRAIT_ADAPTATIONS
+                      TRAIT_ALIAS [2]
+                        METHOD_REFERENCE
+                          ZVAL "App\\HasDesign\\Defaults"
+                          ZVAL "designKey"
+                        ZVAL "designKey@App\\HasDesign"
                 null
                 null
               CLASS [64] "Child" @22-24
@@ -10754,7 +10761,12 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                   USE_TRAIT
                     NAME_LIST
                       ZVAL "App\\Labeled\\Defaults"
-                    null
+                    TRAIT_ADAPTATIONS
+                      TRAIT_ALIAS [2]
+                        METHOD_REFERENCE
+                          ZVAL "App\\Labeled\\Defaults"
+                          ZVAL "label"
+                        ZVAL "label@App\\Labeled"
                   ENUM_CASE
                     ZVAL "Light"
                     null
@@ -10770,7 +10782,12 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                   USE_TRAIT
                     NAME_LIST
                       ZVAL "App\\Labeled\\Defaults"
-                    null
+                    TRAIT_ADAPTATIONS
+                      TRAIT_ALIAS [2]
+                        METHOD_REFERENCE
+                          ZVAL "App\\Labeled\\Defaults"
+                          ZVAL "label"
+                        ZVAL "label@App\\Labeled"
                   METHOD [1] "__construct" @31-31
                     PARAM_LIST
                       PARAM [129]
@@ -10807,7 +10824,12 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                 USE_TRAIT
                   NAME_LIST
                     ZVAL "App\\Labeled\\Defaults"
-                  null
+                  TRAIT_ADAPTATIONS
+                    TRAIT_ALIAS [2]
+                      METHOD_REFERENCE
+                        ZVAL "App\\Labeled\\Defaults"
+                        ZVAL "label"
+                      ZVAL "label@App\\Labeled"
             "#},
             "{name}"
         );

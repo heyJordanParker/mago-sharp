@@ -1451,15 +1451,21 @@ fn a_generic_interface_gives_each_class_its_default_bodies_with_its_type_argumen
 }
 
 /// Spec section 22: implementing an abstract interface method takes no `override`, as the spec's `Page` implements
-/// `HasDesign`, and replacing a default body or a header trait's method replaces a method, so it takes `override`.
+/// `HasDesign`, and replacing a default body or a header trait's method replaces a method, so it takes `override`, as
+/// replacing a computed property's default body does.
 #[test]
 fn override_replaces_a_default_body_or_a_trait_method_and_never_marks_an_implementation() {
-    let sharp = "namespace Demo;\n\nimport Lib.HasTitle;\n\npublic interface Labeled\n{\n    string label();\n    string shout() => \"hey\";\n}\n\npublic class Implementer : Labeled\n{\n    public override string label() => \"x\";\n}\n\npublic class Replacer : Labeled\n{\n    public string label() => \"x\";\n    public string shout() => \"mine\";\n}\n\npublic class Fine : Labeled\n{\n    public string label() => \"x\";\n    public override string shout() => \"mine\";\n}\n\npublic class TraitReplacer : HasTitle\n{\n    public string describe() => \"mine\";\n}\n\npublic class TraitOverrider : HasTitle\n{\n    public override string describe() => \"mine\";\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.HasTitle;\n\npublic interface Labeled\n{\n    string label();\n    string shout() => \"hey\";\n}\n\npublic class Implementer : Labeled\n{\n    public override string label() => \"x\";\n}\n\npublic class Replacer : Labeled\n{\n    public string label() => \"x\";\n    public string shout() => \"mine\";\n}\n\npublic class Fine : Labeled\n{\n    public string label() => \"x\";\n    public override string shout() => \"mine\";\n}\n\npublic class TraitReplacer : HasTitle\n{\n    public string describe() => \"mine\";\n}\n\npublic class TraitOverrider : HasTitle\n{\n    public override string describe() => \"mine\";\n}\n\npublic interface Tagged\n{\n    string tag => \"t\";\n}\n\npublic class TagReplacer : Tagged\n{\n    public string tag => \"mine\";\n}\n\npublic class TagOverrider : Tagged\n{\n    public override string tag => \"mine\";\n}\n";
     let others = [("src/Lib/HasLabel.php", HAS_LABEL)];
 
     assert_eq!(
         issues(("src/Demo/Labeled.sharp", sharp), &others),
-        ["13:12 invalid-override-attribute", "19:19 missing-override-attribute", "30:19 missing-override-attribute"]
+        [
+            "13:12 invalid-override-attribute",
+            "19:19 missing-override-attribute",
+            "30:19 missing-override-attribute",
+            "45:19 missing-override-attribute"
+        ]
     );
     assert_eq!(
         messages(("src/Demo/Labeled.sharp", sharp), &others)[0],
@@ -1503,15 +1509,21 @@ fn a_closed_method_and_a_header_with_two_classes_speak_sharp() {
 
 /// Spec section 22 gives a class one method per name: when two places give the class a body for one method, two
 /// header traits, two interfaces' default bodies, or a default body beside the base class's method, the class writes
-/// the method itself. Until it does, the class is an error that names both places.
+/// the method itself. Until it does, the class is an error that names both places. A computed property two interfaces
+/// give a default body is one too.
 #[test]
 fn a_class_that_gets_one_method_from_two_places_writes_it() {
-    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\nimport Lib.HasTitle;\n\npublic class Twice : HasLabel, HasTitle\n{\n}\n\npublic interface Described\n{\n    string describe() => \"described\";\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n}\n\npublic class Base\n{\n    public virtual string describe() => \"base\";\n}\n\npublic class Beside : Base, Described\n{\n}\n\npublic class Written : Described, Told\n{\n    public override string describe() => \"written\";\n}\n\npublic class WrittenOverBase : Base, Described\n{\n    public override string describe() => super.describe();\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\nimport Lib.HasTitle;\n\npublic class Twice : HasLabel, HasTitle\n{\n}\n\npublic interface Described\n{\n    string describe() => \"described\";\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n}\n\npublic class Base\n{\n    public virtual string describe() => \"base\";\n}\n\npublic class Beside : Base, Described\n{\n}\n\npublic class Written : Described, Told\n{\n    public override string describe() => \"written\";\n}\n\npublic class WrittenOverBase : Base, Described\n{\n    public override string describe() => super.describe();\n}\n\npublic interface Tagged\n{\n    string tag => \"t\";\n}\n\npublic interface Labelled\n{\n    string tag => \"l\";\n}\n\npublic class Tags : Tagged, Labelled\n{\n}\n";
     let others = [("src/Lib/HasLabel.php", HAS_LABEL)];
 
     assert_eq!(
         issues(("src/Demo/Twice.sharp", sharp), &others),
-        ["6:14 ambiguous-inherited-member", "20:14 ambiguous-inherited-member", "29:14 ambiguous-inherited-member"]
+        [
+            "6:14 ambiguous-inherited-member",
+            "20:14 ambiguous-inherited-member",
+            "29:14 ambiguous-inherited-member",
+            "53:14 ambiguous-inherited-member"
+        ]
     );
     assert_eq!(
         messages(("src/Demo/Twice.sharp", sharp), &others),
@@ -1519,33 +1531,38 @@ fn a_class_that_gets_one_method_from_two_places_writes_it() {
             "`Twice` gets `describe` from both `HasLabel` and `HasTitle`: write `describe` in `Twice`.",
             "`Both` gets `describe` from both `Described` and `Told`: write `describe` in `Both`.",
             "`Beside` gets `describe` from both `Base` and `Described`: write `describe` in `Beside`.",
+            "`Tags` gets `tag` from both `Labelled` and `Tagged`: write `tag` in `Tags`.",
         ]
     );
 }
 
 /// Spec section 22: inside its own methods, a class reuses one interface's default body with `super<HasLabel>`. It is
 /// an error when the class does not implement the interface, when the interface gives the method no default body, and
-/// outside a class. A class whose base class already implements the interface is not supported yet.
+/// outside a class. A subclass of a PHP# class that implements the interface reuses it too, and a subclass of a plain
+/// PHP one can't, since only a PHP# class keeps each default body under a name its subclasses call.
 #[test]
 fn super_of_an_interface_reuses_its_default_body_in_a_class_that_implements_it() {
-    let sharp = "namespace Demo;\n\npublic interface Described\n{\n    string describe() => \"described\";\n    string title();\n    string shout() => super<Told>.describe();\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n    public override string describe() => super<Described>.describe() + super<Told>.describe();\n    public string title() => super<Described>.title();\n}\n\npublic class Stranger\n{\n    public string describe() => super<Told>.describe();\n}\n\npublic class Base : Told\n{\n}\n\npublic class Child : Base\n{\n    public string again() => super<Told>.describe();\n}\n";
+    let library =
+        "<?php\n\nnamespace Lib;\n\nclass Legacy implements \\Demo\\Told\n{\n    use \\Demo\\Told\\Defaults;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Legacy;\n\npublic interface Described\n{\n    string describe() => \"described\";\n    string title();\n    string shout() => super<Told>.describe();\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n    public override string describe() => super<Described>.describe() + super<Told>.describe();\n    public string title() => super<Described>.title();\n}\n\npublic class Stranger\n{\n    public string describe() => super<Told>.describe();\n}\n\npublic class Base : Told\n{\n}\n\npublic class Child : Base\n{\n    public string again() => super<Told>.describe();\n}\n\npublic class Heir : Legacy\n{\n    public string again() => super<Told>.describe();\n}\n";
+    let others = [("src/Lib/Legacy.php", library)];
 
     assert_eq!(
-        messages(("src/Demo/Described.sharp", sharp), &[]),
+        messages(("src/Demo/Described.sharp", sharp), &others),
         [
             "`super<Told>` reuses a default body only in the methods of a class that implements `Told`.",
             "`Described.title` has no default body, so `super<Described>.title()` has nothing to run.",
             "`Stranger` does not implement `Told`, so `super<Told>` has no default body to reuse.",
-            "`super<Told>` in `Child`, whose base class already implements `Told`, is not supported yet in PHP#.",
+            "`super<Told>` reuses a default body a PHP# class keeps, and `Legacy`, which implements `Told`, is plain PHP.",
         ]
     );
     assert_eq!(
-        issues(("src/Demo/Described.sharp", sharp), &[]),
+        issues(("src/Demo/Described.sharp", sharp), &others),
         [
-            "7:23 parent-outside-class-scope",
-            "18:30 abstract-super-call",
-            "23:33 invalid-parent-type",
-            "32:30 not-supported-yet",
+            "9:23 parent-outside-class-scope",
+            "20:30 abstract-super-call",
+            "25:33 invalid-parent-type",
+            "39:30 invalid-parent-type",
         ]
     );
 }
