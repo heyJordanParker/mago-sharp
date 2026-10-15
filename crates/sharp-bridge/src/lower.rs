@@ -232,7 +232,6 @@ use crate::sharp_kind::SHARP_AST_VAR;
 use crate::sharp_kind::SHARP_AST_VERIFY_TYPE_ARGS;
 use crate::sharp_kind::SHARP_AST_WHILE;
 use crate::sharp_kind::SHARP_AST_YIELD;
-use crate::sharp_kind::SHARP_AST_YIELD_FROM;
 use crate::sharp_kind::SHARP_AST_ZVAL;
 use crate::sharp_node;
 use crate::sharp_str;
@@ -4500,7 +4499,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_THROW, 0, line, &[exception])
             }
             // `yield value;` is php-src's `yield $value;`, a `YIELD` of its value and no key, and `yield ...other;` is
-            // `yield from $other;`. `check_slice` keeps both as statements of a method that returns `Iterable<T>`.
+            // `foreach ($other as $element#N) { yield $element#N; }`, so each element takes the generator's next
+            // automatic key, where `yield from` would give the keys of `other`. `check_slice` keeps both as statements
+            // of a method that returns `Iterable<T>`, so the loop stands where the statement does.
             Expression::Yield(Yield::Value(YieldValue { value: Some(value), .. })) => {
                 let value = self.expression(value);
 
@@ -4513,8 +4514,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 } else {
                     self.expression(spread.iterator)
                 };
+                self.temporaries += 1;
+                let element = format!("element#{}", self.temporaries).into_bytes();
+                let value = self.variable(spread.span(), &element);
+                let r#yield = self.variable(spread.span(), &element);
+                let r#yield = self.node(SHARP_AST_YIELD, 0, line, &[r#yield, NULL]);
+                let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#yield]);
+                self.temporaries -= 1;
 
-                self.node(SHARP_AST_YIELD_FROM, 0, line, &[iterator])
+                self.node(SHARP_AST_FOREACH, 0, line, &[iterator, value, NULL, body])
             }
             // Spec section 14.4: the engine compiles the statement of `a ?? return`, `continue` or `break` in the
             // middle of the expression, after the ZEND_SHARP_LEAVE that frees what the expression holds.

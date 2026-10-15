@@ -16182,8 +16182,8 @@ fn a_map_that_lands_in_an_iterable_gives_its_entries() {
                 ZVAL 1
         "#}
     );
-    // Each body first makes the object of a PHP array plain PHP passes as `plans`, and its last statement takes the
-    // entries, a child of that statement.
+    // Each body first makes the object of a PHP array plain PHP passes as `plans`, and then a statement takes the
+    // entries as its first child: the loop `yield ...` runs as, the `return` and the assignment.
     let entries = concat!(
         "    STATIC_CALL\n",
         "      ZVAL \"Sharp\\\\Sequence\"\n",
@@ -16193,11 +16193,11 @@ fn a_map_that_lands_in_an_iterable_gives_its_entries() {
         "          ZVAL \"plans\"\n",
     );
     for (method, statement) in
-        [("all", "  YIELD_FROM\n"), ("some", "  RETURN\n"), ("run", "  ASSIGN\n    VAR\n      ZVAL \"kept\"\n")]
+        [("all", "  FOREACH\n"), ("some", "  RETURN\n"), ("run", "  ASSIGN\n    VAR\n      ZVAL \"kept\"\n")]
     {
         let body = lowered.body_of(method);
 
-        assert!(body.ends_with(&format!("{statement}{entries}")), "{method}:\n{body}");
+        assert!(body.contains(&format!("{statement}{entries}")), "{method}:\n{body}");
     }
 }
 
@@ -16232,14 +16232,15 @@ fn a_named_tuple_element_is_an_index_read_of_its_position() {
 }
 
 /// ```php
-/// yield from $pending; yield $latest; yield fn($x) => $x; return;
+/// foreach ($pending as $element#1) { yield $element#1; } yield $latest; yield fn($x) => $x; return;
 /// ```
 ///
 /// `yield value;` is a `YIELD` of its value and a null key, alone as a statement, as php-src's grammar builds
-/// `yield $value;`, and `yield ...other;` is PHP's `yield from`, a `YIELD_FROM` of `other`. `yield x => x;` yields a
-/// lambda, because `=>` is the lambda arrow in PHP#.
+/// `yield $value;`. `yield ...other;` is a loop that yields each element of `other`, so each takes the generator's
+/// next automatic key, where PHP's `yield from` would give the keys of `other`. `yield x => x;` yields a lambda,
+/// because `=>` is the lambda arrow in PHP#.
 #[test]
-fn yield_is_a_yield_statement_and_yield_spread_is_yield_from() {
+fn yield_is_a_yield_statement_and_yield_spread_is_a_loop_that_yields_each_element() {
     let lowered = Lowered::new(
         "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<Any> run(List<int> pending, int latest)\n    {\n        yield ...pending;\n        yield latest;\n        yield x => x;\n        return;\n    }\n}\n",
     );
@@ -16248,9 +16249,17 @@ fn yield_is_a_yield_statement_and_yield_spread_is_yield_from() {
         lowered.body(),
         indoc! {r#"
             STMT_LIST
-              YIELD_FROM
+              FOREACH
                 VAR
                   ZVAL "pending"
+                VAR
+                  ZVAL "element#1"
+                null
+                STMT_LIST
+                  YIELD
+                    VAR
+                      ZVAL "element#1"
+                    null
               YIELD
                 VAR
                   ZVAL "latest"
