@@ -1795,6 +1795,156 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 }
 
 /// ```php
+/// class Tally
+/// {
+///     public static function {'doubled#get'}(): int { return Tally::{'total#get'}() * 2; }
+///     public private(set) static int $total = 0;
+///     public static function {'total#get'}(): int { return self::$total; }
+///     private static function {'total#set'}(int $value) { self::$total = $value + 1; }
+///
+///     public static function run(): int
+///     {
+///         Tally::{'total#set'}($value#1 = 4) ?? $value#1;
+///         Tally::{'total#set'}($value#1 = Tally::{'total#get'}() + 2) ?? $value#1;
+///         return (Tally::{'total#set'}(($old#1 = Tally::{'total#get'}()) + 1) ?? $old#1) + Tally::{'doubled#get'}();
+///     }
+/// }
+/// ```
+///
+/// Decision 3: PHP has no hooks on a static, so a static computed property or one with an accessor body runs its
+/// accessors as its class's hidden static methods, `name#get` at the property's level and `name#set` at its `set`'s,
+/// `[17]` being `ZEND_ACC_PUBLIC | ZEND_ACC_STATIC` and `[20]` `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`. Its storage is a
+/// static only they write, under `private(set)`. Every read calls `name#get`, and every write `name#set`, with the
+/// value written held in a hidden variable, so the write's value is the value written, and a postfix `++` the value
+/// read.
+#[test]
+fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
+    let lowered = Lowered::new(
+        "class Tally\n{\n    public static int doubled => Tally.total * 2;\n    public static int total { get; private set => field = value + 1; } = 0;\n\n    public static int run()\n    {\n        Tally.total = 4;\n        Tally.total += 2;\n        return Tally.total++ + Tally.doubled;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.root(), 1)),
+        indoc! {r#"
+            CLASS "Tally" @1-12
+              null
+              null
+              STMT_LIST
+                METHOD [17] "doubled#get" @3-3
+                  PARAM_LIST
+                  null
+                  STMT_LIST
+                    RETURN
+                      BINARY_OP [3]
+                        STATIC_CALL
+                          ZVAL "Tally"
+                          ZVAL "total#get"
+                          ARG_LIST
+                        ZVAL 2
+                  ZVAL [1] "int"
+                  null
+                PROP_GROUP [4113]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "total"
+                      ZVAL 0
+                      null
+                      null
+                  null
+                METHOD [17] "total#get" @4-4
+                  PARAM_LIST
+                  null
+                  STMT_LIST
+                    RETURN
+                      STATIC_PROP
+                        ZVAL [1] "self"
+                        ZVAL "total"
+                  ZVAL [1] "int"
+                  null
+                METHOD [20] "total#set" @4-4
+                  PARAM_LIST
+                    PARAM
+                      ZVAL [1] "int"
+                      ZVAL "value"
+                      null
+                      null
+                      null
+                      null
+                  null
+                  STMT_LIST
+                    ASSIGN
+                      STATIC_PROP
+                        ZVAL [1] "self"
+                        ZVAL "total"
+                      BINARY_OP [1]
+                        VAR
+                          ZVAL "value"
+                        ZVAL 1
+                  null
+                  null
+                METHOD [17] "run" @6-11
+                  PARAM_LIST
+                  null
+                  STMT_LIST
+                    COALESCE
+                      STATIC_CALL
+                        ZVAL "Tally"
+                        ZVAL "total#set"
+                        ARG_LIST
+                          ASSIGN
+                            VAR
+                              ZVAL "value#1"
+                            ZVAL 4
+                      VAR
+                        ZVAL "value#1"
+                    COALESCE
+                      STATIC_CALL
+                        ZVAL "Tally"
+                        ZVAL "total#set"
+                        ARG_LIST
+                          ASSIGN
+                            VAR
+                              ZVAL "value#1"
+                            BINARY_OP [1]
+                              STATIC_CALL
+                                ZVAL "Tally"
+                                ZVAL "total#get"
+                                ARG_LIST
+                              ZVAL 2
+                      VAR
+                        ZVAL "value#1"
+                    RETURN
+                      BINARY_OP [1]
+                        COALESCE
+                          STATIC_CALL
+                            ZVAL "Tally"
+                            ZVAL "total#set"
+                            ARG_LIST
+                              BINARY_OP [1]
+                                ASSIGN
+                                  VAR
+                                    ZVAL "old#1"
+                                  STATIC_CALL
+                                    ZVAL "Tally"
+                                    ZVAL "total#get"
+                                    ARG_LIST
+                                ZVAL 1
+                          VAR
+                            ZVAL "old#1"
+                        STATIC_CALL
+                          ZVAL "Tally"
+                          ZVAL "doubled#get"
+                          ARG_LIST
+                  ZVAL [1] "int"
+                  null
+              null
+              null
+        "#}
+    );
+}
+
+/// ```php
 /// class Report
 /// {
 ///     public private(set) static int $size = 3;

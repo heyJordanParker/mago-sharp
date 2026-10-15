@@ -476,7 +476,8 @@ where
             .collect()
     }
 
-    /// The `accessor` bodies a read or write of `object.property` runs.
+    /// The `accessor` bodies a read or write of `object.property` runs. For `Class.property`, a static's, they are the
+    /// class's own.
     fn accessors(
         &self,
         object: &Expression<'arena>,
@@ -486,8 +487,16 @@ where
         let ClassLikeMemberSelector::Identifier(name) = property else {
             return Vec::new();
         };
+        let classes = match object.unparenthesized() {
+            Expression::ConstantAccess(class)
+                if self.context.resolved_names.binding(&class.name) == Some(Binding::Class) =>
+            {
+                vec![word(self.context.resolved_names.get(&class.name))]
+            }
+            _ => self.object_classes(object),
+        };
 
-        self.object_classes(object).into_iter().filter_map(|class| self.accessor(class, name.value, accessor)).collect()
+        classes.into_iter().filter_map(|class| self.accessor(class, name.value, accessor)).collect()
     }
 
     fn accessor(&self, class: Word, property: &[u8], accessor: &[u8]) -> Option<Body> {
@@ -1100,9 +1109,8 @@ where
         access: &'ast PropertyAccess<'arena>,
         recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
     ) {
-        if recorder.context.resolved_names.static_property_class(access).is_none() {
-            recorder.read_property(access.object, &access.property, access.span());
-        }
+        // `Class.name` reads a static, which runs its class's `get` body too.
+        recorder.read_property(access.object, &access.property, access.span());
     }
 
     fn walk_in_null_safe_property_access(

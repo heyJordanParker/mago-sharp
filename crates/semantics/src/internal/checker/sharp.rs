@@ -965,7 +965,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                     let variable = property.first_variable();
                     check_declared_name(variable.name, variable.span, context);
                     report_static_without_initial_value(property, context);
-                    report_generic_static_initial_value(property, context);
+                    report_generic_static(property, context);
 
                     Some(FieldOrProperty)
                 }
@@ -2554,17 +2554,7 @@ fn is_slice_property(property: &Property, version: &PHPVersion) -> Result<(), Bo
     };
     let no_access_modifier = "A PHP# member without an access modifier is `private`, while PHP makes it `public`.";
 
-    if let Some(r#static) = property.modifiers().get_static() {
-        if let Property::Hooked(hooked) = property
-            && hooked.hook_list.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
-        {
-            return Err(Box::new(not_supported(
-                r#static.span(),
-                "A static property with an accessor body is not supported yet in PHP#.",
-                "PHP has no hooks on a static property.",
-            )));
-        }
-
+    if property.modifiers().contains_static() {
         if let Property::Hooked(auto_property) = property
             && let Some(init) = auto_property.hook_list.setter().filter(|setter| setter.name.value == b"init")
         {
@@ -2722,12 +2712,6 @@ fn is_slice_property(property: &Property, version: &PHPVersion) -> Result<(), Bo
                     "A property without `public`, `protected` or `private` is not supported yet in PHP#.",
                     no_access_modifier,
                 )))
-            } else if let Some(r#static) = computed.modifiers.get_static() {
-                Err(Box::new(not_supported(
-                    r#static.span(),
-                    "A static computed property is not supported yet in PHP#.",
-                    "PHP has no hooks on a static property, so a computed property is an instance property.",
-                )))
             } else {
                 Ok(())
             }
@@ -2763,22 +2747,46 @@ fn report_parameter_accessor_bodies(
     }
 }
 
-/// Reports a static member of a generic class whose initial value runs as code. Each type argument's statics start as a
-/// copy of the constant initial values, spec section 11, and the engine runs no code on that first use.
-fn report_generic_static_initial_value(property: &Property, context: &mut Context<'_, '_, '_>) {
-    if !property.initial_value_runs_after_class()
+/// Reports a static member of a generic class whose initial value runs as code, or that runs accessors. Each type
+/// argument's statics are an entry of one hidden table, spec section 11, which starts as a copy of constant initial
+/// values, and the engine runs no code on that first use and gives the entry no accessors.
+fn report_generic_static(property: &Property, context: &mut Context<'_, '_, '_>) {
+    if !property.modifiers().contains_static()
         || enclosing_class(context.program, property.span()).is_none_or(|class| class.type_parameters.is_none())
     {
         return;
     }
-    let Some(value) = property.initial_value() else {
+
+    let runs_accessors = match property {
+        Property::Computed(_) => true,
+        Property::Hooked(hooked) => {
+            hooked.hook_list.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
+        }
+        Property::Plain(_) => false,
+    };
+    let refused = if runs_accessors {
+        Some((
+            property.first_variable().span,
+            "A static property with accessors in a generic class is not supported yet in PHP#.",
+        ))
+    } else if property.initial_value_runs_after_class()
+        && let Some(value) = property.initial_value()
+    {
+        Some((
+            value.span(),
+            "A static member of a generic class with an initial value that runs as code is not supported yet in PHP#.",
+        ))
+    } else {
+        None
+    };
+    let Some((span, message)) = refused else {
         return;
     };
 
     context.report(
-        Issue::error("A static member of a generic class with an initial value that runs as code is not supported yet in PHP#.")
-            .with_annotation(Annotation::primary(value.span()).with_message("Not supported yet."))
-            .with_note("Each type argument's statics start as a copy of constant initial values, and the engine runs no code on that first use."),
+        Issue::error(message)
+            .with_annotation(Annotation::primary(span).with_message("Not supported yet."))
+            .with_note("Each type argument's statics are an entry of one table, which starts as a copy of constant initial values, and the engine runs no code on that first use."),
     );
 }
 
@@ -5468,7 +5476,7 @@ fn report_bare_member(span: Span, name: &[u8], context: &mut Context<'_, '_, '_>
     context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message("Used here.")));
 }
 
-/// The class of the static method or the law whose body holds `span`, which has no `this`.
+/// The class of the static method, the static property or the law whose body holds `span`, which has no `this`.
 fn enclosing_static_method_class<'ast, 'arena>(
     program: &'ast Program<'arena>,
     span: Span,
@@ -5482,6 +5490,9 @@ fn enclosing_static_method_class<'ast, 'arena>(
             ClassLikeMember::Method(method) => {
                 method.span().contains(&span.start)
                     && method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Static(_)))
+            }
+            ClassLikeMember::Property(property) => {
+                property.span().contains(&span.start) && property.modifiers().contains_static()
             }
             ClassLikeMember::Law(law) => law.span().contains(&span.start),
             _ => false,

@@ -449,7 +449,13 @@ where
 {
     let mut scope = ScopeContext::new(parent_block_context.scope.get_reference_origin());
     scope.set_class_like(parent_block_context.scope.get_class_like());
-    scope.set_static(false);
+    // A static property's accessors run as its class's static methods, with no `this`.
+    let is_static = parent_block_context
+        .scope
+        .get_class_like()
+        .and_then(|class_like| class_like.properties.get(&property_name))
+        .is_some_and(|property| property.flags.is_static());
+    scope.set_static(is_static);
 
     if let Some(class_like) = parent_block_context.scope.get_class_like()
         && let Some(property) = class_like.properties.get(&property_name)
@@ -473,7 +479,9 @@ where
 
     let mut hook_block_context = BlockContext::new(scope, context.settings.register_super_globals);
 
-    if let Some(class_like_metadata) = parent_block_context.scope.get_class_like() {
+    if let Some(class_like_metadata) = parent_block_context.scope.get_class_like()
+        && !is_static
+    {
         hook_block_context.locals.insert(
             Word::from("$this"),
             Rc::new(wrap_atomic(TAtomic::Object(get_this_type(context, class_like_metadata, None)))),

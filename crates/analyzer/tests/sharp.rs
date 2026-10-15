@@ -6143,6 +6143,28 @@ fn a_get_only_static_is_set_only_by_its_initial_value() {
     );
 }
 
+/// Decision 3: a static property takes a computed body, accessor bodies and observers, as an instance property does.
+/// Its `field` is its static storage, and its accessors have no `this`, as a static method has none. A static computed
+/// property is get-only.
+#[test]
+fn a_static_property_runs_its_accessors_as_an_instance_property_does() {
+    let sharp = "namespace Demo;\n\nclass Counter\n{\n    private static int hits = 0;\n    public static int doubled => Counter.hits * 2;\n    public static int total { get => field; set { field = value; Counter.hits = Counter.hits + 1; } } = 0;\n    public static string label { get; set; didSet => Counter.hits = global.strlen(field); } = \"\";\n    public static int wrong => this.doubled;\n    public static int typed => \"x\";\n\n    public static int alsoWrong()\n    {\n        return this.doubled;\n    }\n\n    public static void bump()\n    {\n        Counter.total = Counter.total + 1;\n        Counter.total += 2;\n        Counter.total++;\n        Counter.label = \"a\";\n        Counter.doubled = 3;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Counter.sharp", sharp), &[]),
+        [
+            "9:32 undefined-variable",
+            "9:37 mixed-property-access",
+            "9:32 mixed-return-statement",
+            "10:32 invalid-return-statement",
+            "14:16 undefined-variable",
+            "14:21 mixed-property-access",
+            "14:16 mixed-return-statement",
+            "23:17 invalid-property-write",
+        ]
+    );
+}
+
 /// Spec section 9.1: the main constructor sets a get-only property once, so a named constructor that sets it again is
 /// an error. One the main constructor leaves unset is the named constructor's to set, once.
 #[test]
@@ -15787,6 +15809,24 @@ fn a_write_of_a_property_carries_its_observers_effects() {
         effect_issues(&[timed, law, CLOCK_STUB, NOW]),
         [
             "app/Shop/Labels.sharp:5:28 impure-law: Law `named` reaches `Tag.name`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
+        ]
+    );
+}
+
+/// Decision 3: a static property's accessors run on its reads and writes as an instance property's do, so a law
+/// reading a static computed property reaches its body's effect. A write of a static changes shared state first.
+#[test]
+fn a_static_property_s_reads_and_writes_carry_its_accessors_effects() {
+    let stamp = (
+        "app/Shop/Stamp.sharp",
+        "namespace App.Shop;\n\npublic class Stamp\n{\n    public static int now => global.now();\n    public static int last { get; set { field = value + global.now(); } } = 0;\n\n    law read(int size) => Stamp.now > size;\n\n    law written(int size) => Stamp.mark(size) > 0;\n\n    public static int mark(int size)\n    {\n        Stamp.last = size;\n        return size;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[stamp, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Stamp.sharp:8:27 impure-law: Law `read` reaches `Stamp.now`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Stamp.sharp:10:30 impure-law: Law `written` reaches `Stamp.mark`, which changes `Stamp.last`. Laws hold only over pure code.",
         ]
     );
 }

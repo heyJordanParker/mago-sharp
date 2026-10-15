@@ -830,6 +830,17 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
+    /// Whether the static property `property` of `class` runs accessors: a computed one, or one with an accessor body or
+    /// an observer. PHP has no hooks on a static, so its class holds them as the hidden static methods `name#get` and
+    /// `name#set`, which every read and write of it calls.
+    pub(crate) fn is_static_accessor(&self, class: &[u8], property: &[u8]) -> bool {
+        let variable = [b"$", property].concat();
+
+        self.codebase
+            .get_declaring_property(class, &variable)
+            .is_some_and(|metadata| metadata.flags.is_static() && !metadata.hooks.is_empty())
+    }
+
     /// The property `class` declares or inherits by the name `property`, if any.
     fn property_declaration(&self, class: &[u8], property: &[u8]) -> Option<Declaration> {
         let variable = [b"$", property].concat();

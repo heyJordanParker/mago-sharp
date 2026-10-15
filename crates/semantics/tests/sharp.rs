@@ -3525,15 +3525,12 @@ fn an_expression_body_is_checked_as_a_method_body() {
 }
 
 #[test]
-fn a_static_computed_property_or_one_without_an_access_modifier_is_not_supported_yet() {
+fn a_computed_property_without_an_access_modifier_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int count => 1;\n    int size => 2;\n}\n";
 
     assert_eq!(
         issues(code),
-        [
-            "5:12 A static computed property is not supported yet in PHP#.",
-            "6:9 A property without `public`, `protected` or `private` is not supported yet in PHP#.",
-        ]
+        ["6:9 A property without `public`, `protected` or `private` is not supported yet in PHP#."]
     );
 }
 
@@ -3715,12 +3712,19 @@ fn an_initial_value_that_is_not_constant_on_a_property_whose_set_has_a_body_is_n
     );
 }
 
+/// Decision 3: a static property takes accessor bodies, observers and a computed body, as an instance property does,
+/// except in a generic class, whose statics are entries of one table that runs no accessors.
 #[test]
-fn a_static_property_with_an_accessor_body_is_not_supported_yet() {
-    let code =
-        "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n}\n";
+fn a_static_property_takes_accessors_except_in_a_generic_class() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int b { get; set; didSet => Report.a = 1; } = 0;\n    public static int c => Report.a + 1;\n}\n\nclass Box<T>\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int c => 1;\n    public static int d { get; set; } = 0;\n}\n";
 
-    assert_eq!(issues(code), ["5:12 A static property with an accessor body is not supported yet in PHP#."]);
+    assert_eq!(
+        issues(code),
+        [
+            "12:23 A static property with accessors in a generic class is not supported yet in PHP#.",
+            "13:23 A static property with accessors in a generic class is not supported yet in PHP#.",
+        ]
+    );
 }
 
 /// Spec section 6.1: `init` sets a property while its object is created, and no object creates a static property.

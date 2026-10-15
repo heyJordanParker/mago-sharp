@@ -411,6 +411,10 @@ where
                 flags |= sharp_internal_flags(&computed_property.modifiers, None);
             }
 
+            if computed_property.modifiers.contains_static() {
+                flags |= MetadataFlags::STATIC;
+            }
+
             let mut metadata =
                 PropertyMetadata::new(VariableIdentifier(php_variable_name(computed_property.variable.name)), flags);
 
