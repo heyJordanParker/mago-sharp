@@ -562,3 +562,110 @@ fn a_foreign_modifier_change_changes_the_fingerprint() {
 
     assert_ne!(plain, foreign, "Marking a class `foreign` should change the fingerprint");
 }
+
+/// Each PHP# form changes the fingerprint when its own part changes, so an edit to it reaches the analysis cache. Each
+/// row is a member of a class, before and after the edit.
+#[test]
+fn an_edit_to_each_php_sharp_form_changes_the_fingerprint() {
+    let rows: [(&str, &[u8], &[u8]); 26] = [
+        ("an `is` type", b"bool run(Any? v) => v is int;", b"bool run(Any? v) => v is string;"),
+        ("an `is` name", b"bool run(Any? v) => v is Order o;", b"bool run(Any? v) => v is Order p;"),
+        ("an `as` type", b"Order? run(Any? v) => v as Order;", b"Invoice? run(Any? v) => v as Invoice;"),
+        ("a value pattern", b"bool run(Any? v) => v is 200;", b"bool run(Any? v) => v is 300;"),
+        ("a comparison pattern", b"bool run(Any? v) => v is < 10;", b"bool run(Any? v) => v is > 10;"),
+        ("a `not` pattern", b"bool run(Any? v) => v is int;", b"bool run(Any? v) => v is not int;"),
+        ("`and` or `or`", b"bool run(int v) => v is > 1 and < 9;", b"bool run(int v) => v is > 1 or < 9;"),
+        (
+            "a pattern's grouping",
+            b"bool run(int v) => v is (> 1 or < 0) and < 9;",
+            b"bool run(int v) => v is > 1 or (< 0 and < 9);",
+        ),
+        ("a properties pattern", b"bool run(Any? v) => v is { status: 200 };", b"bool run(Any? v) => v is { code: 200 };"),
+        (
+            "a type pattern's properties",
+            b"bool run(Any? v) => v is Order { total: 1 };",
+            b"bool run(Any? v) => v is Order { total: 2 };",
+        ),
+        (
+            "a list pattern's rest",
+            b"bool run(List<int> v) => v is [int first, ...];",
+            b"bool run(List<int> v) => v is [..., int first];",
+        ),
+        (
+            "a named rest's type",
+            b"bool run(List<int> v) => v is [int a, ...List<int> rest];",
+            b"bool run(List<int> v) => v is [int a, ...List<string> rest];",
+        ),
+        (
+            "a case's fields",
+            b"bool run(PaymentResult v) => v is PaymentResult.Paid(string id);",
+            b"bool run(PaymentResult v) => v is PaymentResult.Paid(int id);",
+        ),
+        (
+            "a `match` arm",
+            b"string run(Any? v) => match (v) { int i => \"a\", default => \"b\" };",
+            b"string run(Any? v) => match (v) { string i => \"a\", default => \"b\" };",
+        ),
+        (
+            "a `match` guard",
+            b"string run(Any? v) => match (v) { int i => \"a\", default => \"b\" };",
+            b"string run(Any? v) => match (v) { int i when i > 0 => \"a\", default => \"b\" };",
+        ),
+        (
+            "a `match` statement's block arm",
+            b"void run(Any? v) { match (v) { int i => { this.a(); }, default => { } } }",
+            b"void run(Any? v) { match (v) { int i => { this.b(); }, default => { } } }",
+        ),
+        ("a `typeof`", b"Class<Any> run() => typeof(Order);", b"Class<Any> run() => typeof(Invoice);"),
+        ("a `with`", b"Point run(Point p) => p with { x: 1 };", b"Point run(Point p) => p with { x: 2 };"),
+        (
+            "a class value's type arguments",
+            b"int run() => Counter<Order>.count;",
+            b"int run() => Counter<Invoice>.count;",
+        ),
+        (
+            "a `for … of` body",
+            b"void run(List<int> lines) { for (const line of lines) { this.a(); } }",
+            b"void run(List<int> lines) { for (const line of lines) { this.b(); } }",
+        ),
+        ("a local declaration", b"int run() { let total = 1; return total; }", b"int run() { let total = 2; return total; }"),
+        ("a `new`'s type arguments", b"Any run() => new Box<Order>();", b"Any run() => new Box<Invoice>();"),
+        ("a `new`'s initializer", b"Point run() => new Point { x: 1 };", b"Point run() => new Point { x: 2 };"),
+        (
+            "a method call's type arguments",
+            b"Any run(string s) => Json.decode<Order>(s);",
+            b"Any run(string s) => Json.decode<Invoice>(s);",
+        ),
+        (
+            "a null-safe method call's type arguments",
+            b"Any run(Repo? r) => r?.find<Order>(1);",
+            b"Any run(Repo? r) => r?.find<Invoice>(1);",
+        ),
+        ("a `?? return`", b"int run(int? v) { int n = v ?? return 0; return n; }", b"int run(int? v) { int n = v ?? return 1; return n; }"),
+    ];
+
+    for (form, before, after) in rows {
+        let member = |member: &[u8]| {
+            let code = [b"class Shows\n{\n    public ".as_slice(), member, b"\n}\n"].concat();
+
+            fingerprint_of(b"src/Shows.sharp", code.leak())
+        };
+
+        assert_ne!(member(before), member(after), "An edit to {form} should change the fingerprint");
+    }
+}
+
+/// An interface's modifiers, `sealed` among them, change the fingerprint, as an `extern` declaration's effects do.
+#[test]
+fn a_sealed_interface_and_an_extern_change_the_fingerprint() {
+    let shape = |code| fingerprint_of(b"src/Shape.sharp", code);
+    let open = shape(b"public interface Shape\n{\n}\n");
+    let internal = shape(b"internal interface Shape\n{\n}\n");
+    let sealed = shape(b"public sealed interface Shape\n{\n}\n");
+    let clock = shape(b"extern Carbon.now uses Clock;\n");
+    let http = shape(b"extern Carbon.now uses Http;\n");
+
+    assert_ne!(open, internal, "Making an interface `internal` should change the fingerprint");
+    assert_ne!(open, sealed, "Sealing an interface should change the fingerprint");
+    assert_ne!(clock, http, "Changing an `extern` declaration's effects should change the fingerprint");
+}

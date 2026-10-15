@@ -76,6 +76,7 @@ impl Fingerprintable for MethodCall<'_> {
         "method_call".hash(hasher);
         self.object.fingerprint_with_hasher(hasher, resolved_names, options);
         self.method.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.type_arguments.fingerprint_with_hasher(hasher, resolved_names, options);
         self.argument_list.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }
@@ -94,6 +95,7 @@ impl Fingerprintable for NullSafeMethodCall<'_> {
 
         self.object.fingerprint_with_hasher(hasher, resolved_names, options);
         self.method.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.type_arguments.fingerprint_with_hasher(hasher, resolved_names, options);
         self.argument_list.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }

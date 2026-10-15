@@ -1,6 +1,8 @@
 use mago_names::ResolvedNames;
 use mago_syntax::cst::Emit;
 use mago_syntax::cst::ExpressionStatement;
+use mago_syntax::cst::Extern;
+use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::Statement;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
@@ -54,6 +56,14 @@ impl Fingerprintable for Statement<'_> {
             Statement::Static(r#static) => r#static.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::HaltCompiler(halt) => halt.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Unset(unset) => unset.fingerprint_with_hasher(hasher, resolved_names, options),
+            Statement::Extern(r#extern) => r#extern.fingerprint_with_hasher(hasher, resolved_names, options),
+            Statement::ForOf(for_of) => for_of.fingerprint_with_hasher(hasher, resolved_names, options),
+            Statement::LocalDeclaration(declaration) => {
+                declaration.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+            Statement::PatternMatch(pattern_match) => {
+                pattern_match.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
             Statement::Noop(_) => {
                 // Noop statements do not contribute to the fingerprint
             }
@@ -93,5 +103,43 @@ impl Fingerprintable for Emit<'_> {
     {
         hasher.write(b"emit");
         self.value.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for LocalDeclaration<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        hasher.write(b"local");
+        self.keyword.fingerprint_with_hasher(hasher, resolved_names, options);
+        if let Some(hint) = self.hint {
+            hasher.write(b"hint");
+            hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.value.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for Extern<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        hasher.write(b"extern");
+        self.event.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.target.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.uses.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }

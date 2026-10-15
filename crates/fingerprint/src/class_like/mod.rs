@@ -938,6 +938,7 @@ impl Fingerprintable for Interface<'_> {
             }
         }
         "interface".hash(hasher);
+        crate::modifier::fingerprint_modifiers(self.modifiers.iter(), hasher, resolved_names, options);
         self.sealed.is_some().hash(hasher);
         for attribute_list in &self.attribute_lists {
             attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);

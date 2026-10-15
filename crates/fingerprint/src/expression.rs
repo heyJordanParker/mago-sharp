@@ -53,6 +53,12 @@ impl Fingerprintable for Expression<'_> {
             Expression::Instantiation(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::MagicConstant(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Pipe(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Is(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::As(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::PatternMatch(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::TypeOf(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::With(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::GenericClass(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Error(_) => {
                 hasher.write(b"__error__");
             }
