@@ -1832,8 +1832,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// grammar builds `trait Defaults { … }`. It is named `HasDesign\Defaults` for the interface `HasDesign`, and the
     /// engine declares it in the file's namespace, so every name in a body resolves as it does in the interface. Each
     /// default body is a method, in source order: a method's is `public`, and a computed property's is
-    /// `protected function 'designKey@App\HasDesign'(): string`, which the property of each class that gets it runs. An
-    /// interface without a default body has no trait.
+    /// `protected function 'designKey@App\HasDesign'(): string`, which the property of each class that gets it runs. A
+    /// generic interface's trait has the header `App.Keyed<$0>`. An interface without a default body has no trait.
     fn defaults(&mut self, interface: &Interface) -> Option<u32> {
         self.class = self.names.get(&interface.name);
         let mut members = Vec::new();
@@ -1870,6 +1870,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return None;
         }
 
+        // A generic interface's trait names the interface with its type parameters as its header, `Demo.Held<$0>`, so
+        // the engine counts a body's `$i` among the interface's type arguments the class gives.
+        if let Some(parameters) = &interface.type_parameters {
+            let line = self.line(interface.name);
+            let indexes: Vec<String> = (0..parameters.parameters.len()).map(|index| format!("${index}")).collect();
+            let header = format!("{}<{}>", interface_name.as_str_lossy().replace('\\', "."), indexes.join(", "));
+            let header = self.string(0, line, header.as_bytes());
+            members.push(self.node(SHARP_AST_SHARP_CLASS_METADATA, 0, line, &[header, NULL, NULL]));
+        }
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);
         let name = defaults_trait_name(interface.name.value);
 

@@ -1182,7 +1182,6 @@ where
     }
 }
 
-#[allow(clippy::expect_used)]
 /// Replaces, in each type `method` declares, the type parameters `reparent` binds with the ones it binds them to.
 fn reparent_types(method: &mut FunctionLikeMetadata, reparent: &TemplateResult, codebase: &CodebaseMetadata) {
     let replace = |type_metadata: &mut Option<TypeMetadata>| {
@@ -1200,6 +1199,7 @@ fn reparent_types(method: &mut FunctionLikeMetadata, reparent: &TemplateResult, 
     }
 }
 
+#[allow(clippy::expect_used)]
 fn finalize_class_like<A>(scanner: &mut Scanner, context: &Context<'_, '_, A>)
 where
     A: Arena,

@@ -1152,7 +1152,7 @@ fn a_method_opens_with_virtual_and_replaces_with_override() {
 fn super_calls_the_parent_method() {
     let code = "namespace App.Tenant;\n\npublic class Thumbnail : Image\n{\n    public override int size()\n    {\n        let base = super.count;\n        return super.size() + base;\n    }\n}\n";
 
-    assert_eq!(issues(code), ["7:20 This expression is not supported yet in PHP#."]);
+    assert_eq!(issues(code), ["7:20 `super` only calls a method, as in `super.label()` or `super<HasLabel>.label()`."]);
 }
 
 /// Spec section 22: `super<HasLabel>.label()` calls one interface's default body. As `super`, `super<HasLabel>` is only
@@ -1161,7 +1161,7 @@ fn super_calls_the_parent_method() {
 fn super_of_an_interface_calls_its_default_body() {
     let code = "namespace App;\n\npublic class Both : HasLabel, HasTitle\n{\n    public override string label()\n    {\n        let held = super<HasLabel>;\n        return super<HasLabel>.label() + super<HasTitle>.label();\n    }\n}\n";
 
-    assert_eq!(issues(code), ["7:20 This expression is not supported yet in PHP#."]);
+    assert_eq!(issues(code), ["7:20 `super` only calls a method, as in `super.label()` or `super<HasLabel>.label()`."]);
 }
 
 /// Spec section 9.1: the main constructor passes control to its base class with `: super(…)`, whose arguments are a
@@ -1176,7 +1176,7 @@ fn the_main_constructor_passes_control_with_super_and_its_arguments_cannot_use_t
             "10:28 The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`.",
             "15:35 `this` is not available before the constructor runs: pass a parameter instead.",
             "15:41 `this` is not available before the constructor runs: pass a parameter instead.",
-            "20:34 This expression is not supported yet in PHP#.",
+            "20:34 `super` only calls a method, as in `super.label()` or `super<HasLabel>.label()`.",
             "25:52 `this` is not available before the constructor runs: pass a parameter instead.",
             "25:88 `this` is not available before the constructor runs: pass a parameter instead.",
             "30:40 `this` is not available before the constructor runs: pass a parameter instead.",

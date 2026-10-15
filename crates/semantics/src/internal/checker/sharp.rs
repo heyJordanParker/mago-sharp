@@ -328,7 +328,8 @@ const OBJECT: &[u8] = b"Object";
 ///   short name, without a member read or called on it. `new` and each method call, `super.` and
 ///   `Self.` calls included, take type arguments, as in `new PaginatedList<Order>(rows)` and
 ///   `Json.decode<WebhookPayload>(body)`, each a method body's type but `void`. `new Self(...)` in an enum is an error,
-///   because an enum has no constructor. `Self.name` read or written is not supported yet, as `super.name` is not.
+///   because an enum has no constructor. `Self.name` read or written is not supported yet, and `super`
+///   is only the object of a method call, spec section 22.
 ///   PHP's own check reports a positional argument after a spread and a spread after a named argument, and
 ///   `check_function_call` reports `assert` with a spread as its only argument, after which PHP adds a positional
 ///   description. `?.` never follows a class. A function is the global function of that name, PHP's own or one a
@@ -1990,6 +1991,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(SuperCall)
         }
         (Node::Expression(Expression::SuperOf(_)), SuperCall) => None,
+        (Node::Expression(expression @ Expression::SuperOf(_)), Body)
+        | (Node::Expression(expression @ Expression::Parent(Keyword { value: b"super", .. })), Body) => {
+            context.report(
+                Issue::error("`super` only calls a method, as in `super.label()` or `super<HasLabel>.label()`.")
+                    .with_annotation(Annotation::primary(expression.span()).with_message("Written here.")),
+            );
+
+            None
+        }
         // `Self.make()` calls a static method of the class a static method is called on, spec section 25.
         (Node::MethodCall(call), Body) if let Expression::Self_(keyword) = call.object => {
             if !is_sharp_self(keyword) {

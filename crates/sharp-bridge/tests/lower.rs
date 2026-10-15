@@ -10836,6 +10836,126 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
     }
 }
 
+/// Lowers, in PHP:
+///
+/// ```php
+/// interface Tagged { public $tag { get; } }
+/// trait Tagged\Defaults { protected function `tag@App\Tagged`(): string { return 'tagged'; } }
+/// final class Note implements \App\Tagged {
+///     use \App\Tagged\Defaults;
+///     public $tag { get => $this->{'tag@App\Tagged'}(); }
+/// }
+/// final class Own implements \App\Tagged { use \App\Tagged\Defaults; public $tag { get => 'own'; } }
+/// interface Keyed { public function key(): mixed; }
+/// trait Keyed\Defaults { /* header App.Keyed<$0> */ public function holds(mixed $value): bool { … } }
+/// ```
+///
+/// Spec section 22: an interface's computed property is `[1]` `ZEND_ACC_PUBLIC` with an abstract `get` and no PHP type
+/// in the interface, and its default body is the trait's `[2]` `ZEND_ACC_PROTECTED` method, which keeps the type. Each
+/// class that gets the body declares the property, running that method, after its `use`, and a class that overrides it
+/// declares its own, with no PHP type either. A generic interface's trait names the interface with its type parameters
+/// as its header, so the engine counts a default body's `$0` among the interface's type arguments.
+#[test]
+fn an_interface_computed_property_runs_its_default_body_through_a_protected_method_of_the_trait() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic interface Tagged\n{\n    string tag => \"tagged\";\n}\n\npublic class Note : Tagged\n{\n}\n\npublic class Own : Tagged\n{\n    public override string tag => \"own\";\n}\n\npublic interface Keyed<TKey>\n{\n    TKey key();\n\n    bool holds(Any value) => value is TKey;\n}\n",
+    );
+    let class = |name: &str| {
+        lowered
+            .nodes()
+            .iter()
+            .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == name)
+            .expect("the source declares the class") as u32
+    };
+
+    assert_eq!(
+        [
+            lowered.render(lowered.child(class("Tagged"), 2)),
+            lowered.render(lowered.child(class("Tagged\\Defaults"), 2)),
+            lowered.render(lowered.child(class("Note"), 2)),
+            lowered.render(lowered.child(lowered.child(class("Own"), 2), 1)),
+            lowered.render(lowered.child(lowered.child(class("Keyed\\Defaults"), 2), 1)),
+        ]
+        .concat(),
+        indoc! {r#"
+            STMT_LIST
+              PROP_GROUP [1]
+                null
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "tag"
+                    null
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "get" @5-5
+                        null
+                        null
+                        null
+                        null
+                        null
+                null
+            STMT_LIST
+              METHOD [2] "tag@App\\Tagged" @5-5
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    ZVAL "tagged"
+                ZVAL [1] "string"
+                null
+            STMT_LIST
+              USE_TRAIT
+                NAME_LIST
+                  ZVAL "App\\Tagged\\Defaults"
+                null
+              PROP_GROUP [1]
+                null
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "tag"
+                    null
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "get" @9-9
+                        null
+                        null
+                        PROPERTY_HOOK_SHORT_BODY
+                          METHOD_CALL
+                            VAR
+                              ZVAL "this"
+                            ZVAL "tag@App\\Tagged"
+                            ARG_LIST
+                        null
+                        null
+                null
+            PROP_GROUP [1]
+              null
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "tag"
+                  null
+                  null
+                  STMT_LIST
+                    PROPERTY_HOOK "get" @14-14
+                      null
+                      null
+                      PROPERTY_HOOK_SHORT_BODY
+                        ZVAL "own"
+                      null
+                      null
+              ATTRIBUTE_LIST
+                ATTRIBUTE_GROUP
+                  ATTRIBUTE
+                    ZVAL "Override"
+                    null
+            SHARP_CLASS_METADATA
+              ZVAL "App.Keyed<$0>"
+              null
+              null
+        "#}
+    );
+}
+
 /// Spec section 15: an `on` clause adds nothing to its class, because `mago compile` lists each listener in
 /// `.sharp/listeners.php`, so a listener lowers to its method alone.
 #[test]

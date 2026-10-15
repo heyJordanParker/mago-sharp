@@ -1438,16 +1438,9 @@ fn a_generic_interface_gives_each_class_its_default_bodies_with_its_type_argumen
 
     assert_eq!(issues(("src/Demo/Keyed.sharp", sharp), &[]), ["32:37 invalid-return-statement"]);
 
-    // A class that implements the interface holds its own type arguments, so a default body can't read the
-    // interface's while the code runs.
+    // A default body reads the interface's type parameters while the code runs, as the class gives them.
     let reads = "namespace Demo;\n\npublic class Box<TValue>\n{\n    public TValue? value = null;\n}\n\npublic interface Held<TItem>\n{\n    bool holds(Any value) => value is TItem;\n\n    Box<TItem> boxed() => new Box<TItem>();\n}\n";
-    assert_eq!(
-        messages(("src/Demo/Held.sharp", reads), &[]),
-        [
-            "A default body of `Held` that reads its type parameters while the code runs is not supported yet in PHP#.",
-            "A default body of `Held` that reads its type parameters while the code runs is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(messages(("src/Demo/Held.sharp", reads), &[]), Vec::<String>::new());
 }
 
 /// Spec section 22: implementing an abstract interface method takes no `override`, as the spec's `Page` implements
