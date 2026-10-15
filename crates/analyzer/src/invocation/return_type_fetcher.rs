@@ -10,6 +10,8 @@ use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_received_type;
+use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
@@ -26,11 +28,9 @@ use crate::expression::binary::comparison::check_sorted_by_key;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationTarget;
 use crate::invocation::resolver::resolve_invocation_type;
-use crate::statement::function_like::is_map_key;
+use crate::statement::class_like::r#struct::report_class_held_by_key;
+use crate::statement::function_like::collection_key_error;
 use crate::statement::function_like::known_type_or_error;
-use crate::statement::function_like::map_key_error;
-use crate::statement::key_type_mixes_a_backed_enum;
-use crate::statement::report_keys_sharing_entries;
 use crate::utils::names::display_sharp_type;
 
 pub fn fetch_invocation_return_type<'ctx, 'arena, A>(
@@ -70,38 +70,30 @@ where
 
         if is_collection_method(&invocation.target, b"sortedBy") {
             check_sorted_by_key(context, selector, key_type);
-        } else if keys_a_map_by_its_function(&invocation.target)
-            && fills_key_parameter
-            && !is_map_key(context, key_type)
-        {
-            let key_name = display_sharp_type(context, key_type);
-            let error = map_key_error(context, key_type, &key_name, selector.span());
-            context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
+        } else if keys_a_map_by_its_function(&invocation.target) && fills_key_parameter {
+            // A key that keys no `Map`, or a struct that holds a class instance, spec section 10, is refused.
+            let is_refused = if is_key_type(key_type, context.codebase) {
+                report_class_held_by_key(context, key_type, false, selector.span())
+            } else {
+                let key_name = display_sharp_type(context, key_type);
+                let error = collection_key_error(key_name.as_str(), false, selector.span());
+                context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
 
-            // The refused key is an error, so the code that reads the `Map` adds no second issue.
-            let declared = fetch_declared_invocation_return_type(context, invocation, template_result, parameters);
-            let value_type = declared
-                .get_single_array()
-                .map_or_else(get_mixed, |array| get_array_parameters(array, context.codebase).1);
-            let map =
-                TKeyedArray::new_with_parameters(Arc::new(TUnion::from_atomic(TAtomic::Error)), Arc::new(value_type));
+                true
+            };
+            if is_refused {
+                // The refused key is an error, so the code that reads the `Map` adds no second issue.
+                let declared = fetch_declared_invocation_return_type(context, invocation, template_result, parameters);
+                let value_type = declared
+                    .get_single_array()
+                    .map_or_else(get_mixed, |array| get_array_parameters(array, context.codebase).1);
+                let map = TKeyedArray::new_with_parameters(
+                    Arc::new(TUnion::from_atomic(TAtomic::Error)),
+                    Arc::new(value_type),
+                );
 
-            return Ok(TUnion::from_atomic(TAtomic::Array(TArray::Keyed(map))));
-        } else if keys_a_map_by_its_function(&invocation.target)
-            && fills_key_parameter
-            && key_type_mixes_a_backed_enum(context, key_type)
-        {
-            // The engine holds a `Map`'s key as its backing value, so keys that mix a backed enum with other types
-            // share entries where a case and the key of its backing value meet.
-            let method =
-                if is_collection_method(&invocation.target, b"groupBy") { "`groupBy`" } else { "`associateBy`" };
-            report_keys_sharing_entries(
-                context,
-                IssueCode::TemplateConstraintViolation,
-                invocation.span,
-                method,
-                Annotation::primary(selector.span()).with_message("Its keys come from here."),
-            );
+                return Ok(TUnion::from_atomic(TAtomic::Array(TArray::Keyed(map))));
+            }
         }
     }
 
@@ -113,10 +105,10 @@ where
 }
 
 /// Gives PHP#'s `List.wrap(value)` its type `List<T>`, and refuses it when `T` could itself be a list, as spec section
-/// 24 decides. `wrap` returns an array as the list it was asked for, and a `List` and a `Map` both run as PHP arrays,
-/// so it cannot tell a value that is a list from a list of values. `T` is the value's parts that are not lists plus the
-/// elements of its lists, or the value's whole type when every part of it is an array. A refused call keeps `List<T>`,
-/// so the code around it adds no second issue.
+/// 24 decides. `wrap` returns a `List` as it is, so it cannot tell a value that is a list from a list of values. A `Map`
+/// or a `Set` is one object, which `wrap` holds in a one-element `List` as any other value. `T` is the value's parts that
+/// are not lists plus the elements of its lists, or the value's whole type when every part of it is a list. A refused
+/// call keeps `List<T>`, so the code around it adds no second issue.
 fn fetch_list_wrap_return_type<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
@@ -133,7 +125,8 @@ where
     let value_type = artifacts.get_expression_type(value)?;
     let codebase = context.codebase;
 
-    let element_type = if value_type.types.iter().all(TAtomic::is_array) {
+    let is_list = |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(_)));
+    let element_type = if value_type.types.iter().all(is_list) {
         value_type.clone()
     } else {
         value_type.types.iter().fold(None, |element_type: Option<TUnion>, atomic| {
@@ -160,21 +153,16 @@ where
     let message = if value_type.has_mixed() {
         format!("T is {value_text}, which could itself be a list; check what `{source}` is with `is` first")
     } else {
-        let collections: Vec<TAtomic> = element_type.types.iter().filter(|atomic| atomic.is_array()).cloned().collect();
-        if collections.is_empty() {
+        let lists: Vec<TAtomic> = element_type.types.iter().filter(|atomic| is_list(atomic)).cloned().collect();
+        if lists.is_empty() {
             return Some(get_list(element_type));
         }
 
-        let kind = if collections.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)))) {
-            "list"
-        } else {
-            "map"
-        };
-        let reason = if collections.len() == element_type.types.len() { "itself a" } else { "which can be a" };
-        let collection_type = display_sharp_type(context, &TUnion::from_vec(collections));
+        let reason = if lists.len() == element_type.types.len() { "itself a" } else { "which can be a" };
+        let list_type = display_sharp_type(context, &TUnion::from_vec(lists));
 
         format!(
-            "T is {}, {reason} {kind}; write `{source} is {collection_type} one ? [one] : {source}`",
+            "T is {}, {reason} list; write `{source} is {list_type} one ? [one] : {source}`",
             display_sharp_type(context, &element_type)
         )
     };
@@ -183,14 +171,14 @@ where
         IssueCode::InvalidArgument,
         Issue::error(message)
             .with_annotation(Annotation::primary(value.span()).with_message(format!("This is `{value_text}`.")))
-            .with_note("`wrap` returns a `List` or a `Map` as it is, because both run as PHP arrays."),
+            .with_note("`wrap` returns a `List` as it is."),
     );
 
     Some(get_list(element_type))
 }
 
 /// Gives a PHP# `Set<T>`'s `filter` its type `Set<T>`. A docblock writes no `Set`, so `Sharp\SetMethods::filter`
-/// declares the array a `Set` runs as, and the call keeps that array's elements as a `Set`.
+/// declares an array of the elements, and the call keeps them as a `Set`.
 fn fetch_set_filter_return_type<A>(
     context: &Context<'_, '_, A>,
     invocation: &Invocation<'_, '_, '_>,
@@ -208,8 +196,8 @@ where
 }
 
 /// Whether `target` is a PHP# `List`'s or `Map`'s `groupBy` or `associateBy`, which key a `Map` by what their function
-/// returns. A `.sharp` call checks that key by spec section 12's rule, where a backed enum keys a `Map` as its backing
-/// value, so it infers their `G` without the `array-key` bound a `.php` call checks it by.
+/// returns. A `.sharp` call checks that key by spec sections 10 and 12's rule, where a backed enum or a struct keys a
+/// `Map` too, so it infers their `G` without the `array-key` bound a `.php` call checks it by.
 pub(crate) fn keys_a_map_by_its_function(target: &InvocationTarget<'_>) -> bool {
     is_collection_method(target, b"groupBy") || is_collection_method(target, b"associateBy")
 }
@@ -301,6 +289,9 @@ where
     let function_like_metadata = invocation.target.get_function_like_metadata();
     if function_like_metadata.is_some_and(|metadata| metadata.flags.is_sharp()) {
         resulting_type = known_type_or_error(resulting_type);
+        if !context.dialect.is_sharp() {
+            resulting_type = get_php_received_type(&resulting_type, context.codebase);
+        }
     }
 
     if function_like_metadata.is_some_and(|metadata| metadata.flags.is_by_reference()) {

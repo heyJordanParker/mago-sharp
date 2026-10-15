@@ -73,12 +73,21 @@ impl MetadataFlags {
     pub const EXTENSION_PROPERTY: MetadataFlags = MetadataFlags(1 << 50);
     /// A PHP# `foreign` class, spec section 29: an effect, which code has by holding one of its objects.
     pub const FOREIGN: MetadataFlags = MetadataFlags(1 << 51);
+    /// A PHP# struct, spec section 10: a final class whose object never changes and compares by value.
+    pub const STRUCT: MetadataFlags = MetadataFlags(1 << 52);
+    /// A PHP# property each creation of its object must set, spec sections 6.1 and 10: one written `required`, or a
+    /// struct's public `init` property with no initial value that its main constructor does not take. What a
+    /// constructor assigns is its own `MethodMetadata::assigned_properties`.
+    pub const REQUIRED: MetadataFlags = MetadataFlags(1 << 53);
+    /// A PHP# operator, spec section 19: the public static method it runs as, named after .NET's operator method, as
+    /// `op_Addition` for `operator +`. It is readonly by definition, spec section 13.
+    pub const OPERATOR: MetadataFlags = MetadataFlags(1 << 54);
     /// A PHP# property whose `set` or `init` is `internal`, spec section 5: code outside its class's namespace and the
     /// namespaces below it can't write it. `INTERNAL` on a PHP# declaration or member is its `internal` reach.
-    pub const INTERNAL_SET: MetadataFlags = MetadataFlags(1 << 52);
+    pub const INTERNAL_SET: MetadataFlags = MetadataFlags(1 << 55);
     /// A PHP# class-like of a project: a file whose nearest `composer.json` says `"type": "project"`, so no other
     /// package uses it, and spec section 5's too-wide warning runs on it.
-    pub const PROJECT: MetadataFlags = MetadataFlags(1 << 53);
+    pub const PROJECT: MetadataFlags = MetadataFlags(1 << 56);
 }
 
 impl MetadataFlags {
@@ -159,6 +168,12 @@ impl MetadataFlags {
 
     #[inline]
     #[must_use]
+    pub const fn is_operator(self) -> bool {
+        self.contains(Self::OPERATOR)
+    }
+
+    #[inline]
+    #[must_use]
     pub const fn is_init(self) -> bool {
         self.contains(Self::INIT)
     }
@@ -185,6 +200,18 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_foreign(self) -> bool {
         self.contains(Self::FOREIGN)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_struct(self) -> bool {
+        self.contains(Self::STRUCT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_required(self) -> bool {
+        self.contains(Self::REQUIRED)
     }
 
     #[inline]
@@ -539,6 +566,9 @@ mod tests {
             ("EXTENSION_METHOD", MetadataFlags::EXTENSION_METHOD),
             ("EXTENSION_PROPERTY", MetadataFlags::EXTENSION_PROPERTY),
             ("FOREIGN", MetadataFlags::FOREIGN),
+            ("STRUCT", MetadataFlags::STRUCT),
+            ("REQUIRED", MetadataFlags::REQUIRED),
+            ("OPERATOR", MetadataFlags::OPERATOR),
         ];
 
         let mut seen = MetadataFlags::empty();

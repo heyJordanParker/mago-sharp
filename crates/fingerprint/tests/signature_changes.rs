@@ -545,6 +545,16 @@ fn a_method_uses_change_changes_the_fingerprint() {
 }
 
 #[test]
+fn an_extension_block_type_parameter_change_changes_the_fingerprint() {
+    let lists = |code| fingerprint_of(b"src/Lists.sharp", code);
+    let open = lists(b"public static class Lists\n{\n    extension<T>(List<T> items)\n    {\n        public int size() => 0;\n    }\n}\n");
+    let bounded =
+        lists(b"public static class Lists\n{\n    extension<T : Order>(List<T> items)\n    {\n        public int size() => 0;\n    }\n}\n");
+
+    assert_ne!(open, bounded, "Bounding an extension block's type parameter should change the fingerprint");
+}
+
+#[test]
 fn a_foreign_modifier_change_changes_the_fingerprint() {
     let payments = |code| fingerprint_of(b"src/Payments.sharp", code);
     let plain = payments(b"public class Payments\n{\n}\n");

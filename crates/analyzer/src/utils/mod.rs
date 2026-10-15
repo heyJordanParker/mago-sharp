@@ -2,6 +2,9 @@ use diffy::PatchFormatter;
 use mago_allocator::Arena;
 
 use mago_codex::ttype::TType;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::callable::DroppedReadonly;
+use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
@@ -18,6 +21,7 @@ use mago_syntax::cst::UnaryPrefixOperator;
 use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::context::block::BlockContext;
 
 pub mod availability;
 pub mod casing;
@@ -110,6 +114,57 @@ pub fn report_int_for_float<A>(
         code,
         Issue::error(format!("`int` is not `float`: {fix}"))
             .with_annotation(Annotation::primary(value.span()).with_message(format!("Declared `{declared}`."))),
+    );
+}
+
+/// Reports `value`, a PHP# value of the type `given` that would lose a readonly where the type `declared` goes, spec
+/// section 13, with the `code` of the place it lands. `action` says what the code does with it, as "pass order to
+/// this.save", and `fix` follows "is readonly" with the `readonly` to declare, as ". Declare it `readonly Order o`.", or
+/// why there is none. A function value names the parameter or the return that would lose it instead.
+pub fn report_dropped_readonly<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    code: IssueCode,
+    value: &Expression<'_>,
+    (declared, given): (&TUnion, &TUnion),
+    action: &str,
+    fix: &str,
+) where
+    A: Arena,
+{
+    let writer = names::readonly_writer(block_context.scope.get_function_like());
+    let quoted = quoted_source(context, value.span());
+    let dropped = given.types.iter().find_map(|given| {
+        let TAtomic::Callable(TCallable::Signature(given)) = given else {
+            return None;
+        };
+
+        declared.types.iter().find_map(|declared| match declared {
+            TAtomic::Callable(TCallable::Signature(declared)) => declared.drops_readonly_of(given),
+            _ => None,
+        })
+    });
+    let reason = match dropped {
+        Some(DroppedReadonly::Parameter { taken, .. }) => {
+            let taken = names::display_type(context, taken);
+            format!(
+                "it takes a writable `{taken}` where a readonly one is passed. Declare its parameter `readonly {taken}`."
+            )
+        }
+        Some(DroppedReadonly::Return { expected, .. }) => {
+            let expected = names::display_type(context, expected);
+            format!(
+                "it returns a readonly `{expected}` where a writable one is expected. Declare the return `readonly {expected}`."
+            )
+        }
+        None => format!("{quoted} is readonly{fix}"),
+    };
+
+    context.collector.report_with_code(
+        code,
+        Issue::error(format!("{writer} cannot {action}: {reason}"))
+            .with_annotation(Annotation::primary(value.span()).with_message("This value is readonly."))
+            .with_note("A readonly value stays read only: it never goes where code could change it."),
     );
 }
 

@@ -95,7 +95,14 @@ where
     binary.lhs.analyze(context, &mut left_block_context, artifacts)?;
     left_block_context.flags.set_inside_general_use(left_was_inside_general_use);
 
-    extract_function_constant_existence(binary.lhs, artifacts, &mut left_block_context, false);
+    extract_function_constant_existence(
+        context.resolved_names,
+        context.codebase,
+        binary.lhs,
+        artifacts,
+        &mut left_block_context,
+        false,
+    );
 
     let lhs_type = match artifacts.get_rc_expression_type(&binary.lhs).cloned() {
         Some(lhs_type) => {

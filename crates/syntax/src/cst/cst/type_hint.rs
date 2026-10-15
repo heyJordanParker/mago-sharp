@@ -46,6 +46,21 @@ pub enum Hint<'arena> {
     Iterable(LocalIdentifier<'arena>),
     Generic(GenericHint<'arena>),
     Function(FunctionHint<'arena>),
+    Readonly(ReadonlyHint<'arena>),
+}
+
+/// Represents a PHP# readonly type, as spec section 13 writes `readonly` before a type: a value of it is only read.
+///
+/// # Examples
+///
+/// ```csharp
+/// public void render(readonly Order order)
+/// ```
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct ReadonlyHint<'arena> {
+    pub readonly: Keyword<'arena>,
+    pub hint: &'arena Hint<'arena>,
 }
 
 /// Represents a PHP# type with type arguments, as spec sections 11 and 12 write `List<Line>` and
@@ -391,7 +406,14 @@ impl HasSpan for Hint<'_> {
             | Hint::Iterable(identifier) => identifier.span(),
             Hint::Generic(generic) => generic.span(),
             Hint::Function(function) => function.span(),
+            Hint::Readonly(readonly) => readonly.span(),
         }
+    }
+}
+
+impl HasSpan for ReadonlyHint<'_> {
+    fn span(&self) -> Span {
+        self.readonly.span().join(self.hint.span())
     }
 }
 

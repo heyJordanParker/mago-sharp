@@ -86,8 +86,10 @@ pub(crate) fn record<'ast, 'arena, A>(
     };
 
     let function_values = std::mem::take(&mut artifacts.function_values);
+    let readonly_calls = std::mem::take(&mut artifacts.readonly_calls);
     let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, initializer, code);
     summary.function_values = function_values;
+    summary.readonly_calls = readonly_calls;
     // Code that reaches a `foreign` object has its class's effect, whatever its members do (spec section 29), so each
     // member has it too. A pure declaration then refuses a `foreign` implementation, and a call through an interface or
     // a base class has the effect of the `foreign` override it reaches.
@@ -219,6 +221,7 @@ where
         calls: Vec::new(),
         changes: Vec::new(),
         function_values: Vec::new(),
+        readonly_calls: Vec::new(),
         imports: Arc::clone(&imports),
         scope: Arc::clone(&scope),
     };

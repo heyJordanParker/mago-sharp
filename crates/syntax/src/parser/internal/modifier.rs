@@ -61,7 +61,7 @@ where
             Some(T!["static"]) => Modifier::Static(self.expect_any_keyword()?),
             Some(T!["final"]) => Modifier::Final(self.expect_any_keyword()?),
             Some(T!["abstract"]) => Modifier::Abstract(self.expect_any_keyword()?),
-            Some(T!["readonly"]) => Modifier::Readonly(self.expect_any_keyword()?),
+            Some(T!["readonly"]) if !self.is_at_readonly_hint()? => Modifier::Readonly(self.expect_any_keyword()?),
             Some(T!["private(set)"]) => Modifier::PrivateSet(self.expect_any_keyword()?),
             Some(T!["protected(set)"]) => Modifier::ProtectedSet(self.expect_any_keyword()?),
             Some(T!["public(set)"]) => Modifier::PublicSet(self.expect_any_keyword()?),

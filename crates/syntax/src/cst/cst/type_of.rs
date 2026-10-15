@@ -1,21 +1,19 @@
 use mago_span::HasSpan;
 use mago_span::Span;
 
-use crate::cst::cst::identifier::Identifier;
 use crate::cst::cst::keyword::Keyword;
-use crate::cst::cst::type_hint::TypeArgumentList;
+use crate::cst::cst::type_hint::Hint;
 
-/// Represents PHP# `typeof(X)`, the class `X` written by its short name, as spec section 25 gives it.
+/// Represents PHP# `typeof(X)`, the class value of the type `X`, as spec section 25 gives it. A class is written by its
+/// short name.
 ///
-/// Example: `typeof(Order)`, `typeof(PaginatedList<Order>)`
+/// Example: `typeof(Order)`, `typeof(PaginatedList<Order>)`, `typeof(int)`, `typeof(List<Order>)`, `typeof(Self)`
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TypeOf<'arena> {
     pub r#typeof: Keyword<'arena>,
     pub left_parenthesis: Span,
-    pub class: Identifier<'arena>,
-    /// The type arguments of a class value that carries them, as in `typeof(PaginatedList<Order>)`.
-    pub type_arguments: Option<TypeArgumentList<'arena>>,
+    pub r#type: Hint<'arena>,
     pub right_parenthesis: Span,
 }
 

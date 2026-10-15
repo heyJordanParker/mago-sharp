@@ -667,7 +667,9 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
             continue;
         };
         let is_constructor = name.as_bytes() == b"__construct";
-        if class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
+        // A method the codex gives the class, such as section 10's `parse`, spans the whole class, and nobody wrote it.
+        if method.span != class.span
+            && class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
             && method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_public())
             && !method.flags.is_internal()
             && (is_constructor || !name.as_bytes().starts_with(b"__"))

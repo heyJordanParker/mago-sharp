@@ -522,8 +522,17 @@ where
 
             vec![TAtomic::Reference(reference)]
         }
-        TAtomic::Scalar(TScalar::ClassLikeString(class_string)) => {
-            resolve_class_like_string(context, invocation, template_result, parameters, class_string)
+        // A class string of a written type names a parameter, as `class-string<($round is true ? A : B)>` does, and
+        // resolves to one class string for each class it names. A type parameter's bound names no parameter.
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { kind, constraint })) => {
+            resolve_union(context, invocation, template_result, parameters, Arc::unwrap_or_clone(constraint))
+                .types
+                .into_owned()
+                .into_iter()
+                .map(|constraint| {
+                    TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::of_type(kind, constraint)))
+                })
+                .collect()
         }
         atomic => vec![atomic],
     }
@@ -551,46 +560,6 @@ fn resolve_intersection_types<'ctx, 'arena, A>(
     )
     .types
     .into_owned();
-}
-
-fn resolve_class_like_string<'ctx, 'arena, A>(
-    context: &Context<'ctx, 'arena, A>,
-    invocation: &Invocation<'ctx, '_, 'arena>,
-    template_result: &TemplateResult,
-    parameters: &WordMap<TUnion>,
-    class_string: TClassLikeString,
-) -> Vec<TAtomic>
-where
-    A: Arena,
-{
-    let (kind, constraint, generic) = match class_string {
-        TClassLikeString::OfType { kind, constraint } => (kind, constraint, None),
-        TClassLikeString::Generic { kind, parameter_name, defining_entity, constraint } => {
-            (kind, constraint, Some((parameter_name, defining_entity)))
-        }
-        class_string => return vec![TAtomic::Scalar(TScalar::ClassLikeString(class_string))],
-    };
-
-    resolve_union(
-        context,
-        invocation,
-        template_result,
-        parameters,
-        TUnion::from_vec(vec![Arc::unwrap_or_clone(constraint)]),
-    )
-    .types
-    .into_owned()
-    .into_iter()
-    .map(|constraint| {
-        let class_string = if let Some((parameter_name, defining_entity)) = generic {
-            TClassLikeString::generic(kind, parameter_name, defining_entity, constraint)
-        } else {
-            TClassLikeString::of_type(kind, constraint)
-        };
-
-        TAtomic::Scalar(TScalar::ClassLikeString(class_string))
-    })
-    .collect()
 }
 
 fn resolve_derived<'ctx, 'arena, A>(

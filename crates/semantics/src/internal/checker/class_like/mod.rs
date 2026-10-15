@@ -22,6 +22,7 @@ use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyItem;
 use mago_syntax::cst::Sequence;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUseAliasAdaptation;
 
@@ -856,6 +857,15 @@ pub fn check_trait<'ast, 'arena>(r#trait: &'ast Trait<'arena>, context: &mut Con
             _ => {}
         }
     }
+}
+
+/// Checks a PHP# struct, spec section 10, as the final class it runs as: its members as a class's.
+#[inline]
+pub fn check_struct<'ast, 'arena>(r#struct: &'ast Struct<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
+    let struct_name = r#struct.name.value;
+    let struct_fqcn = context.get_name(r#struct.name.span.start);
+
+    check_members(&r#struct.members, r#struct.span(), "struct", struct_name, struct_fqcn, context);
 }
 
 #[inline]

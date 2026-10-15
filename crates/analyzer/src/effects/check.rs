@@ -5,6 +5,7 @@ use std::cell::OnceCell;
 
 use foldhash::HashMap;
 use mago_allocator::Arena;
+use mago_bytes::BytesDisplay;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::TType;
@@ -201,6 +202,50 @@ pub(crate) fn implementations_must_fit_their_declarations(
         .collect()
 }
 
+/// Spec section 13: through a readonly value only methods marked `readonly` run, so a call of an unmarked one is an
+/// error that names the fix: the marker, when the method changes nothing in `this`, or the write that keeps it off.
+pub(crate) fn readonly_values_call_readonly_methods(
+    effects: &Effects,
+    codebase: &CodebaseMetadata,
+    short_name_counts: &OnceCell<HashMap<String, u32>>,
+) -> IssueCollection {
+    effects
+        .readonly_calls()
+        .map(|(call, imports, change)| {
+            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let fix = match &change {
+                None => format!(
+                    "{} does not change {}, so declare it `{} readonly`.",
+                    call.method, call.class, call.declaration
+                ),
+                Some(change) => {
+                    let place = BytesDisplay(change.cause.1.as_bytes());
+                    match change.path.last() {
+                        None => format!("{} changes {}: it writes `{place}`.", call.method, call.class),
+                        Some(body) => format!(
+                            "{} changes {}: it reaches `{}`, which writes `{place}`.",
+                            call.method,
+                            call.class,
+                            display_sharp_member(class_name(body.0), body.1)
+                        ),
+                    }
+                }
+            };
+
+            let issue =
+                Issue::error(format!("{} cannot call {}: {} is readonly.", call.caller, call.call, call.receiver))
+                    .with_code(IssueCode::MissingReadonlyMarker.as_str())
+                    .with_annotation(Annotation::primary(call.span))
+                    .with_help(fix);
+
+            match change {
+                Some(change) => issue.with_annotation(Annotation::secondary(change.span)),
+                None => issue,
+            }
+        })
+        .collect()
+}
+
 /// The error at `span` on the `impurity` of the `body` it refuses, a getter, a law, a lambda or a method, with the
 /// `extern` to write when the callee has none, or how to call a plain PHP property's code from outside `body`.
 /// `class_name` names each class in prose, `code_class_name` names it in the `extern`, and `missing_import` names the
@@ -313,7 +358,9 @@ where
             return;
         }
 
-        let issue = if !member.is_empty() && is_imported_namespace(context, &r#extern.target, class) {
+        let issue = if !member.is_empty()
+            && is_imported_namespace(context.resolved_names, context.codebase, &r#extern.target, class)
+        {
             (IssueCode::NonExistentFunction, format!("Function `{written}` does not exist."))
         } else {
             (IssueCode::NonExistentClassLike, format!("Cannot find class, interface, enum, or type alias `{written}`."))

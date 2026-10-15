@@ -173,6 +173,7 @@ use crate::cst::cst::NameOf;
 use crate::cst::cst::NamedArgument;
 use crate::cst::cst::NamedConstructor;
 use crate::cst::cst::NamedPlaceholderArgument;
+use crate::cst::cst::NamedValue;
 use crate::cst::cst::Namespace;
 use crate::cst::cst::NamespaceBody;
 use crate::cst::cst::NamespaceImplicitBody;
@@ -181,6 +182,7 @@ use crate::cst::cst::NotPattern;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
+use crate::cst::cst::ObjectInitializer;
 use crate::cst::cst::On;
 use crate::cst::cst::OpeningTag;
 use crate::cst::cst::Operator;
@@ -215,6 +217,7 @@ use crate::cst::cst::PropertyHookList;
 use crate::cst::cst::PropertyItem;
 use crate::cst::cst::PropertyPattern;
 use crate::cst::cst::QualifiedIdentifier;
+use crate::cst::cst::ReadonlyHint;
 use crate::cst::cst::RequireConstruct;
 use crate::cst::cst::RequireOnceConstruct;
 use crate::cst::cst::Return;
@@ -229,6 +232,7 @@ use crate::cst::cst::StaticMethodCall;
 use crate::cst::cst::StaticMethodPartialApplication;
 use crate::cst::cst::StaticPropertyAccess;
 use crate::cst::cst::StringPart;
+use crate::cst::cst::Struct;
 use crate::cst::cst::Switch;
 use crate::cst::cst::SwitchBody;
 use crate::cst::cst::SwitchBraceDelimitedBody;
@@ -280,6 +284,7 @@ use crate::cst::cst::VariadicPlaceholderArgument;
 use crate::cst::cst::While;
 use crate::cst::cst::WhileBody;
 use crate::cst::cst::WhileColonDelimitedBody;
+use crate::cst::cst::With;
 use crate::cst::cst::Yield;
 use crate::cst::cst::YieldFrom;
 use crate::cst::cst::YieldPair;
@@ -354,6 +359,7 @@ pub enum NodeKind {
     NamedConstructor,
     ConstructorName,
     Event,
+    Struct,
     ComputedProperty,
     HookedProperty,
     PlainProperty,
@@ -455,6 +461,9 @@ pub enum NodeKind {
     Pipe,
     TypeOf,
     NameOf,
+    With,
+    ObjectInitializer,
+    NamedValue,
     GenericClass,
     LiteralFloat,
     LiteralInteger,
@@ -538,6 +547,7 @@ pub enum NodeKind {
     NullableHint,
     GenericHint,
     FunctionHint,
+    ReadonlyHint,
     TypeArgumentList,
     TypeParameterList,
     TypeParameter,
@@ -645,6 +655,7 @@ pub enum Node<'ast, 'arena> {
     NamedConstructor(&'ast NamedConstructor<'arena>),
     ConstructorName(&'ast ConstructorName<'arena>),
     Event(&'ast Event<'arena>),
+    Struct(&'ast Struct<'arena>),
     ComputedProperty(&'ast ComputedProperty<'arena>),
     HookedProperty(&'ast HookedProperty<'arena>),
     PlainProperty(&'ast PlainProperty<'arena>),
@@ -825,6 +836,7 @@ pub enum Node<'ast, 'arena> {
     NullableHint(&'ast NullableHint<'arena>),
     GenericHint(&'ast GenericHint<'arena>),
     FunctionHint(&'ast FunctionHint<'arena>),
+    ReadonlyHint(&'ast ReadonlyHint<'arena>),
     TypeArgumentList(&'ast TypeArgumentList<'arena>),
     TypeParameterList(&'ast TypeParameterList<'arena>),
     TypeParameter(&'ast TypeParameter<'arena>),
@@ -856,6 +868,9 @@ pub enum Node<'ast, 'arena> {
     Pipe(&'ast Pipe<'arena>),
     TypeOf(&'ast TypeOf<'arena>),
     NameOf(&'ast NameOf<'arena>),
+    With(&'ast With<'arena>),
+    ObjectInitializer(&'ast ObjectInitializer<'arena>),
+    NamedValue(&'ast NamedValue<'arena>),
     GenericClass(&'ast GenericClass<'arena>),
     Error(Span),
     MissingTerminator(Span),
@@ -898,6 +913,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Self::Trait(_)
                 | Self::Enum(_)
                 | Self::Event(_)
+                | Self::Struct(_)
                 | Self::Function(_)
                 | Self::Method(_)
                 | Self::Operator(_)
@@ -925,6 +941,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Self::Trait(_)
                 | Self::Enum(_)
                 | Self::Event(_)
+                | Self::Struct(_)
                 | Self::Block(_)
                 | Self::Constant(_)
                 | Self::Function(_)
@@ -1022,6 +1039,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::NamedConstructor(_) => NodeKind::NamedConstructor,
             Self::ConstructorName(_) => NodeKind::ConstructorName,
             Self::Event(_) => NodeKind::Event,
+            Self::Struct(_) => NodeKind::Struct,
             Self::ComputedProperty(_) => NodeKind::ComputedProperty,
             Self::HookedProperty(_) => NodeKind::HookedProperty,
             Self::PlainProperty(_) => NodeKind::PlainProperty,
@@ -1202,6 +1220,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::NullableHint(_) => NodeKind::NullableHint,
             Self::GenericHint(_) => NodeKind::GenericHint,
             Self::FunctionHint(_) => NodeKind::FunctionHint,
+            Self::ReadonlyHint(_) => NodeKind::ReadonlyHint,
             Self::TypeArgumentList(_) => NodeKind::TypeArgumentList,
             Self::TypeParameterList(_) => NodeKind::TypeParameterList,
             Self::TypeParameter(_) => NodeKind::TypeParameter,
@@ -1233,6 +1252,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Pipe(_) => NodeKind::Pipe,
             Self::TypeOf(_) => NodeKind::TypeOf,
             Self::NameOf(_) => NodeKind::NameOf,
+            Self::With(_) => NodeKind::With,
+            Self::ObjectInitializer(_) => NodeKind::ObjectInitializer,
+            Self::NamedValue(_) => NodeKind::NamedValue,
             Self::GenericClass(_) => NodeKind::GenericClass,
             Self::Error(_) => NodeKind::Error,
             Self::MissingTerminator(_) => NodeKind::MissingTerminator,
@@ -1516,6 +1538,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     }
                     f(Node::FunctionLikeParameterList(&node.parameter_list));
                 }
+                for item in node.readonly.iter() {
+                    f(Node::Keyword(item));
+                }
                 for item in node.on.iter() {
                     f(Node::On(item));
                 }
@@ -1583,6 +1608,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }
             Node::Extension(node) => {
                 f(Node::Keyword(&node.extension));
+                for item in node.type_parameters.iter() {
+                    f(Node::TypeParameterList(item));
+                }
                 f(Node::FunctionLikeParameterList(&node.parameter_list));
                 for item in node.members.iter() {
                     f(Node::ClassLikeMember(item));
@@ -1841,6 +1869,22 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 }
                 for item in node.implements.iter() {
                     f(Node::Implements(item));
+                }
+                for item in node.members.iter() {
+                    f(Node::ClassLikeMember(item));
+                }
+            }
+            Node::Struct(node) => {
+                for item in node.attribute_lists.iter() {
+                    f(Node::AttributeList(item));
+                }
+                for item in node.modifiers.iter() {
+                    f(Node::Modifier(item));
+                }
+                f(Node::Keyword(&node.r#struct));
+                f(Node::LocalIdentifier(&node.name));
+                for item in node.inheritance.iter() {
+                    f(Node::Inheritance(item));
                 }
                 for item in node.members.iter() {
                     f(Node::ClassLikeMember(item));
@@ -2247,6 +2291,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     Expression::PatternMatch(node) => Node::PatternMatch(node),
                     Expression::TypeOf(node) => Node::TypeOf(node),
                     Expression::NameOf(node) => Node::NameOf(node),
+                    Expression::With(node) => Node::With(node),
                     Expression::GenericClass(node) => Node::GenericClass(node),
                     Expression::Error(span) => Node::Error(*span),
                 };
@@ -2415,6 +2460,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
 
                 if let Some(argument_list) = &node.argument_list {
                     f(Node::ArgumentList(argument_list));
+                }
+
+                if let Some(initializer) = &node.initializer {
+                    f(Node::ObjectInitializer(initializer));
                 }
             }
             Node::Keyword(_) => {}
@@ -2829,6 +2878,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Statement::Trait(node) => f(Node::Trait(node)),
                 Statement::Enum(node) => f(Node::Enum(node)),
                 Statement::Event(node) => f(Node::Event(node)),
+                Statement::Struct(node) => f(Node::Struct(node)),
                 Statement::Block(node) => f(Node::Block(node)),
                 Statement::Constant(node) => f(Node::Constant(node)),
                 Statement::Function(node) => f(Node::Function(node)),
@@ -2936,6 +2986,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Hint::Iterable(local_identifier) => f(Node::LocalIdentifier(local_identifier)),
                 Hint::Generic(generic_hint) => f(Node::GenericHint(generic_hint)),
                 Hint::Function(function_hint) => f(Node::FunctionHint(function_hint)),
+                Hint::Readonly(readonly_hint) => f(Node::ReadonlyHint(readonly_hint)),
             },
             Node::GenericHint(node) => {
                 f(Node::LocalIdentifier(&node.name));
@@ -2977,6 +3028,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Hint(node.right));
             }
             Node::NullableHint(node) => f(Node::Hint(node.hint)),
+            Node::ReadonlyHint(node) => {
+                f(Node::Keyword(&node.readonly));
+                f(Node::Hint(node.hint));
+            }
             Node::ParenthesizedHint(node) => f(Node::Hint(node.hint)),
             Node::UnionHint(node) => {
                 f(Node::Hint(node.left));
@@ -3016,10 +3071,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }
             Node::TypeOf(type_of) => {
                 f(Node::Keyword(&type_of.r#typeof));
-                f(Node::Identifier(&type_of.class));
-                if let Some(type_arguments) = &type_of.type_arguments {
-                    f(Node::TypeArgumentList(type_arguments));
-                }
+                f(Node::Hint(&type_of.r#type));
             }
             Node::GenericClass(generic_class) => {
                 f(Node::Expression(generic_class.class));
@@ -3029,6 +3081,20 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Keyword(&name_of.nameof));
                 f(Node::Identifier(&name_of.class));
                 f(Node::LocalIdentifier(&name_of.property));
+            }
+            Node::With(with) => {
+                f(Node::Expression(with.object));
+                f(Node::Keyword(&with.with));
+                f(Node::ObjectInitializer(&with.initializer));
+            }
+            Node::ObjectInitializer(initializer) => {
+                for value in initializer.values.iter() {
+                    f(Node::NamedValue(value));
+                }
+            }
+            Node::NamedValue(value) => {
+                f(Node::LocalIdentifier(&value.name));
+                f(Node::Expression(value.value));
             }
             Node::Error(_)
             | Node::MissingTerminator(_)
@@ -3116,6 +3182,7 @@ impl HasSpan for Node<'_, '_> {
             Self::NamedConstructor(node) => node.span(),
             Self::ConstructorName(node) => node.span(),
             Self::Event(node) => node.span(),
+            Self::Struct(node) => node.span(),
             Self::ComputedProperty(node) => node.span(),
             Self::HookedProperty(node) => node.span(),
             Self::PlainProperty(node) => node.span(),
@@ -3296,6 +3363,7 @@ impl HasSpan for Node<'_, '_> {
             Self::NullableHint(node) => node.span(),
             Self::GenericHint(node) => node.span(),
             Self::FunctionHint(node) => node.span(),
+            Self::ReadonlyHint(node) => node.span(),
             Self::TypeArgumentList(node) => node.span(),
             Self::TypeParameterList(node) => node.span(),
             Self::TypeParameter(node) => node.span(),
@@ -3327,6 +3395,9 @@ impl HasSpan for Node<'_, '_> {
             Self::Pipe(node) => node.span(),
             Self::TypeOf(node) => node.span(),
             Self::NameOf(node) => node.span(),
+            Self::With(node) => node.span(),
+            Self::ObjectInitializer(node) => node.span(),
+            Self::NamedValue(node) => node.span(),
             Self::GenericClass(node) => node.span(),
             Self::Error(span)
             | Self::MissingTerminator(span)

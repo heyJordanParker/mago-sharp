@@ -107,6 +107,29 @@ where
     );
 }
 
+/// Spec section 15: PHP# code listens with `Events.on` and raises events with `emit`, so only the standard library
+/// imports `Sharp.Internal`, the namespace of the engine's functions, or a name under it.
+pub(crate) fn check_internal_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>)
+where
+    A: Arena,
+{
+    let fqn = php_name(name);
+    let internal = b"Sharp\\Internal";
+    if context.source_file.is_standard_library
+        || !fqn.get(..internal.len()).is_some_and(|root| root.eq_ignore_ascii_case(internal))
+        || !matches!(fqn.get(internal.len()), None | Some(b'\\'))
+    {
+        return;
+    }
+
+    context.collector.report_with_code(
+        IssueCode::InternalOutsideLibrary,
+        Issue::error("`Sharp.Internal` holds the engine's functions, and only the standard library imports it.")
+            .with_annotation(Annotation::primary(name.span()).with_message("Imported here."))
+            .with_help("Listen with `Events.on`, and raise an event with `emit`."),
+    );
+}
+
 fn check_typed_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>, fqn: &[u8], use_type: &UseType<'_>)
 where
     A: Arena,

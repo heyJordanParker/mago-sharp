@@ -75,6 +75,11 @@ where
     /// spec section 24 capitalizes every type but the built-in ones, unless a `.` follows the `>`, as in
     /// `Counter<Order>.count++;`, which reads a static member. Its arguments can be longer than the parser looks ahead.
     fn is_at_typed_local(&mut self) -> Result<bool, ParseError> {
+        // Spec section 13: no statement starts with `readonly` and a type but a readonly local, `readonly Order o = …;`.
+        if self.is_at_readonly_hint()? {
+            return Ok(true);
+        }
+
         let Some(hint) = self.stream.lookahead(0)? else {
             return Ok(false);
         };
@@ -96,7 +101,8 @@ where
                 && self.stream.peek_kind_after_type_arguments(1)? != Some(T!["."]));
         }
 
-        if hint.kind != T![Identifier] {
+        // `Self` reads as a local's type here, so the checker can say it is a return type only, spec section 25.
+        if hint.kind != T![Identifier] && hint.kind != T!["self"] {
             return Ok(false);
         }
 

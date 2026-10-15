@@ -38,6 +38,7 @@ use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::PropertyHookList;
 use mago_syntax::cst::PropertyItem;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUse;
 use mago_syntax::cst::TraitUseAbsoluteMethodReference;
@@ -176,6 +177,7 @@ impl Fingerprintable for Extension<'_> {
         H: std::hash::Hasher,
     {
         "extension".hash(hasher);
+        self.type_parameters.fingerprint_with_hasher(hasher, resolved_names, options);
         self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);
@@ -201,6 +203,29 @@ impl Fingerprintable for Event<'_> {
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
         self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for Struct<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "struct".hash(hasher);
+        for attribute_list in &self.attribute_lists {
+            attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        crate::modifier::fingerprint_modifiers(self.modifiers.iter(), hasher, resolved_names, options);
+        self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
+        for member in &self.members {
+            member.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
     }
 }
 
@@ -630,6 +655,9 @@ impl Fingerprintable for Method<'_> {
         self.type_parameters.fingerprint_with_hasher(hasher, resolved_names, options);
         self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
         self.return_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        if self.readonly.is_some() {
+            "readonly".hash(hasher);
+        }
         self.on.fingerprint_with_hasher(hasher, resolved_names, options);
         self.uses.fingerprint_with_hasher(hasher, resolved_names, options);
 

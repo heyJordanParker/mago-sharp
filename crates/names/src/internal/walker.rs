@@ -73,6 +73,7 @@ use mago_syntax::cst::Statement;
 use mago_syntax::cst::StaticMethodCall;
 use mago_syntax::cst::StaticMethodPartialApplication;
 use mago_syntax::cst::StaticPropertyAccess;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUse;
 use mago_syntax::cst::TryCatchClause;
@@ -300,7 +301,8 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         }
     }
 
-    /// Brings the type parameters of a class, an interface or a method into scope until `exit_type_parameters`.
+    /// Brings the type parameters of a class, an interface, an extension block or a method into scope until
+    /// `exit_type_parameters`.
     fn enter_type_parameters(&mut self, list: Option<&TypeParameterList<'arena>>) {
         if self.sharp {
             self.type_parameters.push(list.map_or_else(std::vec::Vec::new, |list| {
@@ -553,6 +555,7 @@ fn declared_class_names<'arena>(program: &Program<'arena>) -> foldhash::HashSet<
             Statement::Trait(r#trait) => Some(IgnoringCase(r#trait.name.value)),
             Statement::Enum(r#enum) => Some(IgnoringCase(r#enum.name.value)),
             Statement::Event(event) => Some(IgnoringCase(event.name.value)),
+            Statement::Struct(r#struct) => Some(IgnoringCase(r#struct.name.value)),
             _ => None,
         })
         .collect()
@@ -826,12 +829,14 @@ where
     }
 
     /// An extension block's receiver is the first parameter of each member, spec section 26. The block's own frame
-    /// holds the receiver while its parameter list is walked, so no other member sees it.
+    /// holds the receiver while its parameter list is walked, so no other member sees it. The block's type parameters
+    /// are in scope in its receiver and in every member, as a class's are.
     fn walk_in_extension(
         &mut self,
         extension: &'ast Extension<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
+        self.enter_type_parameters(extension.type_parameters);
         self.locals.enter_method();
         self.extension = extension.parameter_list.parameters.first().map(|receiver| ExtensionReceiver {
             name: receiver.variable.name,
@@ -847,6 +852,7 @@ where
     ) {
         self.extension = None;
         self.locals.exit_method();
+        self.exit_type_parameters();
     }
 
     /// An extension's computed property runs as a static method too, so its expression sees the receiver.
@@ -1301,6 +1307,17 @@ where
         }
     }
 
+    fn walk_in_struct(&mut self, r#struct: &'ast Struct<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let classlike = context.qualify_name(r#struct.name.value);
+
+        self.resolved_names.insert_at(r#struct.name.span, classlike, false);
+        self.class_members.push(class_member_names(&r#struct.members));
+    }
+
+    fn walk_out_struct(&mut self, _struct: &'ast Struct<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        self.class_members.pop();
+    }
+
     fn walk_in_trait_use(&mut self, trait_use: &'ast TraitUse<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         for trait_name in &trait_use.trait_names {
             let (trait_classlike, imported) = self.resolve_class(context, trait_name.value());
@@ -1412,14 +1429,22 @@ where
         }
     }
 
-    fn walk_in_type_of(&mut self, type_of: &'ast TypeOf<'arena>, context: &mut NameResolutionContext<'arena, A>) {
-        if self.bind_type_parameter(type_of.class.value(), type_of.class.span()) {
+    /// `typeof` takes a type only, spec section 25, so a local in scope named in it is an error, and the name binds as
+    /// that local. Its type resolves as every type does, so the name still resolves as a class name, which a `.sharp`
+    /// file with an error never runs.
+    fn walk_in_type_of(&mut self, type_of: &'ast TypeOf<'arena>, _: &mut NameResolutionContext<'arena, A>) {
+        let Hint::Identifier(identifier) = &type_of.r#type else {
             return;
+        };
+        let name = identifier.value();
+        if self.sharp
+            && !self.type_parameters.iter().any(|list| list.iter().any(|(parameter, _)| *parameter == name))
+            && let Some(local) = self.locals.lookup(name)
+        {
+            let span = identifier.span();
+            self.resolved_names.report_binding_error(BindingError::LocalAsType { name: span, local });
+            self.resolved_names.bind(span, Binding::Local(local));
         }
-
-        let (name, imported) = self.resolve_class(context, type_of.class.value());
-
-        self.resolved_names.insert_at(type_of.class.span(), name, imported);
     }
 
     fn walk_in_name_of(&mut self, name_of: &'ast NameOf<'arena>, context: &mut NameResolutionContext<'arena, A>) {

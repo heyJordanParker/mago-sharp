@@ -96,6 +96,24 @@ pub(crate) struct FunctionValue {
     pub(crate) code: IssueCode,
 }
 
+/// A call of a PHP# method without `readonly` through a readonly value, spec section 13. Only the solve knows whether
+/// the method changes `this`, which its message says. Each text is as the calling file writes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReadonlyCall {
+    pub(crate) callee: Body,
+    pub(crate) span: Span,
+    /// The code that calls: `render`, or `This lambda`.
+    pub(crate) caller: String,
+    /// The call, `order.markPaid`, and its readonly value, `order`.
+    pub(crate) call: String,
+    pub(crate) receiver: String,
+    /// The method's name, its class and its declaration up to its parameters: `totalIn`, `Order` and
+    /// `totalIn(string currency)`.
+    pub(crate) method: String,
+    pub(crate) class: String,
+    pub(crate) declaration: String,
+}
+
 /// A call from one PHP# body to another, with the roots of what it passes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Call {
@@ -120,6 +138,7 @@ pub struct EffectSummary {
     /// Each change, with the write and the place written as the source writes it.
     pub(crate) changes: Vec<(Changed, Span, Word)>,
     pub(crate) function_values: Vec<FunctionValue>,
+    pub(crate) readonly_calls: Vec<ReadonlyCall>,
     /// The name each import of the body's file gives its class, and the file's namespace and imports, as
     /// `Context::imported_names` and `Context::scope` hold them, shared by the file's bodies. A message about the body
     /// names classes, and the imports its code needs, as its file does.
@@ -236,6 +255,8 @@ pub struct Effects {
     solved: Vec<Vec<(Item, Origin)>>,
     /// Each function value, with the position of the body that gives it, whose file names the classes of a message.
     function_values: Vec<(FunctionValue, usize)>,
+    /// Each call of a method without `readonly` through a readonly value, with the position of the body that makes it.
+    readonly_calls: Vec<(ReadonlyCall, usize)>,
 }
 
 impl Effects {
@@ -342,6 +363,11 @@ impl Effects {
                     summary.function_values.iter().map(move |value| (value.clone(), position))
                 })
                 .collect(),
+            readonly_calls: summaries
+                .iter()
+                .enumerate()
+                .flat_map(|(position, summary)| summary.readonly_calls.iter().map(move |call| (call.clone(), position)))
+                .collect(),
         }
     }
 
@@ -377,8 +403,20 @@ impl Effects {
         issues.extend(check::laws_must_be_pure(self, codebase, &short_name_counts));
         issues.extend(check::function_values_must_fit_their_types(self, codebase, &short_name_counts));
         issues.extend(check::implementations_must_fit_their_declarations(self, codebase, &short_name_counts));
+        issues.extend(check::readonly_values_call_readonly_methods(self, codebase, &short_name_counts));
 
         issues
+    }
+
+    /// Each call of a method without `readonly` through a readonly value, with what the method changes in `this`, the
+    /// first write that leads there, or `None` when it changes nothing in `this` and only lacks the marker. The
+    /// imports of the calling body's file name the classes of the write.
+    fn readonly_calls(&self) -> impl Iterator<Item = (&ReadonlyCall, &WordMap<Word>, Option<Impurity>)> + '_ {
+        self.readonly_calls.iter().map(|(call, caller)| {
+            let change = self.first_item(call.callee, |item| item == Item::Changed(Changed::This));
+
+            (call, &*self.imports[*caller], change)
+        })
     }
 
     fn body_impurity(&self, body: Body) -> Option<Impurity> {
@@ -450,7 +488,8 @@ impl Effects {
 
     /// Each PHP# method with the first method without a body it implements whose `uses` does not list one of its
     /// effects: its class and member as messages name them, the declaration's class and metadata, the imports and the
-    /// scope of its file, and the call that has the effect.
+    /// scope of its file, and the call that has the effect. An implementation of `Sharp\Dispatcher::dispatch` is held
+    /// to nothing, spec section 15: it runs the listeners of every event, which may reach any effect.
     fn unfit_implementations<'effects>(
         &'effects self,
         codebase: &'effects CodebaseMetadata,
@@ -472,6 +511,9 @@ impl Effects {
                 let metadata = codebase.get_class_like(class.as_bytes())?;
 
                 metadata.all_parent_classes.iter().chain(&metadata.all_parent_interfaces).find_map(|ancestor| {
+                    if runs_listeners(*ancestor, method) {
+                        return None;
+                    }
                     let declaration =
                         codebase.get_method(ancestor.as_bytes(), method.as_bytes()).filter(|declaration| {
                             declaration.flags.is_sharp()
@@ -537,6 +579,12 @@ fn is_outside(effect: Effect, allowed: &[Word]) -> bool {
 /// The effect an `emit` has, `Sharp\Events`.
 fn events() -> Word {
     word(b"Sharp\\Events")
+}
+
+/// Whether `method` of `class` is `Sharp\Dispatcher::dispatch`, the method the engine calls with the listeners of
+/// every event, spec section 15.
+fn runs_listeners(class: Word, method: Word) -> bool {
+    class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Dispatcher") && method.as_bytes().eq_ignore_ascii_case(b"dispatch")
 }
 
 /// The standard effects that are names and no class, spec section 29, in the spec's order. As `Events` is, each is an

@@ -18,6 +18,8 @@ use mago_codex::misc::GenericParent;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::template::GenericTemplate;
@@ -336,6 +338,60 @@ pub fn seed_method_type_arguments<'ctx, A>(
             template_result,
         );
     }
+}
+
+/// Seeds the type arguments written on a call of the extension member `metadata` of `class`, spec section 26, as
+/// `orders.converted<string>(…)`. They are the member's own: the static method it runs as takes the extension block's
+/// type parameters first, which the call infers from its receiver, the one parameter that names them.
+pub fn seed_extension_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    type_arguments: &TypeArgumentList<'_>,
+    class: Word,
+    metadata: &FunctionLikeMetadata,
+    template_result: &mut TemplateResult,
+) where
+    A: Arena,
+{
+    let receiver_templates: Vec<Word> = metadata
+        .parameters
+        .first()
+        .and_then(|receiver| receiver.get_type_metadata())
+        .map(|receiver| {
+            receiver
+                .type_union
+                .get_template_types()
+                .into_iter()
+                .map(|atomic| match atomic {
+                    TAtomic::GenericParameter(parameter) => parameter.parameter_name,
+                    TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic { parameter_name, .. })) => {
+                        *parameter_name
+                    }
+                    other => {
+                        unreachable!("get_template_types gives type parameters and their class values, not {other:?}")
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let own: TemplateTypes = metadata
+        .template_types
+        .iter()
+        .filter(|(name, _)| !receiver_templates.contains(name))
+        .map(|(name, template)| (*name, template.clone()))
+        .collect();
+
+    seed_type_arguments(
+        context,
+        block_context,
+        artifacts,
+        type_arguments,
+        display_sharp_member(display_class_like_name(context, class), metadata.original_name),
+        metadata.name_span.unwrap_or(metadata.span),
+        &own,
+        template_result,
+    );
 }
 
 /// Converts the type arguments PHP# writes on `new` or a method call with the caller's type parameters in scope,

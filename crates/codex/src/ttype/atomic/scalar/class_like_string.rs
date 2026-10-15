@@ -12,6 +12,7 @@ use crate::ttype::TType;
 use crate::ttype::TypeRef;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::generic::TGenericParameter;
+use crate::ttype::atomic::mixed::TMixed;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::r#enum::TEnum;
 use crate::ttype::atomic::object::named::TNamedObject;
@@ -50,9 +51,12 @@ pub enum TClassLikeString {
     Literal {
         value: Word,
     },
+    /// A class-like string of the type `constraint`. PHP's `class-string<A|B>` is one of these for each class, and a
+    /// PHP# class value of a type that is no class holds that whole type, as `Class<int|string>` holds `int|string`,
+    /// spec section 25.
     OfType {
         kind: TClassLikeStringKind,
-        constraint: Arc<TAtomic>,
+        constraint: Arc<TUnion>,
     },
 }
 
@@ -80,7 +84,7 @@ impl TClassLikeString {
     #[inline]
     #[must_use]
     pub fn of_type(kind: TClassLikeStringKind, constraint: TAtomic) -> Self {
-        Self::OfType { kind, constraint: Arc::new(constraint) }
+        Self::OfType { kind, constraint: Arc::new(TUnion::from_atomic(constraint)) }
     }
 
     /// Creates a new `class-string<T>` instance with a generic parameter.
@@ -113,7 +117,7 @@ impl TClassLikeString {
     #[inline]
     #[must_use]
     pub fn class_string_of_type(constraint: TAtomic) -> Self {
-        Self::OfType { kind: TClassLikeStringKind::Class, constraint: Arc::new(constraint) }
+        Self::of_type(TClassLikeStringKind::Class, constraint)
     }
 
     /// Creates a new `interface-string` instance.
@@ -181,18 +185,19 @@ impl TClassLikeString {
         }
     }
 
-    /// Returns the constraint type `<T>` if this is a `Generic` or `OfType` variant.
+    /// Returns the constraint type `<T>` if this is a `Generic` or `OfType` variant whose constraint is one type.
     #[inline]
     #[must_use]
     pub fn constraint(&self) -> Option<&TAtomic> {
         match self {
             Self::Generic { constraint, .. } => Some(constraint),
-            Self::OfType { constraint, .. } => Some(constraint),
+            Self::OfType { constraint, .. } if constraint.is_single() => Some(constraint.get_single()),
             _ => None,
         }
     }
 
-    /// Returns the atomic type representation of the object type this string refers to.
+    /// Returns the atomic type representation of the object type this string refers to. A constraint of several types,
+    /// as PHP#'s `Class<int|string>`, refers to no one object type, so it is `mixed`.
     #[inline]
     #[must_use]
     pub fn get_object_type(&self, codebase: &CodebaseMetadata) -> TAtomic {
@@ -212,20 +217,19 @@ impl TClassLikeString {
                     TAtomic::Object(TObject::Named(TNamedObject::new(*value)))
                 }
             }
-            TClassLikeString::OfType { constraint, .. } => constraint.as_ref().clone(),
+            TClassLikeString::OfType { constraint, .. } if constraint.is_single() => constraint.get_single().clone(),
+            TClassLikeString::OfType { .. } => TAtomic::Mixed(TMixed::new()),
         }
     }
 }
 
 impl TType for TClassLikeString {
     fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        let mut children = vec![];
-
-        if let Some(constraint) = self.constraint() {
-            children.push(TypeRef::Atomic(constraint));
+        match self {
+            TClassLikeString::Generic { constraint, .. } => vec![TypeRef::Atomic(constraint)],
+            TClassLikeString::OfType { constraint, .. } => vec![TypeRef::Union(constraint)],
+            TClassLikeString::Any { .. } | TClassLikeString::Literal { .. } => vec![],
         }
-
-        children
     }
 
     fn needs_population(&self) -> bool {

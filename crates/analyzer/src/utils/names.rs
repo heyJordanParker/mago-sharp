@@ -6,6 +6,7 @@ use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
@@ -17,12 +18,16 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
+use mago_names::ResolvedNames;
+use mago_names::binding::sharp_operator_symbol;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_names::short_name;
 use mago_span::HasPosition;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Identifier;
+use mago_syntax::cst::MethodCall;
 use mago_syntax_core::utils::is_part_of_identifier;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -516,7 +521,14 @@ where
                 TArray::Set(_) => format!("Set<{}>", display_sharp_type(context, &value)),
             }
         }
-        TAtomic::Iterable(iterable) => format!("Iterable<{}>", display_sharp_type(context, iterable.get_value_type())),
+        TAtomic::Iterable(iterable) if iterable.get_key_type().is_mixed() => {
+            format!("Iterable<{}>", display_sharp_type(context, iterable.get_value_type()))
+        }
+        TAtomic::Iterable(iterable) => format!(
+            "iterable<{}, {}>",
+            display_sharp_type(context, iterable.get_key_type()),
+            display_sharp_type(context, iterable.get_value_type())
+        ),
         TAtomic::Object(TObject::Any) => "Object".to_owned(),
         TAtomic::Object(object) => {
             let Some(name) = object.get_name() else {
@@ -524,17 +536,25 @@ where
             };
             let name =
                 sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, name);
+            let readonly = if matches!(object, TObject::Named(named) if named.is_readonly) { "readonly " } else { "" };
             match object.get_type_parameters() {
                 Some(parameters) if !parameters.is_empty() => {
                     let parameters: Vec<String> =
                         parameters.iter().map(|parameter| display_sharp_type(context, parameter)).collect();
-                    format!("{name}<{}>", parameters.join(", "))
+                    format!("{readonly}{name}<{}>", parameters.join(", "))
                 }
-                _ => name,
+                _ => format!("{readonly}{name}"),
             }
         }
-        TAtomic::Reference(TReference::Symbol { name, .. }) => {
-            sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *name)
+        TAtomic::Reference(TReference::Symbol { name, is_readonly, .. }) => {
+            let readonly = if *is_readonly { "readonly " } else { "" };
+            let name =
+                sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *name);
+
+            format!("{readonly}{name}")
+        }
+        TAtomic::GenericParameter(parameter) if atomic.is_readonly_value() => {
+            format!("readonly {}", parameter.parameter_name)
         }
         TAtomic::GenericParameter(parameter) => parameter.parameter_name.to_string(),
         TAtomic::Callable(TCallable::Signature(signature)) => {
@@ -561,7 +581,7 @@ where
                 sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *value)
             ),
             TClassLikeString::OfType { constraint, .. } => {
-                format!("Class<{}>", display_sharp_atomic(context, constraint))
+                format!("Class<{}>", display_sharp_type(context, constraint))
             }
             TClassLikeString::Generic { parameter_name, .. } => format!("Class<{parameter_name}>"),
             TClassLikeString::Any { .. } => "Class<Object>".to_owned(),
@@ -609,6 +629,49 @@ where
         sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, class_name),
         format_args!("{property_name}.{hook_name}"),
     )
+}
+
+/// The code a spec section 13 message names as the one that writes, passes or calls through a readonly value: the
+/// method or accessor `function` runs, by the name it declares, `operator ==` for an operator, or `This lambda`.
+#[must_use]
+pub(crate) fn readonly_writer(function: Option<&FunctionLikeMetadata>) -> String {
+    let Some(function) = function else {
+        unreachable!("semantics refuses a statement at file level in a PHP# file, so only a body is analyzed");
+    };
+
+    if matches!(function.kind, FunctionLikeKind::Closure | FunctionLikeKind::ArrowFunction) {
+        "This lambda".to_owned()
+    } else if function.flags.is_operator()
+        && let Some(symbol) = sharp_operator_symbol(function.original_name.as_bytes())
+    {
+        format!("operator {symbol}")
+    } else {
+        function.original_name.to_string()
+    }
+}
+
+/// A PHP# method's declaration up to its parameters, as the analyzed file writes it: `totalIn(string currency)`.
+#[must_use]
+pub(crate) fn sharp_method_declaration<A>(context: &Context<'_, '_, A>, method: &FunctionLikeMetadata) -> String
+where
+    A: Arena,
+{
+    let parameters: Vec<String> = method
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let name = parameter.get_name().0.as_bytes();
+            let name = String::from_utf8_lossy(name.strip_prefix(b"$").unwrap_or(name));
+            // A parameter written without its type, a parse error, shows as written.
+            let declared = parameter
+                .get_type_declaration_metadata()
+                .map(|declared| format!("{} ", display_sharp_type(context, &declared.type_union)));
+
+            format!("{}{name}", declared.unwrap_or_default())
+        })
+        .collect();
+
+    format!("{}({})", method.original_name, parameters.join(", "))
 }
 
 /// The member `member_name` of the class `class_name` as the analyzed file names it: `Box.put` in a `.sharp` file, with
@@ -760,12 +823,16 @@ pub(crate) fn namespace_function(
 /// `import Vendor.Pdf;` when no class is named `Vendor\Pdf`. Its member is then one of the namespace's functions,
 /// spec section 23, whether or not that function exists.
 #[must_use]
-pub(crate) fn is_imported_namespace<A, T>(context: &Context<'_, '_, A>, name: &T, full_name: Word) -> bool
+pub(crate) fn is_imported_namespace<T>(
+    resolved_names: &ResolvedNames<'_>,
+    codebase: &CodebaseMetadata,
+    name: &T,
+    full_name: Word,
+) -> bool
 where
-    A: Arena,
     T: HasPosition,
 {
-    context.resolved_names.is_imported(name) && !context.codebase.class_like_exists(full_name.as_bytes())
+    resolved_names.is_imported(name) && !codebase.class_like_exists(full_name.as_bytes())
 }
 
 /// The namespace whose plain PHP function or constant the PHP# `name.member` names, spec section 23: PHP's root
@@ -773,22 +840,43 @@ where
 /// that namespace has a function or a constant `member`, as long as no class has the namespace's name. None when
 /// `name` is a class.
 #[must_use]
-pub(crate) fn member_namespace<A>(context: &Context<'_, '_, A>, name: &Identifier<'_>, member: &[u8]) -> Option<Word>
-where
-    A: Arena,
-{
+pub(crate) fn member_namespace(
+    resolved_names: &ResolvedNames<'_>,
+    codebase: &CodebaseMetadata,
+    name: &Identifier<'_>,
+    member: &[u8],
+) -> Option<Word> {
     if name.value() == b"global" {
         return Some(word(""));
     }
 
-    let namespace = word(context.resolved_names.get(name));
+    let namespace = word(resolved_names.get(name));
     let full_name = namespace_member(namespace, member);
-    let names_member = context.codebase.function_exists(full_name.as_bytes())
-        || context.codebase.constant_exists(full_name.as_bytes());
+    let names_member = codebase.function_exists(full_name.as_bytes()) || codebase.constant_exists(full_name.as_bytes());
 
-    ((is_imported_namespace(context, name, namespace) || names_member)
-        && !context.codebase.class_like_exists(namespace.as_bytes()))
+    ((is_imported_namespace(resolved_names, codebase, name, namespace) || names_member)
+        && !codebase.class_like_exists(namespace.as_bytes()))
     .then_some(namespace)
+}
+
+/// The plain PHP function a PHP# `Name.member(…)` calls, spec section 23: `global.now()` calls the function `now` of
+/// PHP's root namespace, and `Pdf.render(html)` after `import Vendor.Pdf;` the function `render` of that namespace,
+/// where no class is named `Vendor\Pdf`. An imported namespace names its function whether or not the function exists,
+/// so the call of a missing one is refused as a missing function. None for any other call, and for every call in a
+/// PHP file.
+#[must_use]
+pub(crate) fn namespace_function_name(
+    resolved_names: &ResolvedNames<'_>,
+    codebase: &CodebaseMetadata,
+    call: &MethodCall<'_>,
+) -> Option<Word> {
+    let name = resolved_names.static_call_class(call)?;
+    let ClassLikeMemberSelector::Identifier(member) = &call.method else {
+        return None;
+    };
+    let namespace = member_namespace(resolved_names, codebase, &name.name, member.value)?;
+
+    Some(namespace_member(namespace, member.value))
 }
 
 /// The full name of the function or constant `member` of `namespace`, which [`member_namespace`] found: the bare

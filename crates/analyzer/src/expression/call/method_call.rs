@@ -46,7 +46,8 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_static_write;
 use crate::error::AnalysisError;
-use crate::expression::access::written_static_property;
+use crate::expression::access::analyze_through_class_value;
+use crate::expression::access::refuse_statics_of_no_class;
 use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
@@ -57,6 +58,7 @@ use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
+use crate::expression::call::static_method_call::analyze_static_method_call;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
@@ -75,6 +77,7 @@ use crate::invocation::template_result::populate_template_result_from_invocation
 use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
+use crate::plugin::hook::StaticCall;
 use crate::resolver::method::UndocumentedMethod;
 use crate::resolver::method::UnresolvedMethod;
 use crate::resolver::method::get_declared_collection;
@@ -84,9 +87,6 @@ use crate::resolver::method::resolve_method_targets;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
-use crate::statement::keys_mix_a_backed_enum;
-use crate::statement::report_keys_read_back;
-use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_member;
@@ -357,9 +357,31 @@ where
             artifacts,
             extension,
             object,
+            type_arguments,
             Some(argument_list),
             is_null_safe,
             span,
+        );
+    }
+
+    // PHP# calls a static method through a class value, `type.m()`, as PHP's `$type::m()`, spec section 25.
+    if method_resolution.class_value {
+        context.collector.extend(receiver_issues);
+        if refuse_statics_of_no_class(context, artifacts, object, span) {
+            return argument_list.analyze(context, block_context, artifacts);
+        }
+        let call = StaticCall { class: object, method: selector, argument_list, span };
+
+        return analyze_through_class_value(
+            context,
+            block_context,
+            artifacts,
+            object,
+            is_null_safe,
+            span,
+            |context, block_context, artifacts| {
+                analyze_static_method_call(context, block_context, artifacts, call, type_arguments, true)
+            },
         );
     }
 
@@ -389,16 +411,6 @@ where
                 && ["contains", "indexOf", "remove"]
                     .iter()
                     .any(|search| search.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
-        });
-    let takes_map_key = context.dialect.is_sharp()
-        && !refused_on_object
-        && method_resolution.resolved_methods.iter().any(|method| {
-            let name = method.method_identifier.get_method_name();
-
-            sharp_collection_name(&TObject::new_named(method.classname)) == Some("Map")
-                && ["get", "has", "remove", "keys"]
-                    .iter()
-                    .any(|keyed| keyed.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
         });
 
     let undocumented_template_result =
@@ -581,28 +593,6 @@ where
         check_element_equality(context, &method, object, value, &element_type, value_type, is_null_safe);
     }
 
-    // The engine holds a `Map`'s key as its backing value, and reads it back as a case only through one enum. A `Map`
-    // whose keys mix a backed enum with other types cannot read them back in `keys()`, and its `get`, `has` and
-    // `remove` cannot tell a case from the key of its backing value.
-    if takes_map_key
-        && let ClassLikeMemberSelector::Identifier(method) = selector
-        && let Some(map_type) = artifacts.get_expression_type(object)
-        && keys_mix_a_backed_enum(context, map_type)
-    {
-        if method.value.eq_ignore_ascii_case(b"keys") {
-            report_keys_read_back(context, IssueCode::InvalidArrayAccess, object, "`keys()`", selector.span());
-        } else {
-            let finder = format!("`{}`", String::from_utf8_lossy(method.value));
-            report_keys_sharing_entries(
-                context,
-                IssueCode::InvalidArgument,
-                object.span(),
-                &finder,
-                Annotation::primary(method.span()).with_message("Its key is looked up here."),
-            );
-        }
-    }
-
     if !method_resolution.undocumented_methods.is_empty() {
         analyze_undocumented_method_return_type(
             context,
@@ -735,7 +725,7 @@ where
             Ok(None)
         }
         Expression::Access(Access::Property(access)) => {
-            let written = match written_static_property(context, block_context, access) {
+            let written = match StaticProperty::from_property_access(access, context.resolved_names) {
                 // Reading `Counter.items` reported its missing type arguments, and the write back would again.
                 Some(static_property) if bare_generic_class(context, static_property.class).is_some() => Ok(()),
                 // The read of the collection analyzed its class.

@@ -179,7 +179,14 @@ where
         }
     }
 
-    extract_function_constant_existence(condition, artifacts, &mut if_block_context, false);
+    extract_function_constant_existence(
+        context.resolved_names,
+        context.codebase,
+        condition,
+        artifacts,
+        &mut if_block_context,
+        false,
+    );
 
     if_scope.negated_clauses = negate_or_synthesize(
         if_clauses,
@@ -268,7 +275,14 @@ where
     }
 
     // Extract function_exists/defined assertions for the "else" branch.
-    extract_function_constant_existence(condition, artifacts, &mut else_block_context, true);
+    extract_function_constant_existence(
+        context.resolved_names,
+        context.codebase,
+        condition,
+        artifacts,
+        &mut else_block_context,
+        true,
+    );
 
     let was_inside_general_use = else_block_context.flags.inside_general_use();
     else_block_context.flags.set_inside_general_use(true);

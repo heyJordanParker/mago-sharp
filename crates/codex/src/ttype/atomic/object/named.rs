@@ -32,6 +32,9 @@ pub struct TNamedObject {
     pub intersection_types: Option<Vec<TAtomic>>,
     /// Internal analysis flag: `true` if the type parameters have been remapped.
     pub remapped_parameters: bool,
+    /// `true` for a PHP# readonly value, spec section 13: only its `get` accessors and its readonly methods run, and
+    /// everything read through it is readonly too. Only a `.sharp` file's `readonly` before a type sets it.
+    pub is_readonly: bool,
 }
 
 impl TNamedObject {
@@ -47,6 +50,7 @@ impl TNamedObject {
             is_this: false,
             remapped_parameters: false,
             intersection_types: None,
+            is_readonly: false,
         }
     }
 
@@ -224,6 +228,10 @@ impl TType for TNamedObject {
             result = append_intersection_ids(result, intersection_types, None);
         }
 
+        if self.is_readonly {
+            result = concat_word!(b"readonly ", result);
+        }
+
         if self.is_this {
             concat_word!(b"$this(", result, b")")
         } else if self.is_static {
@@ -268,6 +276,10 @@ impl TType for TNamedObject {
 
         if let Some(intersection_types) = self.get_intersection_types() {
             result = append_intersection_ids(result, intersection_types, Some(indent));
+        }
+
+        if self.is_readonly {
+            result = concat_word!(b"readonly ", result);
         }
 
         if self.is_this {

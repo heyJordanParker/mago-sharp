@@ -472,12 +472,12 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required` and `via` are spec syntax outside the slice. Each one is a single error where it starts, and the class
-/// around it still parses.
+/// `required` on a method and `via` are spec syntax outside the slice. Each one is a single error where it starts, and
+/// the class around it still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     for (member, message, start) in [
-        ("public required int count { get; set; }", "`required` is not supported yet in PHP#.", "required"),
+        ("public required int count() { return 1; }", "`required` is not supported yet in PHP#.", "required"),
         ("public string name { get; set; } via Trimmed, Tracked;", "`via` is not supported yet in PHP#.", "via"),
         (
             "public Report(public int id { get; } via Tracked, int other) {}",
@@ -598,6 +598,75 @@ fn a_case_that_carries_data_is_one_not_supported_error_and_the_enum_parses_on() 
     assert_eq!(run.name.value, b"run");
 }
 
+/// A generic struct waits for generics, spec section 10's question 4, so its type parameters are one error, nested
+/// ones included, and the struct parses on. It is refused whole, so it keeps no members, whose types name its
+/// parameters, and the file has that one error.
+#[test]
+fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
+    for parameters in ["<T>", "<TKey, TValue>", "<T : Box<int>>", "<T : Map<string, List<int>>>"] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("struct Pair{parameters} : HasLabel\n{{\n    public int run() {{ return 1; }}\n}}\n\nstruct Next {{ }}\n")
+                .into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Pair.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{parameters}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), "A generic struct is not supported yet in PHP#.");
+        assert_eq!(source(code, error), parameters);
+        let Some(Statement::Struct(pair)) = program.statements.first() else {
+            panic!("expected a struct for `{parameters}`, got {:#?}", program.statements);
+        };
+        assert!(pair.inheritance.is_some(), "the header after `{parameters}` parses");
+        assert!(pair.members.is_empty(), "the struct keeps no members after `{parameters}`");
+        assert!(
+            matches!(program.statements.get(1), Some(Statement::Struct(_))),
+            "the struct after `{parameters}` parses"
+        );
+    }
+}
+
+/// A struct's header lists interfaces only, spec section 10, a generic one with its type arguments, so a type such as
+/// `string` there is one error at the type, and the interfaces after it still parse.
+#[test]
+fn a_struct_header_lists_interfaces_only() {
+    for (header, refused, interfaces) in [
+        (" : HasLabel, Sortable", None, &[&b"HasLabel"[..], b"Sortable"][..]),
+        (" : Comparable<Username>, HasLabel", None, &[b"Comparable", b"HasLabel"]),
+        (" : string", Some("string"), &[]),
+        (" : int, HasLabel", Some("int"), &[b"HasLabel"]),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("struct Username{header}\n{{\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Username.sharp", code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        let expected: Vec<(String, &str)> = refused
+            .map(|refused| {
+                (
+                    "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value."
+                        .to_owned(),
+                    refused,
+                )
+            })
+            .into_iter()
+            .collect();
+        assert_eq!(errors, expected, "{header}");
+        let Some(Statement::Struct(username)) = program.statements.first() else {
+            panic!("expected a struct for `{header}`, got {:#?}", program.statements);
+        };
+        let named: Vec<&[u8]> =
+            username.inheritance.iter().flat_map(|inheritance| inheritance.names()).map(|name| name.value()).collect();
+        assert_eq!(named, interfaces, "{header}");
+        assert!(matches!(username.members.as_slice(), [ClassLikeMember::Method(_)]), "{header}");
+    }
+}
+
 /// A PHP#-only parse error is its own message, so `mago analyze` shows the rule as the issue's title.
 #[test]
 fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
@@ -616,8 +685,12 @@ fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
         ),
         ("class Report\n{\n    private count = 0;\n}\n", "A PHP# field needs a type, as in `private int count = 0;`."),
         (
-            "class Report\n{\n    public required int count { get; set; }\n}\n",
+            "class Report\n{\n    public required int count() { return 1; }\n}\n",
             "`required` is not supported yet in PHP#.",
+        ),
+        (
+            "struct Username : string\n{\n}\n",
+            "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value.",
         ),
         (
             "class Report\n{\n    public void run() { for (const line in lines) {} }\n}\n",
@@ -2440,6 +2513,12 @@ fn php_member_access_and_concatenating_assignment_are_parse_errors_that_name_the
         ("calc->add()", "`->` is PHP syntax: PHP# writes member access with `.`"),
         ("calc?->add()", "`?->` is PHP syntax: PHP# writes null-safe member access with `?.`"),
         ("Calc::make()", "`::` is PHP syntax: PHP# writes static access with `.`"),
+        ("Calc::class", "`Calc::class` is PHP syntax: PHP# writes `typeof(Calc)`"),
+        ("calc::class", "`calc::class` is PHP syntax: PHP# writes `Class.of(calc)`"),
+        ("Self::class", "`Self::class` is PHP syntax: PHP# writes `typeof(Self)`"),
+        ("Demo.Calc::class", "`Demo.Calc::class` is PHP syntax: PHP# writes `typeof(Calc)`"),
+        ("this.calc::class", "`this.calc::class` is PHP syntax: PHP# writes `Class.of(this.calc)`"),
+        ("make()::class", "`::` is PHP syntax: PHP# writes static access with `.`"),
         ("label .= \"x\"", "`.=` is PHP syntax: in PHP# `.` is member access"),
     ] {
         let source = format!("class Report\n{{\n    void run()\n    {{\n        {code};\n    }}\n}}\n");
@@ -3103,14 +3182,21 @@ fn an_attribute_target_is_not_supported_yet() {
     assert_eq!(names, [&b"NotNull"[..]]);
 }
 
-/// `typeof` names a class by its short name, and a class value of a generic class may carry its type arguments, spec
-/// section 25.
+/// `typeof` takes any type, spec section 25: a class by its short name, a class value of a generic class with its type
+/// arguments, `Self`, a built-in type, whose name `int` is never a cast there, and a collection.
 #[test]
-fn typeof_names_a_class_by_its_short_name_with_any_type_arguments() {
-    for (written, class, type_arguments) in [
-        ("typeof(Order)", "Order", None),
-        ("typeof(PaginatedList<Order>)", "PaginatedList", Some("<Order>")),
-        ("typeof(Pair<int, List<Order>>)", "Pair", Some("<int, List<Order>>")),
+fn typeof_takes_any_type() {
+    for (written, r#type) in [
+        ("typeof(Order)", "Order"),
+        ("typeof(PaginatedList<Order>)", "PaginatedList<Order>"),
+        ("typeof(Pair<int, List<Order>>)", "Pair<int, List<Order>>"),
+        ("typeof(Self)", "Self"),
+        ("typeof(int)", "int"),
+        ("typeof( string )", "string"),
+        ("typeof (bool)", "bool"),
+        ("typeof(List<Order>)", "List<Order>"),
+        ("typeof(Map<string, int>)", "Map<string, int>"),
+        ("typeof(Set<int>)", "Set<int>"),
     ] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
@@ -3129,8 +3215,7 @@ fn typeof_names_a_class_by_its_short_name_with_any_type_arguments() {
         let Some(Expression::TypeOf(type_of)) = keep.argument_list.arguments.first().map(Argument::value) else {
             panic!("expected `{written}`, got {:#?}", keep.argument_list.arguments);
         };
-        assert_eq!(source(code, &type_of.class), class);
-        assert_eq!(type_of.type_arguments.as_ref().map(|list| source(code, list)), type_arguments);
+        assert_eq!(source(code, &type_of.r#type), r#type);
         assert_eq!(source(code, type_of), written);
     }
 }
@@ -4029,6 +4114,52 @@ fn an_extension_is_its_receiver_and_its_members_in_braces() {
     );
 }
 
+/// An extension block declares its own type parameters after `extension`, as in C# 14: one, several, or one with a
+/// bound, before its receiver.
+#[test]
+fn an_extension_declares_its_type_parameters_before_its_receiver() {
+    let rows: [(&str, &'static str, &[&str], &str); 3] = [
+        (
+            "extension<T>(List<T> items)",
+            "public static class Lists\n{\n    extension<T>(List<T> items)\n    {\n        public int size() => 0;\n    }\n}\n",
+            &["T"],
+            "List<T> items",
+        ),
+        (
+            "extension<K, V>(Map<K, List<V>> groups)",
+            "public static class Lists\n{\n    extension<K, V>(Map<K, List<V>> groups)\n    {\n        public int size() => 0;\n    }\n}\n",
+            &["K", "V"],
+            "Map<K, List<V>> groups",
+        ),
+        (
+            "extension<T : Order>(List<T> orders)",
+            "public static class Lists\n{\n    extension<T : Order>(List<T> orders)\n    {\n        public int size() => 0;\n    }\n}\n",
+            &["T : Order"],
+            "List<T> orders",
+        ),
+    ];
+
+    for (header, code, expected_parameters, expected_receiver) in rows {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "app/Lists.sharp", code);
+
+        assert!(program.errors.is_empty(), "{header}: {:#?}", program.errors);
+        let [ClassLikeMember::Extension(extension)] = class_members(program).as_slice() else {
+            panic!("{header}: expected an extension, got {:#?}", class_members(program));
+        };
+        let Some(type_parameters) = extension.type_parameters else {
+            panic!("{header}: expected type parameters");
+        };
+        let parameters: Vec<&str> =
+            type_parameters.parameters.iter().map(|parameter| source(code, parameter)).collect();
+        let receivers: Vec<&str> =
+            extension.parameter_list.parameters.iter().map(|parameter| source(code, parameter)).collect();
+        assert_eq!(parameters, expected_parameters, "{header}");
+        assert_eq!(receivers, [expected_receiver], "{header}");
+        assert_eq!(source(code, extension).lines().next(), Some(header));
+    }
+}
+
 /// `extension` starts an extension only at the start of a member, before `(`. After a modifier it is a return type,
 /// before a name a member's type, and in a body a call.
 #[test]
@@ -4111,10 +4242,10 @@ fn a_capitalized_type_in_parentheses_is_a_class_name_and_not_a_cast() {
         panic!("expected five statements, got {:#?}", method_body(program));
     };
     for (statement, class) in [(int, "Int"), (float, "Float"), (bool, "Bool")] {
-        let Expression::TypeOf(type_of) = expression(statement) else {
+        let Expression::TypeOf(TypeOf { r#type: Hint::Identifier(name), .. }) = expression(statement) else {
             panic!("expected `typeof({class})`, got {statement:#?}");
         };
-        assert_eq!(type_of.class.value(), class.as_bytes());
+        assert_eq!(name.value(), class.as_bytes());
     }
     let Expression::Parenthesized(parenthesized) = expression(parsed) else {
         panic!("expected `(Int.parse(text))`, got {parsed:#?}");
@@ -4127,6 +4258,36 @@ fn a_capitalized_type_in_parentheses_is_a_class_name_and_not_a_cast() {
         ),
         "{cast:#?}"
     );
+}
+
+/// PHP# writes a scalar type in lowercase only, spec section 24, so a capitalized one is the standard library's class
+/// of that name, and PHP keeps reading a scalar type ignoring case.
+#[test]
+fn a_capitalized_scalar_type_is_a_class_name() {
+    for (dialect, written, class) in [
+        (Dialect::Sharp, "Int", true),
+        (Dialect::Sharp, "Float", true),
+        (Dialect::Sharp, "Bool", true),
+        (Dialect::Sharp, "String", true),
+        (Dialect::Sharp, "int", false),
+        (Dialect::Php, "Int", false),
+    ] {
+        let (name, code) = match dialect {
+            Dialect::Sharp => {
+                ("src/Report.sharp", format!("class Report\n{{\n    void run({written} value) {{ }}\n}}\n"))
+            }
+            Dialect::Php => ("src/Report.php", format!("<?php\nfunction run({written} $value) {{ }}\n")),
+        };
+        let arena = LocalArena::new();
+        let program = parse(&arena, name, Box::leak(code.into_boxed_str()));
+
+        let hints = Node::Program(program).filter_map(|node| match node {
+            Node::FunctionLikeParameter(parameter) => parameter.hint.as_ref(),
+            _ => None,
+        });
+        assert!(program.errors.is_empty(), "{written}: {:#?}", program.errors);
+        assert_eq!(matches!(hints.as_slice(), [Hint::Identifier(_)]), class, "{dialect:?} `{written}`: {hints:#?}");
+    }
 }
 
 /// PHP lexes its casts ignoring case, so a PHP file keeps reading `(Int) $x` as an int cast.
@@ -4189,8 +4350,62 @@ fn grouping(code: &str, expression: &Expression) -> String {
             format!("({} is {pattern})", grouping(code, is.value))
         }
         Expression::As(r#as) => format!("({} as {})", grouping(code, r#as.value), source(code, r#as.hint)),
+        Expression::With(with) => {
+            format!("({} with {})", grouping(code, with.object), source(code, &with.initializer))
+        }
         _ => source(code, expression).to_owned(),
     }
+}
+
+/// Spec section 16: `with` copies the object before it with the values its initializer names, the shorthand `y` among
+/// them. It binds tighter than `+` and `!` and looser than unary `-`, at PHP's `instanceof` level, and follows a `new`
+/// with its own initializer.
+#[test]
+fn with_copies_the_object_before_it_with_the_values_it_names() {
+    const CODE: &str = "class Report\n{\n    Point run()\n    {\n        return p with { x: 1, y };\n        return a + b with { x: 1 };\n        return !p with { open: true };\n        return -p with { x: 1 };\n        return new Point { x: 1, y } with { x: 2 };\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let groupings: Vec<String> =
+        method_body(program).iter().map(|statement| grouping(CODE, expression(statement))).collect();
+    assert_eq!(
+        groupings,
+        [
+            "(p with { x: 1, y })",
+            "(a + (b with { x: 1 }))",
+            "!p with { open: true }",
+            "(-p with { x: 1 })",
+            "(new Point { x: 1, y } with { x: 2 })",
+        ]
+    );
+    let Expression::With(with) = expression(&method_body(program)[0]) else {
+        panic!("expected `with`, got {:#?}", method_body(program)[0]);
+    };
+    let values: Vec<(&str, bool)> =
+        with.initializer.values.iter().map(|value| (source(CODE, &value.name), value.is_shorthand())).collect();
+    assert_eq!(values, [("x", false), ("y", true)]);
+}
+
+/// Spec section 16: an object initializer follows `new` with or without arguments, and a named constructor, and may be
+/// empty. `{` after `new X` opens one only where a name and `:`, `,` or `}` follow, or `}` closes it at once.
+#[test]
+fn an_object_initializer_follows_new() {
+    const CODE: &str = "class Report\n{\n    Point run()\n    {\n        new Point { x: 1, y };\n        new Point(1) { x: 2 };\n        new Point.origin() { x: 1 };\n        new Point { };\n        new Point();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let initializers: Vec<Option<&str>> = method_body(program)
+        .iter()
+        .map(|statement| match expression(statement) {
+            Expression::Instantiation(instantiation) => {
+                instantiation.initializer.as_ref().map(|initializer| source(CODE, initializer))
+            }
+            other => panic!("expected `new`, got {other:#?}"),
+        })
+        .collect();
+    assert_eq!(initializers, [Some("{ x: 1, y }"), Some("{ x: 2 }"), Some("{ x: 1 }"), Some("{ }"), None]);
 }
 
 #[test]
@@ -5086,4 +5301,136 @@ fn emit_raises_the_expression_after_it() {
     );
     assert!(!php.errors.is_empty(), "`emit new` must stay a parse error in plain PHP");
     assert!(!php.statements.iter().any(|statement| matches!(statement, Statement::Emit(_))), "{:#?}", php.statements);
+}
+
+/// Every readonly type in `node`, as its source, in source order.
+fn readonly_types<'a>(code: &'a str, node: Node<'_, '_>) -> Vec<&'a str> {
+    let mut found = Vec::new();
+    node.visit_children(|child| {
+        if let Node::ReadonlyHint(readonly) = child {
+            assert_eq!(readonly.readonly.value, b"readonly", "a readonly type starts at its keyword");
+            found.push(source(code, readonly));
+        }
+        found.extend(readonly_types(code, child));
+    });
+
+    found
+}
+
+/// Spec section 13: `readonly` before a type is part of the type, wherever a type goes, and covers the whole type
+/// after it.
+#[test]
+fn readonly_before_a_type_is_a_readonly_type() {
+    const CODE: &str = "class Shop\n{\n    public Shop(readonly Order order, public readonly Money due) { }\n    private readonly Money total;\n    public readonly Customer customer => this.owner;\n    public readonly Money? priceIn(readonly List<readonly Line> lines, Function<Money?(readonly Line, string)> priceOf) { readonly Order o = this.order; const free = (readonly Line line) => line.free; return null; }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Shop.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    assert_eq!(
+        readonly_types(CODE, Node::Program(program)),
+        [
+            "readonly Order",
+            "readonly Money",
+            "readonly Money",
+            "readonly Customer",
+            "readonly Money?",
+            "readonly List<readonly Line>",
+            "readonly Line",
+            "readonly Line",
+            "readonly Order",
+            "readonly Line",
+        ]
+    );
+    assert!(
+        class_members(program).iter().all(|member| match member {
+            ClassLikeMember::Method(method) => method.modifiers.iter().all(|modifier| !modifier.is_readonly()),
+            ClassLikeMember::Property(property) => property.modifiers().iter().all(|modifier| !modifier.is_readonly()),
+            _ => true,
+        }),
+        "`readonly` before a type is no modifier: {:#?}",
+        class_members(program)
+    );
+}
+
+/// Spec section 13: `readonly` after a method's parameters marks the method, as its last clause, after `on` and
+/// `uses`, whatever its body.
+#[test]
+fn readonly_after_the_parameters_marks_the_method() {
+    const CODE: &str = "interface Quotes\n{\n    Money quote(Cart cart) uses Http readonly;\n}\n\nclass Order\n{\n    public Money totalIn(string currency) readonly { return this.total; }\n    public int count() readonly => 1;\n    public abstract int size() readonly;\n    public void paid(OrderPaid e) on OrderPaid readonly { }\n    public void markPaid() { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Order.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let marked: Vec<(&str, bool)> = program
+        .statements
+        .iter()
+        .flat_map(|statement| match statement {
+            Statement::Class(class) => class.members.iter().collect::<Vec<_>>(),
+            Statement::Interface(interface) => interface.members.iter().collect(),
+            _ => Vec::new(),
+        })
+        .map(|member| {
+            let ClassLikeMember::Method(method) = member else {
+                panic!("expected a method, got {member:#?}");
+            };
+            if let Some(readonly) = &method.readonly {
+                assert_eq!(source(CODE, readonly), "readonly");
+            }
+
+            (std::str::from_utf8(method.name.value).expect("UTF-8"), method.readonly.is_some())
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        [("quote", true), ("totalIn", true), ("count", true), ("size", true), ("paid", true), ("markPaid", false)]
+    );
+}
+
+/// Spec section 13: `readonly` written before `on` or `uses` is an error at it that says to write it last, and the
+/// method keeps its mark.
+#[test]
+fn readonly_before_another_clause_is_an_error_that_names_the_last_place() {
+    const CODE: &str = "class Order\n{\n    public Money quote(Cart cart) readonly uses Http;\n    public void paid(OrderPaid e) readonly on OrderPaid { }\n    public void sent(OrderPaid e) readonly on OrderPaid uses Mail { }\n    public void kept(OrderPaid e) on OrderPaid readonly uses Mail { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Order.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    let message = "A method's `readonly` is its last clause, after `on` and `uses`, as in `Money quote(Cart cart) uses Http readonly;`.";
+    assert_eq!(
+        errors,
+        [
+            (message.to_string(), "readonly"),
+            (message.to_string(), "readonly"),
+            (message.to_string(), "readonly"),
+            (message.to_string(), "readonly")
+        ]
+    );
+    assert!(
+        class_members(program)
+            .iter()
+            .all(|member| matches!(member, ClassLikeMember::Method(method) if method.readonly.is_some())),
+        "{:#?}",
+        class_members(program)
+    );
+}
+
+/// Before `class` or another modifier, `readonly` stays a modifier, and the checker refuses it there. In plain PHP it
+/// is always PHP's own modifier.
+#[test]
+fn readonly_before_a_declaration_or_in_plain_php_is_a_modifier() {
+    const SHARP: &str = "public readonly class Receipt { }\n";
+    const PHP: &str =
+        "<?php class Bill { public function __construct(public readonly int $due) {} private readonly int $total; }\n";
+    let arena = LocalArena::new();
+    let sharp = parse(&arena, "src/Receipt.sharp", SHARP);
+    let php = parse(&arena, "src/Bill.php", PHP);
+
+    assert!(sharp.errors.is_empty(), "{:#?}", sharp.errors);
+    let Some(Statement::Class(receipt)) = sharp.statements.first() else {
+        panic!("expected a class, got {:#?}", sharp.statements);
+    };
+    assert!(receipt.modifiers.iter().any(Modifier::is_readonly), "{:#?}", receipt.modifiers);
+    assert!(php.errors.is_empty(), "{:#?}", php.errors);
+    assert!(readonly_types(PHP, Node::Program(php)).is_empty());
 }

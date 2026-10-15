@@ -11,8 +11,10 @@ use mago_allocator::LocalArena;
 use mago_analyzer::analysis_result::AnalysisResult;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::Listing;
+use mago_codex::metadata::module::BindingMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
+use mago_codex::metadata::module::top_dispatcher_namespaces;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferences;
@@ -97,6 +99,16 @@ pub struct Listener {
     pub takes_event: bool,
 }
 
+/// The app's module whose binding of `Sharp.Dispatcher` serves the whole app, spec section 15, which `emit` reads
+/// wherever the event is emitted.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DispatcherModule {
+    /// The workspace-relative name of its file.
+    pub file: Word,
+    /// The namespace it binds for, in lowercase.
+    pub namespace: Word,
+}
+
 impl IncrementalAnalysisService {
     /// Every PHP# listener of the last analysis, in the order the engine runs them: by its class's full name, then by
     /// its place in its class.
@@ -135,6 +147,26 @@ impl IncrementalAnalysisService {
         });
 
         listeners.into_iter().map(|(_, _, listener)| listener).collect()
+    }
+
+    /// The app's module whose binding of `Sharp.Dispatcher` serves the whole app, spec section 15: a module of the one
+    /// namespace `top_dispatcher_namespaces` gives. `None` when no app module binds it, and the standard library's
+    /// binding serves, and when two namespaces tie, which the analyzer refuses.
+    #[must_use]
+    pub fn dispatcher_module(&self) -> Option<DispatcherModule> {
+        let [namespace] = top_dispatcher_namespaces(&self.codebase.modules)[..] else {
+            return None;
+        };
+
+        self.codebase
+            .modules
+            .iter()
+            .find(|module| {
+                module.kind != ModuleKind::Test
+                    && module.namespace == namespace
+                    && module.bindings.iter().any(BindingMetadata::binds_dispatcher)
+            })
+            .map(|module| DispatcherModule { file: module.file, namespace })
     }
 
     /// Compiles each `.sharp` file of the last analysis, in file name order.

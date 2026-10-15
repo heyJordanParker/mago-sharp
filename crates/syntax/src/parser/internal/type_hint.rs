@@ -12,6 +12,7 @@ use crate::cst::cst::Keyword;
 use crate::cst::cst::LocalIdentifier;
 use crate::cst::cst::NullableHint;
 use crate::cst::cst::ParenthesizedHint;
+use crate::cst::cst::ReadonlyHint;
 use crate::cst::cst::TypeArgumentList;
 use crate::cst::cst::TypeParameter;
 use crate::cst::cst::TypeParameterBound;
@@ -29,7 +30,7 @@ where
     A: Arena,
 {
     pub(crate) fn is_at_type_hint(&mut self) -> Result<bool, ParseError> {
-        if self.is_at_generic_hint()? || self.is_at_function_hint()? {
+        if self.is_at_generic_hint()? || self.is_at_function_hint()? || self.is_at_readonly_hint()? {
             return Ok(true);
         }
 
@@ -53,6 +54,12 @@ where
         ))
     }
 
+    /// Whether `written` names the scalar type `name`. PHP reads it ignoring case, and PHP# writes it in lowercase
+    /// only, spec section 24, so `Int`, `Float`, `Bool` and `String` in a `.sharp` file are classes, as `(Int)` is.
+    fn is_scalar_name(&self, written: &[u8], name: &[u8]) -> bool {
+        if self.dialect.is_sharp() { written == name } else { written.eq_ignore_ascii_case(name) }
+    }
+
     pub(crate) fn parse_optional_type_hint(&mut self) -> Result<Option<Hint<'arena>>, ParseError> {
         if self.is_at_type_hint()? { Ok(Some(self.parse_type_hint()?)) } else { Ok(None) }
     }
@@ -71,6 +78,13 @@ where
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         let hint = match &token.kind {
+            T!["readonly"] if self.is_at_readonly_hint()? => {
+                let readonly = self.expect_any_keyword()?;
+                let hint = ensure_sufficient_stack(|| self.parse_type_hint_inner(in_expression))?;
+
+                // `readonly` covers the whole type after it, its `?` and its unions included.
+                return Ok(Hint::Readonly(ReadonlyHint { readonly, hint: self.arena.alloc(hint) }));
+            }
             T!["?"] => {
                 let nullable = self.parse_nullable_type_hint()?;
                 if self.dialect.is_sharp() {
@@ -96,10 +110,10 @@ where
             T![Identifier] => match token.value {
                 val if val.eq_ignore_ascii_case(b"void") => Hint::Void(self.parse_local_identifier()?),
                 val if val.eq_ignore_ascii_case(b"never") => Hint::Never(self.parse_local_identifier()?),
-                val if val.eq_ignore_ascii_case(b"float") => Hint::Float(self.parse_local_identifier()?),
-                val if val.eq_ignore_ascii_case(b"bool") => Hint::Bool(self.parse_local_identifier()?),
-                val if val.eq_ignore_ascii_case(b"int") => Hint::Integer(self.parse_local_identifier()?),
-                val if val.eq_ignore_ascii_case(b"string") => Hint::String(self.parse_local_identifier()?),
+                val if self.is_scalar_name(val, b"float") => Hint::Float(self.parse_local_identifier()?),
+                val if self.is_scalar_name(val, b"bool") => Hint::Bool(self.parse_local_identifier()?),
+                val if self.is_scalar_name(val, b"int") => Hint::Integer(self.parse_local_identifier()?),
+                val if self.is_scalar_name(val, b"string") => Hint::String(self.parse_local_identifier()?),
                 val if val.eq_ignore_ascii_case(b"object") => Hint::Object(self.parse_local_identifier()?),
                 val if val.eq_ignore_ascii_case(b"mixed") => Hint::Mixed(self.parse_local_identifier()?),
                 // PHP# writes PHP's `mixed` as `Any`, as spec section 24 decides.
@@ -199,6 +213,36 @@ where
             next if ends_pattern(next) => false,
             Some(name) if name.kind == T![Identifier] => !ends_pattern(self.stream.lookahead(2)?),
             next => next.is_some_and(|token| Self::is_at_start_of_expression(token.kind)),
+        })
+    }
+
+    /// Whether a PHP# readonly type starts here, spec section 13: `readonly` followed by a type, as in
+    /// `readonly Order order`. Before `class`, `struct`, another modifier or anything else, `readonly` is a modifier,
+    /// which the checker refuses on a class and a field with the message that names `{ get; }`.
+    pub(crate) fn is_at_readonly_hint(&mut self) -> Result<bool, ParseError> {
+        if !self.dialect.is_sharp() || self.stream.peek_kind(0)? != Some(T!["readonly"]) {
+            return Ok(false);
+        }
+
+        Ok(match self.stream.lookahead(1)? {
+            Some(token) if token.kind == T![Identifier] => !matches!(
+                token.value,
+                b"struct" | b"virtual" | b"override" | b"required" | b"extern" | b"lazy" | b"internal" | b"foreign"
+            ),
+            Some(token) => {
+                // `readonly readonly Order` reads as one readonly type inside another, which the checker refuses.
+                matches!(
+                    token.kind,
+                    T!["("
+                        | "self"
+                        | "array"
+                        | "callable"
+                        | "readonly"
+                        | QualifiedIdentifier
+                        | FullyQualifiedIdentifier]
+                )
+            }
+            None => false,
         })
     }
 

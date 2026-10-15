@@ -31,12 +31,10 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::BinaryOperator;
-use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassConstantAccess;
 use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::Construct;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Node;
@@ -57,6 +55,7 @@ use crate::context::assertion::AssertionContext;
 use crate::expression::binary::comparison::get_comparison_method;
 use crate::expression::binary::comparison::mixes_numbers;
 use crate::expression::binary::comparison::sharp_refusal;
+use crate::plugin::hook::NamedCall;
 use crate::resolver::class_name::get_class_name_from_atomic;
 use crate::utils::expression::get_expression_id;
 use crate::utils::expression::get_index_id;
@@ -126,32 +125,28 @@ where
             // Collect `@assert` assertions.
             if_types.extend(process_custom_assertions(call.span(), artifacts));
 
-            match call {
-                // If the function does not have any, try collecting
-                // assertions for special functions.
-                Call::Function(function_call) if if_types.is_empty() => {
-                    if_types.extend(scrape_special_function_call_assertions(
-                        assertion_context,
-                        artifacts,
-                        function_call,
-                    ));
-                }
-                _ => {}
+            let named_call = NamedCall::from_call(assertion_context.resolved_names, assertion_context.codebase, call);
+
+            // If the function does not have any, try collecting
+            // assertions for special functions.
+            if let Some(named_call) = &named_call
+                && if_types.is_empty()
+            {
+                if_types.extend(scrape_special_function_call_assertions(assertion_context, artifacts, named_call));
             }
 
-            if let Call::Function(FunctionCall { function: _, argument_list }) = call
-                && 1 == argument_list.arguments.len()
-                && let Some(first_argument) = argument_list.arguments.first()
+            if let Some(named_call) = named_call
+                && let [first_argument] = named_call.argument_list.arguments.as_slice()
                 && let Some(first_argument_expression_id) = assertion_context.get_expression_id(first_argument.value())
             {
-                if is_count_or_size_of_call(expression, assertion_context) {
+                if named_call.calls(COUNT_FUNCTIONS) {
                     if_types.insert(first_argument_expression_id, vec![vec![Assertion::NonEmptyCountable(true)]]);
-                } else if is_function_call_to(expression, assertion_context, b"function_exists") {
+                } else if named_call.calls(&[b"function_exists"]) {
                     if_types.insert(
                         first_argument_expression_id,
                         vec![vec![Assertion::IsType(TAtomic::Scalar(TScalar::String(TString::callable())))]],
                     );
-                } else if is_function_call_to(expression, assertion_context, b"is_callable")
+                } else if named_call.calls(&[b"is_callable"])
                     && let Some(first_argument_type) = artifacts.get_expression_type(first_argument.value())
                 {
                     let mut callables = vec![];
@@ -275,6 +270,24 @@ where
     if if_types.is_empty() { vec![] } else { vec![if_types] }
 }
 
+/// The functions whose call counts its one argument.
+const COUNT_FUNCTIONS: &[&[u8]] = &[b"count", b"sizeof", b"psl\\iter\\count"];
+
+/// The named call `expression` makes, or `None` when it makes none.
+fn get_expression_named_call<'ast, 'arena, A>(
+    expression: &'ast Expression<'arena>,
+    assertion_context: AssertionContext<'_, '_, A>,
+) -> Option<NamedCall<'ast, 'arena>>
+where
+    A: Arena,
+{
+    let Expression::Call(call) = expression else {
+        return None;
+    };
+
+    NamedCall::from_call(assertion_context.resolved_names, assertion_context.codebase, call)
+}
+
 fn process_custom_assertions(expression_span: Span, artifacts: &AnalysisArtifacts) -> WordMap<AssertionSet> {
     let range = (expression_span.start.offset, expression_span.end.offset);
     let mut assertions = artifacts.if_true_assertions.get(&range).cloned().unwrap_or_default();
@@ -302,25 +315,14 @@ fn process_custom_assertions(expression_span: Span, artifacts: &AnalysisArtifact
 fn scrape_special_function_call_assertions<A>(
     assertion_context: AssertionContext<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
-    function_call: &FunctionCall,
+    function_call: &NamedCall<'_, '_>,
 ) -> WordMap<AssertionSet>
 where
     A: Arena,
 {
     let mut if_types = WordMap::default();
 
-    let Expression::Identifier(function_identifier) = function_call.function else {
-        return if_types;
-    };
-
-    let function_name = ascii_lowercase_word(function_identifier.value());
-    let resolved_function_name = ascii_lowercase_word(assertion_context.resolved_names.get(function_identifier));
-    let should_check_against_unresolved = { function_identifier.is_local() };
-
-    let is_array_key_exists = |name: &[u8]| matches!(name, b"array_key_exists" | b"key_exists");
-    if (should_check_against_unresolved && is_array_key_exists(function_name.as_bytes()))
-        || is_array_key_exists(resolved_function_name.as_bytes())
-    {
+    if function_call.calls(&[b"array_key_exists", b"key_exists"]) {
         let key_argument = function_call.argument_list.arguments.first().map(mago_syntax::cst::Argument::value);
         let array_argument = function_call.argument_list.arguments.get(1).map(mago_syntax::cst::Argument::value);
 
@@ -354,11 +356,9 @@ where
         }
     }
 
-    let (argument_variable_id_position, function_assertions) = if resolved_function_name
-        .as_bytes()
-        .starts_with(b"psl\\")
-    {
-        match resolved_function_name.as_bytes() {
+    let function_name = ascii_lowercase_word(function_call.name.as_bytes());
+    let (argument_variable_id_position, function_assertions) = if function_name.as_bytes().starts_with(b"psl\\") {
+        match function_name.as_bytes() {
             b"psl\\iter\\contains_key" => {
                 if let Some(array_key) = function_call
                     .argument_list
@@ -569,16 +569,7 @@ where
             _ => None,
         };
 
-        let mut result = None;
-        if should_check_against_unresolved {
-            result = get_builtin_assertion(function_name.as_bytes());
-        }
-
-        if result.is_none() {
-            result = get_builtin_assertion(resolved_function_name.as_bytes());
-        }
-
-        let Some(found_assertions) = result else {
+        let Some(found_assertions) = get_builtin_assertion(function_name.as_bytes()) else {
             return if_types;
         };
 
@@ -1060,20 +1051,11 @@ where
             return vec![];
         }
 
-        let Expression::Call(Call::Function(function_call)) = expression else {
-            return vec![];
-        };
-        let Expression::Identifier(identifier) = function_call.function else {
+        let Some(function_call) = get_expression_named_call(expression, assertion_context) else {
             return vec![];
         };
 
-        let name = identifier.value();
-        let resolved_name = assertion_context.resolved_names.get(identifier);
-        if !name.eq_ignore_ascii_case(b"is_a")
-            && !name.eq_ignore_ascii_case(b"is_subclass_of")
-            && !resolved_name.eq_ignore_ascii_case(b"is_a")
-            && !resolved_name.eq_ignore_ascii_case(b"is_subclass_of")
-        {
+        if !function_call.calls(&[b"is_a", b"is_subclass_of"]) {
             return vec![];
         }
 
@@ -1939,7 +1921,7 @@ fn is_count_or_size_of_call<A>(expression: &Expression, assertion_context: Asser
 where
     A: Arena,
 {
-    is_function_call_to_one_of(expression, assertion_context, &[b"count", b"sizeof", b"Psl\\Iter\\count"])
+    is_function_call_to_one_of(expression, assertion_context, COUNT_FUNCTIONS)
 }
 
 fn get_strlen_argument_expression_id<A>(
@@ -1949,24 +1931,14 @@ fn get_strlen_argument_expression_id<A>(
 where
     A: Arena,
 {
-    if !is_function_call_to(expression, assertion_context, b"strlen") {
+    if !is_function_call_to_one_of(expression, assertion_context, &[b"strlen"]) {
         return None;
     }
 
     get_first_argument_expression_id(assertion_context, expression)
 }
 
-fn is_function_call_to<A>(
-    expression: &Expression,
-    assertion_context: AssertionContext<'_, '_, A>,
-    function_name: &[u8],
-) -> bool
-where
-    A: Arena,
-{
-    is_function_call_to_one_of(expression, assertion_context, &[function_name])
-}
-
+/// Whether `expression` passes one argument to one of `functions`, each a full name.
 #[inline]
 fn is_function_call_to_one_of<A>(
     expression: &Expression,
@@ -1976,25 +1948,8 @@ fn is_function_call_to_one_of<A>(
 where
     A: Arena,
 {
-    let Expression::Call(Call::Function(FunctionCall { function, argument_list })) = expression else {
-        return false;
-    };
-
-    if argument_list.arguments.len() != 1 {
-        return false;
-    }
-
-    let Expression::Identifier(function_identifier) = function else {
-        return false;
-    };
-
-    if functions.iter().any(|name| function_identifier.value().eq_ignore_ascii_case(name)) {
-        return true;
-    }
-
-    let resolved_function_name = assertion_context.resolved_names.get(function_identifier);
-
-    functions.iter().any(|name| resolved_function_name.eq_ignore_ascii_case(name))
+    get_expression_named_call(expression, assertion_context)
+        .is_some_and(|call| call.argument_list.arguments.len() == 1 && call.calls(functions))
 }
 
 fn get_true_equality_assertions<A>(
@@ -2235,9 +2190,7 @@ fn get_first_argument_expression_id<A>(
 where
     A: Arena,
 {
-    let Expression::Call(Call::Function(FunctionCall { argument_list, .. })) = expression else {
-        return None;
-    };
+    let argument_list = get_expression_named_call(expression, assertion_context)?.argument_list;
 
     if argument_list.arguments.len() != 1 {
         return None;

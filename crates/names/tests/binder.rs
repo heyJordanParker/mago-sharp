@@ -485,7 +485,7 @@ fn an_imported_int_is_the_imported_class() {
 
 #[test]
 fn a_bare_standard_library_name_is_the_class_in_the_sharp_namespace_wherever_a_class_is_named() {
-    const CODE: &str = "namespace App.Tenant.Store;\n\nclass Report\n{\n    public void run(Position here, Environment settings, string text)\n    {\n        Position.current();\n        Environment.current();\n        List.wrap(text);\n        new Int();\n        new Float();\n        new Bool();\n        new Position();\n        new Environment();\n        new List;\n        typeof(Position);\n        typeof(Environment);\n        typeof(List);\n        typeof(Int);\n        typeof(Bool);\n    }\n}\n";
+    const CODE: &str = "namespace App.Tenant.Store;\n\nclass Report\n{\n    public void run(Position here, Environment settings, string text)\n    {\n        Position.current();\n        Environment.current();\n        List.wrap(text);\n        Class.of(here);\n        new Int();\n        new Float();\n        new Bool();\n        new Position();\n        new Environment();\n        new List;\n        typeof(Position);\n        typeof(Environment);\n        typeof(List);\n        typeof(Int);\n        typeof(Bool);\n    }\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
@@ -495,6 +495,7 @@ fn a_bare_standard_library_name_is_the_class_in_the_sharp_namespace_wherever_a_c
         ("Position.current", "Sharp\\Position"),
         ("Environment.current", "Sharp\\Environment"),
         ("List.wrap", "Sharp\\List"),
+        ("Class.of", "Sharp\\Class"),
         ("Int()", "Sharp\\Int"),
         ("Float()", "Sharp\\Float"),
         ("Bool()", "Sharp\\Bool"),
@@ -510,6 +511,7 @@ fn a_bare_standard_library_name_is_the_class_in_the_sharp_namespace_wherever_a_c
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, 0)), class, "`{needle}`");
     }
     assert_eq!(binding(&names, CODE, "List.wrap", 0), Some(Binding::Class));
+    assert_eq!(binding(&names, CODE, "Class.of", 0), Some(Binding::Class));
 }
 
 #[test]
@@ -653,6 +655,36 @@ fn an_extension_member_binds_its_receiver_as_a_parameter() {
             earlier: declared(CODE, "value", 0, LocalKind::Parameter)
         }]
     );
+}
+
+/// An extension block's type parameters are in scope in its receiver, its bounds and every member, a member's own
+/// type parameters beside them, spec section 26. Past the block the name is a class name again.
+#[test]
+fn an_extension_block_binds_its_type_parameters_in_its_receiver_and_members() {
+    const CODE: &str = "namespace App;\n\npublic static class Groups\n{\n    extension<K, V : Order>(Map<K, List<V>> groups)\n    {\n        public List<V> of(K key) => groups[key];\n        public List<TOut> mapped<TOut>(Function<TOut(V)> map) => [];\n    }\n\n    public static V first() => null;\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+    let k = Some(Binding::TypeParameter { declaration: span(CODE, "K", 0) });
+    let v = Some(Binding::TypeParameter { declaration: span(CODE, "V", 0) });
+
+    for nth in [1, 2] {
+        assert_eq!(binding(&names, CODE, "K", nth), k, "`K` #{nth}");
+    }
+    for nth in [1, 2, 3] {
+        assert_eq!(binding(&names, CODE, "V", nth), v, "`V` #{nth}");
+        assert_eq!(resolved(&names, CODE, "V", nth), b"V", "`V` #{nth}");
+    }
+    for nth in [0, 2] {
+        assert_eq!(
+            binding(&names, CODE, "TOut", nth),
+            Some(Binding::TypeParameter { declaration: span(CODE, "TOut", 1) }),
+            "`TOut` #{nth}"
+        );
+    }
+    assert_eq!(resolved(&names, CODE, "Order", 0), b"App\\Order");
+    assert_eq!(binding(&names, CODE, "V", 4), None);
+    assert_eq!(resolved(&names, CODE, "V", 4), b"App\\V");
+    assert_eq!(names.binding_errors(), []);
 }
 
 /// A named constructor binds as a constructor does, spec section 9.1: its parameters are locals of that constructor

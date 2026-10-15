@@ -34,9 +34,10 @@ pub const COMPILED_FOLDER: &str = ".sharp";
 /// The last segment of an input that stands for the `.sharp` files of its folder, as in `app/Shop/*.sharp`.
 ///
 /// Its stamp is the listing of the names of the regular files whose name ends in `.sharp` after at least one other
-/// byte, each followed by a newline, in byte order: its size is the listing's length, its modification time zero, and
-/// its hash the listing's. A link counts as the file it reaches, and a link that reaches none is left out. A file
-/// appearing or going changes it, and an edit doesn't.
+/// byte, and of the folders whose name starts with an ASCII uppercase letter, as a namespace part does, each with a `/`
+/// after it, each followed by a newline, in byte order: its size is the listing's length, its modification time zero,
+/// and its hash the listing's. A link counts as what it reaches, and a link that reaches nothing is left out. A file or
+/// a namespace folder appearing or going changes it, and an edit doesn't.
 pub const SOURCE_LISTING: &str = "*.sharp";
 
 /// The first bytes of a `.sharpc` file. Every 16-byte hash is xxh3-128 in canonical big-endian order.
@@ -365,13 +366,17 @@ fn source_listing(folder: &Path) -> io::Result<Vec<u8>> {
     let mut names = Vec::new();
     for entry in entries {
         let entry = entry?;
-        let name = entry.file_name().into_encoded_bytes();
-        // A link whose target is gone, or a file deleted since the folder was read, is no file, as the loader and the
+        let mut name = entry.file_name().into_encoded_bytes();
+        let source = name.len() > b".sharp".len() && name.ends_with(b".sharp");
+        // A link whose target is gone, or a file deleted since the folder was read, is neither, as the loader and the
         // engine skip it.
-        if name.len() > b".sharp".len()
-            && name.ends_with(b".sharp")
-            && std::fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_file())
-        {
+        let Ok(metadata) = std::fs::metadata(entry.path()) else {
+            continue;
+        };
+        if source && metadata.is_file() {
+            names.push(name);
+        } else if metadata.is_dir() && name.first().is_some_and(u8::is_ascii_uppercase) {
+            name.push(b'/');
             names.push(name);
         }
     }

@@ -79,6 +79,8 @@ where
             cst::Hint::Object(_) => TypeKind::Object,
             cst::Hint::Mixed(_) => TypeKind::Mixed,
             cst::Hint::Iterable(_) => TypeKind::Iterable,
+            // Spec section 13: `readonly` is the checker's rule, and the value runs as its type.
+            cst::Hint::Readonly(readonly) => self.lower_type_kind(readonly.hint),
         }
     }
 
