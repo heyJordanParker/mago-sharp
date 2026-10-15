@@ -10174,6 +10174,22 @@ fn a_renamed_parameter_is_widened_too() {
     );
 }
 
+/// A PHP# member is closed to a PHP# subclass unless it is `virtual` or `abstract`, but PHP# checks only `.sharp` code,
+/// so a plain PHP subclass, a test double included, overrides a closed property and a closed method with no report.
+/// A PHP# subclass that does the same keeps both reports.
+#[test]
+fn a_plain_php_subclass_overrides_a_closed_member_with_no_report() {
+    let shape = "namespace App;\n\npublic class Shape\n{\n    protected string title { get; set; } = \"shape\";\n\n    public string name() => this.title;\n}\n";
+    let legacy = "<?php\n\nnamespace App;\n\nclass LegacyShape extends Shape\n{\n    protected string $title = 'legacy';\n\n    public function name(): string\n    {\n        return 'old';\n    }\n}\n";
+    let sharp = "namespace App;\n\npublic class Square : Shape\n{\n    protected override string title { get; set; } = \"square\";\n\n    public override string name() => \"square\";\n}\n";
+
+    assert_eq!(codes(&issues(("src/App/LegacyShape.php", legacy), &[("src/App/Shape.sharp", shape)])), Vec::<&str>::new());
+    assert_eq!(
+        codes(&issues(("src/App/Square.sharp", sharp), &[("src/App/Shape.sharp", shape)])),
+        ["override-final-method", "override-final-property"]
+    );
+}
+
 /// The engine erases a PHP# class's type parameters whoever extends it, so a PHP class whose `@extends Box<Order>`
 /// narrows `put` to `Order` is refused as PHP refuses it when the class links: the bridge lowers only PHP#. A PHP#
 /// class narrowing the `mixed` parameter of a PHP `@template` class to its type argument is widened. A PHP class

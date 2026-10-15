@@ -3840,6 +3840,9 @@ fn report_signature_compatibility_issue<'ctx, A>(
     use method_signature::SignatureCompatibilityIssue;
 
     match incompatibility {
+        // PHP# checks only `.sharp` code, and the engine runs a closed PHP# method as an open one, so a plain PHP
+        // subclass, a test double included, overrides it.
+        SignatureCompatibilityIssue::FinalMethodOverride if !context.dialect.is_sharp() && parent_class.flags.is_sharp() => {}
         SignatureCompatibilityIssue::FinalMethodOverride => {
             context.collector.report_with_code(
                 IssueCode::OverrideFinalMethod,
@@ -4446,6 +4449,11 @@ fn check_class_like_properties<'ctx, A>(
             // A PHP# property is closed unless it is `virtual` or `abstract`, spec sections 6.1 and 22, so the codex reads
             // it as final. PHP# writes no `final` on a property, so a final PHP# property is a closed one.
             let sharp_parent = context.dialect.is_sharp() && parent_metadata.flags.is_sharp();
+            // PHP# checks only `.sharp` code, so a plain PHP subclass, a test double included, overrides a closed PHP#
+            // property. PHP itself makes one whose `set` is private final, and refuses that override.
+            let open_to_php = !context.dialect.is_sharp()
+                && parent_metadata.flags.is_sharp()
+                && !parent_property.write_visibility.is_private();
             if sharp_parent && parent_property.flags.is_final() && !parent_property.write_visibility.is_private() {
                 let parent_class = display_class_like_name(context, parent_class_name);
 
@@ -4458,9 +4466,10 @@ fn check_class_like_properties<'ctx, A>(
                     .with_annotation(Annotation::secondary(parent_property_span).with_message("Declared closed here."))
                     .with_help(format!("Declare `{property}` `virtual` in `{parent_class}` to let a subclass override it.")),
                 );
-            } else if parent_property.flags.is_final()
+            } else if !open_to_php
+                && (parent_property.flags.is_final()
                 // PHP makes a property whose `set` is private final, so the engine refuses a PHP# override of one.
-                || (context.dialect.is_sharp() && parent_property.write_visibility.is_private())
+                || (context.dialect.is_sharp() && parent_property.write_visibility.is_private()))
             {
                 context.collector.report_with_code(
                     IssueCode::OverrideFinalProperty,
