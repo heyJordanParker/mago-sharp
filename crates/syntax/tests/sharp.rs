@@ -1707,7 +1707,7 @@ fn a_php_double_arrow_in_a_literal_is_a_php_syntax_error() {
     let program = parse(&arena, "src/Report.sharp", CODE);
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages.len(), 1, "{messages:#?}");
+    assert_eq!(messages, ["PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow"]);
     let Some(ParseError::PhpSyntaxInSharp(_, span)) = program.errors.first() else {
         panic!("expected a PHP-syntax error, got {:#?}", program.errors);
     };
