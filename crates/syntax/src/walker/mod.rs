@@ -1251,6 +1251,10 @@ generate_ast_walker! {
         walker.walk_property_item(&hooked_property.item, context);
         walker.walk_property_hook_list(&hooked_property.hook_list, context);
 
+        for behavior in hooked_property.behaviors.iter().flat_map(|behaviors| behaviors.behaviors.iter()) {
+            walker.walk_identifier(behavior, context);
+        }
+
         if let Some(initial_value) = &hooked_property.initial_value {
             walker.walk_expression(initial_value.value, context);
         }

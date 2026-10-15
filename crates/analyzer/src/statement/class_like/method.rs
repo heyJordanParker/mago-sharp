@@ -518,9 +518,9 @@ pub(super) fn check_super_call<A>(
             );
         }
         None if !constructor_of_base.parameters.is_empty()
-            && members.iter().any(|member| {
-                matches!(member, ClassLikeMember::Property(property) if property.initial_value_runs_in_constructor())
-            }) =>
+            && members.iter().any(
+                |member| matches!(member, ClassLikeMember::Property(property) if property.runs_in_constructor()),
+            ) =>
         {
             let mut parameters = Vec::new();
             let mut arguments = Vec::new();
@@ -535,7 +535,8 @@ pub(super) fn check_super_call<A>(
                     },
                     None => String::new(),
                 };
-                let name = String::from_utf8_lossy(mago_bytes::trim_start_byte(parameter.get_name().0.as_bytes(), b'$'));
+                let name =
+                    String::from_utf8_lossy(mago_bytes::trim_start_byte(parameter.get_name().0.as_bytes(), b'$'));
                 let spread = if parameter.flags.is_variadic() { "..." } else { "" };
                 let written_hint = match hint {
                     Some(hint) => {
@@ -551,7 +552,8 @@ pub(super) fn check_super_call<A>(
                 parameters.push(format!("{written_hint} {spread}{name}{default}"));
                 arguments.push(format!("{spread}{name}"));
             }
-            let imports = display_missing_imports(context, classes).map(|imports| format!(" {imports}")).unwrap_or_default();
+            let imports =
+                display_missing_imports(context, classes).map(|imports| format!(" {imports}")).unwrap_or_default();
 
             context.collector.report_with_code(
                 IssueCode::MissingSuperCall,

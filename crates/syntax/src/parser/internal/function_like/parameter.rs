@@ -92,7 +92,7 @@ where
             hooks: self.parse_optional_property_hook_list()?,
         };
         if parameter.hooks.is_some() {
-            self.skip_via_clause(true)?;
+            self.skip_parameter_behaviors(parameter.variable.name)?;
         }
 
         // A computed property's body, as in `public string slug => "x"`, is skipped whole, so the class parses on.

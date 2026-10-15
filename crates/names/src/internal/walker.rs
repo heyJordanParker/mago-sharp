@@ -38,6 +38,7 @@ use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionPartialApplication;
 use mago_syntax::cst::GenericClass;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
@@ -884,6 +885,18 @@ where
     ) {
         if self.sharp {
             self.locals.exit_method();
+        }
+    }
+
+    /// Each behavior after `via` names a class, spec section 6.4.
+    fn walk_in_hooked_property(
+        &mut self,
+        hooked_property: &'ast HookedProperty<'arena>,
+        context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        for behavior in hooked_property.behaviors.iter().flat_map(|behaviors| behaviors.behaviors.iter()) {
+            let (name, imported) = self.resolve_class(context, behavior.value());
+            self.resolved_names.insert_at(behavior.span(), name, imported);
         }
     }
 

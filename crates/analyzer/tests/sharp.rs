@@ -9952,17 +9952,15 @@ fn a_pattern_or_as_of_a_type_parameter_is_checked_with_the_other_arms() {
 }
 
 /// Generics are erased when PHP# compiles, so `Validator<in TItem>` takes `mixed`, and PHP refuses a parameter
-/// narrower than the one it overrides when it links the class. The parameter is refused where it is written, with the
-/// type it must take and the bound that lets it keep its type.
+/// narrower than the one it overrides when it links the class. A PHP# method that takes the type argument, `Order`,
+/// compiles: the bridge widens its parameter, as Java's bridge method takes the erased type.
 #[test]
-fn a_parameter_narrower_than_the_erased_parent_parameter_is_an_error() {
+fn a_parameter_that_takes_the_type_argument_is_widened() {
     let sharp = "namespace Demo;\n\npublic class StrictValidator : Validator<Order>\n{\n    public bool validate(Order item) => true;\n}\n";
 
     assert_eq!(
-        explained(("src/Demo/StrictValidator.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        [
-            "5:32 incompatible-parameter-type Parameter `item` of `StrictValidator.validate` must take at least `Any?`, the type `Validator.validate` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Validator<in TItem : Order>`, so both sides erase to the bound."
-        ]
+        widened(("src/Demo/StrictValidator.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        (Vec::new(), vec!["5:32 item".to_owned()])
     );
 }
 
@@ -10011,28 +10009,33 @@ fn a_field_whose_type_erases_to_another_type_than_the_parent_field_is_an_error()
 }
 
 /// The help of an erased parameter names a bound only where one bound makes both sides erase alike: an enum is a bound,
-/// as `Box<TItem : Status>`, and a union is not. `Class<TItem>` erases to `string` on both sides, so
-/// `kind(Class<Order> type)` links.
+/// as `Box<TItem : Status>`, and a union is not. A plain PHP class narrowing the parameter is refused, since PHP links
+/// it as written, and its PHP# twin widens both parameters. `Class<TItem>` erases to `string` on both sides, so
+/// `kind(Class<Order> type)` links as written. A widened parameter keeps the variance error of `Feed<out TItem>`.
 #[test]
 fn an_erased_parameter_help_names_a_bound_only_where_one_fits() {
-    let sharp_box = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic enum Status\n{\n    case Open;\n}\n\npublic class Box<TItem>\n{\n    public virtual void put(TItem item)\n    {\n    }\n\n    public virtual void kind(Class<TItem> type)\n    {\n    }\n}\n\npublic class StatusBox : Box<Status>\n{\n    public override void put(Status item)\n    {\n    }\n}\n\npublic class PairBox : Box<Order>\n{\n    public override void put(Order|Line item)\n    {\n    }\n\n    public override void kind(Class<Order> type)\n    {\n    }\n}\n";
+    let sharp_box = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic enum Status\n{\n    case Open;\n}\n\npublic class Box<TItem>\n{\n    public virtual void put(TItem item)\n    {\n    }\n\n    public virtual void kind(Class<TItem> type)\n    {\n    }\n}\n";
+    let php_boxes = "<?php\n\nnamespace Demo;\n\n/** @extends Box<Status> */\nclass StatusBox extends Box\n{\n    public function put(Status $item): void\n    {\n    }\n}\n\n/** @extends Box<Order> */\nclass PairBox extends Box\n{\n    public function put(Order|Line $item): void\n    {\n    }\n}\n";
+    let sharp_boxes = "namespace Demo;\n\npublic class StatusBox : Box<Status>\n{\n    public override void put(Status item)\n    {\n    }\n}\n\npublic class PairBox : Box<Order>\n{\n    public override void put(Order|Line item)\n    {\n    }\n\n    public override void kind(Class<Order> type)\n    {\n    }\n}\n";
+    let boxes = [("src/Demo/Box.sharp", sharp_box)];
 
     assert_eq!(
-        explained(("src/Demo/Box.sharp", sharp_box), &[]),
+        explained(("src/Demo/Boxes.php", php_boxes), &boxes),
         [
-            "29:37 incompatible-parameter-type Parameter `item` of `StatusBox.put` must take at least `Any?`, the type `Box.put` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Box<TItem : Status>`, so both sides erase to the bound.",
-            "36:41 incompatible-parameter-type Parameter `item` of `PairBox.put` must take at least `Any?`, the type `Box.put` erases it to. Write `item` with a type that erases to `Any?`.",
+            "8:32 incompatible-parameter-type Parameter `item` of `Demo\\StatusBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `item` with a type that erases to `mixed`, or bound the type parameter, as in `Box<TItem : Status>`, so both sides erase to the bound.",
+            "16:36 incompatible-parameter-type Parameter `item` of `Demo\\PairBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `item` with a type that erases to `mixed`.",
         ]
+    );
+    assert_eq!(
+        widened(("src/Demo/Boxes.sharp", sharp_boxes), &boxes),
+        (Vec::new(), vec!["5:37 item".to_owned(), "12:41 item".to_owned()])
     );
 
     let sharp_feed = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic interface Feed<out TItem>\n{\n    void take(TItem item);\n}\n\npublic class OrderFeed : Feed<Order>\n{\n    public void take(Order item)\n    {\n    }\n}\n";
 
     assert_eq!(
-        explained(("src/Demo/Feed.sharp", sharp_feed), &[]),
-        [
-            "9:10 invalid-template-parameter `TItem` is declared `out`, so `take` cannot take it in.",
-            "14:28 incompatible-parameter-type Parameter `item` of `OrderFeed.take` must take at least `Any?`, the type `Feed.take` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Feed<out TItem : Order>`, so both sides erase to the bound.",
-        ]
+        widened(("src/Demo/Feed.sharp", sharp_feed), &[]),
+        (vec!["9:10 invalid-template-parameter".to_owned()], vec!["14:28 item".to_owned()])
     );
 }
 
@@ -10047,27 +10050,27 @@ fn a_signature_that_links_once_erased_has_no_issue() {
 }
 
 /// A renamed parameter does not hide an erased one: `put(Order order)` over the `virtual` `put(TItem item)` of a
-/// concrete `Box<TItem>`, and over an interface's `put(TItem item)`, reports the rename and the erasure in one run.
+/// concrete `Box<TItem>`, and over an interface's `put(TItem item)`, reports the rename and widens the parameter in
+/// one run.
 #[test]
-fn a_renamed_parameter_reports_its_erased_type_too() {
+fn a_renamed_parameter_is_widened_too() {
     let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<TItem>\n{\n    public virtual void put(TItem item)\n    {\n    }\n}\n\npublic class OrderBox : Box<Order>\n{\n    public override void put(Order order)\n    {\n    }\n}\n\npublic interface Sink<TItem>\n{\n    void put(TItem item);\n}\n\npublic class OrderSink : Sink<Order>\n{\n    public void put(Order order)\n    {\n    }\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Boxes.sharp", sharp), &[]),
-        [
-            "16:26 incompatible-parameter-name",
-            "16:36 incompatible-parameter-type",
-            "28:17 incompatible-parameter-name",
-            "28:27 incompatible-parameter-type",
-        ]
+        widened(("src/Demo/Boxes.sharp", sharp), &[]),
+        (
+            vec!["16:26 incompatible-parameter-name".to_owned(), "28:17 incompatible-parameter-name".to_owned()],
+            vec!["16:36 order".to_owned(), "28:27 order".to_owned()]
+        )
     );
 }
 
 /// The engine erases a PHP# class's type parameters whoever extends it, so a PHP class whose `@extends Box<Order>`
-/// narrows `put` to `Order` is refused as PHP refuses it when the class links, and so is a PHP# class narrowing the
-/// `mixed` parameter of a PHP `@template` class. A PHP class extending a PHP `@template` class keeps its issues.
+/// narrows `put` to `Order` is refused as PHP refuses it when the class links: the bridge lowers only PHP#. A PHP#
+/// class narrowing the `mixed` parameter of a PHP `@template` class to its type argument is widened. A PHP class
+/// extending a PHP `@template` class keeps its issues.
 #[test]
-fn a_php_class_overriding_an_erased_sharp_method_is_refused() {
+fn a_php_class_overriding_an_erased_sharp_method_is_refused_and_a_sharp_class_is_widened() {
     let order_box = "<?php\n\nnamespace Demo;\n\n/** @extends Box<Order> */\nclass OrderBox extends Box\n{\n    public function put(Order $item): void\n    {\n    }\n}\n";
     let sharp_box = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<TItem>\n{\n    public virtual void put(TItem item)\n    {\n    }\n}\n";
     let php_box = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\n/** @template TItem */\nclass Box\n{\n    /** @param TItem $item */\n    public function put(mixed $item): void\n    {\n    }\n}\n";
@@ -10081,10 +10084,8 @@ fn a_php_class_overriding_an_erased_sharp_method_is_refused() {
         ]
     );
     assert_eq!(
-        explained(("src/Demo/OrderBox.sharp", sharp_order_box), &[("src/Demo/Box.php", php_box)]),
-        [
-            "5:36 incompatible-parameter-type Parameter `item` of `OrderBox.put` must take at least `Any?`, the type `Box.put` erases it to. Write `item` with a type that erases to `Any?`."
-        ]
+        widened(("src/Demo/OrderBox.sharp", sharp_order_box), &[("src/Demo/Box.php", php_box)]),
+        (Vec::new(), vec!["5:36 item".to_owned()])
     );
 }
 
@@ -10127,6 +10128,30 @@ fn generic_declarations_infer_what_their_php_template_twins_infer() {
             "Argument type mismatch for template `TItem`.",
         ]
     );
+}
+
+/// The issues of `analyzed` as `line:column code`, then the parameters the analysis widened, as `line:column name`, in
+/// the order they are written.
+fn widened(
+    analyzed: (&'static str, &'static str),
+    others: &[(&'static str, &'static str)],
+) -> (Vec<String>, Vec<String>) {
+    let (issues, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, others);
+    let code = analyzed.1;
+    let mut spans: Vec<_> = artifacts.widened_parameters.into_iter().collect();
+    spans.sort_unstable();
+    let parameters = spans
+        .into_iter()
+        .map(|(start, end)| {
+            let (start, end) = (start as usize, end as usize);
+            let line = code[..start].matches('\n').count() + 1;
+            let column = start - code[..start].rfind('\n').map_or(0, |newline| newline + 1) + 1;
+
+            format!("{line}:{column} {}", &code[start..end])
+        })
+        .collect();
+
+    (issues.iter().map(|issue| located(code, issue)).collect(), parameters)
 }
 
 /// The issues of `analyzed` as `line:column code message`, each followed by its help when it has one.
@@ -11211,10 +11236,10 @@ fn a_type_argument_outside_its_bound_is_named_as_sharp_writes_it() {
     );
 }
 
-/// An override that does not fit the member it overrides names both types as PHP# writes them, and a type that erases
-/// to another type than the parent's names each class and member as PHP# writes it, `ListBase.put`, and each erased
-/// type as PHP# writes it, as `Any?`, or as PHP's where PHP# has no name for it, as in PHP's `array`. The PHP twin keeps
-/// Mago's text.
+/// An override that does not fit the member it overrides names both types as PHP# writes them, and a field that erases
+/// to another type than the parent's names each class and member as PHP# writes it, `ListBase.item`, and each erased
+/// type as PHP# writes it, as `Any?`, or as PHP's where PHP# has no name for it, as in PHP's `array|null`. The
+/// parameter of `ListBase.put` takes the type argument, so it is widened. The PHP twin keeps Mago's text.
 #[test]
 fn an_override_names_its_types_as_sharp_writes_them_and_the_erased_types_as_php_does() {
     let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic class Base<TItem>\n{\n    public TItem? item = null;\n\n    public virtual void put(TItem item)\n    {\n    }\n\n    public virtual TItem get(TItem item) => item;\n}\n\npublic class OrderBase : Base<Order>\n{\n    public override Line? item = null;\n\n    public override void put(Line item)\n    {\n    }\n\n    public override Line get(Order item) => new Line();\n}\n\npublic class ListBase : Base<List<int>>\n{\n    public override List<int>? item = null;\n\n    public override void put(List<int> item)\n    {\n    }\n}\n";
@@ -11234,7 +11259,6 @@ fn an_override_names_its_types_as_sharp_writes_them_and_the_erased_types_as_php_
             "26:26 incompatible-parameter-type Parameter `item` of `OrderBase.put` expects type `Line` but parent `Base.put` expects type `Order` | Parameter `item` expects type `Line` but parent expects `Order` | Parent method `Base.put` parameter defined here | In class `OrderBase` | Parameter types must be contravariant: child must accept equal or wider types than parent. | Change the parameter type to be compatible with the parent method.",
             "30:26 incompatible-return-type Return type `Line` of `OrderBase.get` is incompatible with parent return type `Order` of `Base.get` | Returns type `Line` but parent expects `Order` | Parent method `Base.get` return type defined here | In class `OrderBase` | Return types must be covariant: child must return equal or narrower types than parent. | Change the return type to be compatible with the parent method.",
             "24:21 incompatible-property-type Property `OrderBase.item` has an incompatible type declaration. | This type `Line?` is incompatible with the parent's type. | The parent property is defined with type `Order?` here. | PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class. | Change the type of `item` to `Order?` to match the parent property.",
-            "37:40 incompatible-parameter-type Parameter `item` of `ListBase.put` must take at least `Any?`, the type `Base.put` erases it to. | Erases to PHP's `array`. | `Base.put` takes `Any?` once its type parameters are erased. | PHP# erases type parameters when it compiles, and PHP refuses a parameter narrower than the one it overrides when it links the class. | Write `item` with a type that erases to `Any?`.",
             "35:21 incompatible-property-type Property `ListBase.item` must have `Any?`, the type `Base.item` erases to. | Erases to PHP's `array|null`. | Erases to `Any?`. | PHP# erases type parameters when it compiles, and PHP requires a property to keep the type of the property it overrides. | Write `item` with a type that erases to `Any?`.",
         ]
     );
@@ -12045,37 +12069,23 @@ fn a_php_intersection_key_with_a_backed_enum_keeps_upstreams_key_type() {
     );
 }
 
-/// An erased type is named as PHP# writes it, `Entity`, `Order?`, `Any?` or `Iterable<Any?>`, and as PHP's only where
-/// PHP# has no word for a part of it, `array` and `Closure`, so `array|null` is PHP's whole. The PHP twin keeps Mago's
-/// issues.
+/// A parameter that takes its type argument is widened whatever it erases to: a class narrower than its bound,
+/// `Entity`, a nullable one, a `List` that erases to PHP's `array`, a function type that erases to PHP's `Closure`,
+/// and a plain PHP template's `iterable`. The PHP twin keeps Mago's issues.
 #[test]
-fn an_erased_parameter_type_is_named_as_sharp_writes_it() {
+fn a_parameter_is_widened_whatever_it_erases_to() {
     let sharp = "namespace Demo;\n\nimport Lib.Feed;\n\npublic abstract class Entity\n{\n}\n\npublic class Order : Entity\n{\n}\n\npublic class Box<TItem : Entity>\n{\n    public virtual void put(TItem item)\n    {\n    }\n\n    public virtual void fill(TItem? item)\n    {\n    }\n}\n\npublic class OrderBox : Box<Order>\n{\n    public override void put(Order item)\n    {\n    }\n\n    public override void fill(Order? item)\n    {\n    }\n}\n\npublic class Slot<TValue>\n{\n    public virtual void keep(TValue value)\n    {\n    }\n}\n\npublic class ListSlot : Slot<List<int>?>\n{\n    public override void keep(List<int>? value)\n    {\n    }\n}\n\npublic class FunctionSlot : Slot<Function<int(int)>>\n{\n    public override void keep(Function<int(int)> value)\n    {\n    }\n}\n\npublic class Numbers : Feed<List<int>>\n{\n    public override void keep(List<int> values)\n    {\n    }\n}\n";
     let feed = "<?php\n\nnamespace Lib;\n\n/** @template T of iterable */\nabstract class Feed\n{\n    /** @param T $values */\n    abstract public function keep(iterable $values): void;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Feed;\n\nabstract class Entity\n{\n}\n\nclass Order extends Entity\n{\n}\n\n/** @template TItem of Entity */\nclass Box\n{\n    /** @param TItem $item */\n    public function put(Entity $item): void\n    {\n    }\n}\n\n/** @extends Box<Order> */\nclass OrderBox extends Box\n{\n    public function put(Entity $item): void\n    {\n    }\n}\n\n/** @extends Feed<list<int>> */\nclass Numbers extends Feed\n{\n    /** @param list<int> $values */\n    public function keep(iterable $values): void\n    {\n    }\n}\n";
     let others = [("src/Lib/Feed.php", feed)];
-    let note = "PHP# erases type parameters when it compiles, and PHP refuses a parameter narrower than the one it overrides when it links the class.";
 
     assert_eq!(worded(("src/Demo/Box.php", php), &others), Vec::<String>::new());
     assert_eq!(
-        worded(("src/Demo/Box.sharp", sharp), &others),
-        [
-            format!(
-                "26:36 incompatible-parameter-type Parameter `item` of `OrderBox.put` must take at least `Entity`, the type `Box.put` erases it to. | Erases to `Order`. | `Box.put` takes `Entity` once its type parameters are erased. | {note} | Write `item` with a type that erases to `Entity`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound."
-            ),
-            format!(
-                "30:38 incompatible-parameter-type Parameter `item` of `OrderBox.fill` must take at least `Entity?`, the type `Box.fill` erases it to. | Erases to `Order?`. | `Box.fill` takes `Entity?` once its type parameters are erased. | {note} | Write `item` with a type that erases to `Entity?`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound."
-            ),
-            format!(
-                "44:42 incompatible-parameter-type Parameter `value` of `ListSlot.keep` must take at least `Any?`, the type `Slot.keep` erases it to. | Erases to PHP's `array|null`. | `Slot.keep` takes `Any?` once its type parameters are erased. | {note} | Write `value` with a type that erases to `Any?`."
-            ),
-            format!(
-                "51:50 incompatible-parameter-type Parameter `value` of `FunctionSlot.keep` must take at least `Any?`, the type `Slot.keep` erases it to. | Erases to PHP's `Closure`. | `Slot.keep` takes `Any?` once its type parameters are erased. | {note} | Write `value` with a type that erases to `Any?`."
-            ),
-            format!(
-                "58:41 incompatible-parameter-type Parameter `values` of `Numbers.keep` must take at least `Iterable<Any?>`, the type `Feed.keep` erases it to. | Erases to PHP's `array`. | `Feed.keep` takes `Iterable<Any?>` once its type parameters are erased. | {note} | Write `values` with a type that erases to `Iterable<Any?>`."
-            ),
-        ]
+        widened(("src/Demo/Box.sharp", sharp), &others),
+        (
+            Vec::new(),
+            ["26:36 item", "30:38 item", "44:42 value", "51:50 value", "58:41 values"].map(str::to_owned).to_vec()
+        )
     );
 }
 
@@ -15827,6 +15837,46 @@ fn a_static_property_s_reads_and_writes_carry_its_accessors_effects() {
         [
             "app/Shop/Stamp.sharp:8:27 impure-law: Law `read` reaches `Stamp.now`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
             "app/Shop/Stamp.sharp:10:30 impure-law: Law `written` reaches `Stamp.mark`, which changes `Stamp.last`. Laws hold only over pure code.",
+        ]
+    );
+}
+
+/// Spec section 6.4: a behavior is a class that implements `Sharp.Behavior<T>` for the property's type, which PHP#
+/// creates for each object with `new` and no arguments. One for another type names both types, a class that is no
+/// behavior says so, an interface, an abstract class and a constructor that needs an argument can't be created, and a
+/// name that is no class is the error any unknown class is.
+#[test]
+fn a_behavior_implements_behavior_for_the_property_s_type() {
+    let behavior = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+    );
+    let behaviors = (
+        "src/Demo/Behaviors.sharp",
+        "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n\npublic abstract class Base : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public abstract string set(string value);\n}\n\npublic class Logged : Behavior<string>\n{\n    public Logged(private string prefix)\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => this.prefix + value;\n}\n\npublic class Plain\n{\n}\n",
+    );
+    let order = "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Order\n{\n    public string name { get; set; } via Trimmed = \"\";\n    public int count { get; set; } via Trimmed = 0;\n    public string code { get; set; } via Missing = \"\";\n    public string kind { get; set; } via Behavior = \"\";\n    public string base { get; set; } via Base = \"\";\n    public string log { get; set; } via Logged = \"\";\n    public string note { get; set; } via Plain = \"\";\n}\n";
+    let note = "A behavior runs the property's `get` and `set`: it is a class that implements `Behavior` for the property's type, and PHP# creates one for each object with no arguments.";
+
+    assert_eq!(
+        worded(("src/Demo/Order.sharp", order), &[behavior, behaviors]),
+        [
+            format!(
+                "8:40 invalid-property-behavior `Trimmed` is a `Behavior<string>`, and `count` is an `int`. | Named here. | {note} | Name a behavior that implements `Behavior<int>`, as `count` is an `int`."
+            ),
+            "9:42 non-existent-class Class `Missing` not found. | `Missing` is not defined or cannot be autoloaded | Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.".to_owned(),
+            format!(
+                "10:42 invalid-property-behavior `Behavior` can't be created: PHP# creates each behavior with `new` for each object. | Named here. | {note} | Name a class that implements `Behavior` for the property's type, such as one that extends `Behavior`."
+            ),
+            format!(
+                "11:42 invalid-property-behavior `Base` can't be created: PHP# creates each behavior with `new` for each object. | Named here. | {note} | Name a class that implements `Behavior` for the property's type, such as one that extends `Base`."
+            ),
+            format!(
+                "12:41 invalid-property-behavior `Logged` needs `prefix` to be created: PHP# creates each behavior as `new Logged()`. | Named here. | {note} | Give `prefix` a default value, or keep what it holds in the behavior's own fields."
+            ),
+            format!(
+                "13:42 invalid-property-behavior `Plain` is no `Behavior`, so it can't run the `get` and `set` of `note`. | Named here. | {note} | Name a behavior that implements `Behavior<string>`, as `note` is a `string`."
+            ),
         ]
     );
 }

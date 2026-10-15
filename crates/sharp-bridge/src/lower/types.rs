@@ -306,6 +306,14 @@ impl<'analysis> Types<'analysis> {
             .map_or((None, None), |metadata| self.function_metadata(metadata, None))
     }
 
+    /// Whether the analysis widened the parameter whose name spans `name`: it erases to a narrower type than a parameter
+    /// its method overrides or implements, as `string value` of a `Behavior<string>`'s `set`, so PHP would refuse the
+    /// class when it links. Its declaration takes no PHP type, and the engine checks a call from plain PHP against its
+    /// written type, as Java's bridge method takes the erased type and casts to the written one.
+    pub(crate) fn is_widened(&self, name: Span) -> bool {
+        self.artifacts.widened_parameters.contains(&(name.start.offset, name.end.offset))
+    }
+
     /// The metadata of a function the engine reads on a call, whose own bounds follow `class_bounds`.
     fn function_metadata(
         &self,
@@ -321,11 +329,17 @@ impl<'analysis> Types<'analysis> {
                     .map(|template| text(&template.constraint, self.codebase, Parameter::Bound)),
             )
             .collect();
+        // A widened parameter has no PHP type, so its whole written type is checked.
         let parameters: Vec<Option<String>> = metadata
             .parameters
             .iter()
             .map(|parameter| {
-                parameter.type_metadata.as_ref().and_then(|r#type| self.checked_text(&r#type.type_union, true))
+                let r#type = &parameter.type_metadata.as_ref()?.type_union;
+                if self.is_widened(parameter.name_span) {
+                    return Some(text(r#type, self.codebase, Parameter::Index));
+                }
+
+                self.checked_text(r#type, true)
             })
             .collect();
 

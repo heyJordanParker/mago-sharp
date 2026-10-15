@@ -1159,7 +1159,7 @@ where
         check_sharp_reached_twice(context, class_like_metadata, inheritance_ast, &mut checked_signatures);
     }
     check_class_like_extends(context, class_like_metadata, &extended_types);
-    check_class_like_implements(context, class_like_metadata, &implemented_types, &mut checked_signatures);
+    check_class_like_implements(context, artifacts, class_like_metadata, &implemented_types, &mut checked_signatures);
 
     for member in members {
         if let ClassLikeMember::TraitUse(used_trait) = member {
@@ -1342,7 +1342,7 @@ where
 
     if !class_like_metadata.kind.is_trait() {
         check_inherited_operators(context, class_like_metadata, members, &mut checked_signatures);
-        check_abstract_method_signatures(context, class_like_metadata, &mut checked_signatures);
+        check_abstract_method_signatures(context, artifacts, class_like_metadata, &mut checked_signatures);
         check_trait_method_conflicts(context, class_like_metadata, members);
     }
 
@@ -1834,6 +1834,7 @@ fn check_class_like_extends<'ctx, 'arena, A>(
 #[allow(clippy::unwrap_used)]
 fn check_class_like_implements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
+    artifacts: &mut AnalysisArtifacts,
     class_like_metadata: &'ctx ClassLikeMetadata,
     implemented_types: &[Identifier<'arena>],
     checked_signatures: &mut HashSet<(Word, Word)>,
@@ -1937,7 +1938,13 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                 InheritanceKind::Implements(implemented_type.span()),
             );
 
-            check_interface_method_signatures(context, class_like_metadata, implemented_metadata, checked_signatures);
+            check_interface_method_signatures(
+                context,
+                artifacts,
+                class_like_metadata,
+                implemented_metadata,
+                checked_signatures,
+            );
         } else {
             let implemented_name = BytesDisplay(implemented_type.value());
             let (note, help) = if is_struct {
@@ -2837,6 +2844,7 @@ fn check_inherited_operators<'ctx, 'arena, A>(
 
 fn check_abstract_method_signatures<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
     class_like_metadata: &'ctx ClassLikeMetadata,
     checked_signatures: &mut HashSet<(Word, Word)>,
 ) where
@@ -2960,6 +2968,9 @@ fn check_abstract_method_signatures<'ctx, A>(
             );
 
             for incompatibility in issues {
+                if widens_parameter(artifacts, class_like_metadata, method_fqcn, appearing_method, &incompatibility) {
+                    continue;
+                }
                 report_signature_compatibility_issue(
                     context,
                     class_like_metadata,
@@ -3485,8 +3496,41 @@ fn apply_template_substitution_to_method(
     substituted_method
 }
 
+/// Records the parameter `incompatibility` names in `artifacts` when the bridge widens it, and returns whether it did:
+/// a parameter of a PHP# method that `class_like_metadata` declares itself, at `method_class`, which erases to a
+/// narrower type than the parameter it overrides or implements because it takes the type argument of a type parameter
+/// that parameter names, as `string value` of a `Behavior<string>`'s `set`. The bridge declares it with no PHP type, and
+/// the engine checks a call from plain PHP against its written type, as Java's bridge method does for its erased
+/// generics. A plain PHP class, a method the class inherits, and a narrower type no type parameter explains, as a
+/// closure over PHP's `callable`, keep the refusal: the bridge lowers neither of the first two here, and the last would
+/// refuse calls its parent accepts.
+fn widens_parameter(
+    artifacts: &mut AnalysisArtifacts,
+    class_like_metadata: &ClassLikeMetadata,
+    method_class: Word,
+    method: &FunctionLikeMetadata,
+    incompatibility: &SignatureCompatibilityIssue,
+) -> bool {
+    let SignatureCompatibilityIssue::ErasedParameterNarrowed { parameter_index, substitutes: true, .. } =
+        incompatibility
+    else {
+        return false;
+    };
+    let Some(parameter) = method.parameters.get(*parameter_index) else {
+        return false;
+    };
+    if !class_like_metadata.flags.is_sharp() || method_class != class_like_metadata.name {
+        return false;
+    }
+
+    artifacts.widened_parameters.insert((parameter.name_span.start.offset, parameter.name_span.end.offset));
+
+    true
+}
+
 fn check_interface_method_signatures<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
     class_like_metadata: &'ctx ClassLikeMetadata,
     interface_metadata: &'ctx ClassLikeMetadata,
     checked_signatures: &mut HashSet<(Word, Word)>,
@@ -3569,6 +3613,15 @@ fn check_interface_method_signatures<'ctx, A>(
         );
 
         for incompatibility in issues {
+            if widens_parameter(
+                artifacts,
+                class_like_metadata,
+                class_method_id.get_class_name(),
+                class_method,
+                &incompatibility,
+            ) {
+                continue;
+            }
             report_signature_compatibility_issue(
                 context,
                 class_like_metadata,
@@ -3945,7 +3998,13 @@ fn report_signature_compatibility_issue<'ctx, A>(
                 .with_help("Change the parameter type to be compatible with the parent method."),
             );
         }
-        SignatureCompatibilityIssue::ErasedParameterNarrowed { parameter_index, child_type, parent_type, bound } => {
+        SignatureCompatibilityIssue::ErasedParameterNarrowed {
+            parameter_index,
+            child_type,
+            parent_type,
+            bound,
+            ..
+        } => {
             let parameter = parent_method.parameters.get(parameter_index);
             let param_name = parameter
                 .map_or_else(|| word("unknown"), |p| word(mago_bytes::trim_start_byte(p.name.0.as_bytes(), b'$')));

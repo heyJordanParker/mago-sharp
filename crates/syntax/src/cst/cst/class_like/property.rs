@@ -8,6 +8,7 @@ use crate::cst::cst::attribute::AttributeList;
 use crate::cst::cst::block::Block;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
+use crate::cst::cst::identifier::Identifier;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::modifier::Modifier;
@@ -86,7 +87,20 @@ pub struct HookedProperty<'arena> {
     pub hint: Option<Hint<'arena>>,
     pub item: PropertyItem<'arena>,
     pub hook_list: PropertyHookList<'arena>,
+    pub behaviors: Option<PropertyBehaviorList<'arena>>,
     pub initial_value: Option<PropertyInitialValue<'arena>>,
+}
+
+/// The behaviors a PHP# auto-property runs its `get` and `set` through, spec section 6.4.
+///
+/// They follow its accessors: `via Trimmed, Tracked;`, and `via Trimmed = "";` before an initial value, which ends with
+/// its own `;`.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct PropertyBehaviorList<'arena> {
+    pub via: Span,
+    pub behaviors: TokenSeparatedSequence<'arena, Identifier<'arena>>,
+    pub semicolon: Option<Span>,
 }
 
 /// A PHP# computed property, which runs its expression on every read, as PHP's `get => expr;` hook does:
@@ -319,10 +333,19 @@ impl<'arena> Property<'arena> {
     pub fn initial_value_runs_in_constructor(&self) -> bool {
         !self.modifiers().contains_static()
             && self.initial_value().is_some_and(|value| {
-                matches!(self, Property::Hooked(hooked) if hooked.hook_list.is_readonly())
+                matches!(self, Property::Hooked(hooked) if hooked.hook_list.is_readonly() || hooked.behaviors.is_some())
                     || self.is_observed()
                     || !value.is_constant(&PHPVersion::PHP85, false)
             })
+    }
+
+    /// Returns `true` when a PHP# instance property runs code at the start of the constructor: an initial value
+    /// [that runs there](Self::initial_value_runs_in_constructor), or behaviors, which the constructor creates before
+    /// any initial value (spec section 6.4).
+    #[must_use]
+    pub fn runs_in_constructor(&self) -> bool {
+        self.initial_value_runs_in_constructor()
+            || matches!(self, Property::Hooked(hooked) if hooked.behaviors.is_some())
     }
 
     /// Returns `true` when a PHP# static member's initial value runs once, after its class is declared, instead of
@@ -445,9 +468,21 @@ impl HasSpan for PlainProperty<'_> {
     }
 }
 
+impl HasSpan for PropertyBehaviorList<'_> {
+    fn span(&self) -> Span {
+        let end = self.semicolon.or_else(|| self.behaviors.nodes.last().map(HasSpan::span)).unwrap_or(self.via);
+
+        Span::between(self.via, end)
+    }
+}
+
 impl HasSpan for HookedProperty<'_> {
     fn span(&self) -> Span {
-        let end = self.initial_value.as_ref().map_or_else(|| self.hook_list.span(), HasSpan::span);
+        let end = match (&self.initial_value, &self.behaviors) {
+            (Some(initial_value), _) => initial_value.span(),
+            (None, Some(behaviors)) => behaviors.span(),
+            (None, None) => self.hook_list.span(),
+        };
 
         if let Some(attribute_list) = self.attribute_lists.first() {
             return Span::between(attribute_list.span(), end);

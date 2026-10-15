@@ -3578,6 +3578,24 @@ fn an_access_level_on_get_is_an_error_naming_a_method_that_reads_it() {
     );
 }
 
+/// Spec section 6.4: `via` goes on an instance auto-property with `get; set;`, whose storage its behaviors run around,
+/// so it is an error beside an accessor body, and on a get-only, static or interface property. A constructor
+/// parameter takes none, which the parser reports, as section 9 limits it to access levels and attributes.
+#[test]
+fn via_goes_on_an_instance_auto_property_with_get_and_set() {
+    let code = "namespace App.Tenant;\n\nimport App.Trimmed;\nimport App.Tracked;\n\npublic class Report\n{\n    public string name { get; set; } via Trimmed = \"\";\n    public string title { get; set; } via Trimmed, Tracked = \"\";\n    public string? note { get; set; } via Trimmed;\n    public string code { get; set => field = value; } via Trimmed = \"\";\n    public static string label { get; set; } via Trimmed = \"\";\n    public string tag { get; } via Trimmed = \"\";\n}\n\npublic interface Named\n{\n    string name { get; set; } via Trimmed;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "11:55 `via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
+            "12:46 A static property takes no `via`: each object keeps its own behaviors.",
+            "13:32 `via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
+            "18:31 A property without storage takes no `via`: the class that stores the property names its behaviors.",
+        ]
+    );
+}
+
 /// Spec section 6.2: `willSet` and `didSet` each take a body and need `set`, as they run inside it on each write.
 /// `willSet` cannot change or stop the write, so it neither writes `value` nor returns, and a `set` body cannot return
 /// before `didSet`. What `field` holds in `willSet` before the first write is not decided, so it is not supported yet.

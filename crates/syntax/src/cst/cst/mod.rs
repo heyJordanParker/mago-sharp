@@ -71,6 +71,7 @@ pub use crate::cst::cst::class_like::property::HookedProperty;
 pub use crate::cst::cst::class_like::property::PlainProperty;
 pub use crate::cst::cst::class_like::property::Property;
 pub use crate::cst::cst::class_like::property::PropertyAbstractItem;
+pub use crate::cst::cst::class_like::property::PropertyBehaviorList;
 pub use crate::cst::cst::class_like::property::PropertyConcreteItem;
 pub use crate::cst::cst::class_like::property::PropertyHook;
 pub use crate::cst::cst::class_like::property::PropertyHookAbstractBody;

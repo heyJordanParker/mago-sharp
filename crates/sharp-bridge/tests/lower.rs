@@ -2096,6 +2096,174 @@ fn a_static_initial_value_that_is_not_constant_runs_once_after_its_class() {
 /// }
 /// ```
 ///
+/// ```php
+/// private \App\Trimmed $name#via0;
+/// private \App\Upper $name#via1;
+/// public string $name {
+///     get => $this->{'name#via0'}->get($this->{'name#via1'}->get($this->name));
+///     set { $this->name = $this->{'name#via1'}->set($this->{'name#via0'}->set($value)); }
+/// }
+/// public function __construct() {
+///     $this->{'name#via0'} = new \App\Trimmed();
+///     $this->{'name#via1'} = new \App\Upper();
+///     $this->name = "";
+/// }
+/// ```
+///
+/// Spec section 6.4: each behavior is a hidden private property the constructor fills with `new` before the initial
+/// value, which it writes through the hooks. `set` runs the behaviors in the order they are written and `get` the other
+/// way. A behavior's `set(string value)` takes its type argument where `Behavior.set` erases its parameter to any value,
+/// so it has no PHP type, and the metadata after the parameters checks a call from plain PHP against `string`.
+#[test]
+fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
+    let behavior = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+    );
+    let upper = (
+        "src/Upper.sharp",
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Upper : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.strtoupper(value);\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n\npublic class Report\n{\n    public string name { get; set; } via Trimmed, Upper = \"\";\n}\n",
+        &[behavior, upper],
+    );
+
+    assert_eq!(
+        property_groups(&lowered),
+        [
+            indoc! {r#"
+                PROP_GROUP [4]
+                  ZVAL "App\\Trimmed"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "name#via0"
+                      null
+                      null
+                      null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [4]
+                  ZVAL "App\\Upper"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "name#via1"
+                      null
+                      null
+                      null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "string"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "name"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @14-14
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            METHOD_CALL
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "name#via0"
+                              ZVAL "get"
+                              ARG_LIST
+                                METHOD_CALL
+                                  PROP
+                                    VAR
+                                      ZVAL "this"
+                                    ZVAL "name#via1"
+                                  ZVAL "get"
+                                  ARG_LIST
+                                    PROP
+                                      VAR
+                                        ZVAL "this"
+                                      ZVAL "name"
+                          null
+                          null
+                        PROPERTY_HOOK "set" @14-14
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "name"
+                              METHOD_CALL
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "name#via1"
+                                ZVAL "set"
+                                ARG_LIST
+                                  METHOD_CALL
+                                    PROP
+                                      VAR
+                                        ZVAL "this"
+                                      ZVAL "name#via0"
+                                    ZVAL "set"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "value"
+                          null
+                          null
+                  null
+            "#},
+        ]
+    );
+    assert_eq!(
+        lowered.body_of("__construct"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "name#via0"
+                NEW
+                  ZVAL "App\\Trimmed"
+                  ARG_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "name#via1"
+                NEW
+                  ZVAL "App\\Upper"
+                  ARG_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "name"
+                ZVAL ""
+        "#}
+    );
+    assert_eq!(
+        lowered.parameters_of("set"),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM
+                null
+                ZVAL "value"
+                null
+                null
+                null
+                null
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "string"
+        "#}
+    );
+}
+
 /// Spec section 6.2: the observers are no hooks of their own. The `set` hook runs `willSet`, then the `set` body or the
 /// storage write an auto `set` is, then `didSet`. They run on every write, so an initial value, constant or not, is a
 /// write at the start of the constructor instead of PHP's default.

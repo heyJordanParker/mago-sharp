@@ -3,12 +3,16 @@ use std::rc::Rc;
 
 use mago_codex::context::ScopeContext;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_specialized_template_type;
+use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
@@ -18,6 +22,7 @@ use mago_span::Span;
 use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::HookedProperty;
+use mago_syntax::cst::Identifier;
 use mago_syntax::cst::PlainProperty;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyConcreteItem;
@@ -51,8 +56,12 @@ use crate::statement::function_like::report_missing_return;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::r#return::handle_return_value;
 use crate::utils::int_refused_for_float;
+use crate::utils::names::article;
+use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
+use crate::utils::names::display_property_name;
 use crate::utils::names::display_sharp_accessor;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::report_int_for_float;
@@ -274,9 +283,126 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for HookedProperty<'arena> {
         for hook in &self.hook_list.hooks {
             analyze_property_hook(hook, property_name, context, block_context, artifacts)?;
         }
+        for behavior in self.behaviors.iter().flat_map(|behaviors| behaviors.behaviors.iter()) {
+            check_behavior(behavior, property_name, context, block_context);
+        }
 
         Ok(())
     }
+}
+
+/// Spec section 6.4: a behavior runs a property's `get` and `set`, so it is a class that implements
+/// `Sharp\Behavior<T>` for the property's type `T`, which PHP# creates with `new` and no arguments.
+fn check_behavior<A>(
+    behavior: &Identifier<'_>,
+    property_name: Word,
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+) where
+    A: Arena,
+{
+    let name = word(context.resolved_names.get(behavior));
+    let Some(class) = context.codebase.get_class_like(name.as_bytes()) else {
+        // PHP# creates a behavior with `new`, so an unknown one is named as `new` names it.
+        let missing = display_class_like_name(context, name);
+        context.collector.report_with_code(
+            IssueCode::NonExistentClass,
+            Issue::error(format!("Class `{missing}` not found."))
+                .with_annotation(
+                    Annotation::primary(behavior.span())
+                        .with_message(format!("`{missing}` is not defined or cannot be autoloaded")),
+                )
+                .with_help(
+                    "Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.",
+                ),
+        );
+        return;
+    };
+    let Some(property_type) = block_context
+        .scope
+        .get_class_like()
+        .and_then(|class_like| class_like.properties.get(&property_name))
+        .and_then(|property| property.type_metadata.as_ref())
+        .map(|metadata| metadata.type_union.clone())
+    else {
+        return;
+    };
+
+    let behavior_name = display_class_like_name(context, class.original_name);
+    let required = context
+        .codebase
+        .get_method(class.name.as_bytes(), b"__construct")
+        .and_then(|constructor| {
+            constructor
+                .parameters
+                .iter()
+                .find(|parameter| !parameter.flags.has_default() && !parameter.flags.is_variadic())
+        })
+        .map(|parameter| word(mago_bytes::trim_start_byte(parameter.name.0.as_bytes(), b'$')));
+    let (message, help) = if !class.kind.is_class() || class.flags.is_abstract() {
+        (
+            format!("`{behavior_name}` can't be created: PHP# creates each behavior with `new` for each object."),
+            format!(
+                "Name a class that implements `Behavior` for the property's type, such as one that extends `{behavior_name}`."
+            ),
+        )
+    } else if let Some(parameter) = required {
+        (
+            format!(
+                "`{behavior_name}` needs `{parameter}` to be created: PHP# creates each behavior as `new {behavior_name}()`."
+            ),
+            format!("Give `{parameter}` a default value, or keep what it holds in the behavior's own fields."),
+        )
+    } else {
+        let behavior_type = TUnion::from_atomic(TAtomic::Object(TObject::new_named(class.original_name)));
+        let expected = TUnion::from_atomic(TAtomic::Object(TObject::Named(
+            TNamedObject::new(word(b"Sharp\\Behavior")).with_type_parameters(Some(vec![property_type.clone()])),
+        )));
+        if union_comparator::is_contained_by(
+            context.codebase,
+            &behavior_type,
+            &expected,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::new(),
+        ) {
+            return;
+        }
+
+        let property = display_property_name(context, property_name);
+        let property_type = display_sharp_type(context, &property_type);
+        let expected = display_sharp_type(context, &expected);
+        let implemented =
+            get_specialized_template_type(context.codebase, word(b"T"), word(b"Sharp\\Behavior"), class, None)
+                .filter(|_| context.codebase.class_implements(class.name.as_bytes(), b"Sharp\\Behavior"));
+        let message = match implemented {
+            Some(implemented) => {
+                let implemented = display_sharp_type(context, &implemented);
+                format!(
+                    "`{behavior_name}` is a `Behavior<{implemented}>`, and `{property}` is {} `{property_type}`.",
+                    article(&property_type)
+                )
+            }
+            None => format!("`{behavior_name}` is no `Behavior`, so it can't run the `get` and `set` of `{property}`."),
+        };
+
+        (
+            message,
+            format!(
+                "Name a behavior that implements `{expected}`, as `{property}` is {} `{property_type}`.",
+                article(&property_type)
+            ),
+        )
+    };
+
+    context.collector.report_with_code(
+        IssueCode::InvalidPropertyBehavior,
+        Issue::error(message)
+            .with_annotation(Annotation::primary(behavior.span()).with_message("Named here."))
+            .with_note("A behavior runs the property's `get` and `set`: it is a class that implements `Behavior` for the property's type, and PHP# creates one for each object with no arguments.")
+            .with_help(help),
+    );
 }
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for PropertyHook<'arena> {

@@ -87,6 +87,7 @@ use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Property;
+use mago_syntax::cst::PropertyBehaviorList;
 use mago_syntax::cst::PropertyHook;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
@@ -1020,6 +1021,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 && !context.names.has_storage(&property.hook_list)
             {
                 report_no_storage(variable, initial_value.value.span(), context);
+            }
+            if let Some(behaviors) = &property.behaviors {
+                check_behaviors(property, behaviors, context);
             }
 
             Some(FieldOrProperty)
@@ -2990,6 +2994,42 @@ fn is_slice_accessor(accessor: &PropertyHook) -> bool {
             }
             _ => false,
         }
+}
+
+/// Spec section 6.4: a behavior runs around a property's storage, once per object, so `via` goes on an instance
+/// auto-property with `get; set;` and no accessor body, which a class declares, never an interface.
+fn check_behaviors(property: &HookedProperty, behaviors: &PropertyBehaviorList, context: &mut Context<'_, '_, '_>) {
+    let accessors = &property.hook_list.hooks;
+    let is_auto = |name: &[u8]| {
+        accessors
+            .iter()
+            .any(|accessor| accessor.name.value == name && matches!(accessor.body, PropertyHookBody::Abstract(_)))
+    };
+    let refusal = if is_in_interface(context.program, property.span()) || property.modifiers.contains_abstract() {
+        Some((
+            "A property without storage takes no `via`: the class that stores the property names its behaviors.",
+            None,
+        ))
+    } else if property.modifiers.contains_static() {
+        Some(("A static property takes no `via`: each object keeps its own behaviors.", None))
+    } else if accessors.len() != 2 || !is_auto(b"get") || !is_auto(b"set") {
+        Some((
+            "`via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
+            Some("Write the change in a behavior's `get` or `set`, or drop `via` and write an accessor body."),
+        ))
+    } else {
+        None
+    };
+    let Some((message, help)) = refusal else {
+        return;
+    };
+
+    let mut issue =
+        Issue::error(message).with_annotation(Annotation::primary(behaviors.via).with_message("Written here."));
+    if let Some(help) = help {
+        issue = issue.with_help(help);
+    }
+    context.report(issue);
 }
 
 /// Reports a property without storage that has an initial value.

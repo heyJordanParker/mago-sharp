@@ -98,6 +98,7 @@ use mago_syntax::cst::PartialArgumentList;
 use mago_syntax::cst::PositionalArgument;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::PropertyBehaviorList;
 use mago_syntax::cst::PropertyHook;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
@@ -1481,7 +1482,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         left_brace: Span,
         right_brace: Span,
     ) -> Vec<u32> {
+        // Each behavior is created before any initial value, which its property's `set` may run through.
         let mut initial_values = Vec::new();
+        for member in class_members {
+            if let ClassLikeMember::Property(Property::Hooked(property)) = member
+                && let Some(behaviors) = &property.behaviors
+            {
+                initial_values.extend(self.behavior_creations(property.item.variable(), behaviors));
+            }
+        }
         for member in class_members {
             if let ClassLikeMember::Property(property) = member
                 && property.initial_value_runs_in_constructor()
@@ -1544,6 +1553,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         && matches!(computed.hint, Some(Hint::Nullable(_)))
                     {
                         members.push(self.lazy_flag(computed));
+                    }
+                    if let Property::Hooked(HookedProperty { item, behaviors: Some(behaviors), .. }) = property {
+                        members.extend(self.behavior_slots(item.variable(), behaviors));
                     }
 
                     self.property(property, parent_name)
@@ -2405,7 +2417,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let Some(hint) = &parameter.hint else {
             unreachable!("semantics refuses a method parameter without a type");
         };
-        let hint_index = self.hint(hint);
+        let hint_index = if self.types.is_widened(parameter.variable.span) { NULL } else { self.hint(hint) };
         let service = service.and_then(|service| dropped_service(hint, service));
 
         self.parameter_of_type(parameter, hint_index, service)
@@ -2524,6 +2536,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 if hooked.modifiers.contains_private() { 0 } else { ZEND_ACC_PRIVATE_SET },
                 &hooked.attribute_lists,
                 NULL,
+            ),
+            Property::Hooked(hooked @ HookedProperty { behaviors: Some(behaviors), .. }) => (
+                accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
+                &hooked.attribute_lists,
+                self.behavior_hooks(hooked.item.variable(), &hooked.hook_list, behaviors),
             ),
             Property::Hooked(hooked) => (
                 accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
@@ -2763,6 +2780,95 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
 
         self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PRIVATE, line, &[hint, declaration, NULL])
+    }
+
+    /// The hidden private properties that hold the behaviors of the property `variable`, spec section 6.4, one per
+    /// behavior, `private \App\Trimmed $name#via0;`, named as PHP source can't spell, as the hidden local `this#1` is.
+    fn behavior_slots(&mut self, variable: &DirectVariable, behaviors: &PropertyBehaviorList) -> Vec<u32> {
+        let line = self.line(variable);
+        let mut slots = Vec::new();
+        for (index, behavior) in behaviors.behaviors.iter().enumerate() {
+            let hint = self.string(ZEND_NAME_FQ, line, self.names.get(behavior));
+            let name = self.string(0, line, &behavior_slot_name(variable.name, index));
+            let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, NULL]);
+            let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+            slots.push(self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PRIVATE, line, &[hint, declaration, NULL]));
+        }
+
+        slots
+    }
+
+    /// `$this->{'name#via0'} = new \App\Trimmed();` for each behavior of the property `variable`, which the constructor
+    /// runs before any initial value, spec section 6.4: one instance per object, with no arguments.
+    fn behavior_creations(&mut self, variable: &DirectVariable, behaviors: &PropertyBehaviorList) -> Vec<u32> {
+        let line = self.line(variable);
+        let mut creations = Vec::new();
+        for (index, behavior) in behaviors.behaviors.iter().enumerate() {
+            let slot = self.behavior_slot(line, variable.name, index);
+            let class = self.string(ZEND_NAME_FQ, line, self.names.get(behavior));
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+            let created = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+            creations.push(self.node(SHARP_AST_ASSIGN, 0, line, &[slot, created]));
+        }
+
+        creations
+    }
+
+    /// `$this->{'name#viaN'}`, the slot of the behavior at `index` of the property `property`.
+    fn behavior_slot(&mut self, line: u32, property: &[u8], index: usize) -> u32 {
+        let this = self.string(0, line, b"this");
+        let this = self.node(SHARP_AST_VAR, 0, line, &[this]);
+        let name = self.string(0, line, &behavior_slot_name(property, index));
+
+        self.node(SHARP_AST_PROP, 0, line, &[this, name])
+    }
+
+    /// The hooks of the property `variable` with `behaviors`, spec section 6.4. `set` runs the written value through
+    /// each behavior's `set` in the order they are written, and stores the result. `get` runs the storage through each
+    /// behavior's `get` the other way, so the first behavior wraps the rest:
+    /// `get => $this->{'name#via0'}->get($this->{'name#via1'}->get($this->name));` and
+    /// `set { $this->name = $this->{'name#via1'}->set($this->{'name#via0'}->set($value)); }`.
+    fn behavior_hooks(
+        &mut self,
+        variable: &DirectVariable,
+        accessors: &PropertyHookList,
+        behaviors: &PropertyBehaviorList,
+    ) -> u32 {
+        let (Some(getter), Some(setter)) =
+            (accessors.hooks.iter().find(|accessor| accessor.name.value == b"get"), accessors.setter())
+        else {
+            unreachable!("semantics gives `via` only to a property with `get; set;`");
+        };
+        let count = behaviors.behaviors.len();
+
+        self.accessor_bodies(variable.name, |lowering| {
+            let line = lowering.line(variable);
+            let call = |lowering: &mut Self, index: usize, accessor: &[u8], value: u32| {
+                let slot = lowering.behavior_slot(line, variable.name, index);
+                let method = lowering.string(0, line, accessor);
+                let arguments = lowering.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+
+                lowering.node(SHARP_AST_METHOD_CALL, 0, line, &[slot, method, arguments])
+            };
+
+            let mut read = lowering.storage(line);
+            for index in (0..count).rev() {
+                read = call(lowering, index, b"get", read);
+            }
+            let read = lowering.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[read]);
+            let get = lowering.hook(b"get", getter.name, getter, NULL, read);
+
+            let mut written = lowering.variable(setter.name.span, b"value");
+            for index in 0..count {
+                written = call(lowering, index, b"set", written);
+            }
+            let storage = lowering.storage(line);
+            let store = lowering.node(SHARP_AST_ASSIGN, 0, line, &[storage, written]);
+            let store = lowering.node(SHARP_AST_STMT_LIST, 0, line, &[store]);
+            let set = lowering.hook(b"set", setter.name, setter, NULL, store);
+
+            lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &[get, set])
+        })
     }
 
     /// `$this->{'name#lazy'}`, the hidden flag of the nullable `lazy` property `name`.
@@ -6379,6 +6485,11 @@ fn is_lazy(modifiers: &Sequence<Modifier>) -> bool {
 /// `name#lazy`, the hidden flag of the nullable `lazy` property `name`.
 fn lazy_flag_name(property: &[u8]) -> Vec<u8> {
     [property, b"#lazy"].concat()
+}
+
+/// `name#viaN`, the hidden slot of the behavior at `index` of the property `name`, spec section 6.4.
+fn behavior_slot_name(property: &[u8], index: usize) -> Vec<u8> {
+    [property, format!("#via{index}").as_bytes()].concat()
 }
 
 /// The flags of a member's modifiers. Every modifier is named, so a new one does not compile until it is decided.

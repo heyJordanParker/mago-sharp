@@ -472,16 +472,15 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required` on a method and `via` are spec syntax outside the slice. Each one is a single error where it starts, and
-/// the class around it still parses.
+/// `required` on a method is spec syntax outside the slice, and `via` on a constructor parameter is section 9's error.
+/// Each one is a single error where it starts, and the class around it still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     for (member, message, start) in [
         ("public required int count() { return 1; }", "`required` is not supported yet in PHP#.", "required"),
-        ("public string name { get; set; } via Trimmed, Tracked;", "`via` is not supported yet in PHP#.", "via"),
         (
             "public Report(public int id { get; } via Tracked, int other) {}",
-            "`via` is not supported yet in PHP#.",
+            "Declare `id` in the class body to give it `via`: a member declared on a constructor parameter takes access levels and attributes only.",
             "via",
         ),
     ] {
@@ -506,6 +505,35 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
                 .any(|member| matches!(member, ClassLikeMember::Method(run) if run.name.value == b"run")),
             "the class keeps parsing after `{member}`"
         );
+    }
+}
+
+/// Spec section 6.4: a property names its behaviors after its accessors, `via` and class names separated by commas,
+/// which end with `;`, or before an initial value, which ends with its own.
+#[test]
+fn a_property_names_its_behaviors_after_its_accessors() {
+    for (member, behaviors, initial_value) in [
+        ("public string name { get; set; } via Trimmed, Tracked;", ["Trimmed", "Tracked"].as_slice(), None),
+        ("public string name { get; set; } via Trimmed = \"\";", ["Trimmed"].as_slice(), Some("\"\"")),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str =
+            Box::leak(format!("class Report\n{{\n    {member}\n\n    public int run() => 1;\n}}\n").into_boxed_str());
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        assert!(program.errors.is_empty(), "{member}: {:#?}", program.errors);
+        let [ClassLikeMember::Property(Property::Hooked(property)), ClassLikeMember::Method(_)] =
+            class_members(program).as_slice()
+        else {
+            panic!("expected a property and a method for `{member}`, got {:#?}", class_members(program));
+        };
+        let Some(list) = &property.behaviors else {
+            panic!("expected behaviors for `{member}`");
+        };
+        let names: Vec<&str> = list.behaviors.iter().map(|behavior| source(code, behavior)).collect();
+        assert_eq!(names, behaviors, "{member}");
+        assert_eq!(property.initial_value.as_ref().map(|value| source(code, value.value)), initial_value, "{member}");
+        assert_eq!(source(code, property), member, "{member}");
     }
 }
 

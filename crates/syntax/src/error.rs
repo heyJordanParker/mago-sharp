@@ -96,6 +96,9 @@ pub enum ParseError {
     /// A PHP# parameter written as a computed property, as in `public string slug => "x"`, at its `=>`. A computed
     /// property has no incoming value to receive.
     ComputedParameterInSharp(Span),
+    /// A `via` clause on the PHP# constructor parameter named by the text, at `via`. Spec section 9: a member declared on
+    /// a parameter takes access levels and attributes only.
+    BehaviorParameterInSharp(Box<str>, Span),
     /// Anything but `super(…)` or `this(…)` after a PHP# constructor's `:`, as in `: parent(row)`, `: super { }` or
     /// `: ?Type`, from the `:` up to the body.
     ConstructorInitializerInSharp(Span),
@@ -156,6 +159,7 @@ impl HasFileId for ParseError {
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
+            | ParseError::BehaviorParameterInSharp(_, span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
@@ -206,6 +210,7 @@ impl HasSpan for ParseError {
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
+            | ParseError::BehaviorParameterInSharp(_, span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
@@ -345,6 +350,9 @@ impl std::fmt::Display for ParseError {
             ParseError::OtherMemberInSharpModule(_) => {
                 "A module holds only service bindings and laws: give each binding one expression.".to_string()
             }
+            ParseError::BehaviorParameterInSharp(name, _) => format!(
+                "Declare `{name}` in the class body to give it `via`: a member declared on a constructor parameter takes access levels and attributes only."
+            ),
             ParseError::ComputedParameterInSharp(_) => {
                 "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()
             }
@@ -422,6 +430,7 @@ impl From<&ParseError> for Issue {
             | ParseError::ReadonlyNotLastInSharp(..)
             | ParseError::OtherMemberInSharpModule(..)
             | ParseError::ComputedParameterInSharp(..)
+            | ParseError::BehaviorParameterInSharp(..)
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)
             | ParseError::NestedTypeInSharp(..)
