@@ -1401,11 +1401,12 @@ fn a_header_trait_stands_anywhere_in_a_class_header_and_in_an_enum_header() {
 }
 
 /// A header trait's abstract method the class leaves out, one whose arity differs from another trait's, and a trait
-/// field the class declares again with another type each report what the PHP twin's `use` reports.
+/// field the class declares again with another type, as a field or a computed property, each report what the PHP
+/// twin's `use` reports.
 #[test]
 fn a_header_trait_reports_what_use_reports_in_php() {
-    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\nimport Lib.Measured;\nimport Lib.Priced;\n\npublic class Narrow : HasLabel, Measured\n{\n}\n\npublic class Clash : HasLabel\n{\n    private int name = 1;\n}\n\npublic class Unpriced : Priced\n{\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\HasLabel;\nuse Lib\\Measured;\nuse Lib\\Priced;\n\nclass Narrow\n{\n    use HasLabel, Measured;\n}\n\nclass Clash\n{\n    use HasLabel;\n\n    private int $name = 1;\n}\n\nclass Unpriced\n{\n    use Priced;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\nimport Lib.Measured;\nimport Lib.Priced;\n\npublic class Narrow : HasLabel, Measured\n{\n}\n\npublic class Clash : HasLabel\n{\n    private int name = 1;\n}\n\npublic class Unpriced : Priced\n{\n}\n\npublic class Computed : HasLabel\n{\n    public int name => 1;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\HasLabel;\nuse Lib\\Measured;\nuse Lib\\Priced;\n\nclass Narrow\n{\n    use HasLabel, Measured;\n}\n\nclass Clash\n{\n    use HasLabel;\n\n    private int $name = 1;\n}\n\nclass Unpriced\n{\n    use Priced;\n}\n\nclass Computed\n{\n    use HasLabel;\n\n    public int $name { get => 1; }\n}\n";
     let others = [("src/Lib/HasLabel.php", HAS_LABEL)];
 
     let sharp_issues = issues(("src/Demo/Narrow.sharp", sharp), &others);
@@ -1413,6 +1414,7 @@ fn a_header_trait_reports_what_use_reports_in_php() {
 
     assert!(!php_issues.is_empty());
     assert_eq!(codes(&sharp_issues), codes(&php_issues), "{sharp_issues:?} {php_issues:?}");
+    assert!(sharp_issues.contains(&"22:5 incompatible-property-override".to_owned()), "{sharp_issues:?}");
 }
 
 /// Spec section 22: an interface's default body sees only the interface's own members, a PHP# class that implements
@@ -1503,10 +1505,10 @@ fn a_closed_method_and_a_header_with_two_classes_speak_sharp() {
 /// Spec section 22 gives a class one method per name: when two places give the class a body for one method, two
 /// header traits, two interfaces' default bodies, or a default body beside the base class's method, the class writes
 /// the method itself. Until it does, the class is an error that names both places. A computed property two interfaces
-/// give a default body is one too.
+/// give a default body, or one interface beside the base class's property, is one too.
 #[test]
 fn a_class_that_gets_one_method_from_two_places_writes_it() {
-    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\nimport Lib.HasTitle;\n\npublic class Twice : HasLabel, HasTitle\n{\n}\n\npublic interface Described\n{\n    string describe() => \"described\";\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n}\n\npublic class Base\n{\n    public virtual string describe() => \"base\";\n}\n\npublic class Beside : Base, Described\n{\n}\n\npublic class Written : Described, Told\n{\n    public override string describe() => \"written\";\n}\n\npublic class WrittenOverBase : Base, Described\n{\n    public override string describe() => super.describe();\n}\n\npublic interface Tagged\n{\n    string tag => \"t\";\n}\n\npublic interface Labelled\n{\n    string tag => \"l\";\n}\n\npublic class Tags : Tagged, Labelled\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\nimport Lib.HasTitle;\n\npublic class Twice : HasLabel, HasTitle\n{\n}\n\npublic interface Described\n{\n    string describe() => \"described\";\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n}\n\npublic class Base\n{\n    public virtual string describe() => \"base\";\n}\n\npublic class Beside : Base, Described\n{\n}\n\npublic class Written : Described, Told\n{\n    public override string describe() => \"written\";\n}\n\npublic class WrittenOverBase : Base, Described\n{\n    public override string describe() => super.describe();\n}\n\npublic interface Tagged\n{\n    string tag => \"t\";\n}\n\npublic interface Labelled\n{\n    string tag => \"l\";\n}\n\npublic class Tags : Tagged, Labelled\n{\n}\n\npublic class TagBase\n{\n    public string tag => \"base\";\n}\n\npublic class TagBeside : TagBase, Tagged\n{\n}\n";
     let others = [("src/Lib/HasLabel.php", HAS_LABEL)];
 
     assert_eq!(
@@ -1515,7 +1517,8 @@ fn a_class_that_gets_one_method_from_two_places_writes_it() {
             "6:14 ambiguous-inherited-member",
             "20:14 ambiguous-inherited-member",
             "29:14 ambiguous-inherited-member",
-            "53:14 ambiguous-inherited-member"
+            "53:14 ambiguous-inherited-member",
+            "62:14 ambiguous-inherited-member"
         ]
     );
     assert_eq!(
@@ -1525,6 +1528,7 @@ fn a_class_that_gets_one_method_from_two_places_writes_it() {
             "`Both` gets `describe` from both `Described` and `Told`: write `describe` in `Both`.",
             "`Beside` gets `describe` from both `Base` and `Described`: write `describe` in `Beside`.",
             "`Tags` gets `tag` from both `Labelled` and `Tagged`: write `tag` in `Tags`.",
+            "`TagBeside` gets `tag` from both `TagBase` and `Tagged`: write `tag` in `TagBeside`.",
         ]
     );
 }
@@ -1532,12 +1536,13 @@ fn a_class_that_gets_one_method_from_two_places_writes_it() {
 /// Spec section 22: inside its own methods, a class reuses one interface's default body with `super<HasLabel>`. It is
 /// an error when the class does not implement the interface, when the interface gives the method no default body, and
 /// outside a class. A subclass of a PHP# class that implements the interface reuses it too, and a subclass of a plain
-/// PHP one can't, since only a PHP# class keeps each default body under a name its subclasses call.
+/// PHP one can't, since only a PHP# class keeps each default body under a name its subclasses call. `super<Told>` as a
+/// value is the semantics checker's error, and the analysis adds none.
 #[test]
 fn super_of_an_interface_reuses_its_default_body_in_a_class_that_implements_it() {
     let library =
         "<?php\n\nnamespace Lib;\n\nclass Legacy implements \\Demo\\Told\n{\n    use \\Demo\\Told\\Defaults;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Legacy;\n\npublic interface Described\n{\n    string describe() => \"described\";\n    string title();\n    string shout() => super<Told>.describe();\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n    public override string describe() => super<Described>.describe() + super<Told>.describe();\n    public string title() => super<Described>.title();\n}\n\npublic class Stranger\n{\n    public string describe() => super<Told>.describe();\n}\n\npublic class Base : Told\n{\n}\n\npublic class Child : Base\n{\n    public string again() => super<Told>.describe();\n}\n\npublic class Heir : Legacy\n{\n    public string again() => super<Told>.describe();\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Legacy;\n\npublic interface Described\n{\n    string describe() => \"described\";\n    string title();\n    string shout() => super<Told>.describe();\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n    public override string describe() => super<Described>.describe() + super<Told>.describe();\n    public string title() => super<Described>.title();\n}\n\npublic class Stranger\n{\n    public string describe() => super<Told>.describe();\n}\n\npublic class Base : Told\n{\n}\n\npublic class Child : Base\n{\n    public string again() => super<Told>.describe();\n}\n\npublic class Heir : Legacy\n{\n    public string again() => super<Told>.describe();\n}\n\npublic class Holder : Told\n{\n    public Any? held() => super<Told>;\n}\n";
     let others = [("src/Lib/Legacy.php", library)];
 
     assert_eq!(

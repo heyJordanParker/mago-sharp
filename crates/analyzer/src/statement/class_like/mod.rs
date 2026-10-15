@@ -5530,12 +5530,10 @@ fn check_readonly_class_trait_properties<'ctx, 'arena, A>(
 
     for trait_name_id in trait_uses.iter().flat_map(|(_, trait_names)| trait_names) {
         let trait_fqcn = word(context.resolved_names.get(*trait_name_id));
+        let properties =
+            context.codebase.get_class_like(trait_fqcn.as_ref()).map(|trait_metadata| &trait_metadata.properties);
 
-        let Some(trait_metadata) = context.codebase.get_class_like(trait_fqcn.as_ref()) else {
-            continue;
-        };
-
-        for (property_name, property) in &trait_metadata.properties {
+        for (property_name, property) in properties.into_iter().flatten() {
             if !property.flags.is_readonly() {
                 context.collector.report_with_code(
                     IssueCode::InvalidTraitUse,

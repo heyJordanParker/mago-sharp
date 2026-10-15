@@ -5,6 +5,7 @@ use mago_analyzer::effects::Effects;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleMetadata;
@@ -162,11 +163,22 @@ impl<'analysis> Types<'analysis> {
             .filter_map(|name| self.codebase.get_trait(self.names.get(&name)))
             .map(|header_trait| header_trait.original_name)
             .collect();
-        if let Some(metadata) = self.codebase.get_class_like(class) {
-            traits.extend(self.codebase.get_defaults_traits(metadata).iter().map(|defaults| defaults.original_name));
-        }
+        let metadata = self.scanned(class);
+        traits.extend(self.codebase.get_defaults_traits(metadata).iter().map(|defaults| defaults.original_name));
 
         traits
+    }
+
+    /// The metadata of the fully qualified class-like name `class`, which the bridge lowers.
+    fn scanned(&self, class: &[u8]) -> &'analysis ClassLikeMetadata {
+        let Some(metadata) = self.codebase.get_class_like(class) else {
+            unreachable!(
+                "the codex scans each class-like the bridge lowers, `{}` included",
+                String::from_utf8_lossy(class)
+            );
+        };
+
+        metadata
     }
 
     /// The computed properties with a default body, spec section 22, that the fully qualified class-like name `class`
@@ -174,10 +186,7 @@ impl<'analysis> Types<'analysis> {
     /// the class does not, by its name with `$` and its interface's full name.
     #[must_use]
     pub fn default_properties(&self, class: &[u8]) -> Vec<(Word, Word)> {
-        let Some(metadata) = self.codebase.get_class_like(class) else {
-            return Vec::new();
-        };
-
+        let metadata = self.scanned(class);
         let mut properties = Vec::new();
         for interface in self
             .codebase
@@ -222,9 +231,7 @@ impl<'analysis> Types<'analysis> {
     /// declaration order.
     #[must_use]
     pub fn default_bodies(&self, class: &[u8]) -> Vec<(Word, Word, Word)> {
-        let Some(metadata) = self.codebase.get_class_like(class) else {
-            return Vec::new();
-        };
+        let metadata = self.scanned(class);
 
         self.codebase
             .get_defaults_traits(metadata)
