@@ -7664,10 +7664,10 @@ fn a_null_safe_access_on_an_index_reads_a_missing_key_as_null() {
 /// end. Appending is `add`." So `=`, `+=`, `++` and `--` write a `List` index, on a local, a parameter, a property
 /// and an element of another `List`, and PHP's `list[] = v` is refused with the `add` to write. A write into a `List`'s
 /// element is a change through its index, which the index change rule decides. PHP# has no `x[] = v` on any collection,
-/// so a `Map` or a `Set` refuses it too.
+/// so a `Map` or a `Set` refuses it too, once, a nullable `Map` too.
 #[test]
 fn an_index_write_replaces_a_list_element_and_list_append_is_add() {
-    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public List<int> held { get; private set; } = [];\n\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups, Set<int> tags, Map<int, string> names)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        sizes[1]++;\n        --sizes[1];\n        grid[0][1] = 1;\n        this.held[0] = 2;\n        groups[\"b\"] = [1];\n        sizes[] = 3;\n        this.held[] = 4;\n        grid[0][] = 5;\n        groups[] = [1];\n        tags[] = 1;\n        names[] = \"a\";\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public List<int> held { get; private set; } = [];\n\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups, Set<int> tags, Map<int, string> names, Map<string, string>? maybe)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        sizes[1]++;\n        --sizes[1];\n        grid[0][1] = 1;\n        this.held[0] = 2;\n        groups[\"b\"] = [1];\n        sizes[] = 3;\n        this.held[] = 4;\n        grid[0][] = 5;\n        groups[] = [1];\n        tags[] = 1;\n        names[] = \"a\";\n        maybe[] = \"b\";\n    }\n}\n";
     let list = "A `List` grows with `add`: `list[] = value` is PHP syntax.";
     let map = "A `Map` writes a key with `map[key] = value`: `map[] = value` is PHP syntax.";
 
@@ -7683,6 +7683,7 @@ fn an_index_write_replaces_a_list_element_and_list_append_is_add() {
             format!("19:9 invalid-array-access {map}"),
             "20:9 invalid-array-access A `Set<int>` has no index.".to_owned(),
             format!("21:9 invalid-array-access {map}"),
+            format!("22:9 invalid-array-access {map}"),
         ]
     );
 }
@@ -10594,10 +10595,11 @@ fn a_loop_unpacks_each_two_element_tuple() {
 }
 
 /// Spec section 30 unpacks a tuple, whose type gives its length, so `const [a, b] = value` takes nothing else. A `List`
-/// may hold fewer elements than it unpacks, as `List<int> xs = [1]` does, so it is read by index instead.
+/// may hold fewer elements than it unpacks, as `List<int> xs = [1]` does, so it is read by index instead. A value no
+/// place declares, as a call's result, is shown by its own type.
 #[test]
 fn a_local_unpack_takes_only_a_tuple() {
-    let sharp = "namespace Demo;\n\nclass Store\n{\n    public int run(List<int> xs, Map<string, int> counts, [int, string] pair, [int, string]? maybe)\n    {\n        const [a, b] = xs;\n        const [c, d] = counts;\n        const [e, f] = pair;\n        const [g, h] = maybe;\n        List<int> ys = [1];\n        const [p, q] = ys;\n        return a + c + e + g + q;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public int run(List<int> xs, Map<string, int> counts, [int, string] pair, [int, string]? maybe)\n    {\n        const [a, b] = xs;\n        const [c, d] = counts;\n        const [e, f] = pair;\n        const [g, h] = maybe;\n        List<int> ys = [1];\n        const [p, q] = ys;\n        const [m, n] = Store.make();\n        return a + c + e + g + q + n;\n    }\n\n    private static List<int> make() => [1];\n}\n";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Store.sharp", sharp), &[])
@@ -10609,6 +10611,7 @@ fn a_local_unpack_takes_only_a_tuple() {
             "8:24 invalid-destructuring-source Only a tuple unpacks, and `counts` is a `Map<string, int>`. ",
             "10:24 invalid-destructuring-source Only a tuple unpacks, and `maybe` is a `[int, string]?`. ",
             "12:24 invalid-destructuring-source Only a tuple unpacks, and `ys` is a `List<int>`. A `List` may hold fewer elements: read them by index, as in `ys[0]`.",
+            "13:24 invalid-destructuring-source Only a tuple unpacks, and `Store.make()` is a `List<int>`. A `List` may hold fewer elements: read them by index, as in `Store.make()[0]`.",
         ]
     );
 }

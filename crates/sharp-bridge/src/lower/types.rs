@@ -1114,14 +1114,13 @@ impl<'analysis> Types<'analysis> {
     /// Whether the method call `call`, null-safe or not, runs a `Map` method that leaves its receiver as it is, which
     /// `Sharp\MapMethods` declares mutation-free.
     pub(crate) fn reads_map(&self, call: &Expression) -> bool {
-        matches!(self.collection_method(call), Some(("Map", _)))
-            && self.artifacts.get_callees(call).any(|target| match target {
-                CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } => self
-                    .codebase
-                    .get_method(class.as_bytes(), method.as_bytes())
-                    .is_some_and(|metadata| metadata.flags.is_mutation_free()),
-                _ => false,
-            })
+        let Some(("Map", method)) = self.collection_method(call) else {
+            return false;
+        };
+
+        self.codebase
+            .get_method(b"Sharp\\MapMethods", &method)
+            .is_some_and(|metadata| metadata.flags.is_mutation_free())
     }
 
     /// Whether the method call `call`, null-safe or not, runs a lazy operation of a PHP# `Iterable<T>`, spec section 12,

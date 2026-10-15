@@ -937,12 +937,8 @@ where
                 Issue::error("A `Map` writes a key with `map[key] = value`: `map[] = value` is PHP syntax.")
                     .with_annotation(Annotation::primary(array_target.span()).with_message("This appends to a `Map`.")),
             );
-            array_target_index_type = written_type.types.iter().find_map(|atomic| match atomic {
-                TAtomic::Array(TArray::Keyed(TKeyedArray { parameters: Some((key, _)), .. })) => {
-                    Some(Rc::new(key.as_ref().clone()))
-                }
-                _ => None,
-            });
+            array_target_index_type =
+                written_type.to_non_nullable().get_single_array().and_then(TArray::get_key_type).map(Rc::new);
         }
 
         let new_index_type = array_target_index_type.unwrap_or(Rc::new(get_non_negative_int()));
