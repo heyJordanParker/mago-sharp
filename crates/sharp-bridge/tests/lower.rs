@@ -15177,17 +15177,19 @@ fn equality_of_strings_ints_and_enums_is_identity() {
 }
 
 /// ```php
-/// $b = \Sharp\Internal\equals($raw, $counts); $b = !\Sharp\Internal\equals($raw, 1.5); return $raw === null;
+/// $b = \Sharp\Internal\equals($raw, $counts); $b = !\Sharp\Internal\equals($raw, 1.5); $b = $raw === "pro";
+/// return $raw === null;
 /// ```
 ///
 /// Spec section 24: an unchecked `Any?` compares by value with whatever it holds, so `==` on it runs the engine's
 /// `\Sharp\Internal\equals`, which compares a `Map` by its entries and an `int` with a `float` as two floats, and `!=`
-/// is its `!`. `== null` stays the null test. The body starts with the statement that makes `counts` a `Map`.
+/// is its `!`. A string, a `bool` and `null` equal only the same one, so `===` tests them. The body starts with the
+/// statement that makes `counts` a `Map`.
 #[test]
 fn equality_of_an_unchecked_any_compares_by_value() {
     let body = body_in(
         "bool run(Any? raw, Map<string, int> counts)",
-        "        let b = raw == counts;\n        b = raw != 1.5;\n        return raw == null;\n",
+        "        let b = raw == counts;\n        b = raw != 1.5;\n        b = raw == \"pro\";\n        return raw == null;\n",
         &[],
     );
     let comparisons = &body[body.find("  ASSIGN\n    VAR\n      ZVAL \"b\"").expect("the comparisons")..];
@@ -15216,6 +15218,13 @@ fn equality_of_an_unchecked_any_compares_by_value() {
                       VAR
                         ZVAL "raw"
                       ZVAL 1.5
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                BINARY_OP [16]
+                  VAR
+                    ZVAL "raw"
+                  ZVAL "pro"
               RETURN
                 BINARY_OP [16]
                   VAR

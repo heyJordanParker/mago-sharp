@@ -4756,15 +4756,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `lhs == rhs`, or `lhs != rhs` when `negated`, as spec section 19 compares a value of `lhs`'s type with one of
-    /// `rhs`'s: an unchecked `Any?` with whatever it holds, spec section 24, and two class values by their whole type, as
-    /// C# compares two `Type`s, through `\Sharp\Internal\equals`, the `op_Equality` the class of an instance side
-    /// declares, which lifts a null side itself, an int and a float as two floats, and `===` otherwise. `== null` tests
-    /// for null and runs no operator. A collection search compares each element with its value through it, so a search
-    /// never compares differently from `==`.
+    /// `rhs`'s: an unchecked `Any?` with a value [`compares_unchecked`] names, spec section 24, and two class values by
+    /// their whole type, as C# compares two `Type`s, through `\Sharp\Internal\equals`, the `op_Equality` the class of an
+    /// instance side declares, which lifts a null side itself, an int and a float as two floats, and `===` otherwise.
+    /// `== null` tests for null and runs no operator. A collection search compares each element with its value through
+    /// it, so a search never compares differently from `==`.
     fn equality(&mut self, line: u32, lhs: Side, rhs: Side, negated: bool) -> u32 {
         let (lhs_type, rhs_type) = (self.side_type(&lhs), self.side_type(&rhs));
-        let unchecked = (lhs_type.is_mixed() || rhs_type.is_mixed()) && !lhs_type.is_null() && !rhs_type.is_null();
-        if unchecked || holds_class_value(lhs_type) || holds_class_value(rhs_type) {
+        if compares_unchecked(lhs_type, rhs_type)
+            || compares_unchecked(rhs_type, lhs_type)
+            || holds_class_value(lhs_type)
+            || holds_class_value(rhs_type)
+        {
             let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\equals");
             let lhs = self.side(&lhs);
             let rhs = self.side(&rhs);
@@ -7258,6 +7261,13 @@ fn mixes_numbers(lhs: &TUnion, rhs: &TUnion) -> bool {
 /// Whether a value of `union` may be a class value, which `==` compares by its whole type, type arguments included.
 fn holds_class_value(union: &TUnion) -> bool {
     union.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
+}
+
+/// Whether `==` on an unchecked `Any?` of `any` and a value of `other` needs the engine's `==`, spec section 24: a
+/// number equals an `int` or a `float` of the same value, and a collection, a struct or an object compares by value. A
+/// string, a `bool` or `null` equals only the same one, which PHP's `===` tests.
+fn compares_unchecked(any: &TUnion, other: &TUnion) -> bool {
+    any.is_mixed() && !other.types.iter().all(|atomic| atomic.is_any_string() || atomic.is_bool() || atomic.is_null())
 }
 
 /// The kinds of number the values of `union` are, `null` aside, as `[may hold an int, may hold a float]`, or `None`
