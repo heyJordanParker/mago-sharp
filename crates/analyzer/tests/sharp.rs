@@ -16400,28 +16400,33 @@ fn a_getter_with_an_effect_compiles_and_a_law_reading_it_is_refused() {
     );
 }
 
-/// Spec section 6.2: an observer runs inside the `set` hook on each write, the constructor's included, so a write of
-/// the property carries its effects, and a law that builds the object is refused naming the observer's call.
+/// Spec section 6.2: an observer runs inside the `set` hook on each write once the object is built, so a write after
+/// the constructor returns carries its effects, and a law that writes the property is refused naming the observer's
+/// call. A constructor's write and a named constructor's run no observer, so a law that only builds the object is pure.
 #[test]
-fn a_write_of_a_property_carries_its_observers_effects() {
+fn a_write_of_a_property_carries_its_observers_effects_once_the_object_is_built() {
     let quiet = (
         "app/Shop/Tag.sharp",
-        "namespace App.Shop;\n\npublic class Tag\n{\n    public string name { get; set; didSet => this.name.length; } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n}\n",
+        "namespace App.Shop;\n\npublic class Tag\n{\n    public string name { get; set; didSet => this.name.length; } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n\n    public static Tag renamed()\n    {\n        const tag = new Tag();\n        tag.name = \"old\";\n        return tag;\n    }\n}\n",
     );
     let timed = (
         "app/Shop/Tag.sharp",
-        "namespace App.Shop;\n\npublic class Tag\n{\n    public string name { get; set; didSet => global.now(); } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n}\n",
+        "namespace App.Shop;\n\npublic class Tag\n{\n    public string name { get; set; didSet => global.now(); } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n\n    public Tag.titled(string title) : this()\n    {\n        this.name = title;\n    }\n\n    public static Tag renamed()\n    {\n        const tag = new Tag();\n        tag.name = \"old\";\n        return tag;\n    }\n}\n",
     );
-    let law = (
+    let quiet_laws = (
         "app/Shop/Labels.sharp",
-        "namespace App.Shop;\n\npublic class Labels\n{\n    law named(int size) => new Tag().name.length > size;\n}\n",
+        "namespace App.Shop;\n\npublic class Labels\n{\n    law built(int size) => new Tag().name.length > size;\n\n    law renamed(int size) => Tag.renamed().name.length > size;\n}\n",
+    );
+    let timed_laws = (
+        "app/Shop/Labels.sharp",
+        "namespace App.Shop;\n\npublic class Labels\n{\n    law built(int size) => new Tag().name.length > size;\n\n    law titled(int size) => Tag.titled(\"a\").name.length > size;\n\n    law renamed(int size) => Tag.renamed().name.length > size;\n}\n",
     );
 
-    assert_eq!(effect_issues(&[quiet, law, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[quiet, quiet_laws, CLOCK_STUB, NOW]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[timed, law, CLOCK_STUB, NOW]),
+        effect_issues(&[timed, timed_laws, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Labels.sharp:5:28 impure-law: Law `named` reaches `Tag.name`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
+            "app/Shop/Labels.sharp:9:30 impure-law: Law `renamed` reaches `Tag.name`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
 }
@@ -16558,13 +16563,17 @@ fn a_behavior_implements_behavior_for_the_property_s_type() {
     assert_eq!(issues(("src/Demo/Order.sharp", untyped), &[behavior, behaviors]), ["5:12 parse"]);
 }
 
-/// Spec section 6.2: an observer sees `value`, the written value, and `didSet` sees `field`, the stored one, each of
-/// the property's type, so passing either where an `int` goes is the error a `set` body's is.
+/// Spec section 6.2: an observer sees `value`, the written value, and `field`, the stored one, each of
+/// the property's type, so passing either where an `int` goes is the error a `set` body's is. `field` in `willSet` is
+/// the value the write replaces.
 #[test]
 fn an_observer_sees_value_and_field_of_the_property_type() {
-    let sharp = "namespace Demo;\n\nclass Tag\n{\n    public string name { get; set; willSet => this.size(value); didSet => this.size(field); } = \"\";\n\n    private void size(int count)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tag\n{\n    public string name { get; set; willSet => this.size(value); didSet => this.size(field); } = \"\";\n    public string title { get; set; willSet => this.size(field); } = \"\";\n\n    private void size(int count)\n    {\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Tag.sharp", sharp), &[]), ["5:57 invalid-argument", "5:85 invalid-argument"]);
+    assert_eq!(
+        issues(("src/Demo/Tag.sharp", sharp), &[]),
+        ["5:57 invalid-argument", "5:85 invalid-argument", "6:58 invalid-argument"]
+    );
 }
 
 /// Spec section 6.5: a `lazy` body may have any effect, so one calling a method with the effect `Database` compiles. A

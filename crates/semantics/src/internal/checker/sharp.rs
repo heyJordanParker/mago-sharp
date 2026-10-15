@@ -9,7 +9,6 @@ use mago_names::binding::MethodParts;
 use mago_names::binding::php_method_name;
 use mago_names::binding::php_operator_name;
 use mago_names::scope::php_name;
-use mago_php_version::PHPVersion;
 use mago_reporting::Annotation;
 use mago_reporting::AnnotationKind;
 use mago_reporting::Issue;
@@ -199,10 +198,11 @@ const OBJECT: &[u8] = b"Object";
 ///   `public` field is an error, because spec section 6 has no public fields.
 /// - An override: a field written `override`, which replaces a plain PHP parent's property, spec section 6.1. It may
 ///   be `public`, as the parent's property is, and has a constant initial value. The analyzer checks the parent.
-/// - A static field or property: an initial value that is constant, which PHP stores as its default, and a `set`
-///   accessor, because PHP has no `readonly` static property.
+/// - A static field or property: an initial value, and a `set` accessor, because PHP has no `readonly` static
+///   property.
 /// - An initial value: any expression a method body has, without `this`, which is an error. A constant initial value,
-///   as a parameter default is, becomes the member's default, and any other runs at the start of the constructor.
+///   as a parameter default is, becomes the member's default, and any other runs at the start of the constructor, or
+///   a static's when a request first uses its class's statics.
 /// - A property: `public`, `protected` or `private`, an optional `static`, a type, one name, the accessors `get` and
 ///   an optional `set` that may take an access modifier narrower than the property's, and an optional initial value
 ///   after the accessors, which is a field's. A property without `get`, an accessor declared twice, or a `set` access
@@ -217,11 +217,11 @@ const OBJECT: &[u8] = b"Object";
 ///   `this.name` or `this?.name` inside `name`'s own accessor is an error that names `field`, because PHP reads the
 ///   storage there, while C# calls the accessor again. PHP has no hooks on a static property, so a static property's
 ///   accessor bodies run as hidden static methods of its class, and a generic class's static with a body is not
-///   supported yet. A non-constant initial value on a property whose `set` has a body is not supported yet, because
-///   it would run the body in the constructor.
-/// - Observers, spec section 6.2: `willSet` and `didSet` with a body, beside a `set` accessor, run on every write,
-///   the initial value's included. `willSet` sees `value`, and `didSet` sees `field`. `willSet` neither returns nor
-///   writes `value`, `didSet` returns no value, and `field` in `willSet` is not supported yet.
+///   supported yet. An initial value fills the storage without running a `set` body.
+/// - Observers, spec section 6.2: `willSet` and `didSet` with a body, beside a `set` accessor, run on every write
+///   once the object is built, so never on an initial value or a write while a constructor runs. `willSet` sees
+///   `value` and reads the value it replaces in `field`, and `didSet` sees `field`. `willSet` neither returns nor
+///   writes `value`, and `didSet` returns no value.
 /// - Behaviors, spec section 6.4: `via` and class names after the accessors of an instance auto-property with
 ///   `get; set;`, and the analyzer checks each is a `Behavior` for the property's type.
 /// - A computed property: `public`, `protected` or `private`, an optional `static` or `lazy`, a type, one name and an
@@ -997,7 +997,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         (Node::ClassLikeMember(ClassLikeMember::Property(property)), Class) => {
-            match is_slice_property(property, &context.version) {
+            match is_slice_property(property) {
                 Ok(()) => {
                     let variable = property.first_variable();
                     check_declared_name(variable.name, variable.span, context);
@@ -2684,15 +2684,14 @@ fn report_optional_before_required(parameters: &FunctionLikeParameterList, conte
 /// storage, which is `private` or `protected`, `private` when it has no modifier, and a property the API, whose
 /// accessors `check_accessors` decides.
 ///
-/// A static member takes only a constant initial value, which PHP stores as its default, because any other runs in
-/// the constructor. A static property has `set`, because PHP has no `readonly` static property.
+/// A static property has `set`, because PHP has no `readonly` static property.
 ///
 /// An override is a property, spec section 6.1, so a field takes no `override`, and no `virtual` or `abstract` either:
 /// a subclass overrides a `protected` field with a property already. An abstract property declares accessors with no
 /// body and no initial value. The analyzer checks an override against its parent.
 ///
 /// A `lazy` property is computed, spec section 6.5: `lazy T name => expr;` is its only form.
-fn is_slice_property(property: &Property, version: &PHPVersion) -> Result<(), Box<Issue>> {
+fn is_slice_property(property: &Property) -> Result<(), Box<Issue>> {
     let not_supported = |span: Span, message: &str, note: &str| {
         Issue::error(message)
             .with_annotation(Annotation::primary(span).with_message("Not supported yet."))
@@ -2828,24 +2827,6 @@ fn is_slice_property(property: &Property, version: &PHPVersion) -> Result<(), Bo
                     item.span(),
                     "An initial value before the accessors is not supported yet in PHP#.",
                     "A PHP# property writes its initial value after its accessors: `public int views { get; set; } = 0;`.",
-                )))
-            } else if let Some(initial_value) = &auto_property.initial_value
-                && !initial_value.value.is_constant(version, false)
-                && let Some(setter) = auto_property
-                    .hook_list
-                    .setter()
-                    .filter(|setter| matches!(setter.body, PropertyHookBody::Concrete(_)))
-            {
-                let setter = BytesDisplay(setter.name.value);
-
-                Err(Box::new(not_supported(
-                    initial_value.value.span(),
-                    &format!(
-                        "An initial value that is not constant, on a property whose `{setter}` has a body, is not supported yet in PHP#."
-                    ),
-                    &format!(
-                        "A constant initial value is the property's default, while any other would run the `{setter}` body at the start of the constructor."
-                    ),
                 )))
             } else {
                 Ok(())
@@ -3300,8 +3281,7 @@ fn check_accessor_node(node: Node<'_, '_>, property: &[u8], in_lambda: bool, con
 }
 
 /// Spec section 6.2: `willSet` runs before the write and cannot change it, so it never writes `value`, the local its
-/// name declares at `value`. What `field` holds before a property's first write is not decided, so `field` in it is
-/// not supported yet.
+/// name declares at `value`.
 fn check_will_set(node: Node<'_, '_>, value: Span, context: &mut Context<'_, '_, '_>) {
     let target = match node {
         Node::Assignment(assignment) => Some(assignment.lhs),
@@ -3320,14 +3300,6 @@ fn check_will_set(node: Node<'_, '_>, value: Span, context: &mut Context<'_, '_,
             Issue::error("`willSet` cannot change `value`: the write after it stores `value` as written.")
                 .with_annotation(Annotation::primary(target.span()).with_message("Changed here."))
                 .with_help("Change the value in a `set` body, as in `set => field = value.trim();`."),
-        );
-    } else if let Node::ConstantAccess(access) = node
-        && context.names.binding(&access.name) == Some(Binding::Field)
-    {
-        context.report(
-            Issue::error("`field` in `willSet` is not supported yet in PHP#.")
-                .with_annotation(Annotation::primary(access.span()).with_message("Not supported yet."))
-                .with_note("Before a property's first write its storage holds no old value, and what `willSet` reads there is not decided yet. `didSet` reads `field`, the new value."),
         );
     }
 

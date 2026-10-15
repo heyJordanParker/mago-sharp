@@ -3640,8 +3640,7 @@ fn via_goes_on_an_instance_auto_property_with_get_and_set() {
 
 /// Spec section 6.2: `willSet` and `didSet` each take a body and need `set`, as they run inside it on each write.
 /// `willSet` cannot change or stop the write, so it neither writes `value` nor returns, and a `set` body cannot return
-/// before `didSet`, nor `didSet` return a value. What `field` holds in `willSet` before the first write is not decided,
-/// so it is not supported yet.
+/// before `didSet`, nor `didSet` return a value. `field` in `willSet` reads the value the write replaces.
 /// A member declared on a constructor parameter takes no observer, as section 9 says.
 #[test]
 fn observers_take_a_body_beside_set_and_cannot_change_or_stop_the_write() {
@@ -3657,7 +3656,6 @@ fn observers_take_a_body_beside_set_and_cannot_change_or_stop_the_write() {
             "9:43 `willSet` cannot change `value`: the write after it stores `value` as written.",
             "9:54 `willSet` cannot change `value`: the write after it stores `value` as written.",
             "10:62 This accessor is not supported yet in PHP#.",
-            "10:54 `field` in `willSet` is not supported yet in PHP#.",
             "11:50 `didSet` must not return a value.",
             "13:58 Declare `title` in the class body to give it `didSet`: a member declared on a constructor parameter takes access levels and attributes only.",
         ]
@@ -3759,19 +3757,13 @@ fn an_initial_value_needs_storage() {
     );
 }
 
-/// A constant initial value is the property's default, but any other would run the `set` or `init` body in the
-/// constructor.
+/// Spec section 6: an initial value fills the storage without running a `set` or `init` body, so any initial value,
+/// constant or not, goes on a property whose `set` or `init` has a body.
 #[test]
-fn an_initial_value_that_is_not_constant_on_a_property_whose_set_has_a_body_is_not_supported_yet() {
+fn an_initial_value_on_a_property_whose_set_has_a_body_is_in_the_slice() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; set => field = value; } = strlen(\"x\");\n    public int b { get => field; set; } = strlen(\"x\");\n    public int c { get; set => field = value; } = 1;\n    public int d { get; init => field = value; } = strlen(\"x\");\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:51 An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#.",
-            "8:52 An initial value that is not constant, on a property whose `init` has a body, is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// Decision 3: a static property takes accessor bodies, observers and a computed body, as an instance property does,

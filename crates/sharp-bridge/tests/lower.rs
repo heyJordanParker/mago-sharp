@@ -1885,7 +1885,7 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 /// read.
 /// ```php
 /// public static function {'twice#get'}(): int { return 2; }
-/// private static int $hits;
+/// private static int $hits = 0;
 /// public static function {'hits#set'}(int $value) { Meter::log("hit"); self::$hits = $value; }
 /// protected static function {'label#set'}(string $value) { self::$label = $value; Meter::log(self::$label); }
 ///
@@ -1894,14 +1894,14 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 /// Meter::{'note#get'}() ?? (Meter::{'note#set'}($value#1 = "n") ?? $value#1);
 /// Meter::{'label#set'}($value#1 = Meter::{'label#get'}() . "l") ?? $value#1;
 ///
-/// private static function #statics(): void { self::{'hits#set'}(0); self::{'label#set'}(strval(1)); … }
+/// private static function #statics(): void { self::$label = strval(1); }
 /// ```
 ///
 /// Decision 3, for each form a static property's accessors take: a `get` body of either form, `set;` and a narrower
 /// `protected set`, and `willSet` before and `didSet` after the write. Prefix `++` and `--` give the value written and
-/// postfix `--` the value read, `??=` writes only when the read is null, and `+=` on a string appends. An observed
-/// static's initial value, constant or not, is a write through `name#set` in `#statics`, which runs when a request
-/// first builds the class's statics, so its observers run on it, spec section 6.2.
+/// postfix `--` the value read, `??=` writes only when the read is null, and `+=` on a string appends. A static's
+/// initial value fills its storage, spec section 6.2: a constant one is its default, and any other a write of the
+/// storage in `#statics`, which runs when a request first builds the class's statics, so it runs no observer.
 #[test]
 fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_methods() {
     let lowered = Lowered::new(
@@ -1944,7 +1944,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                     PROP_DECL
                       PROP_ELEM
                         ZVAL "hits"
-                        null
+                        ZVAL 0
                         null
                         null
                     null
@@ -2036,7 +2036,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                     PROP_DECL
                       PROP_ELEM
                         ZVAL "note"
-                        null
+                        ZVAL null
                         null
                         null
                     null
@@ -2181,28 +2181,18 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                       ZVAL [1] "void"
                       ZVAL "Function<void()>"
                     null
-                  METHOD [20] "#statics" @5-5
+                  METHOD [20] "#statics" @6-6
                     PARAM_LIST
                     null
                     STMT_LIST
-                      STATIC_CALL
-                        ZVAL [1] "self"
-                        ZVAL "hits#set"
-                        ARG_LIST
-                          ZVAL 0
-                      STATIC_CALL
-                        ZVAL [1] "self"
-                        ZVAL "label#set"
-                        ARG_LIST
-                          CALL
-                            ZVAL "strval"
-                            ARG_LIST
-                              ZVAL 1
-                      STATIC_CALL
-                        ZVAL [1] "self"
-                        ZVAL "note#set"
-                        ARG_LIST
-                          ZVAL null
+                      ASSIGN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "label"
+                        CALL
+                          ZVAL "strval"
+                          ARG_LIST
+                            ZVAL 1
                     ZVAL [1] "void"
                     null
                 null
@@ -2748,12 +2738,14 @@ fn a_generic_behavior_is_created_with_its_type_arguments() {
 }
 
 /// Spec section 6.2: the observers are no hooks of their own. The `set` hook runs `willSet`, then the `set` body or the
-/// storage write an auto `set` is, then `didSet`. They run on every write, so an initial value, constant or not, is a
-/// write at the start of the constructor instead of PHP's default.
+/// storage write an auto `set` is, then `didSet`, and both run only once the object is built, so each waits on
+/// `\Sharp\Internal\building($this)`, asked once per write. An initial value fills the storage, spec section 6: a
+/// constant one is PHP's default, and any other, on a property with a `set` hook, is PHP's `setRawValue` at the start
+/// of the constructor, which runs no hook.
 #[test]
-fn observers_run_inside_the_set_hook() {
+fn observers_run_inside_the_set_hook_once_the_object_is_built() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public string name { get; set; willSet => this.log(value); didSet => this.log(field); } = \"\";\n    public int count { get; set { field = value * 2; } didSet { this.log(\"count\"); } } = 0;\n\n    public void log(Any? text)\n    {\n    }\n}\n",
+        "class Report\n{\n    public string name { get; set; willSet => this.log(field); didSet => this.log(field); } = \"\";\n    public int count { get; set { field = value * 2; } didSet { this.log(\"count\"); } } = 0;\n    public string title { get; set => field = global.trim(value); } = global.strval(1);\n\n    public void log(Any? text)\n    {\n    }\n}\n",
     );
 
     assert_eq!(
@@ -2765,21 +2757,37 @@ fn observers_run_inside_the_set_hook() {
                   PROP_DECL
                     PROP_ELEM
                       ZVAL "name"
-                      null
+                      ZVAL ""
                       null
                       STMT_LIST
                         PROPERTY_HOOK "set" @3-3
                           null
                           null
                           STMT_LIST
-                            STMT_LIST
-                              METHOD_CALL
+                            ASSIGN
+                              VAR
+                                ZVAL "built#1"
+                              UNARY_OP [14]
+                                CALL
+                                  ZVAL "Sharp\\Internal\\building"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "this"
+                            IF
+                              IF_ELEM
                                 VAR
-                                  ZVAL "this"
-                                ZVAL "log"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "value"
+                                  ZVAL "built#1"
+                                STMT_LIST
+                                  STMT_LIST
+                                    METHOD_CALL
+                                      VAR
+                                        ZVAL "this"
+                                      ZVAL "log"
+                                      ARG_LIST
+                                        PROP
+                                          VAR
+                                            ZVAL "this"
+                                          ZVAL "name"
                             STMT_LIST
                               ASSIGN
                                 PROP
@@ -2788,16 +2796,21 @@ fn observers_run_inside_the_set_hook() {
                                   ZVAL "name"
                                 VAR
                                   ZVAL "value"
-                            STMT_LIST
-                              METHOD_CALL
+                            IF
+                              IF_ELEM
                                 VAR
-                                  ZVAL "this"
-                                ZVAL "log"
-                                ARG_LIST
-                                  PROP
-                                    VAR
-                                      ZVAL "this"
-                                    ZVAL "name"
+                                  ZVAL "built#1"
+                                STMT_LIST
+                                  STMT_LIST
+                                    METHOD_CALL
+                                      VAR
+                                        ZVAL "this"
+                                      ZVAL "log"
+                                      ARG_LIST
+                                        PROP
+                                          VAR
+                                            ZVAL "this"
+                                          ZVAL "name"
                           null
                           null
                   null
@@ -2808,13 +2821,22 @@ fn observers_run_inside_the_set_hook() {
                   PROP_DECL
                     PROP_ELEM
                       ZVAL "count"
-                      null
+                      ZVAL 0
                       null
                       STMT_LIST
                         PROPERTY_HOOK "set" @4-4
                           null
                           null
                           STMT_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "built#1"
+                              UNARY_OP [14]
+                                CALL
+                                  ZVAL "Sharp\\Internal\\building"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "this"
                             STMT_LIST
                               ASSIGN
                                 PROP
@@ -2825,13 +2847,45 @@ fn observers_run_inside_the_set_hook() {
                                   VAR
                                     ZVAL "value"
                                   ZVAL 2
-                            STMT_LIST
-                              METHOD_CALL
+                            IF
+                              IF_ELEM
+                                VAR
+                                  ZVAL "built#1"
+                                STMT_LIST
+                                  STMT_LIST
+                                    METHOD_CALL
+                                      VAR
+                                        ZVAL "this"
+                                      ZVAL "log"
+                                      ARG_LIST
+                                        ZVAL "count"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "string"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "title"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "set" @5-5
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              PROP
                                 VAR
                                   ZVAL "this"
-                                ZVAL "log"
+                                ZVAL "title"
+                              CALL
+                                ZVAL "trim"
                                 ARG_LIST
-                                  ZVAL "count"
+                                  VAR
+                                    ZVAL "value"
                           null
                           null
                   null
@@ -2842,18 +2896,21 @@ fn observers_run_inside_the_set_hook() {
         lowered.render(lowered.child(lowered.method_named("__construct"), 2)),
         indoc! {r#"
             STMT_LIST
-              ASSIGN
-                PROP
+              METHOD_CALL
+                NEW
+                  ZVAL "ReflectionProperty"
+                  ARG_LIST
+                    CLASS_NAME
+                      ZVAL [1] "self"
+                    ZVAL "title"
+                ZVAL "setRawValue"
+                ARG_LIST
                   VAR
                     ZVAL "this"
-                  ZVAL "name"
-                ZVAL ""
-              ASSIGN
-                PROP
-                  VAR
-                    ZVAL "this"
-                  ZVAL "count"
-                ZVAL 0
+                  CALL
+                    ZVAL "strval"
+                    ARG_LIST
+                      ZVAL 1
         "#}
     );
 }
@@ -3465,7 +3522,9 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 /// Spec section 9.1: a named constructor is the static method it runs as. `: this(…)` creates the object with the
 /// main constructor, and the body is a closure bound to it, so it runs as a method body on a real `$this`: `super.m()`
 /// is `parent::m()`, `return;` and a lambda's `return;` return nothing, and a lambda reads `$this` as in a method. The
-/// closure takes each parameter, a variadic one spread back out. The method returns the object after its body.
+/// closure takes each parameter, a variadic one spread back out. The method returns the object after its body. The
+/// closure takes `[1073741824]`, `ZEND_ACC_SHARP_BUILDS`, as it still builds the object, so its writes run no
+/// observer, spec section 6.2.
 #[test]
 fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
     let lowered = Lowered::new(
@@ -3502,7 +3561,7 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                       VAR
                         ZVAL "size"
                 METHOD_CALL
-                  CLOSURE "" @16-24
+                  CLOSURE [1073741824] "" @16-24
                     PARAM_LIST
                       PARAM
                         null
@@ -3659,7 +3718,7 @@ fn a_named_constructor_of_a_generic_class_takes_the_class_type_arguments_as_its_
                         ZVAL "item"
                   ZVAL "#0"
               METHOD_CALL
-                CLOSURE "" @8-10
+                CLOSURE [1073741824] "" @8-10
                   PARAM_LIST
                     PARAM
                       null

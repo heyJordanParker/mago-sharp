@@ -326,14 +326,13 @@ impl<'arena> Property<'arena> {
 
     /// Returns `true` when a PHP# instance property's initial value runs at the start of the constructor instead of
     /// being PHP's default: a value that is not a constant expression, any value of a property that runs as
-    /// `readonly`, which takes no default, or any value of a property with an observer, which runs on that write too
-    /// (spec section 6.2). A static member's runs once, after its class is declared.
+    /// `readonly`, which takes no default, or any value of a property with behaviors, whose `set` processes it (spec
+    /// section 6.4). A static member's runs once, when a request first uses its class's statics.
     #[must_use]
     pub fn initial_value_runs_in_constructor(&self) -> bool {
         !self.modifiers().contains_static()
             && self.initial_value().is_some_and(|value| {
                 matches!(self, Property::Hooked(hooked) if hooked.hook_list.is_readonly() || hooked.behaviors.is_some())
-                    || self.is_observed()
                     || !value.is_constant(&PHPVersion::PHP85, false)
             })
     }
@@ -348,20 +347,11 @@ impl<'arena> Property<'arena> {
     }
 
     /// Returns `true` when a PHP# static member's initial value runs once, when a request first uses its class's
-    /// statics, instead of being PHP's default: a value that is not a constant expression, or any value of a property
-    /// with an observer.
+    /// statics, instead of being PHP's default: a value that is not a constant expression.
     #[must_use]
     pub fn initial_value_runs_after_class(&self) -> bool {
         self.modifiers().contains_static()
-            && self
-                .initial_value()
-                .is_some_and(|value| self.is_observed() || !value.is_constant(&PHPVersion::PHP85, false))
-    }
-
-    /// Returns `true` when a PHP# property has a change observer, `willSet` or `didSet` (spec section 6.2).
-    #[must_use]
-    pub fn is_observed(&self) -> bool {
-        matches!(self, Property::Hooked(hooked) if hooked.hook_list.hooks.iter().any(PropertyHook::is_observer))
+            && self.initial_value().is_some_and(|value| !value.is_constant(&PHPVersion::PHP85, false))
     }
 }
 

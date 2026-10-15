@@ -283,6 +283,16 @@ where
         subjects: Vec::new(),
         inlining: Vec::new(),
         grew: false,
+        builds_this: match body {
+            Body::Method(class, method) => {
+                method.as_bytes().eq_ignore_ascii_case(b"__construct")
+                    || context
+                        .codebase
+                        .get_method(class.as_bytes(), method.as_bytes())
+                        .is_some_and(|method| method.flags.is_named_constructor())
+            }
+            _ => false,
+        },
         summary: empty_summary(),
         lambda_summaries: Vec::new(),
     };
@@ -335,6 +345,9 @@ where
     inlining: Vec<Span>,
     /// Whether a local gained a root during this walk.
     grew: bool,
+    /// Whether the body builds `this`: a constructor's or a named constructor's, whose writes of `this` run no
+    /// observer, spec section 6.2.
+    builds_this: bool,
     summary: EffectSummary,
     /// The summary of each lambda written in the body, once, which a function value of the lambda runs.
     lambda_summaries: Vec<EffectSummary>,
@@ -480,6 +493,10 @@ where
                 let receiver = self.roots(access.object);
                 self.change(receiver.clone(), span, place);
                 let arguments = vec![value.map(|value| self.roots(value)).unwrap_or_default()];
+                // A write of `this` while a constructor builds it runs no observer, spec section 6.2.
+                let builds_this = self.builds_this
+                    && matches!(access.object.unparenthesized(), Expression::ConstantAccess(name)
+                        if self.context.resolved_names.binding(&name.name) == Some(Binding::This));
                 for set in self.accessors(access.object, &access.property, b"set") {
                     // The write runs the observers inside the `set` hook too, spec section 6.2. A property without one
                     // has no such body, and a call of a body without a summary adds nothing.
@@ -487,7 +504,9 @@ where
                         unreachable!("an accessor's body is an accessor body");
                     };
                     let observers = [b"willSet".as_slice(), b"didSet"]
-                        .map(|observer| Body::Accessor(class, property, word(observer)));
+                        .map(|observer| Body::Accessor(class, property, word(observer)))
+                        .into_iter()
+                        .filter(|_| !builds_this);
                     for callee in std::iter::once(set).chain(observers) {
                         self.summary.calls.push(Call {
                             callee,

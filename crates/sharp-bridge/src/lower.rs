@@ -267,6 +267,7 @@ const ZEND_TYPE_NULLABLE: u32 = 1 << 8;
 const IS_STATIC: u32 = 15;
 const ZEND_PARAM_VARIADIC: u32 = 1 << 4;
 const ZEND_PARAM_WIDENED: u32 = 1 << 6;
+const ZEND_ACC_SHARP_BUILDS: u32 = 1 << 30;
 const ZEND_PARENTHESIZED_CONDITIONAL: u32 = 1;
 const ZEND_DIM_IS: u32 = 1;
 const ZEND_BIND_REF: u32 = 1;
@@ -1517,7 +1518,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 && property.initial_value_runs_in_constructor()
                 && let Some(value) = property.initial_value()
             {
-                initial_values.push(self.initial_value(property.first_variable(), value));
+                initial_values.push(self.initial_value(property, value));
             }
         }
 
@@ -2353,9 +2354,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         let closure_parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &closure_parameters);
         let body = self.method_body(&constructor.body, false, Vec::new());
+        // The body still builds the object, so its writes run no observer, spec section 6.2.
         let closure = self.declaration(
             SHARP_AST_CLOSURE,
-            0,
+            ZEND_ACC_SHARP_BUILDS,
             &constructor.body,
             &constructor.body,
             b"",
@@ -2500,7 +2502,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// `point with { y: 9 }` copies the object, spec section 16, as PHP 8.5's `clone` with values does:
     /// `(function ($value#1) { return \clone($this, ['y' => $value#1]); })->call($point, 9)`. `clone` writes each
-    /// value through the property's accessor, after the copy's `__clone`.
+    /// value through the property's accessor, after the copy's `__clone`, while the engine marks the copy as still
+    /// being built, so the writes run no observer, spec section 6.2.
     fn with(&mut self, with: &With) -> u32 {
         let object = self.expression(with.object);
 
@@ -2849,7 +2852,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     PropertyHookBody::Abstract(_) => lowering.storage_body(accessor),
                 };
                 if observed {
-                    body = lowering.observed(accessor, will_set, body, did_set);
+                    body = lowering.observed(accessor, will_set, body, did_set, true);
                 }
                 let mut parameters = NULL;
                 if accessor.is_setter()
@@ -2929,26 +2932,45 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The `set` hook of a property with observers, spec section 6.2: `willSet`, then `write`, the `set` body or the
-    /// storage write, then `didSet`, so both run on every write, the constructor's and the initial value's included.
+    /// storage write, then `didSet`. An instance property's observers run only once its object is built, so they wait
+    /// on what `\Sharp\Internal\building` says: `$built#1 = !\Sharp\Internal\building($this);
+    /// if ($built#1) { willSet } write; if ($built#1) { didSet }`. A static's run on every write, as its initial value
+    /// never writes through it.
     fn observed(
         &mut self,
         setter: &PropertyHook,
         will_set: Option<&PropertyHook>,
         write: u32,
         did_set: Option<&PropertyHook>,
+        instance: bool,
     ) -> u32 {
-        let mut body = |observer: &PropertyHook| {
+        let line = self.line(setter);
+        let span = setter.name.span;
+        let mut statements = Vec::new();
+        if instance {
+            let this = self.variable(span, b"this");
+            let building = self.global_call(line, b"Sharp\\Internal\\building", &[this]);
+            let built = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[building]);
+            let place = self.variable(span, b"built#1");
+            statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[place, built]));
+        }
+        let observer = |lowering: &mut Self, observer: &PropertyHook| {
             let PropertyHookBody::Concrete(body) = &observer.body else {
                 unreachable!("semantics refuses an observer without a body");
             };
+            let body = lowering.accessor_body(observer.name.value, body);
+            if !instance {
+                return body;
+            }
+            let built = lowering.variable(span, b"built#1");
 
-            self.accessor_body(observer.name.value, body)
+            lowering.if_chain(span, &[(built, body)])
         };
-        let before = will_set.map(&mut body);
-        let after = did_set.map(&mut body);
-        let statements: Vec<u32> = before.into_iter().chain([write]).chain(after).collect();
+        statements.extend(will_set.map(|will_set| observer(self, will_set)));
+        statements.push(write);
+        statements.extend(did_set.map(|did_set| observer(self, did_set)));
 
-        self.node(SHARP_AST_STMT_LIST, 0, self.line(setter), &statements)
+        self.node(SHARP_AST_STMT_LIST, 0, line, &statements)
     }
 
     fn short_body(&mut self, accessor: &[u8], body: &PropertyHookConcreteExpressionBody) -> u32 {
@@ -3241,7 +3263,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The hidden method that sets each static whose initial value isn't constant, as PHP gives a static only a constant
     /// default: `private static function #statics(): void { self::$a = …; }`. The engine runs it once each request,
     /// when it first builds the class's statics, after their constant defaults (`zend_class_init_sharp_statics`), so a
-    /// preloaded class gets the values too. None when each static's initial value is its default.
+    /// preloaded class gets the values too. Each value fills the storage, so it runs neither a `set` body nor an
+    /// observer, spec section 6.2. None when each static's initial value is its default.
     fn static_initial_values(&mut self, members: &Sequence<ClassLikeMember>) -> Option<u32> {
         let properties: Vec<&Property> = members
             .iter()
@@ -3261,18 +3284,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let line = self.line(variable);
             let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
             let value = self.expression(value);
-            // An observed static's observers run on its initial value's write too, spec section 6.2.
-            statements.push(if runs_static_accessors(property) {
-                let method = self.string(0, line, &[variable.name, b"#set"].concat());
-                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
-
-                self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
-            } else {
-                let member = self.string(0, line, variable.name);
-                let target = self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, member]);
-
-                self.node(SHARP_AST_ASSIGN, 0, line, &[target, value])
-            });
+            let member = self.string(0, line, variable.name);
+            let target = self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, member]);
+            statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[target, value]));
         }
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
@@ -3366,7 +3380,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 PropertyHookBody::Abstract(_) => lowering.storage_set(setter.name.span),
             };
             let body = if will_set.is_some() || did_set.is_some() {
-                lowering.observed(setter, will_set, write, did_set)
+                lowering.observed(setter, will_set, write, did_set, false)
             } else {
                 write
             };
@@ -3495,15 +3509,35 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// `$this->name = value;` on the line of the member's name.
-    fn initial_value(&mut self, variable: &DirectVariable, value: &Expression) -> u32 {
+    /// The write of `property`'s initial value `value` at the start of the constructor, on the line of its name. It
+    /// fills the storage, so it runs neither a `set` body nor an observer, spec section 6: PHP's
+    /// `(new \ReflectionProperty(self::class, 'name'))->setRawValue($this, value);` when the property has a `set` hook,
+    /// and `$this->name = value;`, which runs the behaviors' `set`, otherwise.
+    fn initial_value(&mut self, property: &Property, value: &Expression) -> u32 {
+        let variable = property.first_variable();
         let line = self.line(variable);
-        let this = self.variable(variable.span, b"this");
         let name = self.string(0, line, variable.name);
-        let property = self.node(SHARP_AST_PROP, 0, line, &[this, name]);
         let value = self.expression(value);
+        let this = self.variable(variable.span, b"this");
+        let runs_set_hook = matches!(property, Property::Hooked(hooked) if hooked.behaviors.is_none()
+        && hooked.hook_list.hooks.iter().any(|accessor| {
+            accessor.is_observer() || (accessor.is_setter() && matches!(accessor.body, PropertyHookBody::Concrete(_)))
+        }));
+        if !runs_set_hook {
+            let property = self.node(SHARP_AST_PROP, 0, line, &[this, name]);
 
-        self.node(SHARP_AST_ASSIGN, 0, line, &[property, value])
+            return self.node(SHARP_AST_ASSIGN, 0, line, &[property, value]);
+        }
+
+        let own = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+        let class = self.node(SHARP_AST_CLASS_NAME, 0, line, &[own]);
+        let reflection = self.string(ZEND_NAME_FQ, line, b"ReflectionProperty");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[class, name]);
+        let reflection = self.node(SHARP_AST_NEW, 0, line, &[reflection, arguments]);
+        let method = self.string(0, line, b"setRawValue");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[this, value]);
+
+        self.node(SHARP_AST_METHOD_CALL, 0, line, &[reflection, method, arguments])
     }
 
     /// A type is the type PHP writes for it once generics are erased, as [`Lowering::erase`] gives it.
