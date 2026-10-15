@@ -10944,7 +10944,7 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
 #[test]
 fn a_sub_interfaces_default_body_runs_instead_of_its_parents() {
     let lowered = Lowered::new(
-        "namespace App;\n\npublic interface Shows\n{\n    string label() => \"shows\";\n}\n\npublic interface ShowsMore : Shows\n{\n    override string label() => \"more\";\n}\n\npublic class Fancy : ShowsMore\n{\n}\n",
+        "namespace App;\n\npublic interface Shows\n{\n    string label() => \"shows\";\n\n    string tag => \"s\";\n}\n\npublic interface ShowsMore : Shows\n{\n    override string label() => \"more\";\n\n    override string tag => \"m\";\n}\n\npublic class Fancy : ShowsMore\n{\n}\n",
     );
     let class = |name: &str| {
         lowered
@@ -10968,6 +10968,28 @@ fn a_sub_interfaces_default_body_runs_instead_of_its_parents() {
                   ZVAL "Override"
                   null
             null
+        "#}
+    );
+    // A computed property's body of the sub-interface replaces its parent's too.
+    assert_eq!(
+        lowered.render(lowered.child(lowered.child(lowered.child(lowered.child(class("Fancy"), 2), 1), 1), 0)),
+        indoc! {r#"
+            PROP_ELEM
+              ZVAL "tag"
+              null
+              null
+              STMT_LIST
+                PROPERTY_HOOK "get" @18-18
+                  null
+                  null
+                  PROPERTY_HOOK_SHORT_BODY
+                    METHOD_CALL
+                      VAR
+                        ZVAL "this"
+                      ZVAL "tag@App\\ShowsMore"
+                      ARG_LIST
+                  null
+                  null
         "#}
     );
     assert_eq!(

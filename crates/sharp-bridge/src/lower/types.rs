@@ -626,13 +626,9 @@ impl<'analysis> Types<'analysis> {
                 return false;
             };
 
-            std::iter::once(atomic)
-                .chain(object.get_intersection_types().unwrap_or_default())
-                .filter_map(|part| match part {
-                    TAtomic::Object(TObject::Named(part)) => Some(part.name),
-                    _ => None,
-                })
-                .any(|name| self.codebase.get_trait(name.as_bytes()).is_some())
+            std::iter::once(atomic).chain(object.get_intersection_types().unwrap_or_default()).any(|part| {
+                matches!(part, TAtomic::Object(TObject::Named(part)) if self.codebase.get_trait(part.name.as_bytes()).is_some())
+            })
         };
         // A method's own type parameter matches any value from plain PHP, so one bounded by a trait checks its bound.
         let bounded_by_trait = |atomic: &TAtomic| match atomic {
