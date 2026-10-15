@@ -37,9 +37,11 @@ where
             function: Some(self.expect_php_keyword(T!["function"])?),
             ampersand: if self.stream.is_at(T!["&"])? { Some(self.stream.eat_span(T!["&"])?) } else { None },
             name: self.parse_local_identifier()?,
+            type_parameters: None,
             parameter_list: self.parse_function_like_parameter_list()?,
             return_type_hint: self.parse_optional_function_like_return_type_hint()?,
             on: None,
+            uses: None,
             initializer: None,
             body: self.parse_method_body()?,
         })
@@ -49,12 +51,13 @@ where
     /// and no `function` keyword, or a field, `int count = 0;`. A name followed by `(` with no type before it is the
     /// constructor, `public Report(int count) {}`, a method without a return type.
     ///
-    /// The type is parsed once, and the name after it decides: a name followed by `(` makes a method, anything else
-    /// a field. A type has no length limit, so no fixed lookahead can decide before it. A PHP property, which starts
+    /// The type is parsed once, and the name after it decides: a name followed by `(`, or by `<` and its type
+    /// parameters, makes a method, anything else a field. A type has no length limit, so no fixed lookahead can decide before it. A PHP property, which starts
     /// with `var` or a `$` variable, still parses so the rest of the class does, and its PHP syntax is an error. So do
     /// `required` on any member but the constructor, which is one "not supported yet" error, and a type declared inside
-    /// the class-like. A class name, a `.` and a name followed by `(` is a named constructor. `extension(…)` with no
-    /// attribute or modifier before it is an extension, spec section 26.
+    /// the class-like. A class name, a `.` and a name followed by `(` is a named constructor. `class` followed by `<`
+    /// is the type `Class<Order>`, since a declared class names itself first. `extension(…)` with no attribute or
+    /// modifier before it is an extension, spec section 26.
     pub(crate) fn parse_sharp_member_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -69,7 +72,8 @@ where
             ));
         }
         if self.is_at_event()?
-            || matches!(self.stream.peek_kind(0)?, Some(T!["interface" | "class" | "enum" | "trait"]))
+            || matches!(self.stream.peek_kind(0)?, Some(T!["interface" | "enum" | "trait"]))
+            || (self.stream.is_at(T!["class"])? && self.stream.peek_kind(1)? != Some(T!["<"]))
         {
             return Err(self.parse_nested_type(attributes, modifiers)?);
         }
@@ -87,21 +91,36 @@ where
         };
 
         let hint = self.parse_type_hint()?;
-        // A named constructor, `public Report.fromJson(string json) : this(…) {}` in spec section 9.1.
+        // A named constructor, `public Report.fromJson(string json) : this(…) {}` in spec section 9.1. It takes its
+        // class's type arguments, as Dart's does, so one written with type parameters parses whole and is left out.
         if let Hint::Identifier(Identifier::Local(class)) = hint
             && self.stream.is_at(T!["."])?
-            && self.stream.peek_kind(2)? == Some(T!["("])
+            && matches!(self.stream.peek_kind(2)?, Some(T!["(" | "<"]))
         {
-            return Ok(ClassLikeMember::NamedConstructor(NamedConstructor {
+            let dot = self.stream.eat_span(T!["."])?;
+            let name = self.parse_local_identifier()?;
+            let type_parameters = self.parse_optional_type_parameter_list()?;
+            let constructor = NamedConstructor {
                 attribute_lists: attributes,
                 modifiers,
                 class,
-                dot: self.stream.eat_span(T!["."])?,
-                name: self.parse_local_identifier()?,
+                dot,
+                name,
                 parameter_list: self.parse_function_like_parameter_list()?,
                 initializer: self.parse_optional_constructor_initializer()?,
                 body: self.parse_method_body()?,
-            }));
+            };
+            if let Some(type_parameters) = type_parameters {
+                let class_name = String::from_utf8_lossy(class.value).into_owned().into_boxed_str();
+
+                return Err(ParseError::NamedConstructorTypeParametersInSharp(
+                    class_name,
+                    self.state.type_parameters_of.clone(),
+                    type_parameters.span(),
+                ));
+            }
+
+            return Ok(ClassLikeMember::NamedConstructor(constructor));
         }
         if let Hint::Identifier(Identifier::Local(name)) = hint
             && self.stream.is_at(T!["("])?
@@ -112,9 +131,11 @@ where
                 function: None,
                 ampersand: None,
                 name,
+                type_parameters: None,
                 parameter_list: self.parse_function_like_parameter_list()?,
                 return_type_hint: None,
                 on: None,
+                uses: None,
                 initializer: self.parse_optional_constructor_initializer()?,
                 body: self.parse_method_body()?,
             }));
@@ -150,7 +171,7 @@ where
 
             return Ok(ClassLikeMember::Property(self.parse_untyped_property(attributes, modifiers, name)?));
         }
-        if !matches!(self.stream.peek_kind(1)?, Some(T!["("])) {
+        if !matches!(self.stream.peek_kind(1)?, Some(T!["(" | "<"])) {
             return Ok(ClassLikeMember::Property(self.parse_property_with_hint(
                 attributes,
                 modifiers,
@@ -166,8 +187,10 @@ where
             return_type_hint: Some(FunctionLikeReturnTypeHint { colon: None, hint }),
             ampersand: None,
             name: self.parse_local_identifier()?,
+            type_parameters: self.parse_optional_type_parameter_list()?.map(|list| &*self.arena.alloc(list)),
             parameter_list: self.parse_function_like_parameter_list()?,
-            on: self.parse_optional_on()?,
+            on: self.parse_optional_on()?.map(|on| &*self.arena.alloc(on)),
+            uses: self.parse_optional_uses()?.map(|uses| &*self.arena.alloc(uses)),
             initializer: None,
             body: self.parse_method_body()?,
         }))

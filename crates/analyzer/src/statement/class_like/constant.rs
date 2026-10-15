@@ -102,7 +102,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
                     },
                 );
 
-                let mut comparison_result = ComparisonResult::with_sharp_rules(is_sharp);
+                let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
                 if !union_comparator::is_contained_by(
                     context.codebase,
                     value_type,

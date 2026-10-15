@@ -6,6 +6,7 @@ use mago_span::Span;
 use crate::cst::cst::argument::ArgumentList;
 use crate::cst::cst::class_like::member::ClassLikeMemberSelector;
 use crate::cst::cst::expression::Expression;
+use crate::cst::cst::type_hint::TypeArgumentList;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -30,6 +31,8 @@ pub struct MethodCall<'arena> {
     pub object: &'arena Expression<'arena>,
     pub arrow: Span,
     pub method: ClassLikeMemberSelector<'arena>,
+    /// PHP#'s type arguments, as in `Json.decode<WebhookPayload>(body)`. Always `None` in PHP.
+    pub type_arguments: Option<TypeArgumentList<'arena>>,
     pub argument_list: ArgumentList<'arena>,
 }
 
@@ -39,6 +42,8 @@ pub struct NullSafeMethodCall<'arena> {
     pub object: &'arena Expression<'arena>,
     pub question_mark_arrow: Span,
     pub method: ClassLikeMemberSelector<'arena>,
+    /// PHP#'s type arguments, as in `this.repository?.find<Order>(id)`. Always `None` in PHP.
+    pub type_arguments: Option<TypeArgumentList<'arena>>,
     pub argument_list: ArgumentList<'arena>,
 }
 

@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use indexmap::IndexMap;
 
 use mago_algebra::clause::Clause;
@@ -13,6 +15,8 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::union::TUnion;
+use mago_codex::ttype::wrap_atomic;
+use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::Level;
@@ -21,9 +25,11 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::As;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Parenthesized;
+use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PropertiesPattern;
@@ -32,6 +38,7 @@ use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::called_function;
+use mago_syntax::utils::pattern::has_type_test;
 use mago_syntax::walker::Walker;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
@@ -54,10 +61,14 @@ use crate::reconciler::reconcile_keyed_types;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::override_attribute;
+use crate::statement::get_type_from_hint;
+use crate::statement::report_erased_type_test;
+use crate::statement::report_hint_type_arguments;
 use crate::utils::misc::check_for_paradox;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
 use crate::utils::names::display_missing_imports;
+use crate::utils::quoted_source;
 
 pub mod access;
 pub mod argument_list;
@@ -200,7 +211,27 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                 Expression::Construct(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Throw(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Clone(expr) => expr.analyze(context, block_context, artifacts),
-                Expression::Error(_) | Expression::Is(_) if is_refused(self) => {
+                Expression::Error(_)
+                | Expression::Access(_)
+                | Expression::Call(_)
+                | Expression::TypeOf(_)
+                | Expression::Instantiation(_)
+                | Expression::Is(_)
+                | Expression::As(_)
+                | Expression::PatternMatch(_)
+                    if is_refused(self, context) =>
+                {
+                    if let Expression::Is(is) = self {
+                        for (hint, variable) in Node::Pattern(is.pattern).filter_map(|node| match node {
+                            Node::TypePattern(TypePattern { hint, variable: Some(variable) }) => Some((hint, variable)),
+                            _ => None,
+                        }) {
+                            let variable_id = php_variable_name(variable.value);
+                            let variable_type = Rc::new(get_type_from_hint(context, block_context, artifacts, hint));
+                            block_context.local_types.insert(variable_id, (Rc::clone(&variable_type), hint.span()));
+                            block_context.locals.insert(variable_id, variable_type);
+                        }
+                    }
                     let refused_type =
                         if context.dialect.is_sharp() { TUnion::from_atomic(TAtomic::Error) } else { get_never() };
                     artifacts.set_expression_type(&self, refused_type);
@@ -213,11 +244,26 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                 Expression::Instantiation(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::MagicConstant(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Pipe(expr) => expr.analyze(context, block_context, artifacts),
-                Expression::Is(_) | Expression::As(_) | Expression::PatternMatch(_) => {
-                    analyze_php_shape(Node::Expression(self), context, block_context, artifacts)
+                Expression::Is(is) => analyze_php_shape(
+                    Node::Expression(self),
+                    type_pattern_hints(is.pattern),
+                    context,
+                    block_context,
+                    artifacts,
+                ),
+                Expression::As(r#as) => {
+                    analyze_php_shape(Node::Expression(self), vec![r#as.hint], context, block_context, artifacts)
                 }
+                Expression::PatternMatch(pattern_match) => analyze_php_shape(
+                    Node::Expression(self),
+                    match_arm_hints(pattern_match),
+                    context,
+                    block_context,
+                    artifacts,
+                ),
                 Expression::TypeOf(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::NameOf(expr) => expr.analyze(context, block_context, artifacts),
+                Expression::GenericClass(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::List(list_expr) => {
                     context.collector.report_with_code(
                     IssueCode::ListUsedInReadContext,
@@ -314,10 +360,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
 }
 
 /// Analyzes a PHP# `is`, `as` or `match` as the PHP it runs as, which the engine's bridge lowers too, so the analyzer
-/// narrows on the code that runs. An expression's type is its PHP's. A form the slice refuses has no PHP, and its
-/// error is the semantic check's.
+/// narrows on the code that runs. `hints` are the types it tests, whose type arguments it checks. An expression's type
+/// is its PHP's. A form the slice refuses has no PHP, and its error is the semantic check's.
 pub(crate) fn analyze_php_shape<'ctx, 'arena, A>(
     node: Node<'_, 'arena>,
+    hints: Vec<&Hint<'_>>,
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
@@ -325,6 +372,25 @@ pub(crate) fn analyze_php_shape<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    let mut is_refused = false;
+    for hint in hints {
+        is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint);
+        is_refused |= report_erased_type_test(context, hint);
+
+        // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any` or of a
+        // union is `instanceof` a name spanning the whole type, and narrows to the type written, which the analysis
+        // records as the type the test reads.
+        let reads_type_arguments = match hint {
+            Hint::Identifier(name) => context.resolved_names.is_type_parameter(name),
+            Hint::Generic(_) | Hint::Mixed(_) | Hint::Union(_) => has_type_test(hint),
+            _ => false,
+        };
+        if reads_type_arguments {
+            let tested = get_type_from_hint(context, block_context, artifacts, hint);
+            artifacts.record_tested_type(hint, tested);
+        }
+    }
+
     let Some(PhpShape { php, temporaries, tests }) =
         context.get_assertion_context_from_block(block_context).php_shape(node)
     else {
@@ -357,7 +423,7 @@ where
     context.patterns.truncate(patterns);
 
     // The PHP of a pattern calls a type test that no source the user wrote calls. It is the PHP# syntax itself, so it is
-    // never replaced by syntax. A properties pattern's `is_object` is its null check, which a value that cannot be null
+    // never a bare call to refuse. A properties pattern's `is_object` is its null check, which a value that cannot be null
     // makes redundant. C# reports nothing there, and no source the user wrote can drop the check.
     let mut pattern_calls = Vec::new();
     match node {
@@ -383,6 +449,25 @@ where
         }
         _ => None,
     };
+    // An `as`, or an `is` of a type, whose value is always of the type tests nothing. PHP# says so in the words the user
+    // wrote, in place of PHP's report on the conditional it runs as.
+    let redundant_test = match node {
+        Node::Expression(Expression::Is(is)) if let Pattern::Type(TypePattern { hint, .. }) = is.pattern => {
+            Some((is.value, hint.span(), is.is.span.join(is.pattern.span())))
+        }
+        Node::Expression(Expression::As(r#as)) => {
+            Some((r#as.value, r#as.hint.span(), r#as.r#as.span.join(r#as.hint.span())))
+        }
+        _ => None,
+    }
+    .filter(|(value, hint, _)| {
+        // A value whose expression is refused has no type to be already of.
+        artifacts.get_expression_type(*value).is_some_and(|value| !is_refused_type(value))
+            && tests.iter().any(|(pattern, test)| {
+                pattern.contains(&hint.start)
+                    && artifacts.get_rc_expression_type(*test).is_some_and(|test| test.is_true())
+            })
+    });
     let is_code = |issue: &Issue, code: IssueCode| issue.code.as_deref() == Some(code.as_str());
     let issues: Vec<Issue> = issues
         .into_iter()
@@ -397,12 +482,41 @@ where
 
             // PHP's report on `match (true)` names `true`, so a PHP# `match` reports what it misses itself.
             !is_code(issue, IssueCode::MatchNotExhaustive)
-                && (!is_code(issue, IssueCode::ReplacedBySyntax) || called.is_none())
+                && (!(is_code(issue, IssueCode::ReplacedBySyntax) || is_code(issue, IssueCode::BareFunctionCall))
+                    || called.is_none())
                 && (!redundant || called.is_none_or(|call| call.value != b"is_object"))
                 && (!always_true
-                    || span.is_none_or(|span| !last_arm_test.is_some_and(|test| test.contains(&span.start))))
+                    || span.is_none_or(|span| {
+                        !last_arm_test.is_some_and(|test| test.contains(&span.start))
+                            && !redundant_test.is_some_and(|(value, _, test)| {
+                                test.contains(&span.start)
+                                    || (span.start == value.span().start && span.end > value.span().end)
+                            })
+                    }))
         })
         .collect();
+
+    if let Some((value, hint, test)) = redundant_test {
+        let value_text = quoted_source(context, value.span());
+        let hint_text = quoted_source(context, hint);
+        let article =
+            if hint_text.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+        let (consequence, help) = if let Node::Expression(Expression::As(_)) = node {
+            ("changes nothing", format!("Write `{value_text}` alone."))
+        } else {
+            ("is always true", "Remove the test.".to_owned())
+        };
+
+        context.collector.report_with_code(
+            IssueCode::RedundantTypeComparison,
+            Issue::help(format!(
+                "`{value_text}` is already {article} `{hint_text}`, so `{}` {consequence}.",
+                quoted_source(context, test)
+            ))
+            .with_annotation(Annotation::primary(test).with_message("Tests nothing."))
+            .with_help(help),
+        );
+    }
 
     if let Node::Expression(Expression::PatternMatch(pattern_match))
     | Node::Statement(Statement::PatternMatch(pattern_match)) = node
@@ -446,7 +560,13 @@ where
     context.collector.extend(issues);
     result?;
 
-    if let (Node::Expression(expression), Node::Expression(php)) = (node, php)
+    // A refused type, as `value as Box` writes, gives the expression no type, so where its value goes reports nothing
+    // again.
+    if let Node::Expression(expression) = node
+        && is_refused
+    {
+        artifacts.set_expression_type(expression, wrap_atomic(TAtomic::Error));
+    } else if let (Node::Expression(expression), Node::Expression(php)) = (node, php)
         && let Some(php_type) = artifacts.get_rc_expression_type(php).cloned()
     {
         artifacts.set_rc_expression_type(expression, php_type);
@@ -643,14 +763,27 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Parenthesized<'arena> {
     }
 }
 
-/// Whether an error already refuses `expression`: it failed to parse, or it is `!x is T`, which `check_slice` refuses.
-/// Its type is the error type in PHP# and `never` in PHP, and it adds no issue.
-pub(crate) const fn is_refused(expression: &Expression<'_>) -> bool {
+/// Whether an error already refuses `expression`. `check_slice` refuses it when it failed to parse, it is `!x is T`, it
+/// calls a named constructor of a type parameter, or it tests or converts a value to a type with no
+/// [type test](mago_syntax::utils::pattern::has_type_test) in `is`, `as` or a `match` arm. Its type is the error type
+/// in PHP# and `never` in PHP, a variable its `is` pattern names holds the type written beside it, and it adds no other
+/// issue.
+pub(crate) fn is_refused<A>(expression: &Expression<'_>, context: &Context<'_, '_, A>) -> bool
+where
+    A: Arena,
+{
     match expression {
         Expression::Error(_) => true,
+        Expression::Instantiation(instantiation) => {
+            instantiation.constructor.is_some()
+                && matches!(instantiation.class, Expression::Identifier(class) if context.resolved_names.is_type_parameter(class))
+        }
         Expression::Is(is) => {
             matches!(is.value, Expression::UnaryPrefix(prefix) if matches!(prefix.operator, UnaryPrefixOperator::Not(_)))
+                || type_pattern_hints(is.pattern).into_iter().any(|hint| !has_type_test(hint))
         }
+        Expression::As(r#as) => !has_type_test(r#as.hint),
+        Expression::PatternMatch(pattern_match) => is_refused_match(pattern_match),
         _ => false,
     }
 }
@@ -660,6 +793,38 @@ pub(crate) const fn is_refused(expression: &Expression<'_>) -> bool {
 /// it gets the same type, because the expression's own error already reports it.
 pub(crate) fn is_refused_type(union: &TUnion) -> bool {
     union.types.iter().any(|atomic| matches!(atomic, TAtomic::Error))
+}
+
+/// Whether an arm of `pattern_match`, an expression or a statement, tests its value against a type no test can run
+/// on yet.
+pub(crate) fn is_refused_match(pattern_match: &PatternMatch<'_>) -> bool {
+    match_arm_hints(pattern_match).into_iter().any(|hint| !has_type_test(hint))
+}
+
+/// The type of each type pattern in `pattern`, itself or a pattern inside it.
+fn type_pattern_hints<'ast>(pattern: &'ast Pattern<'ast>) -> Vec<&'ast Hint<'ast>> {
+    match pattern {
+        Pattern::Type(type_pattern) => vec![&type_pattern.hint],
+        Pattern::Not(not) => type_pattern_hints(not.pattern),
+        Pattern::Binary(binary) => [type_pattern_hints(binary.left), type_pattern_hints(binary.right)].concat(),
+        Pattern::Parenthesized(parenthesized) => type_pattern_hints(parenthesized.pattern),
+        Pattern::Properties(properties) => {
+            properties.properties.iter().flat_map(|property| type_pattern_hints(property.pattern)).collect()
+        }
+        Pattern::Value(_) | Pattern::Comparison(_) => Vec::new(),
+    }
+}
+
+/// The type of each type pattern in the arms of `pattern_match`.
+pub(crate) fn match_arm_hints<'ast>(pattern_match: &'ast PatternMatch<'ast>) -> Vec<&'ast Hint<'ast>> {
+    pattern_match
+        .arms
+        .iter()
+        .flat_map(|arm| match arm {
+            PatternMatchArm::Pattern(arm) => type_pattern_hints(arm.pattern),
+            PatternMatchArm::Default(_) => Vec::new(),
+        })
+        .collect()
 }
 
 pub fn find_expression_logic_issues<'ctx, 'arena, A>(

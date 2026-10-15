@@ -69,6 +69,94 @@ fn the_names_in_a_class_or_interface_header_resolve_as_class_names() {
 }
 
 #[test]
+fn a_generic_type_in_a_header_resolves_by_its_name() {
+    const CODE: &str = "namespace App.Tenant.Store;\n\nimport App.Shared.PaginatedList;\n\nclass OrderPage : PaginatedList<Order>, Shareable\n{\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(resolved(&names, CODE, "PaginatedList<", 0), b"App\\Shared\\PaginatedList");
+    assert_eq!(resolved(&names, CODE, "Shareable", 0), b"App\\Tenant\\Store\\Shareable");
+}
+
+/// Every type name that names a type parameter binds as that type parameter and resolves to the name as written, never
+/// namespace-qualified. A generic class type resolves its name as a class name, and `List`, `Map` and `Class` are never
+/// classes.
+#[test]
+fn a_type_parameter_written_as_a_type_binds_as_its_type_parameter_and_resolves_to_its_name() {
+    const CODE: &str = "namespace App;\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    private Map<string, Class<TItem>> types = [:];\n\n    public TItem first()\n    {\n        return this.first();\n    }\n\n    public List<T> keep<T>(List<T> items, PaginatedList<Order> page)\n    {\n        TItem x = this.first();\n        const pick = (T item) => item;\n        const kept = this.keep<TItem>([], page);\n        const kind = typeof(TItem);\n        const made = new TItem(x);\n        const same = x is TItem;\n        const cast = x as TItem;\n        try {\n        } catch (TItem failure) {\n        }\n        return items;\n    }\n\n    public void sort<TKey, TValue : Comparable<TKey>>()\n    {\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    let item = Some(Binding::TypeParameter { declaration: span(CODE, "TItem", 0) });
+    for nth in 1..=9 {
+        assert_eq!(binding(&names, CODE, "TItem", nth), item, "`TItem` #{nth}");
+        assert_eq!(resolved(&names, CODE, "TItem", nth), b"TItem", "`TItem` #{nth}");
+    }
+
+    let t = Some(Binding::TypeParameter { declaration: name_at(CODE, "T>(List", "T") });
+    for at in ["T> keep", "T> items", "T item)"] {
+        assert_eq!(bound_at(&names, CODE, at, "T"), t, "`T` at `{at}`");
+        assert_eq!(names.get(&name_at(CODE, at, "T").start), b"T", "`T` at `{at}`");
+    }
+
+    assert_eq!(
+        bound_at(&names, CODE, "TKey>>", "TKey"),
+        Some(Binding::TypeParameter { declaration: name_at(CODE, "TKey, TValue", "TKey") })
+    );
+    assert_eq!(resolved(&names, CODE, "TKey>>", 0), b"TKey");
+
+    assert_eq!(resolved(&names, CODE, "DatabaseEntity", 0), b"App\\DatabaseEntity");
+    assert_eq!(resolved(&names, CODE, "Comparable", 0), b"App\\Comparable");
+    assert_eq!(resolved(&names, CODE, "PaginatedList<Order>", 0), b"App\\PaginatedList");
+    assert_eq!(binding(&names, CODE, "PaginatedList<Order>", 0), None);
+    assert_eq!(resolved(&names, CODE, "Order", 0), b"App\\Order");
+    for needle in ["List<T> keep", "List<T> items", "Map<string", "Class<TItem>"] {
+        assert!(!names.contains(&Position::new(offset(CODE, needle, 0))), "`{needle}` has a resolved name");
+    }
+}
+
+/// A class's or an interface's type parameters are in scope in its whole declaration, its header included, and a
+/// method's in its signature and body, where they win over the class's of the same name. Past the declaration, the
+/// name is a class name again.
+#[test]
+fn a_type_parameter_is_in_scope_in_its_declaration_and_a_method_type_parameter_shadows_the_class_type_parameter() {
+    const CODE: &str = "namespace App;\n\npublic interface Validator<in TItem>\n{\n    bool check(TItem item);\n}\n\npublic class Box<TItem> : PaginatedList<TItem>, Validator<TItem>\n{\n    public TItem convert<TItem>(TItem value)\n    {\n        return value;\n    }\n\n    public bool check(TItem item)\n    {\n        return true;\n    }\n}\n\nclass Other\n{\n    public TItem get(TItem item)\n    {\n        return item;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    let of = |nth: usize| Some(Binding::TypeParameter { declaration: span(CODE, "TItem", nth) });
+    assert_eq!(binding(&names, CODE, "TItem", 1), of(0));
+    for (nth, declaration) in [(3, 2), (4, 2), (5, 6), (7, 6), (8, 2)] {
+        assert_eq!(binding(&names, CODE, "TItem", nth), of(declaration), "`TItem` #{nth}");
+        assert_eq!(resolved(&names, CODE, "TItem", nth), b"TItem", "`TItem` #{nth}");
+    }
+    for nth in [9, 10] {
+        assert_eq!(binding(&names, CODE, "TItem", nth), None, "`TItem` #{nth}");
+        assert_eq!(resolved(&names, CODE, "TItem", nth), b"App\\TItem", "`TItem` #{nth}");
+    }
+}
+
+/// A type parameter written before `.` binds as that type parameter, as it does written as a type, so `TItem.make()`
+/// and `TItem.LIMIT` never name the class `App\TItem`. Past its declaration the name before `.` is a class again.
+#[test]
+fn a_type_parameter_before_a_dot_binds_as_its_type_parameter_inside_its_declaration_only() {
+    const CODE: &str = "namespace App;\n\npublic class Box<TItem>\n{\n    public int run<TKey>()\n    {\n        TItem.make();\n        TKey.make();\n        return TItem.LIMIT;\n    }\n}\n\nclass Other\n{\n    public void run()\n    {\n        TItem.make();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    let item = Some(Binding::TypeParameter { declaration: span(CODE, "TItem", 0) });
+    for nth in [1, 2] {
+        assert_eq!(binding(&names, CODE, "TItem", nth), item, "`TItem` #{nth}");
+        assert_eq!(resolved(&names, CODE, "TItem", nth), b"TItem", "`TItem` #{nth}");
+    }
+    assert_eq!(binding(&names, CODE, "TKey.", 0), Some(Binding::TypeParameter { declaration: span(CODE, "TKey", 0) }));
+    assert_eq!(resolved(&names, CODE, "TKey.", 0), b"TKey");
+
+    assert_eq!(binding(&names, CODE, "TItem", 3), Some(Binding::Class));
+    assert_eq!(resolved(&names, CODE, "TItem", 3), b"App\\TItem");
+}
+
+#[test]
 fn the_interfaces_in_an_enum_header_resolve_as_class_names() {
     const CODE: &str = "namespace App.Tenant.Store;\n\nimport App.Shared.HasLabel;\n\nenum Status : string, HasLabel, Sorted\n{\n}\n\nenum Suit : HasLabel\n{\n}\n";
     let arena = LocalArena::new();
@@ -317,6 +405,42 @@ fn a_static_call_is_a_method_call_whose_object_binds_as_a_class() {
     assert_eq!(classes, [Some(&b"Calc"[..]), None, None, None]);
 }
 
+/// `Counter<Order>.count` names a static member of one type argument's class, spec section 11: `Counter` binds as a
+/// class and resolves like any class name, and each type argument resolves as a type, a type parameter as its type
+/// parameter. The checker and the engine read the class of the member through it, as they read `Counter.count`.
+#[test]
+fn a_class_with_type_arguments_before_a_dot_binds_as_the_class_and_its_type_arguments_as_types() {
+    const CODE: &str = "namespace App.Shop;\n\nimport App.Sales.Order;\n\npublic class Box<TItem>\n{\n    public int run()\n    {\n        Counter<Order>.reset();\n        Counter<TItem>.count++;\n        return Counter<List<Order>>.count + this.size;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
+    let program = parse_file(&arena, &file);
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let names = NameResolver::new(&arena).resolve(program);
+
+    for nth in 0..3 {
+        assert_eq!(binding(&names, CODE, "Counter<", nth), Some(Binding::Class), "`Counter` #{nth}");
+        assert_eq!(resolved(&names, CODE, "Counter<", nth), b"App\\Shop\\Counter", "`Counter` #{nth}");
+    }
+    assert_eq!(resolved(&names, CODE, "Order>.", 0), b"App\\Sales\\Order");
+    assert_eq!(resolved(&names, CODE, "Order>>", 0), b"App\\Sales\\Order");
+    assert_eq!(
+        binding(&names, CODE, "TItem>.", 0),
+        Some(Binding::TypeParameter { declaration: span(CODE, "TItem", 0) })
+    );
+
+    let calls = Node::Program(program).filter_map(|node| match node {
+        Node::MethodCall(call) => Some(names.static_call_class(call).map(|class| class.name.value())),
+        _ => None,
+    });
+    let properties = Node::Program(program).filter_map(|node| match node {
+        Node::PropertyAccess(access) => Some(names.static_property_class(access).map(|class| class.name.value())),
+        _ => None,
+    });
+
+    assert_eq!(calls, [Some(&b"Counter"[..])]);
+    assert_eq!(properties, [Some(&b"Counter"[..]), Some(b"Counter"), None]);
+}
+
 #[test]
 fn a_bare_int_or_float_before_a_dot_is_the_class_in_the_sharp_namespace() {
     const CODE: &str = "namespace App.Tenant.Store;\n\nclass Report\n{\n    public float run(string text)\n    {\n        return Int.parse(text) + Float.tryParse(text) ?? 0.0;\n    }\n}\n";
@@ -469,15 +593,6 @@ fn a_standard_library_name_in_a_catch_a_header_or_an_attribute_is_the_class_in_t
     ] {
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, 0)), class, "`{needle:?}`");
     }
-}
-
-#[test]
-fn a_bare_replaces_attribute_is_the_attribute_of_the_standard_library() {
-    const CODE: &str = "namespace Sharp.Time;\n\npublic static class Date\n{\n    [Replaces(\"date\")]\n    public static string format(int timestamp) => \"\";\n}\n";
-    let arena = LocalArena::new();
-    let names = bind(&arena, CODE);
-
-    assert_eq!(resolved(&names, CODE, "Replaces", 0), b"Sharp\\Replaces");
 }
 
 /// An `extern` target binds through the file's imports as a class first, and `Class.member` binds its class and keeps
@@ -661,28 +776,40 @@ fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
 }
 
 /// A help that names a standard class reads whether the file's bare short name names another class-like: one of its
-/// namespace, one it imports, or one it declares. `Sharp.Replaces` is the class-like of its own namespace, so a file in
+/// namespace, one it imports, or one it declares. `Sharp.Position` is the class-like of its own namespace, so a file in
 /// `Sharp` records no class-like of its namespace for it.
 #[test]
 fn a_file_records_each_default_class_its_short_name_no_longer_names() {
-    let namespace_classes = NamespaceClasses::new(["App\\Position", "Sharp\\Replaces"]);
+    let namespace_classes = NamespaceClasses::new(["App\\Position", "Sharp\\Position"]);
 
     for (code, shadowed) in [
         ("namespace App;\n\nclass Paths\n{\n}\n", vec!["Sharp\\Position"]),
         ("namespace App;\n\nimport Lib.Clock;\n\nclass Paths\n{\n}\n", vec!["Sharp\\Clock", "Sharp\\Position"]),
         ("namespace Shop;\n\nclass Cache\n{\n}\n", vec!["Sharp\\Cache"]),
         ("namespace Shop;\n\nclass Paths\n{\n}\n", vec![]),
-        ("namespace Sharp;\n\nclass Paths\n{\n    [Replaces(\"x\")]\n    public void run() { }\n}\n", vec![]),
+        ("namespace Sharp;\n\nclass Paths\n{\n    public string here() => Position.current().file;\n}\n", vec![]),
     ] {
         let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(code.as_bytes()));
         let arena = LocalArena::new();
         let names = NameResolver::new(&arena).resolve_in(parse_file(&arena, &file), &namespace_classes);
 
-        let mut recorded: Vec<&str> = mago_names::STANDARD_EFFECTS
-            .into_iter()
-            .chain(["Sharp\\Position", "Sharp\\Replaces"])
-            .filter(|class| names.shadows_default_class(class.as_bytes()))
-            .collect();
+        let mut recorded: Vec<&str> = [
+            "Sharp\\Database",
+            "Sharp\\Http",
+            "Sharp\\Files",
+            "Sharp\\Console",
+            "Sharp\\Process",
+            "Sharp\\Clock",
+            "Sharp\\Random",
+            "Sharp\\Cache",
+            "Sharp\\Mail",
+            "Sharp\\Environment",
+            "Sharp\\Events",
+            "Sharp\\Position",
+        ]
+        .into_iter()
+        .filter(|class| names.shadows_default_class(class.as_bytes()))
+        .collect();
         recorded.sort_unstable();
         assert_eq!(recorded, shadowed, "{code}");
         assert_eq!(names.namespace_classes().count(), 0, "{code}");

@@ -23,41 +23,6 @@ final class Position
     public static function current(): Position {}
 }
 
-/**
- * The process environment: its command-line arguments, its current directory and its environment variables. PHP#
- * reads them here instead of from PHP's superglobals.
- */
-final class Environment
-{
-    /**
-     * @var list<string> the command-line arguments, starting with the script's name.
-     */
-    public readonly array $arguments;
-
-    /**
-     * @var string the directory the process runs in.
-     */
-    public readonly string $currentDirectory;
-
-    public function __construct() {}
-
-    /**
-     * @return string|null the environment variable `$name`, or null when it is not set.
-     *
-     * @mutation-free
-     */
-    public function variable(string $name): ?string {}
-
-    /**
-     * @return string the environment variable `$name`.
-     *
-     * @throws \ValueError when it is not set.
-     *
-     * @mutation-free
-     */
-    public function require(string $name): string {}
-}
-
 final class List
 {
     /**

@@ -30,6 +30,8 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::instantiation::bare_generic_class;
+use crate::expression::instantiation::report_missing_type_arguments;
 use crate::resolver::class_name::ResolutionOrigin;
 use crate::resolver::class_name::ResolvedClassname;
 use crate::resolver::class_name::resolve_classnames_from_expression;
@@ -69,6 +71,9 @@ where
     let mut result = MethodResolutionResult::default();
 
     let class_resolutions = resolve_classnames_from_expression(context, block_context, artifacts, class_expr, false)?;
+    if let Some((class, _)) = bare_generic_class(context, class_expr) {
+        report_missing_type_arguments(context, class, class_expr.span());
+    }
     if let Some(class_type) = artifacts.get_expression_type(class_expr)
         && class_type.is_nullable()
     {
@@ -97,7 +102,6 @@ where
 
             continue;
         }
-
         for method_name in &method_names {
             let resolved_methods = resolve_method_from_classname(
                 context,

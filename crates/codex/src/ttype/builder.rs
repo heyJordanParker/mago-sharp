@@ -1023,61 +1023,71 @@ fn get_class_string_type(
     classname: Option<Word>,
 ) -> Result<TUnion, TypeError> {
     Ok(match parameter {
-        Some(parameter) => {
-            let constraint_union = get_union_from_type(&parameter.entry.inner, scope, type_context, classname)?;
-
-            let mut class_strings = vec![];
-            for constraint in constraint_union.types.into_owned() {
-                match constraint {
-                    TAtomic::Object(TObject::Named(_) | TObject::Enum(_) | TObject::HasMethod(_))
-                    | TAtomic::Reference(TReference::Symbol { .. })
-                    | TAtomic::Alias(_)
-                    | TAtomic::Variable(_)
-                    | TAtomic::Conditional(_)
-                    | TAtomic::Derived(
-                        TDerived::IndexAccess(_)
-                        | TDerived::New(_)
-                        | TDerived::TemplateType(_)
-                        | TDerived::ValueOf(_)
-                        | TDerived::Intersection(_),
-                    ) => class_strings
-                        .push(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::of_type(kind, constraint)))),
-                    TAtomic::GenericParameter(TGenericParameter {
-                        parameter_name,
-                        defining_entity,
-                        constraint: nested_constraint,
-                        ..
-                    }) => {
-                        for constraint_atomic in Arc::unwrap_or_clone(nested_constraint).types.into_owned() {
-                            class_strings.push(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::generic(
-                                kind,
-                                parameter_name,
-                                defining_entity,
-                                constraint_atomic,
-                            ))));
-                        }
-                    }
-                    _ => {
-                        return Err(TypeError::InvalidType(
-                            kind.to_string(),
-                            format!(
-                                "class string parameter must target an object type, found `{}`.",
-                                constraint.get_id()
-                            ),
-                            span,
-                        ));
-                    }
-                }
-            }
-
-            TUnion::from_vec(class_strings)
-        }
+        Some(parameter) => get_class_strings_of(
+            kind,
+            get_union_from_type(&parameter.entry.inner, scope, type_context, classname)?,
+            span,
+        )?,
         None => wrap_atomic(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::any(kind)))),
     })
 }
 
+/// The class strings of `kind` that name a class of `constraint_union`, as `class-string<T>` writes them.
+///
+/// # Errors
+///
+/// Returns a [`TypeError`] at `span` when `constraint_union` holds a type that is not an object type.
+pub fn get_class_strings_of(
+    kind: TClassLikeStringKind,
+    constraint_union: TUnion,
+    span: Span,
+) -> Result<TUnion, TypeError> {
+    let mut class_strings = vec![];
+    for constraint in constraint_union.types.into_owned() {
+        match constraint {
+            TAtomic::Object(TObject::Named(_) | TObject::Enum(_) | TObject::HasMethod(_))
+            | TAtomic::Reference(TReference::Symbol { .. })
+            | TAtomic::Alias(_)
+            | TAtomic::Variable(_)
+            | TAtomic::Conditional(_)
+            | TAtomic::Derived(
+                TDerived::IndexAccess(_)
+                | TDerived::New(_)
+                | TDerived::TemplateType(_)
+                | TDerived::ValueOf(_)
+                | TDerived::Intersection(_),
+            ) => class_strings
+                .push(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::of_type(kind, constraint)))),
+            TAtomic::GenericParameter(TGenericParameter {
+                parameter_name,
+                defining_entity,
+                constraint: nested_constraint,
+                ..
+            }) => {
+                for constraint_atomic in Arc::unwrap_or_clone(nested_constraint).types.into_owned() {
+                    class_strings.push(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::generic(
+                        kind,
+                        parameter_name,
+                        defining_entity,
+                        constraint_atomic,
+                    ))));
+                }
+            }
+            _ => {
+                return Err(TypeError::InvalidType(
+                    kind.to_string(),
+                    format!("class string parameter must target an object type, found `{}`.", constraint.get_id()),
+                    span,
+                ));
+            }
+        }
+    }
+
+    Ok(TUnion::from_vec(class_strings))
+}
+
 #[inline]
-fn get_template_atomic(defining_entities: &[GenericTemplate], parameter_name: Word) -> TAtomic {
+pub(crate) fn get_template_atomic(defining_entities: &[GenericTemplate], parameter_name: Word) -> TAtomic {
     let GenericTemplate { defining_entity: template_source, constraint: template_type, .. } = &defining_entities[0];
 
     TAtomic::GenericParameter(TGenericParameter {

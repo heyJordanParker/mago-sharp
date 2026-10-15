@@ -8,12 +8,12 @@
 use std::collections::HashMap;
 
 use mago_names::binding::Binding;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -27,14 +27,12 @@ use mago_syntax::cst::Statement;
 use super::Lines;
 use super::Lowering;
 use super::NULL;
-use super::ZEND_NAME_FQ;
 use super::is_current_position;
 use super::set_parameter;
 use super::types::Declaration;
 use super::types::DeclarationKind;
 use super::types::receiver_classes;
 use crate::lower::checked::CheckedProgram;
-use crate::sharp_kind::SHARP_AST_CONST;
 use crate::sharp_kind::SHARP_AST_VAR;
 use crate::sharp_node;
 use crate::store_text;
@@ -258,17 +256,6 @@ impl Lowering<'_, '_> {
                 slots[slot] = index as u32;
             }
         }
-        // A form leaves the library file's namespace when it is copied, so each global constant it reads is named in
-        // full, where the caller's own namespace would be looked up first.
-        let constants: Vec<usize> = self
-            .nodes
-            .iter()
-            .filter(|node| node.kind == SHARP_AST_CONST)
-            .map(|node| self.children[node.first_child as usize] as usize)
-            .collect();
-        for constant in constants {
-            self.nodes[constant].attr = ZEND_NAME_FQ;
-        }
         for node in &mut self.nodes {
             node.line = 0;
         }
@@ -277,7 +264,10 @@ impl Lowering<'_, '_> {
     }
 
     /// Appends what `expression` runs to `steps`, and whether the inlining rule takes all of it: a literal, a read of
-    /// one of the slots `names` names, and a call of a global function or a method whose receiver it takes.
+    /// one of the slots `names` names, a read of a plain PHP constant through its namespace, as `global.PHP_EOL` reads
+    /// one, and a call of a plain PHP function through its namespace, as `global.trim(x)` calls one, or of a method
+    /// whose receiver it takes. Both name their constant or function in full, so a copy in another namespace reaches
+    /// the same one. A bare constant is the library file's own, which a copy in another namespace would not find.
     fn steps(&self, expression: &Expression, names: &[&[u8]], steps: &mut Vec<Step>) -> bool {
         match expression {
             Expression::Parenthesized(parenthesized) => self.steps(parenthesized.expression, names, steps),
@@ -292,14 +282,9 @@ impl Lowering<'_, '_> {
 
                 true
             }
-            Expression::ConstantAccess(name) if self.names.binding(&name.name) == Some(Binding::Constant) => {
-                !self.types.constant_target(name).as_bytes().contains(&b'\\')
-            }
-            Expression::Call(Call::Function(FunctionCall {
-                function: Expression::Identifier(function),
-                argument_list,
-            })) if !matches!(self.names.binding(function), Some(Binding::Local(_))) => {
-                self.argument_steps(argument_list, names, steps) && self.call_step(steps)
+            Expression::Access(Access::Property(_)) => self.types.namespace_constant(expression).is_some(),
+            Expression::Call(Call::Method(call)) if self.types.namespace_function(expression).is_some() => {
+                self.argument_steps(&call.argument_list, names, steps) && self.call_step(steps)
             }
             Expression::Call(Call::Method(call)) => self.method_call_steps(expression, call, names, steps),
             _ => false,
@@ -316,7 +301,12 @@ impl Lowering<'_, '_> {
         steps: &mut Vec<Step>,
     ) -> bool {
         match self.names.static_call_class(call) {
-            Some(class) if is_current_position(self.names.get(&class.name), call) => return false,
+            Some(class)
+                if self.names.is_type_parameter(&class.name)
+                    || is_current_position(self.names.get(&class.name), call) =>
+            {
+                return false;
+            }
             Some(_) => {}
             None if self.takes_receiver(call.object) && self.steps(call.object, names, steps) => {}
             None => return false,
@@ -353,7 +343,9 @@ impl Lowering<'_, '_> {
     /// each parameter one positional argument. A form that reads its slots out of order, or after a call, takes only
     /// values that do nothing when read, since inlined they run in the form's order instead of the call's.
     pub(super) fn inlined_call(&mut self, expression: &Expression, call: &MethodCall) -> Option<u32> {
+        // A type parameter's class is a subclass of its bound when the code runs, which may declare its own method.
         let receiver = match self.names.static_call_class(call) {
+            Some(class) if self.names.is_type_parameter(&class.name) => return None,
             Some(_) => None,
             None if self.takes_receiver(call.object) => Some(call.object),
             None => return None,
@@ -397,7 +389,8 @@ impl Lowering<'_, '_> {
         Some(self.copy(form, form.root, &values, line))
     }
 
-    /// Whether reading `expression` runs nothing: a literal, a name, a lambda, `typeof(X)` or `nameof(X.y)`.
+    /// Whether reading `expression` runs nothing: a literal, a name, a plain PHP constant read through its namespace, a
+    /// lambda, `typeof(X)` or `nameof(X.y)`.
     pub(super) fn is_pure(&self, expression: &Expression) -> bool {
         match expression {
             Expression::Parenthesized(parenthesized) => self.is_pure(parenthesized.expression),
@@ -409,6 +402,7 @@ impl Lowering<'_, '_> {
             Expression::ConstantAccess(name) => {
                 matches!(self.names.binding(&name.name), Some(Binding::Local(_) | Binding::This | Binding::Constant))
             }
+            Expression::Access(Access::Property(_)) => self.types.namespace_constant(expression).is_some(),
             _ => false,
         }
     }

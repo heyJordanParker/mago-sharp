@@ -18,6 +18,11 @@ where
         self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"internal"
     }
 
+    /// Whether `token` is spec section 29's `foreign`, which starts a class's modifiers, as `public` does.
+    pub(crate) fn is_foreign(&self, token: Token<'_>) -> bool {
+        self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"foreign"
+    }
+
     /// Whether the token `offset` ahead is spec section 5's `internal`.
     fn is_internal_token_at(&mut self, offset: usize) -> Result<bool, ParseError> {
         Ok(self.stream.lookahead(offset)?.is_some_and(|token| self.is_internal(token)))
@@ -81,6 +86,7 @@ where
                     Some(b"extern") => Modifier::Extern(self.expect_any_keyword()?),
                     Some(b"lazy") => Modifier::Lazy(self.expect_any_keyword()?),
                     Some(b"internal") => Modifier::Internal(self.expect_any_keyword()?),
+                    Some(b"foreign") => Modifier::Foreign(self.expect_any_keyword()?),
                     _ => return Ok(None),
                 }
             }

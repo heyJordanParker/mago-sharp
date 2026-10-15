@@ -48,6 +48,13 @@ fn sources() -> Vec<(String, Vec<u8>)> {
     sources
 }
 
+/// The path and contents of the PHP# slice fixture, which holds every form of the slice.
+fn slice_fixture() -> (String, Vec<u8>) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../semantics/tests/fixtures/slice.sharp");
+
+    (fixture.display().to_string(), std::fs::read(&fixture).expect("the slice fixture"))
+}
+
 /// The checks that run in one walk, such as PHP#'s slice check, see every node `Node::visit_children` reaches. Keywords
 /// are left out, because the walker skips some of them, such as a closure's `use`.
 #[test]
@@ -72,4 +79,30 @@ fn the_walker_enters_every_node_visit_children_reaches() {
     }
 
     assert_eq!(parsed, 469, "the number of sources without a parse error");
+}
+
+/// The walker enters every type parameter list, type parameter, bound and type argument list of the slice fixture: the
+/// lists of `Page`, `convert`, `Listing`, `Source` and `Comparable`, the bounds of `Page`, `convert` and `Listing`, and
+/// the type arguments of its types, headers, `new`, method calls and null-safe method calls.
+#[test]
+fn the_walker_enters_every_type_parameter_and_type_argument_list() {
+    let (name, contents) = slice_fixture();
+    let arena = LocalArena::new();
+    let file = File::ephemeral(Cow::Owned(name.into_bytes()), Cow::Owned(contents));
+    let program = parse_file(&arena, &file);
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+
+    let mut walked = HashSet::new();
+    Entering.walk_program(program, &mut walked);
+    let count = |kind: NodeKind| walked.iter().filter(|(entered, _, _)| *entered == kind).count();
+
+    assert_eq!(
+        [
+            count(NodeKind::TypeParameterList),
+            count(NodeKind::TypeParameter),
+            count(NodeKind::TypeParameterBound),
+            count(NodeKind::TypeArgumentList),
+        ],
+        [5, 6, 4, 28]
+    );
 }

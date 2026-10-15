@@ -34,6 +34,7 @@ use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUseAdaptation;
 use mago_syntax::cst::TraitUseMethodReference;
 use mago_syntax::cst::TraitUseSpecification;
+use mago_syntax::cst::TypeParameterList;
 use mago_word::WordMap;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
@@ -77,6 +78,7 @@ use crate::scanner::function_like::scan_law;
 use crate::scanner::property::scan_properties;
 use crate::scanner::ttype::get_type_metadata_from_hint;
 use crate::scanner::ttype::get_type_metadata_from_type;
+use crate::scanner::ttype::scan_type_parameters;
 use crate::scanner::typing_error_issue;
 use crate::scanner::version_claim::evaluate_version_attributes;
 use crate::symbol::SymbolKind;
@@ -131,6 +133,7 @@ where
         class.implements.as_ref(),
         None,
         None,
+        None,
         context,
         scope,
     )?;
@@ -163,6 +166,7 @@ where
         class.extends.as_ref(),
         class.implements.as_ref(),
         class.inheritance.as_ref(),
+        class.type_parameters.as_ref(),
         None,
         context,
         scope,
@@ -196,6 +200,7 @@ where
         interface.extends.as_ref(),
         None,
         interface.inheritance.as_ref(),
+        interface.type_parameters.as_ref(),
         None,
         context,
         scope,
@@ -226,6 +231,7 @@ where
         &r#trait.attribute_lists,
         None,
         &r#trait.members,
+        None,
         None,
         None,
         None,
@@ -262,6 +268,7 @@ where
         None,
         r#enum.implements.as_ref(),
         r#enum.inheritance.as_ref(),
+        None,
         r#enum.backing_type_hint.as_ref(),
         context,
         scope,
@@ -299,6 +306,7 @@ where
         None,
         None,
         event.inheritance.as_ref(),
+        None,
         None,
         context,
         scope,
@@ -416,7 +424,8 @@ where
     A: Arena,
 {
     let class = |identifier: &Identifier<'arena>| (word(context.resolved_names.get(identifier)), identifier.span());
-    let service = get_type_metadata_from_hint(&binding.service, None, context);
+    // A binding declares no type parameters.
+    let service = get_type_metadata_from_hint(&binding.service, None, &TypeResolutionContext::new(), context);
     let value = match &binding.value {
         BindingValue::Class(identifier) => {
             let (name, span) = class(identifier);
@@ -483,6 +492,7 @@ fn scan_class_like<'arena, A>(
     extends: Option<&'arena Extends<'arena>>,
     implements: Option<&'arena Implements<'arena>>,
     inheritance: Option<&'arena Inheritance<'arena>>,
+    type_parameters: Option<&'arena TypeParameterList<'arena>>,
     enum_type: Option<&'arena EnumBackingTypeHint<'arena>>,
     context: &Context<'_, 'arena, A>,
     scope: &mut NamespaceScope,
@@ -542,6 +552,12 @@ where
             // A PHP# static class runs as a final PHP class, and the analyzer refuses `new` on it by name.
             if context.program.dialect.is_sharp() && modifiers.is_some_and(Sequence::contains_static) {
                 class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::STATIC;
+            }
+
+            if modifiers
+                .is_some_and(|modifiers| modifiers.iter().any(|modifier| matches!(modifier, Modifier::Foreign(_))))
+            {
+                class_like_metadata.flags |= MetadataFlags::FOREIGN;
             }
 
             codebase.symbols.add_symbol_name(name, SymbolKind::Class);
@@ -608,12 +624,15 @@ where
     }
 
     // A PHP# header, `: Base, IFace`, lists a class's base among its interfaces. PHP links the one class there as
-    // the parent, and so does the populator. An enum has no parent, so every name in its header is an interface.
-    if let Some(inheritance) = inheritance {
-        for type_name in &inheritance.types {
-            class_like_metadata
-                .add_direct_parent_interface(ascii_lowercase_word(context.resolved_names.get(type_name)));
-        }
+    // the parent, and so does the populator. An enum has no parent, so every name in its header is an interface. A
+    // generic type in the header, as in `: PaginatedList<Order>`, names its class before its type arguments, and the
+    // checker refuses any other type there. `List`, `Map` and `Class` have no resolved name, because no class is one.
+    for name in inheritance.iter().flat_map(|inheritance| inheritance.names()) {
+        let Some(name) = context.resolved_names.resolve(&name) else {
+            continue;
+        };
+
+        class_like_metadata.add_direct_parent_interface(ascii_lowercase_word(name));
     }
 
     let mut type_context = TypeResolutionContext::new();
@@ -1356,6 +1375,62 @@ where
         }
     }
 
+    // A PHP# type parameter is the template a `@template` tag declares, its bound the tag's `of`, and `out` and `in`
+    // its `@template-covariant` and `@template-contravariant`, spec sections 11 and 11.1.
+    if let Some(type_parameters) = type_parameters {
+        let templates = scan_type_parameters(
+            type_parameters,
+            GenericParent::ClassLike(name),
+            original_name,
+            &mut type_context,
+            context,
+            scope,
+        );
+        let mut template_variance = std::mem::take(&mut class_like_metadata.template_variance);
+        for ((template_name, definition), parameter) in templates.into_iter().zip(&type_parameters.parameters) {
+            class_like_metadata.add_template_type(template_name, definition);
+
+            let variance = Variance::from(parameter);
+            if variance.is_readonly() {
+                class_like_metadata.template_readonly.insert(template_name);
+            }
+
+            template_variance.push(variance);
+        }
+
+        class_like_metadata.set_template_variance(template_variance);
+    }
+
+    // A header's generic type is the `@extends` or `@implements` tag of a PHP class. The header lists a class's base
+    // among its interfaces until the populator links it, so a class counts its type arguments as implemented and the
+    // populator moves the count with the base.
+    for generic in inheritance.iter().flat_map(|inheritance| &inheritance.types).filter_map(|hint| match hint {
+        Hint::Generic(generic) => Some(generic),
+        _ => None,
+    }) {
+        let Some(parent_name) = context.resolved_names.resolve(&generic.name) else {
+            continue;
+        };
+
+        let parent_name = ascii_lowercase_word(parent_name);
+        let arguments: Vec<TUnion> = generic
+            .type_arguments
+            .arguments
+            .iter()
+            .map(|argument| {
+                get_type_metadata_from_hint(argument, Some(original_name), &type_context, context).type_union
+            })
+            .collect();
+        let counts = if class_like_metadata.kind.is_interface() {
+            &mut class_like_metadata.template_type_extends_count
+        } else {
+            &mut class_like_metadata.template_type_implements_count
+        };
+
+        counts.insert(parent_name, arguments.len());
+        class_like_metadata.add_template_extended_offset(parent_name, arguments);
+    }
+
     for member in members {
         let ClassLikeMember::Constant(constant) = member else {
             continue;
@@ -1784,6 +1859,7 @@ fn create_enum_method(
             where_constraints: WordMap::default(),
         }),
         listens: vec![],
+        uses: vec![],
         type_resolution_context: None,
         thrown_types,
         issues: Vec::default(),

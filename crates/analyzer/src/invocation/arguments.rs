@@ -12,6 +12,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -29,6 +30,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Expression;
+use mago_syntax::dialect::Dialect;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -38,7 +40,7 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::invocation::InvocationTarget;
 use crate::invocation::analyzer::adjust_offset_for_variadic;
-use crate::statement::function_like::closure_parameter_types;
+use crate::statement::function_like::rejected_nullable_parameter::writes_null;
 use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
 use crate::utils::int_refused_for_float;
@@ -48,6 +50,28 @@ use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::report_int_for_float;
+use crate::utils::template::explain_blocked_substitution;
+
+/// The part of `union` that may share a value with another type. A PHP# type parameter and its class type, as `TItem`
+/// and `Class<TItem>`, are opaque, so with `is_sharp` they share a value with no other type, and a union of them alone
+/// has no such part.
+fn shareable_part(union: &TUnion, is_sharp: bool) -> Option<Cow<'_, TUnion>> {
+    if !is_sharp {
+        return Some(Cow::Borrowed(union));
+    }
+
+    let types: Vec<TAtomic> = union
+        .types
+        .iter()
+        .filter(|atomic| {
+            !atomic.is_generic_parameter()
+                && !matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(class_string)) if class_string.is_generic())
+        })
+        .cloned()
+        .collect();
+
+    (!types.is_empty()).then(|| Cow::Owned(TUnion::from_vec(types)))
+}
 
 /// Checks if an argument can be passed by reference.
 pub(super) fn is_argument_referenceable(
@@ -83,24 +107,6 @@ pub(super) fn is_array_multisort(invocation_target: &InvocationTarget<'_>) -> bo
     )
 }
 
-fn is_empty_container_construction(expression: &Expression) -> bool {
-    if let Expression::Instantiation(instantiation) = expression
-        && let Some(argument_list) = &instantiation.argument_list
-        && argument_list.arguments.len() == 1
-        && let Some(first_arg) = argument_list.arguments.iter().next()
-    {
-        let argument_value = first_arg.value();
-
-        match argument_value {
-            Expression::Array(array_expr) => array_expr.elements.is_empty(),
-            Expression::LegacyArray(array_expr) => array_expr.elements.is_empty(),
-            _ => false,
-        }
-    } else {
-        false
-    }
-}
-
 /// Analyzes an argument expression and stores its inferred type.
 pub fn analyze_and_store_argument_type<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -111,7 +117,7 @@ pub fn analyze_and_store_argument_type<'ctx, 'arena, A>(
     argument_offset: usize,
     analyzed_argument_types: &mut HashMap<usize, (TUnion, Span)>,
     referenced_parameter: bool,
-    closure_parameter_type: Option<&TUnion>,
+    expected_type: Option<&TUnion>,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
@@ -120,10 +126,8 @@ where
         return Ok(());
     }
 
-    let inferred_parameter_types =
-        closure_parameter_type.map(|closure_parameter_type| closure_parameter_types(context, closure_parameter_type));
-
-    let inferred_parameter_types = std::mem::replace(&mut artifacts.inferred_parameter_types, inferred_parameter_types);
+    let expected_type = expected_type.map(|expected| (argument_expression.unparenthesized().span(), expected.clone()));
+    let expected_type = std::mem::replace(&mut artifacts.expected_type, expected_type);
 
     let was_inside_general_use = block_context.flags.inside_general_use();
     let was_inside_call = block_context.flags.inside_call();
@@ -138,7 +142,7 @@ where
     block_context.flags.set_inside_general_use(was_inside_general_use);
     block_context.flags.set_inside_call(was_inside_call);
     block_context.flags.set_inside_variable_reference(was_inside_variable_reference);
-    artifacts.inferred_parameter_types = inferred_parameter_types;
+    artifacts.expected_type = expected_type;
 
     let argument_type = artifacts.get_expression_type(argument_expression).cloned().unwrap_or_else(get_mixed);
 
@@ -224,7 +228,9 @@ where
         return false;
     }
 
-    if !parameter_type.accepts_null() {
+    let takes_null =
+        if context.dialect.is_sharp() { writes_null(parameter_type) } else { parameter_type.accepts_null() };
+    if !takes_null {
         if input_type.is_null() {
             let target_name_str = invocation_target.guess_name(context);
             let parameter_type_str = display_type(context, parameter_type);
@@ -317,9 +323,12 @@ where
     }
 
     // Spec section 11 checks a value from plain PHP where it enters PHP#, so a plain PHP caller passes the backing
-    // values where PHP# takes a `Map` keyed by a backed enum.
-    let backing_parameter_type =
-        if context.dialect.is_sharp() { None } else { get_backing_array_type(parameter_type, context.codebase) };
+    // values where PHP# takes a `Map` keyed by a backed enum, its key read as the target writes it.
+    let backing_parameter_type = if context.dialect.is_sharp() {
+        None
+    } else {
+        get_backing_array_type(parameter_type, context.codebase, invocation_target.get_dialect())
+    };
     let parameter_type = backing_parameter_type.as_ref().unwrap_or(parameter_type);
 
     // Spec section 12 converts a list passed where a `Set` is expected: a PHP# method or lambda makes a `Set` of each
@@ -333,7 +342,7 @@ where
         .filter(|declared_type| is_declared_set(declared_type))
         .and_then(|_| get_list_accepting_set_type(parameter_type));
 
-    let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
+    let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
     let type_match_found = is_contained_by(
         context.codebase,
         input_type,
@@ -384,8 +393,8 @@ where
         return false;
     }
 
-    let is_empty_container = input_type.is_empty_array() || is_empty_container_construction(input_expression);
-    if union_comparison_result.type_coerced.unwrap_or(false) && !input_type.is_mixed() && !is_empty_container {
+    let is_coerced = union_comparison_result.type_coerced.unwrap_or(false);
+    let (kind, mut issue) = if is_coerced {
         let (issue_kind, annotation_msg, note_msg) = if union_comparison_result
             .type_coerced_from_nested_mixed
             .unwrap_or(false)
@@ -406,7 +415,7 @@ where
             )
         };
 
-        let mut issue = Issue::error(format!(
+        let issue = Issue::error(format!(
             "Argument type mismatch for {} of `{}`: expected `{}`, but provided type `{}` is less specific.",
             argument_label, target_name_str, parameter_type_str, input_type_str
         ))
@@ -417,12 +426,8 @@ where
             "Provide a value that more precisely matches `{parameter_type_str}` or adjust the parameter type."
         ));
 
-        if let Some(type_diff) = get_type_diff(context, parameter_type, input_type) {
-            issue = issue.with_note(type_diff);
-        }
-
-        context.collector.report_with_code(issue_kind, issue);
-    } else if !union_comparison_result.type_coerced.unwrap_or(false) {
+        (issue_kind, issue)
+    } else {
         let parameter_requires_closure = parameter_type
             .types
             .iter()
@@ -433,8 +438,13 @@ where
             .iter()
             .any(|atomic| matches!(atomic, TAtomic::Callable(callable) if callable.is_closure()));
 
+        let is_sharp = context.dialect.is_sharp();
         let types_can_be_identical = (!parameter_requires_closure || input_can_be_closure)
-            && can_argument_be_identical(context.codebase, input_type, parameter_type);
+            && shareable_part(input_type, is_sharp).zip(shareable_part(parameter_type, is_sharp)).is_some_and(
+                |(input_type, parameter_type)| {
+                    can_argument_be_identical(context.codebase, &input_type, &parameter_type)
+                },
+            );
 
         if types_can_be_identical && parameter_type.is_callable() && !parameter_requires_closure {
             let all_inputs_are_resolvable_aliases = input_type.types.iter().all(|atomic| {
@@ -457,12 +467,8 @@ where
             }
         }
 
-        let kind;
-        let mut issue;
         if types_can_be_identical {
-            kind = IssueCode::PossiblyInvalidArgument;
-
-            issue = Issue::error(format!(
+            let issue = Issue::error(format!(
                 "Possible argument type mismatch for {} of `{}`: expected `{}`, but possibly received `{}`.",
                 argument_label, target_name_str, parameter_type_str, input_type_str
             ))
@@ -475,9 +481,10 @@ where
                 "The provided type `{input_type_str}` overlaps with `{parameter_type_str}` but is not fully contained."
             ))
             .with_help("Ensure the argument always has the expected type using checks or assertions.");
+
+            (IssueCode::PossiblyInvalidArgument, issue)
         } else {
-            kind = IssueCode::InvalidArgument;
-            issue = Issue::error(format!(
+            let issue = Issue::error(format!(
                 "Invalid argument type for {} of `{}`: expected `{}`, but found `{}`.",
                 argument_label, target_name_str, parameter_type_str, input_type_str
             ))
@@ -491,14 +498,18 @@ where
             .with_help(format!(
                 "Change the argument value to match `{parameter_type_str}`, or update the parameter's type declaration."
             ));
-        }
 
-        if let Some(type_diff) = get_type_diff(context, parameter_type, input_type) {
-            issue = issue.with_note(type_diff);
+            (IssueCode::InvalidArgument, issue)
         }
+    };
 
-        context.collector.report_with_code(kind, issue);
+    if let Some(type_diff) = get_type_diff(context, parameter_type, input_type) {
+        issue = issue.with_note(type_diff);
     }
+
+    let (kind, issue) =
+        explain_blocked_substitution(context, input_type, parameter_type, IssueCode::InvalidArgument, (kind, issue));
+    context.collector.report_with_code(kind, issue);
 
     false
 }
@@ -533,14 +544,14 @@ fn can_argument_be_identical(codebase: &CodebaseMetadata, input_type: &TUnion, p
 }
 
 /// Returns `parameter_type` with each `Map` keyed by a backed enum keyed by the backing type instead, or `None` when
-/// it has no such `Map`.
-fn get_backing_array_type(parameter_type: &TUnion, codebase: &CodebaseMetadata) -> Option<TUnion> {
+/// it has no such `Map`, for a call `dialect` code writes.
+fn get_backing_array_type(parameter_type: &TUnion, codebase: &CodebaseMetadata, dialect: Dialect) -> Option<TUnion> {
     let backing_atomic = |atomic: &TAtomic| {
         let TAtomic::Array(TArray::Keyed(keyed_array)) = atomic else {
             return None;
         };
         let (key_type, value_type) = keyed_array.parameters.as_ref()?;
-        let Cow::Owned(backing_key_type) = get_backing_key_type(key_type, codebase) else {
+        let Cow::Owned(backing_key_type) = get_backing_key_type(key_type, codebase, dialect) else {
             return None;
         };
 

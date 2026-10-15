@@ -10,7 +10,6 @@ use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::misc::VariableIdentifier;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::callable::parameter::TCallableParameter;
-use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::union::TUnion;
@@ -27,6 +26,7 @@ use mago_syntax::cst::Pipe;
 use mago_syntax::cst::PlaceholderArgument;
 use mago_syntax::cst::PositionalArgument;
 use mago_syntax::cst::VariadicPlaceholderArgument;
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 
 use crate::context::Context;
@@ -34,7 +34,9 @@ use crate::context::Context;
 mod resolver;
 mod template_inference;
 
+pub(crate) use resolver::rename_trait_objects;
 pub(crate) use resolver::resolve_invocation_type;
+pub(crate) use template_inference::infer_parameter_templates_from_argument;
 
 pub(crate) mod arguments;
 
@@ -226,8 +228,11 @@ impl<'ctx> InvocationTarget<'ctx> {
             return display_name.to_string();
         }
 
-        if let Some(receiver) = self.get_sharp_collection_receiver()
-            && let Some(FunctionLikeIdentifier::Method(_, method_name)) = self.get_function_like_identifier()
+        if let InvocationTarget::FunctionLike {
+            identifier: FunctionLikeIdentifier::Method(_, method_name),
+            method_context: Some(MethodTargetContext { class_type: StaticClassType::Object(receiver), .. }),
+            ..
+        } = self
             && let Some(collection) = crate::utils::names::display_sharp_collection(context, receiver)
         {
             return format!("{collection}.{method_name}");
@@ -240,18 +245,6 @@ impl<'ctx> InvocationTarget<'ctx> {
                     if self.is_non_closure_callable() { "callable".to_string() } else { "Closure".to_string() }
                 },
             )
-    }
-
-    /// Returns the `Sharp\ListMethods`, `Sharp\MapMethods` or `Sharp\SetMethods` object a PHP# `List`, `Map` or `Set`
-    /// method is called on, typed by the elements of the collection.
-    pub fn get_sharp_collection_receiver(&self) -> Option<&TObject> {
-        match self {
-            InvocationTarget::FunctionLike {
-                method_context: Some(MethodTargetContext { class_type: StaticClassType::Object(object), .. }),
-                ..
-            } if crate::utils::names::sharp_collection_name(object).is_some() => Some(object),
-            _ => None,
-        }
     }
 
     /// Guesses the kind of the callable target (e.g., "function", "method", "closure", "callable").
@@ -304,6 +297,16 @@ impl<'ctx> InvocationTarget<'ctx> {
         match self {
             InvocationTarget::FunctionLike { metadata, .. } => Some(metadata),
             InvocationTarget::Callable { .. } | InvocationTarget::ExternalMethod { .. } => None,
+        }
+    }
+
+    /// Returns the dialect the target is declared in: PHP# for a function or method a `.sharp` file declares, plain PHP
+    /// otherwise. Its parameter types are read in it, as a PHP# type parameter's bound is.
+    #[inline]
+    pub const fn get_dialect(&self) -> Dialect {
+        match self.get_function_like_metadata() {
+            Some(metadata) if metadata.flags.is_sharp() => Dialect::Sharp,
+            _ => Dialect::Php,
         }
     }
 

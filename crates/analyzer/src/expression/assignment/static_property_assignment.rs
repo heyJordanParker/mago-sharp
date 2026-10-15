@@ -20,6 +20,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::check::check_foreign_static_write;
 use crate::error::AnalysisError;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::resolve_static_properties;
@@ -30,6 +31,8 @@ use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::report_int_for_float;
 
+/// Writes `assigned_value_type` to the static property `property_access` names. A write back after a read of the same
+/// place, `class_is_analyzed`, does not analyze its class again.
 pub(crate) fn analyze<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -38,11 +41,13 @@ pub(crate) fn analyze<'ctx, 'arena, A>(
     assigned_value_type: &TUnion,
     assigned_value: Option<&Expression<'arena>>,
     property_access_id: Option<Word>,
+    class_is_analyzed: bool,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
 {
-    let property_resolution = resolve_static_properties(context, block_context, artifacts, property_access, true)?;
+    let property_resolution =
+        resolve_static_properties(context, block_context, artifacts, property_access, true, class_is_analyzed)?;
 
     let mut resolved_property_type = None;
     let mut matched_all_properties = true;
@@ -56,7 +61,7 @@ where
             );
         }
 
-        let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
+        let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
 
         let type_match_found = union_comparator::is_contained_by(
             context.codebase,
@@ -69,6 +74,13 @@ where
         );
 
         let property_name = resolved_property.property_name;
+        if context.dialect.is_sharp()
+            && let Some(class_id) = resolved_property.declaring_class_id
+        {
+            let span = assigned_value.map_or(property_access.span, HasSpan::span);
+            check_foreign_static_write(context, class_id, property_name, assigned_value_type, span);
+        }
+
         // PHP# names the property as it reads, `Order.count`, and PHP keeps the name `php` gives it.
         let display_property =
             |context: &Context<'ctx, 'arena, A>, php: String| match resolved_property.declaring_class_id {

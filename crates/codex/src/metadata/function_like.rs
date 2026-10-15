@@ -13,7 +13,6 @@ use mago_word::WordSet;
 use crate::assertion::Assertion;
 use crate::issue::ScanningIssueKind;
 use crate::metadata::attribute::AttributeMetadata;
-use crate::metadata::attribute::ConstantExpression;
 use crate::metadata::class_like::TemplateTypes;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::parameter::FunctionLikeParameterMetadata;
@@ -136,6 +135,10 @@ pub struct FunctionLikeMetadata {
     /// for every method that listens to nothing.
     pub listens: Vec<Word>,
 
+    /// The fully qualified names a PHP# method without a body lists after `uses`, spec section 29: the effects its
+    /// implementations may have. Empty for a pure declaration and for every method with a body.
+    pub uses: Vec<Word>,
+
     /// Contains context information needed for resolving types within this function's scope
     /// (e.g., `use` statements, current namespace, class context). Often populated during analysis.
     pub type_resolution_context: Option<TypeResolutionContext>,
@@ -241,6 +244,7 @@ impl FunctionLikeMetadata {
             attributes: vec![],
             method_metadata,
             listens: vec![],
+            uses: vec![],
             type_resolution_context: None,
             thrown_types: vec![],
             assertions: BTreeMap::new(),
@@ -301,19 +305,6 @@ impl FunctionLikeMetadata {
     #[must_use]
     pub fn get_attributes(&self) -> &[AttributeMetadata] {
         &self.attributes
-    }
-
-    /// The PHP functions this method's `[Replaces]` attributes name, decision 040, as written and with the span of
-    /// each name, in source order.
-    pub fn replaced_functions(&self) -> impl Iterator<Item = (Word, Span)> + '_ {
-        self.attributes
-            .iter()
-            .filter(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Replaces"))
-            .flat_map(|attribute| &attribute.arguments)
-            .filter_map(|argument| match (&argument.value, argument.value_span) {
-                (Some(ConstantExpression::String(function)), Some(span)) => Some((*function, span)),
-                _ => None,
-            })
     }
 
     /// Returns a mutable reference to the method-specific info, if this is a method.

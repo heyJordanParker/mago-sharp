@@ -112,11 +112,14 @@ where
     property_metadata.set_span(Some(parameter.span()));
     property_metadata.set_visibility(read_visibility, write_visibility);
     property_metadata.set_type_declaration_metadata(
-        parameter.hint.as_ref().map(|hint| get_type_metadata_from_hint(hint, Some(class_like_metadata.name), context)),
+        parameter
+            .hint
+            .as_ref()
+            .map(|hint| get_type_metadata_from_hint(hint, Some(class_like_metadata.name), type_context, context)),
     );
 
     if let Some(hook_list) = &parameter.hooks {
-        scan_hooks(hook_list, &mut property_metadata, class_like_metadata, context, scope);
+        scan_hooks(hook_list, &mut property_metadata, class_like_metadata, type_context, context, scope);
     }
 
     let mut used_parameter_type_from_docblock = false;
@@ -255,12 +258,9 @@ where
                     metadata.set_name_span(Some(name_span));
                     metadata.set_default_type_metadata(default_type);
                     metadata.set_visibility(read_visibility, write_visibility);
-                    metadata.set_type_declaration_metadata(
-                        plain_property
-                            .hint
-                            .as_ref()
-                            .map(|hint| get_type_metadata_from_hint(hint, Some(class_like_metadata.name), context)),
-                    );
+                    metadata.set_type_declaration_metadata(plain_property.hint.as_ref().map(|hint| {
+                        get_type_metadata_from_hint(hint, Some(class_like_metadata.name), type_context, context)
+                    }));
 
                     if let Some(document) = document.as_ref() {
                         update_property_metadata_from_docblock(
@@ -361,10 +361,9 @@ where
             metadata.set_span(Some(hooked_property.span()));
             metadata.set_visibility(read_visibility, write_visibility);
             metadata.set_type_declaration_metadata(
-                hooked_property
-                    .hint
-                    .as_ref()
-                    .map(|hint| get_type_metadata_from_hint(hint, Some(class_like_metadata.name), context)),
+                hooked_property.hint.as_ref().map(|hint| {
+                    get_type_metadata_from_hint(hint, Some(class_like_metadata.name), type_context, context)
+                }),
             );
 
             if let Some(document) = document.as_ref() {
@@ -379,7 +378,7 @@ where
                 );
             }
 
-            scan_hooks(&hooked_property.hook_list, &mut metadata, class_like_metadata, context, scope);
+            scan_hooks(&hooked_property.hook_list, &mut metadata, class_like_metadata, type_context, context, scope);
 
             if matches!(verdict.type_override, Some(TypeOverride::Untyped)) {
                 metadata.type_declaration_metadata = None;
@@ -418,10 +417,9 @@ where
             metadata.set_span(Some(computed_property.span()));
             metadata.set_visibility(read_visibility, read_visibility);
             metadata.set_type_declaration_metadata(
-                computed_property
-                    .hint
-                    .as_ref()
-                    .map(|hint| get_type_metadata_from_hint(hint, Some(class_like_metadata.name), context)),
+                computed_property.hint.as_ref().map(|hint| {
+                    get_type_metadata_from_hint(hint, Some(class_like_metadata.name), type_context, context)
+                }),
             );
 
             if let Some(document) = document.as_ref() {
@@ -518,6 +516,7 @@ fn scan_hooks<'arena, A>(
     hook_list: &'arena PropertyHookList<'arena>,
     property: &mut PropertyMetadata,
     class_like_metadata: &mut ClassLikeMetadata,
+    type_context: &TypeResolutionContext,
     context: &Context<'_, 'arena, A>,
     scope: &NamespaceScope,
 ) where
@@ -531,7 +530,7 @@ fn scan_hooks<'arena, A>(
         }
 
         let mut hook_metadata =
-            scan_property_hook(hook, property, context, scope, Some(class_like_metadata.original_name));
+            scan_property_hook(hook, property, type_context, context, scope, Some(class_like_metadata.original_name));
         class_like_metadata.issues.extend(hook_metadata.take_issues());
         property.hooks.insert(hook_metadata.name, hook_metadata);
     }
@@ -569,6 +568,7 @@ fn sharp_null_default(hint: Option<&Hint>, name_span: Span) -> Option<TypeMetada
 fn scan_property_hook<'arena, A>(
     hook: &'arena PropertyHook<'arena>,
     property_metadata: &PropertyMetadata,
+    type_context: &TypeResolutionContext,
     context: &Context<'_, 'arena, A>,
     scope: &NamespaceScope,
     classname: Option<Word>,
@@ -591,7 +591,7 @@ where
 
     let mut parameter = if is_set {
         if let Some(param_list) = &hook.parameter_list {
-            param_list.parameters.first().map(|p| scan_hook_parameter(p, property_metadata, context))
+            param_list.parameters.first().map(|p| scan_hook_parameter(p, property_metadata, type_context, context))
         } else {
             Some(create_implicit_value_parameter(property_metadata, hook.span()))
         }
@@ -698,6 +698,7 @@ where
 fn scan_hook_parameter<'arena, A>(
     param: &'arena FunctionLikeParameter<'arena>,
     property_metadata: &PropertyMetadata,
+    type_context: &TypeResolutionContext,
     context: &Context<'_, 'arena, A>,
 ) -> FunctionLikeParameterMetadata
 where
@@ -714,7 +715,7 @@ where
     let mut param_metadata = FunctionLikeParameterMetadata::new(name, param.span(), name_span, flags);
 
     if let Some(hint) = &param.hint {
-        let type_meta = get_type_metadata_from_hint(hint, None, context);
+        let type_meta = get_type_metadata_from_hint(hint, None, type_context, context);
         param_metadata.set_type_declaration_metadata(Some(type_meta));
     } else if let Some(prop_type) = &property_metadata.type_metadata {
         param_metadata.set_type_declaration_metadata(Some(prop_type.clone()));

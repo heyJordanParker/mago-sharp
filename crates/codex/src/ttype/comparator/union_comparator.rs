@@ -61,7 +61,7 @@ pub fn is_contained_by(
 
 /// Whether every one of `parts` fits, by `is_part_contained_by`. A failed comparison sets `int_for_float` only when
 /// every part it refuses was refused for an `int`.
-fn are_parts_contained_by<'part>(
+pub(super) fn are_parts_contained_by<'part>(
     parts: impl IntoIterator<Item = &'part TAtomic>,
     union_comparison_result: &mut ComparisonResult,
     mut is_part_contained_by: impl FnMut(&TAtomic, &mut ComparisonResult) -> bool,
@@ -93,7 +93,7 @@ pub fn is_contained_by_with_erased_template_arguments(
     container_type: &TUnion,
     union_comparison_result: &mut ComparisonResult,
 ) -> bool {
-    let mut direct_result = ComparisonResult::with_sharp_rules(union_comparison_result.sharp_rules);
+    let mut direct_result = union_comparison_result.nested();
     if is_contained_by(codebase, input_type, container_type, false, false, false, &mut direct_result) {
         *union_comparison_result = direct_result;
         return true;
@@ -145,6 +145,10 @@ fn replace_erased_template_arguments(input_type: &TUnion, container_type: &TUnio
     replaced.then_some(relaxed)
 }
 
+/// Whether a function that returns `input_type` may stand where one that returns `container_type` is expected.
+///
+/// A `void` return gives null, so it fits a container that takes null. Under PHP#'s rules, an opaque type parameter
+/// does not take null through its `Any?` bound.
 #[inline]
 pub fn is_return_type_contained_by(
     codebase: &CodebaseMetadata,
@@ -153,7 +157,17 @@ pub fn is_return_type_contained_by(
     ignore_false: bool,
     union_comparison_result: &mut ComparisonResult,
 ) -> bool {
-    (input_type.is_void() && container_type.accepts_null())
+    let takes_void = if union_comparison_result.sharp_rules {
+        container_type.types.iter().any(|atomic| match atomic {
+            TAtomic::Null | TAtomic::Placeholder => true,
+            TAtomic::Mixed(mixed) => !mixed.is_non_null(),
+            _ => false,
+        })
+    } else {
+        container_type.accepts_null()
+    };
+
+    (input_type.is_void() && takes_void)
         || is_contained_by(codebase, input_type, container_type, false, ignore_false, false, union_comparison_result)
 }
 
@@ -188,7 +202,7 @@ fn is_contained_by_atomic(
             return true;
         }
         TAtomic::GenericParameter(TGenericParameter { intersection_types: None, constraint, .. })
-            if !container_has_template =>
+            if !container_has_template && !union_comparison_result.sharp_rules =>
         {
             return are_parts_contained_by(
                 constraint.types.as_ref(),
@@ -308,7 +322,7 @@ fn is_contained_by_atomic(
             continue;
         }
 
-        let mut atomic_comparison_result = ComparisonResult::with_sharp_rules(union_comparison_result.sharp_rules);
+        let mut atomic_comparison_result = union_comparison_result.nested();
         let is_atomic_contained_by = atomic_comparator::is_contained_by(
             codebase,
             input_type_part,
@@ -357,7 +371,7 @@ fn is_contained_by_atomic(
         && let Some(combined_container_type) =
             get_combined_keyed_array_union_container(codebase, input_type_part, container_atomic_types)
     {
-        let mut atomic_comparison_result = ComparisonResult::with_sharp_rules(union_comparison_result.sharp_rules);
+        let mut atomic_comparison_result = union_comparison_result.nested();
         if atomic_comparator::is_contained_by(
             codebase,
             input_type_part,

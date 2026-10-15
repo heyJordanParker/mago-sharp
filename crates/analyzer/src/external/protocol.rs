@@ -95,6 +95,7 @@ use mago_reporting::Issue;
 use mago_reporting::Level;
 use mago_span::HasSpan;
 use mago_syntax::cst::NodeKind;
+use mago_syntax::dialect::Dialect;
 use mago_text_edit::Safety;
 use mago_word::Word;
 use mago_word::WordSet;
@@ -136,7 +137,7 @@ use crate::invocation::MethodTargetContext;
 
 pub const ANALYZER_PROTOCOL_MAGIC: [u8; 4] = *b"MANA";
 pub const ANALYZER_PROTOCOL_MAJOR: u16 = 1;
-pub const ANALYZER_PROTOCOL_MINOR: u16 = 10;
+pub const ANALYZER_PROTOCOL_MINOR: u16 = 11;
 
 const HEADER_LENGTH: usize = 12;
 const INITIAL_MESSAGE_CAPACITY: usize = 256;
@@ -1909,7 +1910,7 @@ fn encode_array_snapshot<'type_info>(
 
             writer.write_bool(keyed.parameters.is_some());
             if let Some((key_type, value_type)) = &keyed.parameters {
-                encode_backing_key_snapshot(writer, key_type, types, depth + 1)?;
+                encode_backing_key_snapshot(writer, key_type, Dialect::Php, types, depth + 1)?;
                 encode_union_snapshot_inner(writer, value_type, types, depth + 1)?;
             }
 
@@ -1921,7 +1922,7 @@ fn encode_array_snapshot<'type_info>(
             writer.write_u8(2);
             writer.write_bool(false);
             writer.write_bool(true);
-            encode_backing_key_snapshot(writer, element_type, types, depth + 1)?;
+            encode_backing_key_snapshot(writer, element_type, Dialect::Sharp, types, depth + 1)?;
             encode_union_snapshot_inner(writer, element_type, types, depth + 1)?;
             writer.write_bool(false);
         }
@@ -1931,14 +1932,15 @@ fn encode_array_snapshot<'type_info>(
 }
 
 /// Encodes `key_type` as the key of the array it runs as: an external analyzer is plain PHP, which keys a PHP# `Map`
-/// or `Set` of a backed enum by the case's backing value.
+/// or `Set` of a backed enum by the case's backing value. `dialect` is the dialect that wrote `key_type`.
 fn encode_backing_key_snapshot<'type_info>(
     writer: &mut PayloadWriter,
     key_type: &'type_info TUnion,
+    dialect: Dialect,
     types: &mut SnapshotTypeTable<'_, 'type_info>,
     depth: usize,
 ) -> Result<(), ExternalAnalyzerError> {
-    match get_backing_key_type(key_type, types.codebase) {
+    match get_backing_key_type(key_type, types.codebase, dialect) {
         Cow::Borrowed(key_type) => encode_union_snapshot_inner(writer, key_type, types, depth),
         Cow::Owned(key_type) => encode_owned_union_snapshot(writer, &key_type, types, depth),
     }
@@ -3441,6 +3443,29 @@ pub(super) mod testing {
 
         assert_eq!(snapshot_key_and_value(TArray::Keyed(map), &codebase), ["string", "int"]);
         assert_eq!(snapshot_key_and_value(TArray::Keyed(array), &codebase), ["int", "int"]);
+    }
+
+    /// A `Map`'s key and a `Set`'s element, which a snapshot encodes as the key of the array they run as, nest as deep as
+    /// a `List`'s element and a `Map`'s value do: each level of each passes three levels of the maximum depth, so 86
+    /// levels of any of them are refused.
+    #[test]
+    fn a_map_key_and_a_set_element_nest_as_deep_as_a_list_element() {
+        let levels = MAXIMUM_TYPE_DEPTH / 3 + 1;
+        let array = |array: TArray| TUnion::from_atomic(TAtomic::Array(array));
+        let (mut list, mut key, mut value, mut set) = (get_int(), get_int(), get_int(), get_int());
+        for _ in 0..levels {
+            list = get_list(list);
+            key = array(TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(key), Arc::new(get_int()))));
+            value = array(TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(get_int()), Arc::new(value))));
+            set = array(TArray::Set(Arc::new(set)));
+        }
+
+        for nested in [list, key, value, set] {
+            let refusal =
+                encode_union_snapshot(&mut PayloadWriter::new(), &nested, &mut Vec::new(), &CodebaseMetadata::new(), 0);
+
+            assert!(matches!(refusal, Err(error) if error.to_string().contains("maximum nesting depth")));
+        }
     }
 
     #[test]

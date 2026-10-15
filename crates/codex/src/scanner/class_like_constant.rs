@@ -50,8 +50,10 @@ where
     let visibility =
         constant.modifiers.get_first_visibility().and_then(|m| Visibility::try_from(m).ok()).unwrap_or_default();
     let is_final = constant.modifiers.contains_final();
-    let type_declaration =
-        constant.hint.as_ref().map(|h| get_type_metadata_from_hint(h, Some(class_like_metadata.name), context));
+    let type_declaration = constant
+        .hint
+        .as_ref()
+        .map(|h| get_type_metadata_from_hint(h, Some(class_like_metadata.name), type_context, context));
 
     let mut flags = if is_final { MetadataFlags::FINAL } else { MetadataFlags::empty() };
     flags |= MetadataFlags::origin_flags(context.file.file_type);

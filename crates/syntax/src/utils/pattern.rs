@@ -133,8 +133,12 @@ pub fn called_function(node: Node<'_, '_>) -> Option<LocalIdentifier<'static>> {
 
 /// Whether a type pattern or an `as` has PHP that tests a value against `hint`.
 ///
-/// A scalar type has `is_int`, `is_float`, `is_string` or `is_bool`, and a class has `instanceof`. `php_shape` builds no
-/// PHP for a form that tests any other type, so the semantic check refuses it.
+/// A scalar type has `is_int`, `is_float`, `is_string` or `is_bool`, and a class or a type parameter has `instanceof`.
+/// `Any`, a generic class with its type arguments, a `List`, `Map` or `Set` with its element types, and a union of
+/// types with a test have `instanceof` a name that spans the type. The analyzer records the type each
+/// stands for, and the bridge lowers that test to the engine's, which reads the type arguments the code runs with and
+/// walks a collection's elements. `php_shape` builds no PHP for a form that tests any other type, so the semantic check
+/// refuses it.
 #[must_use]
 pub fn has_type_test(hint: &Hint<'_>) -> bool {
     type_test_of(hint).is_some()
@@ -144,7 +148,9 @@ pub fn has_type_test(hint: &Hint<'_>) -> bool {
 enum TypeTest<'arena> {
     /// A call to the function that tests a scalar type.
     Scalar(LocalIdentifier<'static>),
-    /// `instanceof` the class.
+    /// `instanceof` the class. For a type parameter, a generic class with its type arguments and a collection, the
+    /// name spans the whole type, where the analyzer records the type the test reads and the bridge lowers the engine's
+    /// test of it.
     Class(Identifier<'arena>),
 }
 
@@ -153,8 +159,31 @@ enum TypeTest<'arena> {
 fn type_test_of<'arena>(hint: &Hint<'arena>) -> Option<TypeTest<'arena>> {
     match hint {
         Hint::Identifier(class) => Some(TypeTest::Class(*class)),
+        Hint::Generic(generic) if is_engine_tested(hint) => {
+            Some(TypeTest::Class(Identifier::Local(LocalIdentifier { span: hint.span(), value: generic.name.value })))
+        }
+        hint if is_engine_tested(hint) => {
+            Some(TypeTest::Class(Identifier::Local(LocalIdentifier { span: hint.span(), value: b"" })))
+        }
         hint => scalar_test(hint).map(TypeTest::Scalar),
     }
+}
+
+/// Whether the engine's test of the type the analyzer records tests `hint`: `Any`, a generic class or a collection
+/// with its type arguments, and a union whose every member has a test. A class value is a string with no test, and a
+/// union with `null` is nullable, which no type pattern is.
+fn is_engine_tested(hint: &Hint<'_>) -> bool {
+    match hint {
+        Hint::Mixed(_) => true,
+        Hint::Generic(generic) => generic.name.value != b"Class",
+        Hint::Union(union) => is_tested_member(union.left) && is_tested_member(union.right),
+        _ => false,
+    }
+}
+
+/// Whether a member of a union has a test of its own.
+fn is_tested_member(hint: &Hint<'_>) -> bool {
+    matches!(hint, Hint::Identifier(_)) || scalar_test(hint).is_some() || is_engine_tested(hint)
 }
 
 /// The function that tests a value against a scalar type, at the type's span.
@@ -473,7 +502,8 @@ where
         })
     }
 
-    /// `instanceof` for a class, and the scalar test for a scalar type.
+    /// `instanceof` for a class, a type parameter or a generic class with its type arguments, and the scalar test for
+    /// a scalar type.
     fn type_test(
         &self,
         hint: &'arena Hint<'arena>,

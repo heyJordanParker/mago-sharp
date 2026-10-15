@@ -91,29 +91,6 @@ fn extern_is_a_declaration_of_the_file_and_of_no_method_body() {
     assert_eq!(issues(code), ["13:9 This statement is not supported yet in PHP#."]);
 }
 
-const NOT_AN_EFFECT: &str = "is not an effect: `uses` takes Database, Http, Files, Console, Process, Clock, Random, Cache, Mail, Environment or Events.";
-
-/// Spec section 29: a function type's `uses` names effects, so a name that is no effect is refused, whether it names
-/// nothing or a class.
-#[test]
-fn a_function_type_uses_only_effects() {
-    let typo = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Htp>? charge = null;\n}\n";
-    let class = "namespace App.Shop;\n\nimport App.Orders.Order;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Order>? charge = null;\n}\n";
-
-    assert_eq!(issues(typo), [format!("5:32 `Htp` {NOT_AN_EFFECT}")]);
-    assert_eq!(issues(class), [format!("7:32 `Order` {NOT_AN_EFFECT}")]);
-}
-
-/// An `extern`'s `uses` takes the same effects as a function type's.
-#[test]
-fn an_extern_uses_only_effects() {
-    let typo = "namespace App.Stubs;\n\nimport Lib.Foo;\n\nextern Foo.bar uses Htp;\n";
-    let class = "namespace App.Stubs;\n\nimport App.Orders.Order;\nimport Lib.Foo;\n\nextern Foo.baz uses Order;\n";
-
-    assert_eq!(issues(typo), [format!("5:21 `Htp` {NOT_AN_EFFECT}")]);
-    assert_eq!(issues(class), [format!("6:21 `Order` {NOT_AN_EFFECT}")]);
-}
-
 /// `extern event` marks a plain PHP class as an event, spec section 15, so it names a class, with or without the
 /// effects its `uses` lists.
 #[test]
@@ -159,35 +136,6 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
         ]]
     );
-}
-
-/// Spec section 29: a standard effect's name in a `uses` is that effect, even where the file imports or declares a
-/// class under the name, as a file that calls Laravel's `Http` facade still writes `uses Http`.
-#[test]
-fn a_uses_takes_a_standard_effect_where_a_class_has_its_name() {
-    for name in mago_names::STANDARD_EFFECTS.map(mago_names::short_name) {
-        for code in [
-            format!("namespace App.Stubs;\n\nimport Lib.{name};\n\nextern {name}.now uses {name};\n"),
-            format!(
-                "namespace App.Shop;\n\nimport Lib.{name};\n\nclass Checkout\n{{\n    Function<{name}(Cart) uses {name}>? charge = null;\n}}\n"
-            ),
-            format!("namespace App.Shop;\n\nclass {name}\n{{\n    Function<int() uses {name}>? tick = null;\n}}\n"),
-        ] {
-            assert_eq!(issues(leak(code.clone())), Vec::<String>::new(), "{code}");
-        }
-    }
-}
-
-/// Every standard effect passes a `uses`, `Events` too, written bare or through an import of its class.
-#[test]
-fn a_uses_takes_every_standard_effect_bare_or_imported() {
-    let function_type = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http, Mail, Events>? charge = null;\n    Function<int() uses Database, Files, Console, Process, Clock, Random, Cache, Environment>? all = null;\n}\n";
-    let extern_ = "namespace App.Stubs;\n\nimport Lib.Foo;\n\nextern Foo.bar uses Http, Events;\n";
-    let imported = "namespace App.Stubs;\n\nimport Lib.Foo;\nimport Sharp.Http;\n\nextern Foo.bar uses Http;\n";
-
-    assert_eq!(issues(function_type), Vec::<String>::new());
-    assert_eq!(issues(extern_), Vec::<String>::new());
-    assert_eq!(issues(imported), Vec::<String>::new());
 }
 
 /// Spec section 28: a law states a fact about the values of a class or an enum, and an interface has no values.
@@ -886,12 +834,13 @@ fn compact_extract_and_global_are_errors() {
     );
 }
 
-/// Spec section 8 removes `echo` and `print`: output goes through `printf` or `fwrite`. Spec section 2 makes `echo` a
-/// plain name, so `echo` written as a call is a call of a function no code declares, refused the same way.
+/// Spec section 8 removes `echo` and `print`: output goes through `global.printf` or `global.fwrite`. Spec section 2
+/// makes `echo` a plain name, so `echo` written as a call is a call of a function no code declares, refused the same
+/// way.
 #[test]
 fn echo_is_an_error_that_names_printf_and_fwrite() {
     let code = leak(method("        echo \"total\", extra;\n        echo(\"total\");\n        return extra;\n"));
-    let message = "PHP# has no `echo`: write `printf` or `fwrite`.";
+    let message = "PHP# has no `echo`: write `global.printf` or `global.fwrite`.";
 
     assert_eq!(issues(code), [format!("7:9 {message}"), format!("8:9 {message}")]);
 }
@@ -900,7 +849,7 @@ fn echo_is_an_error_that_names_printf_and_fwrite() {
 fn print_is_an_error_that_names_printf_and_fwrite() {
     let code =
         leak(method("        const shown = print \"total\";\n        print(\"total\");\n        return extra;\n"));
-    let message = "PHP# has no `print`: write `printf` or `fwrite`.";
+    let message = "PHP# has no `print`: write `global.printf` or `global.fwrite`.";
 
     assert_eq!(issues(code), [format!("7:23 {message}"), format!("8:9 {message}")]);
 }
@@ -1051,7 +1000,7 @@ fn die_in_every_form_is_an_error_that_names_stderr_and_exit() {
     let code = leak(method(
         "        die;\n        die();\n        die(\"failed\");\n        die(1);\n        return extra;\n",
     ));
-    let message = "PHP# has no `die`: write the message to STDERR, then `exit(1)`.";
+    let message = "PHP# has no `die`: write the message to STDERR, then `global.exit(1)`.";
 
     assert_eq!(
         issues(code),
@@ -1059,40 +1008,12 @@ fn die_in_every_form_is_an_error_that_names_stderr_and_exit() {
     );
 }
 
-/// `exit("…")` prints its message and exits with status 0, as `die("…")` does. The engine runs a `.sharp` file
-/// without the analyzer, which refuses an argument that is not an `int`, so `check_slice` refuses a string literal or
-/// a template, in parentheses or not.
+/// `exit` is PHP's function `exit`, which the analyzer refuses bare as it refuses any bare call of a plain PHP
+/// function, spec section 23, so `check_slice` takes it in every form.
 #[test]
-fn exit_with_a_string_literal_is_an_error_as_die_is() {
-    let code = leak(method(
-        "        exit(\"failed\");\n        exit(status: \"failed\");\n        exit(`failed`);\n        exit((\"failed\"));\n        exit(((\"failed\")));\n        return extra;\n",
-    ));
-    let message = "PHP# has no `die`: write the message to STDERR, then `exit(1)`.";
-
-    assert_eq!(
-        issues(code),
-        [
-            format!("7:9 {message}"),
-            format!("8:9 {message}"),
-            format!("9:9 {message}"),
-            format!("10:9 {message}"),
-            format!("11:9 {message}"),
-        ]
-    );
-}
-
-#[test]
-fn exit_without_parentheses_is_an_error_that_names_the_call() {
-    let code = leak(method("        exit;\n        return extra;\n"));
-
-    assert_eq!(issues(code), ["7:9 PHP# calls `exit` as a function: write `exit(0)`."]);
-}
-
-/// Spec section 8 keeps `exit(code)` as PHP 8.4's built-in function.
-#[test]
-fn exit_with_a_code_or_without_arguments_is_in_the_slice() {
+fn exit_in_every_form_is_in_the_slice() {
     let code = leak(
-        method("        exit(1);\n        exit(code);\n        exit(status: code);\n        exit();\n        return code;\n")
+        method("        exit(1);\n        exit(code);\n        exit(status: code);\n        exit();\n        exit;\n        return code;\n")
             .replace("int extra", "int code"),
     );
 
@@ -1297,6 +1218,15 @@ fn self_is_only_a_return_type() {
     );
 }
 
+/// `Self` is the class with its own type parameters, so `new Self(…)` in a generic class names no type arguments, and
+/// `new Self<…>(…)` is refused.
+#[test]
+fn new_self_names_no_type_arguments() {
+    let code = "namespace App.Tenant;\n\npublic class Repo<TItem>\n{\n    public required Repo()\n    {\n    }\n\n    public Self copy() => new Self();\n\n    public Self typed() => new Self<TItem>();\n}\n";
+
+    assert_eq!(issues(code), ["11:36 `Self` already carries its class's type parameters."]);
+}
+
 /// Spec section 9.1: a named constructor belongs to the class that declares it and is not inherited, so `Self`, which
 /// can be any subclass, cannot name one. The help names the class, and that fix compiles.
 #[test]
@@ -1431,6 +1361,20 @@ fn an_interface_method_takes_union_types_and_a_variadic_parameter() {
     let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    int|float total(int|float ...values);\n\n    (int|string)? key(string? name, int ...rest);\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A type an interface method can't take is refused with what an interface method has, its type parameters among them.
+#[test]
+fn a_type_an_interface_method_cannot_take_names_what_it_has() {
+    let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    callable area();\n}\n";
+
+    assert_eq!(issues(code), ["5:5 This type is not supported yet in PHP#."]);
+    assert_eq!(
+        check("src/Report.sharp", code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
+        [[
+            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body."
+        ]]
+    );
 }
 
 /// An interface member is public, written bare, so an access modifier on a property or a method is one error. A
@@ -2295,7 +2239,7 @@ fn a_method_refused_at_its_name_has_its_body_checked() {
         [
             "5:17 A method named after its class is not supported yet in PHP#.",
             "7:22 PHP# has no superglobals; take a Request",
-            "8:9 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "8:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
         ]
     );
 }
@@ -2312,7 +2256,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "5:10 This method name is not supported yet in PHP#.".to_owned(),
             "5:30 PHP# has no superglobals; take a Request".to_owned(),
             "12:12 An enum has no constructor: its cases are its only values.".to_owned(),
-            "14:9 PHP# has no `echo`: write `printf` or `fwrite`.".to_owned(),
+            "14:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
             format!("20:17 PHP# has no `__LINE__`: {line}"),
             "21:15 A constant without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             format!("21:21 PHP# has no `__LINE__`: {line}"),
@@ -2323,7 +2267,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "27:9 A method without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             "29:13 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.".to_owned(),
             "29:20 This type is not supported yet in PHP#.".to_owned(),
-            "30:9 PHP# has no `echo`: write `printf` or `fwrite`.".to_owned(),
+            "30:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
         ]
     );
 }
@@ -2372,14 +2316,17 @@ fn a_function_or_namespace_refused_at_its_name_has_its_code_checked() {
         issues(code),
         [
             "3:10 PHP# has no top-level functions: move `helper` into a class as a static method.",
-            "5:5 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "5:5 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
             "8:1 This namespace is not supported yet in PHP#.",
-            "14:9 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "14:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
         ]
     );
     assert_eq!(
         issues(braced),
-        ["1:1 This namespace is not supported yet in PHP#.", "6:13 PHP# has no `echo`: write `printf` or `fwrite`."]
+        [
+            "1:1 This namespace is not supported yet in PHP#.",
+            "6:13 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
+        ]
     );
 }
 
@@ -2964,13 +2911,14 @@ fn a_static_class_cannot_extend_a_class_or_implement_an_interface() {
 
 #[test]
 fn a_static_class_takes_only_public_and_static() {
-    let code = "namespace App.Tenant;\n\nabstract static class Text\n{\n}\n\nfinal static class Slug\n{\n}\n";
+    let code = "namespace App.Tenant;\n\nabstract static class Text\n{\n}\n\nfinal static class Slug\n{\n}\n\nforeign static class Clock\n{\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "3:1 A static class takes only `public` and `static`: remove `abstract`.",
             "7:1 A static class takes only `public` and `static`: remove `final`.",
+            "11:1 A static class takes only `public` and `static`: remove `foreign`.",
         ]
     );
     assert_eq!(
@@ -2991,23 +2939,63 @@ fn an_extern_method_outside_the_sharp_namespace_is_left_to_the_analyzer() {
     }
 }
 
+/// A `foreign` class takes a native body for what plain PHP cannot reach, as `Environment` reads the command line, so
+/// a `static` one is accepted there as in a static class, whatever its access.
 #[test]
-fn an_extern_method_is_public_static_in_a_static_class_with_no_body_in_any_namespace() {
+fn an_extern_method_is_static_in_a_static_or_foreign_class_with_no_body_in_any_namespace() {
     for namespace in ["Sharp.Text", "App"] {
         let code = leak(format!(
-            "namespace {namespace};\n\npublic class Plain\n{{\n    public static extern string slug(string title);\n}}\n\npublic static class Text\n{{\n    private static extern string trim(string title);\n    public static extern string pad(string title) => title;\n    public extern string cut(string title);\n}}\n"
+            "namespace {namespace};\n\npublic class Plain\n{{\n    public static extern string slug(string title);\n}}\n\npublic static class Text\n{{\n    private static extern string trim(string title);\n    public static extern string pad(string title) => title;\n    public extern string cut(string title);\n}}\n\npublic foreign class Shell\n{{\n    private static extern List<string> lines();\n    public extern string name();\n}}\n"
         ));
 
         assert_eq!(
             issues(code),
             [
-                "5:33 An `extern` method is `public static`, in a static class, with no body.",
-                "10:34 An `extern` method is `public static`, in a static class, with no body.",
-                "11:33 An `extern` method is `public static`, in a static class, with no body.",
-                "12:26 An `extern` method is `public static`, in a static class, with no body.",
+                "5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
+                "11:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
+                "12:26 An `extern` method is `static`, in a static or `foreign` class, with no body.",
+                "18:26 An `extern` method is `static`, in a static or `foreign` class, with no body.",
             ],
             "{namespace}"
         );
+    }
+}
+
+/// Spec section 29 works a body's effects out from its code, so only a method without a body, an interface's or an
+/// abstract class's, names effects in `uses`. A method with a body names only its function parameters there, as in
+/// `charge(…) uses prepare => …`.
+#[test]
+fn a_method_with_a_body_names_only_its_function_parameters_in_uses() {
+    let refused = |name: &str| {
+        format!("A method with a body takes no effect in `uses`, and `{name}` is not one of its function parameters.")
+    };
+    for (code, expected) in [
+        (
+            "public class Gateway\n{\n    public int charge(int cents) uses Http => cents;\n}\n",
+            vec![format!("5:39 {}", refused("Http"))],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents) uses Http\n    {\n        return cents;\n    }\n}\n",
+            vec![format!("5:39 {}", refused("Http"))],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
+            vec![],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)>? prepare) uses prepare => cents;\n}\n",
+            vec![],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare, cents, Http => cents;\n}\n",
+            vec![format!("5:76 {}", refused("cents")), format!("5:83 {}", refused("Http"))],
+        ),
+        ("public interface Gateway\n{\n    int charge(int cents) uses Http;\n}\n", vec![]),
+        ("public abstract class Gateway\n{\n    public abstract int charge(int cents) uses Http;\n}\n", vec![]),
+    ] {
+        let code = leak(format!("namespace App;\n\n{code}"));
+
+        assert_eq!(issues(code), expected, "{code}");
     }
 }
 
@@ -3019,8 +3007,8 @@ fn an_extern_method_with_a_body_has_its_body_checked() {
     assert_eq!(
         issues(code),
         [
-            "5:33 An `extern` method is `public static`, in a static class, with no body.",
-            "7:9 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
+            "7:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
         ]
     );
 }
@@ -3936,19 +3924,32 @@ fn a_null_start_needs_a_type() {
     assert_eq!(issues(code), ["7:21 A null start needs a type: write `T? value = null`."]);
 }
 
+/// `List`, `Set` and `Class` take one type argument and `Map` two, wherever the type is written, and none is `void`,
+/// which is only a return type. A wrong count is refused with the count and what each type argument is. A class takes
+/// any number, which the analyzer checks, so `Paged<Line>` is a generic class type.
 #[test]
-fn a_type_with_type_arguments_other_than_list_map_or_set_is_not_supported_yet() {
-    let code = "class Report\n{\n    public List<void> run(Set<string, int> a, List<int, int> b, Map<string> c, Paged<Line> d, Map<string, void> e)\n    {\n        return [];\n    }\n}\n";
+fn a_list_map_set_or_class_with_the_wrong_count_of_type_arguments_names_the_count() {
+    let code = "class Report\n{\n    private Map<string> cache = [];\n\n    public List<void> run(Set<string, int> a, List<int, int> b, Map<string> c, Paged<Line> d, Map<string, int, int>? e, Class<Line, Line> f)\n    {\n        List<int, string> local = [];\n        return [];\n    }\n}\n";
+    let refused = |at: &str, name: &str| {
+        let takes = match name {
+            "Map" => "2 type arguments: the key and the value",
+            "Class" => "1 type argument: the class",
+            _ => "1 type argument: the element",
+        };
+        format!("{at} `{name}` takes {takes}.")
+    };
 
     assert_eq!(
         issues(code),
         [
-            "3:12 This type is not supported yet in PHP#.",
-            "3:27 This type is not supported yet in PHP#.",
-            "3:47 This type is not supported yet in PHP#.",
-            "3:65 This type is not supported yet in PHP#.",
-            "3:80 This type is not supported yet in PHP#.",
-            "3:95 This type is not supported yet in PHP#.",
+            refused("3:13", "Map"),
+            "5:17 A type argument cannot be `void`: `void` is only a return type.".to_owned(),
+            refused("5:27", "Set"),
+            refused("5:47", "List"),
+            refused("5:65", "Map"),
+            refused("5:95", "Map"),
+            refused("5:121", "Class"),
+            refused("7:9", "List"),
         ]
     );
 }
@@ -4042,12 +4043,26 @@ fn new_creates_a_class_written_by_its_short_name_with_its_arguments() {
 
 #[test]
 fn new_outside_the_slice_is_not_supported_yet() {
-    let code =
-        leak(method("        const kind = new (Report);\n        const other = new class {};\n        return 1;\n"));
+    let code = leak(method("        const other = new class {};\n        return 1;\n"));
+
+    assert_eq!(issues(code), ["7:23 This expression is not supported yet in PHP#."]);
+}
+
+/// `new (type)(…)` creates an object from a class value, with or without type arguments, spec section 25. It calls
+/// the constructor, so it names no named constructor, and it takes its arguments as any `new` does. The analyzer
+/// decides what the value holds.
+#[test]
+fn new_through_a_class_value_calls_the_constructor_with_its_arguments() {
+    let code = leak(method(
+        "        const made = new (type)(extra);\n        const page = new (any)<Order>(extra);\n        const named = new (any)<Order>.fromJson(extra);\n        const bare = new (type);\n        return 1;\n",
+    ));
 
     assert_eq!(
         issues(code),
-        ["7:22 This expression is not supported yet in PHP#.", "8:23 This expression is not supported yet in PHP#."]
+        [
+            "9:39 `new` through a class value calls the class's constructor, so it names no other one.",
+            "10:22 This `new` without arguments is not supported yet in PHP#.",
+        ]
     );
 }
 
@@ -4386,6 +4401,272 @@ fn a_header_naming_an_interface_twice_or_an_enum_header_naming_unit_enum_is_an_e
     );
 }
 
+/// A header parses any type, as C#'s base list does. It names a class or an interface, or a generic class type whose
+/// type arguments are checked as a parameter's types, and any other type is not supported yet where it is written.
+#[test]
+fn a_header_names_a_class_or_a_generic_class_type_and_any_other_type_is_not_supported_yet() {
+    let code = "namespace App.Tenant;\n\nimport Lib.PaginatedList;\n\npublic class OrderPage : PaginatedList<Order>, Comparable<OrderPage> { }\n\nclass Card : int { }\n\npublic class Bad : PaginatedList<void> { }\n\npublic class Worse<TItem, TOther> : TItem, Lines<Self>, List<int>, TOther<Order> { }\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:14 This type is not supported yet in PHP#.",
+            "9:34 A type argument cannot be `void`: `void` is only a return type.",
+            "11:37 This type is not supported yet in PHP#.",
+            "11:50 `Self` is only a return type in PHP#.",
+            "11:57 This type is not supported yet in PHP#.",
+            "11:68 A type parameter takes no type arguments: write `TOther`.",
+        ]
+    );
+}
+
+/// Every example of spec sections 11 and 25 is in the slice: type parameters on a class, an interface and a method,
+/// bounds, generic types, `Class<T>`, type arguments on `new` and on a call, `value is TItem`, and section 11.1's `in`
+/// and `out`.
+#[test]
+fn the_generics_examples_of_the_spec_are_in_the_slice() {
+    let code = "namespace App.Tenant;\n\nimport Illuminate.Database.Eloquent.Model;\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    public TItem first(List<TItem> items) => items[0];\n}\n\npublic class Repository\n{\n    private Map<string, Class<Element>> elements = [:];\n\n    public PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query) => new PaginatedList<TItem>(query.rows());\n\n    public void share<TItem : DatabaseEntity & Shareable>(TItem item, Any body)\n    {\n        const page = new PaginatedList<Order>(this.rows());\n        const payload = Json.decode<WebhookPayload>(body);\n        const found = this?.find<Order>(1);\n    }\n\n    public Model? load(Class<Model> type, int id) => type.find(id);\n}\n\npublic interface Validator<in TItem>\n{\n    bool check(TItem item);\n}\n\npublic interface Source<out TItem>\n{\n    TItem next();\n}\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n\npublic class Inbox\n{\n    public bool holds<TItem>(List<TItem> items, Any value) => value is TItem;\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11.
+#[test]
+fn a_type_parameter_whose_name_does_not_start_with_t_and_an_uppercase_letter_is_an_error() {
+    let code = "namespace App.Tenant;\n\npublic class Box<Item, T, TKey, Tkey, T1, TK>\n{\n    public void run<Value>() { }\n}\n";
+    let refusal = "A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.";
+
+    assert_eq!(
+        issues(code),
+        [format!("3:18 {refusal}"), format!("3:33 {refusal}"), format!("3:39 {refusal}"), format!("5:21 {refusal}")]
+    );
+}
+
+/// A type parameter is a type, so it starts with a capital letter as every PHP# type does: the rule that names it `T`
+/// or `T` and a capital letter refuses a lowercase one wherever a list declares it, once.
+#[test]
+fn a_type_parameter_starts_with_a_capital_letter() {
+    let lowercase = "namespace App.Tenant;\n\nclass Box<t>\n{\n    public void run<item>() { }\n}\n\ninterface Source<t>\n{\n    void next<value>();\n}\n\nenum Status\n{\n    case Open;\n\n    public void run<item>() { }\n}\n";
+    let capitalized = "namespace App.Tenant;\n\nclass Box<T>\n{\n    public void run<TItem>() { }\n}\n\ninterface Source<T>\n{\n    void next<TValue>();\n}\n\nenum Status\n{\n    case Open;\n\n    public void run<TItem>() { }\n}\n";
+    let refusal = "A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.";
+
+    assert_eq!(
+        issues(lowercase),
+        [
+            format!("3:11 {refusal}"),
+            format!("5:21 {refusal}"),
+            format!("8:18 {refusal}"),
+            format!("10:15 {refusal}"),
+            format!("17:21 {refusal}"),
+        ]
+    );
+    assert_eq!(issues(capitalized), Vec::<String>::new());
+}
+
+#[test]
+fn a_type_parameter_list_that_declares_a_name_twice_is_an_error() {
+    let code =
+        "namespace App.Tenant;\n\npublic class Pair<TKey, TValue, TKey>\n{\n    public void run<T, T>() { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["3:33 This type parameter list declares `TKey` twice.", "5:24 This type parameter list declares `T` twice.",]
+    );
+}
+
+/// Only a class or an interface declares variance, spec section 11.1, so `in` or `out` on a method's type parameter
+/// is an error, and on a class's or an interface's is not.
+#[test]
+fn in_or_out_is_an_error_only_on_a_method_type_parameter() {
+    let code = "namespace App.Tenant;\n\npublic class Box<out TItem, in TOther>\n{\n    public void run<out T, in TKey, TValue>() { }\n}\n\npublic interface Source<out TItem>\n{\n    TItem next<in T>();\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:21 A method's type parameter takes no `out`: only a class or an interface declares variance, so remove it.",
+            "5:28 A method's type parameter takes no `in`: only a class or an interface declares variance, so remove it.",
+            "10:16 A method's type parameter takes no `in`: only a class or an interface declares variance, so remove it.",
+        ]
+    );
+}
+
+/// A bound is a class or an interface, a generic class type, or several of them joined with `&`, spec section 11. A
+/// union of classes names `&`, which joins several bounds.
+#[test]
+fn a_bound_that_is_not_a_class_an_interface_or_a_generic_class_type_is_an_error() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        (5..=13)
+            .map(|line| match line {
+                8 => "8:24 A bound can't be a union: join several bounds with `&`.".to_owned(),
+                line => format!("{line}:24 A bound is a class or an interface, as in `<TItem : DatabaseEntity>`."),
+            })
+            .collect::<Vec<_>>()
+    );
+    assert!(check("src/Report.sharp", code).iter().all(|issue| issue.notes
+        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+}
+
+/// A bound's type arguments are a parameter's types, so a `void` among them is refused as one, alone or joined with
+/// `&`.
+#[test]
+fn a_type_argument_of_a_bound_is_never_void() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TA : Comparable<void>>\n{\n    public void a<TB : DatabaseEntity & Comparable<void>>() { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:34 A type argument cannot be `void`: `void` is only a return type.",
+            "5:41 Type `Comparable<void>` cannot be part of an intersection.",
+            "5:52 A type argument cannot be `void`: `void` is only a return type.",
+        ]
+    );
+}
+
+/// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes a class, an
+/// interface or a type parameter, a class value may carry its type arguments, a type argument is never `void`, and a
+/// type parameter takes no type arguments, nor does a local before `.`: only a class takes them there. The analyzer
+/// checks a generic class's arity and bounds, and refuses a class value as a `Map` key as it refuses one in a `Map`
+/// literal.
+#[test]
+fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_takes() {
+    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<Order?, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "6:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+            "7:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
+            "8:31 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
+            "9:27 A type argument cannot be `void`: `void` is only a return type.",
+            "18:43 A type argument cannot be `void`: `void` is only a return type.",
+            "19:33 A type parameter takes no type arguments: write `typeof(TItem)`.",
+            "20:28 A type parameter takes no type arguments: write `TItem`.",
+            "21:26 `type` is not a class, so it takes no type arguments.",
+            "25:29 A type parameter takes no type arguments: write `TItem`.",
+        ]
+    );
+}
+
+/// The type arguments of `new` and of a method call, `super.` and `Self.` calls included, are a method body's types,
+/// so `void` and `mixed` among them are errors.
+#[test]
+fn the_type_arguments_of_new_and_of_a_method_call_are_checked_as_types() {
+    let code = "namespace App.Tenant;\n\nclass Report : Base\n{\n    public int run(int extra)\n    {\n        const page = new PaginatedList<Order>(extra);\n        const payload = Json.decode<WebhookPayload>(extra);\n        const found = this?.find<Order, List<int>>(extra);\n        const none = new PaginatedList<void>(extra);\n        const any = Json.decode<mixed>(extra);\n        const raw = this?.find<void>(extra);\n        return super.run<Order>(extra);\n    }\n\n    public static int make(int extra) => Self.make<Order>(extra);\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "10:40 A type argument cannot be `void`: `void` is only a return type.",
+            "11:33 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
+            "12:32 A type argument cannot be `void`: `void` is only a return type.",
+        ]
+    );
+}
+
+/// What reads a type argument runs in a body: `is`, `as` and a `match` arm of a type parameter or of a class with type
+/// arguments, `typeof`, `new`, a static member of a type parameter, and a catch clause of one, alone or in a union. A
+/// constant value has no type argument to read, and `new TItem` names none, because its type argument carries its own.
+/// A named constructor of a type parameter, `new TItem.of(…)`, is not supported yet.
+#[test]
+fn a_type_argument_is_read_in_a_body_and_never_in_a_constant() {
+    let code = "namespace App.Tenant;\n\nclass Box<TItem>\n{\n    public bool run<TKey>(Any value, List<TItem> items)\n    {\n        const a = value is TItem item;\n        const b = value as TKey;\n        const c = match (value) { TItem => 1, PaginatedList<Order> page => 2, default => 0 };\n        const d = typeof(TItem);\n        const e = new TKey(value);\n        const f = TItem.make(value);\n        const g = TItem.LIMIT;\n        TKey.count = g;\n        try {\n        } catch (TItem failure) {\n        } catch (RuntimeException | TKey failure) {\n        }\n        return value is PaginatedList<Order> page;\n    }\n\n    public string named(string name = typeof(TItem)) => name;\n\n    public int limit(int size = TItem.LIMIT) => size;\n\n    public Any made(Any value) => new TItem<int>(value);\n\n    public Any built(Any value) => new TItem.of(value);\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "22:39 `typeof(TItem)` is not a constant: it reads the type argument the code runs with.",
+            "24:33 `TItem.LIMIT` is not a constant: it reads the type argument the code runs with.",
+            "26:44 `TItem` already carries the type arguments of the type it stands for.",
+            "28:36 A named constructor through a type parameter, as in `new TItem.of(…)`, is not supported yet in PHP#.",
+        ]
+    );
+}
+
+/// Spec section 11 gives each type argument of a generic class its own static members, as C# does, so a static field,
+/// property or method uses the class's type parameters, in its signature and in its body, as `Box<int>.wrap(1)` gives
+/// them.
+#[test]
+fn a_static_member_uses_its_class_type_parameters() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    private static int count = 0;\n\n    public static List<TItem> seen { get; set; } = [];\n\n    private static TItem? last = null;\n\n    public static List<TItem> wrap(TItem item) => [item];\n\n    public static int size()\n    {\n        List<TItem> items = [];\n        return items.count();\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A named constructor takes its class's type arguments where `new` names them, so a generic class declares one as a
+/// class without type parameters does, using its type parameters.
+#[test]
+fn a_generic_class_declares_a_named_constructor() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public Box(public TItem item { get; }) { }\n\n    public Box.of(TItem item) : this(item) { }\n}\n\npublic class Plain\n{\n    public Plain(public int item { get; }) { }\n\n    public Plain.of(int item) : this(item) { }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A class constant holds one value for every type argument, so its type uses none of its class's type parameters, nor
+/// `Self`, which carries them: the refusal names every type parameter `Self` carries.
+#[test]
+fn a_class_constant_cannot_use_its_class_type_parameters() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public const TItem EMPTY = 1;\n\n    public const int SIZE = 1;\n\n    public const Self? NONE = null;\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public const Self? NONE = null;\n}\n\npublic class Triple<TFirst, TSecond, TThird>\n{\n    public const Self? NONE = null;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:18 A constant can't use `TItem`, because every `Box<…>` shares it.",
+            "9:18 A constant can't use `Self`, because every `Box<…>` shares it and `Self` carries `TItem`.",
+            "14:18 A constant can't use `Self`, because every `Pair<…>` shares it and `Self` carries `TFirst` and `TSecond`.",
+            "19:18 A constant can't use `Self`, because every `Triple<…>` shares it and `Self` carries `TFirst`, `TSecond` and `TThird`.",
+        ]
+    );
+}
+
+/// A static method's own type parameters are its own, so it uses them as any method does.
+#[test]
+fn a_static_method_uses_its_own_type_parameters() {
+    let code =
+        "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public static List<T> of<T>(T item) => [item];\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// `Self` is the class with its own type parameters, so a static member of a generic class returns it and creates one
+/// with `new Self()`, as `Box<int>.make()` makes a `Box<int>`. PHP's `self` there keeps its own refusal.
+#[test]
+fn a_static_member_of_a_generic_class_returns_self() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public static Self make() => new Self();\n\n    public static self? none() => null;\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public static Self? none() => null;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "11:19 PHP# has no `self`: write the class's own name, `Box`, for the declaring class, or `Self` for the class a static method is called on.",
+        ]
+    );
+}
+
+/// A generic member of a union gets the checks it gets outside a union, inside its type arguments too. Each union
+/// follows the same type written alone.
+#[test]
+fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union() {
+    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<Order?, int> c = [:];\n    private Map<Order?, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<int> g;\n    private Class<int>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:13 A type parameter takes no type arguments: write `TItem`.",
+            "6:13 A type parameter takes no type arguments: write `TItem`.",
+            "7:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+            "8:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+            "9:23 A type argument cannot be `void`: `void` is only a return type.",
+            "10:23 A type argument cannot be `void`: `void` is only a return type.",
+            "11:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
+            "12:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
+            "13:27 A type argument cannot be `void`: `void` is only a return type.",
+            "14:27 A type argument cannot be `void`: `void` is only a return type.",
+        ]
+    );
+}
+
 #[test]
 fn a_property_in_an_enum_reports_only_the_php_error() {
     let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    private int count = 0;\n}\n";
@@ -4526,14 +4807,58 @@ fn a_second_default_arm_or_a_block_arm_in_a_match_that_gives_a_value_is_an_error
 
 #[test]
 fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
-    let code =
-        leak(method("        const a = extra is int? n;\n        const b = extra as int?;\n        return extra;\n"));
+    let code = leak(method(
+        "        const a = extra is int? n;\n        const b = extra as int?;\n        const c = extra as Map<string, float>?;\n        const d = extra as void;\n        return extra;\n",
+    ));
 
     assert_eq!(
         issues(code),
         [
             "7:28 A type pattern is never nullable: null never matches a type.",
             "8:28 `as` converts to a type that is not nullable or `void`.",
+            "9:28 `as` converts to a type that is not nullable or `void`.",
+            "10:28 `as` converts to a type that is not nullable or `void`.",
+        ]
+    );
+    let helps: Vec<_> = check("src/Report.sharp", code).into_iter().filter_map(|issue| issue.help).collect();
+    assert_eq!(
+        helps,
+        [
+            "Test for null with `x == null`, or join both with `or`, as in `x is int or null`.",
+            "Write `as int`.",
+            "Write `as Map<string, float>`."
+        ]
+    );
+}
+
+/// A function value keeps no type while the code runs, so `is`, `as` and a `match` arm of a function type are errors,
+/// alone or in a union, while `Any` and a union of types with a test are patterns.
+#[test]
+fn a_type_test_of_a_function_type_is_an_error() {
+    let code = leak(method(
+        "        const a = extra is Function<int(int)>;\n        const b = extra as Function<int(int)>;\n        const c = match (extra) { int|Function<int()> f => 1, default => 2 };\n        const d = extra is Any;\n        const e = extra is int|string n;\n        const f = extra as int|string;\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:28 A function type can't be tested: a function value doesn't keep its type while the code runs.",
+            "8:28 A function type can't be tested: a function value doesn't keep its type while the code runs.",
+            "9:39 A function type can't be tested: a function value doesn't keep its type while the code runs.",
+        ]
+    );
+}
+
+/// A class value is a string with no test, so `as` refuses its type and names every type it converts to.
+#[test]
+fn an_as_to_a_type_without_a_test_names_the_types_as_converts_to() {
+    let code = leak(method("        const a = extra as Class<Report>;\n        return extra;\n"));
+
+    let notes: Vec<_> = check("src/Report.sharp", code).into_iter().flat_map(|issue| issue.notes).collect();
+    assert_eq!(
+        notes,
+        [
+            "`as` converts to `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`."
         ]
     );
 }
@@ -4744,8 +5069,8 @@ fn an_enum_returns_self_holds_union_constants_and_refuses_new_self() {
     assert_eq!(issues(code), ["14:34 An enum has no constructor: its cases are its only values."]);
 }
 
-/// `List` and `Map` both run as PHP's `array`, and every function type as `\Closure`, so a union of two of either is
-/// a type written twice, which the engine refuses.
+/// `List` and `Map` both run as PHP's `array`, and every function type as `\Closure`, so a union of two of either
+/// holds two types the engine can't tell apart.
 #[test]
 fn a_union_of_two_collections_or_two_function_types_is_a_type_written_twice() {
     let code = leak(method("        return 1;\n").replace(
@@ -4756,8 +5081,32 @@ fn a_union_of_two_collections_or_two_function_types_is_a_type_written_twice() {
     assert_eq!(
         issues(code),
         [
-            "5:30 Duplicate type `Map<string, int>` is redundant.",
+            "5:30 `List<int>` and `Map<string, int>` both run as a PHP array, so a union can't hold both.",
             "5:70 Duplicate type `Function<string()>` is redundant."
+        ]
+    );
+}
+
+/// Spec section 11: type arguments reach the running program, so a union is refused only where the engine can't tell
+/// two members apart. Two generic classes, or one class with other type arguments, compile. `List`, `Map` and `Set`
+/// share PHP's one array kind, and a collection beside an `Iterable` of its element type adds nothing to it, while a
+/// collection beside another generic class compiles.
+#[test]
+fn a_union_refuses_only_members_the_engine_cannot_tell_apart() {
+    let code = leak(method("        return 1;\n").replace(
+        "int extra",
+        "Box<Order>|Pair<Order> a, Box<int>|Box<string> b, Box<Order>|Box<Order> c, List<int>|Map<string, int> d, List<int>|Set<int> e, Iterable<int>|List<int> f, Iterable<int>|Map<string, int> g, Set<int>|Iterable<int> h, Iterable<string>|List<int> i, Iterable<string>|Map<string, int> j, Order|Entity k, List<Order>|Box<Order> l",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:81 Duplicate type `Box<Order>` is redundant.",
+            "5:105 `List<int>` and `Map<string, int>` both run as a PHP array, so a union can't hold both.",
+            "5:135 `List<int>` and `Set<int>` both run as a PHP array, so a union can't hold both.",
+            "5:161 `List<int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
+            "5:188 `Map<string, int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
+            "5:217 `Set<int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
         ]
     );
 }
@@ -4821,20 +5170,26 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
 }
 
 /// A construct outside the slice is refused with a note that lists what PHP# has where it is written, so the note of
-/// a refused class member names a class's members and the note of a refused expression names a body's expressions.
+/// a refused class member names a class's members, the note of a refused expression names a body's expressions, and
+/// the note of a refused type in a pattern names the patterns.
 #[test]
 fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
     let body = leak(method("        const copy = clone this;\n        return extra;\n"));
+    let pattern = leak(method("        const called = extra is callable;\n        return extra;\n"));
 
     for (code, note) in [
         (
+            pattern,
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`, with an optional name, as in `int count`, a value, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`.",
+        ),
+        (
             class,
-            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a static class, extensions, with no other modifiers, `extends` or `implements`.",
+            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a static class, extensions, with no other modifiers, `extends` or `implements`.",
         ),
         (
             body,
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`.",
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`.",
         ),
     ] {
         assert_eq!(
@@ -5005,7 +5360,10 @@ fn an_operator_body_is_a_method_body() {
         "    public static Money operator +(Money a, Money b)\n    {\n        echo \"adding\";\n        return a;\n    }\n",
     );
 
-    assert_eq!(issues_in("src/Money.sharp", code), ["7:9 PHP# has no `echo`: write `printf` or `fwrite`."]);
+    assert_eq!(
+        issues_in("src/Money.sharp", code),
+        ["7:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`."]
+    );
 }
 
 #[test]
