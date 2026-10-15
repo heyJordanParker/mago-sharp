@@ -1550,7 +1550,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 ClassLikeMember::Property(property) => {
                     if let Property::Computed(computed) = property
                         && is_lazy(&computed.modifiers)
-                        && matches!(computed.hint, Some(Hint::Nullable(_)))
                     {
                         members.push(self.lazy_flag(computed));
                     }
@@ -1591,8 +1590,73 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 &[parameters, NULL, body, NULL, NULL],
             ));
         }
+        members.extend(self.copy_resets(class_members, parent_name.is_some(), keyword, right_brace));
 
         members
+    }
+
+    /// The hidden `public function __clone(): void` of a class whose copy must not share what its original holds, spec
+    /// sections 6.4, 6.5 and 16. A copy, made with `with` or with plain PHP's `clone`, gets a new instance of each
+    /// behavior, and computes each `lazy` property again on its first read, as Kotlin's `copy()` does. It runs the
+    /// parent's `__clone` first when the parent has one. None for a class with neither.
+    fn copy_resets(
+        &mut self,
+        class_members: &Sequence<ClassLikeMember>,
+        has_parent: bool,
+        keyword: Span,
+        right_brace: Span,
+    ) -> Option<u32> {
+        let line = self.line(right_brace);
+        let mut statements = Vec::new();
+        for member in class_members {
+            match member {
+                ClassLikeMember::Property(Property::Hooked(property)) => {
+                    if let Some(behaviors) = &property.behaviors {
+                        statements.extend(self.behavior_creations(property.item.variable(), behaviors));
+                    }
+                }
+                ClassLikeMember::Property(Property::Computed(computed))
+                    if is_lazy(&computed.modifiers) && !computed.modifiers.contains_static() =>
+                {
+                    let flag = self.lazy_flag_fetch(line, computed.variable.name);
+                    let r#false = self.zval(line, sharp_value::SHARP_FALSE, |_| {});
+                    statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[flag, r#false]));
+                }
+                _ => {}
+            }
+        }
+        if statements.is_empty() {
+            return None;
+        }
+
+        // `if (\method_exists(parent::class, '__clone')) { parent::__clone(); }`: a parent's own copy runs first.
+        if has_parent {
+            let parent = self.string(ZEND_NAME_NOT_FQ, line, b"parent");
+            let class = self.node(SHARP_AST_CLASS_NAME, 0, line, &[parent]);
+            let name = self.string(0, line, b"__clone");
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[class, name]);
+            let function = self.string(ZEND_NAME_FQ, line, b"method_exists");
+            let exists = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+            let parent = self.string(ZEND_NAME_NOT_FQ, line, b"parent");
+            let method = self.string(0, line, b"__clone");
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+            let call = self.node(SHARP_AST_STATIC_CALL, 0, line, &[parent, method, arguments]);
+            let call = self.node(SHARP_AST_STMT_LIST, 0, line, &[call]);
+            let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[exists, call]);
+            statements.insert(0, self.node(SHARP_AST_IF, 0, line, &[branch]));
+        }
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+        let void = self.string(ZEND_NAME_NOT_FQ, line, b"void");
+
+        Some(self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            keyword,
+            right_brace,
+            b"__clone",
+            &[parameters, NULL, body, void, NULL],
+        ))
     }
 
     /// The hidden static a generic PHP# class keeps each type argument's own static fields in, spec section 11, as
@@ -2739,20 +2803,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The `get` body of `lazy T name => expr;`, spec section 6.5: it runs `expr` on the first read and keeps the value
-    /// in the property's storage, `get => $this->name ??= expr;`. A nullable value can be null, so it keeps whether
-    /// it ran in the hidden flag [`Lowering::lazy_flag`] declares:
+    /// in the property's storage, and whether it ran in the hidden flag [`Lowering::lazy_flag`] declares, which a
+    /// copy's `__clone` clears and a null value can't stand in for:
     /// `get { if (!$this->{'name#lazy'}) { $this->name = expr; $this->{'name#lazy'} = true; } return $this->name; }`.
     /// A throw in `expr` keeps nothing, so the next read runs it again.
     fn lazy_body(&mut self, computed: &ComputedProperty) -> u32 {
         let line = self.line(computed.body.arrow);
         let storage = self.storage(line);
         let value = self.expression(computed.body.expression);
-        if !matches!(computed.hint, Some(Hint::Nullable(_))) {
-            let kept = self.node(SHARP_AST_ASSIGN_COALESCE, 0, line, &[storage, value]);
-
-            return self.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[kept]);
-        }
-
         let keep = self.node(SHARP_AST_ASSIGN, 0, line, &[storage, value]);
         let flag = self.lazy_flag_fetch(line, computed.variable.name);
         let r#true = self.zval(line, sharp_value::SHARP_TRUE, |_| {});
@@ -2768,7 +2826,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_STMT_LIST, 0, line, &[r#if, r#return])
     }
 
-    /// The hidden flag of a nullable `lazy` property, `private bool ${'name#lazy'} = false;`, which its `get` hook sets
+    /// The hidden flag of an instance `lazy` property, `private bool ${'name#lazy'} = false;`, which its `get` hook sets
     /// once the value is kept. No PHP# name has a `#`, so it names no member a program declares.
     fn lazy_flag(&mut self, computed: &ComputedProperty) -> u32 {
         let line = self.line(&computed.variable);
@@ -2870,7 +2928,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// `$this->{'name#lazy'}`, the hidden flag of the nullable `lazy` property `name`.
+    /// `$this->{'name#lazy'}`, the hidden flag of the instance `lazy` property `name`.
     fn lazy_flag_fetch(&mut self, line: u32, property: &[u8]) -> u32 {
         let this = self.string(0, line, b"this");
         let this = self.node(SHARP_AST_VAR, 0, line, &[this]);
@@ -6481,7 +6539,7 @@ fn is_lazy(modifiers: &Sequence<Modifier>) -> bool {
     modifiers.iter().any(|modifier| matches!(modifier, Modifier::Lazy(_)))
 }
 
-/// `name#lazy`, the hidden flag of the nullable `lazy` property `name`.
+/// `name#lazy`, the hidden flag of the instance `lazy` property `name`.
 fn lazy_flag_name(property: &[u8]) -> Vec<u8> {
     [property, b"#lazy"].concat()
 }

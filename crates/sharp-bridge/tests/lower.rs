@@ -2597,6 +2597,62 @@ fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
     );
 }
 
+/// ```php
+/// public function __clone(): void
+/// {
+///     if (\method_exists(parent::class, '__clone')) { parent::__clone(); }
+///     $this->{'name#via0'} = new \App\Trimmed();
+/// }
+/// ```
+///
+/// Spec sections 6.4 and 16: a copy made with `with` or with plain PHP's `clone` gets a new instance of each behavior,
+/// so the two never share a behavior's state. A parent's own `__clone` runs first, when it has one.
+#[test]
+fn a_copy_gets_new_behaviors_after_its_parent_s_copy_runs() {
+    let behavior = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+    );
+    let named = ("src/Named.sharp", "namespace App;\n\npublic abstract class Named\n{\n}\n");
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n\npublic class Report : Named\n{\n    public string name { get; set; } via Trimmed = \"\";\n}\n",
+        &[behavior, named],
+    );
+
+    assert_eq!(
+        lowered.declared("__clone"),
+        indoc! {r#"
+            METHOD [1] "__clone" @12-15
+              PARAM_LIST
+              null
+              STMT_LIST
+                IF
+                  IF_ELEM
+                    CALL
+                      ZVAL "method_exists"
+                      ARG_LIST
+                        CLASS_NAME
+                          ZVAL [1] "parent"
+                        ZVAL "__clone"
+                    STMT_LIST
+                      STATIC_CALL
+                        ZVAL [1] "parent"
+                        ZVAL "__clone"
+                        ARG_LIST
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "name#via0"
+                  NEW
+                    ZVAL "App\\Trimmed"
+                    ARG_LIST
+              ZVAL [1] "void"
+              null
+        "#}
+    );
+}
+
 /// Spec section 6.2: the observers are no hooks of their own. The `set` hook runs `willSet`, then the `set` body or the
 /// storage write an auto `set` is, then `didSet`. They run on every write, so an initial value, constant or not, is a
 /// write at the start of the constructor instead of PHP's default.
@@ -10678,13 +10734,16 @@ fn internal_runs_as_public() {
 }
 
 /// ```php
-/// public private(set) int $doubled { get => $this->doubled ??= 2; }
+/// private bool ${'doubled#lazy'} = false;
+/// public private(set) int $doubled { get { if (!$this->{'doubled#lazy'}) { $this->doubled = 2; $this->{'doubled#lazy'} = true; } return $this->doubled; } }
 /// private bool ${'found#lazy'} = false;
-/// public private(set) ?int $found { get { if (!$this->{'found#lazy'}) { $this->found = null; $this->{'found#lazy'} = true; } return $this->found; } }
+/// public private(set) ?int $found { get { … } }
+/// public function __clone(): void { $this->{'doubled#lazy'} = false; $this->{'found#lazy'} = false; }
 /// ```
 ///
-/// A `lazy` property keeps its first value in its own storage, which only its `get` hook writes. A nullable one can
-/// keep null, so a hidden flag beside it says whether the body ran.
+/// A `lazy` property keeps its first value in its own storage, which only its `get` hook writes, and a hidden flag
+/// beside it says whether the body ran, since a kept null can't say so. A copy is a new value, so its `__clone`
+/// clears each flag, and its first read computes the value again, spec section 6.5.
 #[test]
 fn a_lazy_property_keeps_its_first_value_in_its_storage() {
     let lowered = Lowered::with(
@@ -10697,6 +10756,15 @@ fn a_lazy_property_keeps_its_first_value_in_its_storage() {
         lowered.render(lowered.child(class, 2)),
         indoc! {r#"
             STMT_LIST
+              PROP_GROUP [4]
+                ZVAL [1] "bool"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "doubled#lazy"
+                    ZVAL false
+                    null
+                    null
+                null
               PROP_GROUP [4097]
                 ZVAL [1] "int"
                 PROP_DECL
@@ -10708,13 +10776,32 @@ fn a_lazy_property_keeps_its_first_value_in_its_storage() {
                       PROPERTY_HOOK "get" @3-3
                         null
                         null
-                        PROPERTY_HOOK_SHORT_BODY
-                          ASSIGN_COALESCE
+                        STMT_LIST
+                          IF
+                            IF_ELEM
+                              UNARY_OP [14]
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "doubled#lazy"
+                              STMT_LIST
+                                ASSIGN
+                                  PROP
+                                    VAR
+                                      ZVAL "this"
+                                    ZVAL "doubled"
+                                  ZVAL 2
+                                ASSIGN
+                                  PROP
+                                    VAR
+                                      ZVAL "this"
+                                    ZVAL "doubled#lazy"
+                                  ZVAL true
+                          RETURN
                             PROP
                               VAR
                                 ZVAL "this"
                               ZVAL "doubled"
-                            ZVAL 2
                         null
                         null
                 null
@@ -10766,6 +10853,24 @@ fn a_lazy_property_keeps_its_first_value_in_its_storage() {
                               ZVAL "found"
                         null
                         null
+                null
+              METHOD [1] "__clone" @1-5
+                PARAM_LIST
+                null
+                STMT_LIST
+                  ASSIGN
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "doubled#lazy"
+                    ZVAL false
+                  ASSIGN
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "found#lazy"
+                    ZVAL false
+                ZVAL [1] "void"
                 null
         "#}
     );
