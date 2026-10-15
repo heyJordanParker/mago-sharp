@@ -1,6 +1,7 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::expander::StaticClassType;
@@ -12,6 +13,7 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::StaticMethodCall;
 use mago_syntax::cst::TypeArgumentList;
+use mago_word::Word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -39,6 +41,7 @@ use crate::resolver::static_method::resolve_static_method_targets;
 use crate::statement::class_like::listener::check_events_on;
 use crate::statement::class_like::r#struct::check_struct_parse;
 use crate::utils::expression::expression_is_nullsafe;
+use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::quoted_source;
 
@@ -239,6 +242,15 @@ where
             )
         });
 
+    let encodes_json = context.dialect.is_sharp()
+        && invocation_targets.iter().any(|target| {
+            matches!(
+                target,
+                InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, method), .. }
+                    if class.as_bytes().eq_ignore_ascii_case(b"sharp\\json\\json") && method.as_bytes().eq_ignore_ascii_case(b"encode")
+            )
+        });
+
     record_external_method_call(context, artifacts, &invocation_targets, call.span);
     if !method_resolution.undocumented_methods.is_empty() {
         record_external_method_call_targets(
@@ -299,6 +311,20 @@ where
         check_events_on(context, &listened.clone(), at);
     }
 
+    if encodes_json
+        && let Some(argument) = call.argument_list.arguments.first()
+        && let Some(value) = artifacts.get_expression_type(argument.value())
+        && let Some(key) = json_key_without_text(context, value)
+    {
+        let key = display_class_like_name(context, key);
+        context.collector.report_with_code(
+            IssueCode::JsonKeyWithoutText,
+            Issue::error(format!("`Json.encode` writes each `Map` key as JSON text, and `{key}` has no `toString()`."))
+                .with_annotation(Annotation::primary(argument.span()).with_message("Encoded here."))
+                .with_help(format!("Declare `public string toString()` on `{key}`, or encode a `Map` keyed by text.")),
+        );
+    }
+
     if !method_resolution.undocumented_methods.is_empty() {
         analyze_undocumented_method_return_type(
             context,
@@ -322,6 +348,34 @@ where
     }
 
     Ok(())
+}
+
+/// The class of the first object key in `value` that has no JSON text, spec section 10: a `Map` anywhere in it, a
+/// `List`'s elements and a `Map`'s values included, keyed by an object that is neither a backed enum nor declares
+/// `toString()`. An `int` and a `string` key are their own text, and an `Any` is decided where it runs.
+fn json_key_without_text<A>(context: &Context<'_, '_, A>, value: &TUnion) -> Option<Word>
+where
+    A: Arena,
+{
+    value.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Array(TArray::List(list)) => json_key_without_text(context, &list.element_type),
+        TAtomic::Array(TArray::Keyed(keyed)) => keyed.parameters.as_ref().and_then(|(key, value)| {
+            key.types
+                .iter()
+                .find_map(|key| match key {
+                    TAtomic::Object(TObject::Named(named)) => {
+                        let class = context.codebase.get_class_like(named.name.as_bytes())?;
+                        let has_text = class.enum_type.is_some()
+                            || context.codebase.get_method(named.name.as_bytes(), b"tostring").is_some();
+
+                        (!has_text).then_some(named.name)
+                    }
+                    _ => None,
+                })
+                .or_else(|| json_key_without_text(context, value))
+        }),
+        _ => None,
+    })
 }
 
 #[cfg(test)]

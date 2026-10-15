@@ -18610,6 +18610,35 @@ fn code_without_a_body_allows_emit_with_uses_events() {
     }
 }
 
+/// The standard library's `Json`, as `sharp/composer/` ships it.
+const JSON: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Json/Json.sharp",
+    include_str!("../../../../composer/library/Sharp/Json/Json.sharp"),
+);
+
+/// Spec sections 10 and 24: `Json.encode` takes any value, and a JSON object's key is text, so a `Map` keyed by an
+/// object without `toString()`, wherever the value holds it, is an error. A struct with `toString()`, a backed enum,
+/// an `int` and a `string` key a JSON object. A plain PHP twin's `json_encode` call names `Json.encode`.
+#[test]
+fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
+    let shapes = ("app/Shop/Shapes.sharp", "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n\npublic struct Tag\n{\n    public Tag(public string name { get; }) { }\n\n    public string toString() => this.name;\n}\n");
+    let report = ("app/Shop/Report.sharp", "namespace App.Shop;\n\nimport Sharp.Json.Json;\n\npublic class Report\n{\n    public static void run(Map<Point, int> points, Map<Tag, int> tags, List<Map<Point, int>> nested, Map<string, Point> values, Map<int, string> numbered, Any? raw)\n    {\n        Report.keep(Json.encode(tags));\n        Report.keep(Json.encode(values));\n        Report.keep(Json.encode(numbered));\n        Report.keep(Json.encode(raw));\n        Report.keep(Json.encode(points));\n        Report.keep(Json.encode(nested));\n    }\n\n    public static void keep(string json)\n    {\n    }\n}\n");
+    let bare = ("app/Shop/Bare.sharp", "namespace App.Shop;\n\npublic class Bare\n{\n    public static string run(Any? value) => json_encode(value);\n}\n");
+
+    assert_eq!(worded(JSON, &[]), Vec::<String>::new());
+    assert_eq!(
+        refusals(report, &[JSON, shapes]),
+        [
+            "13:33 json-key-without-text `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.",
+            "14:33 json-key-without-text `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.",
+        ]
+    );
+    assert_eq!(
+        messages(bare, &[JSON])[0],
+        "`json_encode` is wrapped by the standard library: write `Json.encode(…)`. Add `import Sharp.Json.Json;` to the file."
+    );
+}
+
 /// The standard library's `Events`, as `sharp/composer/` ships it.
 const EVENTS: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Events.sharp",

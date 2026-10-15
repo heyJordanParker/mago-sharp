@@ -128,7 +128,7 @@ public class Report
         const limit = Report.MAX;
         const rate = Calc.standard.cents;
         const label = Status.Active.label();
-        const active = Status.Default == Status.Active;
+        const active = Status.DEFAULT == Status.Active;
         return;
     }
 
@@ -316,9 +316,9 @@ public class Report
 [Entity("status"), Searchable]
 public enum Status : string, HasLabel
 {
-    public const Status Default = Status.Active;
-    public const int|string Key = 1;
-    protected const (int|string)? Code = null;
+    public const Status DEFAULT = Status.Active;
+    public const int|string KEY = 1;
+    protected const (int|string)? CODE = null;
 
     case Active = "active";
     [Field("archived")]

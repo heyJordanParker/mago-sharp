@@ -1,4 +1,10 @@
 use mago_bytes::BytesDisplay;
+use mago_casing::is_camel_case;
+use mago_casing::is_class_case;
+use mago_casing::is_constant_case;
+use mago_casing::to_camel_case;
+use mago_casing::to_class_case;
+use mago_casing::to_constant_case;
 use mago_database::file::FolderNamespace;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
@@ -825,7 +831,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                         .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier.")),
                 );
             }
-            check_declared_name(property.variable.name, property.variable.span, context);
+            check_member_name(&property.modifiers, property.variable.name, property.variable.span, "Property", context);
 
             Some(FieldOrProperty)
         }
@@ -874,7 +880,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::Method(method), Interface) => match is_slice_signature(method) {
             Ok(()) => {
-                check_declared_name(method.name.value, method.name.span, context);
+                check_member_name(&method.modifiers, method.name.value, method.name.span, "Method", context);
 
                 Some(Signature)
             }
@@ -1002,7 +1008,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(Enum)
         }
         (Node::EnumCase(case), Enum) => {
-            check_declared_name(case.item.name().value, case.item.name().span, context);
+            check_declared_name(case.item.name().value, case.item.name().span, "Enum case", NameCase::Pascal, context);
 
             Some(Enum)
         }
@@ -1037,7 +1043,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             match is_slice_property(property) {
                 Ok(()) => {
                     let variable = property.first_variable();
-                    check_declared_name(variable.name, variable.span, context);
+                    let kind = if matches!(property, Property::Plain(_)) { "Field" } else { "Property" };
+                    check_member_name(property.modifiers(), variable.name, variable.span, kind, context);
                     report_static_without_initial_value(property, context);
                     report_generic_static(property, context);
 
@@ -1056,7 +1063,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ClassLikeMember(ClassLikeMember::Constant(constant)), Class | Enum) => match is_slice_constant(constant) {
             Ok(()) => {
                 let name = &constant.first_item().name;
-                check_declared_name(name.value, name.span, context);
                 // PHP reserves `X::class` for the class's name, so it loads no constant named `class` in any case.
                 if name.value.eq_ignore_ascii_case(b"class")
                     && let Some(class) = enclosing_class_like_name(context.program, constant.span())
@@ -1069,6 +1075,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                         ))
                         .with_annotation(Annotation::primary(name.span).with_message("Declared here.")),
                     );
+                } else {
+                    check_declared_name(name.value, name.span, "Constant", NameCase::UpperSnake, context);
                 }
 
                 Some(ClassConstant)
@@ -1230,7 +1238,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 // The constructor, the one method without a return type, carries its class's name, which
                 // `check_class_name` reports.
                 if method.return_type_hint.is_some() {
-                    check_declared_name(method.name.value, method.name.span, context);
+                    check_member_name(&method.modifiers, method.name.value, method.name.span, "Method", context);
                 }
 
                 check_method_uses(method, context);
@@ -4959,11 +4967,52 @@ fn is_magic_name(name: &[u8]) -> bool {
     name.len() > 4 && name.starts_with(b"__") && name.ends_with(b"__")
 }
 
-/// Reports a declared name written `__Something__`, which spec section 27 removes as it removes reading one.
-fn check_declared_name(name: &[u8], span: Span, context: &mut Context<'_, '_, '_>) {
-    if is_magic_name(name) {
-        report_magic_constant(name, span, None, context);
+/// Checks the name of a method, a field or a property, the `kind`, in camel case. A member written `override` keeps its
+/// parent's name, so its case is its parent's choice.
+fn check_member_name(
+    modifiers: &Sequence<Modifier>,
+    name: &[u8],
+    span: Span,
+    kind: &str,
+    context: &mut Context<'_, '_, '_>,
+) {
+    if is_magic_name(name) || !modifiers.iter().any(|modifier| matches!(modifier, Modifier::Override(_))) {
+        check_declared_name(name, span, kind, NameCase::Camel, context);
     }
+}
+
+/// The case spec section 24 names a kind of declaration in, as TypeScript does.
+#[derive(Clone, Copy)]
+enum NameCase {
+    /// Namespaces, types, type parameters, events and enum cases.
+    Pascal,
+    /// Methods, properties, fields, parameters and locals.
+    Camel,
+    /// Constants.
+    UpperSnake,
+}
+
+/// Reports a declared name written `__Something__`, which spec section 27 removes as it removes reading one, and warns
+/// on a name that breaks the case spec section 24 gives its `kind`, as "Method name `TotalIn` should be in camel case."
+fn check_declared_name(name: &[u8], span: Span, kind: &str, case: NameCase, context: &mut Context<'_, '_, '_>) {
+    if is_magic_name(name) {
+        return report_magic_constant(name, span, None, context);
+    }
+
+    let (holds, written, fixed) = match case {
+        NameCase::Pascal => (is_class_case(name), "Pascal case", to_class_case(name)),
+        NameCase::Camel => (is_camel_case(name), "camel case", to_camel_case(name)),
+        NameCase::UpperSnake => (is_constant_case(name), "upper snake case", to_constant_case(name)),
+    };
+    if holds {
+        return;
+    }
+
+    context.report(
+        Issue::warning(format!("{kind} name `{}` should be in {written}.", BytesDisplay(name)))
+            .with_annotation(Annotation::primary(span).with_message("Named here."))
+            .with_help(format!("Rename it `{}`.", BytesDisplay(&fixed))),
+    );
 }
 
 /// Reports a PHP superglobal, written with `$` or bare, which spec section 29 removes.
@@ -5319,8 +5368,8 @@ pub fn check_class_name(class_name: &LocalIdentifier, context: &mut Context<'_, 
                 .with_annotation(Annotation::primary(class_name.span).with_message("Class declared here."))
                 .with_note("PHP# reserves this name for a type."),
         );
-    } else if is_magic_name(class_name.value) {
-        check_declared_name(class_name.value, class_name.span, context);
+    } else if is_magic_name(class_name.value) || class_name.value.first().is_some_and(u8::is_ascii_uppercase) {
+        check_declared_name(class_name.value, class_name.span, "Type", NameCase::Pascal, context);
     } else {
         check_capitalized(class_name.value, class_name.span, context);
     }
@@ -5390,7 +5439,12 @@ pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) 
         for part in name.value().split(|&byte| byte == b'.') {
             let end = start + part.len() as u32;
 
-            check_capitalized(part, name.span().subspan(start, end), context);
+            let span = name.span().subspan(start, end);
+            if part.first().is_some_and(u8::is_ascii_uppercase) {
+                check_declared_name(part, span, "Namespace", NameCase::Pascal, context);
+            } else {
+                check_capitalized(part, span, context);
+            }
             start = end + 1;
         }
     }
@@ -5778,7 +5832,10 @@ fn check_local_name(name: &[u8], span: Span, kind: &str, context: &mut Context<'
                 .with_help(format!("Rename it, as in `{renamed}`.")),
         );
     } else {
-        check_declared_name(name, span, context);
+        let mut kind = kind.to_owned();
+        kind[..1].make_ascii_uppercase();
+
+        check_declared_name(name, span, &kind, NameCase::Camel, context);
     }
 }
 

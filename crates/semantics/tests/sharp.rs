@@ -1237,14 +1237,17 @@ fn a_named_constructor_shares_no_name_with_a_method() {
 
     assert_eq!(coded(after), clash("`Order.copy` cannot share its name with `Order`'s named constructor `copy`."));
     assert_eq!(
-        coded(before),
+        coded(before)[..1],
         clash("The named constructor `Order.copy` cannot share its name with the method `Order.Copy`.")
     );
     assert_eq!(coded(static_method), clash("`Clash.of` cannot share its name with `Clash`'s named constructor `of`."));
     assert_eq!(issues(after), ["8:16 `Order.copy` cannot share its name with `Order`'s named constructor `copy`."]);
     assert_eq!(
         issues(before),
-        ["8:18 The named constructor `Order.copy` cannot share its name with the method `Order.Copy`."]
+        [
+            "8:18 The named constructor `Order.copy` cannot share its name with the method `Order.Copy`.",
+            "7:16 Method name `Copy` should be in camel case.",
+        ]
     );
     assert_eq!(
         issues(law),
@@ -1863,6 +1866,9 @@ fn a_type_takes_any_capitalized_word_but_a_reserved_type_name() {
             let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
             let expected = if RESERVED.contains(&name.as_str()) {
                 vec![format!("{at} Cannot use `{name}` as a class name: it is reserved.")]
+            } else if name.contains('_') {
+                // Spec section 24 names a type in Pascal case, so `Include_once` compiles with a warning.
+                vec![format!("{at} Type name `{name}` should be in Pascal case.")]
             } else {
                 vec![]
             };
@@ -1972,6 +1978,7 @@ fn a_class_has_one_method_per_name_and_no_overloading() {
         [
             "7:17 `Access.grant` is declared twice: a class has one method per name, with no overloading by argument types.",
             "9:17 `Access.Grant` is declared twice: a class has one method per name, with no overloading by argument types.",
+            "9:17 Method name `Grant` should be in camel case.",
         ]
     );
     assert_eq!(
@@ -1989,7 +1996,8 @@ fn methods_whose_names_differ_only_in_case_are_an_error() {
     assert_eq!(
         issues(code),
         [
-            "5:16 `Report.Run` is declared twice: a class has one method per name, with no overloading by argument types."
+            "5:16 `Report.Run` is declared twice: a class has one method per name, with no overloading by argument types.",
+            "5:16 Method name `Run` should be in camel case.",
         ]
     );
 
@@ -2131,6 +2139,39 @@ fn a_class_interface_or_enum_name_starts_with_a_capital_letter() {
         ]
     );
     assert_eq!(issues(capitalized), Vec::<String>::new());
+}
+
+/// Spec section 24 names things as TypeScript does: namespaces, types and enum cases in PascalCase, methods,
+/// properties, fields, parameters and locals in camelCase, and constants in UPPER_SNAKE_CASE. A name that breaks the
+/// rule is a warning that names the case. A member written `override` keeps its parent's name, so it gets none.
+#[test]
+fn a_name_that_breaks_its_case_is_a_warning() {
+    let rows = [
+        ("namespace App.Tenant;\n\nclass Http_Client\n{\n}\n", "3:7 Type name `Http_Client` should be in Pascal case."),
+        ("namespace App.Bad_Part;\n\nclass Box\n{\n}\n", "1:15 Namespace name `Bad_Part` should be in Pascal case."),
+        ("namespace App.Tenant;\n\nenum Status\n{\n    case Paid_Now;\n}\n", "5:10 Enum case name `Paid_Now` should be in Pascal case."),
+        ("namespace App.Tenant;\n\nclass Box\n{\n    private int Total = 0;\n}\n", "5:17 Field name `Total` should be in camel case."),
+        ("namespace App.Tenant;\n\nclass Box\n{\n    public int due_date { get; } = 0;\n}\n", "5:16 Property name `due_date` should be in camel case."),
+        ("namespace App.Tenant;\n\nclass Box\n{\n    public const int maxLines = 1;\n}\n", "5:22 Constant name `maxLines` should be in upper snake case."),
+        ("namespace App.Tenant;\n\nclass Box\n{\n    public int TotalIn() => 1;\n}\n", "5:16 Method name `TotalIn` should be in camel case."),
+        ("namespace App.Tenant;\n\nclass Box\n{\n    public int run(int Count) => Count;\n}\n", "5:24 Parameter name `Count` should be in camel case."),
+        ("namespace App.Tenant;\n\nclass Box\n{\n    public int run()\n    {\n        const line_count = 1;\n        return line_count;\n    }\n}\n", "7:15 Local name `line_count` should be in camel case."),
+        ("namespace App.Tenant;\n\ninterface Priced\n{\n    int Price();\n}\n", "5:9 Method name `Price` should be in camel case."),
+    ];
+
+    for (code, warning) in rows {
+        assert_eq!(issues(code), [warning], "{code}");
+    }
+
+    let named = "namespace App.Billing;\n\npublic class Invoice<TLine>\n{\n    const MAX_LINES = 100;\n    List<TLine> pendingLines = [];\n    public string dueDate { get; set; } = \"\";\n\n    public int totalIn(string currency)\n    {\n        const lineCount = 1;\n        return lineCount;\n    }\n}\n";
+    assert_eq!(issues(named), Vec::<String>::new());
+
+    let overridden = "namespace App.Tenant;\n\nclass Box : Base\n{\n    public override int Total() => 1;\n    public override int Count { get; } = 0;\n}\n";
+    assert_eq!(issues(overridden), Vec::<String>::new());
+
+    let helped = check("src/Report.sharp", "namespace App.Tenant;\n\nclass Box\n{\n    public int TotalIn() => 1;\n}\n");
+    assert_eq!(helped[0].level, mago_reporting::Level::Warning);
+    assert_eq!(helped[0].help.as_deref(), Some("Rename it `totalIn`."));
 }
 
 /// A name that starts with `_` is not capitalized. A `__Something__` name keeps its own error.
@@ -4792,7 +4833,7 @@ fn implements_in_an_enum_is_not_supported_yet_and_a_final_enum_method_is_an_erro
 /// constant value, which may read a case of the enum.
 #[test]
 fn an_enum_constant_follows_the_class_constant_rules() {
-    let code = "namespace App.Tenant;\n\nenum Status : string\n{\n    case Active = \"a\";\n\n    public const Status Default = Status.Active;\n    private const int LIMIT = 3;\n    const string BARE = \"b\";\n    public const int ONE = 1, TWO = 2;\n}\n";
+    let code = "namespace App.Tenant;\n\nenum Status : string\n{\n    case Active = \"a\";\n\n    public const Status DEFAULT = Status.Active;\n    private const int LIMIT = 3;\n    const string BARE = \"b\";\n    public const int ONE = 1, TWO = 2;\n}\n";
 
     assert_eq!(issues(code), ["10:5 A constant declares one name: declare each constant on its own line."]);
 }
@@ -5187,7 +5228,7 @@ fn an_enum_case_of_the_same_file_is_read_through_its_enum_name_in_a_class_and_in
 /// with a method called on it. A case's value reads another class's constant the same way.
 #[test]
 fn a_case_is_read_through_its_enum_name_in_every_place() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Registry;\n\npublic enum Status : string\n{\n    case Active = \"a\";\n    case Paused = Registry.PAUSED;\n\n    public const Status Default = Status.Active;\n\n    public bool active() => this === Status.Active;\n\n    public string label() => this.name;\n}\n\nclass Report\n{\n    public string run(Status status = Status.Active)\n    {\n        if (status === Status.Active) {\n            return Status.Active.label();\n        }\n        return Status.Default.label();\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Registry;\n\npublic enum Status : string\n{\n    case Active = \"a\";\n    case Paused = Registry.PAUSED;\n\n    public const Status DEFAULT = Status.Active;\n\n    public bool active() => this === Status.Active;\n\n    public string label() => this.name;\n}\n\nclass Report\n{\n    public string run(Status status = Status.Active)\n    {\n        if (status === Status.Active) {\n            return Status.Active.label();\n        }\n        return Status.DEFAULT.label();\n    }\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
@@ -5613,7 +5654,7 @@ fn self_in_a_function_type_is_an_error_and_a_list_of_self_is_a_return_type() {
 /// has no constructor, so `new Self(…)` in it is an error.
 #[test]
 fn an_enum_returns_self_holds_union_constants_and_refuses_new_self() {
-    let code = "namespace App;\n\npublic enum Status : string\n{\n    public const int|string Key = 1;\n    public const (int|string)? Code = null;\n\n    case Active = \"a\";\n\n    public static Self first() => Status.Active;\n\n    public static Self? find(string ...codes) => Status.tryFrom(codes[0] ?? \"\");\n\n    public static Self make() => new Self(\"a\");\n}\n";
+    let code = "namespace App;\n\npublic enum Status : string\n{\n    public const int|string KEY = 1;\n    public const (int|string)? CODE = null;\n\n    case Active = \"a\";\n\n    public static Self first() => Status.Active;\n\n    public static Self? find(string ...codes) => Status.tryFrom(codes[0] ?? \"\");\n\n    public static Self make() => new Self(\"a\");\n}\n";
 
     assert_eq!(issues(code), ["14:34 An enum has no constructor: its cases are its only values."]);
 }

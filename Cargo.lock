@@ -1869,6 +1869,7 @@ version = "0.3.1"
 dependencies = [
  "mago-allocator",
  "mago-bytes",
+ "mago-casing",
  "mago-database",
  "mago-names",
  "mago-php-version",
