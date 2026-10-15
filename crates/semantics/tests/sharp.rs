@@ -1501,7 +1501,8 @@ fn an_interface_member_is_public_written_bare() {
 }
 
 /// Spec section 5: a namespace's inside is its folder. A file an `autoload` PSR-4 folder holds declares the namespace
-/// of its folder, or the file declares its way into another namespace, and a test folder's file declares any.
+/// of its folder, or the file declares its way into another namespace, and a test folder's file declares any. A folder
+/// whose name no namespace can take is named to be renamed, since no file could declare its namespace.
 #[test]
 fn a_file_declares_the_namespace_of_its_folder() {
     let messages = |folder: Option<FolderNamespace>, code: &'static str| {
@@ -1528,6 +1529,15 @@ fn a_file_declares_the_namespace_of_its_folder() {
         Vec::<String>::new()
     );
     assert_eq!(messages(None, "namespace App.Tenant.Store;\n\npublic class Order\n{\n}\n"), Vec::<String>::new());
+    assert_eq!(
+        messages(
+            Some(FolderNamespace::Namespace("App.it's\\here".into())),
+            "namespace App;\n\npublic class Order\n{\n}\n"
+        ),
+        [
+            "This file's folder `it's\\here` can't name a namespace: a namespace's inside is its folder, and a namespace takes letters, digits and `_`."
+        ]
+    );
 }
 
 /// Spec section 5's `internal` is an access modifier of a member, a parameter's member, an accessor and a declaration.

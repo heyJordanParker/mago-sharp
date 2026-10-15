@@ -120,6 +120,8 @@ use mago_syntax::token::Precedence;
 use mago_syntax::token::is_sharp_keyword;
 use mago_syntax::utils::pattern::has_type_test;
 use mago_syntax_core::stack::ensure_sufficient_stack;
+use mago_syntax_core::utils::is_part_of_identifier;
+use mago_syntax_core::utils::is_start_of_identifier;
 
 use crate::internal::checker::class_like::check_law_parameters;
 use crate::internal::consts::RESERVED_CLASS_NAMES;
@@ -5009,9 +5011,20 @@ pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) 
     if let Some(FolderNamespace::Namespace(folder)) = &context.source_file.folder_namespace
         && name.is_none_or(|name| name.value() != folder.as_bytes())
     {
-        let issue = Issue::error(format!(
-            "This file's folder holds the namespace `{folder}`, so the file declares `namespace {folder};`."
-        ))
+        // A folder whose name no namespace can take, as `it's`, gives the file a namespace no file can declare.
+        let unnamed = folder.split('.').find(|part| {
+            !part.as_bytes().first().is_some_and(is_start_of_identifier)
+                || !part.as_bytes().iter().all(is_part_of_identifier)
+        });
+        let issue = match unnamed {
+            Some(part) => Issue::error(format!(
+                "This file's folder `{part}` can't name a namespace: a namespace's inside is its folder, and a namespace takes letters, digits and `_`."
+            ))
+            .with_help(format!("Rename the folder `{part}` to the namespace it holds, as in `Store`.")),
+            None => Issue::error(format!(
+                "This file's folder holds the namespace `{folder}`, so the file declares `namespace {folder};`."
+            )),
+        }
         .with_note("A namespace's inside is its folder, so no file declares its way into another namespace.");
 
         context.report(match name {
