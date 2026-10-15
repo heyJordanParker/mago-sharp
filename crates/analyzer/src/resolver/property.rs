@@ -79,6 +79,7 @@ use crate::utils::expression::analyze_member_object;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_enum_case;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_type;
@@ -162,7 +163,7 @@ where
     let is_all_null = object_type.is_null() || object_type.is_void();
 
     if is_null_safe && !for_assignment {
-        check_redundant_nullsafe(context, operator_span, object_expression, &object_type);
+        check_redundant_nullsafe(context, operator_span, object_expression, &object_type, false);
     }
 
     if context.dialect.is_sharp()
@@ -1249,7 +1250,22 @@ where
     // the object is created, so it cannot set one, as C# refuses with CS8852. The property's own accessor body writes
     // its storage through `field`, on `this` only.
     // A struct never changes, spec section 10: every property is set only while the struct is created, `init` or not.
+    // An enum case never changes either, spec section 20: its fields are set only while the case is made.
     let is_struct = declaring_class_metadata.flags.is_struct();
+    if for_assignment
+        && context.dialect.is_sharp()
+        && let Some(case) = display_enum_case(context, declaring_class_metadata)
+    {
+        context.collector.report_with_code(
+            IssueCode::InvalidPropertyWrite,
+            Issue::error(format!("An enum case never changes; return a changed copy made with `{case}(…)`."))
+                .with_annotation(Annotation::primary(selector.span()).with_message("Written here."))
+                .with_note("A case's fields are set only while it is made."),
+        );
+        result.has_error_path = true;
+
+        return None;
+    }
     if for_assignment && context.dialect.is_sharp() && (is_struct || property_metadata.flags.is_init()) {
         let writes_its_storage = is_backing_store_access(object_expr, prop_name, block_context, context.resolved_names);
         let creates_this = is_created_object(object_expr)
@@ -1827,12 +1843,14 @@ fn report_access_on_null<'ctx, A>(
     }
 }
 
-/// Reports a nullsafe operator on an object that is never `null`.
+/// Reports a nullsafe operator on an object that is never `null`. `called` is whether the operator calls the object
+/// itself, as PHP#'s `f?.(x)` does, which a plain call replaces.
 pub(crate) fn check_redundant_nullsafe<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
     operator_span: Span,
     object_expr: &Expression<'arena>,
     object_type: &TUnion,
+    called: bool,
 ) where
     A: Arena,
 {
@@ -1842,7 +1860,16 @@ pub(crate) fn check_redundant_nullsafe<'arena, A>(
         return;
     }
 
-    let (nullsafe, access) = if context.dialect.is_sharp() { ("?.", ".") } else { ("?->", "->") };
+    let (nullsafe, access) = match (context.dialect.is_sharp(), called) {
+        (true, true) => ("?.", ""),
+        (true, false) => ("?.", "."),
+        (false, _) => ("?->", "->"),
+    };
+    let help = if called {
+        "Call the function directly, as in `f(x)`.".to_owned()
+    } else {
+        format!("Consider using the direct property access operator (`{access}`) for clarity.")
+    };
 
     // A PHP# file that writes PHP's `?->` already has a parse error at the operator.
     let written =
@@ -1863,7 +1890,7 @@ pub(crate) fn check_redundant_nullsafe<'arena, A>(
                     .with_message(format!("This expression (type `{object_type_str}`) is never `null`")),
             )
             .with_note(format!("The nullsafe operator (`{nullsafe}`) short-circuits the access if the object is `null`. Since this expression is guaranteed not to be `null`, this check is unnecessary."))
-            .with_help(format!("Consider using the direct property access operator (`{access}`) for clarity.")),
+            .with_help(help),
     );
 
     context.collector.propose_with_code(IssueCode::RedundantNullsafeOperator, issue, |edits| {

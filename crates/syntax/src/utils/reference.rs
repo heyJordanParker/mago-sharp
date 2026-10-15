@@ -12,12 +12,15 @@ use crate::cst::Expression;
 use crate::cst::ForBody;
 use crate::cst::ForeachBody;
 use crate::cst::ForeachTarget;
+use crate::cst::FunctionCall;
 use crate::cst::IfBody;
+use crate::cst::Leave;
 use crate::cst::LegacyArray;
 use crate::cst::List;
 use crate::cst::MatchArm;
 use crate::cst::MethodCall;
 use crate::cst::MethodPartialApplication;
+use crate::cst::NullSafeFunctionCall;
 use crate::cst::PartialApplication;
 use crate::cst::PartialArgument;
 use crate::cst::PartialArgumentList;
@@ -410,13 +413,17 @@ where
             Yield::From(yield_from) => find_method_references_in_expression(yield_from.iterator, predicate),
         },
         Expression::Throw(throw) => find_method_references_in_expression(throw.exception, predicate),
+        Expression::Leave(Leave::Return(r#return)) => {
+            r#return.value.map(|value| find_method_references_in_expression(value, predicate)).unwrap_or_default()
+        }
         Expression::Clone(clone) => find_method_references_in_expression(clone.object, predicate),
         Expression::Call(call) => match call {
-            Call::Function(function_call) => {
+            Call::Function(FunctionCall { function, argument_list })
+            | Call::NullSafeFunction(NullSafeFunctionCall { function, argument_list, .. }) => {
                 let mut references = vec![];
 
-                references.extend(find_method_references_in_expression(function_call.function, predicate));
-                references.extend(find_references_in_argument_list(&function_call.argument_list, predicate));
+                references.extend(find_method_references_in_expression(function, predicate));
+                references.extend(find_references_in_argument_list(argument_list, predicate));
                 references
             }
             Call::Method(method_call) => {

@@ -13,6 +13,9 @@ use mago_syntax::cst::Match;
 use mago_syntax::cst::MatchArm;
 use mago_syntax::cst::MatchDefaultArm;
 use mago_syntax::cst::MatchExpressionArm;
+use mago_syntax::cst::PatternMatch;
+use mago_syntax::cst::PatternMatchArm;
+use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Switch;
 use mago_syntax::cst::SwitchBody;
 use mago_syntax::cst::SwitchBraceDelimitedBody;
@@ -90,6 +93,72 @@ impl Fingerprintable for MatchDefaultArm<'_> {
     {
         "match_default_arm".hash(hasher);
         self.expression.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for PatternMatch<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "pattern_match".hash(hasher);
+        self.expression.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.arms.len().hash(hasher);
+        for arm in &self.arms {
+            arm.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for PatternMatchArm<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        match self {
+            PatternMatchArm::Pattern(arm) => {
+                "pattern_arm".hash(hasher);
+                arm.pattern.fingerprint_with_hasher(hasher, resolved_names, options);
+                if let Some(guard) = &arm.guard {
+                    "when".hash(hasher);
+                    guard.condition.fingerprint_with_hasher(hasher, resolved_names, options);
+                }
+                arm.body.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+            PatternMatchArm::Default(arm) => {
+                "default_arm".hash(hasher);
+                arm.body.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+        }
+    }
+}
+
+impl Fingerprintable for PatternMatchArmBody<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        match self {
+            PatternMatchArmBody::Expression(expression) => {
+                expression.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+            PatternMatchArmBody::Block(block) => block.fingerprint_with_hasher(hasher, resolved_names, options),
+        }
     }
 }
 

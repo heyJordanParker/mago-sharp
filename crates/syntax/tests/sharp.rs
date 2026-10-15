@@ -592,10 +592,10 @@ fn a_type_declared_inside_another_is_one_error_and_its_owner_parses_on() {
     assert_eq!(source(MODULE, error), "public event Paid(int orderId);");
 }
 
-/// A case that carries data, spec section 20, is one error from its name to its closing parenthesis. The case stays
-/// in the enum, and the members after it still parse. PHP keeps its own parse error at the parenthesis.
+/// A case that carries data, spec section 20, parses into `EnumCaseItem::Data` with its fields, and the members after
+/// it parse on. PHP keeps its own parse error at the parenthesis.
 #[test]
-fn a_case_that_carries_data_is_one_not_supported_error_and_the_enum_parses_on() {
+fn a_case_that_carries_data_parses_with_its_fields() {
     const CODE: &str = "enum PaymentResult\n{\n    case Open;\n    case Paid(string transactionId, int cents);\n\n    public int run() { return 1; }\n}\n";
     let arena = LocalArena::new();
 
@@ -612,11 +612,7 @@ fn a_case_that_carries_data_is_one_not_supported_error_and_the_enum_parses_on() 
     );
 
     let program = parse(&arena, "src/PaymentResult.sharp", CODE);
-    let [error] = program.errors else {
-        panic!("expected one error, got {:#?}", program.errors);
-    };
-    assert_eq!(error.to_string(), "A case that carries data is not supported yet in PHP#.");
-    assert_eq!(source(CODE, error), "Paid(string transactionId, int cents)");
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
     let Some(Statement::Enum(payment_result)) = program.statements.first() else {
         panic!("expected an enum, got {:#?}", program.statements);
     };
@@ -625,10 +621,72 @@ fn a_case_that_carries_data_is_one_not_supported_error_and_the_enum_parses_on() 
     else {
         panic!("expected the cases `Open` and `Paid` and the method `run`, got {:#?}", payment_result.members);
     };
-    assert_eq!(open.item.name().value, b"Open");
-    assert!(matches!(paid.item, EnumCaseItem::Unit(_)), "{:#?}", paid.item);
-    assert_eq!(paid.item.name().value, b"Paid");
+    assert!(matches!(open.item, EnumCaseItem::Unit(_)), "{:#?}", open.item);
+    let EnumCaseItem::Data(paid) = &paid.item else {
+        panic!("expected `Paid` to carry data, got {:#?}", paid.item);
+    };
+    assert_eq!(paid.name.value, b"Paid");
+    let fields: Vec<&[u8]> = paid.parameter_list.parameters.iter().map(|field| field.variable.name).collect();
+    assert_eq!(fields, [b"transactionId".as_slice(), b"cents"]);
+    assert_eq!(
+        &CODE[paid.span().start.offset as usize..paid.span().end.offset as usize],
+        "Paid(string transactionId, int cents)"
+    );
     assert_eq!(run.name.value, b"run");
+}
+
+/// Spec section 20.1: `sealed` before `interface` makes a sealed interface, at the start of a file, after attributes
+/// and after modifiers. Before a class, and in a `.php` file, it stays a parse error, and elsewhere it is a name.
+#[test]
+fn a_sealed_interface_parses_and_sealed_stays_a_name_elsewhere() {
+    let arena = LocalArena::new();
+    for code in [
+        "sealed interface Interaction { }\n",
+        "public sealed interface Interaction { }\n",
+        "[Deprecated]\npublic sealed interface Interaction { }\n",
+        "public interface Interaction { }\n",
+    ] {
+        let program = parse(&arena, "src/Interaction.sharp", code);
+        assert!(program.errors.is_empty(), "{code}: {:#?}", program.errors);
+        let Some(Statement::Interface(interface)) = program.statements.first() else {
+            panic!("expected an interface in {code}, got {:#?}", program.statements);
+        };
+        assert_eq!(interface.sealed.is_some(), code.contains("sealed"), "{code}");
+        assert_eq!(
+            &code[interface.span().start.offset as usize..interface.span().end.offset as usize],
+            code.trim_end()
+        );
+    }
+
+    for (path, code) in [
+        ("src/Banner.sharp", "public sealed class Banner { }\n"),
+        ("src/Interaction.php", "<?php\n\nsealed interface Interaction { }\n"),
+    ] {
+        assert!(!parse(&arena, path, code).errors.is_empty(), "{code} parsed");
+    }
+
+    let program = parse(
+        &arena,
+        "src/Shop.sharp",
+        "class Shop\n{\n    void run(int sealed)\n    {\n        const kept = sealed;\n    }\n}\n",
+    );
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+}
+
+/// Spec section 20: a case is a type of its own, written through its enum as `PaymentResult.Paid`, and a named
+/// constructor's name still parses.
+#[test]
+fn a_case_type_is_written_through_its_enum() {
+    const CODE: &str = "class Shop\n{\n    public Shop.of(PaymentResult.Paid paid) : this() { }\n    public void settle(PaymentResult.Paid paid) { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Shop.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let hints: Vec<&[u8]> = Node::Program(program).filter_map(|node| match node {
+        Node::Hint(Hint::Identifier(identifier)) => Some(identifier.value()),
+        _ => None,
+    });
+    assert_eq!(hints, [b"PaymentResult.Paid".as_slice(), b"PaymentResult.Paid"]);
 }
 
 /// A generic struct waits for generics, spec section 10's question 4, so its type parameters are one error, nested
@@ -4383,11 +4441,43 @@ fn grouping(code: &str, expression: &Expression) -> String {
             format!("({} is {pattern})", grouping(code, is.value))
         }
         Expression::As(r#as) => format!("({} as {})", grouping(code, r#as.value), source(code, r#as.hint)),
+        Expression::Conditional(Conditional { condition, then: Some(then), r#else, .. }) => {
+            format!("({} ? {} : {})", grouping(code, condition), grouping(code, then), grouping(code, r#else))
+        }
         Expression::With(with) => {
             format!("({} with {})", grouping(code, with.object), source(code, &with.initializer))
         }
         _ => source(code, expression).to_owned(),
     }
+}
+
+/// Spec section 21: `a ? b : c ? d : e` means `a ? b : (c ? d : e)`, as in C#, Java, TypeScript, Swift and Dart. PHP
+/// reads it as `(a ? b : c) ? d : e`, which PHP 8 refuses.
+#[test]
+fn a_ternary_in_the_else_branch_nests_to_the_right() {
+    const CODE: &str = "class Report\n{\n    int run()\n    {\n        return a ? 1 : b ? 2 : 3;\n        return a ? 1 : b ? 2 : c ? 3 : 4;\n        return a ? b ? 1 : 2 : 3;\n        return a ? 1 : b ?? 2;\n        return (a ? 1 : b) ? 2 : 3;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let groupings: Vec<String> =
+        method_body(program).iter().map(|statement| grouping(CODE, expression(statement))).collect();
+    assert_eq!(
+        groupings,
+        [
+            "(a ? 1 : (b ? 2 : 3))",
+            "(a ? 1 : (b ? 2 : (c ? 3 : 4)))",
+            "(a ? (b ? 1 : 2) : 3)",
+            "(a ? 1 : (b ?? 2))",
+            "((a ? 1 : b) ? 2 : 3)",
+        ]
+    );
+
+    const PHP: &str = "<?php\n$a ? 1 : $b ? 2 : 3;\n";
+    let php = parse(&arena, "src/Report.php", PHP);
+    let groupings: Vec<String> =
+        php.statements.iter().skip(1).map(|statement| grouping(PHP, expression(statement))).collect();
+    assert_eq!(groupings, ["(($a ? 1 : $b) ? 2 : 3)"]);
 }
 
 /// Spec section 16: `with` copies the object before it with the values its initializer names, the shorthand `y` among
@@ -4631,7 +4721,9 @@ fn a_question_mark_before_the_name_an_is_pattern_declares_makes_the_type_nullabl
     };
     for is in [r#if.condition, expression(statement)] {
         let Expression::Is(Is {
-            pattern: Pattern::Type(TypePattern { hint: hint @ Hint::Nullable(_), variable }), ..
+            pattern:
+                Pattern::Type(TypePattern { hint: hint @ Hint::Nullable(_), fields: None, properties: None, variable }),
+            ..
         }) = is
         else {
             panic!("expected `is` and a nullable type, got {is:#?}");
@@ -4653,7 +4745,9 @@ fn a_question_mark_that_ends_an_is_pattern_makes_the_type_nullable() {
     };
     for is in [r#if.condition, expression(returned)] {
         let Expression::Is(Is {
-            pattern: Pattern::Type(TypePattern { hint: Hint::Nullable(_), variable: None }), ..
+            pattern:
+                Pattern::Type(TypePattern { hint: Hint::Nullable(_), fields: None, properties: None, variable: None }),
+            ..
         }) = is
         else {
             panic!("expected `is` and a nullable type, got {is:#?}");
@@ -4745,20 +4839,221 @@ fn a_properties_pattern_tests_each_property_against_a_pattern() {
     assert_eq!(written, ["status: 200", "body: string body"]);
 }
 
+/// Spec section 14.4: `f?.(x)` calls `f` only when it is not null, as C#'s `f?.Invoke(x)`. Each row is the function and
+/// its arguments, on a local, a property and a call's result. In PHP, `?->(` stays an error.
 #[test]
-fn list_and_enum_case_patterns_are_not_supported_yet() {
-    const CODE: &str = "class Report\n{\n    void run()\n    {\n        lines is [Line first, ...List<Line> rest];\n        result is PaymentResult.Paid(string id);\n        result is PaymentResult.Declined declined;\n    }\n}\n";
+fn question_mark_dot_before_arguments_calls_a_function_that_is_there() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        doubler?.(4);\n        this.handler?.(4, 5);\n        this.next()?.();\n    }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
-    let errors: Vec<(String, &str)> =
-        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let calls: Vec<(&str, &str)> = method_body(program)
+        .iter()
+        .map(|statement| {
+            let Expression::Call(Call::NullSafeFunction(call)) = expression(statement) else {
+                panic!("expected `?.(`, got {statement:#?}");
+            };
+
+            (source(CODE, call.function), source(CODE, &call.argument_list))
+        })
+        .collect();
+    assert_eq!(calls, [("doubler", "(4)"), ("this.handler", "(4, 5)"), ("this.next()", "()")]);
+
+    const PHP: &str = "<?php\n$doubler?->(4);\n";
+    assert!(!parse(&arena, "src/Report.php", PHP).errors.is_empty());
+}
+
+/// Spec section 14.4: `a ?? return`, `a ?? continue` and `a ?? break` leave when `a` is null, as Kotlin's `a ?: return`.
+/// Each row is the statement the right side of `??` runs, with no `;`: `return` with and without a value, in a call
+/// argument, `continue` and `break`. `return` after anything but `??` stays a statement, and in PHP `?? return` stays
+/// an error.
+#[test]
+fn return_continue_and_break_after_null_coalesce_leave() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        a ?? return;\n        b ?? return price * 2;\n        charge(c ?? return -1, 2);\n        d ?? continue;\n        e ?? break;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let leaves: Vec<&str> = method_body(program)
+        .iter()
+        .map(|statement| {
+            let coalesce = match expression(statement) {
+                Expression::Call(Call::Function(call)) => call.argument_list.arguments.as_slice()[0].value(),
+                expression => expression,
+            };
+            let Expression::Binary(Binary { rhs: rhs @ Expression::Leave(_), .. }) = coalesce else {
+                panic!("expected `?? return`, `?? continue` or `?? break`, got {statement:#?}");
+            };
+
+            source(CODE, rhs)
+        })
+        .collect();
+    assert_eq!(leaves, ["return", "return price * 2", "return -1", "continue", "break"]);
+
+    const ASSIGNED: &str = "class Report\n{\n    void run()\n    {\n        const a = return;\n    }\n}\n";
+    assert!(!parse(&arena, "src/Report.sharp", ASSIGNED).errors.is_empty());
+
+    const PHP: &str = "<?php\n$a ?? return;\n";
+    assert!(!parse(&arena, "src/Report.php", PHP).errors.is_empty());
+}
+
+/// Spec section 21: a properties pattern can test the type at the same time, and bind, as in C#. Each row is the type,
+/// its properties and its name. A pattern creates a variable only through a typed declaration, so a properties pattern
+/// without a type takes no name.
+#[test]
+fn a_type_with_properties_is_one_pattern_that_may_bind() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        payment is Paid { amount: > 1000 } big;\n        payment is Paid { amount: > 1000 };\n        response is Response { body: ResponseBody { type: \"json\" } } json;\n        match (payment) {\n            Paid { amount: 0 } free when free.ready => {},\n            default => {},\n        }\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let patterns: Vec<&Pattern> = method_body(program)
+        .iter()
+        .flat_map(|statement| match statement {
+            Statement::PatternMatch(r#match) => r#match
+                .arms
+                .iter()
+                .filter_map(|arm| match arm {
+                    PatternMatchArm::Pattern(arm) => Some(arm.pattern),
+                    PatternMatchArm::Default(_) => None,
+                })
+                .collect(),
+            statement => match expression(statement) {
+                Expression::Is(is) => vec![is.pattern],
+                expression => panic!("expected `is`, got {expression:#?}"),
+            },
+        })
+        .collect();
+    let written: Vec<(&str, Option<&str>, Option<&str>)> = patterns
+        .iter()
+        .map(|pattern| {
+            let Pattern::Type(TypePattern { hint, properties, variable, .. }) = pattern else {
+                panic!("expected a type pattern, got {pattern:#?}");
+            };
+
+            (
+                source(CODE, hint),
+                properties.as_ref().map(|properties| source(CODE, properties)),
+                variable.as_ref().map(|variable| source(CODE, variable)),
+            )
+        })
+        .collect();
     assert_eq!(
-        errors,
+        written,
         [
-            ("A list pattern is not supported yet in PHP#.".to_owned(), "[Line first, ...List<Line> rest]"),
-            ("An enum case pattern is not supported yet in PHP#.".to_owned(), "PaymentResult.Paid(string id)"),
-            ("An enum case pattern is not supported yet in PHP#.".to_owned(), "PaymentResult.Declined declined"),
+            ("Paid", Some("{ amount: > 1000 }"), Some("big")),
+            ("Paid", Some("{ amount: > 1000 }"), None),
+            ("Response", Some("{ body: ResponseBody { type: \"json\" } }"), Some("json")),
+            ("Paid", Some("{ amount: 0 }"), Some("free")),
+        ]
+    );
+
+    // The parser reads a name after a properties pattern without a type, and the semantic check refuses it, so the
+    // rest of the file is still checked.
+    const UNTYPED: &str = "class Report\n{\n    void run()\n    {\n        response is { status: 200 } ok;\n    }\n}\n";
+    let untyped = parse(&arena, "src/Report.sharp", UNTYPED);
+    assert!(untyped.errors.is_empty(), "{:#?}", untyped.errors);
+    let Expression::Is(Is { pattern: Pattern::Properties(properties), .. }) = expression(&method_body(untyped)[0])
+    else {
+        panic!("expected `is` with a properties pattern");
+    };
+    assert_eq!(
+        (source(UNTYPED, properties), properties.variable.as_ref().map(|variable| source(UNTYPED, variable))),
+        ("{ status: 200 } ok", Some("ok"))
+    );
+}
+
+/// Spec section 21: a list pattern tests a list's elements, each against any pattern, and a rest anywhere among them
+/// takes the elements the others leave, named with its type or bare. Each row is the elements in order, a rest marked
+/// with whether it is named. The parser takes a second rest, which the semantic check refuses.
+#[test]
+fn a_list_pattern_tests_each_element_and_takes_the_rest() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        lines is [];\n        lines is [Line only];\n        lines is [Line first, ...List<Line> rest];\n        lines is [> 0, not null, { total: 1 }, ...List<int> others];\n        lines is [[1, int nested]];\n        lines is [...List<Line> before, Line last];\n        lines is [Line first, ..., Line last];\n        lines is [..., Line middle, ...];\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let lists: Vec<Vec<String>> = method_body(program)
+        .iter()
+        .map(|statement| {
+            let Expression::Is(Is { pattern: Pattern::List(list), .. }) = expression(statement) else {
+                panic!("expected a list pattern, got {statement:#?}");
+            };
+
+            list.elements
+                .iter()
+                .map(|element| match element {
+                    ListPatternElement::Pattern(pattern) => source(CODE, *pattern).to_owned(),
+                    ListPatternElement::Rest(rest) => {
+                        format!(
+                            "rest {}, named: {}",
+                            source(CODE, rest),
+                            rest.hint.is_some() && rest.variable.is_some()
+                        )
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        lists,
+        [
+            vec![],
+            vec!["Line only".to_owned()],
+            vec!["Line first".to_owned(), "rest ...List<Line> rest, named: true".to_owned()],
+            vec![
+                "> 0".to_owned(),
+                "not null".to_owned(),
+                "{ total: 1 }".to_owned(),
+                "rest ...List<int> others, named: true".to_owned()
+            ],
+            vec!["[1, int nested]".to_owned()],
+            vec!["rest ...List<Line> before, named: true".to_owned(), "Line last".to_owned()],
+            vec!["Line first".to_owned(), "rest ..., named: false".to_owned(), "Line last".to_owned()],
+            vec!["rest ..., named: false".to_owned(), "Line middle".to_owned(), "rest ..., named: false".to_owned()],
+        ]
+    );
+}
+
+/// Spec section 21: a case of an enum with data is matched by its fields in parentheses, its properties or its name,
+/// as a type pattern whose type is the case.
+#[test]
+fn an_enum_case_pattern_is_a_type_pattern_of_the_case() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        result is PaymentResult.Paid(string id);\n        result is PaymentResult.Declined declined;\n        result is PaymentResult.Paid(> 0, string note) { id: 1 } paid;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    // Each row is the case, its fields, its properties and its name.
+    let patterns: Vec<String> = method_body(program)
+        .iter()
+        .map(|statement| {
+            let Expression::Is(Is { pattern: Pattern::Type(pattern), .. }) = expression(statement) else {
+                panic!("expected a type pattern, got {statement:#?}");
+            };
+            let fields: Vec<&str> = pattern
+                .fields
+                .iter()
+                .flat_map(|fields| fields.fields.iter())
+                .map(|field| source(CODE, *field))
+                .collect();
+
+            format!(
+                "{} | {} | {} | {}",
+                source(CODE, &pattern.hint),
+                fields.join(", "),
+                pattern.properties.map_or("", |properties| source(CODE, properties)),
+                pattern.variable.as_ref().map_or("", |variable| source(CODE, variable)),
+            )
+        })
+        .collect();
+    assert_eq!(
+        patterns,
+        [
+            "PaymentResult.Paid | string id |  | ",
+            "PaymentResult.Declined |  |  | declined",
+            "PaymentResult.Paid | > 0, string note | { id: 1 } | paid",
         ]
     );
 }

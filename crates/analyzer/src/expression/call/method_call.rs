@@ -46,7 +46,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_static_write;
 use crate::error::AnalysisError;
-use crate::expression::access::analyze_through_class_value;
+use crate::expression::access::analyze_through_value;
 use crate::expression::access::refuse_statics_of_no_class;
 use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
@@ -193,7 +193,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NullSafeMethodCall<'arena> {
         if context.dialect.is_sharp()
             && let Some(object_type) = artifacts.get_expression_type(self.object).cloned()
         {
-            check_redundant_nullsafe(context, self.question_mark_arrow, self.object, &object_type);
+            check_redundant_nullsafe(context, self.question_mark_arrow, self.object, &object_type, false);
         }
 
         if context.plugin_registry.has_nullsafe_method_call_hooks() {
@@ -372,7 +372,7 @@ where
         }
         let call = StaticCall { class: object, method: selector, argument_list, span };
 
-        return analyze_through_class_value(
+        return analyze_through_value(
             context,
             block_context,
             artifacts,

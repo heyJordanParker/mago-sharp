@@ -376,6 +376,7 @@ where
             Expression::Call(call) => {
                 let (receiver, arguments) = match call {
                     CallExpression::Function(call) => (None, &call.argument_list),
+                    CallExpression::NullSafeFunction(call) => (None, &call.argument_list),
                     CallExpression::Method(call) => (Some(call.object), &call.argument_list),
                     CallExpression::NullSafeMethod(call) => (Some(call.object), &call.argument_list),
                     CallExpression::StaticMethod(call) => (None, &call.argument_list),
@@ -692,6 +693,7 @@ where
         let span = call.span();
         let (receiver, arguments, function) = match call {
             CallExpression::Function(call) => (None, &call.argument_list, Some(call.function)),
+            CallExpression::NullSafeFunction(call) => (None, &call.argument_list, Some(call.function)),
             CallExpression::Method(call) => (Some(call.object), &call.argument_list, None),
             CallExpression::NullSafeMethod(call) => (Some(call.object), &call.argument_list, None),
             CallExpression::StaticMethod(call) => (None, &call.argument_list, None),

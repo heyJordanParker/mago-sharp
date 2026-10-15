@@ -28,6 +28,7 @@ use mago_sharp_bridge::sharp_node;
 use mago_sharp_bridge::sharp_str;
 use mago_sharp_bridge::sharp_value;
 use mago_sharp_bridge::unit::encode;
+use xxhash_rust::xxh3::xxh3_64;
 
 /// A file the checker accepted and its lowered unit, or the checker's refusal.
 struct Lowered(Result<Unit, Vec<String>>);
@@ -329,10 +330,11 @@ fn php_syntax_returns_a_parse_error_and_no_nodes() {
 
 #[test]
 fn a_construct_outside_the_slice_returns_its_not_supported_error() {
-    let lowered =
-        Lowered::new(&method("        switch (extra) {\n            default: break;\n        }\n        return 1;\n"));
+    let lowered = Lowered::new(&method(
+        "        while (extra > 0) {\n            while (extra > 1) {\n                break 2;\n            }\n        }\n        return 1;\n",
+    ));
 
-    assert_eq!(lowered.diagnostics(), ["9:9 compile error: This statement is not supported yet in PHP#."]);
+    assert_eq!(lowered.diagnostics(), ["11:17 compile error: This statement is not supported yet in PHP#."]);
 }
 
 /// Spec section 2: each of the 43 PHP keywords PHP# doesn't use is a plain name, and so is a word that means something
@@ -414,7 +416,7 @@ fn a_word_php_sharp_does_not_reserve_names_a_property_a_local_and_a_parameter() 
         assert_eq!(
             lowered.declared("read"),
             format!(
-                "METHOD [1] \"read\" @13-13\n  PARAM_LIST\n    PARAM\n      ZVAL [1] \"int\"\n      ZVAL \"{word}\"\n      null\n      null\n      null\n      null\n  null\n  STMT_LIST\n    RETURN\n      VAR\n        ZVAL \"{word}\"\n  ZVAL [1] \"int\"\n  null\n"
+                "METHOD [1] \"read\" @13-13\n  PARAM_LIST\n    PARAM\n      ZVAL [1] \"int\"\n      ZVAL \"{word}\"\n      null\n      null\n      null\n      null\n  null\n  STMT_LIST\n    RETURN\n      VAR\n        ZVAL \"{word}\"\n  SHARP_TYPE_ARGS\n    ZVAL [1] \"int\"\n    ZVAL \"Function<int(int)>\"\n  null\n"
             ),
             "{word}"
         );
@@ -761,8 +763,9 @@ fn a_file_with_extern_declarations_lowers_to_the_nodes_it_lowers_to_without_them
     assert_eq!(with.tree(), without.tree());
 }
 
-/// `foreign` tells only the checker which effect a class's objects carry, spec section 29, so the engine gets the
-/// plain class, which a test fake may extend.
+/// `foreign` tells the checker which effect a class's objects carry, spec section 29, so the engine gets the plain
+/// class, which a test fake may extend. Only the function type of each method lists the effect, as `is` tests a
+/// closure of it.
 #[test]
 fn a_foreign_class_lowers_to_the_nodes_of_the_plain_class() {
     let foreign = Lowered::new(
@@ -772,7 +775,10 @@ fn a_foreign_class_lowers_to_the_nodes_of_the_plain_class() {
         "namespace App.Billing;\n\npublic class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
     );
 
-    assert_eq!(foreign.tree(), plain.tree());
+    assert_eq!(
+        foreign.tree(),
+        plain.tree().replace("\"Function<int(int)>\"", "\"Function<int(int) uses App.Billing.Payments>\"")
+    );
 }
 
 /// A law, spec section 28, is checked and never runs, so the engine gets the same tree without it. A module of laws
@@ -1169,7 +1175,9 @@ fn a_file_without_a_namespace_declares_its_classes_globally() {
 /// }
 /// ```
 ///
-/// `[1]` on the method is `ZEND_ACC_PUBLIC`, and `[1]` on `int` is `ZEND_NAME_NOT_FQ`.
+/// `[1]` on the method is `ZEND_ACC_PUBLIC`, and `[1]` on `int` is `ZEND_NAME_NOT_FQ`. The return type sits in a
+/// `SHARP_TYPE_ARGS` with the method's whole function type, which a closure of the method keeps for `is`, spec section
+/// 21.
 #[test]
 fn a_method_is_a_public_function_with_its_return_type_after_its_parameters() {
     let lowered = Lowered::new(&method("        return extra;\n"));
@@ -1196,7 +1204,9 @@ fn a_method_is_a_public_function_with_its_return_type_after_its_parameters() {
                     RETURN
                       VAR
                         ZVAL "extra"
-                  ZVAL [1] "int"
+                  SHARP_TYPE_ARGS
+                    ZVAL [1] "int"
+                    ZVAL "Function<int(int)>"
                   null
               null
               null
@@ -2023,7 +2033,9 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                         null
                     null
                     STMT_LIST
-                    ZVAL [1] "void"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "void"
+                      ZVAL "Function<void(string?)>"
                     null
                   METHOD [17] "run" @13-20
                     PARAM_LIST
@@ -2109,7 +2121,9 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                                 ZVAL "l"
                         VAR
                           ZVAL "value#1"
-                    ZVAL [1] "void"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "void"
+                      ZVAL "Function<void()>"
                     null
                   METHOD [20] "#statics" @5-5
                     PARAM_LIST
@@ -2260,7 +2274,9 @@ fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
                           ZVAL "Tally"
                           ZVAL "doubled#get"
                           ARG_LIST
-                  ZVAL [1] "int"
+                  SHARP_TYPE_ARGS
+                    ZVAL [1] "int"
+                    ZVAL "Function<int()>"
                   null
               null
               null
@@ -3478,7 +3494,9 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                                 VAR
                                   ZVAL "this"
                                 ZVAL "label"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<string()>"
                           null
                       ASSIGN
                         VAR
@@ -4136,7 +4154,9 @@ fn parameters_carry_their_type_name_and_default() {
     assert_eq!(
         lowered.render(lowered.child(method as u32, 3)),
         indoc! {r#"
-            ZVAL "Lib\\Calc"
+            SHARP_TYPE_ARGS
+              ZVAL "Lib\\Calc"
+              ZVAL "Function<Lib.Calc(Lib.Calc, float, int)>"
         "#}
     );
 }
@@ -4178,7 +4198,9 @@ fn a_nullable_type_is_its_type_with_the_nullable_flag() {
     assert_eq!(
         lowered.render(lowered.child(method as u32, 3)),
         indoc! {r#"
-            ZVAL [256] "Lib\\Calc"
+            SHARP_TYPE_ARGS
+              ZVAL [256] "Lib\\Calc"
+              ZVAL "Function<Lib.Calc?(int?, Lib.Calc?)>"
         "#}
     );
 }
@@ -4236,7 +4258,9 @@ fn a_list_type_is_the_array_type_and_a_map_type_its_class() {
     assert_eq!(
         lowered.render(lowered.child(method as u32, 3)),
         indoc! {r#"
-            ZVAL [256] "Sharp\\Map"
+            SHARP_TYPE_ARGS
+              ZVAL [256] "Sharp\\Map"
+              ZVAL "Function<Map<string, List<int>>?(List<int>, Map<string, int>?)>"
         "#}
     );
 }
@@ -4290,7 +4314,9 @@ fn a_collection_with_a_nullable_type_argument_is_the_type_of_the_collection() {
     assert_eq!(
         lowered.render(lowered.child(method as u32, 3)),
         indoc! {r#"
-            ZVAL [256] "Sharp\\Map"
+            SHARP_TYPE_ARGS
+              ZVAL [256] "Sharp\\Map"
+              ZVAL "Function<Map<string, Any?>?(List<int?>, Map<string, List<Lib.Calc?>>, List<(int|string)?>)>"
         "#}
     );
 }
@@ -7344,7 +7370,9 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
                         ARG_LIST
                           VAR
                             ZVAL "prefix"
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<bool(Set<string>)>"
                   null
               ASSIGN
                 VAR
@@ -7387,7 +7415,9 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
                           ZVAL "tags"
                         ZVAL "count"
                         ARG_LIST
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<int(Set<string>)>"
                   null
               RETURN
                 CONDITIONAL
@@ -7693,7 +7723,9 @@ fn a_function_type_is_the_closure_class() {
     assert_eq!(
         lowered.render(lowered.child(method as u32, 3)),
         indoc! {r#"
-            ZVAL "Closure"
+            SHARP_TYPE_ARGS
+              ZVAL "Closure"
+              ZVAL "Function<Function<int(string, int)>(Function<int(string, int)>, Function<void()>?)>"
         "#}
     );
 }
@@ -7745,11 +7777,12 @@ fn a_nullable_function_type_with_effects_is_the_nullable_closure_class() {
 /// private \Sharp\Map $handlers;
 /// ```
 ///
-/// A `Map` is its class, whatever its value type, under the type text a write from plain PHP is checked against.
+/// A `Map` is its class, whatever its value type, under the type text a write from plain PHP is checked against, whose
+/// function type lists its effects by their full names, sorted.
 #[test]
 fn a_map_of_function_types_with_two_effects_is_the_map_class() {
     let (hint, declaration) = lowered_field(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Function<Charge(Cart) uses Mail, Http>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Mail, Http>> handlers)\n    {\n        this.handlers = handlers;\n    }\n}\n",
     );
 
     assert_eq!(
@@ -7757,7 +7790,7 @@ fn a_map_of_function_types_with_two_effects_is_the_map_class() {
         indoc! {r#"
             SHARP_TYPE_ARGS
               ZVAL "Sharp\\Map"
-              ZVAL "Map<string, Function<App.Shop.Charge(App.Shop.Cart)>>"
+              ZVAL "Map<string, Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Http, Sharp.Mail>>"
         "#}
     );
     assert_eq!(declaration, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"handlers\"\n    null\n    null\n    null\n");
@@ -7876,7 +7909,9 @@ fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
                             ZVAL "this"
                           ZVAL "rows"
                         ZVAL 0
-                  ZVAL "Lib\\DatabaseEntity"
+                  SHARP_TYPE_ARGS
+                    ZVAL "Lib\\DatabaseEntity"
+                    ZVAL "Function<$0()>"
                   null
                 METHOD [1] "find" @16-16
                   PARAM_LIST
@@ -7891,7 +7926,9 @@ fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
                   STMT_LIST
                     RETURN
                       ZVAL null
-                  ZVAL [256] "Lib\\DatabaseEntity"
+                  SHARP_TYPE_ARGS
+                    ZVAL [256] "Lib\\DatabaseEntity"
+                    ZVAL "Function<$0?(int)>"
                   null
                 SHARP_CLASS_METADATA
                   null
@@ -7928,10 +7965,15 @@ fn a_type_parameter_without_a_bound_is_mixed_alone_nullable_or_in_a_union() {
         }
     "});
     let members = lowered.child(lowered.child(lowered.root(), 1), 2);
+    // The PHP return type is the first child of the `SHARP_TYPE_ARGS` that holds the method's function type.
     let signature = |index: u32| {
         let method = lowered.child(members, index);
 
-        format!("{}{}", lowered.render(lowered.child(method, 0)), lowered.render(lowered.child(method, 3)))
+        format!(
+            "{}{}",
+            lowered.render(lowered.child(method, 0)),
+            lowered.render(lowered.child(lowered.child(method, 3), 0))
+        )
     };
 
     assert_eq!(
@@ -8010,7 +8052,9 @@ fn a_type_parameter_bounded_by_object_is_php_object() {
               SHARP_TYPE_ARGS
                 ZVAL "Object"
                 null
-            ZVAL [1] "Object"
+            SHARP_TYPE_ARGS
+              ZVAL [1] "Object"
+              ZVAL "Function<#0(#0)>"
         "#}
     );
 }
@@ -8065,11 +8109,13 @@ fn a_type_parameter_bound_by_several_classes_is_their_intersection() {
     assert_eq!(
         lowered.render(lowered.child(method, 3)),
         indoc! {r#"
-            TYPE_UNION
-              TYPE_INTERSECTION
-                ZVAL "Lib\\DatabaseEntity"
-                ZVAL "Lib\\Shareable"
-              ZVAL [1] "null"
+            SHARP_TYPE_ARGS
+              TYPE_UNION
+                TYPE_INTERSECTION
+                  ZVAL "Lib\\DatabaseEntity"
+                  ZVAL "Lib\\Shareable"
+                ZVAL [1] "null"
+              ZVAL "Function<$0?($0)>"
         "#}
     );
 }
@@ -8205,7 +8251,9 @@ fn a_generic_class_type_is_its_class_and_a_class_value_type_is_string() {
     assert_eq!(
         lowered.render(lowered.child(load, 3)),
         indoc! {r#"
-            ZVAL [257] "string"
+            SHARP_TYPE_ARGS
+              ZVAL [257] "string"
+              ZVAL "Function<Class<Lib.Model>?(Class<Lib.Model>, Class<Lib.Model>?)>"
         "#}
     );
     assert_eq!(
@@ -8357,7 +8405,9 @@ fn any_and_nullable_any_are_mixed() {
     assert_eq!(
         lowered.render(lowered.child(method as u32, 3)),
         indoc! {r#"
-            ZVAL [1] "mixed"
+            SHARP_TYPE_ARGS
+              ZVAL [1] "mixed"
+              ZVAL "Function<Any(Any, Any?)>"
         "#}
     );
     assert_eq!(
@@ -8527,7 +8577,8 @@ fn a_union_type_is_one_type_union_list_of_its_types_in_written_order() {
     let field = lowered.child(lowered.child(members, 0), 0);
     let method = lowered.child(members, 1);
     let parameter = lowered.child(lowered.child(lowered.child(method, 0), 0), 0);
-    let return_type = lowered.child(method, 3);
+    // The PHP return type, inside the `SHARP_TYPE_ARGS` that holds the method's function type.
+    let return_type = lowered.child(lowered.child(method, 3), 0);
 
     assert_eq!(
         lowered.render(field),
@@ -8573,7 +8624,8 @@ fn a_nullable_union_is_its_type_union_list_with_null_last() {
     assert_eq!(lowered.diagnostics(), Vec::<String>::new());
     let method = lowered.child(lowered.child(lowered.child(lowered.root(), 2), 2), 0);
     let parameters = lowered.child(method, 0);
-    let return_type = lowered.child(method, 3);
+    // The PHP return type, inside the `SHARP_TYPE_ARGS` that holds the method's function type.
+    let return_type = lowered.child(lowered.child(method, 3), 0);
 
     assert_eq!(
         lowered.render(parameters),
@@ -9195,7 +9247,9 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
                           ZVAL "App\\Box"
                           ARG_LIST
                         ZVAL "#0"
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<App.Box<#0>()>"
                   null
         "##}
     );
@@ -9228,9 +9282,13 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
                                 SHARP_TYPE_ARGS
                                   null
                                   ZVAL "#0"
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "Function<List<#0>()>"
                         null
-                        null
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<Function<List<#0>()>()>"
                   null
         "##}
     );
@@ -9492,7 +9550,12 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
         );
         assert!(tree.contains(&typed), "{parameter}: {tree}");
     }
-    assert_eq!(tree.matches("SHARP_TYPE_ARGS\n          ZVAL").count(), 8, "{tree}");
+    // Each of the eight properties above, and no other: a method's result type holds its function type instead.
+    assert_eq!(
+        tree.matches("SHARP_TYPE_ARGS\n          ZVAL [256] \"App\\\\Box\"\n          ZVAL \"App.").count(),
+        8,
+        "{tree}"
+    );
     // PHP's typed property check runs the check, so a property takes no `set` hook for it: only a written `set` or
     // `init` body is a hook.
     assert!(!tree.contains("VERIFY_TYPE_ARGS ["), "{tree}");
@@ -9580,7 +9643,9 @@ fn every_function_plain_php_calls_checks_its_parameters_type_arguments() {
                       ZVAL "App.PaginatedList<App.Order>"
                   null
                   ZVAL 1
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<int(App.PaginatedList<App.Order>)>"
                   null
         "#}
     );
@@ -9612,7 +9677,9 @@ fn every_function_plain_php_calls_checks_its_parameters_type_arguments() {
                       VAR
                         ZVAL "seen"
                       ZVAL 1
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<void(App.PaginatedList<App.Order>)>"
                   null
         "#}
     );
@@ -9889,7 +9956,12 @@ fn a_generic_method_call_on_a_list_carries_no_type_arguments() {
         &[],
     );
 
-    assert!(!lowered.body_of("labels").contains("SHARP_TYPE_ARGS"), "{}", lowered.body_of("labels"));
+    // A call with type arguments is a `SHARP_TYPE_ARGS` around the call. The lambda's own holds its function type.
+    assert!(
+        lowered.body_of("labels").starts_with("STMT_LIST\n  RETURN\n    METHOD_CALL\n"),
+        "{}",
+        lowered.body_of("labels")
+    );
 }
 
 /// A PHP# generic class ends with its metadata, a `SHARP_TYPE_ARGS` without a `new` whose second text is its bounds:
@@ -10367,6 +10439,265 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
 /// }
 /// ```
 ///
+/// ```php
+/// abstract class CheckoutState
+/// {
+///     public function label(): string { return 'checkout'; }
+///     public static function op_Equality(mixed $a, mixed $b): bool
+///     {
+///         if ($a instanceof \App\CheckoutState\Open && $b instanceof \App\CheckoutState\Open) { return true; }
+///         if ($a instanceof \App\CheckoutState\Paying && $b instanceof \App\CheckoutState\Paying) { return $a->gateway === $b->gateway; }
+///         return $a === $b;
+///     }
+/// }
+/// final class CheckoutState\Open extends \App\CheckoutState implements \Sharp\Struct
+/// {
+///     private static $instance;
+///     private function __construct() {}
+///     public static function instance(): self { return self::$instance ??= new self(); }
+/// }
+/// final class CheckoutState\Paying extends \App\CheckoutState implements \Sharp\Struct
+/// {
+///     public function __construct(public readonly string $gateway) {}
+/// }
+/// class Shop
+/// {
+///     public function open(): \App\CheckoutState { return \App\CheckoutState\Open::instance(); }
+///     public function pay(): \App\CheckoutState { return new \App\CheckoutState\Paying(gateway: 'stripe'); }
+///     public function same(\App\CheckoutState $a, \App\CheckoutState $b): bool { return \App\CheckoutState::op_Equality($a, $b); }
+/// }
+/// ```
+///
+/// Spec section 20: an enum with a case that carries data is an abstract class, `[64]`
+/// `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS`, and each case a final subclass named in the enum's namespace. A plain case is the
+/// one object its class's `instance()` gives, and `CheckoutState.Paying(…)` creates its case. An enum compares by value,
+/// sections 19 and 20, so `==` runs the enum's `op_Equality`, which compares two of the same case field by field and
+/// anything else as identical, as a struct's does. A plain case is a case with no fields, so the copy `unserialize`
+/// makes of it is equal to it. Each case implements `\Sharp\Struct`, so a `Map` or a `Set` hashes it by its fields, as
+/// it hashes a struct.
+#[test]
+fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic enum CheckoutState\n{\n    case Open;\n    case Paying(string gateway);\n\n    public string label() => \"checkout\";\n}\n\npublic class Shop\n{\n    public CheckoutState open() => CheckoutState.Open;\n    public CheckoutState pay() => CheckoutState.Paying(gateway: \"stripe\");\n    public bool same(CheckoutState a, CheckoutState b) => a == b;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App"
+                null
+              CLASS [64] "CheckoutState" @3-9
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "label" @8-8
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ZVAL "checkout"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "Function<string()>"
+                    null
+                  METHOD [17] "op_Equality" @3-3
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "mixed"
+                        ZVAL "a"
+                        null
+                        null
+                        null
+                        null
+                      PARAM
+                        ZVAL [1] "mixed"
+                        ZVAL "b"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      IF
+                        IF_ELEM
+                          AND
+                            INSTANCEOF
+                              VAR
+                                ZVAL "a"
+                              ZVAL "App\\CheckoutState\\Open"
+                            INSTANCEOF
+                              VAR
+                                ZVAL "b"
+                              ZVAL "App\\CheckoutState\\Open"
+                          STMT_LIST
+                            RETURN
+                              ZVAL true
+                      IF
+                        IF_ELEM
+                          AND
+                            INSTANCEOF
+                              VAR
+                                ZVAL "a"
+                              ZVAL "App\\CheckoutState\\Paying"
+                            INSTANCEOF
+                              VAR
+                                ZVAL "b"
+                              ZVAL "App\\CheckoutState\\Paying"
+                          STMT_LIST
+                            RETURN
+                              BINARY_OP [16]
+                                PROP
+                                  VAR
+                                    ZVAL "a"
+                                  ZVAL "gateway"
+                                PROP
+                                  VAR
+                                    ZVAL "b"
+                                  ZVAL "gateway"
+                      RETURN
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "a"
+                          VAR
+                            ZVAL "b"
+                    ZVAL [1] "bool"
+                    null
+                null
+                null
+              CLASS [32] "CheckoutState\\Open" @5-5
+                ZVAL "App\\CheckoutState"
+                NAME_LIST
+                  ZVAL "Sharp\\Struct"
+                STMT_LIST
+                  PROP_GROUP [20]
+                    null
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "instance"
+                        null
+                        null
+                        null
+                    null
+                  METHOD [4] "__construct" @5-5
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                    null
+                    null
+                  METHOD [17] "instance" @5-5
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ASSIGN_COALESCE
+                          STATIC_PROP
+                            ZVAL [1] "self"
+                            ZVAL "instance"
+                          NEW
+                            ZVAL [1] "self"
+                            ARG_LIST
+                    ZVAL [1] "self"
+                    null
+                null
+                null
+              CLASS [32] "CheckoutState\\Paying" @6-6
+                ZVAL "App\\CheckoutState"
+                NAME_LIST
+                  ZVAL "Sharp\\Struct"
+                STMT_LIST
+                  METHOD [1] "__construct" @6-6
+                    PARAM_LIST
+                      PARAM [129]
+                        ZVAL [1] "string"
+                        ZVAL "gateway"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    null
+                    null
+                null
+                null
+              CLASS "Shop" @11-16
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "open" @13-13
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_CALL
+                          ZVAL "App\\CheckoutState\\Open"
+                          ZVAL "instance"
+                          ARG_LIST
+                    SHARP_TYPE_ARGS
+                      ZVAL "App\\CheckoutState"
+                      ZVAL "Function<App.CheckoutState()>"
+                    null
+                  METHOD [1] "pay" @14-14
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        NEW
+                          ZVAL "App\\CheckoutState\\Paying"
+                          ARG_LIST
+                            NAMED_ARG
+                              ZVAL "gateway"
+                              ZVAL "stripe"
+                    SHARP_TYPE_ARGS
+                      ZVAL "App\\CheckoutState"
+                      ZVAL "Function<App.CheckoutState()>"
+                    null
+                  METHOD [1] "same" @15-15
+                    PARAM_LIST
+                      PARAM
+                        ZVAL "App\\CheckoutState"
+                        ZVAL "a"
+                        null
+                        null
+                        null
+                        null
+                      PARAM
+                        ZVAL "App\\CheckoutState"
+                        ZVAL "b"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_CALL
+                          ZVAL "App\\CheckoutState"
+                          ZVAL "op_Equality"
+                          ARG_LIST
+                            VAR
+                              ZVAL "a"
+                            VAR
+                              ZVAL "b"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "bool"
+                      ZVAL "Function<bool(App.CheckoutState, App.CheckoutState)>"
+                    null
+                null
+                null
+        "#}
+    );
+}
+
 /// Spec section 15: an event is a final class, `[32]` `ZEND_ACC_FINAL`, whose constructor promotes each parameter to a
 /// public get-only property, `[129]` `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, and its header is the `implements` name
 /// list. An interface's get-only property, written bare, is a public property, `[1]`, with an abstract `get` hook.
@@ -10459,7 +10790,9 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
                           ARG_LIST
                             VAR
                               ZVAL "orderId"
-                    ZVAL "App\\OrderPaid"
+                    SHARP_TYPE_ARGS
+                      ZVAL "App\\OrderPaid"
+                      ZVAL "Function<App.OrderPaid(int)>"
                     null
                 null
                 null
@@ -10536,7 +10869,9 @@ fn virtual_lowers_to_nothing_and_override_to_the_override_attribute() {
                     STMT_LIST
                       RETURN
                         ZVAL 1
-                    ZVAL [1] "int"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "int"
+                      ZVAL "Function<int()>"
                     null
                   METHOD [1] "name" @9-12
                     PARAM_LIST
@@ -10544,7 +10879,9 @@ fn virtual_lowers_to_nothing_and_override_to_the_override_attribute() {
                     STMT_LIST
                       RETURN
                         ZVAL "thumbnail"
-                    ZVAL [1] "string"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "Function<string()>"
                     ATTRIBUTE_LIST
                       ATTRIBUTE_GROUP
                         ATTRIBUTE
@@ -10747,7 +11084,9 @@ fn internal_runs_as_public() {
                   STMT_LIST
                     RETURN
                       ZVAL 1
-                  ZVAL [1] "int"
+                  SHARP_TYPE_ARGS
+                    ZVAL [1] "int"
+                    ZVAL "Function<int()>"
                   null
               null
               null
@@ -11244,7 +11583,9 @@ fn self_is_static_and_required_adds_no_flag() {
                       ARG_LIST
                         VAR
                           ZVAL "row"
-                TYPE [15]
+                SHARP_TYPE_ARGS
+                  TYPE [15]
+                  ZVAL "Function<App.Tenant.DatabaseEntity(Lib.Row)>"
                 null
               METHOD [17] "find" @16-16
                 PARAM_LIST
@@ -11270,7 +11611,9 @@ fn self_is_static_and_required_adds_no_flag() {
                           VAR
                             ZVAL "row"
                       ZVAL null
-                TYPE [271]
+                SHARP_TYPE_ARGS
+                  TYPE [271]
+                  ZVAL "Function<App.Tenant.DatabaseEntity?(Lib.Row)>"
                 null
               METHOD [17] "counted" @18-18
                 PARAM_LIST
@@ -11290,9 +11633,11 @@ fn self_is_static_and_required_adds_no_flag() {
                       ARG_LIST
                         VAR
                           ZVAL "row"
-                TYPE_UNION
-                  TYPE [15]
-                  ZVAL [1] "int"
+                SHARP_TYPE_ARGS
+                  TYPE_UNION
+                    TYPE [15]
+                    ZVAL [1] "int"
+                  ZVAL "Function<App.Tenant.DatabaseEntity|int(Lib.Row)>"
                 null
         "#}
     );
@@ -11904,6 +12249,62 @@ fn a_null_safe_method_value_or_property_call_is_a_conditional_over_the_rest_of_t
                         ZVAL 1
                     ZVAL "count"
                     ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
+/// $a = ($doubler === null ? null : $doubler(4));
+/// return (($nullsafe#1 = $this->next()) === null ? null : $nullsafe#1($a ?? 0));
+/// ```
+///
+/// Spec section 14.4: PHP has no `?->` that calls a function, so `f?.(x)` is a conditional on `f`, as a null-safe
+/// property call is. A function other than a local goes into a hidden variable, so it runs once.
+#[test]
+fn a_null_safe_function_call_is_a_conditional_on_the_function() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public int? run(Function<int(int)>? doubler)\n    {\n        const a = doubler?.(4);\n        return this.next()?.(a ?? 0);\n    }\n\n    private Function<int(int)>? next() => null;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "doubler"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    VAR
+                      ZVAL "doubler"
+                    ARG_LIST
+                      ZVAL 4
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    ASSIGN
+                      VAR
+                        ZVAL "nullsafe#1"
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "next"
+                        ARG_LIST
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    VAR
+                      ZVAL "nullsafe#1"
+                    ARG_LIST
+                      COALESCE
+                        VAR
+                          ZVAL "a"
+                        ZVAL 0
         "#}
     );
 }
@@ -13308,7 +13709,9 @@ fn position_current_is_a_new_position_of_its_file_line_column_and_enclosing_meth
                       ZVAL 10
                       ZVAL 29
                       ZVAL "App.Tenant.Report.run"
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<Sharp.Position()>"
                   null
               RETURN
                 ZVAL 1
@@ -15611,7 +16014,9 @@ fn a_lambda_that_writes_no_capture_is_an_arrow_function() {
                       ZVAL "a"
                     VAR
                       ZVAL "extra"
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<int(int)>"
                   null
               ASSIGN
                 VAR
@@ -15632,7 +16037,9 @@ fn a_lambda_that_writes_no_capture_is_an_arrow_function() {
                       VAR
                         ZVAL "b"
                       ZVAL 2
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<int(int)>"
                   null
               RETURN
                 CALL
@@ -15697,7 +16104,9 @@ fn a_lambda_with_a_block_or_a_written_capture_is_a_closure_with_a_use_list() {
                           ZVAL "step"
                         VAR
                           ZVAL "extra"
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<void(int)>"
                   null
               ASSIGN
                 VAR
@@ -15712,7 +16121,9 @@ fn a_lambda_with_a_block_or_a_written_capture_is_a_closure_with_a_use_list() {
                         VAR
                           ZVAL "count"
                         ZVAL 1
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<int()>"
                   null
               CALL
                 VAR
@@ -15775,7 +16186,9 @@ fn a_let_in_a_loop_captured_by_reference_is_unset_before_its_assignment() {
                           VAR
                             ZVAL "seen"
                           ZVAL 1
-                      null
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<void()>"
                       null
                   CALL
                     VAR
@@ -15897,7 +16310,9 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
                       null
                   null
                   STMT_LIST
-                  ZVAL [1] "void"
+                  SHARP_TYPE_ARGS
+                    ZVAL [1] "void"
+                    ZVAL "Function<void(int)>"
                   ATTRIBUTE_LIST
                     ATTRIBUTE_GROUP
                       ATTRIBUTE
@@ -16681,22 +17096,28 @@ fn as_is_a_conditional_that_gives_the_value_or_null() {
     );
 }
 
-/// A function type has no test, since a function value keeps no type while the code runs. The checker refuses it, and a
-/// `match` without arms, before the lowering meets a form it has no PHP for.
+/// A `match` without arms has no PHP, so the checker refuses it before the lowering meets it.
 #[test]
-fn is_as_and_match_without_a_test_are_refused_before_lowering() {
-    let lowered = Lowered::new(&method_with(
-        "void run(Any? extra)",
-        "        const call = extra as Function<int(int)>;\n        const called = extra is Function<int(int)>;\n        match (extra) {}\n",
-    ));
+fn a_match_without_arms_is_refused_before_lowering() {
+    let lowered = Lowered::new(&method_with("void run(Any? extra)", "        match (extra) {}\n"));
 
+    assert_eq!(lowered.diagnostics(), ["9:9 compile error: A `match` needs a `default` arm."]);
+}
+
+/// Spec section 21: a function type is tested as any type is, by the engine's test of its type text, its effects
+/// included, which compares a closure's own function type with it.
+#[test]
+fn a_test_of_a_function_type_is_the_engine_test_of_its_type_text() {
     assert_eq!(
-        lowered.diagnostics(),
-        [
-            "9:31 compile error: A function type can't be tested: a function value doesn't keep its type while the code runs.",
-            "10:33 compile error: A function type can't be tested: a function value doesn't keep its type while the code runs.",
-            "11:9 compile error: A `match` needs a `default` arm.",
-        ]
+        body_in("bool run(Any? extra)", "        return extra is Function<int(int) uses Http>;\n", &[]),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Function<int(int) uses Sharp.Http>"
+        "#}
     );
 }
 
@@ -16942,23 +17363,20 @@ fn an_index_a_pattern_tests_coalesces_a_missing_key_to_null() {
 }
 
 /// ```php
-/// $limit = 10;
 /// $a = $extra === 200;
-/// $b = \is_int($extra) && $extra >= 1 && $extra < $limit || !($extra === -1);
-/// $c = $extra === $limit;
-/// $d = \is_object($extra) && (${'match#1'} = $extra->count) > 0 && \is_string($label = $extra->name);
+/// $b = \is_int($extra) && $extra >= 1 && $extra < 10 || !($extra === -1);
+/// $c = \is_object($extra) && (${'match#1'} = $extra->count) > 0 && \is_string($label = $extra->name);
 /// ```
 ///
 /// A value is compared with `===`, a comparison keeps its operator, and `and`, `or` and `not` are `&&`, `||` and
-/// `!`. A bare name is the local's value when a local of that name is in scope. A properties pattern tests that the
-/// value is an object, then reads each property once. A comparison orders a `Calc`, which declares no `operator <=>`,
-/// only once `int` has ruled it out.
+/// `!`. A properties pattern tests that the value is an object, then reads each property once. A comparison orders a
+/// `Calc`, which declares no `operator <=>`, only once `int` has ruled it out.
 #[test]
 fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
     assert_eq!(
         body_in(
             "Calc|int run(Calc|int extra)",
-            "        let limit = 10;\n        const a = extra is 200;\n        const b = extra is int and >= 1 and < limit or (not -1);\n        const c = extra is limit;\n        const d = extra is { count: > 0, name: string label };\n        return extra;\n",
+            "        const a = extra is 200;\n        const b = extra is int and >= 1 and < 10 or (not -1);\n        const c = extra is { count: > 0, name: string label };\n        return extra;\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; final class Calc { public int $count = 0; public ?string $name = null; }",
@@ -16966,10 +17384,6 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
         ),
         indoc! {r#"
             STMT_LIST
-              ASSIGN
-                VAR
-                  ZVAL "limit"
-                ZVAL 10
               ASSIGN
                 VAR
                   ZVAL "a"
@@ -16995,8 +17409,7 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
                     BINARY_OP [20]
                       VAR
                         ZVAL "extra"
-                      VAR
-                        ZVAL "limit"
+                      ZVAL 10
                   UNARY_OP [14]
                     BINARY_OP [16]
                       VAR
@@ -17006,14 +17419,6 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
               ASSIGN
                 VAR
                   ZVAL "c"
-                BINARY_OP [16]
-                  VAR
-                    ZVAL "extra"
-                  VAR
-                    ZVAL "limit"
-              ASSIGN
-                VAR
-                  ZVAL "d"
                 AND
                   AND
                     CALL
@@ -17040,6 +17445,269 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
                           VAR
                             ZVAL "extra"
                           ZVAL "name"
+              RETURN
+                VAR
+                  ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
+/// $a = ($big = $extra) instanceof \Lib\Calc && (${'match#1'} = $big->count) > 1000;
+/// $b = (${'match#1'} = $this->calc()) instanceof \Lib\Calc && (${'match#2'} = ${'match#1'}->count) > 0;
+/// ```
+///
+/// Spec section 21: a type pattern with properties tests the type, then each property on the value the name holds, or
+/// on the subject's hidden variable when it has no name. Each property is read once, as in a properties pattern.
+/// `a ?? return`, `a ?? continue` and `a ?? break` lower to a RETURN, CONTINUE or BREAK node in the place of the right side
+/// of `??`, which the engine compiles in the middle of the expression. PHP has no spelling for it.
+#[test]
+fn a_leave_after_null_coalesce_is_its_statement_inside_the_expression() {
+    assert_eq!(
+        body_in(
+            "int run(List<int?> values)",
+            "        const a = values[0] ?? return -1;\n        for (int i = 0; i < 2; i++) {\n            const b = values[i] ?? continue;\n            const c = values[i + 1] ?? break;\n        }\n        return a;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                COALESCE
+                  DIM
+                    VAR
+                      ZVAL "values"
+                    ZVAL 0
+                  RETURN
+                    UNARY_MINUS
+                      ZVAL 1
+              FOR
+                EXPR_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "i"
+                    ZVAL 0
+                EXPR_LIST
+                  BINARY_OP [20]
+                    VAR
+                      ZVAL "i"
+                    ZVAL 2
+                EXPR_LIST
+                  POST_INC
+                    VAR
+                      ZVAL "i"
+                STMT_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "b"
+                    COALESCE
+                      DIM
+                        VAR
+                          ZVAL "values"
+                        VAR
+                          ZVAL "i"
+                      CONTINUE
+                        null
+                  ASSIGN
+                    VAR
+                      ZVAL "c"
+                    COALESCE
+                      DIM
+                        VAR
+                          ZVAL "values"
+                        BINARY_OP [1]
+                          VAR
+                            ZVAL "i"
+                          ZVAL 1
+                      BREAK
+                        null
+              RETURN
+                VAR
+                  ZVAL "a"
+            "#}
+    );
+}
+
+/// ```php
+/// $a = \is_array($values) && \count($values) === 0;
+/// $b = \is_array($values) && \count($values) >= 1 && \is_int($first = $values[0])
+///     && ($rest = \array_slice($values, 1)) is List<int>;
+/// ```
+///
+/// The rest is tested as a typed element is, by the engine's test of its type, so `...List<Circle> rest` holds only
+/// circles.
+#[test]
+fn a_list_pattern_tests_the_count_then_each_element_then_takes_the_rest() {
+    assert_eq!(
+        body_in(
+            "int run(List<int> values)",
+            "        const a = values is [];\n        const b = values is [int first, ...List<int> rest];\n        return 0;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                AND
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "values"
+                  BINARY_OP [16]
+                    CALL
+                      ZVAL "count"
+                      ARG_LIST
+                        VAR
+                          ZVAL "values"
+                    ZVAL 0
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                AND
+                  AND
+                    AND
+                      CALL
+                        ZVAL "is_array"
+                        ARG_LIST
+                          VAR
+                            ZVAL "values"
+                      GREATER_EQUAL
+                        CALL
+                          ZVAL "count"
+                          ARG_LIST
+                            VAR
+                              ZVAL "values"
+                        ZVAL 1
+                    CALL
+                      ZVAL "is_int"
+                      ARG_LIST
+                        ASSIGN
+                          VAR
+                            ZVAL "first"
+                          DIM
+                            VAR
+                              ZVAL "values"
+                            ZVAL 0
+                  SHARP_IS_TYPE
+                    ASSIGN
+                      VAR
+                        ZVAL "rest"
+                      CALL
+                        ZVAL "array_slice"
+                        ARG_LIST
+                          VAR
+                            ZVAL "values"
+                          ZVAL 1
+                    ZVAL "List<int>"
+              RETURN
+                ZVAL 0
+            "#}
+    );
+}
+
+/// ```php
+/// $a = $value is List<Any?> && \count($value) === 1 && \is_int($one = $value[0]);
+/// ```
+///
+/// A value that may be a list or anything else is tested with the engine's test of `List<Any?>` first, where a `List`
+/// needs only `\is_array`.
+#[test]
+fn a_list_pattern_on_any_value_tests_it_is_a_list_first() {
+    assert_eq!(
+        body_in("int run(Any value)", "        const a = value is [int one];\n        return 0;\n", &[]),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                AND
+                  AND
+                    SHARP_IS_TYPE
+                      VAR
+                        ZVAL "value"
+                      ZVAL "List<Any?>"
+                    BINARY_OP [16]
+                      CALL
+                        ZVAL "count"
+                        ARG_LIST
+                          VAR
+                            ZVAL "value"
+                      ZVAL 1
+                  CALL
+                    ZVAL "is_int"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "one"
+                        DIM
+                          VAR
+                            ZVAL "value"
+                          ZVAL 0
+              RETURN
+                ZVAL 0
+            "#}
+    );
+}
+
+#[test]
+fn a_type_with_properties_tests_the_type_then_each_property() {
+    assert_eq!(
+        body_in(
+            "Calc|int run(Calc|int extra)",
+            "        const a = extra is Calc { count: > 1000 } big;\n        const b = this.calc() is Calc { count: > 0 };\n        return extra;\n    }\n\n    public Calc calc()\n    {\n        return new Calc();\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib; final class Calc { public int $count = 0; public ?string $name = null; }",
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                AND
+                  INSTANCEOF
+                    ASSIGN
+                      VAR
+                        ZVAL "big"
+                      VAR
+                        ZVAL "extra"
+                    ZVAL "Lib\\Calc"
+                  GREATER
+                    ASSIGN
+                      VAR
+                        ZVAL "match#1"
+                      PROP
+                        VAR
+                          ZVAL "big"
+                        ZVAL "count"
+                    ZVAL 1000
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                AND
+                  INSTANCEOF
+                    ASSIGN
+                      VAR
+                        ZVAL "match#1"
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "calc"
+                        ARG_LIST
+                    ZVAL "Lib\\Calc"
+                  GREATER
+                    ASSIGN
+                      VAR
+                        ZVAL "match#2"
+                      PROP
+                        VAR
+                          ZVAL "match#1"
+                        ZVAL "count"
+                    ZVAL 0
               RETURN
                 VAR
                   ZVAL "extra"
@@ -17329,7 +17997,9 @@ fn a_backed_enum_is_a_final_enum_class_with_its_backing_type_cases_and_methods()
                           VAR
                             ZVAL "this"
                           ZVAL "value"
-                    ZVAL [1] "string"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "Function<string()>"
                     null
                   METHOD [17] "parse" @17-21
                     PARAM_LIST
@@ -17362,7 +18032,9 @@ fn a_backed_enum_is_a_final_enum_class_with_its_backing_type_cases_and_methods()
                             ZVAL "from"
                             ARG_LIST
                               ZVAL "active"
-                    ZVAL "App\\Tenant\\Status"
+                    SHARP_TYPE_ARGS
+                      ZVAL "App\\Tenant\\Status"
+                      ZVAL "Function<App.Tenant.Status(string)>"
                     null
                 ATTRIBUTE_LIST
                   ATTRIBUTE_GROUP
@@ -17428,7 +18100,9 @@ fn a_pure_enum_is_a_final_enum_class_of_unit_cases_without_a_backing_type() {
                           VAR
                             ZVAL "this"
                           ZVAL "name"
-                    ZVAL [1] "string"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "Function<string()>"
                     null
                   METHOD [17] "size" @8-8
                     PARAM_LIST
@@ -17747,7 +18421,9 @@ fn an_enum_method_lowers_a_list_literal_a_function_type_and_a_lambda_as_a_class_
                               ZVAL "Suit"
                               ZVAL "Spades"
                             null
-                    TYPE [7]
+                    SHARP_TYPE_ARGS
+                      TYPE [7]
+                      ZVAL "Function<List<Suit>()>"
                     null
                   METHOD [1] "matches" @8-12
                     PARAM_LIST
@@ -17781,9 +18457,13 @@ fn an_enum_method_lowers_a_list_literal_a_function_type_and_a_lambda_as_a_class_
                                 ZVAL "other"
                               VAR
                                 ZVAL "first"
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<bool(Suit)>"
                           null
-                          null
-                    ZVAL "Closure"
+                    SHARP_TYPE_ARGS
+                      ZVAL "Closure"
+                      ZVAL "Function<Function<bool(Suit)>()>"
                     null
                 null
                 null
@@ -17841,7 +18521,9 @@ fn an_enum_returns_self_and_holds_a_union_typed_constant() {
                       CLASS_CONST
                         ZVAL "App\\Status"
                         ZVAL "Active"
-                  TYPE [15]
+                  SHARP_TYPE_ARGS
+                    TYPE [15]
+                    ZVAL "Function<App.Status()>"
                   null
                 METHOD [17] "all" @11-11
                   PARAM_LIST
@@ -17852,10 +18534,41 @@ fn an_enum_returns_self_and_holds_a_union_typed_constant() {
                         ZVAL [1] "static"
                         ZVAL "cases"
                         ARG_LIST
-                  TYPE [7]
+                  SHARP_TYPE_ARGS
+                    TYPE [7]
+                    ZVAL "Function<List<App.Status>()>"
                   null
               null
               ZVAL [1] "string"
+        "#}
+    );
+}
+
+/// ```php
+/// abstract class Shape { public const int Sides = 4; }
+/// ```
+///
+/// A constant of an enum whose cases carry data is a constant of the abstract class the enum runs as, first among its
+/// members, as a class's constant is.
+#[test]
+fn an_enum_with_data_holds_its_constant_as_a_class_does() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nenum Shape\n{\n    public const int Sides = 4;\n\n    case Square(int side);\n}\n",
+    );
+    let class = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_CLASS).expect("the enum");
+    let members = lowered.child(class as u32, 2);
+
+    assert_eq!(
+        lowered.render(lowered.child(members, 0)),
+        indoc! {r#"
+            CLASS_CONST_GROUP [1]
+              CLASS_CONST_DECL
+                CONST_ELEM
+                  ZVAL "Sides"
+                  ZVAL 4
+                  null
+              null
+              ZVAL [1] "int"
         "#}
     );
 }
@@ -18322,6 +19035,23 @@ fn the_unit_names_each_form_it_inlines_with_its_fingerprint() {
         .collect();
 
     assert_eq!(inlined, [("sharp\\text::shout".to_owned(), shout.fingerprint())]);
+}
+
+/// The unit names the function type of each method its file declares with the xxh3-64 of the type text `is` tests a
+/// closure of it by, which `Reads::function_types` takes, since the effects the text lists come from other files.
+#[test]
+fn the_unit_names_each_function_type_with_the_hash_of_its_text() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int twice(int x) => x * 2;\n}\n";
+    let lowered = Lowered::new(code);
+    let function_types: Vec<(String, u64)> = lowered
+        .unit()
+        .expect("the source lowers")
+        .function_types()
+        .iter()
+        .map(|read| (String::from_utf8_lossy(&read.name).into_owned(), read.fingerprint))
+        .collect();
+
+    assert_eq!(function_types, [("App\\Tenant\\Report::twice".to_owned(), xxh3_64(b"Function<int(int)>"))]);
 }
 
 /// Each node an inlined form copies takes the line of its call, as the call's own nodes would, and each value keeps
@@ -19373,18 +20103,18 @@ fn an_extension_member_is_the_static_call_of_its_method() {
 
 /// ```php
 /// return match (true) {
-///     \App\Point::op_Equality($p, $origin) => "origin",
+///     ($q = $p) instanceof \App\Point && \App\Point::op_Equality($q, $origin) => "origin",
 ///     default => "elsewhere",
 /// };
 /// ```
 ///
-/// A value pattern compares with section 19's `==`, so a struct subject matches an equal struct through the struct's
-/// `op_Equality`.
+/// A pattern takes types and constants only, so a local's value is compared in `when`, spec section 21. Its `==` is
+/// section 19's, so a struct subject matches an equal struct through the struct's `op_Equality`.
 #[test]
-fn a_value_pattern_on_a_struct_runs_its_op_equality() {
+fn a_struct_compared_in_when_runs_its_op_equality() {
     assert_eq!(
         Lowered::with(
-            "namespace App;\n\nclass Report\n{\n    public string run(Point p, Point origin)\n    {\n        return match (p) {\n            origin => \"origin\",\n            default => \"elsewhere\",\n        };\n    }\n}\n",
+            "namespace App;\n\nclass Report\n{\n    public string run(Point p, Point origin)\n    {\n        return match (p) {\n            Point q when q == origin => \"origin\",\n            default => \"elsewhere\",\n        };\n    }\n}\n",
             &[("src/App/Point.sharp", POINT), ("src/App/Money.sharp", MONEY)]
         )
         .body(),
@@ -19396,14 +20126,22 @@ fn a_value_pattern_on_a_struct_runs_its_op_equality() {
                   MATCH_ARM_LIST
                     MATCH_ARM
                       EXPR_LIST
-                        STATIC_CALL
-                          ZVAL "App\\Point"
-                          ZVAL "op_Equality"
-                          ARG_LIST
-                            VAR
-                              ZVAL "p"
-                            VAR
-                              ZVAL "origin"
+                        AND
+                          INSTANCEOF
+                            ASSIGN
+                              VAR
+                                ZVAL "q"
+                              VAR
+                                ZVAL "p"
+                            ZVAL "App\\Point"
+                          STATIC_CALL
+                            ZVAL "App\\Point"
+                            ZVAL "op_Equality"
+                            ARG_LIST
+                              VAR
+                                ZVAL "q"
+                              VAR
+                                ZVAL "origin"
                       ZVAL "origin"
                     MATCH_ARM
                       null
@@ -22025,7 +22763,9 @@ fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
                         ZVAL "size"
                       VAR
                         ZVAL "depth"
-              ZVAL "App\\Size"
+              SHARP_TYPE_ARGS
+                ZVAL "App\\Size"
+                ZVAL "Function<App.Size(App.Size, int)>"
               null
         "#}
     );
@@ -22252,8 +22992,10 @@ const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(
 ///
 ///     public static function op_Equality(mixed $a, mixed $b): bool
 ///     {
-///         if (!$a instanceof \App\Point || !$b instanceof \App\Point) { return $a === $b; }
-///         return $a->x === $b->x && $a->y === $b->y && \App\Money::op_Equality($a->total, $b->total);
+///         if ($a instanceof \App\Point && $b instanceof \App\Point) {
+///             return $a->x === $b->x && $a->y === $b->y && \App\Money::op_Equality($a->total, $b->total);
+///         }
+///         return $a === $b;
 ///     }
 /// }
 /// ```
@@ -22387,7 +23129,9 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
                               VAR
                                 ZVAL "this"
                               ZVAL "total"
-                    ZVAL "App\\Point"
+                    SHARP_TYPE_ARGS
+                      ZVAL "App\\Point"
+                      ZVAL "Function<App.Point(int)>"
                     null
                   METHOD [17] "op_Equality" @3-3
                     PARAM_LIST
@@ -22409,57 +23153,55 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
                     STMT_LIST
                       IF
                         IF_ELEM
-                          OR
-                            UNARY_OP [14]
-                              INSTANCEOF
-                                VAR
-                                  ZVAL "a"
-                                ZVAL "App\\Point"
-                            UNARY_OP [14]
-                              INSTANCEOF
-                                VAR
-                                  ZVAL "b"
-                                ZVAL "App\\Point"
+                          AND
+                            INSTANCEOF
+                              VAR
+                                ZVAL "a"
+                              ZVAL "App\\Point"
+                            INSTANCEOF
+                              VAR
+                                ZVAL "b"
+                              ZVAL "App\\Point"
                           STMT_LIST
                             RETURN
-                              BINARY_OP [16]
-                                VAR
-                                  ZVAL "a"
-                                VAR
-                                  ZVAL "b"
+                              AND
+                                AND
+                                  BINARY_OP [16]
+                                    PROP
+                                      VAR
+                                        ZVAL "a"
+                                      ZVAL "x"
+                                    PROP
+                                      VAR
+                                        ZVAL "b"
+                                      ZVAL "x"
+                                  BINARY_OP [16]
+                                    PROP
+                                      VAR
+                                        ZVAL "a"
+                                      ZVAL "y"
+                                    PROP
+                                      VAR
+                                        ZVAL "b"
+                                      ZVAL "y"
+                                STATIC_CALL
+                                  ZVAL "App\\Money"
+                                  ZVAL "op_Equality"
+                                  ARG_LIST
+                                    PROP
+                                      VAR
+                                        ZVAL "a"
+                                      ZVAL "total"
+                                    PROP
+                                      VAR
+                                        ZVAL "b"
+                                      ZVAL "total"
                       RETURN
-                        AND
-                          AND
-                            BINARY_OP [16]
-                              PROP
-                                VAR
-                                  ZVAL "a"
-                                ZVAL "x"
-                              PROP
-                                VAR
-                                  ZVAL "b"
-                                ZVAL "x"
-                            BINARY_OP [16]
-                              PROP
-                                VAR
-                                  ZVAL "a"
-                                ZVAL "y"
-                              PROP
-                                VAR
-                                  ZVAL "b"
-                                ZVAL "y"
-                          STATIC_CALL
-                            ZVAL "App\\Money"
-                            ZVAL "op_Equality"
-                            ARG_LIST
-                              PROP
-                                VAR
-                                  ZVAL "a"
-                                ZVAL "total"
-                              PROP
-                                VAR
-                                  ZVAL "b"
-                                ZVAL "total"
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "a"
+                          VAR
+                            ZVAL "b"
                     ZVAL [1] "bool"
                     null
                 null

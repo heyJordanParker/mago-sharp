@@ -13,7 +13,9 @@ use mago_hir::ir::item::annotation::generics::Variance;
 use mago_hir::ir::item::annotation::member::PropertyAnnotationKind;
 use mago_hir::ir::item::expression::ItemExpressionKind;
 use mago_hir::ir::item::member::MemberItemKind;
+use mago_hir::ir::item::modifier::ModifierKind;
 use mago_hir::ir::item::statement::ItemStatementKind;
+use mago_hir::ir::statement::NamespaceBody;
 use mago_hir::ir::statement::StatementKind;
 use mago_hir::lower::LowerSettings;
 use mago_hir::lower::Lowering;
@@ -420,4 +422,38 @@ function broken(int $size): void
     let folded = identity.fold_ir(&ir);
 
     assert_eq!(folded, ir, "an identity fold must preserve annotation errors");
+}
+
+/// Spec section 20.1: a PHP# interface keeps `public` and `sealed` as its modifiers, and the identity fold keeps them.
+#[test]
+fn a_sealed_interface_keeps_its_modifiers_through_the_fold() {
+    let code = "namespace App;\n\npublic sealed interface Interaction\n{\n}\n";
+    let arena = LocalArena::new();
+    let scratch = LocalArena::new();
+    let file = File::ephemeral(Cow::Borrowed(b"Interaction.sharp"), Cow::Borrowed(code.as_bytes()));
+    let program = parse_file(&scratch, &file);
+    let ir: IR<'_, (), (), ()> = Lowering::new(&arena, &scratch, &file, program, LowerSettings::default()).lower();
+    drop(scratch);
+
+    let StatementKind::Namespace(namespace) = &ir.statements[0].kind else {
+        panic!("the file starts with its namespace");
+    };
+    let NamespaceBody::Implicit { statements, .. } = &namespace.body else {
+        panic!("the namespace has no braces");
+    };
+    let StatementKind::Item(item) = &statements[0].kind else {
+        panic!("the namespace holds the interface");
+    };
+    let ItemStatementKind::Interface(interface) = &item.kind else {
+        panic!("the item is the interface");
+    };
+
+    assert_eq!(
+        interface.modifiers.iter().map(|modifier| modifier.kind).collect::<Vec<_>>(),
+        [ModifierKind::Public, ModifierKind::Sealed]
+    );
+
+    let identity = Identity { arena: &arena };
+
+    assert_eq!(identity.fold_ir(&ir), ir, "an identity fold must keep an interface's modifiers");
 }

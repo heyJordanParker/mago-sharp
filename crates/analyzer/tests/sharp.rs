@@ -58,6 +58,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::parser::parse_file;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
+use mago_word::word;
 
 #[path = "../../../tests/support/sharp_words.rs"]
 mod sharp_words;
@@ -1294,6 +1295,19 @@ fn a_class_member_read_in_a_constant_expression_is_checked_as_a_class_constant()
 
     assert_eq!(codes(&sharp_issues), codes(&php_issues), "{sharp_issues:?} {php_issues:?}");
     assert_eq!(sharp_issues, ["9:42 non-existent-class-constant"]);
+}
+
+/// Spec section 21: a pattern takes types and constants only, so its value is a constant expression. `Class.y` there is
+/// the class constant or enum case, and a static property is a constant the class does not have.
+#[test]
+fn a_pattern_takes_constants_of_the_codebase_only() {
+    let registry = "<?php\n\nnamespace Lib;\n\nenum Order: string\n{\n    case Ascending = 'asc';\n}\n\nfinal class Registry\n{\n    public const int VERSION = 2;\n    public static string $label = 'registry';\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Order;\nimport Lib.Registry;\n\nclass Members\n{\n    public bool run(Any? value)\n    {\n        return value is Registry.VERSION or Order.Ascending or Registry.label;\n    }\n\n    public bool below(int value) => value is < Registry.label;\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Members.sharp", sharp), &[("src/Lib/Registry.php", registry)]),
+        ["10:73 non-existent-class-constant", "13:57 non-existent-class-constant"]
+    );
 }
 
 /// A PHP class extends a PHP# abstract class and implements a PHP# interface, whose method has no access modifier
@@ -3755,14 +3769,16 @@ fn a_redundant_null_check_names_the_test_it_is_written_with() {
 }
 
 /// A redundant null check names its pattern by the words the pattern is written with, so a comment between them stays
-/// out of the message. The `is` and each `not` lead the check only when they are written right before it. PHP names its
-/// own operator.
+/// out of the message. The `is` and each `not` lead the check only when they are written right before it, wherever the
+/// pattern stands, as after a list's rest or in a case's field. PHP names its own operator.
 #[test]
 fn a_redundant_null_check_names_its_pattern_without_its_comments() {
-    let sharp = "namespace Demo;\n\nclass Billing\n{\n    public void renew(Customer report)\n    {\n        const a = report is /* c */ null;\n        const b = report is /* c */ not /* d */ null;\n        const c = report is (/* e */ null) or not null;\n        const d = report is { name: /* f */ null };\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Billing\n{\n    public void renew(Customer report, List<string> names, List<Customer> customers, Delivery delivery)\n    {\n        const a = report is /* c */ null;\n        const b = report is /* c */ not /* d */ null;\n        const c = report is (/* e */ null) or not null;\n        const d = report is { name: /* f */ null };\n        const e = report is Customer { name: not /* g */ null } customer;\n        const f = names is [not /* h */ null];\n        const g = customers is [..., { name: not /* i */ null }];\n        const h = delivery is Delivery.Noted(not /* j */ null);\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Billing\n{\n    public function renew(Customer $report): void\n    {\n        $a = $report === /* c */ null;\n        $b = $report !== /* c */ null;\n    }\n}\n";
+    let delivery =
+        ("src/Demo/Delivery.sharp", "namespace Demo;\n\nenum Delivery\n{\n    case Noted(string note);\n}\n");
     let redundant = |analyzed| -> Vec<String> {
-        worded(analyzed, &[("src/Demo/Customer.sharp", CUSTOMER)])
+        worded(analyzed, &[("src/Demo/Customer.sharp", CUSTOMER), delivery])
             .into_iter()
             .filter(|line| line.contains(" redundant-comparison "))
             .map(|line| line.split(" | ").next().unwrap_or_default().to_owned())
@@ -3784,6 +3800,10 @@ fn a_redundant_null_check_names_its_pattern_without_its_comments() {
             "9:19 redundant-comparison Redundant `null` check: `Customer` is never `null`.",
             "9:47 redundant-comparison Redundant `not null` check: `Customer` is never `null`.",
             "10:31 redundant-comparison Redundant `null` check: `string` is never `null`.",
+            "11:40 redundant-comparison Redundant `not null` check: `string` is never `null`.",
+            "12:29 redundant-comparison Redundant `not null` check: `string` is never `null`.",
+            "13:40 redundant-comparison Redundant `not null` check: `string` is never `null`.",
+            "14:46 redundant-comparison Redundant `not null` check: `string` is never `null`.",
         ]
     );
 }
@@ -4846,6 +4866,377 @@ fn a_properties_pattern_on_a_value_that_cannot_be_null_reports_nothing_and_its_p
     assert_eq!(codes(&php_issues), ["redundant-type-comparison", "redundant-logical-operation"]);
 }
 
+const PAYMENT_RESULT: (&str, &str) = (
+    "src/App/PaymentResult.sharp",
+    "namespace App;\n\npublic enum PaymentResult\n{\n    case Paid(string transactionId);\n    case Declined(string reason);\n    case RequiresAction(string redirect);\n\n    public string label() => \"payment\";\n}\n",
+);
+
+const CHECKOUT_STATE: (&str, &str) = (
+    "src/App/CheckoutState.sharp",
+    "namespace App;\n\npublic enum CheckoutState\n{\n    case Open;\n    case Paying(string gateway);\n}\n",
+);
+
+const INTERACTION: (&str, &str) =
+    ("src/App/Interaction.sharp", "namespace App;\n\npublic sealed interface Interaction\n{\n    string name();\n}\n");
+
+const POPUP_INTERACTION: (&str, &str) = (
+    "src/App/PopupInteraction.sharp",
+    "namespace App;\n\npublic class PopupInteraction : Interaction\n{\n    public string name() => \"popup\";\n}\n",
+);
+
+const SCROLL_INTERACTION: (&str, &str) = (
+    "src/App/ScrollInteraction.sharp",
+    "namespace App;\n\npublic class ScrollInteraction : Interaction\n{\n    public string name() => \"scroll\";\n}\n",
+);
+
+/// Spec section 20.1: a sealed interface's implementers sit in its namespace. A class of another namespace that
+/// implements it is an error that names the namespace, and an implementer in it is not.
+#[test]
+fn a_sealed_interface_is_implemented_only_in_its_namespace() {
+    let banner = "namespace App.Shop;\n\nimport App.Interaction;\n\npublic class Banner : Interaction\n{\n    public string name() => \"banner\";\n}\n";
+
+    assert_eq!(refusals(POPUP_INTERACTION, &[INTERACTION]), Vec::<String>::new());
+    assert_eq!(
+        refusals(("src/App/Shop/Banner.sharp", banner), &[INTERACTION, POPUP_INTERACTION]),
+        [
+            "5:23 invalid-implement `App.Shop.Banner` cannot implement the sealed interface `App.Interaction`: its implementers sit in the namespace `App`. | Move the class into the namespace `App`, or implement another interface."
+        ]
+    );
+
+    // An interface of the namespace that extends it is one way in: the namespace's classes that implement it join the
+    // set, which a `match` over the sealed interface then covers, and a class elsewhere is refused as an implementer.
+    let gesture = (
+        "src/App/Gesture.sharp",
+        "namespace App;\n\npublic interface Gesture : Interaction\n{\n    int fingers();\n}\n",
+    );
+    let swipe = (
+        "src/App/Swipe.sharp",
+        "namespace App;\n\npublic class Swipe : Gesture\n{\n    public string name() => \"swipe\";\n    public int fingers() => 2;\n}\n",
+    );
+    let pinch = "namespace App.Shop;\n\nimport App.Gesture;\n\npublic class Pinch : Gesture\n{\n    public string name() => \"pinch\";\n    public int fingers() => 2;\n}\n";
+    let shop = "namespace App;\n\nclass Shop\n{\n    public string half(Interaction interaction) => match (interaction) {\n        PopupInteraction popup => popup.name(),\n    };\n\n    public string all(Interaction interaction) => match (interaction) {\n        PopupInteraction popup => popup.name(),\n        Swipe swipe => swipe.name(),\n    };\n}\n";
+    assert_eq!(refusals(swipe, &[INTERACTION, gesture]), Vec::<String>::new());
+    assert_eq!(
+        refusals(("src/App/Shop/Pinch.sharp", pinch), &[INTERACTION, gesture]),
+        [
+            "5:22 invalid-implement `App.Shop.Pinch` cannot implement the sealed interface `App.Interaction`: its implementers sit in the namespace `App`. | Move the class into the namespace `App`, or implement another interface."
+        ]
+    );
+    assert_eq!(
+        refusals(("src/App/Shop.sharp", shop), &[INTERACTION, POPUP_INTERACTION, gesture, swipe]),
+        [
+            "5:52 match-not-exhaustive This `match` misses `Swipe`. | Add an arm for each value it misses, or add `default => …` as the last arm."
+        ]
+    );
+}
+
+/// Spec section 20: each case of an enum with a case that carries data is a type of its own. `PaymentResult.Declined(…)`
+/// creates one, its fields are its properties, a method can take one case alone, and a plain case is one object of its
+/// own type.
+#[test]
+fn a_data_case_is_a_type_of_its_own() {
+    let code = "namespace App;\n\nclass Shop\n{\n    public PaymentResult decline() => PaymentResult.Declined(reason: \"card expired\");\n    public string reason(PaymentResult.Declined d) => d.reason;\n    public int wrong(PaymentResult.Declined d) => d.reason;\n    public string settle(PaymentResult.Paid paid) => paid.transactionId;\n    public string refuse() => this.settle(PaymentResult.Declined(reason: \"x\"));\n    public CheckoutState open() => CheckoutState.Open;\n    public CheckoutState.Open same() => CheckoutState.Open;\n    public PaymentResult missing() => PaymentResult.Paid(42);\n    public string label(PaymentResult result) => result.label();\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Shop.sharp", code), &[PAYMENT_RESULT, CHECKOUT_STATE]),
+        ["7:51 invalid-return-statement", "9:43 invalid-argument", "12:58 invalid-argument"]
+    );
+
+    // A dotted type names a case, and never a class of another namespace.
+    let order = ("src/App/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order { }\n");
+    let dotted = "namespace App;\n\nclass Till\n{\n    public bool open(Shop.Order order) => true;\n}\n";
+    let messages: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Till.sharp", dotted), &[order])
+        .into_iter()
+        .map(|issue| format!("{} {}", located(dotted, &issue), issue.message))
+        .collect();
+    assert_eq!(messages, ["5:22 non-existent-class-like `Shop.Order` is no case of an enum."]);
+
+    // A plain case is an object, which a parameter's default cannot hold yet.
+    let default =
+        "namespace App;\n\nclass Till\n{\n    public bool open(CheckoutState state = CheckoutState.Open) => true;\n}\n";
+    let messages: Vec<String> =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Till.sharp", default), &[CHECKOUT_STATE])
+            .into_iter()
+            .map(|issue| format!("{} {}", located(default, &issue), issue.message))
+            .collect();
+    assert_eq!(
+        messages,
+        [
+            "5:44 not-supported-yet Reading a case of an enum whose cases carry data, as `CheckoutState.Open`, in a constant expression is not supported yet in PHP#."
+        ]
+    );
+}
+
+/// Spec sections 19 and 20: an enum compares by value, so `==` on two cases of an enum whose cases carry data compares
+/// the same case field by field, as a struct compares, and two different cases are unequal. A case keys a `Map`, joins
+/// a `Set` and is found by `contains` the same way. A case with a field `==` can't compare has no `==`, and can't key a
+/// `Map` or join a `Set`, naming the field. An enum case is no object to test for identity, and has no order.
+#[test]
+fn a_data_case_compares_by_value() {
+    let sharp = "namespace App;\n\nclass Plan\n{\n    public Plan() { }\n}\n\nenum Step\n{\n    case Run(Function<void()> action);\n    case Hold(Plan plan);\n}\n\nenum Booking\n{\n    case Held(Plan plan);\n}\n\nclass Compare\n{\n    public Set<PaymentResult> seen = [];\n    public Map<CheckoutState, int> visits = [:];\n    public Set<Step> steps = [];\n\n    public bool equal(PaymentResult a, PaymentResult b) => a == b;\n    public bool cases(PaymentResult.Paid a, PaymentResult.Declined b) => a == b;\n    public bool other(PaymentResult a, PaymentResult.Paid b) => a != b;\n    public bool loose(Any? a, PaymentResult b) => a == b;\n    public bool nullable(PaymentResult? a, PaymentResult b) => a == b;\n    public bool open(CheckoutState a) => a == CheckoutState.Open;\n    public bool has(List<PaymentResult> results, PaymentResult result) => results.contains(result);\n    public bool same(PaymentResult a, PaymentResult b) => a === b;\n    public bool number(PaymentResult a, int b) => a == b;\n    public bool apart(PaymentResult a, CheckoutState b) => a == b;\n    public bool before(PaymentResult a, PaymentResult b) => a < b;\n    public bool run(Step a, Step b) => a == b;\n    public bool held(Booking a, Booking b) => a == b;\n}\n";
+
+    assert_eq!(
+        written(
+            sharp,
+            &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Compare.sharp", sharp), &[PAYMENT_RESULT, CHECKOUT_STATE])
+        ),
+        [
+            "23:12 template-constraint-violation `Step` can't be in a `Set`: `action` is a `Function<void()>`, a function, and a `Set` holds only values.",
+            "32:59 invalid-operand `===` cannot compare `PaymentResult` with `PaymentResult`: it tests whether two class instances are the same object.",
+            "33:51 invalid-operand `==` cannot compare `PaymentResult` with `int`.",
+            "34:60 invalid-operand `==` cannot compare `PaymentResult` with `CheckoutState`.",
+            "35:61 invalid-operand `<` orders numbers, strings and classes that declare `operator <=>`, and `PaymentResult` is none of them.",
+            "36:40 invalid-operand `Step` can't be compared: `action` is a function.",
+            "37:47 invalid-operand `Booking` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
+        ]
+    );
+}
+
+/// Spec section 21: a `match` statement runs one arm, so one with a `default` whose every arm returns, continues or
+/// breaks leaves the code around it: an `if` around it narrows what follows, and a method needs no return after it. A
+/// `break` in an arm leaves the loop, so a method whose loop it ends still needs its return. An expression arm leaves
+/// when its expression never returns, as `global.exit(1)`.
+#[test]
+fn a_match_statement_whose_every_arm_leaves_leaves_the_code_around_it() {
+    let code = "namespace App;\n\nclass Shows\n{\n    public int size(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => {\n                    return 0;\n                },\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    public int sum(List<string?> values, int k)\n    {\n        let total = 0;\n        for (const value of values) {\n            if (value == null) {\n                match (k) {\n                    0 => {\n                        continue;\n                    },\n                    default => {\n                        break;\n                    },\n                }\n            }\n            total += this.take(value);\n        }\n\n        return total;\n    }\n\n    public int pick(Any? value)\n    {\n        match (value) {\n            int n => {\n                return n;\n            },\n            default => {\n                return 0;\n            },\n        }\n    }\n\n    public int never(int x)\n    {\n        while (true) {\n            match (x) {\n                0 => {\n                    break;\n                },\n                default => { },\n            }\n        }\n    }\n\n    public int exited(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => global.exit(1),\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    public int shown(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => this.take(\"a\"),\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    private int take(string s) => 1;\n}\n";
+
+    assert_eq!(
+        written(code, &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shows.sharp", code), &[])),
+        [
+            "53:16 missing-return-statement Missing return statement in method `Shows.never`",
+            "90:26 possibly-null-argument Argument #1 of method `Shows.take` is possibly `null`, but parameter type `string` does not accept it.",
+        ]
+    );
+}
+
+/// Spec sections 13 and 20: a `readonly` before a type whose value never changes is an error, and an enum is one, so
+/// an enum whose cases carry data, one of its cases, and a collection of them take none, as a struct takes none.
+#[test]
+fn a_data_case_never_changes_so_readonly_changes_nothing() {
+    let view = "namespace App;\n\npublic class Shows\n{\n    public void result(readonly PaymentResult result) { }\n\n    public void paid(readonly PaymentResult.Paid? paid) { }\n\n    public void states(readonly List<CheckoutState> states) { }\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Shows.sharp", view), &[PAYMENT_RESULT, CHECKOUT_STATE]),
+        [
+            "A `PaymentResult` never changes, so `readonly` changes nothing: write `PaymentResult`.",
+            "A `PaymentResult.Paid?` never changes, so `readonly` changes nothing: write `PaymentResult.Paid?`.",
+            "A `List<CheckoutState>` never changes, so `readonly` changes nothing: write `List<CheckoutState>`.",
+        ]
+    );
+
+    // A case's field is set only while the case is made, so a write names the copy to make, as a struct's does, and a
+    // name that starts with a vowel takes "An".
+    let event = "namespace App;\n\nenum Event\n{\n    case Started;\n    case Moved(int x, int y);\n}\n";
+    let moves = "namespace App;\n\npublic class Moves\n{\n    public void seen(readonly Event seen) { }\n\n    public void moved(Event.Moved moved)\n    {\n        moved.x = 3;\n    }\n}\n";
+    assert_eq!(
+        messages(("src/App/Moves.sharp", moves), &[("src/App/Event.sharp", event)]),
+        [
+            "An enum case never changes; return a changed copy made with `Event.Moved(…)`.",
+            "An `Event` never changes, so `readonly` changes nothing: write `Event`.",
+        ]
+    );
+}
+
+/// Spec section 21: a case pattern tests the case's class, and its fields by position bind the case's fields, typed as
+/// the case declares them. A value pattern `Enum.Case` tests the case's class too. A pattern that unpacks another
+/// number of fields than its case has, as a plain case's none, is an error.
+#[test]
+fn a_case_pattern_unpacks_the_fields_by_position() {
+    let code = "namespace App;\n\nclass Shop\n{\n    public string describe(PaymentResult result) => match (result) {\n        PaymentResult.Paid(string transactionId) => transactionId,\n        PaymentResult.Declined declined => declined.reason,\n        PaymentResult.RequiresAction { redirect: \"\" } => \"nowhere\",\n        default => \"other\",\n    };\n\n    public bool open(CheckoutState state) => state is CheckoutState.Open;\n\n    public int wrong(PaymentResult result) => result is PaymentResult.Paid(int id) ? id : 0;\n\n    public bool count(PaymentResult result) => result is PaymentResult.Paid(string a, string b);\n\n    public int plain(CheckoutState state) => match (state) {\n        CheckoutState.Paying(string gateway) => 1,\n        CheckoutState.Open(string open) => 2,\n        default => 0,\n    };\n}\n";
+
+    assert_eq!(
+        refusals(("src/App/Shop.sharp", code), &[PAYMENT_RESULT, CHECKOUT_STATE]),
+        [
+            "14:76 impossible-type-comparison Impossible type assertion: `id` of type `string` can never be `int`. | Check that the correct variable is being passed, or update the assertion type.",
+            "14:47 redundant-logical-operation Redundant `&&` operation: left operand is evaluated and right operand is always `false`. | Consider simplifying this expression to `false`.",
+            "14:47 impossible-condition Redundant ternary operator: condition is always `false`. | Consider replacing the entire expression with just this `else` branch.",
+            "16:76 invalid-argument `PaymentResult.Paid` has 1 field, and this pattern unpacks 2. | ",
+            "20:27 invalid-argument `CheckoutState.Open` has 0 fields, and this pattern unpacks 1. | ",
+        ]
+    );
+}
+
+/// Spec sections 20, 20.1 and 21: a `match` over an enum whose cases carry data, or over a sealed interface, needs no
+/// `default` when its arms handle each case or implementer, and names the ones it misses otherwise. An arm with `when`
+/// handles nothing, and a plain case is handled by its value.
+#[test]
+fn a_match_over_a_closed_set_needs_no_default() {
+    let code = "namespace App;\n\nclass Shop\n{\n    public string covered(PaymentResult result) => match (result) {\n        PaymentResult.Paid(string transactionId) => transactionId,\n        PaymentResult.Declined d => d.reason,\n        PaymentResult.RequiresAction(string redirect) => redirect,\n    };\n\n    public string missing(PaymentResult result) => match (result) {\n        PaymentResult.Paid p => \"paid\",\n    };\n\n    public string guarded(PaymentResult result, bool test) => match (result) {\n        PaymentResult.Paid p when test => \"test\",\n        PaymentResult.Declined d => \"declined\",\n        PaymentResult.RequiresAction a => \"action\",\n    };\n\n    public string mixed(CheckoutState state) => match (state) {\n        CheckoutState.Open => \"open\",\n        CheckoutState.Paying p => p.gateway,\n    };\n\n    public string open(CheckoutState state) => match (state) {\n        CheckoutState.Paying p => p.gateway,\n    };\n\n    public string one(PaymentResult.Paid paid, bool test) => match (paid) {\n        PaymentResult.Paid p when test => p.transactionId,\n    };\n\n    public string interacted(Interaction interaction) => match (interaction) {\n        PopupInteraction popup => popup.name(),\n        ScrollInteraction scroll => scroll.name(),\n    };\n\n    public string half(Interaction interaction) => match (interaction) {\n        PopupInteraction popup => popup.name(),\n    };\n\n    public string tested(Interaction interaction, bool test) => match (interaction) {\n        PopupInteraction popup when test => popup.name(),\n    };\n}\n";
+
+    assert_eq!(
+        refusals(
+            ("src/App/Shop.sharp", code),
+            &[PAYMENT_RESULT, CHECKOUT_STATE, INTERACTION, POPUP_INTERACTION, SCROLL_INTERACTION]
+        ),
+        [
+            "11:52 match-not-exhaustive This `match` misses `PaymentResult.Declined` and `PaymentResult.RequiresAction`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "15:63 match-not-exhaustive This `match` misses `PaymentResult.Paid`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "26:48 match-not-exhaustive This `match` misses `CheckoutState.Open`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "30:62 match-not-exhaustive This `match` misses `PaymentResult.Paid`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "39:52 match-not-exhaustive This `match` misses `ScrollInteraction`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "43:65 match-not-exhaustive This `match` misses `PopupInteraction` and `ScrollInteraction`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+        ]
+    );
+
+    // Arms that unpack one case together handle it when they differ in one field and hold every value of its type.
+    let delivery = "namespace App;\n\nenum Delivery\n{\n    case Sent;\n    case Noted(string? note);\n    case Routed(string route, int? stop);\n    case Flagged(bool urgent);\n    case Tagged(int|string|null tag);\n}\n";
+    let together = "namespace App;\n\nclass Post\n{\n    public string noted(Delivery delivery) => match (delivery) {\n        Delivery.Sent => \"sent\",\n        Delivery.Noted(string note) => note,\n        Delivery.Noted(null) => \"no note\",\n        Delivery.Routed(string route, int stop) => route,\n        Delivery.Routed(string route, null) => route,\n        Delivery.Flagged(true) => \"urgent\",\n        Delivery.Flagged(false) => \"calm\",\n        Delivery.Tagged((int or string)) => \"tagged\",\n        Delivery.Tagged(null) => \"untagged\",\n    };\n\n    public string half(Delivery delivery) => match (delivery) {\n        Delivery.Sent => \"sent\",\n        Delivery.Noted(string note) => note,\n        Delivery.Routed(\"north\", int stop) => \"north\",\n        Delivery.Routed(string route, null) => route,\n        Delivery.Flagged f => \"flagged\",\n        Delivery.Tagged t => \"tagged\",\n    };\n\n    public string either(Delivery delivery, bool test) => match (delivery) {\n        Delivery.Sent => \"sent\",\n        Delivery.Noted(string note) => note,\n        Delivery.Noted(null) when test => \"tested\",\n        Delivery.Routed(string route, int stop) => route,\n        Delivery.Routed(string route, null) => route,\n        Delivery.Flagged(true) => \"urgent\",\n        Delivery.Tagged t => \"tagged\",\n    };\n}\n";
+    assert_eq!(
+        refusals(("src/App/Post.sharp", together), &[("src/App/Delivery.sharp", delivery)]),
+        [
+            "17:46 match-not-exhaustive This `match` misses `Delivery.Noted` and `Delivery.Routed`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "26:59 match-not-exhaustive This `match` misses `Delivery.Noted` and `Delivery.Flagged`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+        ]
+    );
+}
+
+/// A case written in a class is the semantic check's error. No class runs as it, so the analyzer adds nothing.
+#[test]
+fn a_case_written_in_a_class_is_left_to_the_semantic_check() {
+    let code = "namespace App;\n\nclass Shop\n{\n    case Open;\n    case Paid(string id);\n}\n";
+
+    assert_eq!(messages(("src/App/Shop.sharp", code), &[]), Vec::<String>::new());
+}
+
+/// A file that declares the class a case runs as clashes with the case, whichever is read first.
+#[test]
+fn a_class_named_as_a_case_is_an_error_that_names_the_case() {
+    let messages = |analyzed, others: &[(&'static str, &'static str)]| -> Vec<String> {
+        analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().map(|issue| issue.message).collect()
+    };
+
+    let case = "The case `PaymentResult.Paid` runs as a class of that name, which another file declares.";
+    let class = "Class `Paid` clashes with the case `PaymentResult.Paid`, which runs as a class of that name.";
+    // The codebase keeps one declaration of a name, chosen by where each is written, and the other one is reported.
+    for (path, in_class, in_enum) in
+        [("src/App/PaymentResult/Paid.sharp", None, Some(case)), ("app/Paid.sharp", Some(class), None)]
+    {
+        let declared = (path, "namespace App.PaymentResult;\n\nclass Paid { }\n");
+
+        assert_eq!(messages(declared, &[PAYMENT_RESULT]), Vec::from_iter(in_class), "{path}");
+        assert_eq!(messages(PAYMENT_RESULT, &[declared]), Vec::from_iter(in_enum), "{path}");
+    }
+}
+
+/// Spec section 14.4: `a ?? return`, `a ?? continue` and `a ?? break` leave when `a` is null, so the value is `a`'s type
+/// without null. A `return` value meets the method's return type, a `continue` or `break` needs its loop, and a loop
+/// that leaves only through `?? break` still ends.
+#[test]
+fn leave_on_null_leaves_the_method_or_the_loop() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int price(Map<string, int> prices, string plan)\n    {\n        int price = prices[plan] ?? return -1;\n        return price + 1;\n    }\n\n    public static int total(List<int?> values)\n    {\n        let total = 0;\n        for (int i = 0; i < values.count(); i++) {\n            int value = values[i] ?? continue;\n            total = total + value;\n        }\n        return total;\n    }\n\n    public static int first(List<int?> values)\n    {\n        let found = 0;\n        let i = 0;\n        while (true) {\n            found = values[i] ?? break;\n            i = i + 1;\n        }\n        return found + i;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+
+    let wrong = "namespace Demo;\n\nclass Report\n{\n    public static int price(int? price) => price ?? return \"none\";\n\n    public static int outside(int? price) => price ?? continue;\n\n    public static int known(int price) => price ?? return 0;\n}\n";
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", wrong), &[]),
+        ["5:60 invalid-return-statement", "7:55 invalid-continue", "9:43 redundant-null-coalesce"]
+    );
+
+    // PHP# has no `switch`, so a `break` outside a loop names only the loop.
+    let outside = "namespace Demo;\n\nclass Report\n{\n    public static int stop(int? price) => price ?? break;\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", outside), &[]),
+        ["5:52 invalid-break A `break` stands only inside a loop. | "]
+    );
+
+    // A loop's condition or increment leaves that loop, as the engine runs it: its `?? break` ends the loop, and its
+    // `?? continue` starts the loop's next round.
+    let condition = "namespace Demo;\n\nclass Report\n{\n    public static int counted(List<List<int?>> rows)\n    {\n        let total = 0;\n        for (const values of rows) {\n            for (let i = 0; i < 10 && (values[i] ?? break) > 0; i += 1) {\n                total += 1;\n            }\n        }\n        return total;\n    }\n\n    public static int read(List<int?> values)\n    {\n        let i = 0;\n        while (i < 3 && (values[i] ?? break) > 0) {\n            i += 1;\n        }\n        return i;\n    }\n\n    public static int skipped(List<int?> values)\n    {\n        let i = 0;\n        for (; i < 3 && (values[i] ?? continue) > 0; i += 1) {\n        }\n        return i;\n    }\n\n    public static int stepped(List<int?> values)\n    {\n        let i = 0;\n        for (; i < 3; i = values[i] ?? break) {\n        }\n        return i;\n    }\n\n    public static int after(List<int?> values)\n    {\n        let i = 0;\n        do {\n            i += 1;\n        } while ((values[i] ?? break) > 0);\n        return i;\n    }\n}\n";
+    assert_eq!(refusals(("src/Demo/Report.sharp", condition), &[]), Vec::<String>::new());
+
+    // A loop whose body always breaks still checks its increment. A lambda runs apart from the loop around it, so its
+    // `?? break` stands outside every loop.
+    let apart = "namespace Demo;\n\nclass Report\n{\n    public static int once(List<int> values)\n    {\n        let found = 0;\n        for (let i = 0; i < values.count(); i += 1) {\n            found = values[i];\n            break;\n        }\n        return found;\n    }\n\n    public static void inner(List<int?> values)\n    {\n        for (const value of values) {\n            Function<int()> read = () => value ?? break;\n        }\n    }\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", apart), &[]),
+        ["18:51 invalid-break A `break` stands only inside a loop. | "]
+    );
+}
+
+/// Spec section 21: a list pattern tests the count, then each element against its pattern, and its rest takes the
+/// elements after them. Each element and the rest are typed from the list.
+#[test]
+fn list_patterns_test_the_count_and_each_element() {
+    let sharp = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static float total(List<Circle> circles) => match (circles) {\n        [] => 0.0,\n        [Circle { radius: > 1.0 } only] => only.radius,\n        [Circle first, ...List<Circle> rest] => first.radius + rest.count(),\n        default => -1.0,\n    };\n\n    public static bool pair(List<int> values) => values is [> 0, not 5];\n\n    public static int first(List<int> values)\n    {\n        if (values is [int head, ...List<int> tail]) {\n            return head + tail.count();\n        }\n        return 0;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
+
+    // A `List?` holds no list when it is null, and a nested list pattern tests an element.
+    let nullable = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int>? values) => match (values) {\n        null => -1,\n        [] => 0,\n        [int, ...List<int> rest] => 1 + rest.count(),\n        default => 2,\n    };\n\n    public static bool nested(List<List<int>> rows) => rows is [[1, int two]];\n}\n";
+    assert_eq!(issues(("src/Demo/Report.sharp", nullable), &[]), Vec::<String>::new());
+
+    // A rest stands anywhere: the elements after it are counted from the end, and a bare rest names nothing. The last
+    // list arm before `default` covers every list it leaves, written alone, after `not` or in parentheses.
+    let anywhere = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static float last(List<Circle> circles) => match (circles) {\n        [...List<Circle> before, Circle last] => last.radius + before.count(),\n        default => 0.0,\n    };\n\n    public static int ends(List<int> values)\n    {\n        if (values is [int first, ..., int last]) {\n            return first + last;\n        }\n        return 0;\n    }\n\n    public static int middle(List<int> values) => match (values) {\n        [1, ...List<int> inner, int end] => inner.count() + end,\n        [..., > 9] => 9,\n        default => 0,\n    };\n\n    public static int negated(List<int> values) => match (values) {\n        [] => 0,\n        not [] => 1,\n        default => 2,\n    };\n\n    public static int grouped(List<int> values) => match (values) {\n        [] => 0,\n        ([..., int end]) => end,\n        default => 2,\n    };\n}\n";
+    assert_eq!(issues(("src/Demo/Report.sharp", anywhere), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
+
+    // A value that holds no `List` never matches.
+    let other = "namespace Demo;\n\nclass Report\n{\n    public static bool mapped(Map<string, int> entries) => entries is [int one];\n\n    public static bool text(string name) => name is [] or \"\";\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", other), &[]),
+        [
+            "5:71 impossible-type-comparison This pattern never matches the value it tests. | Remove the pattern, or test a value that can match it.",
+            "7:53 impossible-type-comparison This pattern never matches the value it tests. | Remove the pattern, or test a value that can match it.",
+        ]
+    );
+
+    // A value that may be a `List` or anything else, as an `Any` or an element of a `List<Any>`, is tested with
+    // `is List<Any?>` first, and its elements and rest are typed by their patterns.
+    let any = "namespace Demo;\n\nclass Report\n{\n    public static int first(Any value) => match (value) {\n        [int one] => one,\n        [int head, ...List<int> rest] => head + rest.count(),\n        default => 0,\n    };\n\n    public static bool inner(List<Any> values) => values is [[]];\n\n    public static bool maybe(Any? value) => value is [string];\n}\n";
+    assert_eq!(refusals(("src/Demo/Report.sharp", any), &[]), Vec::<String>::new());
+
+    // A rest's type is tested as a typed element's is: one no element can have never matches, and `rest` has the type
+    // written.
+    let typed = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static bool texts(List<int> values) => values is [int first, ...List<string> rest];\n\n    public static float circles(List<Any> shapes) => match (shapes) {\n        [...List<Circle> rest] => rest[0].radius,\n        default => 0.0,\n    };\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", typed), &[("src/Lib/Shapes.php", SHAPES)]),
+        [
+            "7:61 impossible-type-comparison This pattern never matches the value it tests. | Remove the pattern, or test a value that can match it."
+        ]
+    );
+
+    // Spec section 21 skips `default` only on an enum or a sealed interface, so a `match` on a list needs it.
+    let defaultless = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int> values) => match (values) {\n        [] => 0,\n        [int, ...List<int> rest] => 1,\n    };\n}\n";
+    assert_eq!(issues(("src/Demo/Report.sharp", defaultless), &[]), ["5:49 match-not-exhaustive"]);
+}
+
+/// Spec section 14.4: `f?.(x)` calls `f` only when it is not null. The call is checked against the function's
+/// signature, its result can also be null, and `?.` on a function that is never null is redundant.
+#[test]
+fn a_null_safe_call_calls_only_a_function_that_is_there() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private Function<int(int)>? handler = null;\n\n    public Function<int(int)>? next() => this.handler;\n\n    public int? local(Function<int(int)>? doubler) => doubler?.(4);\n\n    public int? property() => this.handler?.(4);\n\n    public int? called() => this.next()?.(4);\n\n    public int sure(Function<int(int)>? doubler) => doubler?.(4);\n\n    public int? text(Function<int(int)>? doubler) => doubler?.(\"four\");\n\n    public int? never(Function<int(int)> doubler) => doubler?.(4);\n}\n";
+
+    // A result that can be null where `int` is returned gets the two errors a null-safe method call's result gets.
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "15:53 nullable-return-statement",
+            "15:53 invalid-return-statement",
+            "17:64 invalid-argument",
+            "19:61 redundant-nullsafe-operator",
+        ]
+    );
+}
+
+/// Spec section 21: `shape is Circle { radius: > 1.0 } big` tests the type, then each property on it, and binds `big`.
+/// It is checked as its PHP twin, `($big = $shape) instanceof Circle && $big->radius > 1.0`: the property reads the
+/// tested type's, and `big` is that type where the test holds.
+#[test]
+fn a_type_with_properties_tests_both_and_binds() {
+    let sharp = "namespace Demo;\n\nimport Lib.Shape;\nimport Lib.Circle;\nimport Lib.Square;\n\nclass Report\n{\n    public static float big(Shape shape)\n    {\n        if (shape is Circle { radius: > 1.0 } big) {\n            return big.radius;\n        }\n        return 0.0;\n    }\n\n    public static bool unnamed(Shape shape) => shape is Square { side: >= 2.0 };\n\n    public static string arm(Shape shape) => match (shape) {\n        Circle { radius: > 5.0 } c when c.radius < 9.0 => \"mid\",\n        Square { side: 0.0 } => \"point\",\n        default => \"other\",\n    };\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Shape;\nuse Lib\\Circle;\nuse Lib\\Square;\n\nclass Report\n{\n    public static function big(Shape $shape): float\n    {\n        if (($big = $shape) instanceof Circle && $big->radius > 1.0) {\n            return $big->radius;\n        }\n        return 0.0;\n    }\n\n    public static function unnamed(Shape $shape): bool { return $shape instanceof Square && $shape->side >= 2.0; }\n\n    public static function arm(Shape $shape): string { return match (true) {\n        ($c = $shape) instanceof Circle && $c->radius > 5.0 and $c->radius < 9.0 => \"mid\",\n        $shape instanceof Square && $shape->side === 0.0 => \"point\",\n        default => \"other\",\n    }; }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
+
+    let missing = "namespace Demo;\n\nimport Lib.Shape;\nimport Lib.Circle;\n\nclass Report\n{\n    public static bool missing(Shape shape) => shape is Circle { side: 1.0 };\n}\n";
+    assert!(
+        issues(("src/Demo/Report.sharp", missing), &[("src/Lib/Shapes.php", SHAPES)])
+            .contains(&"8:66 non-existent-property".to_owned())
+    );
+}
+
 #[test]
 fn a_pattern_that_can_never_match_is_an_error_at_the_pattern() {
     let sharp = "namespace Demo;\n\nimport Lib.Circle;\nimport Lib.Square;\n\nclass Report\n{\n    public static bool square(Circle circle) => circle is Square;\n\n    public static bool text(int count) => count is string;\n\n    public static bool named(int count) => count is \"none\";\n\n    public static Square? converted(Circle circle) => circle as Square;\n\n    public static int arm(Circle circle) => match (circle) {\n        Square => 1,\n        default => 0,\n    };\n\n    public static int value(int count) => match (count) {\n        1 => 1,\n        \"none\" => 0,\n        default => 2,\n    };\n\n    public static bool possible(int? count) => count is int and > 0;\n}\n";
@@ -5037,14 +5428,21 @@ fn a_match_without_default_that_handles_every_enum_case_reports_nothing() {
     assert_eq!(reported, Vec::<&str>::new());
 }
 
-/// An enum declared in PHP# has its cases counted as a PHP enum's, inside its own methods too.
+/// An enum declared in PHP# has its cases counted as a PHP enum's, inside its own methods too, where an arm with `when`
+/// handles no case of `this`.
 #[test]
 fn a_match_without_default_over_a_sharp_enum_names_the_cases_it_misses() {
-    let sharp = "namespace Demo;\n\npublic enum Stage : string\n{\n    case Open = \"o\";\n    case Paid = \"p\";\n    case Closed = \"c\";\n\n    public string label() => match (this) {\n        Stage.Open => \"open\",\n        Stage.Paid or Stage.Closed => \"done\",\n    };\n}\n\nclass Orders\n{\n    public static string missing(Stage stage) => match (stage) {\n        Stage.Open => \"open\",\n        Stage.Paid => \"paid\",\n    };\n}\n";
+    let sharp = "namespace Demo;\n\npublic enum Stage : string\n{\n    case Open = \"o\";\n    case Paid = \"p\";\n    case Closed = \"c\";\n\n    public string label() => match (this) {\n        Stage.Open => \"open\",\n        Stage.Paid or Stage.Closed => \"done\",\n    };\n\n    public string guarded(bool test) => match (this) {\n        Stage.Open when test => \"open\",\n    };\n}\n\nclass Orders\n{\n    public static string missing(Stage stage) => match (stage) {\n        Stage.Open => \"open\",\n        Stage.Paid => \"paid\",\n    };\n}\n";
 
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Orders.sharp", sharp), &[]);
 
-    assert_eq!(written_errors(sharp, &issues), ["match match-not-exhaustive This `match` misses `Stage.Closed`."]);
+    assert_eq!(
+        written_errors(sharp, &issues),
+        [
+            "match match-not-exhaustive This `match` misses `Stage.Open`, `Stage.Paid` and `Stage.Closed`.",
+            "match match-not-exhaustive This `match` misses `Stage.Closed`.",
+        ]
+    );
 
     let php = "<?php\n\nnamespace Demo;\n\nenum Stage: string\n{\n    case Open = 'o';\n    case Paid = 'p';\n    case Closed = 'c';\n\n    public function label(): string\n    {\n        return match ($this) {\n            Stage::Open => 'open',\n            Stage::Paid, Stage::Closed => 'done',\n        };\n    }\n}\n\nclass Orders\n{\n    public static function missing(Stage $stage): string\n    {\n        return match ($stage) {\n            Stage::Open => 'open',\n            Stage::Paid => 'paid',\n        };\n    }\n}\n";
     assert_eq!(
@@ -5092,16 +5490,22 @@ fn an_arm_that_is_always_true_before_the_last_is_reported_with_the_arms_it_hides
     );
 }
 
+/// A pattern that unpacks fields of what is no case of an enum with data reports that alone, and the `match` around it
+/// reports nothing more. A dotted name of a class reports only that it names no case, where its type is read.
 #[test]
-fn a_pattern_the_parser_refuses_reports_only_its_parse_error() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void count(int? count)\n    {\n        match (count) {\n            [int first] => {},\n            Shape.Circle(radius) => {},\n            default => {},\n        }\n    }\n}\n";
+fn a_case_pattern_on_no_case_reports_only_that() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void count(int? count)\n    {\n        match (count) {\n            1 => {},\n            Shape.Circle(radius) => {},\n            Shapes.Box(side) => {},\n            default => {},\n        }\n    }\n}\n";
+    let box_class = ("src/Demo/Shapes/Box.sharp", "namespace Demo.Shapes;\n\npublic class Box\n{\n}\n");
 
-    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[box_class]);
     let messages: Vec<&str> = issues.iter().map(|issue| issue.message.as_str()).collect();
 
     assert_eq!(
         messages,
-        ["A list pattern is not supported yet in PHP#.", "An enum case pattern is not supported yet in PHP#."]
+        [
+            "`Shape.Circle` is no case of an enum whose cases carry data, so it has no fields to unpack.",
+            "`Shapes.Box` is no case of an enum.",
+        ]
     );
 }
 
@@ -10675,7 +11079,7 @@ fn a_refused_type_test_still_declares_its_name() {
 /// refusal.
 #[test]
 fn new_of_a_refused_value_reports_nothing_more() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any make(Any value)\n    {\n        const type = value as Function<int()>;\n        return new (type)();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any make(Any value)\n    {\n        const type = value as Class<Report>;\n        return new (type)();\n    }\n}\n";
 
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -12160,6 +12564,50 @@ fn a_type_test_of_a_php_class_with_docblock_templates_passes() {
 
     assert_eq!(explained(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// Spec section 21: every type answers `is`, `as` and `match` the same way, function types included, so a lambda and a
+/// method value are tested in each. A `Closure` a plain PHP method returns declares no PHP# type, so testing it against
+/// a function type is `unknown-function-type`, in each form.
+#[test]
+fn function_types_are_tested_like_any_type() {
+    let legacy = (
+        "src/Lib/Legacy.php",
+        "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    public static function doubler(): \\Closure\n    {\n        return fn($x) => $x * 2;\n    }\n}\n",
+    );
+    let code = "namespace App;\n\nimport Lib.Legacy;\n\npublic class Shows\n{\n    public int twice(int x) => x * 2;\n\n    public void run()\n    {\n        Any? doubled = (int x) => x * 2;\n        Any? method = this.twice;\n        const a = doubled is Function<int(int)>;\n        const b = doubled as Function<string(string)>;\n        const c = match (method) { Function<int(int)> f => f(1), default => 2 };\n        const d = Legacy.doubler() is Function<int(int)>;\n        const e = Legacy.doubler() as Function<int(int)>;\n        const f = match (Legacy.doubler()) { Function<int(int)> f => f(1), default => 2 };\n        Legacy.doubler() is Function<int(int)>;\n    }\n}\n";
+    let unknown = |line: u32, column: u32| {
+        format!(
+            "{line}:{column} unknown-function-type The type of `Legacy.doubler()`'s function is unknown: its source declares no parameter or result types."
+        )
+    };
+
+    assert_eq!(
+        written(code, &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shows.sharp", code), &[legacy])),
+        [unknown(16, 19), unknown(17, 19), unknown(18, 26), unknown(19, 9)]
+    );
+}
+
+/// A plain PHP method named as a value, and a `Closure` written as a type or tested for, declare no PHP# type either, so
+/// a function-type test of them is `unknown-function-type`, and never always true, whatever types the analyzer knows. A
+/// PHP# lambda in a local keeps its type.
+#[test]
+fn a_function_type_test_of_a_plain_php_function_value_is_unknown() {
+    let legacy = (
+        "src/Lib/Legacy.php",
+        "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    public static function twice(int $x): int\n    {\n        return $x * 2;\n    }\n}\n",
+    );
+    let code = "namespace App;\n\nimport Closure;\nimport Lib.Legacy;\n\npublic class Shows\n{\n    public bool named(Closure closure) => closure is Function<int(int)>;\n\n    public bool method() => Legacy.twice is Function<int(int)>;\n\n    public bool narrowed(Any? value) => value is Closure tested && tested is Function<int(int)>;\n\n    public bool local()\n    {\n        let doubled = (int x) => x * 2;\n        return doubled is Function<int(int)>;\n    }\n}\n";
+
+    assert_eq!(
+        written(code, &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shows.sharp", code), &[legacy])),
+        [
+            "8:43 unknown-function-type The type of `closure`'s function is unknown: its source declares no parameter or result types.",
+            "10:29 unknown-function-type The type of `Legacy.twice`'s function is unknown: its source declares no parameter or result types.",
+            "12:68 unknown-function-type The type of `tested`'s function is unknown: its source declares no parameter or result types.",
+            "17:24 redundant-type-comparison `doubled` is already a `Function<int(int)>`, so `is Function<int(int)>` is always true.",
+        ]
+    );
 }
 
 /// Spec section 11: a plain PHP class's objects carry no type arguments while the code runs, so a type test that gives
@@ -16184,6 +16632,27 @@ fn a_getter_building_and_changing_a_new_object_passes() {
     );
 }
 
+/// A call's result has the roots of what the call is given, as `f?.(x)` gives `x`'s when `f` is there, so a getter that
+/// changes what a function value returns for a field of `this` changes `this`.
+#[test]
+fn a_getter_changing_what_a_function_value_returns_for_its_field_is_refused() {
+    let builder = (
+        "app/Shop/Builder.sharp",
+        "namespace App.Shop;\n\npublic class Builder\n{\n    private string text = \"\";\n\n    public void add(string part)\n    {\n        this.text = this.text + part;\n    }\n}\n",
+    );
+    let page = (
+        "app/Shop/Page.sharp",
+        "namespace App.Shop;\n\npublic class Page\n{\n    private Builder? builder = null;\n\n    private Function<Builder(Builder?)>? pick = null;\n\n    public string title\n    {\n        get\n        {\n            this.pick?.(this.builder)?.add(\"Shop\");\n            return \"\";\n        }\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[page, builder]),
+        [
+            "app/Shop/Page.sharp:13:13 getter-writes-this: Getter `title` reaches `Builder.add`, which changes `this.text`. A getter never writes `this`. Help: Write the change in a method, and call it before the read."
+        ]
+    );
+}
+
 /// `: super(…)` runs in the constructor, so `new` reaches the effects of its arguments and of the base class's
 /// constructor, as it reaches the constructor body's.
 #[test]
@@ -16557,6 +17026,44 @@ fn a_recursive_pair_of_methods_solves_without_looping() {
         effects.impurity(&codebase, &even).as_deref(),
         Some("reaches `Tree.odd`, which calls `global.now` with the effect `Clock`")
     );
+}
+
+/// Spec section 21: a function type lists the effects of each body its function calls, in any file, so an edit of one
+/// can change it. `callee_files` gives the file of each method a call reaches, every override it can run, and each
+/// accessor's class, but never the calling file itself. A change of state is no effect, so the type lists none for it.
+#[test]
+fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
+    let base = (
+        "app/Shop/Base.sharp",
+        "namespace App.Shop;\n\npublic abstract class Base\n{\n    public virtual int price() => 1;\n}\n",
+    );
+    let sale = (
+        "app/Shop/Sale.sharp",
+        "namespace App.Shop;\n\npublic class Sale : Base\n{\n    public override int price() => global.now();\n}\n",
+    );
+    let stock = (
+        "app/Shop/Stock.sharp",
+        "namespace App.Shop;\n\npublic class Stock\n{\n    public int count { get => 2; }\n}\n",
+    );
+    let till = (
+        "app/Shop/Till.sharp",
+        "namespace App.Shop;\n\npublic class Till\n{\n    private int rung = 0;\n\n    public int ring(Base item, Stock stock) => item.price() + stock.count + this.add();\n\n    public int add()\n    {\n        this.rung += 1;\n        return this.rung;\n    }\n}\n",
+    );
+    let (codebase, summaries) = summarized(&[base, sale, stock, till, CLOCK_STUB, NOW]);
+    let effects = Effects::solve(&codebase, &summaries);
+    let file = |class: &[u8]| codebase.get_class_like(class).expect("the class is declared").span.file_id;
+    let method = |name: &[u8]| {
+        FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Till"), ascii_lowercase_word(name))
+    };
+
+    let callee_files = effects.callee_files(&codebase);
+    assert_eq!(
+        callee_files.get(&file(b"App\\Shop\\Till")),
+        Some(&[file(b"App\\Shop\\Base"), file(b"App\\Shop\\Sale"), file(b"App\\Shop\\Stock")].into_iter().collect())
+    );
+    assert_eq!(callee_files.get(&file(b"App\\Shop\\Sale")), None);
+    assert_eq!(effects.function_effects(&method(b"add")), Some(Vec::new()));
+    assert_eq!(effects.function_effects(&method(b"ring")), Some(vec![word("Sharp\\Clock")]));
 }
 
 /// An operator on an instance runs the operator its class declares (spec section 19), so a getter that applies one
@@ -17509,10 +18016,17 @@ fn emit_has_the_effect_events() {
     let [order_event, order_paid] = ORDER_EVENTS;
     let checkout = (
         "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<void() uses Events> announce = () => { emit new OrderPaid(1); };\n\n    private Function<void()> silent = () => { emit new OrderPaid(2); };\n\n    public int paid\n    {\n        get\n        {\n            emit new OrderPaid(3);\n            return 3;\n        }\n    }\n\n    public int total => this.complete();\n\n    law completes(Checkout checkout) => checkout.complete() > 0;\n\n    law announces(Checkout checkout) => checkout.paid > 0;\n\n    public int complete()\n    {\n        emit new OrderPaid(4);\n        return 4;\n    }\n\n    public void run()\n    {\n        this.announce();\n        this.silent();\n    }\n}\n",
+        "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<void() uses Events> announce = () => { emit new OrderPaid(1); };\n\n    private Function<void()> silent = () => { emit new OrderPaid(2); };\n\n    public int paid\n    {\n        get\n        {\n            emit new OrderPaid(3);\n            return 3;\n        }\n    }\n\n    public int total => this.complete();\n\n    law completes(Checkout checkout) => checkout.complete() > 0;\n\n    law announces(Checkout checkout) => checkout.paid > 0;\n\n    public int complete()\n    {\n        emit new OrderPaid(4);\n        return 4;\n    }\n\n    public void run()\n    {\n        this.announce();\n        this.silent();\n    }\n\n    public void broadcast()\n    {\n        emit new OrderPaid(5);\n        this.announce();\n    }\n}\n",
     );
 
     assert_eq!(issues(checkout, &ORDER_EVENTS), Vec::<String>::new());
+    // Its own `emit` and a call of a function whose type lists `Events` give a function type `Events` once.
+    let (codebase, summaries) = summarized(&[checkout, order_event, order_paid]);
+    let broadcast = FunctionLikeIdentifier::Method(
+        ascii_lowercase_word(b"App\\Shop\\Checkout"),
+        ascii_lowercase_word(b"broadcast"),
+    );
+    assert_eq!(Effects::solve(&codebase, &summaries).function_effects(&broadcast), Some(vec![word("Sharp\\Events")]));
     assert_eq!(
         effect_issues(&[checkout, order_event, order_paid]),
         [
@@ -18549,4 +19063,27 @@ fn plain_php_messages_show_a_readonly_type_as_its_php_type() {
 
     assert!(messages.iter().all(|message| !message.contains("readonly")), "{messages:#?}");
     assert_eq!(messages.len(), 5, "{messages:#?}");
+}
+
+/// Spec section 21: a pattern takes types and constants only, as in C#, and a local's value is compared in `when`. The
+/// error writes that `when` with the type of the value the pattern compares, wherever the pattern stands, and the
+/// form is not analyzed further.
+#[test]
+fn a_pattern_reads_no_local_and_names_the_when_that_compares_it() {
+    let delivery = "namespace App;\n\nenum Delivery\n{\n    case Noted(string note);\n}\n";
+    let code = "namespace App;\n\nclass Post\n{\n    private int limit = 3;\n\n    public string run(Delivery delivery, Any? value, string code, int extra)\n    {\n        const top = 10.5;\n        let label = match (value) {\n            top => \"local\",\n            extra => \"parameter\",\n            default => \"other\",\n        };\n        let tested = value is this.limit;\n        tested = value is < top;\n        tested = value is 2 + extra;\n        tested = delivery is Delivery.Noted(code);\n        tested = delivery is Delivery.Noted { note: code };\n        match (value) {\n            extra => { },\n            default => { },\n        }\n        return label;\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/App/Post.sharp", code), &[("src/App/Delivery.sharp", delivery)]),
+        [
+            "11:13 replaced-by-syntax `top` is a local: compare its value in `when`, as in `float n when n == top`. | ",
+            "12:13 replaced-by-syntax `extra` is a parameter: compare its value in `when`, as in `int n when n == extra`. | ",
+            "15:31 replaced-by-syntax `this` is the object the method runs on: compare its value in `when`, as in `int n when n == this.limit`. | ",
+            "16:29 replaced-by-syntax `top` is a local: compare its value in `when`, as in `float n when n < top`. | ",
+            "17:31 replaced-by-syntax `extra` is a parameter: compare its value in `when`, as in `int n when n == 2 + extra`. | ",
+            "18:45 replaced-by-syntax `code` is a parameter: compare its value in `when`, as in `string n when n == code`. | ",
+            "19:53 replaced-by-syntax `code` is a parameter: compare its value in `when`, as in `string n when n == code`. | ",
+            "21:13 replaced-by-syntax `extra` is a parameter: compare its value in `when`, as in `int n when n == extra`. | ",
+        ]
+    );
 }

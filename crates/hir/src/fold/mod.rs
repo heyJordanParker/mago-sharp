@@ -874,6 +874,7 @@ generate_fold! {
                 .arena()
                 .alloc_slice_fill_iter(interface.attributes.iter().map(|attribute| folder.fold_attribute(attribute))),
             version_constraint: folder.arena().alloc_slice_copy(interface.version_constraint),
+            modifiers: folder.arena().alloc_slice_copy(interface.modifiers),
             name: interface.name.copy_into(folder.arena()),
             extends: interface.extends.map(|extends| copy_ref_into(extends, folder.arena())),
             members: fold_delimited(folder.arena(), &interface.members, |member| folder.fold_member_item(member)),

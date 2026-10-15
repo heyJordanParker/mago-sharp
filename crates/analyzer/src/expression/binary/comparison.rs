@@ -25,9 +25,11 @@ use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::Parenthesized;
 use mago_syntax::cst::Pattern;
+use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::Variable;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
@@ -53,9 +55,12 @@ use crate::expression::binary::utils::is_always_identical_to;
 use crate::expression::binary::utils::is_always_less_than;
 use crate::expression::binary::utils::is_always_less_than_or_equal;
 use crate::expression::binary::utils::takes_operands;
+use crate::statement::class_like::r#struct::data_enum;
 use crate::statement::class_like::r#struct::declares_equality;
+use crate::statement::class_like::r#struct::value_properties;
 use crate::utils::expression::get_literal_array_key;
 use crate::utils::misc::unwrap_expression;
+use crate::utils::names::article;
 use crate::utils::names::display_bool;
 use crate::utils::names::display_type;
 use crate::utils::quoted_source;
@@ -709,6 +714,7 @@ enum Comparand {
     Int,
     Float,
     Bool,
+    /// A case of the enum of this name, spec section 20. A case that carries data compares by value, field by field.
     Enum(Word),
     /// An instance of a class that is no struct, or a function.
     Instance,
@@ -752,6 +758,7 @@ fn comparands(union: &TUnion, codebase: &CodebaseMetadata) -> Vec<Comparand> {
                 found.push(match class {
                     Some(class) if class.kind.is_enum() => Comparand::Enum(class.name),
                     Some(class) if class.flags.is_struct() => Comparand::Struct(class.name),
+                    Some(class) if let Some(r#enum) = data_enum(codebase, class) => Comparand::Enum(r#enum),
                     _ => Comparand::Instance,
                 })
             }
@@ -956,7 +963,14 @@ fn refusal(
                 || lhs.iter().any(|comparand| rhs.contains(comparand))
                 || mixes_numbers(lhs_type, rhs_type, codebase)
             {
-                None
+                // A case that carries data compares field by field, as a struct does.
+                lhs.iter()
+                    .chain(&rhs)
+                    .find_map(|comparand| match comparand {
+                        Comparand::Enum(name) => struct_property_refusal(*name, codebase, visiting),
+                        _ => None,
+                    })
+                    .map(|_| Refusal::StructProperty)
             } else {
                 Some(Refusal::DifferentTypes)
             }
@@ -1320,9 +1334,10 @@ pub(crate) fn check_element_equality<A>(
     );
 }
 
-/// The first property of the struct `name`, in declaration order, that its own `==` cannot compare with another of its
-/// type, with why, spec section 10: a struct compares by value only when each of its properties does. `visiting` holds
-/// the structs being checked, so a struct that holds itself, as in `Node? next`, compares by the rest.
+/// The first property of the struct `name`, in declaration order, or field of a case of the enum `name`, that its own
+/// `==` cannot compare with another of its type, with why, spec sections 10 and 20: a struct or a case compares by
+/// value only when each of its properties does. `visiting` holds the structs and enums being checked, so one that
+/// holds itself, as in `Node? next`, compares by the rest.
 fn struct_property_refusal<'codebase>(
     name: Word,
     codebase: &'codebase CodebaseMetadata,
@@ -1332,9 +1347,10 @@ fn struct_property_refusal<'codebase>(
     if visiting.contains(&class.name) {
         return None;
     }
+    let properties = value_properties(codebase, class)?;
     visiting.push(class.name);
 
-    let refused = class.struct_properties().into_iter().find_map(|property| {
+    let refused = properties.into_iter().find_map(|property| {
         let r#type = &property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?.type_union;
         // `==` on two `Any` values compiles, and compares by value only a string, a number or an enum case.
         if comparands(r#type, codebase).contains(&Comparand::Any) {
@@ -1349,9 +1365,9 @@ fn struct_property_refusal<'codebase>(
     refused
 }
 
-/// The issue that refuses `==` on the struct one of `lhs_type` and `rhs_type` holds, naming the first property its own
-/// `==` cannot compare, as "`RenewRequest` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`."
-/// A function has no equality, as "`Spot` can't be compared: `onMove` is a function."
+/// The issue that refuses `==` on the struct or the enum one of `lhs_type` and `rhs_type` holds, naming the first
+/// property or field its own `==` cannot compare, as "`RenewRequest` can't compare by value: `plan` is a `Plan`, which
+/// declares no `operator ==`." A function has no equality, as "`Spot` can't be compared: `onMove` is a function."
 fn struct_property_issue<A>(context: &Context<'_, '_, A>, lhs_type: &TUnion, rhs_type: &TUnion) -> Issue
 where
     A: Arena,
@@ -1359,7 +1375,7 @@ where
     let codebase = context.codebase;
     let Some((name, property, reason)) =
         comparands(lhs_type, codebase).into_iter().chain(comparands(rhs_type, codebase)).find_map(|comparand| {
-            let Comparand::Struct(name) = comparand else {
+            let (Comparand::Struct(name) | Comparand::Enum(name)) = comparand else {
                 return None;
             };
             let (property, reason) = struct_property_refusal(name, codebase, &mut Vec::new())?;
@@ -1370,6 +1386,11 @@ where
         unreachable!("`==` is refused for a struct's property only when one of its properties cannot compare");
     };
     let r#struct = display_operand(context, &get_named_object(name, None));
+    let (value, note) = if codebase.get_class_like(name.as_bytes()).is_some_and(|class| class.flags.is_struct()) {
+        ("struct", "A struct compares by value, property by property, with each property's own `==`.")
+    } else {
+        ("case", "An enum case compares by value, field by field, with each field's own `==`.")
+    };
     let property_name = property.name.0.as_bytes();
     let property_name = BytesDisplay(property_name.strip_prefix(b"$").unwrap_or(property_name));
     let declared = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref());
@@ -1379,11 +1400,11 @@ where
         return Issue::error(
             format!("`{struct}` can't be compared: `{property_name}` is a function.", struct = r#struct),
         )
-        .with_note("A function value has no equality, so a struct that holds one has none.");
+        .with_note(format!("A function value has no equality, so a {value} that holds one has none."));
     }
     let r#type = declared
         .map_or_else(|| "Any?".to_owned(), |r#type| display_operand(context, &r#type.type_union.to_non_nullable()));
-    let article = if r#type.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" };
+    let article = article(&r#type);
     let why = match reason {
         Some(Refusal::Instance) => "which declares no `operator ==`",
         Some(Refusal::Collection) => "and `==` on a collection is not supported yet",
@@ -1398,7 +1419,7 @@ where
         struct = r#struct,
         type = r#type
     ))
-    .with_note("A struct compares by value, property by property, with each property's own `==`.")
+    .with_note(note)
 }
 
 /// The issue that refuses `comparison`, of values of two types that never match, with `help` naming what to convert.
@@ -1555,6 +1576,20 @@ fn written_words<'arena>(
         Pattern::Properties(properties) => {
             properties.properties.iter().find_map(|property| written_words(property.pattern, Vec::new(), value))
         }
+        Pattern::List(list) => list.elements.iter().find_map(|element| match element {
+            ListPatternElement::Pattern(pattern) => written_words(pattern, Vec::new(), value),
+            ListPatternElement::Rest(_) => None,
+        }),
+        Pattern::Type(TypePattern { fields, properties, .. }) if pattern.span() != value => fields
+            .iter()
+            .flat_map(|fields| fields.fields.iter())
+            .find_map(|field| written_words(field, Vec::new(), value))
+            .or_else(|| {
+                properties
+                    .iter()
+                    .flat_map(|properties| properties.properties.iter())
+                    .find_map(|property| written_words(property.pattern, Vec::new(), value))
+            }),
         Pattern::Type(_) | Pattern::Value(_) => (pattern.span() == value).then_some(leading),
         Pattern::Comparison(_) => None,
     }

@@ -37,6 +37,7 @@ pub mod magic_constant;
 pub mod modifier;
 pub mod namespace;
 pub mod partial_application;
+pub mod pattern;
 pub mod pipe;
 pub mod program;
 pub mod r#return;

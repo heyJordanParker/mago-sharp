@@ -95,7 +95,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
             // PHP# writes both `Class::NAME` and `Class::$name` as `Class.name`, with a bare name bound to a class.
             // Like the engine, a read is the constant or enum case when the class has one by that name, then the
             // static property, then the static method as a closure, as `Class::name(...)`. A constant expression
-            // reads only the constant or enum case, as PHP's does.
+            // reads only the constant or enum case, as PHP's does, and so does a pattern, which spec section 21 says
+            // takes constants only.
             Access::Property(access) => match StaticProperty::from_property_access(access, context.resolved_names) {
                 // Spec section 23: `global.PHP_EOL`, and `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;`, read a plain
                 // PHP constant through its namespace, as a plain PHP function is called through it.
@@ -132,10 +133,32 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                 Some(StaticProperty { class, name: StaticPropertyName::Identifier(name), span })
                     if let Some(class_name) = context.resolved_names.static_property_class(access)
                         && (block_context.flags.inside_constant_expression()
+                            || context.patterns.iter().any(|(_, pattern)| pattern.span().contains(&span.start))
                             || context
                                 .codebase
                                 .class_constant_exists(context.resolved_names.get(&class_name.name), name.value)) =>
                 {
+                    // Spec section 20: a plain case of an enum whose cases carry data is the one object its class
+                    // makes on the first read, which PHP's constant expressions cannot read.
+                    let class_name = context.resolved_names.get(&class_name.name);
+                    if block_context.flags.inside_constant_expression()
+                        && context
+                            .codebase
+                            .get_class_like(&[class_name, b"\\", name.value].concat())
+                            .is_some_and(|case| case.flags.is_enum_case_class())
+                    {
+                        context.collector.report_with_code(
+                            IssueCode::NotSupportedYet,
+                            Issue::error(format!(
+                                "Reading a case of an enum whose cases carry data, as `{}.{}`, in a constant expression is not supported yet in PHP#.",
+                                BytesDisplay(class_name.rsplit(|&byte| byte == b'\\').next().unwrap_or_default()),
+                                BytesDisplay(name.value),
+                            ))
+                            .with_annotation(Annotation::primary(span).with_message("Read here."))
+                            .with_note("A case of such an enum is an object, made when the code first reads it."),
+                        );
+                    }
+
                     class_constant_access::analyze_class_constant_access(
                         context,
                         block_context,
@@ -482,13 +505,13 @@ where
     }
 }
 
-/// Analyzes a PHP# read or call through the class value `object`, which is analyzed, with `analyze`. Through `?.`,
-/// `type?.y` or `type?.m()`, the member is reached only when `object` holds a class, so `analyze` runs with `object`
-/// typed as its class values, as `if (type !== null)` narrows a local, and the result at `span` can also be the `null`
-/// the access stops at. `object` keeps its own type afterwards. A null receiver skips a call's arguments, so the locals
-/// afterwards are the ones from before, with each local an argument writes merged as the short-circuited right-hand
-/// side of `&&` merges it.
-pub(crate) fn analyze_through_class_value<'ctx, 'arena, A>(
+/// Analyzes a PHP# read or call through `object`, a class value or a function, which is analyzed, with `analyze`.
+/// Through `?.`, `type?.y`, `type?.m()` or `f?.(x)`, the member is reached or the function called only when `object`
+/// is not null, so `analyze` runs with `object` typed as its values that are not null, as `if (type !== null)` narrows
+/// a local, and the result at `span` can also be the `null` the access stops at. `object` keeps its own type
+/// afterwards. A null receiver skips a call's arguments, so the locals afterwards are the ones from before, with each
+/// local an argument writes merged as the short-circuited right-hand side of `&&` merges it.
+pub(crate) fn analyze_through_value<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,

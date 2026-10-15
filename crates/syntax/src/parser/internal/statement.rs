@@ -70,6 +70,9 @@ where
             {
                 self.parse_module().map(Statement::Module)
             }
+            T![Identifier] if !self.state.within_block && self.is_at_interface()? => {
+                self.parse_interface_with_attributes(Sequence::empty()).map(Statement::Interface)
+            }
             T![Identifier] if !self.state.within_block && self.is_at_event()? => self
                 .parse_event_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())
                 .map(Statement::Event),
@@ -88,7 +91,9 @@ where
                 let maybe_after = self.stream.peek_kind(1)?;
 
                 match next.kind {
-                    T!["interface"] => self.parse_interface_with_attributes(attributes).map(Statement::Interface),
+                    T!["interface" | Identifier] if self.is_at_interface()? => {
+                        self.parse_interface_with_attributes(attributes).map(Statement::Interface)
+                    }
                     T!["trait"] => self.parse_trait_with_attributes(attributes).map(Statement::Trait),
                     T!["enum"] => self.parse_enum_with_attributes(attributes).map(Statement::Enum),
                     T!["class"] => self.parse_class_with_attributes(attributes).map(Statement::Class),

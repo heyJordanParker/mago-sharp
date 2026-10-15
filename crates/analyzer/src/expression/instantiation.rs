@@ -69,6 +69,7 @@ use crate::resolver::class_name::report_class_value_of_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::statement::function_like::get_this_type;
+use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
@@ -545,7 +546,7 @@ where
                 Annotation::primary(class_expression_span)
                     .with_message(format!(
                         "This expression is `class-string<{classname_str}>` where `{classname_str}` is {article} {kind_name}",
-                        article = if metadata.kind.is_interface() { "an" } else { "a" }
+                        article = article(kind_name)
                     )),
             )
             .with_note(format!(

@@ -6,6 +6,7 @@ use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::expander::contains_parameter_variable;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
@@ -19,6 +20,7 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::MethodCall;
+use mago_syntax::cst::NullSafeFunctionCall;
 use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
@@ -31,6 +33,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::access::analyze_through_value;
 use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::get_function_like_target;
 use crate::expression::call::get_function_like_target_with_skip;
@@ -42,6 +45,7 @@ use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::NamedCall;
 use crate::resolver::extension::is_imported_by_default;
+use crate::resolver::property::check_redundant_nullsafe;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_code_member;
@@ -92,6 +96,60 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
 
         Ok(())
     }
+}
+
+/// Analyzes PHP#'s `f?.(x)`, spec section 14.4, as a call of the function `f` holds when it is not null: the arguments
+/// are checked against its signature, the result can also be `null`, and a function that is never null makes `?.`
+/// redundant.
+pub(super) fn analyze_null_safe_function_call<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    call: &NullSafeFunctionCall<'arena>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let was_inside_call = block_context.flags.inside_call();
+    block_context.flags.set_inside_call(true);
+    call.function.analyze(context, block_context, artifacts)?;
+    block_context.flags.set_inside_call(was_inside_call);
+
+    let function_type = artifacts.get_expression_type(call.function).cloned().unwrap_or_else(get_mixed);
+    check_redundant_nullsafe(context, call.question_mark_dot, call.function, &function_type, true);
+
+    analyze_through_value(
+        context,
+        block_context,
+        artifacts,
+        call.function,
+        true,
+        call.span(),
+        |context, block_context, artifacts| {
+            let mut template_result = TemplateResult::default();
+            let (targets, encountered_invalid_targets) = resolve_callable_targets(
+                context,
+                &function_type.to_non_nullable(),
+                call.function.span(),
+                &mut template_result,
+            );
+
+            analyze_invocation_targets(
+                context,
+                block_context,
+                artifacts,
+                template_result,
+                targets,
+                InvocationArgumentsSource::ArgumentList(&call.argument_list),
+                call.span(),
+                None,
+                encountered_invalid_targets,
+                false,
+                false,
+                false,
+            )
+        },
+    )
 }
 
 /// Analyzes `call` with `analyze`, between the function call hooks. A hook before it may skip the analysis and give

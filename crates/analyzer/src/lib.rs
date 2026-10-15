@@ -48,6 +48,9 @@ pub mod settings;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod telemetry;
 
+/// The engine's bridge lowers each PHP# pattern from the PHP the analyzer analyzed, so both build it with these names.
+pub use crate::context::assertion::CodebasePatternNames;
+
 mod analyzable;
 mod assertion;
 mod common;
@@ -243,6 +246,7 @@ where
         let statements_start = trace_enabled.then(std::time::Instant::now);
         analyze_statements(statements, &mut context, &mut block_context, &mut artifacts)?;
         if program.dialect.is_sharp() {
+            statement::class_like::enum_case::report_dotted_types(program, &mut context);
             effects::check::check_uses(&mut context, &block_context, &mut artifacts, program);
             readonly_types::check_readonly_types(&mut context, program);
         }

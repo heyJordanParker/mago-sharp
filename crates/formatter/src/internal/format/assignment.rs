@@ -507,6 +507,11 @@ where
 
                         function_call.function
                     }
+                    Call::NullSafeFunction(null_safe_function_call) => {
+                        call_argument_lists.push(&null_safe_function_call.argument_list);
+
+                        null_safe_function_call.function
+                    }
                     Call::Method(method_call) => {
                         call_argument_lists.push(&method_call.argument_list);
 

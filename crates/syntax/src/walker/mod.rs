@@ -70,6 +70,7 @@ use crate::cst::cst::Enum;
 use crate::cst::cst::EnumBackingTypeHint;
 use crate::cst::cst::EnumCase;
 use crate::cst::cst::EnumCaseBackedItem;
+use crate::cst::cst::EnumCaseDataItem;
 use crate::cst::cst::EnumCaseItem;
 use crate::cst::cst::EnumCaseUnitItem;
 use crate::cst::cst::EvalConstruct;
@@ -80,6 +81,7 @@ use crate::cst::cst::ExpressionStatement;
 use crate::cst::cst::Extends;
 use crate::cst::cst::Extension;
 use crate::cst::cst::Extern;
+use crate::cst::cst::FieldsPattern;
 use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
 use crate::cst::cst::ForColonDelimitedBody;
@@ -135,8 +137,11 @@ use crate::cst::cst::KeyValueArrayElement;
 use crate::cst::cst::Keyword;
 use crate::cst::cst::Label;
 use crate::cst::cst::Law;
+use crate::cst::cst::Leave;
 use crate::cst::cst::LegacyArray;
 use crate::cst::cst::List;
+use crate::cst::cst::ListPattern;
+use crate::cst::cst::ListPatternElement;
 use crate::cst::cst::Literal;
 use crate::cst::cst::LiteralFloat;
 use crate::cst::cst::LiteralInteger;
@@ -173,6 +178,7 @@ use crate::cst::cst::NamespaceBody;
 use crate::cst::cst::NamespaceImplicitBody;
 use crate::cst::cst::NestedVariable;
 use crate::cst::cst::NotPattern;
+use crate::cst::cst::NullSafeFunctionCall;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
@@ -214,6 +220,7 @@ use crate::cst::cst::QualifiedIdentifier;
 use crate::cst::cst::ReadonlyHint;
 use crate::cst::cst::RequireConstruct;
 use crate::cst::cst::RequireOnceConstruct;
+use crate::cst::cst::RestPattern;
 use crate::cst::cst::Return;
 use crate::cst::cst::ShellExecuteString;
 use crate::cst::cst::ShortOpeningTag;
@@ -877,6 +884,10 @@ generate_ast_walker! {
             walker.walk_modifier(modifier, context);
         }
 
+        if let Some(sealed) = &interface.sealed {
+            walker.walk_keyword(sealed, context);
+        }
+
         walker.walk_keyword(&interface.interface, context);
         walker.walk_local_identifier(&interface.name, context);
         if let Some(type_parameters) = &interface.type_parameters {
@@ -1364,11 +1375,19 @@ generate_ast_walker! {
             EnumCaseItem::Backed(enum_case_backed_item) => {
                 walker.walk_enum_case_backed_item(enum_case_backed_item, context);
             }
+            EnumCaseItem::Data(enum_case_data_item) => {
+                walker.walk_enum_case_data_item(enum_case_data_item, context);
+            }
         }
     }
 
     'arena EnumCaseUnitItem as enum_case_unit_item => {
         walker.walk_local_identifier(&enum_case_unit_item.name, context);
+    }
+
+    'arena EnumCaseDataItem as enum_case_data_item => {
+        walker.walk_local_identifier(&enum_case_data_item.name, context);
+        walker.walk_function_like_parameter_list(&enum_case_data_item.parameter_list, context);
     }
 
     'arena EnumCaseBackedItem as enum_case_backed_item => {
@@ -2064,6 +2083,7 @@ generate_ast_walker! {
             Expression::Yield(r#yield) => walker.walk_yield(r#yield, context),
             Expression::Construct(construct) => walker.walk_construct(construct, context),
             Expression::Throw(throw) => walker.walk_throw(throw, context),
+            Expression::Leave(leave) => walker.walk_leave(leave, context),
             Expression::Clone(clone) => walker.walk_clone(clone, context),
             Expression::Call(call) => walker.walk_call(call, context),
             Expression::PartialApplication(partial_application) => walker.walk_partial_application(partial_application, context),
@@ -2481,11 +2501,18 @@ generate_ast_walker! {
                 walker.walk_parenthesized_pattern(parenthesized_pattern, context);
             }
             Pattern::Properties(properties_pattern) => walker.walk_properties_pattern(properties_pattern, context),
+            Pattern::List(list_pattern) => walker.walk_list_pattern(list_pattern, context),
         });
     }
 
     'arena TypePattern as type_pattern => {
         walker.walk_hint(&type_pattern.hint, context);
+        if let Some(fields) = &type_pattern.fields {
+            walker.walk_fields_pattern(fields, context);
+        }
+        if let Some(properties) = &type_pattern.properties {
+            walker.walk_properties_pattern(properties, context);
+        }
         if let Some(variable) = &type_pattern.variable {
             walker.walk_local_identifier(variable, context);
         }
@@ -2511,15 +2538,47 @@ generate_ast_walker! {
         walker.walk_pattern(parenthesized_pattern.pattern, context);
     }
 
+    'arena FieldsPattern as fields_pattern => {
+        for field in &fields_pattern.fields {
+            walker.walk_pattern(field, context);
+        }
+    }
+
     'arena PropertiesPattern as properties_pattern => {
         for property_pattern in &properties_pattern.properties {
             walker.walk_property_pattern(property_pattern, context);
+        }
+
+        if let Some(variable) = &properties_pattern.variable {
+            walker.walk_local_identifier(variable, context);
         }
     }
 
     'arena PropertyPattern as property_pattern => {
         walker.walk_local_identifier(&property_pattern.name, context);
         walker.walk_pattern(property_pattern.pattern, context);
+    }
+
+    'arena ListPattern as list_pattern => {
+        for element in &list_pattern.elements {
+            walker.walk_list_pattern_element(element, context);
+        }
+    }
+
+    'arena ListPatternElement as list_pattern_element => {
+        match list_pattern_element {
+            ListPatternElement::Pattern(pattern) => walker.walk_pattern(pattern, context),
+            ListPatternElement::Rest(rest_pattern) => walker.walk_rest_pattern(rest_pattern, context),
+        }
+    }
+
+    'arena RestPattern as rest_pattern => {
+        if let Some(hint) = rest_pattern.hint {
+            walker.walk_hint(hint, context);
+        }
+        if let Some(variable) = &rest_pattern.variable {
+            walker.walk_local_identifier(variable, context);
+        }
     }
 
     'arena PatternMatch as pattern_match => {
@@ -2693,6 +2752,14 @@ generate_ast_walker! {
         walker.walk_expression(r#throw.exception, context);
     }
 
+    'arena Leave as leave => {
+        match leave {
+            Leave::Return(r#return) => walker.walk_return(r#return, context),
+            Leave::Continue(r#continue) => walker.walk_continue(r#continue, context),
+            Leave::Break(r#break) => walker.walk_break(r#break, context),
+        }
+    }
+
     'arena Clone as clone => {
         walker.walk_keyword(&clone.clone, context);
         walker.walk_expression(clone.object, context);
@@ -2702,6 +2769,9 @@ generate_ast_walker! {
         match call {
             Call::Function(function_call) => {
                 walker.walk_function_call(function_call, context);
+            }
+            Call::NullSafeFunction(null_safe_function_call) => {
+                walker.walk_null_safe_function_call(null_safe_function_call, context);
             }
             Call::Method(method_call) => {
                 walker.walk_method_call(method_call, context);
@@ -2718,6 +2788,11 @@ generate_ast_walker! {
     'arena FunctionCall as function_call => {
         walker.walk_expression(function_call.function, context);
         walker.walk_argument_list(&function_call.argument_list, context);
+    }
+
+    'arena NullSafeFunctionCall as null_safe_function_call => {
+        walker.walk_expression(null_safe_function_call.function, context);
+        walker.walk_argument_list(&null_safe_function_call.argument_list, context);
     }
 
     'arena MethodCall as method_call => {

@@ -1600,6 +1600,26 @@ fn analyze_finds_no_issues_in_a_class_with_a_law() {
     assert!(stderr.contains("No issues found."), "{stdout}{stderr}");
 }
 
+/// Spec section 20: Lean models a case that carries data as a constructor of its fields, which it reads only by
+/// matching, so a law that reads a field is refused by name.
+#[test]
+fn compile_refuses_a_law_that_reads_a_field_of_a_case() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\n");
+    write(
+        root,
+        "app/Shared/Payment.sharp",
+        "namespace App.Shared;\n\npublic enum Payment\n{\n    case Paid(int cents);\n    case Pending;\n\n    law paidKeepsCents(int cents) => Payment.Paid(cents).cents == cents;\n}\n",
+    );
+
+    let output = run(root, "compile", &[]);
+    let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+    assert_eq!(output.status.code(), Some(1), "{printed}");
+    assert!(printed.contains("the field Payment.Paid.cents of a case"), "{printed}");
+}
+
 #[test]
 fn compile_refuses_a_file_whose_law_calls_plain_php_with_an_effect() {
     let directory = extern_workspace(&stripe_stub(""));

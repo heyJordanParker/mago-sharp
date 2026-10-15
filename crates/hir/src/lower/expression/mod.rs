@@ -657,12 +657,11 @@ where
 
     fn lower_call(&mut self, call: &'scratch cst::Call<'scratch>) -> &'arena Call<'arena, (), (), ()> {
         let (callee, argument_list) = match call {
-            cst::Call::Function(function_call) => (
-                Callee {
-                    span: function_call.function.span(),
-                    kind: CalleeKind::Function(self.lower_callee(function_call.function)),
-                },
-                &function_call.argument_list,
+            cst::Call::Function(cst::FunctionCall { function, argument_list })
+            // PHP#'s `f?.(x)` calls `f` as a plain call does whenever it runs it.
+            | cst::Call::NullSafeFunction(cst::NullSafeFunctionCall { function, argument_list, .. }) => (
+                Callee { span: function.span(), kind: CalleeKind::Function(self.lower_callee(function)) },
+                argument_list,
             ),
             cst::Call::Method(method_call) => {
                 let object = self.arena.alloc(self.lower_expression(method_call.object));

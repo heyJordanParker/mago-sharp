@@ -5,6 +5,7 @@ use mago_span::Span;
 
 use crate::cst::cst::attribute::AttributeList;
 use crate::cst::cst::expression::Expression;
+use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::terminator::Terminator;
@@ -25,6 +26,18 @@ pub struct EnumCase<'arena> {
 pub enum EnumCaseItem<'arena> {
     Unit(EnumCaseUnitItem<'arena>),
     Backed(EnumCaseBackedItem<'arena>),
+    /// A PHP# case that carries data, spec section 20, as in `case Paid(string transactionId);`.
+    Data(EnumCaseDataItem<'arena>),
+}
+
+/// Represents a PHP# enum case that carries data: its name and the fields it holds, which make its constructor.
+///
+/// Example: `Paid(string transactionId)`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct EnumCaseDataItem<'arena> {
+    pub name: LocalIdentifier<'arena>,
+    pub parameter_list: FunctionLikeParameterList<'arena>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
@@ -47,6 +60,7 @@ impl<'arena> EnumCaseItem<'arena> {
         match &self {
             EnumCaseItem::Unit(enum_case_unit_item) => &enum_case_unit_item.name,
             EnumCaseItem::Backed(enum_case_backed_item) => &enum_case_backed_item.name,
+            EnumCaseItem::Data(enum_case_data_item) => &enum_case_data_item.name,
         }
     }
 }
@@ -66,7 +80,14 @@ impl HasSpan for EnumCaseItem<'_> {
         match self {
             EnumCaseItem::Unit(item) => item.span(),
             EnumCaseItem::Backed(item) => item.span(),
+            EnumCaseItem::Data(item) => item.span(),
         }
+    }
+}
+
+impl HasSpan for EnumCaseDataItem<'_> {
+    fn span(&self) -> Span {
+        self.name.span().join(self.parameter_list.span())
     }
 }
 

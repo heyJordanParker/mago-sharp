@@ -287,16 +287,34 @@ fn a_law_and_a_method_named_alike_are_a_duplicate_member() {
 
 #[test]
 fn every_construct_outside_the_slice_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\ninterface Shape\n{\n}\n\ntrait Named\n{\n}\n\nclass Report\n{\n    public int run(int extra)\n    {\n        switch (extra) {\n            default: return 1;\n        }\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\ninterface Shape\n{\n}\n\ntrait Named\n{\n}\n\nclass Report\n{\n    public int run(int extra)\n    {\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "7:1 This statement is not supported yet in PHP#.",
-            "15:9 This statement is not supported yet in PHP#.",
-            "18:22 This `new` without arguments is not supported yet in PHP#.",
-            "19:25 This expression is not supported yet in PHP#.",
-            "20:22 This expression is not supported yet in PHP#.",
+            "15:22 This `new` without arguments is not supported yet in PHP#.",
+            "16:25 This expression is not supported yet in PHP#.",
+            "17:22 This expression is not supported yet in PHP#.",
+        ]
+    );
+}
+
+/// Spec section 21 removes `switch` for `match`, and PHP's `and`, `or` and `xor` for `&&`, `||` and `!`. Each is an
+/// error that names what to write, never "not supported yet", which would say a later version adds it.
+#[test]
+fn switch_and_or_and_xor_are_errors_that_name_their_replacement() {
+    let code = leak(method(
+        "        switch (extra) {\n            default: return 1;\n        }\n        let a = extra > 0;\n        a = a and true;\n        a = a or true;\n        a = a xor true;\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:9 PHP# has no `switch`: write `match`.",
+            "11:15 PHP# has no `and`: write `&&`.",
+            "12:15 PHP# has no `or`: write `||`.",
+            "13:15 PHP# has no `xor`: write `!=` between two `bool`s.",
         ]
     );
 }
@@ -2407,7 +2425,7 @@ fn an_expression_refused_at_part_of_it_has_the_rest_checked() {
             format!("13:14 PHP# has no `__LINE__`: {line}"),
             format!("14:9 {request}"),
             format!("14:24 {request}"),
-            "15:19 Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`.".to_owned(),
+            format!("15:19 {request}"),
             format!("15:38 PHP# has no `__LINE__`: {line}"),
         ]
     );
@@ -3954,18 +3972,14 @@ fn bitwise_operators_their_compound_assignments_and_modulo_assignment_are_in_the
 
 #[test]
 fn operators_outside_the_slice_are_not_supported_yet() {
-    let code = leak(method(
-        "        let a = extra;\n        a = @extra;\n        a = extra xor true;\n        a = extra and true;\n        a = extra or true;\n        a = extra <> 1;\n        return a;\n",
-    ));
+    let code =
+        leak(method("        let a = extra;\n        a = @extra;\n        a = extra <> 1;\n        return a;\n"));
 
     assert_eq!(
         issues(code),
         [
             "8:13 `@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.",
             "9:19 This operator is not supported yet in PHP#.",
-            "10:19 This operator is not supported yet in PHP#.",
-            "11:19 This operator is not supported yet in PHP#.",
-            "12:19 This operator is not supported yet in PHP#.",
         ]
     );
 }
@@ -4376,16 +4390,12 @@ fn the_two_operand_ternary_is_not_part_of_php_sharp() {
     );
 }
 
+/// Spec section 21: `a ? b : c ? d : e` means `a ? b : (c ? d : e)`, so it needs no parentheses.
 #[test]
-fn a_ternary_nested_in_a_condition_without_parentheses_is_an_error_as_in_php() {
+fn a_ternary_in_the_else_branch_needs_no_parentheses() {
     let code = leak(method("        return extra > 1 ? 1 : extra > 0 ? 2 : 3;\n"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:16 Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`."
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
@@ -4957,6 +4967,29 @@ fn a_backing_type_other_than_int_or_string_reports_only_the_php_error() {
     assert_eq!(issues(code), ["3:15 Enum `Status` backing type must be either `string` or `int`, but found `float`."]);
 }
 
+/// Spec section 20: an enum is backed, every case with a value and none carrying data, or not, any mix of plain cases
+/// and cases that carry data. A case's fields are its class's public get-only properties, as an event's parameters are.
+#[test]
+fn enum_shapes_are_backed_or_not() {
+    let code = "namespace App.Shop;\n\nenum Plan : string\n{\n    case Free = \"free\";\n    case Custom(int seats);\n}\n\nenum PaymentResult\n{\n    case Paid(public string transactionId);\n    case Declined(string ...reasons);\n    case Tagged(Set<string> tags);\n    case Held(string reason { get; });\n}\n\nenum Timing\n{\n    case Later(int seconds);\n    case Never;\n    case Void;\n\n    public int later() => 1;\n    public int void() => 2;\n}\n";
+    let fixed = "namespace App.Shop;\n\nenum PaymentResult\n{\n    case Paid(string transactionId);\n    case Declined(string reason);\n    case RequiresAction(string redirect);\n}\n\nenum CheckoutState\n{\n    case Open;\n    case Paying(string gateway, int attempt = 1);\n    case Done(Order order);\n}\n\nclass Order { }\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "6:16 Case `Custom` of backed enum `Plan` must not carry data.",
+            "11:15 A case's field takes no modifier: it is a public get-only property of the case.",
+            "12:26 A case's field cannot be variadic: it is one property of the case.",
+            "13:17 A `Set` field of a case is not supported yet in PHP#.",
+            "14:29 A case's field takes no accessors: it is a get-only property of the case.",
+            "23:16 The method `later` shares its name with the case `Later`, which `Timing.Later(…)` creates.",
+            "20:10 A case of an enum whose cases carry data is a class, so it can't be named `Never`.",
+            "21:10 A case of an enum whose cases carry data is a class, so it can't be named `Void`.",
+        ]
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
+}
+
 #[test]
 fn an_enum_method_without_a_return_type_is_an_error() {
     let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    public status() {}\n    public label() {}\n}\n";
@@ -5045,10 +5078,104 @@ fn an_enum_method_takes_collection_and_function_types_and_holds_lambdas_as_a_cla
 #[test]
 fn is_as_and_match_with_their_patterns_are_in_the_slice() {
     let code = leak(method(
-        "        if (extra is int count && count > 0) {\n            return count;\n        }\n        const small = extra is >= 1 and < 10 or 100 ? 1 : 0;\n        const report = this as Report;\n        const counted = this is { count: int total } && total > 0;\n        match (extra) {\n            0 => {\n                return 0;\n            },\n            int n when n < 0 => this.run(n),\n            default => {},\n        }\n        return match (extra) {\n            < 0 => -1,\n            not (0 or 1) => 2,\n            default => small,\n        };\n",
+        "        if (extra is int count && count > 0) {\n            return count;\n        }\n        const small = extra is >= 1 and < 10 or 100 ? 1 : 0;\n        const report = this as Report;\n        const counted = this is { count: int total } && total > 0;\n        const big = this is Report { count: > 1000 } large && large.count > 0;\n        const plain = this is Report { count: 0 };\n        const empty = extra is [];\n        const pair = extra is [int only, not null];\n        const rest = extra is [> 0, ...List<int> others] && others.count() > 0;\n        const ends = extra is [int first, ..., int last] && first < last;\n        const paid = this is PaymentResult.Paid(string id) && id != \"\";\n        const declined = this is PaymentResult.Declined { reason: \"\" } declined;\n        match (extra) {\n            0 => {\n                return 0;\n            },\n            int n when n < 0 => this.run(n),\n            default => {},\n        }\n        return match (extra) {\n            < 0 => -1,\n            not (0 or 1) => 2,\n            default => small,\n        };\n",
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Spec section 14.4: `f?.(x)` calls a function that may be null, on a local, a property or a call's result.
+#[test]
+fn a_null_safe_call_of_a_function_is_in_the_slice() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Function<int(int)>? handler = null;\n\n    public Function<int(int)>? next() => this.handler;\n\n    public int? run(Function<int(int)>? doubler)\n    {\n        const a = doubler?.(4);\n        const b = this.handler?.(a ?? 0);\n        return this.next()?.(b ?? 0);\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Spec section 21: a pattern takes types and constants only, as in C#, and a local's value is compared in `when`, which
+/// the analyzer's error writes with the value's type. A pattern's value is a constant value, so a bare member is the
+/// error a body gets and a static member of a class the file declares is the error a default gets.
+#[test]
+fn a_pattern_reads_no_local() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 10;\n    private static int ceiling = 5;\n    private int limit = 3;\n\n    public void run(int extra, Any? value)\n    {\n        const top = 10;\n        let label = match (value) {\n            top => \"local\",\n            extra => \"parameter\",\n            default => \"other\",\n        };\n        let tested = value is this.limit;\n        tested = value is < top;\n        tested = value is 2 + extra;\n        tested = value is -limit;\n        tested = value is Report.ceiling;\n        tested = value is Report.MAX or -10 or \"10\" or 2 + 8;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "20:28 Write `this.limit`: members of the same object are always written with `this.`.",
+            "21:27 `Report.ceiling` is a static member, which a constant value cannot read.",
+        ]
+    );
+}
+
+/// Spec section 14.4: `a ?? return`, `a ?? continue` and `a ?? break` are in the slice, and a `return` there takes a value
+/// exactly when its method returns one, as a `return` statement does.
+#[test]
+fn a_leave_after_null_coalesce_is_in_the_slice_and_returns_as_its_method_does() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int run(int? extra)\n    {\n        const a = extra ?? return 0;\n        for (int i = 0; i < 3; i++) {\n            const b = extra ?? continue;\n            const c = extra ?? break;\n        }\n        const d = extra ?? return;\n        return a;\n    }\n\n    public void log(int? extra)\n    {\n        const a = extra ?? return;\n        const b = extra ?? return 5;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "12:28 Method `Report.run` with return type must return a value.",
+            "19:35 Method `Report.log` with return type of `void` must not return a value.",
+        ]
+    );
+}
+
+/// Spec section 21: a pattern creates a variable only through a typed declaration, so a name after a properties pattern
+/// without a type is an error, and the rest of the file is still checked.
+#[test]
+fn a_properties_pattern_without_a_type_takes_no_name() {
+    let code = leak(method(
+        "        const ok = extra is { status: 200 } response;\n        let typed = extra is Report { status: 200 } report;\n        $leftover = 1;\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:45 A pattern creates a variable only through a typed declaration: write the type, as in `Response { status: 200 } r`.",
+            "9:9 PHP# variables have no `$`: write `leftover`.",
+        ]
+    );
+}
+
+/// A `finally` block runs while its `try` statement leaves, so a `break` or `continue` that leaves the block, plain or
+/// after `??`, is an error, as in C# (CS0157) and as the engine refuses it. One that a loop inside the block holds, or
+/// one inside a lambda, leaves no `finally` block.
+#[test]
+fn break_and_continue_never_leave_a_finally_block() {
+    let code = leak(method(
+        "        for (int i = 0; i < 3; i++) {\n            try {\n                extra += 1;\n            } finally {\n                if (extra > 5) {\n                    break;\n                }\n                extra = extra ?? continue;\n                if (extra > 7) {\n                    continue;\n                }\n                extra = extra ?? break;\n                while (extra > 9) {\n                    extra -= 1;\n                    continue;\n                }\n                const skip = (int? value) => {\n                    for (const step of [1]) {\n                        break;\n                    }\n                    return value ?? 0;\n                };\n            }\n        }\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "12:21 `break` cannot leave a `finally` block.",
+            "14:34 `?? continue` cannot leave a `finally` block.",
+            "16:21 `continue` cannot leave a `finally` block.",
+            "18:34 `?? break` cannot leave a `finally` block.",
+        ]
+    );
+}
+
+/// Spec section 21: a list pattern has one rest, anywhere, and a named rest is the `List` of the elements the others
+/// leave.
+#[test]
+fn a_list_pattern_has_one_rest_and_a_named_rest_is_a_list() {
+    let code = leak(method(
+        "        const mapped = extra is [...Map<string, int> entries];\n        const set = extra is [1, ...Set<int> rest];\n        const twice = extra is [..., 1, ...List<int> rest];\n        const fine = extra is [..., 1] || extra is [...List<int> before, 1] || extra is [1, ..., 2];\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:37 A rest is a `List` of the elements the others leave, as in `...List<Line> rest`.",
+            "8:37 A rest is a `List` of the elements the others leave, as in `...List<Line> rest`.",
+            "9:41 A list pattern has one rest: the elements its other patterns leave.",
+        ]
+    );
 }
 
 #[test]
@@ -5059,11 +5186,13 @@ fn a_match_without_a_default_arm_is_an_error() {
     assert_eq!(issues(code), ["7:9 A `match` needs a `default` arm."]);
 }
 
+/// Arms that name `Class.y` values, `null` or a class, as a case of an enum with data or an implementer of a sealed
+/// interface, may cover every value, so only the analyzer, which knows the value's type, can ask for `default`.
 #[test]
 fn a_match_whose_arms_name_class_values_leaves_its_default_to_the_analyzer() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Status;\n\nclass Report\n{\n    public string label(Status? status)\n    {\n        match (status) {\n            Status.Open when status !== null => {},\n            Status.Closed or null => {},\n        }\n        return match (status) {\n            Status.Open => \"open\",\n            0 => \"zero\",\n        };\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Status;\n\nclass Report\n{\n    public string label(Status? status)\n    {\n        match (status) {\n            Status.Open when status !== null => {},\n            Status.Closed or null => {},\n            Status other => {},\n        }\n        return match (status) {\n            Status.Open => \"open\",\n            0 => \"zero\",\n        };\n    }\n}\n";
 
-    assert_eq!(issues(code), ["13:16 A `match` needs a `default` arm."]);
+    assert_eq!(issues(code), ["14:16 A `match` needs a `default` arm."]);
 }
 
 #[test]
@@ -5107,22 +5236,15 @@ fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
     );
 }
 
-/// A function value keeps no type while the code runs, so `is`, `as` and a `match` arm of a function type are errors,
-/// alone or in a union, while `Any` and a union of types with a test are patterns.
+/// Spec section 21: every type answers `is`, `as` and `match` the same way, function types included, alone or in a
+/// union, as `Any` and a union of types with a test do.
 #[test]
-fn a_type_test_of_a_function_type_is_an_error() {
+fn a_function_type_is_tested_like_any_type() {
     let code = leak(method(
-        "        const a = extra is Function<int(int)>;\n        const b = extra as Function<int(int)>;\n        const c = match (extra) { int|Function<int()> f => 1, default => 2 };\n        const d = extra is Any;\n        const e = extra is int|string n;\n        const f = extra as int|string;\n        return extra;\n",
+        "        const a = extra is Function<int(int)>;\n        const b = extra as Function<int(int)>;\n        const c = match (extra) { int|Function<int()> f => 1, default => 2 };\n        const d = extra is Any;\n        const e = extra is int|string n;\n        const f = extra as int|string;\n        const g = extra is Function<void(int) uses Http>;\n        return extra;\n",
     ));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:28 A function type can't be tested: a function value doesn't keep its type while the code runs.",
-            "8:28 A function type can't be tested: a function value doesn't keep its type while the code runs.",
-            "9:39 A function type can't be tested: a function value doesn't keep its type while the code runs.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// A class value is a string with no test, so `as` refuses its type and names every type it converts to.
@@ -5150,7 +5272,7 @@ fn a_nullable_type_pattern_names_the_null_check_to_write() {
 #[test]
 fn a_pattern_variable_under_or_or_not_is_an_error_but_under_the_not_that_starts_is() {
     let code = leak(method(
-        "        const a = extra is int x or string y;\n        const b = extra is not (int z and > 0);\n        const c = match (extra) {\n            not int w => 1,\n            default => 0,\n        };\n        return extra;\n",
+        "        const a = extra is int x or string y;\n        const b = extra is not (int z and > 0);\n        const c = match (extra) {\n            not int w => 1,\n            default => 0,\n        };\n        const d = this is Report { count: int v } or null;\n        const e = extra is [int u, ...List<int> t] or 1;\n        return extra;\n",
     ));
 
     assert_eq!(
@@ -5159,6 +5281,9 @@ fn a_pattern_variable_under_or_or_not_is_an_error_but_under_the_not_that_starts_
             "7:32 `x` is declared under `or` or `not`, where the pattern can match without a value for it.",
             "7:44 `y` is declared under `or` or `not`, where the pattern can match without a value for it.",
             "10:21 `w` is declared under `or` or `not`, where the pattern can match without a value for it.",
+            "13:47 `v` is declared under `or` or `not`, where the pattern can match without a value for it.",
+            "14:33 `u` is declared under `or` or `not`, where the pattern can match without a value for it.",
+            "14:49 `t` is declared under `or` or `not`, where the pattern can match without a value for it.",
         ]
     );
 }
@@ -5190,7 +5315,7 @@ fn a_pattern_variable_named_this_is_an_error() {
 #[test]
 fn comparisons_and_equalities_do_not_chain_and_name_both_groupings() {
     let code = leak(method(
-        "        const a = extra < 1 < 2;\n        const b = extra == 1 != 2;\n        const c = extra is int is bool;\n        const d = extra < 1 is bool;\n        const e = extra is > 1 < 2;\n        const f = extra < 1 == true;\n        const g = extra == 1 is bool;\n        const h = (extra < 1) < 2;\n        match (extra) {\n            > 1 < 2 => this.run(1),\n            default => this.run(2),\n        }\n        return extra;\n",
+        "        const a = extra < 1 < 2;\n        const b = extra == 1 != 2;\n        const c = extra is int is bool;\n        const d = extra < 1 is bool;\n        const e = extra is > 1 < 2;\n        const f = extra < 1 == true;\n        const g = extra == 1 is bool;\n        const h = (extra < 1) < 2;\n        match (extra) {\n            > 1 < 2 => this.run(1),\n            default => this.run(2),\n        }\n        const i = this is Report { count: > 1 < 2 };\n        const j = extra is [> 1 < 2];\n        return extra;\n",
     ));
 
     assert_eq!(
@@ -5202,6 +5327,8 @@ fn comparisons_and_equalities_do_not_chain_and_name_both_groupings() {
             "10:19 Comparisons do not chain: write `(extra < 1) is bool` or `extra < (1 is bool)`.",
             "11:19 Comparisons do not chain: write `extra is > (1 < 2)`.",
             "16:13 Comparisons do not chain: write `> (1 < 2)`.",
+            "19:19 Comparisons do not chain: write `this is Report { count: > (1 < 2) }`.",
+            "20:19 Comparisons do not chain: write `extra is [> (1 < 2)]`.",
         ]
     );
 }
@@ -5464,7 +5591,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     for (code, note) in [
         (
             pattern,
-            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`, with an optional name, as in `int count`, a value, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`.",
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`.",
         ),
         (
             class,

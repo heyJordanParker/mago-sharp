@@ -430,6 +430,7 @@ where
 
         return match call {
             Call::Function(function_call) => is_simple_single_line_expression(f, function_call.function),
+            Call::NullSafeFunction(function_call) => is_simple_single_line_expression(f, function_call.function),
             Call::Method(method_call) => {
                 is_simple_single_line_expression(f, method_call.object) && method_call.method.is_identifier()
             }
@@ -508,6 +509,7 @@ pub(super) fn is_simple_call_argument<'arena>(node: &'arena Expression<'arena>, 
         Expression::Call(call) => {
             let callee = match call {
                 Call::Function(function_call) => function_call.function,
+                Call::NullSafeFunction(function_call) => function_call.function,
                 Call::Method(method_call) => method_call.object,
                 Call::NullSafeMethod(null_safe_method_call) => null_safe_method_call.object,
                 Call::StaticMethod(static_method_call) => static_method_call.class,

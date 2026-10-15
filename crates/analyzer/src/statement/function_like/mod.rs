@@ -125,12 +125,17 @@ impl HasSpan for FunctionLikeBody<'_, '_> {
     }
 }
 
+/// The type of a closure or an arrow function: its signature, with the return type its body gives when it declares
+/// none. Spec section 14.2: a parameter without a type has the type `inferred_parameter_types` gives it from the type
+/// the lambda is written for, so the engine tests a closure of it by that type, as the checker assigns it. A type that
+/// names a type parameter stays unwritten, since it may be another function's.
 pub fn resolve_closure_like_type<A>(
     context: &Context<'_, '_, A>,
     closure_span: Span,
     function_metadata: &FunctionLikeMetadata,
     inner_has_returned: bool,
     inner_artifacts: AnalysisArtifacts,
+    inferred_parameter_types: Option<&HashMap<usize, TUnion>>,
 ) -> TUnion
 where
     A: Arena,
@@ -143,6 +148,18 @@ where
         context.codebase,
         &TypeExpansionOptions::default(),
     );
+    if let Some(inferred) = inferred_parameter_types {
+        signature.parameters = std::mem::take(&mut signature.parameters)
+            .into_iter()
+            .enumerate()
+            .map(|(index, parameter)| match inferred.get(&index) {
+                Some(inferred) if parameter.get_type_signature().is_none() && !inferred.has_template_types() => {
+                    parameter.with_type_signature(Some(Arc::new(inferred.clone())))
+                }
+                _ => parameter,
+            })
+            .collect();
+    }
 
     if function_metadata.template_types.is_empty() {
         if function_metadata.flags.has_yield() && function_metadata.return_type_metadata.is_none() {
@@ -529,6 +546,7 @@ where
     parent_artifacts.function_values.append(&mut artifacts.function_values);
     parent_artifacts.readonly_calls.append(&mut artifacts.readonly_calls);
     parent_artifacts.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));
+    parent_artifacts.listings.extend(std::mem::take(&mut artifacts.listings));
     parent_artifacts.pending_readonly_property_writes.append(&mut artifacts.pending_readonly_property_writes);
 
     Ok(artifacts)

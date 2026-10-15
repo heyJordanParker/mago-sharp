@@ -76,6 +76,7 @@ use crate::cst::cst::Enum;
 use crate::cst::cst::EnumBackingTypeHint;
 use crate::cst::cst::EnumCase;
 use crate::cst::cst::EnumCaseBackedItem;
+use crate::cst::cst::EnumCaseDataItem;
 use crate::cst::cst::EnumCaseItem;
 use crate::cst::cst::EnumCaseUnitItem;
 use crate::cst::cst::EvalConstruct;
@@ -86,6 +87,7 @@ use crate::cst::cst::ExpressionStatement;
 use crate::cst::cst::Extends;
 use crate::cst::cst::Extension;
 use crate::cst::cst::Extern;
+use crate::cst::cst::FieldsPattern;
 use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
 use crate::cst::cst::ForColonDelimitedBody;
@@ -141,8 +143,11 @@ use crate::cst::cst::KeyValueArrayElement;
 use crate::cst::cst::Keyword;
 use crate::cst::cst::Label;
 use crate::cst::cst::Law;
+use crate::cst::cst::Leave;
 use crate::cst::cst::LegacyArray;
 use crate::cst::cst::List;
+use crate::cst::cst::ListPattern;
+use crate::cst::cst::ListPatternElement;
 use crate::cst::cst::Literal;
 use crate::cst::cst::LiteralFloat;
 use crate::cst::cst::LiteralInteger;
@@ -179,6 +184,7 @@ use crate::cst::cst::NamespaceBody;
 use crate::cst::cst::NamespaceImplicitBody;
 use crate::cst::cst::NestedVariable;
 use crate::cst::cst::NotPattern;
+use crate::cst::cst::NullSafeFunctionCall;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
@@ -220,6 +226,7 @@ use crate::cst::cst::QualifiedIdentifier;
 use crate::cst::cst::ReadonlyHint;
 use crate::cst::cst::RequireConstruct;
 use crate::cst::cst::RequireOnceConstruct;
+use crate::cst::cst::RestPattern;
 use crate::cst::cst::Return;
 use crate::cst::cst::ShellExecuteString;
 use crate::cst::cst::ShortOpeningTag;
@@ -327,6 +334,7 @@ pub enum NodeKind {
     Block,
     Call,
     FunctionCall,
+    NullSafeFunctionCall,
     MethodCall,
     NullSafeMethodCall,
     StaticMethodCall,
@@ -340,6 +348,7 @@ pub enum NodeKind {
     EnumCaseBackedItem,
     EnumCaseItem,
     EnumCaseUnitItem,
+    EnumCaseDataItem,
     Extends,
     Implements,
     Inheritance,
@@ -542,6 +551,7 @@ pub enum NodeKind {
     ShortOpeningTag,
     Terminator,
     Throw,
+    Leave,
     Hint,
     IntersectionHint,
     NullableHint,
@@ -565,7 +575,11 @@ pub enum NodeKind {
     BinaryPattern,
     ParenthesizedPattern,
     PropertiesPattern,
+    FieldsPattern,
     PropertyPattern,
+    ListPattern,
+    ListPatternElement,
+    RestPattern,
     PatternMatch,
     PatternMatchArm,
     PatternMatchPatternArm,
@@ -623,6 +637,7 @@ pub enum Node<'ast, 'arena> {
     Block(&'ast Block<'arena>),
     Call(&'ast Call<'arena>),
     FunctionCall(&'ast FunctionCall<'arena>),
+    NullSafeFunctionCall(&'ast NullSafeFunctionCall<'arena>),
     MethodCall(&'ast MethodCall<'arena>),
     NullSafeMethodCall(&'ast NullSafeMethodCall<'arena>),
     StaticMethodCall(&'ast StaticMethodCall<'arena>),
@@ -636,6 +651,7 @@ pub enum Node<'ast, 'arena> {
     EnumCaseBackedItem(&'ast EnumCaseBackedItem<'arena>),
     EnumCaseItem(&'ast EnumCaseItem<'arena>),
     EnumCaseUnitItem(&'ast EnumCaseUnitItem<'arena>),
+    EnumCaseDataItem(&'ast EnumCaseDataItem<'arena>),
     Extends(&'ast Extends<'arena>),
     Implements(&'ast Implements<'arena>),
     Inheritance(&'ast Inheritance<'arena>),
@@ -831,6 +847,7 @@ pub enum Node<'ast, 'arena> {
     ShortOpeningTag(&'ast ShortOpeningTag),
     Terminator(&'ast Terminator<'arena>),
     Throw(&'ast Throw<'arena>),
+    Leave(&'ast Leave<'arena>),
     Hint(&'ast Hint<'arena>),
     IntersectionHint(&'ast IntersectionHint<'arena>),
     NullableHint(&'ast NullableHint<'arena>),
@@ -854,7 +871,11 @@ pub enum Node<'ast, 'arena> {
     BinaryPattern(&'ast BinaryPattern<'arena>),
     ParenthesizedPattern(&'ast ParenthesizedPattern<'arena>),
     PropertiesPattern(&'ast PropertiesPattern<'arena>),
+    FieldsPattern(&'ast FieldsPattern<'arena>),
     PropertyPattern(&'ast PropertyPattern<'arena>),
+    ListPattern(&'ast ListPattern<'arena>),
+    ListPatternElement(&'ast ListPatternElement<'arena>),
+    RestPattern(&'ast RestPattern<'arena>),
     PatternMatch(&'ast PatternMatch<'arena>),
     PatternMatchArm(&'ast PatternMatchArm<'arena>),
     PatternMatchPatternArm(&'ast PatternMatchPatternArm<'arena>),
@@ -1007,6 +1028,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Block(_) => NodeKind::Block,
             Self::Call(_) => NodeKind::Call,
             Self::FunctionCall(_) => NodeKind::FunctionCall,
+            Self::NullSafeFunctionCall(_) => NodeKind::NullSafeFunctionCall,
             Self::MethodCall(_) => NodeKind::MethodCall,
             Self::NullSafeMethodCall(_) => NodeKind::NullSafeMethodCall,
             Self::StaticMethodCall(_) => NodeKind::StaticMethodCall,
@@ -1020,6 +1042,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::EnumCaseBackedItem(_) => NodeKind::EnumCaseBackedItem,
             Self::EnumCaseItem(_) => NodeKind::EnumCaseItem,
             Self::EnumCaseUnitItem(_) => NodeKind::EnumCaseUnitItem,
+            Self::EnumCaseDataItem(_) => NodeKind::EnumCaseDataItem,
             Self::Extends(_) => NodeKind::Extends,
             Self::Implements(_) => NodeKind::Implements,
             Self::Inheritance(_) => NodeKind::Inheritance,
@@ -1215,6 +1238,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::ShortOpeningTag(_) => NodeKind::ShortOpeningTag,
             Self::Terminator(_) => NodeKind::Terminator,
             Self::Throw(_) => NodeKind::Throw,
+            Self::Leave(_) => NodeKind::Leave,
             Self::Hint(_) => NodeKind::Hint,
             Self::IntersectionHint(_) => NodeKind::IntersectionHint,
             Self::NullableHint(_) => NodeKind::NullableHint,
@@ -1238,7 +1262,11 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::BinaryPattern(_) => NodeKind::BinaryPattern,
             Self::ParenthesizedPattern(_) => NodeKind::ParenthesizedPattern,
             Self::PropertiesPattern(_) => NodeKind::PropertiesPattern,
+            Self::FieldsPattern(_) => NodeKind::FieldsPattern,
             Self::PropertyPattern(_) => NodeKind::PropertyPattern,
+            Self::ListPattern(_) => NodeKind::ListPattern,
+            Self::ListPatternElement(_) => NodeKind::ListPatternElement,
+            Self::RestPattern(_) => NodeKind::RestPattern,
             Self::PatternMatch(_) => NodeKind::PatternMatch,
             Self::PatternMatchArm(_) => NodeKind::PatternMatchArm,
             Self::PatternMatchPatternArm(_) => NodeKind::PatternMatchPatternArm,
@@ -1382,11 +1410,16 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }
             Node::Call(node) => match node {
                 Call::Function(node) => f(Node::FunctionCall(node)),
+                Call::NullSafeFunction(node) => f(Node::NullSafeFunctionCall(node)),
                 Call::Method(node) => f(Node::MethodCall(node)),
                 Call::NullSafeMethod(node) => f(Node::NullSafeMethodCall(node)),
                 Call::StaticMethod(node) => f(Node::StaticMethodCall(node)),
             },
             Node::FunctionCall(node) => {
+                f(Node::Expression(node.function));
+                f(Node::ArgumentList(&node.argument_list));
+            }
+            Node::NullSafeFunctionCall(node) => {
                 f(Node::Expression(node.function));
                 f(Node::ArgumentList(&node.argument_list));
             }
@@ -1468,8 +1501,13 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::EnumCaseItem(node) => match &node {
                 EnumCaseItem::Backed(node) => f(Node::EnumCaseBackedItem(node)),
                 EnumCaseItem::Unit(node) => f(Node::EnumCaseUnitItem(node)),
+                EnumCaseItem::Data(node) => f(Node::EnumCaseDataItem(node)),
             },
             Node::EnumCaseUnitItem(node) => f(Node::LocalIdentifier(&node.name)),
+            Node::EnumCaseDataItem(node) => {
+                f(Node::LocalIdentifier(&node.name));
+                f(Node::FunctionLikeParameterList(&node.parameter_list));
+            }
             Node::Extends(node) => {
                 f(Node::Keyword(&node.extends));
                 for item in node.types.iter() {
@@ -1903,6 +1941,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 for item in node.modifiers.iter() {
                     f(Node::Modifier(item));
                 }
+                if let Some(sealed) = &node.sealed {
+                    f(Node::Keyword(sealed));
+                }
                 f(Node::Keyword(&node.interface));
                 f(Node::LocalIdentifier(&node.name));
                 for item in node.type_parameters.iter() {
@@ -2104,9 +2145,16 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Pattern::Binary(pattern) => f(Node::BinaryPattern(pattern)),
                 Pattern::Parenthesized(pattern) => f(Node::ParenthesizedPattern(pattern)),
                 Pattern::Properties(pattern) => f(Node::PropertiesPattern(pattern)),
+                Pattern::List(pattern) => f(Node::ListPattern(pattern)),
             },
             Node::TypePattern(node) => {
                 f(Node::Hint(&node.hint));
+                if let Some(fields) = &node.fields {
+                    f(Node::FieldsPattern(fields));
+                }
+                if let Some(properties) = &node.properties {
+                    f(Node::PropertiesPattern(properties));
+                }
                 if let Some(variable) = &node.variable {
                     f(Node::LocalIdentifier(variable));
                 }
@@ -2125,14 +2173,39 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Pattern(node.right));
             }
             Node::ParenthesizedPattern(node) => f(Node::Pattern(node.pattern)),
+            Node::FieldsPattern(node) => {
+                for field in node.fields.iter() {
+                    f(Node::Pattern(field));
+                }
+            }
             Node::PropertiesPattern(node) => {
                 for property in node.properties.iter() {
                     f(Node::PropertyPattern(property));
+                }
+                if let Some(variable) = &node.variable {
+                    f(Node::LocalIdentifier(variable));
                 }
             }
             Node::PropertyPattern(node) => {
                 f(Node::LocalIdentifier(&node.name));
                 f(Node::Pattern(node.pattern));
+            }
+            Node::ListPattern(node) => {
+                for element in node.elements.iter() {
+                    f(Node::ListPatternElement(element));
+                }
+            }
+            Node::ListPatternElement(node) => match node {
+                ListPatternElement::Pattern(pattern) => f(Node::Pattern(pattern)),
+                ListPatternElement::Rest(rest) => f(Node::RestPattern(rest)),
+            },
+            Node::RestPattern(node) => {
+                if let Some(hint) = node.hint {
+                    f(Node::Hint(hint));
+                }
+                if let Some(variable) = &node.variable {
+                    f(Node::LocalIdentifier(variable));
+                }
             }
             Node::PatternMatch(node) => {
                 f(Node::Keyword(&node.r#match));
@@ -2279,6 +2352,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     Expression::Yield(node) => Node::Yield(node),
                     Expression::Construct(node) => Node::Construct(node),
                     Expression::Throw(node) => Node::Throw(node),
+                    Expression::Leave(node) => Node::Leave(node),
                     Expression::Clone(node) => Node::Clone(node),
                     Expression::Call(node) => Node::Call(node),
                     Expression::PartialApplication(node) => Node::PartialApplication(node),
@@ -2962,6 +3036,11 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Keyword(&node.throw));
                 f(Node::Expression(node.exception));
             }
+            Node::Leave(node) => match node {
+                Leave::Return(r#return) => f(Node::Return(r#return)),
+                Leave::Continue(r#continue) => f(Node::Continue(r#continue)),
+                Leave::Break(r#break) => f(Node::Break(r#break)),
+            },
             Node::Hint(node) => match &node {
                 Hint::Identifier(identifier) => f(Node::Identifier(identifier)),
                 Hint::Parenthesized(parenthesized_hint) => {
@@ -3153,6 +3232,7 @@ impl HasSpan for Node<'_, '_> {
             Self::Block(node) => node.span(),
             Self::Call(node) => node.span(),
             Self::FunctionCall(node) => node.span(),
+            Self::NullSafeFunctionCall(node) => node.span(),
             Self::MethodCall(node) => node.span(),
             Self::NullSafeMethodCall(node) => node.span(),
             Self::StaticMethodCall(node) => node.span(),
@@ -3166,6 +3246,7 @@ impl HasSpan for Node<'_, '_> {
             Self::EnumCaseBackedItem(node) => node.span(),
             Self::EnumCaseItem(node) => node.span(),
             Self::EnumCaseUnitItem(node) => node.span(),
+            Self::EnumCaseDataItem(node) => node.span(),
             Self::Extends(node) => node.span(),
             Self::Implements(node) => node.span(),
             Self::Inheritance(node) => node.span(),
@@ -3361,6 +3442,7 @@ impl HasSpan for Node<'_, '_> {
             Self::ShortOpeningTag(node) => node.span(),
             Self::Terminator(node) => node.span(),
             Self::Throw(node) => node.span(),
+            Self::Leave(node) => node.span(),
             Self::Hint(node) => node.span(),
             Self::IntersectionHint(node) => node.span(),
             Self::NullableHint(node) => node.span(),
@@ -3384,7 +3466,11 @@ impl HasSpan for Node<'_, '_> {
             Self::BinaryPattern(node) => node.span(),
             Self::ParenthesizedPattern(node) => node.span(),
             Self::PropertiesPattern(node) => node.span(),
+            Self::FieldsPattern(node) => node.span(),
             Self::PropertyPattern(node) => node.span(),
+            Self::ListPattern(node) => node.span(),
+            Self::ListPatternElement(node) => node.span(),
+            Self::RestPattern(node) => node.span(),
             Self::PatternMatch(node) => node.span(),
             Self::PatternMatchArm(node) => node.span(),
             Self::PatternMatchPatternArm(node) => node.span(),

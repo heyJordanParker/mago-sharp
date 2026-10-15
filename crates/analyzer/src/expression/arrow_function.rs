@@ -137,13 +137,20 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrowFunction<'arena> {
             &self.parameter_list,
             None,
             FunctionLikeBody::Expression(self.expression),
-            inferred_parameter_types,
+            inferred_parameter_types.clone(),
         )?;
 
         let has_returned = inner_block_context.flags.has_returned();
         merge_captured_references(context, block_context, inner_block_context);
 
-        let resulting_closure = resolve_closure_like_type(context, s, function_metadata, has_returned, inner_artifacts);
+        let resulting_closure = resolve_closure_like_type(
+            context,
+            s,
+            function_metadata,
+            has_returned,
+            inner_artifacts,
+            inferred_parameter_types.as_ref(),
+        );
 
         artifacts.set_expression_type(self, resulting_closure);
 

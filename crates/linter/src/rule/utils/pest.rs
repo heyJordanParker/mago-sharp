@@ -85,7 +85,8 @@ fn find_function_call_in_chain<'arena>(expr: &'arena Expression<'arena>) -> Opti
             Call::Function(func_call) => Some(func_call),
             Call::Method(inner_method) => find_function_call_in_chain(inner_method.object),
             Call::NullSafeMethod(inner_method) => find_function_call_in_chain(inner_method.object),
-            Call::StaticMethod(_) => None,
+            // PHP#'s `f?.(x)`, which a Pest test in PHP never writes.
+            Call::NullSafeFunction(_) | Call::StaticMethod(_) => None,
         },
         Expression::Access(access) => match access {
             Access::Property(property_access) => find_function_call_in_chain(property_access.object),

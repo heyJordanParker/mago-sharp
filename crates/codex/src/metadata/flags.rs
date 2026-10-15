@@ -82,17 +82,23 @@ impl MetadataFlags {
     /// A PHP# operator, spec section 19: the public static method it runs as, named after .NET's operator method, as
     /// `op_Addition` for `operator +`. It is readonly by definition, spec section 13.
     pub const OPERATOR: MetadataFlags = MetadataFlags(1 << 54);
+    /// A PHP# enum case that runs as a class, spec section 20: the final subclass of its enum, named in the enum's
+    /// namespace, that a case of an enum with a case that carries data runs as.
+    pub const ENUM_CASE_CLASS: MetadataFlags = MetadataFlags(1 << 55);
+    /// A PHP# sealed interface, spec section 20.1: its permitted inheritors are the classes of its namespace that
+    /// implement it, which the populator gathers.
+    pub const SEALED: MetadataFlags = MetadataFlags(1 << 56);
     /// A PHP# property whose `set` or `init` is `internal`, spec section 5: code outside its class's namespace and the
     /// namespaces below it can't write it.
-    pub const INTERNAL_SET: MetadataFlags = MetadataFlags(1 << 55);
+    pub const INTERNAL_SET: MetadataFlags = MetadataFlags(1 << 57);
     /// A PHP# class-like of a project: a file whose nearest `composer.json` says `"type": "project"`, so no other
     /// package uses it, and spec section 5's too-wide warning runs on it.
-    pub const PROJECT: MetadataFlags = MetadataFlags(1 << 56);
+    pub const PROJECT: MetadataFlags = MetadataFlags(1 << 58);
     /// A PHP# declaration or member written `internal`, spec section 5: it reaches its namespace and every namespace
     /// below it. `INTERNAL` stays PHPDoc's `@internal`.
-    pub const INTERNAL_REACH: MetadataFlags = MetadataFlags(1 << 57);
+    pub const INTERNAL_REACH: MetadataFlags = MetadataFlags(1 << 59);
     /// A PHP# field, spec section 6: storage that is never a property, as `ReflectionProperty::isField()` tells.
-    pub const FIELD: MetadataFlags = MetadataFlags(1 << 58);
+    pub const FIELD: MetadataFlags = MetadataFlags(1 << 60);
 }
 
 impl MetadataFlags {
@@ -187,6 +193,18 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_event(self) -> bool {
         self.contains(Self::EVENT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_enum_case_class(self) -> bool {
+        self.contains(Self::ENUM_CASE_CLASS)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_sealed(self) -> bool {
+        self.contains(Self::SEALED)
     }
 
     #[inline]
@@ -586,6 +604,8 @@ mod tests {
             ("STRUCT", MetadataFlags::STRUCT),
             ("REQUIRED", MetadataFlags::REQUIRED),
             ("OPERATOR", MetadataFlags::OPERATOR),
+            ("ENUM_CASE_CLASS", MetadataFlags::ENUM_CASE_CLASS),
+            ("SEALED", MetadataFlags::SEALED),
             ("INTERNAL_SET", MetadataFlags::INTERNAL_SET),
             ("PROJECT", MetadataFlags::PROJECT),
             ("INTERNAL_REACH", MetadataFlags::INTERNAL_REACH),

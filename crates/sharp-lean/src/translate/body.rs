@@ -556,7 +556,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 Some(format!("({left} {} {right})", if binary.is_and() { "&&" } else { "||" }))
             }
             Pattern::Parenthesized(parenthesized) => self.pattern(subject, kind, parenthesized.pattern),
-            Pattern::Type(_) | Pattern::Properties(_) => {
+            Pattern::Type(_) | Pattern::Properties(_) | Pattern::List(_) => {
                 self.unmodeled(pattern.span(), "a type test".to_owned(), issues::TYPE_TEST);
                 None
             }
@@ -588,6 +588,23 @@ impl<'body, 'program> Body<'body, 'program> {
             let class = names.get(&class.name);
             if !self.is_translated_class(call.object.span(), class) {
                 return "default".to_owned();
+            }
+            // Spec section 20: `PaymentResult.Paid(…)` creates the case, which is its constructor applied to the
+            // fields in order, a value and no call.
+            if let Some(case) = self.method_name(&call.method)
+                && self.checked.types().enum_case_class(class, case).is_some()
+            {
+                let class_name = self.reached_name(class);
+                let lean = names::full_name(&class_name);
+                let Some(arguments) = self.arguments(&call.argument_list, call.argument_list.arguments.len()) else {
+                    return "default".to_owned();
+                };
+                self.uses(class, &lean, names::short_name(&class_name));
+
+                let mut constructor = vec![names::member(&lean, case)];
+                constructor.extend(arguments);
+
+                return format!("({})", constructor.join(" "));
             }
             let target = self.checked.types().call_target(expression);
             if target.kind != DeclarationKind::StaticMethod {
@@ -841,7 +858,8 @@ impl<'body, 'program> Body<'body, 'program> {
             let short = names::short_name(&class_name);
 
             return match self.checked.types().member_declaration(class, member.value).kind {
-                DeclarationKind::EnumCase => {
+                // Spec section 20: a plain case of an enum whose cases carry data is the constructor without fields.
+                DeclarationKind::EnumCase | DeclarationKind::CaseObject => {
                     self.uses(class, &lean, short);
                     names::member(&lean, member.value)
                 }
@@ -879,6 +897,20 @@ impl<'body, 'program> Body<'body, 'program> {
     /// The read of `class`'s property `property` from `object`: a field of the object's structure, or a backed enum's
     /// `value`.
     fn field(&mut self, object: String, class: &[u8], property: &[u8], expression: &Expression) -> String {
+        // Spec section 20: a case that carries data is a constructor, whose fields Lean reads only by matching on it.
+        if let Some(separator) = class.iter().rposition(|&byte| byte == b'\\')
+            && let (r#enum, case) = (&class[..separator], &class[separator + 1..])
+            && self.checked.types().enum_case_class(r#enum, case).is_some()
+        {
+            let place = format!(
+                "{}.{}.{}",
+                names::short_name(r#enum),
+                String::from_utf8_lossy(case),
+                String::from_utf8_lossy(property)
+            );
+
+            return self.unmodeled(expression.span(), format!("the field {place} of a case"), issues::NOT_TRANSLATED);
+        }
         let class_name = self.reached_name(class);
         let short = names::short_name(&class_name);
         let place = format!("{short}.{}", String::from_utf8_lossy(property));

@@ -37,12 +37,15 @@ use crate::cst::cst::instantiation::GenericClass;
 use crate::cst::cst::instantiation::Instantiation;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::literal::Literal;
+use crate::cst::cst::r#loop::Break;
+use crate::cst::cst::r#loop::Continue;
 use crate::cst::cst::magic_constant::MagicConstant;
 use crate::cst::cst::name_of::NameOf;
 use crate::cst::cst::partial_application::PartialApplication;
 use crate::cst::cst::pattern::As;
 use crate::cst::cst::pattern::Is;
 use crate::cst::cst::pipe::Pipe;
+use crate::cst::cst::r#return::Return;
 use crate::cst::cst::string::CompositeString;
 use crate::cst::cst::string::StringPart;
 use crate::cst::cst::throw::Throw;
@@ -54,6 +57,19 @@ use crate::cst::cst::variable::Variable;
 use crate::cst::cst::with::With;
 use crate::cst::cst::r#yield::Yield;
 use crate::cst::node::NodeKind;
+
+/// Represents leaving the method or the loop from the right side of `??` when its left side is null, spec section
+/// 14.4: the `return`, `continue` or `break` statement it runs, which has no `;`.
+///
+/// Example: `a ?? return`, `a ?? return -1`, `a ?? continue`, `a ?? break`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
+pub enum Leave<'arena> {
+    Return(Return<'arena>),
+    Continue(Continue<'arena>),
+    Break(Break<'arena>),
+}
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -91,6 +107,7 @@ pub enum Expression<'arena> {
     Yield(Yield<'arena>),
     Construct(Construct<'arena>),
     Throw(Throw<'arena>),
+    Leave(Leave<'arena>),
     Clone(Clone<'arena>),
     Call(Call<'arena>),
     PartialApplication(PartialApplication<'arena>),
@@ -461,6 +478,7 @@ impl<'arena> Expression<'arena> {
             Expression::Yield(_) => NodeKind::Yield,
             Expression::Construct(_) => NodeKind::Construct,
             Expression::Throw(_) => NodeKind::Throw,
+            Expression::Leave(_) => NodeKind::Leave,
             Expression::Clone(_) => NodeKind::Clone,
             Expression::Call(_) => NodeKind::Call,
             Expression::PartialApplication(_) => NodeKind::PartialApplication,
@@ -486,6 +504,16 @@ impl<'arena> Expression<'arena> {
 impl HasSpan for Parenthesized<'_> {
     fn span(&self) -> Span {
         self.left_parenthesis.join(self.right_parenthesis)
+    }
+}
+
+impl HasSpan for Leave<'_> {
+    fn span(&self) -> Span {
+        match self {
+            Leave::Return(r#return) => r#return.span(),
+            Leave::Continue(r#continue) => r#continue.span(),
+            Leave::Break(r#break) => r#break.span(),
+        }
     }
 }
 
@@ -515,6 +543,7 @@ impl HasSpan for Expression<'_> {
             Expression::Yield(expression) => expression.span(),
             Expression::Construct(expression) => expression.span(),
             Expression::Throw(expression) => expression.span(),
+            Expression::Leave(expression) => expression.span(),
             Expression::Clone(expression) => expression.span(),
             Expression::Call(expression) => expression.span(),
             Expression::PartialApplication(expression) => expression.span(),

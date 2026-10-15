@@ -25,7 +25,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::access::analyze_class_value_member;
-use crate::expression::access::analyze_through_class_value;
+use crate::expression::access::analyze_through_value;
 use crate::expression::access::refuse_statics_of_no_class;
 use crate::expression::call::analyze_extension_access;
 use crate::expression::is_refused_type;
@@ -151,7 +151,7 @@ where
         && let ClassLikeMemberSelector::Identifier(name) = property_selector
         && let Some(classes) = artifacts.get_expression_type(object).and_then(class_value_classes)
     {
-        return analyze_through_class_value(
+        return analyze_through_value(
             context,
             block_context,
             artifacts,

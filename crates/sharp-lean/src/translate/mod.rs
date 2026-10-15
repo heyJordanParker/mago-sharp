@@ -346,9 +346,21 @@ impl Translator<'_, '_> {
                     issues::RESERVED_NAME,
                 );
             }
-            lines.push(format!("  | {}", names::identifier(name.value)));
-            if let EnumCaseItem::Backed(item) = &case.item {
-                values.push((names::identifier(name.value), body.value(item.value)));
+            match &case.item {
+                // Spec section 20: a case that carries data is a constructor of its fields.
+                EnumCaseItem::Data(item) => {
+                    let mut constructor = vec![format!("  | {}", names::identifier(name.value))];
+                    for field in &item.parameter_list.parameters {
+                        let r#type = field.hint.as_ref().map_or_else(|| "Unit".to_owned(), |hint| body.r#type(hint));
+                        constructor.push(format!("({} : {type})", names::identifier(field.variable.name)));
+                    }
+                    lines.push(constructor.join(" "));
+                }
+                EnumCaseItem::Backed(item) => {
+                    lines.push(format!("  | {}", names::identifier(name.value)));
+                    values.push((names::identifier(name.value), body.value(item.value)));
+                }
+                EnumCaseItem::Unit(_) => lines.push(format!("  | {}", names::identifier(name.value))),
             }
         }
         lines.push("  deriving Repr, DecidableEq, Inhabited".to_owned());

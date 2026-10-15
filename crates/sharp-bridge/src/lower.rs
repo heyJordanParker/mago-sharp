@@ -73,6 +73,7 @@ use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::InterpolatedString;
+use mago_syntax::cst::Leave;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LiteralStringPart;
 use mago_syntax::cst::LocalDeclaration;
@@ -103,6 +104,7 @@ use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::PropertyHookConcreteExpressionBody;
 use mago_syntax::cst::PropertyHookList;
+use mago_syntax::cst::Return;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::StringPart;
@@ -122,6 +124,7 @@ use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_syntax_core::utils::parse_literal_integer_as_float;
 use mago_word::Word;
 use mago_word::word;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::Unit;
 use crate::kind::SHARP_T_FILE;
@@ -232,6 +235,7 @@ pub(crate) mod types;
 
 use types::Declaration;
 use types::DeclarationKind;
+use types::FunctionType;
 use types::PlainParameter;
 use types::Types;
 use types::agreed_kind;
@@ -492,6 +496,8 @@ struct Lowering<'lowering, 'arena> {
     property: Vec<u8>,
     /// Each inline form the lowering copied, with its fingerprint, as often as it copied it.
     inlined: Vec<Read>,
+    /// Each function type the lowering spelled for a method or lambda of the file, with its text's fingerprint.
+    function_types: Vec<Read>,
     /// The declared return type of the method being lowered, which a value it returns crosses into. A lambda declares
     /// none.
     returns: Option<TUnion>,
@@ -532,6 +538,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             static_type_parameters: None,
             property: Vec::new(),
             inlined: Vec::new(),
+            function_types: Vec::new(),
             returns: None,
             local_types: HashMap::default(),
             promoted_beside: false,
@@ -594,8 +601,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.nodes[root as usize].end_line = self.lines.last();
         self.inlined.sort();
         self.inlined.dedup();
+        self.function_types.sort();
 
-        Unit { nodes: self.nodes, children: self.children, root, texts: self.texts, inlined: self.inlined }
+        Unit {
+            nodes: self.nodes,
+            children: self.children,
+            root,
+            texts: self.texts,
+            inlined: self.inlined,
+            function_types: self.function_types,
+        }
     }
 
     fn strict_types(&mut self) -> u32 {
@@ -627,6 +642,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 statements.push(self.class(class));
             }
             Statement::Interface(interface) => statements.push(self.interface(interface)),
+            Statement::Enum(r#enum) if r#enum.has_data_case() => self.data_enum(r#enum, statements),
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
             Statement::Event(event) => statements.push(self.event(event)),
             Statement::Struct(r#struct) => statements.push(self.r#struct(r#struct)),
@@ -836,7 +852,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
         });
         if !declares_equality {
-            members.push(self.struct_equality(r#struct.name.span));
+            members.push(self.value_equality(r#struct.name.span, &[self.class]));
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
         members.extend(self.class_metadata(self.line(r#struct.name.span)));
@@ -860,49 +876,55 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// A struct's `==`, spec section 10, as `public static function op_Equality(mixed $a, mixed $b): bool`, spanning
-    /// the struct's name: `$a === $b` unless both are instances of the struct, so null equals only null and a value of
-    /// another type is unequal, and otherwise each property compared with that property's own `==`, joined by `&&`.
-    fn struct_equality(&mut self, span: Span) -> u32 {
+    /// The `==` of a struct, spec section 10, or of an enum with a case that carries data, section 20, as
+    /// `public static function op_Equality(mixed $a, mixed $b): bool`, spanning the name at `span`. `classes` holds the
+    /// struct, or the class of each case. Two instances of one of them are equal when each property equals its pair by
+    /// the property's own `==`, joined by `&&`, so two of a plain case are always equal. Any other pair is equal only
+    /// when identical, so null equals only null and a value of another type or case is unequal:
+    /// `if ($a instanceof \App\Point && $b instanceof \App\Point) { return …; } return $a === $b;`.
+    fn value_equality(&mut self, span: Span, classes: &[&[u8]]) -> u32 {
         let name = php_operator_name(&BinaryOperator::Equal(span), 2)
             .unwrap_or_else(|| unreachable!("`==` runs as `op_Equality`"));
         self.enter(name);
         let line = self.line(span);
         let mut parameters = Vec::new();
-        let mut not_instances = Vec::new();
         for operand in [b"a", b"b"] {
             let hint = self.string(ZEND_NAME_NOT_FQ, line, b"mixed");
             let name = self.string(0, line, operand);
             parameters.push(self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL]));
-
-            let value = self.variable(span, operand);
-            let class = self.string(ZEND_NAME_FQ, line, self.class);
-            let instance = self.node(SHARP_AST_INSTANCEOF, 0, line, &[value, class]);
-            not_instances.push(self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[instance]));
         }
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
 
-        let either_is_other = self.node(SHARP_AST_OR, 0, line, &not_instances);
+        let mut statements = Vec::new();
+        for class in classes {
+            let instances = [b"a", b"b"].map(|operand| {
+                let value = self.variable(span, operand);
+                let class = self.string(ZEND_NAME_FQ, line, class);
+
+                self.node(SHARP_AST_INSTANCEOF, 0, line, &[value, class])
+            });
+            let both = self.node(SHARP_AST_AND, 0, line, &instances);
+
+            let mut equal = None;
+            for (property, r#type) in self.types.struct_properties(class) {
+                let side = |object| Side::Property { span, object, property, r#type };
+                let property_equal = self.equality(line, side(b"a"), side(b"b"), false);
+                equal = Some(match equal {
+                    Some(earlier) => self.node(SHARP_AST_AND, 0, line, &[earlier, property_equal]),
+                    None => property_equal,
+                });
+            }
+            let equal = equal.unwrap_or_else(|| self.zval(line, sharp_value::SHARP_TRUE, |_| {}));
+            let r#return = self.node(SHARP_AST_RETURN, 0, line, &[equal]);
+            let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#return]);
+            let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[both, body]);
+            statements.push(self.node(SHARP_AST_IF, 0, line, &[branch]));
+        }
         let a = self.variable(span, b"a");
         let b = self.variable(span, b"b");
         let identical = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[a, b]);
-        let r#return = self.node(SHARP_AST_RETURN, 0, line, &[identical]);
-        let statements = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#return]);
-        let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[either_is_other, statements]);
-        let guard = self.node(SHARP_AST_IF, 0, line, &[branch]);
-
-        let mut equal = None;
-        for (property, r#type) in self.types.struct_properties(self.class) {
-            let side = |object| Side::Property { span, object, property, r#type };
-            let property_equal = self.equality(line, side(b"a"), side(b"b"), false);
-            equal = Some(match equal {
-                Some(earlier) => self.node(SHARP_AST_AND, 0, line, &[earlier, property_equal]),
-                None => property_equal,
-            });
-        }
-        let equal = equal.unwrap_or_else(|| self.zval(line, sharp_value::SHARP_TRUE, |_| {}));
-        let r#return = self.node(SHARP_AST_RETURN, 0, line, &[equal]);
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[guard, r#return]);
+        statements.push(self.node(SHARP_AST_RETURN, 0, line, &[identical]));
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let return_type = self.string(ZEND_NAME_NOT_FQ, line, b"bool");
 
         self.declaration(
@@ -1812,30 +1834,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The constructor spans the event's name and parameters.
     fn event(&mut self, event: &Event) -> u32 {
         self.class = self.names.get(&event.name);
-        self.enter(b"__construct");
-        let mut parameters = Vec::new();
-        for parameter in &event.parameter_list.parameters {
-            let index = self.parameter(parameter, None);
-            self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
-            parameters.push(index);
-        }
-
-        let line = self.line(&event.parameter_list);
-        let metadata = self.types.method_metadata(self.class, b"__construct");
-        parameters.extend(self.parameter_metadata(metadata, line));
-        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
-        let constructor = self.declaration(
-            SHARP_AST_METHOD,
-            ZEND_ACC_PUBLIC,
-            event.name.span,
-            &event.parameter_list,
-            b"__construct",
-            &[parameters, NULL, body, NULL, NULL],
-        );
-        let mut members = vec![constructor];
+        let mut members = vec![self.promoted_constructor(event.name.span, &event.parameter_list)];
         members.extend(self.class_metadata(self.line(event.name)));
-        let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
+        let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(&event.parameter_list), &members);
         let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
 
         self.declaration(
@@ -1846,6 +1847,153 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             event.name.value,
             &[NULL, header, members, NULL, NULL],
         )
+    }
+
+    /// The public constructor of an event or a case that carries data, from `name` to the end of `parameters`, which
+    /// promotes each parameter to a `public readonly` property and has no statement.
+    fn promoted_constructor(&mut self, name: Span, parameter_list: &FunctionLikeParameterList) -> u32 {
+        self.enter(b"__construct");
+        let mut parameters = Vec::new();
+        for parameter in &parameter_list.parameters {
+            let index = self.parameter(parameter, None);
+            self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+            parameters.push(index);
+        }
+
+        let line = self.line(parameter_list);
+        let metadata = self.types.method_metadata(self.class, b"__construct");
+        parameters.extend(self.parameter_metadata(metadata, line));
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            name,
+            parameter_list,
+            b"__construct",
+            &[parameters, NULL, body, NULL, NULL],
+        )
+    }
+
+    /// Spec section 20: an enum with a case that carries data is an abstract class, with the enum's header as its
+    /// interface list, the enum's constants and methods, and the `op_Equality` that compares two of the same case
+    /// field by field, as `abstract class PaymentResult implements \App\HasLabel`. Each case is a final subclass named
+    /// in the enum's namespace, declared after it, that implements `\Sharp\Struct`, so a `Map` or a `Set` hashes it by
+    /// its fields as it hashes a struct. A case that carries data promotes its fields in its constructor, as
+    /// `final class Paid extends \App\PaymentResult implements \Sharp\Struct { public function __construct(public readonly string $transactionId) {} }`
+    /// in the namespace `App\PaymentResult`. A plain case is a case with no fields, so a copy `unserialize` makes is
+    /// equal to it, and its `instance()` makes its one object once and gives it:
+    /// `final class Open extends \App\CheckoutState implements \Sharp\Struct { private static $instance;
+    /// private function __construct() {} public static function instance(): self { return self::$instance ??= new self(); } }`.
+    fn data_enum(&mut self, r#enum: &Enum, statements: &mut Vec<u32>) {
+        self.class = self.names.get(&r#enum.name);
+        let enum_name = self.class;
+        let mut members = Vec::new();
+        // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
+        for member in &r#enum.members {
+            members.push(match member {
+                ClassLikeMember::Method(method) => self.method(method, modifier_flags(&method.modifiers), &[]),
+                ClassLikeMember::Constant(constant) => self.constant(constant),
+                ClassLikeMember::EnumCase(_) | ClassLikeMember::Law(_) => continue,
+                _ => unreachable!("check_slice refuses the enum member `{member}`"),
+            });
+        }
+        let cases: Vec<Vec<u8>> = r#enum
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                ClassLikeMember::EnumCase(case) => Some([enum_name, b"\\", case.item.name().value].concat()),
+                _ => None,
+            })
+            .collect();
+        let cases: Vec<&[u8]> = cases.iter().map(Vec::as_slice).collect();
+        members.push(self.value_equality(r#enum.name.span, &cases));
+
+        let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
+        let attributes = self.attributes(&r#enum.attribute_lists, None, None);
+        let header = r#enum.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
+        statements.push(self.declaration(
+            SHARP_AST_CLASS,
+            ZEND_ACC_EXPLICIT_ABSTRACT_CLASS,
+            r#enum.r#enum.span,
+            r#enum.right_brace,
+            r#enum.name.value,
+            &[NULL, header, members, attributes, NULL],
+        ));
+
+        for member in &r#enum.members {
+            let ClassLikeMember::EnumCase(case) = member else {
+                continue;
+            };
+            let name = case.item.name();
+            let line = self.line(name.span);
+            let members = match &case.item {
+                EnumCaseItem::Data(item) => vec![self.promoted_constructor(name.span, &item.parameter_list)],
+                EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => self.case_object(name.span),
+            };
+            let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
+            let marker = self.string(ZEND_NAME_FQ, line, b"Sharp\\Struct");
+            let header = self.node(SHARP_AST_NAME_LIST, 0, line, &[marker]);
+            let parent = self.string(ZEND_NAME_FQ, line, enum_name);
+            let attributes = self.attributes(&case.attribute_lists, None, None);
+            let class_name = [r#enum.name.value, b"\\", name.value].concat();
+
+            statements.push(self.declaration(
+                SHARP_AST_CLASS,
+                ZEND_ACC_FINAL,
+                case.case.span,
+                case.terminator.span(),
+                &class_name,
+                &[parent, header, members, attributes, NULL],
+            ));
+        }
+    }
+
+    /// The members of the class of a plain case of an enum with a case that carries data, at `name`: the private
+    /// static property `instance`, a private constructor, and the public static `instance()`, which makes the case's
+    /// one object on the first call and gives it.
+    fn case_object(&mut self, name: Span) -> Vec<u32> {
+        self.enter(b"instance");
+        let line = self.line(name);
+        let property_name = self.string(0, line, b"instance");
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[property_name, NULL, NULL, NULL]);
+        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+        let property =
+            self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PRIVATE | ZEND_ACC_STATIC, line, &[NULL, declaration, NULL]);
+
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
+        let constructor = self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PRIVATE,
+            name,
+            name,
+            b"__construct",
+            &[parameters, NULL, body, NULL, NULL],
+        );
+
+        let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+        let property_name = self.string(0, line, b"instance");
+        let instance = self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, property_name]);
+        let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+        let object = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+        let made = self.node(SHARP_AST_ASSIGN_COALESCE, 0, line, &[instance, object]);
+        let returned = self.node(SHARP_AST_RETURN, 0, line, &[made]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[returned]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let return_type = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+        let instance = self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC,
+            name,
+            name,
+            b"instance",
+            &[parameters, NULL, body, return_type, NULL],
+        );
+
+        vec![property, constructor, instance]
     }
 
     /// An enum is a final class with the enum flag, its header as its interface list and its backing type as its last
@@ -1889,6 +2037,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let value = match &case.item {
             EnumCaseItem::Unit(_) => NULL,
             EnumCaseItem::Backed(item) => self.expression(item.value),
+            EnumCaseItem::Data(_) => unreachable!("`data_enum` lowers an enum with a case that carries data"),
         };
         let attributes = self.attributes(&case.attribute_lists, None, None);
 
@@ -1944,6 +2093,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let (start, return_type) = match &method.return_type_hint {
             Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
             None => (method.name.span, NULL),
+        };
+        // Spec section 14.3: a method named without parentheses is a function value, a closure of the method.
+        let return_type = if php_method_name(method) == b"__construct" {
+            return_type
+        } else {
+            let function_type = self.types.method_type(self.class, php_method_name(method));
+
+            self.function_type(return_type, function_type, self.line(start))
         };
         self.static_type_parameters = None;
         let r#override = method.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
@@ -3495,12 +3652,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         ensure_sufficient_stack(|| match statement {
             Statement::Block(block) => self.block(block),
             Statement::Expression(statement) => self.expression(statement.expression),
-            Statement::Return(r#return) => {
-                let returns = self.returns.clone();
-                let value = r#return.value.map_or(NULL, |value| self.crossed_value(value, returns.as_ref()));
-
-                self.node(SHARP_AST_RETURN, 0, self.line(r#return), &[value])
-            }
+            Statement::Return(r#return) => self.r#return(r#return),
             // `emit e;` is `\Sharp\Internal\emit($e);`, which runs every listener of the event before it returns.
             Statement::Emit(emit) => {
                 let line = self.line(emit);
@@ -3547,6 +3699,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::Continue(r#continue) => self.node(SHARP_AST_CONTINUE, 0, self.line(r#continue), &[NULL]),
             _ => unreachable!("check_slice refuses the statement `{statement}`"),
         })
+    }
+
+    fn r#return(&mut self, r#return: &Return) -> u32 {
+        let returns = self.returns.clone();
+        let value = r#return.value.map_or(NULL, |value| self.crossed_value(value, returns.as_ref()));
+
+        self.node(SHARP_AST_RETURN, 0, self.line(r#return), &[value])
     }
 
     fn loop_body(&mut self, body: &Statement) -> u32 {
@@ -3791,6 +3950,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 rhs: Expression::Identifier(class),
             }) => {
                 let value = self.expression(lhs);
+                // `is List<Any?>` on a `List` or null, as a list pattern's first test on a `List?`, is the null check,
+                // and PHP's `\is_array` gives it without walking the elements.
+                if self.types.tests_only_for_null(lhs, class) {
+                    let line = self.line(class);
+                    let function = self.string(ZEND_NAME_FQ, line, b"is_array");
+                    let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+
+                    return self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+                }
                 // A test of a type parameter or of a class with type arguments reads them while the code runs.
                 if let Some(tested) = self.types.tested_type(class) {
                     let tested = self.type_text(line, &tested);
@@ -4020,6 +4188,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             }
             Expression::Call(Call::Method(call)) => self.method_call(expression, call),
+            // `f?.(x)` whose conditional `null_safe_chain` built already tests `f`: the call of what `f` holds.
+            Expression::Call(Call::NullSafeFunction(call)) => {
+                let function = self.expression(call.function);
+                let arguments = self.arguments(&call.argument_list);
+
+                self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+            }
             Expression::Call(Call::Function(FunctionCall {
                 function: call_function @ Expression::Identifier(function),
                 argument_list,
@@ -4165,6 +4340,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_THROW, 0, line, &[exception])
             }
+            // Spec section 14.4: the engine compiles the statement of `a ?? return`, `continue` or `break` in the
+            // middle of the expression, after the ZEND_SHARP_LEAVE that frees what the expression holds.
+            Expression::Leave(Leave::Return(r#return)) => self.r#return(r#return),
+            Expression::Leave(Leave::Continue(_)) => self.node(SHARP_AST_CONTINUE, 0, line, &[NULL]),
+            Expression::Leave(Leave::Break(_)) => self.node(SHARP_AST_BREAK, 0, line, &[NULL]),
             Expression::CompositeString(CompositeString::Interpolated(template)) => self.template(template),
             Expression::ArrowFunction(arrow_function) => self.arrow_function(arrow_function),
             Expression::Closure(closure) => self.closure(closure),
@@ -4195,8 +4375,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             unreachable!("check_slice refuses the member name `{member}`");
         };
         let kind = agreed_kind(classes.iter().map(|class| self.types.member_declaration(class, name.value).kind));
-        let member = self.member(member);
         let line = self.line(read);
+        if kind == DeclarationKind::CaseObject {
+            let case = self.types.member_declaration(classes[0], name.value);
+            let case_class = self.string(ZEND_NAME_FQ, line, case.class.as_bytes());
+            let instance = self.string(0, line, case.name.as_bytes());
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+
+            return self.node(SHARP_AST_STATIC_CALL, 0, line, &[case_class, instance, arguments]);
+        }
+        let member = self.member(member);
 
         match kind {
             DeclarationKind::Constant | DeclarationKind::EnumCase => {
@@ -4795,7 +4983,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, an
-    /// extension's member, or any link below a collection method call that runs as PHP on the array or below an
+    /// extension's member, a call of a function that may be null, `f?.(x)`, or any link below a collection method call that runs as PHP on the array or below an
     /// extension's member, which runs as a static call, with its receiver, when `chain` is a member
     /// read, a call or an index whose chain holds one no conditional tests yet. A null there would reach the PHP
     /// function, where `?->` skips only the rest of its own chain. The walk stops at a receiver a hidden variable
@@ -4849,6 +5037,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     }
 
                     call.object
+                }
+                // PHP has no `?->` that calls a function, spec section 14.4's `f?.(x)`.
+                Expression::Call(Call::NullSafeFunction(call)) => {
+                    if !self.tested_links.contains(&link.span()) {
+                        return Some((link, call.function));
+                    }
+
+                    call.function
                 }
                 _ => return None,
             };
@@ -4919,10 +5115,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn arrow_function(&mut self, arrow_function: &ArrowFunction) -> u32 {
         let lambda = arrow_function.span();
         let parameters = self.lambda_parameters(lambda, &arrow_function.parameter_list);
-        let ((mut statements, value), captures_type_arguments) = self.lambda_body(|lowering| {
+        let ((mut statements, value, return_type), captures_type_arguments) = self.lambda_body(|lowering| {
             (
                 lowering.collection_parameters(&arrow_function.parameter_list.parameters),
                 lowering.expression(arrow_function.expression),
+                lowering.lambda_type(lambda),
             )
         });
         if statements.is_empty()
@@ -4935,7 +5132,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 lambda,
                 arrow_function.expression,
                 b"",
-                &[parameters, NULL, value, NULL, NULL],
+                &[parameters, NULL, value, return_type, NULL],
             );
         }
 
@@ -4944,7 +5141,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements.push(self.node(SHARP_AST_RETURN, 0, line, &[value]));
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
 
-        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, NULL, NULL])
+        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, NULL])
     }
 
     /// A lambda with a block body is a `CLOSURE`, as php-src's grammar builds `function () use (…) { … }`, which makes
@@ -4952,17 +5149,46 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn closure(&mut self, closure: &Closure) -> u32 {
         let lambda = closure.span();
         let parameters = self.lambda_parameters(lambda, &closure.parameter_list);
-        let (body, captures_type_arguments) = self.lambda_body(|lowering| {
+        let ((body, return_type), captures_type_arguments) = self.lambda_body(|lowering| {
             let mut statements = lowering.collection_parameters(&closure.parameter_list.parameters);
             for statement in &closure.body.statements {
                 statements.push(lowering.statement(statement));
             }
 
-            lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(&closure.body), &statements)
+            (
+                lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(&closure.body), &statements),
+                lowering.lambda_type(lambda),
+            )
         });
         let uses = self.closure_uses(lambda, captures_type_arguments);
 
-        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, NULL, NULL])
+        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, NULL])
+    }
+
+    /// The result type of the lambda at `lambda`, which has no PHP type, with its whole type, as
+    /// [`Self::function_type`] gives it. A type that names the method's own type parameter as `#i` makes the lambda
+    /// capture the method's type arguments, as its body's would.
+    fn lambda_type(&mut self, lambda: Span) -> u32 {
+        let function_type = self.types.lambda_type(lambda);
+
+        self.function_type(NULL, function_type, self.line(lambda))
+    }
+
+    /// The result type of a PHP# method or lambda declaration: a `SHARP_TYPE_ARGS` of `php_type` and `function_type`'s
+    /// text, which `is` tests a closure of it by, or `php_type` alone when no function type takes a closure of it. The
+    /// unit lists the text's fingerprint, or zero without one, since its effects come from other files' bodies.
+    fn function_type(&mut self, php_type: u32, function_type: FunctionType, line: u32) -> u32 {
+        let FunctionType { name, text } = function_type;
+        self.function_types.push(Read {
+            name: name.into_bytes(),
+            fingerprint: text.as_ref().map_or(0, |text| xxh3_64(text.as_bytes())),
+        });
+        let Some(function_type) = text else {
+            return php_type;
+        };
+        let text = self.type_text(line, &function_type);
+
+        self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[php_type, text])
     }
 
     /// The parameters of the lambda at `lambda`, each with its type or a null type, as PHP writes a parameter without
@@ -5802,9 +6028,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// numbered after those of the forms around it, which may still hold their values.
     fn pattern(&mut self, node: Node<'_, '_>) -> u32 {
         let arena = LocalArena::new();
-        let names = self.names;
-        let is_local = |span: Span| matches!(names.binding(&span), Some(Binding::Local(_)));
-        let Some(PhpShape { php, temporaries, .. }) = php_shape(&arena, node, self.temporaries, &is_local) else {
+        let names = self.types.pattern_names();
+        let Some(PhpShape { php, temporaries, .. }) = php_shape(&arena, node, self.temporaries, &names) else {
             unreachable!("check_slice refuses the pattern forms that have no PHP");
         };
 
@@ -5873,6 +6098,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         if let Some(inlined) = self.inlined_call(expression, call) {
             return inlined;
+        }
+        // Spec section 20: `PaymentResult.Paid(…)` creates the case, an object of its class.
+        if let Some(class) = self.names.static_call_class(call)
+            && let ClassLikeMemberSelector::Identifier(method) = &call.method
+            && let Some(case) = self.types.enum_case_class(self.names.get(&class.name), method.value)
+        {
+            let name = self.string(ZEND_NAME_FQ, self.line(method), case.as_bytes());
+            let arguments = self.arguments(&call.argument_list);
+
+            return self.node(SHARP_AST_NEW, 0, self.line(call), &[name, arguments]);
         }
 
         let line = self.line(call);
@@ -6898,6 +7133,7 @@ mod tests {
     use std::borrow::Cow;
 
     use mago_analyzer::artifacts::AnalysisArtifacts;
+    use mago_analyzer::effects::Effects;
     use mago_codex::metadata::CodebaseMetadata;
     use mago_database::file::File;
     use mago_names::resolver::NameResolver;
@@ -6916,12 +7152,14 @@ mod tests {
         let arena = LocalArena::new();
         let program = parse_file_with_dialect(&arena, &file, Dialect::Sharp, ParserSettings::default());
         let (artifacts, codebase, forms) = (AnalysisArtifacts::new(), CodebaseMetadata::new(), InlineForms::default());
+        let effects = Effects::solve(&codebase, &[]);
         let checked = CheckedProgram::unchecked(
             &file,
             program,
             NameResolver::new(&arena).resolve(program),
             &artifacts,
             &codebase,
+            &effects,
             &forms,
         );
 

@@ -9,9 +9,11 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use foldhash::HashMap;
+use foldhash::HashSet;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_database::file::FileId;
 use mago_names::display_sharp_member;
 use mago_names::scope::NamespaceScope;
 use mago_reporting::IssueCollection;
@@ -257,6 +259,8 @@ pub struct Effects {
     function_values: Vec<(FunctionValue, usize)>,
     /// Each call of a method without `readonly` through a readonly value, with the position of the body that makes it.
     readonly_calls: Vec<(ReadonlyCall, usize)>,
+    /// The file of each call, with the position of each body it reaches.
+    calls: Vec<(FileId, Vec<usize>)>,
 }
 
 impl Effects {
@@ -368,7 +372,41 @@ impl Effects {
                 .enumerate()
                 .flat_map(|(position, summary)| summary.readonly_calls.iter().map(move |call| (call.clone(), position)))
                 .collect(),
+            calls: summaries
+                .iter()
+                .zip(targets)
+                .flat_map(|(summary, targets)| {
+                    summary.calls.iter().zip(targets).map(|(call, targets)| (call.span.file_id, targets))
+                })
+                .collect(),
         }
+    }
+
+    /// The files whose PHP# bodies a call in each file reaches, an override a call can run included, so an edit of
+    /// one can change the effects of the calling file's functions. A method is in its file, and an accessor in its
+    /// class's.
+    #[must_use]
+    pub fn callee_files(&self, codebase: &CodebaseMetadata) -> HashMap<FileId, HashSet<FileId>> {
+        let file_of = |body: Body| match body {
+            Body::Method(class, method) => {
+                codebase.get_method(class.as_bytes(), method.as_bytes()).map(|method| method.span.file_id)
+            }
+            Body::Accessor(class, _, _) => codebase.get_class_like(class.as_bytes()).map(|class| class.span.file_id),
+            Body::InitialValue(..) | Body::Lambda(_) => unreachable!("a call reaches a method or an accessor"),
+        };
+
+        let mut files: HashMap<FileId, HashSet<FileId>> = HashMap::default();
+        for (caller, targets) in &self.calls {
+            for &target in targets {
+                if let Some(callee) = file_of(self.bodies[target])
+                    && callee != *caller
+                {
+                    files.entry(*caller).or_default().insert(callee);
+                }
+            }
+        }
+
+        files
     }
 
     /// Why `method` is impure, as a sentence's predicate that names classes as the method's file does, or `None` when
@@ -392,6 +430,36 @@ impl Effects {
                 sharp_effect_name(codebase, imports, &short_name_counts, effect)
             })
         })
+    }
+
+    /// The effects of the PHP# method or lambda `function`, by full class name, each once, as a function type's `uses`
+    /// lists them: each effect of the plain PHP and the `foreign` classes it reaches, and `Sharp\Events` when it emits.
+    /// A change of state is no effect. `None` when it calls plain PHP no `extern` declares, which no function type lists,
+    /// and for a function no summary records, such as a plain PHP one or a method without a body.
+    #[must_use]
+    pub fn function_effects(&self, function: &FunctionLikeIdentifier) -> Option<Vec<Word>> {
+        let body = match function {
+            FunctionLikeIdentifier::Method(class, method) => {
+                Body::Method(ascii_lowercase_word(class.as_bytes()), ascii_lowercase_word(method.as_bytes()))
+            }
+            FunctionLikeIdentifier::Closure(name) => Body::Lambda(*name),
+            FunctionLikeIdentifier::Function(_) => unreachable!("PHP# declares no function outside a class"),
+        };
+
+        let mut effects = Vec::new();
+        for (item, _) in &self.solved[*self.index.get(&body)?] {
+            let effect = match item {
+                Item::Effect(Effect::Foreign(effect)) => *effect,
+                Item::Effect(Effect::Emit) => events(),
+                Item::Effect(Effect::Unknown(_)) => return None,
+                Item::Changed(_) => continue,
+            };
+            if !effects.contains(&effect) {
+                effects.push(effect);
+            }
+        }
+
+        Some(effects)
     }
 
     /// The issues of every effect rule. The getter rule reads only the solve, and the law rule reads which bodies are

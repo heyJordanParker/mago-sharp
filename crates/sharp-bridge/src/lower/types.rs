@@ -1,5 +1,7 @@
+use mago_analyzer::CodebasePatternNames;
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::artifacts::CallTarget;
+use mago_analyzer::effects::Effects;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -50,6 +52,8 @@ pub struct Types<'analysis> {
     names: ResolvedNames<'analysis>,
     artifacts: &'analysis AnalysisArtifacts,
     codebase: &'analysis CodebaseMetadata,
+    /// The effects of every PHP# body, which a function's type lists.
+    effects: &'analysis Effects,
     inline_forms: &'analysis InlineForms,
 }
 
@@ -76,6 +80,9 @@ pub enum DeclarationKind {
     },
     Constant,
     EnumCase,
+    /// The one object of a plain case of an enum with a case that carries data, spec section 20, which the static
+    /// `instance()` of the case's class gives. The declaration's class is the case's class.
+    CaseObject,
     StaticProperty,
     /// `typed` is whether the property's root declaration, the one at the bottom of its chain of overrides, has a type.
     /// PHP refuses a type on an override of an untyped property, so every override above an untyped root runs untyped.
@@ -95,13 +102,19 @@ impl<'analysis> Types<'analysis> {
         names: ResolvedNames<'analysis>,
         artifacts: &'analysis AnalysisArtifacts,
         codebase: &'analysis CodebaseMetadata,
+        effects: &'analysis Effects,
         inline_forms: &'analysis InlineForms,
     ) -> Self {
-        Self { file, names, artifacts, codebase, inline_forms }
+        Self { file, names, artifacts, codebase, effects, inline_forms }
     }
 
     pub(crate) fn names(&self) -> &ResolvedNames<'analysis> {
         &self.names
+    }
+
+    /// What the PHP of a pattern depends on, as the analysis answered it.
+    pub(crate) fn pattern_names(&self) -> CodebasePatternNames<'_, 'analysis> {
+        CodebasePatternNames { names: &self.names, codebase: self.codebase }
     }
 
     /// The type the analysis gave `expression`.
@@ -273,6 +286,21 @@ impl<'analysis> Types<'analysis> {
         Some(text(tested, self.codebase, Parameter::Index))
     }
 
+    /// Whether the test at `name` is of `List<Any?>` and the analysis knows `value` is a `List` or null, as a list
+    /// pattern's first test on a `List?` is, so the test asks only whether `value` is not null.
+    pub(crate) fn tests_only_for_null(&self, value: &Expression, name: &impl HasSpan) -> bool {
+        let is_list = |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(_)));
+        let tests_any_list = self.artifacts.get_tested_type(name).is_some_and(|tested| {
+            tested.types.iter().all(|atomic| {
+                matches!(atomic, TAtomic::Array(TArray::List(list))
+                    if list.element_type.is_mixed() && list.known_elements.is_none() && !list.non_empty)
+            })
+        });
+
+        tests_any_list
+            && self.expression_type(value).types.iter().all(|atomic| is_list(atomic) || matches!(atomic, TAtomic::Null))
+    }
+
     /// The classes the type argument of the type parameter `name`, written as a class in `TItem.member`, can be: the
     /// classes of its bound, as [`receiver_classes`] gives them. None for a class.
     pub(crate) fn type_parameter_classes(&self, name: &impl HasSpan) -> Option<Vec<&'analysis [u8]>> {
@@ -312,6 +340,81 @@ impl<'analysis> Types<'analysis> {
     /// the caller's `strict_types`, and carries `ZEND_PARAM_WIDENED`, so inheritance skips its variance check.
     pub(crate) fn is_widened(&self, name: Span) -> bool {
         self.artifacts.widened_parameters.contains(&(name.start.offset, name.end.offset))
+    }
+
+    /// The whole type of the lambda written at `lambda`, which `is` tests a closure of it by: [`Self::function_type`] of
+    /// the parameter and result types the analysis gave it, written or inferred.
+    pub(crate) fn lambda_type(&self, lambda: Span) -> FunctionType {
+        let Some(TAtomic::Callable(TCallable::Signature(signature))) =
+            self.artifacts.get_expression_type(&lambda).and_then(|r#type| r#type.types.first())
+        else {
+            unreachable!("the analysis types a lambda as its signature, not the lambda at {lambda:?}");
+        };
+        let parameters: Vec<Option<&TUnion>> =
+            signature.get_parameters().iter().map(TCallableParameter::get_type_signature).collect();
+
+        self.function_type(
+            &FunctionLikeIdentifier::for_closure(self.file, lambda),
+            &parameters,
+            signature.get_return_type(),
+        )
+    }
+
+    /// The whole type of the method `class::method`, which `is` tests a closure of it by: [`Self::function_type`] of its
+    /// declared parameter types and its result type.
+    pub(crate) fn method_type(&self, class: &[u8], method: &[u8]) -> FunctionType {
+        let function = FunctionLikeIdentifier::Method(word(class), word(method));
+        let Some(metadata) = self.codebase.get_method(class, method) else {
+            unreachable!("the codebase holds every method a PHP# file declares, not {}", function.as_string());
+        };
+        let parameters: Vec<Option<&TUnion>> = metadata
+            .parameters
+            .iter()
+            .map(|parameter| parameter.type_metadata.as_ref().map(|r#type| &r#type.type_union))
+            .collect();
+        let result = metadata.return_type_metadata.as_ref().map(|r#type| &r#type.type_union);
+
+        self.function_type(&function, &parameters, result)
+    }
+
+    /// The [`FunctionType`] of the PHP# function `function`, with `parameters` and `result`.
+    fn function_type(
+        &self,
+        function: &FunctionLikeIdentifier,
+        parameters: &[Option<&TUnion>],
+        result: Option<&TUnion>,
+    ) -> FunctionType {
+        FunctionType { name: function.as_string(), text: self.function_type_text(function, parameters, result) }
+    }
+
+    /// The type text `Function<R(P1, P2) uses E1, E2>` of the PHP# function `function`, with `parameters` and `result`,
+    /// each class's type parameter as `$i` and the function's own as `#i`, and the effects it reaches, sorted. A type
+    /// it leaves out is `Any?`. `None`, so a closure of it is of no function type, when no function type can say its
+    /// type: when the effects solve finds an effect no `uses` lists, as for plain PHP no `extern` declares, or a type is
+    /// one PHP# can't write, as the `never` of a lambda that always throws.
+    fn function_type_text(
+        &self,
+        function: &FunctionLikeIdentifier,
+        parameters: &[Option<&TUnion>],
+        result: Option<&TUnion>,
+    ) -> Option<String> {
+        if !parameters.iter().copied().chain([result]).flatten().all(is_written_in_sharp) {
+            return None;
+        }
+        let mut effects: Vec<String> = self
+            .effects
+            .function_effects(function)?
+            .into_iter()
+            .map(|effect| class_text(effect, self.codebase))
+            .collect();
+        effects.sort_unstable();
+        effects.dedup();
+        let written = |r#type: Option<&TUnion>| {
+            r#type.map_or_else(|| "Any?".to_owned(), |r#type| text(r#type, self.codebase, Parameter::Index))
+        };
+        let parameters: Vec<String> = parameters.iter().map(|parameter| written(*parameter)).collect();
+
+        Some(format!("Function<{}({}){}>", written(result), parameters.join(", "), uses_text(&effects)))
     }
 
     /// The metadata of a function the engine reads on a call, whose own bounds follow `class_bounds`.
@@ -500,13 +603,26 @@ impl<'analysis> Types<'analysis> {
     pub(crate) fn declared_member(&self, class: &[u8], member: &[u8]) -> Option<Declaration> {
         let declared = |kind, public| Declaration { kind, class: word(class), name: word(member), public };
 
-        if self.codebase.get_enum_case(class, member).is_some() {
+        if let Some(case) = self.enum_case_class(class, member) {
+            Some(Declaration { kind: DeclarationKind::CaseObject, class: case, name: word(b"instance"), public: true })
+        } else if self.codebase.get_enum_case(class, member).is_some() {
             Some(declared(DeclarationKind::EnumCase, true))
         } else if let Some(constant) = self.codebase.get_class_constant(class, member) {
             Some(declared(DeclarationKind::Constant, constant.visibility.is_public()))
         } else {
             self.property_declaration(class, member).or_else(|| self.method_declaration(class, member))
         }
+    }
+
+    /// The full name of the class the case `case` of the enum whose full name is `class` runs as, when a case of the
+    /// enum carries data, spec section 20: `App\PaymentResult\Paid` for `App\PaymentResult` and `Paid`.
+    #[must_use]
+    pub fn enum_case_class(&self, class: &[u8], case: &[u8]) -> Option<Word> {
+        let metadata = self.codebase.get_class_like(&[class, b"\\", case].concat())?;
+
+        (metadata.flags.is_enum_case_class()
+            && metadata.direct_parent_class.is_some_and(|parent| parent.as_bytes().eq_ignore_ascii_case(class)))
+        .then_some(metadata.original_name)
     }
 
     /// The declaration the method call `call`, null-safe or not, runs, as the analysis resolved it when it checked the
@@ -996,6 +1112,15 @@ fn plain_parameters<'function>(
     (!sharp).then(|| function.parameters.iter().map(PlainParameter::Declared).collect())
 }
 
+/// The whole type of a PHP# method or lambda, which `is` tests a closure of it by.
+#[derive(Debug)]
+pub(crate) struct FunctionType {
+    /// The function, `Class::method` or the lambda's `{closure:…}` name.
+    pub(crate) name: String,
+    /// Its type text, `Function<R(P1, P2) uses E1, E2>`, or `None` when no function type can say its type.
+    pub(crate) text: Option<String>,
+}
+
 /// A parameter of plain PHP code a call runs, which a `Map` or a `Set` crosses into: a declared function's, method's or
 /// constructor's, or one of the signature of a plain PHP closure a local holds.
 #[derive(Clone, Copy, Debug)]
@@ -1173,10 +1298,24 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
             let written = |r#type: Option<&TUnion>| r#type.map_or_else(|| "Any?".to_owned(), type_text);
             let parameters: Vec<String> =
                 signature.get_parameters().iter().map(|parameter| written(parameter.get_type_signature())).collect();
+            let mut effects: Vec<String> =
+                signature.effects.iter().flatten().map(|effect| class_text(*effect, codebase)).collect();
+            effects.sort_unstable();
+            effects.dedup();
 
-            format!("Function<{}({})>", written(signature.get_return_type()), parameters.join(", "))
+            format!(
+                "Function<{}({}){}>",
+                written(signature.get_return_type()),
+                parameters.join(", "),
+                uses_text(&effects)
+            )
         }
     }
+}
+
+/// The `uses` of a function type text, ` uses E1, E2`, for `effects`, which are sorted, or nothing for none.
+fn uses_text(effects: &[String]) -> String {
+    if effects.is_empty() { String::new() } else { format!(" uses {}", effects.join(", ")) }
 }
 
 /// The full dotted name of the class `name`, as it is declared.

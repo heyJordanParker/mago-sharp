@@ -18,7 +18,6 @@ use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::reference::ReferenceOrigin;
-use mago_codex::symbol::SymbolKind;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
@@ -93,6 +92,7 @@ use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::utils::missing_type_hints;
 use crate::utils::names::and_list;
+use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
@@ -125,6 +125,26 @@ fn report_duplicate_definition<A>(
 ) where
     A: Arena,
 {
+    // Spec section 20: a case of an enum with a case that carries data runs as the class of its name.
+    if let Some(case) = context.codebase.get_class_like(name).filter(|original| original.flags.is_enum_case_class()) {
+        let full_name = case.original_name.as_bytes();
+        let separator = full_name.iter().rposition(|&byte| byte == b'\\').unwrap_or_default();
+        let (enum_name, case_name) = (&full_name[..separator], &full_name[separator + 1..]);
+        context.collector.report_with_code(
+            IssueCode::DuplicateDefinition,
+            Issue::error(format!(
+                "{title} `{}` clashes with the case `{}`, which runs as a class of that name.",
+                display_class_like_name(context, case.original_name),
+                display_member(context, word(enum_name), BytesDisplay(case_name)),
+            ))
+            .with_annotation(Annotation::primary(duplicate_span).with_message(format!("{title} declared here.")))
+            .with_annotation(Annotation::secondary(original_span).with_message("Case declared here."))
+            .with_help("Rename the case or the class."),
+        );
+
+        return;
+    }
+
     let name = if context.dialect.is_sharp() {
         display_class_like_name(context, word(name)).to_string()
     } else {
@@ -167,7 +187,13 @@ fn report_class_like_named_as_a_namespace<A>(
         .class_likes
         .values()
         .filter(|other| {
+            // Spec section 20: each case of an enum that carries data runs as a class in the enum's namespace, and a
+            // class another file declares under a case's name clashes with the case instead.
+            let is_own_case =
+                class_like_metadata.permitted_inheritors.as_ref().is_some_and(|cases| cases.contains(&other.name));
+
             (sharp || other.flags.is_sharp())
+                && !is_own_case
                 && other.name.as_bytes().strip_prefix(name).is_some_and(|rest| rest.starts_with(b"\\"))
         })
         .min_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()))
@@ -184,7 +210,7 @@ fn report_class_like_named_as_a_namespace<A>(
         (class_like_metadata.original_name.to_string(), inside.original_name.to_string())
     };
     let kind = class_like_metadata.kind.as_str();
-    let article = if matches!(class_like_metadata.kind, SymbolKind::Enum | SymbolKind::Interface) { "an" } else { "a" };
+    let article = article(kind);
 
     context.collector.report_with_code(
         IssueCode::NameAlreadyInUse,
@@ -1831,6 +1857,30 @@ fn check_class_like_extends<'ctx, 'arena, A>(
     }
 }
 
+/// Reports `class`, which implements the sealed `interface` at `span` from another namespace, spec section 20.1.
+fn report_outside_implementer<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    interface: &ClassLikeMetadata,
+    span: Span,
+) where
+    A: Arena,
+{
+    let dotted = |name: Word| String::from_utf8_lossy(name.as_bytes()).replace('\\', ".");
+    let (class_name, interface_name) = (dotted(class.original_name), dotted(interface.original_name));
+    let namespace = interface_name.rsplit_once('.').map_or("", |(namespace, _)| namespace);
+
+    context.collector.report_with_code(
+        IssueCode::InvalidImplement,
+        Issue::error(format!(
+            "`{class_name}` cannot implement the sealed interface `{interface_name}`: its implementers sit in the namespace `{namespace}`."
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Implemented here."))
+        .with_note("A sealed interface is a closed set of classes, all in its namespace, so a `match` over it can handle each.")
+        .with_help(format!("Move the class into the namespace `{namespace}`, or implement another interface.")),
+    );
+}
+
 #[allow(clippy::unwrap_used)]
 fn check_class_like_implements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -1912,7 +1962,20 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                 );
             }
 
-            if !class_like_metadata.is_permitted_to_inherit(implemented_metadata) {
+            // A sealed interface counts its implementers through the interfaces that extend it, spec section 20.1.
+            let sealed = std::iter::once(implemented_metadata)
+                .chain(
+                    implemented_metadata
+                        .all_parent_interfaces
+                        .iter()
+                        .filter_map(|interface| context.codebase.get_class_like(interface.as_bytes())),
+                )
+                .find(|interface| {
+                    interface.flags.is_sealed() && !class_like_metadata.is_permitted_to_inherit(interface)
+                });
+            if let Some(sealed) = sealed {
+                report_outside_implementer(context, class_like_metadata, sealed, implemented_type.span());
+            } else if !class_like_metadata.is_permitted_to_inherit(implemented_metadata) {
                 context.collector.report_with_code(
                     IssueCode::InvalidImplement,
                     Issue::error(format!("{using_kind_capitalized} `{using_name}` is not permitted to implement `{implemented_name}`"))

@@ -141,7 +141,10 @@ fn every_text_of_a_lowered_unit_is_an_offset_into_its_texts() {
         .map(|node| &texts[node.text.offset as usize..(node.text.offset + node.text.len) as usize])
         .collect();
 
-    assert_eq!(resolved, [&b"strict_types"[..], b"App\\Tenant", b"weekly", b"string", b"title", b"Report"]);
+    assert_eq!(
+        resolved,
+        [&b"strict_types"[..], b"App\\Tenant", b"weekly", b"string", b"Function<string()>", b"title", b"Report"]
+    );
     assert!(lowered.nodes().iter().any(|node| node.kind == sharp_kind::SHARP_AST_ZVAL
         && node.value == sharp_value::SHARP_STRING
         && node.text.len == 6));
@@ -207,7 +210,10 @@ fn a_compiled_file_reads_back_through_the_c_layout() {
 
     let texts: Vec<&[u8]> =
         decoded.nodes.iter().filter(|node| node.text.len != 0).map(|node| decoded.text(node.text)).collect();
-    assert_eq!(texts, [&b"strict_types"[..], b"App\\Tenant", b"weekly", b"string", b"title", b"Report"]);
+    assert_eq!(
+        texts,
+        [&b"strict_types"[..], b"App\\Tenant", b"weekly", b"string", b"Function<string()>", b"title", b"Report"]
+    );
     assert_eq!(decoded.children, lowered.children());
     assert_eq!(decoded.facts, FACTS);
 }
@@ -475,6 +481,7 @@ fn reads() -> Reads {
         bodies: vec![read("App\\Shared\\Money::total", 13)],
         inlined: vec![read("Sharp\\List::count", 31)],
         listed: vec![read("class-likes", 41)],
+        function_types: vec![read("App\\Orders\\Cart::checkout", 51)],
     }
 }
 
@@ -511,6 +518,12 @@ fn the_key_changes_with_the_source_and_with_each_read() {
             let moved = reads.inlined.remove(0);
             reads.listed.push(moved);
         }),
+        ("a function type's effects", |reads| reads.function_types[0].fingerprint = 52),
+        ("one more function type", |reads| reads.function_types.push(read("App\\Orders\\Cart::pay", 53))),
+        ("a function type moved to the listings", |reads| {
+            let moved = reads.function_types.remove(0);
+            reads.listed.push(moved);
+        }),
     ] {
         let mut edited = reads();
         edit(&mut edited);
@@ -541,6 +554,7 @@ fn a_body_edit_keeps_the_key_until_the_inferred_return_changes() {
         bodies: vec![read("App\\Shared\\Money::total", xxhash_rust::xxh3::xxh3_64(inferred_return.as_bytes()))],
         inlined: Vec::new(),
         listed: Vec::new(),
+        function_types: Vec::new(),
     };
     let before = key(source, &total("int"));
 

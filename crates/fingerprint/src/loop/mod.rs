@@ -7,6 +7,9 @@ use mago_syntax::cst::DoWhile;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForColonDelimitedBody;
+use mago_syntax::cst::ForOf;
+use mago_syntax::cst::ForOfTarget;
+use mago_syntax::cst::ForOfVariable;
 use mago_syntax::cst::Foreach;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::ForeachColonDelimitedBody;
@@ -19,6 +22,49 @@ use mago_syntax::cst::WhileColonDelimitedBody;
 
 use crate::FingerprintOptions;
 use crate::Fingerprintable;
+
+impl Fingerprintable for ForOf<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "for_of".hash(hasher);
+        self.keyword.fingerprint_with_hasher(hasher, resolved_names, options);
+        match &self.target {
+            ForOfTarget::Value(value) => value.fingerprint_with_hasher(hasher, resolved_names, options),
+            ForOfTarget::KeyValue(target) => {
+                "key_value".hash(hasher);
+                target.key.fingerprint_with_hasher(hasher, resolved_names, options);
+                target.value.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+        }
+        self.expression.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.body.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for ForOfVariable<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        if let Some(hint) = self.hint {
+            "hint".hash(hasher);
+            hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
 
 impl Fingerprintable for For<'_> {
     #[inline]
