@@ -44,3 +44,21 @@ function both_known(array $value): void
     assert_pair_of_ints_or_bools($value);
     take_pair($value);
 }
+
+/** @psalm-assert non-empty-list<list{int|string, ...<int>}> $value */
+function assert_rows_of_ints_after_the_first(mixed $value): void {}
+
+/** @param non-empty-list<list{int, ...<int>}> $value */
+function take_rows_of_ints(array $value): void {}
+
+/**
+ * Neither row type holds the other, so the rows meet element by element: the first element is `int` from
+ * `$rows`, and the rest is `int` from the assertion.
+ *
+ * @param non-empty-list<list{int, ...<int|string>}> $rows
+ */
+function both_known_and_open(array $rows): void
+{
+    assert_rows_of_ints_after_the_first($rows);
+    take_rows_of_ints($rows);
+}

@@ -573,6 +573,7 @@ test_case!(yield_from_invalid_key);
 test_case!(yield_from_invalid_type);
 test_case!(yield_from_non_iterable);
 test_case!(yield_global_scope);
+test_case!(yield_from_global_scope);
 test_case!(yield_invalid_key);
 test_case!(yield_invalid_value);
 test_case!(yield_merge_iterables);
