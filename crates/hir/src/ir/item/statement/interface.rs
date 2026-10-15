@@ -13,6 +13,7 @@ use crate::ir::item::annotation::ItemAnnotation;
 use crate::ir::item::attribute::Attribute;
 use crate::ir::item::inheritance::Extends;
 use crate::ir::item::member::MemberItem;
+use crate::ir::item::modifier::Modifier;
 use mago_allocator::copy::CopyInto;
 use mago_allocator::copy::copy_ref_into;
 use mago_allocator::copy::copy_slice_into;
@@ -24,6 +25,8 @@ pub struct Interface<'arena, I, S, E> {
     pub annotation: Option<&'arena ItemAnnotation<'arena, I, S, E>>,
     pub attributes: &'arena [Attribute<'arena, I, S, E>],
     pub version_constraint: &'arena [PHPVersionRange],
+    /// PHP#'s modifiers, as in `public sealed interface Interaction`. Always empty in PHP.
+    pub modifiers: &'arena [Modifier],
     pub name: Identifier<'arena>,
     pub extends: Option<&'arena Extends<'arena>>,
     pub members: Delimited<'arena, MemberItem<'arena, I, S, E>>,
@@ -46,6 +49,7 @@ where
             annotation: self.annotation.map(|node| copy_ref_into(node, arena)),
             attributes: copy_slice_into(self.attributes, arena),
             version_constraint: arena.alloc_slice_copy(self.version_constraint),
+            modifiers: arena.alloc_slice_copy(self.modifiers),
             name: self.name.copy_into(arena),
             extends: self.extends.map(|node| copy_ref_into(node, arena)),
             members: self.members.copy_into(arena),
