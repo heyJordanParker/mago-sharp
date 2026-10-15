@@ -16193,6 +16193,31 @@ fn a_method_value_of_a_prelude_method_is_pure() {
     assert_eq!(effect_issues(&[shelf]), Vec::<String>::new());
 }
 
+/// A static method value has its method's effects wherever it runs, as a method value read from an object has: passed
+/// to a `uses f` parameter, as `Scope.run(Job.ping)`, or to plain PHP, as `global.call_user_func(Job.ping)`. So a pure
+/// interface method refuses an implementation that runs one.
+#[test]
+fn a_static_method_value_has_its_method_s_effects_where_it_runs() {
+    let pinged = ("app/Shop/Pinged.sharp", "namespace App.Shop;\n\npublic event Pinged(int number);\n");
+    let runner = ("app/Shop/Runner.sharp", "namespace App.Shop;\n\npublic interface Runner\n{\n    string go();\n}\n");
+    let stub = ("app/Stubs/Builtins.sharp", "namespace App.Stubs;\n\nextern global.call_user_func;\n");
+    for (go, column) in [("Scope.run(Job.ping)", 37), ("global.call_user_func(Job.ping)", 49)] {
+        let code = format!(
+            "namespace App.Shop;\n\nimport Sharp.Scope;\n\npublic class Job : Runner\n{{\n    public static string ping()\n    {{\n        emit new Pinged(1);\n        return \"pinged\";\n    }}\n\n    public string go() => {go};\n}}\n"
+        );
+        let job = ("app/Shop/Job.sharp", Box::leak(code.into_boxed_str()) as &'static str);
+
+        assert_eq!(issues(job, &[pinged, runner, stub, SCOPE]), Vec::<String>::new(), "{go}");
+        assert_eq!(
+            effect_issues(&[job, pinged, runner, stub, SCOPE]),
+            [format!(
+                "app/Shop/Job.sharp:13:{column} incompatible-effects: `Job.go` reaches `Job.ping`, which emits `Pinged` with the effect `Events`, so the pure `Runner.go` cannot accept it."
+            )],
+            "{go}"
+        );
+    }
+}
+
 /// A method value of a `foreign` class has that class's effect wherever it runs, as a call of the method has, so a law
 /// that runs `environment.require` through a `uses f` parameter is impure.
 #[test]

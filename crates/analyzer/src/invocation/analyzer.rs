@@ -90,7 +90,7 @@ fn is_uses_parameter(parameter: InvocationTargetParameter<'_>) -> bool {
 
 /// The type an argument for `parameter`, of the type `parameter_type`, meets: a `uses` parameter takes a function with
 /// any effects, so its function types list none to compare.
-fn met_parameter_type<'parameter>(
+fn effect_free_parameter_type<'parameter>(
     parameter: InvocationTargetParameter<'_>,
     parameter_type: &'parameter TUnion,
 ) -> Cow<'parameter, TUnion> {
@@ -871,7 +871,7 @@ where
                         context,
                         artifacts,
                         &argument_value_type,
-                        &met_parameter_type(parameter_ref, &final_parameter_type),
+                        &effect_free_parameter_type(parameter_ref, &final_parameter_type),
                         *argument_offset,
                         argument_expression,
                         &invocation.target,

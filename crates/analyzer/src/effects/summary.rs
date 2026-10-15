@@ -954,9 +954,7 @@ where
         }
 
         let span = value.span();
-        if let Expression::Access(Access::Property(access)) = value.unparenthesized() {
-            self.method_value(access, span, reached);
-        }
+        self.method_value(value, span, reached);
 
         // A value the analysis gave no type passes no function type's effects.
         let effects = self.artifacts.get_expression_type(value).map(declared_effects).unwrap_or_default();
@@ -1049,8 +1047,8 @@ where
             let value = argument.value();
             if let Some(lambda) = self.lambda(value) {
                 self.inline(lambda, |_| elements.clone());
-            } else if let Expression::Access(Access::Property(method)) = value.unparenthesized() {
-                self.method_value(method, span, &elements);
+            } else {
+                self.method_value(value, span, &elements);
             }
         }
 
@@ -1061,30 +1059,42 @@ where
         }
     }
 
-    /// A method value, such as `this.label`, passed to a call that runs it on `elements`.
-    fn method_value(&mut self, value: &PropertyAccess<'arena>, span: Span, elements: &Roots) {
-        let ClassLikeMemberSelector::Identifier(name) = &value.property else {
-            return;
+    /// A method value, such as `this.label` or `Job.ping`, passed to a call that runs it on `elements`: a call of each
+    /// method its type names the analysis resolved it to, with the object it is read from as the receiver, which has
+    /// the effects a call of the method has.
+    fn method_value(&mut self, value: &'ast Expression<'arena>, span: Span, elements: &Roots) {
+        let receiver = match value.unparenthesized() {
+            Expression::Access(Access::Property(access)) => self.roots(access.object),
+            _ => Roots::new(),
         };
-
-        let receiver = self.roots(value.object);
-        for class in self.object_classes(value.object) {
-            let codebase = self.codebase();
-            // A method value has the effects a call of its method has.
-            match method_value_runs(codebase, class, name.value) {
-                Some(Runs::Body(callee)) => {
-                    let parameters = codebase
-                        .get_declaring_method(class.as_bytes(), name.value)
-                        .map_or(0, |metadata| metadata.parameters.len());
+        let codebase = self.codebase();
+        let runs: Vec<(Runs, usize)> = self
+            .artifacts
+            .get_expression_type(value)
+            .into_iter()
+            .flat_map(|value| value.types.iter())
+            .filter_map(|atomic| match atomic {
+                TAtomic::Callable(TCallable::Signature(TCallableSignature {
+                    source: Some(FunctionLikeIdentifier::Method(class, method)),
+                    ..
+                })) => Some((
+                    method_value_runs(codebase, *class, method.as_bytes())?,
+                    codebase.get_declaring_method(class.as_bytes(), method.as_bytes())?.parameters.len(),
+                )),
+                _ => None,
+            })
+            .collect();
+        for (runs, parameters) in runs {
+            match runs {
+                Runs::Body(callee) => {
                     let arguments = vec![elements.clone(); parameters];
                     self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments });
                 }
-                Some(Runs::Foreign { callee, effects }) => {
+                Runs::Foreign { callee, effects } => {
                     for effect in effects {
                         self.summary.effects.push((effect, span, callee));
                     }
                 }
-                None => {}
             }
         }
     }
