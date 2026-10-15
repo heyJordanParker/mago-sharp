@@ -2446,7 +2446,7 @@ fn a_static_initial_value_that_is_not_constant_runs_once_after_its_class() {
 /// Spec section 6.4: each behavior is a hidden private property the constructor fills with `new` before the initial
 /// value, which it writes through the hooks. `set` runs the behaviors in the order they are written and `get` the other
 /// way. A behavior's `set(string value)` takes its type argument where `Behavior.set` erases its parameter to any value,
-/// so it has no PHP type, and the metadata after the parameters checks a call from plain PHP against `string`.
+/// so it keeps its PHP type `string` and carries `ZEND_PARAM_WIDENED`, `[64]`, which skips PHP's variance check.
 #[test]
 fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
     let behavior = (
@@ -2583,16 +2583,13 @@ fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
         lowered.parameters_of("set"),
         indoc! {r#"
             PARAM_LIST
-              PARAM
-                null
+              PARAM [64]
+                ZVAL [1] "string"
                 ZVAL "value"
                 null
                 null
                 null
                 null
-              SHARP_TYPE_ARGS
-                null
-                ZVAL "string"
         "#}
     );
 }

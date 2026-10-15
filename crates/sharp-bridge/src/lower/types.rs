@@ -308,8 +308,8 @@ impl<'analysis> Types<'analysis> {
 
     /// Whether the analysis widened the parameter whose name spans `name`: it erases to a narrower type than a parameter
     /// its method overrides or implements, as `string value` of a `Behavior<string>`'s `set`, so PHP would refuse the
-    /// class when it links. Its declaration takes no PHP type, and the engine checks a call from plain PHP against its
-    /// written type, as Java's bridge method takes the erased type and casts to the written one.
+    /// class when it links. Its declaration keeps its PHP type, which reflection reports and every call checks under
+    /// the caller's `strict_types`, and carries `ZEND_PARAM_WIDENED`, so inheritance skips its variance check.
     pub(crate) fn is_widened(&self, name: Span) -> bool {
         self.artifacts.widened_parameters.contains(&(name.start.offset, name.end.offset))
     }
@@ -329,18 +329,10 @@ impl<'analysis> Types<'analysis> {
                     .map(|template| text(&template.constraint, self.codebase, Parameter::Bound)),
             )
             .collect();
-        // A widened parameter has no PHP type, so its whole written type is checked.
         let parameters: Vec<Option<String>> = metadata
             .parameters
             .iter()
-            .map(|parameter| {
-                let r#type = &parameter.type_metadata.as_ref()?.type_union;
-                if self.is_widened(parameter.name_span) {
-                    return Some(text(r#type, self.codebase, Parameter::Index));
-                }
-
-                self.checked_text(r#type, true)
-            })
+            .map(|parameter| self.checked_text(&parameter.type_metadata.as_ref()?.type_union, true))
             .collect();
 
         (

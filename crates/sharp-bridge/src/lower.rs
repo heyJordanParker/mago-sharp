@@ -263,6 +263,7 @@ const ZEND_SHARP_NEW_CLASS_VALUE: u32 = 1;
 const ZEND_TYPE_NULLABLE: u32 = 1 << 8;
 const IS_STATIC: u32 = 15;
 const ZEND_PARAM_VARIADIC: u32 = 1 << 4;
+const ZEND_PARAM_WIDENED: u32 = 1 << 6;
 const ZEND_PARENTHESIZED_CONDITIONAL: u32 = 1;
 const ZEND_DIM_IS: u32 = 1;
 const ZEND_BIND_REF: u32 = 1;
@@ -2475,16 +2476,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
     }
 
-    /// A variadic parameter carries `ZEND_PARAM_VARIADIC`, as php-src's grammar builds `int ...$values`. A parameter
-    /// the container fills, whose type is `service`, carries the service's id when its PHP type drops it.
+    /// A variadic parameter carries `ZEND_PARAM_VARIADIC`, as php-src's grammar builds `int ...$values`, and a widened
+    /// one `ZEND_PARAM_WIDENED` (`Types::is_widened`). A parameter the container fills, whose type is `service`,
+    /// carries the service's id when its PHP type drops it.
     fn parameter(&mut self, parameter: &FunctionLikeParameter, service: Option<&FunctionLikeParameterMetadata>) -> u32 {
         let Some(hint) = &parameter.hint else {
             unreachable!("semantics refuses a method parameter without a type");
         };
-        let hint_index = if self.types.is_widened(parameter.variable.span) { NULL } else { self.hint(hint) };
+        let hint_index = self.hint(hint);
         let service = service.and_then(|service| dropped_service(hint, service));
+        let node = self.parameter_of_type(parameter, hint_index, service);
+        if self.types.is_widened(parameter.variable.span) {
+            self.nodes[node as usize].attr |= ZEND_PARAM_WIDENED;
+        }
 
-        self.parameter_of_type(parameter, hint_index, service)
+        node
     }
 
     /// A parameter with its lowered type, or with a null type, as a lambda's parameter can be, and with the id of the
