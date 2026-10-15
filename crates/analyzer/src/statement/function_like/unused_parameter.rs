@@ -292,6 +292,7 @@ pub mod utils {
         use mago_syntax::cst::Assignment;
         use mago_syntax::cst::AssignmentOperator;
         use mago_syntax::cst::Binary;
+        use mago_syntax::cst::Call;
         use mago_syntax::cst::Class;
         use mago_syntax::cst::Closure;
         use mago_syntax::cst::Conditional;
@@ -304,7 +305,6 @@ pub mod utils {
         use mago_syntax::cst::ForeachKeyValueTarget;
         use mago_syntax::cst::ForeachValueTarget;
         use mago_syntax::cst::Function;
-        use mago_syntax::cst::FunctionCall;
         use mago_syntax::cst::Global;
         use mago_syntax::cst::If;
         use mago_syntax::cst::Interface;
@@ -322,6 +322,7 @@ pub mod utils {
         use mago_syntax::walker::Walker;
 
         use crate::context::Context;
+        use crate::utils::expression::get_named_call;
 
         #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
         pub(super) enum VariableReference<'arena> {
@@ -685,20 +686,10 @@ pub mod utils {
         where
             A: Arena,
         {
-            fn walk_in_function_call(
-                &self,
-                function_call: &'ast FunctionCall<'arena>,
-                context: &mut (bool, &Context<'_, 'arena, A>),
-            ) {
-                if context.0 {
-                    return;
-                }
-
-                let Expression::Identifier(func) = function_call.function else {
-                    return;
-                };
-
-                context.0 = context.1.resolve_function_name(func).eq_ignore_ascii_case(self.0);
+            fn walk_in_call(&self, call: &'ast Call<'arena>, context: &mut (bool, &Context<'_, 'arena, A>)) {
+                context.0 = context.0
+                    || get_named_call(context.1.resolved_names, context.1.codebase, call)
+                        .is_some_and(|call| call.calls(&[self.0]));
             }
 
             #[inline]

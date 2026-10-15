@@ -30,14 +30,11 @@ use mago_names::ResolvedNames;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
-use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::BinaryOperator;
-use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassConstantAccess;
 use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::Construct;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Node;
@@ -59,11 +56,12 @@ use crate::expression::binary::comparison::get_comparison_method;
 use crate::expression::binary::comparison::mixes_numbers;
 use crate::expression::binary::comparison::sharp_refusal;
 use crate::resolver::class_name::get_class_name_from_atomic;
+use crate::utils::expression::NamedCall;
 use crate::utils::expression::get_expression_id;
 use crate::utils::expression::get_index_id;
+use crate::utils::expression::get_named_call;
 use crate::utils::expression::get_non_nullsafe_expression_id;
 use crate::utils::misc::unwrap_expression;
-use crate::utils::names::namespace_function_name;
 
 #[derive(Debug, Clone, Copy)]
 pub enum OtherValuePosition {
@@ -128,7 +126,7 @@ where
             // Collect `@assert` assertions.
             if_types.extend(process_custom_assertions(call.span(), artifacts));
 
-            let named_call = get_named_call(expression, assertion_context);
+            let named_call = get_named_call(assertion_context.resolved_names, assertion_context.codebase, call);
 
             // If the function does not have any, try collecting
             // assertions for special functions.
@@ -276,52 +274,19 @@ where
 /// The functions whose call counts its one argument.
 const COUNT_FUNCTIONS: &[&[u8]] = &[b"count", b"sizeof", b"psl\\iter\\count"];
 
-/// A call of a function by its name, which narrows as the function does: PHP's `name(…)`, and PHP#'s `global.name(…)`
-/// and `Pdf.render(…)`, which call a plain PHP function through its namespace.
-struct NamedCall<'ast, 'arena> {
-    /// The lowercase full name of the function.
-    name: Word,
-    /// The lowercase name as written when it has no namespace, which PHP calls in the root namespace when the file's
-    /// namespace has no function of that name.
-    unqualified: Option<Word>,
-    argument_list: &'ast ArgumentList<'arena>,
-}
-
-impl NamedCall<'_, '_> {
-    /// Whether the call may run one of `functions`, each a lowercase full name.
-    fn calls(&self, functions: &[&[u8]]) -> bool {
-        functions.iter().any(|function| {
-            self.name.as_bytes() == *function || self.unqualified.is_some_and(|name| name.as_bytes() == *function)
-        })
-    }
-}
-
-/// The call `expression` makes of a function by its name, or `None` when it makes no such call.
-fn get_named_call<'ast, 'arena, A>(
+/// The named call `expression` makes, or `None` when it makes none.
+fn get_expression_named_call<'ast, 'arena, A>(
     expression: &'ast Expression<'arena>,
     assertion_context: AssertionContext<'_, '_, A>,
 ) -> Option<NamedCall<'ast, 'arena>>
 where
     A: Arena,
 {
-    match expression {
-        Expression::Call(Call::Function(FunctionCall {
-            function: Expression::Identifier(identifier),
-            argument_list,
-        })) => Some(NamedCall {
-            name: ascii_lowercase_word(assertion_context.resolved_names.get(identifier)),
-            unqualified: identifier.is_local().then(|| ascii_lowercase_word(identifier.value())),
-            argument_list,
-        }),
-        Expression::Call(Call::Method(call)) => Some(NamedCall {
-            name: ascii_lowercase_word(
-                namespace_function_name(assertion_context.resolved_names, assertion_context.codebase, call)?.as_bytes(),
-            ),
-            unqualified: None,
-            argument_list: &call.argument_list,
-        }),
-        _ => None,
-    }
+    let Expression::Call(call) = expression else {
+        return None;
+    };
+
+    get_named_call(assertion_context.resolved_names, assertion_context.codebase, call)
 }
 
 fn process_custom_assertions(expression_span: Span, artifacts: &AnalysisArtifacts) -> WordMap<AssertionSet> {
@@ -392,8 +357,9 @@ where
         }
     }
 
-    let (argument_variable_id_position, function_assertions) = if function_call.name.as_bytes().starts_with(b"psl\\") {
-        match function_call.name.as_bytes() {
+    let function_name = ascii_lowercase_word(function_call.name.as_bytes());
+    let (argument_variable_id_position, function_assertions) = if function_name.as_bytes().starts_with(b"psl\\") {
+        match function_name.as_bytes() {
             b"psl\\iter\\contains_key" => {
                 if let Some(array_key) = function_call
                     .argument_list
@@ -604,11 +570,7 @@ where
             _ => None,
         };
 
-        let Some(found_assertions) = function_call
-            .unqualified
-            .and_then(|name| get_builtin_assertion(name.as_bytes()))
-            .or_else(|| get_builtin_assertion(function_call.name.as_bytes()))
-        else {
+        let Some(found_assertions) = get_builtin_assertion(function_name.as_bytes()) else {
             return if_types;
         };
 
@@ -1090,7 +1052,7 @@ where
             return vec![];
         }
 
-        let Some(function_call) = get_named_call(expression, assertion_context) else {
+        let Some(function_call) = get_expression_named_call(expression, assertion_context) else {
             return vec![];
         };
 
@@ -1977,7 +1939,7 @@ where
     get_first_argument_expression_id(assertion_context, expression)
 }
 
-/// Whether `expression` passes one argument to one of `functions`, each a lowercase full name.
+/// Whether `expression` passes one argument to one of `functions`, each a full name.
 #[inline]
 fn is_function_call_to_one_of<A>(
     expression: &Expression,
@@ -1987,7 +1949,7 @@ fn is_function_call_to_one_of<A>(
 where
     A: Arena,
 {
-    get_named_call(expression, assertion_context)
+    get_expression_named_call(expression, assertion_context)
         .is_some_and(|call| call.argument_list.arguments.len() == 1 && call.calls(functions))
 }
 
@@ -2229,7 +2191,7 @@ fn get_first_argument_expression_id<A>(
 where
     A: Arena,
 {
-    let argument_list = get_named_call(expression, assertion_context)?.argument_list;
+    let argument_list = get_expression_named_call(expression, assertion_context)?.argument_list;
 
     if argument_list.arguments.len() != 1 {
         return None;

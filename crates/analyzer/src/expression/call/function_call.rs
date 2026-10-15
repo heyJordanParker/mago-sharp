@@ -138,8 +138,12 @@ where
         None,
         call.method.span(),
         None,
-        false,
+        block_context.known_functions.contains(&ascii_lowercase_word(function.as_bytes())),
     );
+    if let Some(metadata) = target.as_ref().and_then(InvocationTarget::get_function_like_metadata) {
+        check_function_use(context, block_context, metadata, function, call.method.span());
+    }
+
     let analyze = |context: &mut Context<'ctx, 'arena, A>| {
         analyze_invocation_targets(
             context,
@@ -290,13 +294,7 @@ where
                 report_bare_function_call(context, block_context, artifacts, metadata, arguments, span);
             }
 
-            crate::utils::casing::check_function_casing_with_metadata(context, metadata, name, span);
-            crate::utils::experimental::check_experimental_function_with_metadata(
-                context,
-                block_context,
-                metadata,
-                span,
-            );
+            check_function_use(context, block_context, metadata, name, span);
         }
 
         return Ok(if let Some(t) = target { (vec![t], false) } else { (vec![], false) });
@@ -312,6 +310,21 @@ where
     };
 
     Ok(resolve_callable_targets(context, &expression_type.clone(), expression.span(), template_result))
+}
+
+/// Reports a call of `function` by `used_name` in a casing other than its declared one, and a call of a function marked
+/// `@experimental`: the checks PHP's `name(…)` and PHP#'s `global.name(…)` both get at `span`.
+fn check_function_use<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    function: &FunctionLikeMetadata,
+    used_name: Word,
+    span: Span,
+) where
+    A: Arena,
+{
+    crate::utils::casing::check_function_casing_with_metadata(context, function, used_name, span);
+    crate::utils::experimental::check_experimental_function_with_metadata(context, block_context, function, span);
 }
 
 /// The targets a call of a value of `expression_type` runs: the function a closure or a callable names, or the

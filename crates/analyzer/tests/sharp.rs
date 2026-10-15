@@ -4390,6 +4390,43 @@ fn a_plain_php_function_called_through_global_narrows_as_in_php() {
     assert_eq!(wrong, Vec::<String>::new());
 }
 
+/// A plain PHP function called through `global.` gets every check PHP's call of it gets, and PHP's call gets them by the
+/// name it runs, so `fresh()` in a namespace runs the root `fresh`. Each row is a body of `run`, its PHP twin, and the
+/// issue codes both report.
+#[test]
+fn a_plain_php_function_called_through_global_is_checked_as_in_php() {
+    const LIBRARY: &str = "<?php\n\n#[\\NoDiscard]\nfunction fresh(string $value): int\n{\n    return 1;\n}\n\nfunction record(mixed ...$values): void\n{\n}\n\n/** @experimental */\nfunction preview(string $value): void\n{\n}\n";
+    let settings =
+        || Settings { find_unused_parameters: true, check_experimental: true, check_name_casing: true, ..settings() };
+    let rows: [(&str, &str, &[&str]); 6] = [
+        (
+            "if (global.function_exists(\"missing_helper\")) { global.missing_helper(text); }",
+            "if (\\function_exists('missing_helper')) { \\missing_helper($text); }",
+            &[],
+        ),
+        ("global.strlen(text);", "\\strlen($text);", &["unused-statement"]),
+        ("global.fresh(text);", "fresh($text);", &["unused-function-call"]),
+        ("global.record(global.func_get_args());", "\\record(\\func_get_args());", &[]),
+        ("global.Record(text);", "\\Record($text);", &["incorrect-function-casing"]),
+        ("global.preview(text);", "\\preview($text);", &["experimental-usage"]),
+    ];
+
+    let wrong: Vec<String> = rows
+        .into_iter()
+        .filter_map(|(sharp_body, php_body, expected)| {
+            let sharp: &'static str = format!("namespace Demo;\n\nclass Probe\n{{\n    public void run(string text)\n    {{\n        {sharp_body}\n    }}\n}}\n").leak();
+            let php: &'static str = format!("<?php\n\nnamespace Demo;\n\nclass Probe\n{{\n    public function run(string $text): void\n    {{\n        {php_body}\n    }}\n}}\n").leak();
+            let sharp_issues = issues_with(settings(), ("src/Demo/Probe.sharp", sharp), &[("src/library.php", LIBRARY)]);
+            let php_issues = issues_with(settings(), ("src/Demo/Probe.php", php), &[("src/library.php", LIBRARY)]);
+
+            (codes(&sharp_issues) != expected || codes(&php_issues) != expected)
+                .then(|| format!("{sharp_body} gives {sharp_issues:?}, and PHP gives {php_issues:?}"))
+        })
+        .collect();
+
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
 #[test]
 fn a_match_narrows_each_arm_as_its_php_does() {
     let sharp = "namespace Demo;\n\nimport Lib.Shape;\nimport Lib.Circle;\nimport Lib.Square;\n\nclass Report\n{\n    public static string describe(Shape? shape) => match (shape) {\n        null => \"nothing\",\n        Circle c when c.radius > 10.0 => \"big\",\n        Circle => \"circle\",\n        default => \"other\",\n    };\n\n    public static string grade(int score) => match (score) {\n        < 0 => \"invalid\",\n        >= 90 => \"top\",\n        >= 50 and < 70 => \"pass\",\n        default => \"fail\",\n    };\n\n    public static float count(Shape? shape)\n    {\n        let total = 0.0;\n        match (shape) {\n            Circle c => {\n                total = c.radius;\n            },\n            Square s when s.side > 1.0 => total = s.side,\n            default => {},\n        }\n        return total;\n    }\n}\n";

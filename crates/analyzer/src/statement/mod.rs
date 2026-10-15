@@ -78,6 +78,7 @@ use crate::utils::docblock::populate_docblock_variables_excluding;
 use crate::utils::expression::expression_has_observable_side_effect;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_function_like_id_from_call;
+use crate::utils::expression::get_named_call;
 use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_function_like_identifier;
@@ -880,17 +881,10 @@ fn detect_unused_statement_expressions<'ast, 'arena, A>(
 
             "A binary operation used as a statement likely has no effect."
         }
-        Expression::Call(Call::Function(FunctionCall { function, .. })) => {
-            let Expression::Identifier(function_name) = function else {
-                return;
-            };
-
-            let unqualified_name = function_name.value();
-            let name = context.resolved_names.get(function_name);
-
-            let Some(function) = context.codebase.get_function(name).or_else(|| {
-                if function_name.is_local() { context.codebase.get_function(unqualified_name) } else { None }
-            }) else {
+        Expression::Call(call) => {
+            let Some(function) = get_named_call(context.resolved_names, context.codebase, call)
+                .and_then(|call| context.codebase.get_function(call.name.as_bytes()))
+            else {
                 return;
             };
 
@@ -941,7 +935,8 @@ where
         return false;
     };
 
-    let Some(identifier) = get_function_like_id_from_call(call, context.resolved_names, &artifacts.expression_types)
+    let Some(identifier) =
+        get_function_like_id_from_call(call, context.resolved_names, context.codebase, &artifacts.expression_types)
     else {
         return true;
     };
@@ -982,9 +977,12 @@ where
         (no_discard || metadata.flags.must_use()).then_some((code, identifier, no_discard))
     };
 
-    if let Some(identifier) =
-        get_function_like_id_from_call(call_expression, context.resolved_names, &artifacts.expression_types)
-    {
+    if let Some(identifier) = get_function_like_id_from_call(
+        call_expression,
+        context.resolved_names,
+        context.codebase,
+        &artifacts.expression_types,
+    ) {
         return check_target(identifier);
     }
 

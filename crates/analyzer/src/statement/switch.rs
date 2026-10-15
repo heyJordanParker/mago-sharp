@@ -593,7 +593,14 @@ where
         }
 
         if let Some(case_condition) = switch_case.expression() {
-            extract_function_constant_existence(case_condition, self.artifacts, &mut case_block_context, false);
+            extract_function_constant_existence(
+                self.context.resolved_names,
+                self.context.codebase,
+                case_condition,
+                self.artifacts,
+                &mut case_block_context,
+                false,
+            );
         }
 
         if !case_clauses.is_empty()
