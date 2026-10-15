@@ -4823,6 +4823,17 @@ fn a_match_over_a_closed_set_needs_no_default() {
             "39:52 match-not-exhaustive This `match` misses `ScrollInteraction`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
         ]
     );
+
+    // Arms that unpack one case together handle it when they differ in one field and hold every value of its type.
+    let delivery = "namespace App;\n\nenum Delivery\n{\n    case Sent;\n    case Noted(string? note);\n    case Routed(string route, int? stop);\n    case Flagged(bool urgent);\n    case Tagged(int|string|null tag);\n}\n";
+    let together = "namespace App;\n\nclass Post\n{\n    public string noted(Delivery delivery) => match (delivery) {\n        Delivery.Sent => \"sent\",\n        Delivery.Noted(string note) => note,\n        Delivery.Noted(null) => \"no note\",\n        Delivery.Routed(string route, int stop) => route,\n        Delivery.Routed(string route, null) => route,\n        Delivery.Flagged(true) => \"urgent\",\n        Delivery.Flagged(false) => \"calm\",\n        Delivery.Tagged((int or string)) => \"tagged\",\n        Delivery.Tagged(null) => \"untagged\",\n    };\n\n    public string half(Delivery delivery) => match (delivery) {\n        Delivery.Sent => \"sent\",\n        Delivery.Noted(string note) => note,\n        Delivery.Routed(\"north\", int stop) => \"north\",\n        Delivery.Routed(string route, null) => route,\n        Delivery.Flagged f => \"flagged\",\n        Delivery.Tagged t => \"tagged\",\n    };\n\n    public string either(Delivery delivery, bool test) => match (delivery) {\n        Delivery.Sent => \"sent\",\n        Delivery.Noted(string note) => note,\n        Delivery.Noted(null) when test => \"tested\",\n        Delivery.Routed(string route, int stop) => route,\n        Delivery.Routed(string route, null) => route,\n        Delivery.Flagged(true) => \"urgent\",\n        Delivery.Tagged t => \"tagged\",\n    };\n}\n";
+    assert_eq!(
+        refusals(("src/App/Post.sharp", together), &[("src/App/Delivery.sharp", delivery)]),
+        [
+            "17:46 match-not-exhaustive This `match` misses `Delivery.Noted` and `Delivery.Routed`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "26:59 match-not-exhaustive This `match` misses `Delivery.Noted` and `Delivery.Flagged`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+        ]
+    );
 }
 
 /// A file that declares the class a case runs as clashes with the case, whichever is read first.

@@ -14,11 +14,18 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::r#enum::TEnum;
+use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_literal_string;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_mixed_list;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_null;
+use mago_codex::ttype::get_true;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_names::binding::php_variable_name;
@@ -36,12 +43,14 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::Leave;
 use mago_syntax::cst::ListPattern;
 use mago_syntax::cst::ListPatternElement;
+use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Parenthesized;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PatternMatchArm;
+use mago_syntax::cst::PatternMatchPatternArm;
 use mago_syntax::cst::PropertiesPattern;
 use mago_syntax::cst::RestPattern;
 use mago_syntax::cst::Statement;
@@ -686,7 +695,7 @@ fn report_unhandled<'ctx, 'arena, A>(
     });
 
     let (missing, enums) = if is_closed {
-        missing_cases(pattern_match.span(), &value_type, handled, context, block_context, artifacts)
+        missing_cases(pattern_match, &value_type, handled, context, block_context, artifacts)
     } else {
         (vec![], vec![])
     };
@@ -716,10 +725,10 @@ fn report_unhandled<'ctx, 'arena, A>(
     );
 }
 
-/// The cases of the enum `value_type` that no `handled` test of the `match` at `span` matches, as PHP# writes them,
+/// The cases of the enum `value_type` that no `handled` test of `pattern_match` matches, as PHP# writes them,
 /// `Status.Open`, in the order the enum declares them, and `null` last, with the enums those cases name.
 fn missing_cases<'ctx, 'arena, A>(
-    span: Span,
+    pattern_match: &PatternMatch<'arena>,
     value_type: &TUnion,
     handled: &[&Expression<'arena>],
     context: &mut Context<'ctx, 'arena, A>,
@@ -762,7 +771,7 @@ where
             &mut unhandled_context,
             &mut WordSet::default(),
             &WordSet::default(),
-            &span,
+            &pattern_match.span(),
             false,
             false,
         );
@@ -799,6 +808,7 @@ where
     }
     // A closed set of classes leaves each class no arm tests, of all the cases of an enum with data or all the
     // implementers of a sealed interface while the value is still the set's type, and else each class left.
+    let together = cases_handled_together(pattern_match, context, block_context, artifacts);
     let tested: Vec<&[u8]> = handled
         .iter()
         .filter_map(|test| match test.unparenthesized() {
@@ -809,6 +819,7 @@ where
             }) => context.resolved_names.resolve(class),
             _ => None,
         })
+        .chain(together.iter().map(|case| case.as_bytes()))
         .collect();
     let mut left_classes: Vec<&ClassLikeMetadata> = Vec::new();
     for class in atomics().filter_map(|atomic| closed_class(atomic, context.codebase)) {
@@ -879,6 +890,109 @@ where
     };
 
     arena.alloc(Expression::Binary(Binary { lhs: subject, operator: *operator, rhs }))
+}
+
+/// The cases of an enum with data that the arms of `pattern_match` without `when` handle together, spec section 20:
+/// arms that unpack one case, whose patterns hold every value of each field's declared type but one field's, and
+/// together hold every value of that field's type, as `Delivery.Noted(string note)` and `Delivery.Noted(null)` hold
+/// every `string?`.
+fn cases_handled_together<'ctx, A>(
+    pattern_match: &PatternMatch<'_>,
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Vec<Word>
+where
+    A: Arena,
+{
+    // Each arm's case, the types its fields declare, and the type each field's pattern holds every value of. A case
+    // pattern's PHP exists only for a case of an enum with data, so its hint names one.
+    let unpacking = pattern_match.arms.iter().filter_map(|arm| match arm {
+        PatternMatchArm::Pattern(PatternMatchPatternArm {
+            pattern: Pattern::Type(TypePattern { hint, fields: Some(fields), properties: None, .. }),
+            guard: None,
+            ..
+        }) => Some((hint, fields)),
+        _ => None,
+    });
+    let mut arms: Vec<(Word, Vec<TUnion>, Vec<Option<TUnion>>)> = Vec::new();
+    for (hint, fields) in unpacking {
+        let case = context.resolved_names.resolve(hint).and_then(|name| context.codebase.get_class_like(name));
+        let constructor = case.and_then(|case| context.codebase.get_method(case.name.as_bytes(), b"__construct"));
+        if let (Some(case), Some(constructor)) = (case, constructor) {
+            let declared = constructor
+                .parameters
+                .iter()
+                .map(|parameter| parameter.get_type_metadata().map_or_else(get_mixed, |declared| declared.type_union.clone()))
+                .collect();
+            let held = fields.fields.iter().map(|field| held_type(field, context, block_context, artifacts)).collect();
+            arms.push((case.name, declared, held));
+        }
+    }
+
+    let holds = |held: &Option<TUnion>, declared: &TUnion| {
+        held.as_ref().is_some_and(|held| {
+            union_comparator::is_contained_by(
+                context.codebase,
+                declared,
+                held,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::new(),
+            )
+        })
+    };
+    let mut together: Vec<Word> = Vec::new();
+    for (case, declared, _) in &arms {
+        let case_arms: Vec<&Vec<Option<TUnion>>> =
+            arms.iter().filter(|(other, _, _)| other == case).map(|(_, _, held)| held).collect();
+        let handles_case = (0..declared.len()).any(|varying| {
+            let others_hold = case_arms.iter().all(|held| {
+                held.iter().zip(declared).enumerate().all(|(field, (held, declared))| field == varying || holds(held, declared))
+            });
+            let varying_held = case_arms.iter().map(|held| held[varying].clone()).reduce(|left, right| {
+                Some(combine_union_types(&left?, &right?, context.codebase, CombinerOptions::default()))
+            });
+
+            others_hold && varying_held.is_some_and(|held| holds(&held, &declared[varying]))
+        });
+        if handles_case && !together.contains(case) {
+            together.push(*case);
+        }
+    }
+
+    together
+}
+
+/// The type a field pattern holds every value of: a type pattern's type, without fields or properties, the type of
+/// `null`, `true` or `false`, which is the value itself, and both sides' of `or`. `None` for any other pattern, which
+/// holds only some values of a type.
+fn held_type<'ctx, A>(
+    pattern: &Pattern<'_>,
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    match pattern {
+        Pattern::Type(TypePattern { hint, fields: None, properties: None, .. }) => {
+            Some(get_type_from_hint(context, block_context, artifacts, hint))
+        }
+        Pattern::Value(Expression::Literal(Literal::Null(_))) => Some(get_null()),
+        Pattern::Value(Expression::Literal(Literal::True(_))) => Some(get_true()),
+        Pattern::Value(Expression::Literal(Literal::False(_))) => Some(get_false()),
+        Pattern::Binary(binary) if !binary.is_and() => {
+            let left = held_type(binary.left, context, block_context, artifacts)?;
+            let right = held_type(binary.right, context, block_context, artifacts)?;
+
+            Some(combine_union_types(&left, &right, context.codebase, CombinerOptions::default()))
+        }
+        Pattern::Parenthesized(parenthesized) => held_type(parenthesized.pattern, context, block_context, artifacts),
+        _ => None,
+    }
 }
 
 /// The class a value of `atomic` is in a closed set of, spec section 20: a case of an enum with data, an enum with

@@ -4953,6 +4953,26 @@ fn a_leave_after_null_coalesce_is_in_the_slice_and_returns_as_its_method_does() 
     );
 }
 
+/// A `finally` block runs while its `try` statement leaves, so a `break` or `continue` that leaves the block, plain or
+/// after `??`, is an error, as in C# (CS0157) and as the engine refuses it. One that a loop inside the block holds, or
+/// one inside a lambda, leaves no `finally` block.
+#[test]
+fn break_and_continue_never_leave_a_finally_block() {
+    let code = leak(method(
+        "        for (int i = 0; i < 3; i++) {\n            try {\n                extra += 1;\n            } finally {\n                if (extra > 5) {\n                    break;\n                }\n                extra = extra ?? continue;\n                if (extra > 7) {\n                    continue;\n                }\n                extra = extra ?? break;\n                while (extra > 9) {\n                    extra -= 1;\n                    continue;\n                }\n                const skip = (int? value) => {\n                    for (const step of [1]) {\n                        break;\n                    }\n                    return value ?? 0;\n                };\n            }\n        }\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "12:21 `break` cannot leave a `finally` block.",
+            "14:34 `?? continue` cannot leave a `finally` block.",
+            "16:21 `continue` cannot leave a `finally` block.",
+            "18:34 `?? break` cannot leave a `finally` block.",
+        ]
+    );
+}
+
 /// Spec section 21: a list pattern has one rest, anywhere, and a named rest is the `List` of the elements the others
 /// leave.
 #[test]

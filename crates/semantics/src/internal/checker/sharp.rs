@@ -62,6 +62,7 @@ use mago_syntax::cst::Keyword;
 use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalDeclaration;
+use mago_syntax::cst::Leave;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::Method;
@@ -98,6 +99,7 @@ use mago_syntax::cst::StringPart;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Terminator;
 use mago_syntax::cst::TryCatchClause;
+use mago_syntax::cst::TryFinallyClause;
 use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::TypePattern;
@@ -117,6 +119,7 @@ use mago_syntax::token::GetPrecedence;
 use mago_syntax::token::Precedence;
 use mago_syntax::token::is_sharp_keyword;
 use mago_syntax::utils::pattern::has_type_test;
+use mago_syntax::walker::Walker;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
 use crate::internal::checker::class_like::check_law_parameters;
@@ -1361,6 +1364,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Hint(_) | Node::DirectVariable(_), TryCatchClause) => None,
         (Node::Block(_), TryCatchClause) => Some(Body),
 
+        // The block is checked as a body, and no jump leaves it.
+        (Node::TryFinallyClause(finally), Body) => {
+            report_jumps_out_of_finally(finally, context);
+
+            Some(Body)
+        }
         (Node::Statement(statement), Body) if let Some((body, fix)) = body_without_braces(statement, context) => {
             context.report(
                 Issue::error("PHP# writes the body of `if`, `else` and each loop in braces.")
@@ -1398,7 +1407,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Statement::Continue(Continue { level: None, .. }),
             )
             | Node::Try(_)
-            | Node::TryFinallyClause(_)
             | Node::Break(_)
             | Node::Continue(_)
             | Node::ExpressionStatement(_)
@@ -3381,6 +3389,75 @@ fn is_in_file_level_code(context: &Context<'_, '_, '_>) -> bool {
         context.ancestors.iter().skip_while(|node| matches!(node, Node::Statement(Statement::Namespace(_))));
 
     matches!(ancestors.next(), Some(Node::Statement(statement)) if runs_code(statement))
+}
+
+/// Reports each `break` and `continue`, plain or after `??`, that leaves the `finally` block `finally`: one that no loop
+/// inside the block holds, outside the lambdas and classes the block declares. A `finally` block runs while its `try`
+/// statement leaves, so it cannot jump out, as in C# (CS0157), and the engine refuses the jump when it loads the file.
+fn report_jumps_out_of_finally(finally: &TryFinallyClause<'_>, context: &mut Context<'_, '_, '_>) {
+    let mut jumps = FinallyJumps::default();
+    FinallyJumpWalker.walk_block(&finally.block, &mut jumps);
+
+    for (span, jump) in jumps.leaving {
+        context.report(
+            Issue::error(format!("`{jump}` cannot leave a `finally` block."))
+                .with_annotation(Annotation::primary(span).with_message("Leaves the `finally` block."))
+                .with_note("A `finally` block runs while its `try` statement leaves, so it cannot jump out, as in C#.")
+                .with_help("Set a local in the `finally` block, and test it after the `try` statement."),
+        );
+    }
+}
+
+/// The jumps of a `finally` block that leave it, with how each is written, and how many loops, lambdas and classes
+/// inside the block hold the node the walk is at.
+#[derive(Default)]
+struct FinallyJumps {
+    inner: usize,
+    leaving: Vec<(Span, &'static str)>,
+}
+
+/// Collects the `FinallyJumps` of a `finally` block.
+struct FinallyJumpWalker;
+
+impl FinallyJumpWalker {
+    /// Whether `node` holds its own `break` and `continue`: a loop, a lambda or a class.
+    fn holds_jumps(node: Node<'_, '_>) -> bool {
+        matches!(
+            node,
+            Node::While(_)
+                | Node::DoWhile(_)
+                | Node::For(_)
+                | Node::ForOf(_)
+                | Node::Closure(_)
+                | Node::ArrowFunction(_)
+                | Node::AnonymousClass(_)
+        )
+    }
+}
+
+impl<'ast, 'arena> Walker<'ast, 'arena, FinallyJumps> for FinallyJumpWalker {
+    fn walk_in_node(&self, node: Node<'ast, 'arena>, jumps: &mut FinallyJumps) {
+        if Self::holds_jumps(node) {
+            jumps.inner += 1;
+        }
+        if jumps.inner > 0 {
+            return;
+        }
+
+        match node {
+            Node::Statement(Statement::Break(r#break)) => jumps.leaving.push((r#break.span(), "break")),
+            Node::Statement(Statement::Continue(r#continue)) => jumps.leaving.push((r#continue.span(), "continue")),
+            Node::Leave(Leave::Break(r#break)) => jumps.leaving.push((r#break.span(), "?? break")),
+            Node::Leave(Leave::Continue(r#continue)) => jumps.leaving.push((r#continue.span(), "?? continue")),
+            _ => {}
+        }
+    }
+
+    fn walk_out_node(&self, node: Node<'ast, 'arena>, jumps: &mut FinallyJumps) {
+        if Self::holds_jumps(node) {
+            jumps.inner -= 1;
+        }
+    }
 }
 
 /// The first body of an `if`, `else` or loop that is not a block in braces, with the block to write in its place. An
