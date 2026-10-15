@@ -10,12 +10,13 @@ use mago_syntax::walker::Walker;
 
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::statement::class_like::r#struct::value_properties;
 use crate::utils::quoted_source;
 
 /// Spec section 13: `readonly` holds only types PHP# checks, and only a value something can change. So each `readonly`
 /// before a type of a PHP# program that reaches a plain PHP class, at its top or in a type argument, is an error, and
-/// one before a type that holds no PHP# object changes nothing: an enum, a struct, a function type, and a collection of
-/// those, which is copied as a struct is. The semantics checks refuse `readonly` before a keyword type before any class
+/// one before a type that holds no PHP# object changes nothing: an enum, its cases that carry data included, a struct,
+/// a function type, and a collection of those, which is copied as a struct is. The semantics checks refuse `readonly` before a keyword type before any class
 /// is known.
 pub(crate) fn check_readonly_types<A>(context: &mut Context<'_, '_, A>, program: &Program<'_>)
 where
@@ -72,7 +73,7 @@ where
             plain.push(name);
         }
 
-        class.map(|class| !class.kind.is_enum() && !class.flags.is_struct())
+        class.map(|class| !class.kind.is_enum() && value_properties(context.codebase, class).is_none())
     };
 
     match hint {

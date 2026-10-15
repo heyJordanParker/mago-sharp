@@ -298,6 +298,7 @@ where
     )?;
     if carries_data {
         register_case_classes(codebase, r#enum, &mut class_like_metadata, context, scope);
+        create_value_equality(codebase, &mut class_like_metadata, span);
     }
 
     finish_registration(codebase, class_like_metadata)
@@ -481,7 +482,9 @@ where
     let declares_equality = r#struct.members.iter().any(|member| {
         matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
     });
-    create_struct_equality(codebase, &mut class_like_metadata, span, declares_equality);
+    if !declares_equality {
+        create_value_equality(codebase, &mut class_like_metadata, span);
+    }
     if leaves_parse_free(&r#struct.members) {
         create_parse_methods(codebase, &mut class_like_metadata, span);
     }
@@ -1958,20 +1961,12 @@ fn require_struct_properties(class_like: &mut ClassLikeMetadata, members: &Seque
     }
 }
 
-/// A struct's `operator ==`, which the bridge writes to compare each property, spec section 10, unless
-/// `declares_equality` says the struct declares its own. It takes any value, so an `Any?` compares with a struct, and
-/// is false when the other value is no instance of the struct. The analyzer decides which values `==` may compare with
-/// a struct. It spans the whole struct, which no declared member does.
-fn create_struct_equality(
-    codebase: &mut CodebaseMetadata,
-    class_like: &mut ClassLikeMetadata,
-    span: Span,
-    declares_equality: bool,
-) {
-    if declares_equality {
-        return;
-    }
-
+/// The `operator ==` of a struct that declares none, or of an enum with a case that carries data, which the bridge
+/// writes to compare each property of a struct, or each field of the same case, spec sections 10, 19 and 20. It takes
+/// any value, so an `Any?` compares with one, and is false when the other value is no instance of the same struct or
+/// case. The analyzer decides which values `==` may compare with one. It spans the whole struct or enum, which no
+/// declared member does.
+fn create_value_equality(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
     let operand = |name: &str| create_parameter(name, get_mixed(), span);
     let equality = create_static_method("op_Equality", span, vec![operand("$a"), operand("$b")], get_bool(), vec![]);
     add_method(codebase, b"op_Equality", class_like, equality);

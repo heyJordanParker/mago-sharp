@@ -833,7 +833,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
         });
         if !declares_equality {
-            members.push(self.struct_equality(r#struct.name.span));
+            members.push(self.value_equality(r#struct.name.span, &[self.class]));
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
         members.extend(self.class_metadata(self.line(r#struct.name.span)));
@@ -857,49 +857,55 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// A struct's `==`, spec section 10, as `public static function op_Equality(mixed $a, mixed $b): bool`, spanning
-    /// the struct's name: `$a === $b` unless both are instances of the struct, so null equals only null and a value of
-    /// another type is unequal, and otherwise each property compared with that property's own `==`, joined by `&&`.
-    fn struct_equality(&mut self, span: Span) -> u32 {
+    /// The `==` of a struct, spec section 10, or of an enum with a case that carries data, section 20, as
+    /// `public static function op_Equality(mixed $a, mixed $b): bool`, spanning the name at `span`. `classes` holds the
+    /// struct, or the class of each case that carries data. Two instances of one of them are equal when each property
+    /// equals its pair by the property's own `==`, joined by `&&`. Any other pair, null and a plain case included, is
+    /// equal only when identical, so null equals only null and a value of another type or case is unequal:
+    /// `if ($a instanceof \App\Point && $b instanceof \App\Point) { return …; } return $a === $b;`.
+    fn value_equality(&mut self, span: Span, classes: &[&[u8]]) -> u32 {
         let name = php_operator_name(&BinaryOperator::Equal(span), 2)
             .unwrap_or_else(|| unreachable!("`==` runs as `op_Equality`"));
         self.enter(name);
         let line = self.line(span);
         let mut parameters = Vec::new();
-        let mut not_instances = Vec::new();
         for operand in [b"a", b"b"] {
             let hint = self.string(ZEND_NAME_NOT_FQ, line, b"mixed");
             let name = self.string(0, line, operand);
             parameters.push(self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL]));
-
-            let value = self.variable(span, operand);
-            let class = self.string(ZEND_NAME_FQ, line, self.class);
-            let instance = self.node(SHARP_AST_INSTANCEOF, 0, line, &[value, class]);
-            not_instances.push(self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[instance]));
         }
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
 
-        let either_is_other = self.node(SHARP_AST_OR, 0, line, &not_instances);
+        let mut statements = Vec::new();
+        for class in classes {
+            let instances = [b"a", b"b"].map(|operand| {
+                let value = self.variable(span, operand);
+                let class = self.string(ZEND_NAME_FQ, line, class);
+
+                self.node(SHARP_AST_INSTANCEOF, 0, line, &[value, class])
+            });
+            let both = self.node(SHARP_AST_AND, 0, line, &instances);
+
+            let mut equal = None;
+            for (property, r#type) in self.types.struct_properties(class) {
+                let side = |object| Side::Property { span, object, property, r#type };
+                let property_equal = self.equality(line, side(b"a"), side(b"b"), false);
+                equal = Some(match equal {
+                    Some(earlier) => self.node(SHARP_AST_AND, 0, line, &[earlier, property_equal]),
+                    None => property_equal,
+                });
+            }
+            let equal = equal.unwrap_or_else(|| self.zval(line, sharp_value::SHARP_TRUE, |_| {}));
+            let r#return = self.node(SHARP_AST_RETURN, 0, line, &[equal]);
+            let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#return]);
+            let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[both, body]);
+            statements.push(self.node(SHARP_AST_IF, 0, line, &[branch]));
+        }
         let a = self.variable(span, b"a");
         let b = self.variable(span, b"b");
         let identical = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[a, b]);
-        let r#return = self.node(SHARP_AST_RETURN, 0, line, &[identical]);
-        let statements = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#return]);
-        let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[either_is_other, statements]);
-        let guard = self.node(SHARP_AST_IF, 0, line, &[branch]);
-
-        let mut equal = None;
-        for (property, r#type) in self.types.struct_properties(self.class) {
-            let side = |object| Side::Property { span, object, property, r#type };
-            let property_equal = self.equality(line, side(b"a"), side(b"b"), false);
-            equal = Some(match equal {
-                Some(earlier) => self.node(SHARP_AST_AND, 0, line, &[earlier, property_equal]),
-                None => property_equal,
-            });
-        }
-        let equal = equal.unwrap_or_else(|| self.zval(line, sharp_value::SHARP_TRUE, |_| {}));
-        let r#return = self.node(SHARP_AST_RETURN, 0, line, &[equal]);
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[guard, r#return]);
+        statements.push(self.node(SHARP_AST_RETURN, 0, line, &[identical]));
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let return_type = self.string(ZEND_NAME_NOT_FQ, line, b"bool");
 
         self.declaration(
@@ -1767,10 +1773,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Spec section 20: an enum with a case that carries data is an abstract class, with the enum's header as its
-    /// interface list and the enum's constants and methods, as
-    /// `abstract class PaymentResult implements \App\HasLabel`. Each case is a final subclass named in the enum's
-    /// namespace, declared after it. A case that carries data promotes its fields in its constructor, as
-    /// `final class Paid extends \App\PaymentResult { public function __construct(public readonly string $transactionId) {} }`
+    /// interface list, the enum's constants and methods, and the `op_Equality` that compares two of the same case
+    /// field by field, as `abstract class PaymentResult implements \App\HasLabel`. Each case is a final subclass named
+    /// in the enum's namespace, declared after it. A case that carries data promotes its fields in its constructor and
+    /// implements `\Sharp\Struct`, so a `Map` or a `Set` hashes it by its fields as it hashes a struct, as
+    /// `final class Paid extends \App\PaymentResult implements \Sharp\Struct { public function __construct(public readonly string $transactionId) {} }`
     /// in the namespace `App\PaymentResult`. A plain case is one object, which its `instance()` makes once and gives:
     /// `final class Open extends \App\CheckoutState { private static $instance; private function __construct() {}
     /// public static function instance(): self { return self::$instance ??= new self(); } }`.
@@ -1787,6 +1794,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 _ => unreachable!("check_slice refuses the enum member `{member}`"),
             });
         }
+        let data_cases: Vec<Vec<u8>> = r#enum
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                ClassLikeMember::EnumCase(EnumCase { item: EnumCaseItem::Data(item), .. }) => {
+                    Some([enum_name, b"\\", item.name.value].concat())
+                }
+                _ => None,
+            })
+            .collect();
+        let data_cases: Vec<&[u8]> = data_cases.iter().map(Vec::as_slice).collect();
+        members.push(self.value_equality(r#enum.name.span, &data_cases));
 
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
         let attributes = self.attributes(&r#enum.attribute_lists, None, None);
@@ -1806,9 +1825,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             };
             let name = case.item.name();
             let line = self.line(name.span);
-            let members = match &case.item {
-                EnumCaseItem::Data(item) => vec![self.promoted_constructor(name.span, &item.parameter_list)],
-                EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => self.case_object(name.span),
+            let (members, header) = match &case.item {
+                EnumCaseItem::Data(item) => {
+                    let constructor = self.promoted_constructor(name.span, &item.parameter_list);
+                    let marker = self.string(ZEND_NAME_FQ, line, b"Sharp\\Struct");
+
+                    (vec![constructor], self.node(SHARP_AST_NAME_LIST, 0, line, &[marker]))
+                }
+                EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => (self.case_object(name.span), NULL),
             };
             let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
             let parent = self.string(ZEND_NAME_FQ, line, enum_name);
@@ -1821,7 +1845,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 case.case.span,
                 case.terminator.span(),
                 &class_name,
-                &[parent, NULL, members, attributes, NULL],
+                &[parent, header, members, attributes, NULL],
             ));
         }
     }

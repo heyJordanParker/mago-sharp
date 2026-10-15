@@ -4491,6 +4491,47 @@ fn a_data_case_is_a_type_of_its_own() {
     );
 }
 
+/// Spec sections 19 and 20: an enum compares by value, so `==` on two cases of an enum whose cases carry data compares
+/// the same case field by field, as a struct compares, and two different cases are unequal. A case keys a `Map`, joins
+/// a `Set` and is found by `contains` the same way. A case with a field `==` can't compare has no `==`, and can't key a
+/// `Map` or join a `Set`, naming the field. An enum case is no object to test for identity, and has no order.
+#[test]
+fn a_data_case_compares_by_value() {
+    let sharp = "namespace App;\n\nclass Plan\n{\n    public Plan() { }\n}\n\nenum Step\n{\n    case Run(Function<void()> action);\n    case Hold(Plan plan);\n}\n\nenum Booking\n{\n    case Held(Plan plan);\n}\n\nclass Compare\n{\n    public Set<PaymentResult> seen = [];\n    public Map<CheckoutState, int> visits = [:];\n    public Set<Step> steps = [];\n\n    public bool equal(PaymentResult a, PaymentResult b) => a == b;\n    public bool cases(PaymentResult.Paid a, PaymentResult.Declined b) => a == b;\n    public bool other(PaymentResult a, PaymentResult.Paid b) => a != b;\n    public bool loose(Any? a, PaymentResult b) => a == b;\n    public bool nullable(PaymentResult? a, PaymentResult b) => a == b;\n    public bool open(CheckoutState a) => a == CheckoutState.Open;\n    public bool has(List<PaymentResult> results, PaymentResult result) => results.contains(result);\n    public bool same(PaymentResult a, PaymentResult b) => a === b;\n    public bool number(PaymentResult a, int b) => a == b;\n    public bool apart(PaymentResult a, CheckoutState b) => a == b;\n    public bool before(PaymentResult a, PaymentResult b) => a < b;\n    public bool run(Step a, Step b) => a == b;\n    public bool held(Booking a, Booking b) => a == b;\n}\n";
+
+    assert_eq!(
+        written(
+            sharp,
+            &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Compare.sharp", sharp), &[PAYMENT_RESULT, CHECKOUT_STATE])
+        ),
+        [
+            "23:12 template-constraint-violation `Step` can't be in a `Set`: `action` is a `Function<void()>`, a function, and a `Set` holds only values.",
+            "32:59 invalid-operand `===` cannot compare `PaymentResult` with `PaymentResult`: it tests whether two class instances are the same object.",
+            "33:51 invalid-operand `==` cannot compare `PaymentResult` with `int`.",
+            "34:60 invalid-operand `==` cannot compare `PaymentResult` with `CheckoutState`.",
+            "35:61 invalid-operand `<` orders numbers, strings and classes that declare `operator <=>`, and `PaymentResult` is none of them.",
+            "36:40 invalid-operand `Step` can't be compared: `action` is a function.",
+            "37:47 invalid-operand `Booking` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
+        ]
+    );
+}
+
+/// Spec sections 13 and 20: a `readonly` before a type whose value never changes is an error, and an enum is one, so
+/// an enum whose cases carry data, one of its cases, and a collection of them take none, as a struct takes none.
+#[test]
+fn a_data_case_never_changes_so_readonly_changes_nothing() {
+    let view = "namespace App;\n\npublic class Shows\n{\n    public void result(readonly PaymentResult result) { }\n\n    public void paid(readonly PaymentResult.Paid? paid) { }\n\n    public void states(readonly List<CheckoutState> states) { }\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Shows.sharp", view), &[PAYMENT_RESULT, CHECKOUT_STATE]),
+        [
+            "A `PaymentResult` never changes, so `readonly` changes nothing: write `PaymentResult`.",
+            "A `PaymentResult.Paid?` never changes, so `readonly` changes nothing: write `PaymentResult.Paid?`.",
+            "A `List<CheckoutState>` never changes, so `readonly` changes nothing: write `List<CheckoutState>`.",
+        ]
+    );
+}
+
 /// Spec section 21: a case pattern tests the case's class, and its fields by position bind the case's fields, typed as
 /// the case declares them. A value pattern `Enum.Case` tests the case's class too.
 #[test]

@@ -3,6 +3,7 @@ use mago_bytes::BytesDisplay;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
+use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
@@ -214,12 +215,50 @@ pub(crate) fn declares_equality(codebase: &CodebaseMetadata, name: Word) -> bool
     codebase.get_method(name.as_bytes(), b"op_Equality").is_some_and(|equality| equality.span != r#struct.span)
 }
 
-/// Reports each struct in `key_type` that holds a class instance without `==` and `hash()` at any depth, spec section
-/// 10: a `Map` finds a struct key, and a `Set` a struct element, by a hash of its fields and their `==`, and a class
-/// instance has neither unless its class declares `operator ==`. A struct that declares `operator ==` is held through it
-/// and its `hash()`, so it holds what it likes. A class key is `map_key_error`'s to report. Precedent: Rust's `HashMap`
-/// needs `Hash` on every field, and Swift's `Dictionary` needs `Hashable`. `in_set` names a `Set` element. Returns
-/// whether it reported one.
+/// The properties a value of `class` compares by with `==`, and is hashed by as a `Map` key or a `Set` element, when
+/// it is a value, spec sections 10, 19 and 20: each property of a struct, and each field of a case of an enum with a
+/// case that carries data, of every case for the enum itself. None for any other class.
+pub(crate) fn value_properties<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    class: &'codebase ClassLikeMetadata,
+) -> Option<Vec<&'codebase PropertyMetadata>> {
+    if class.flags.is_struct() || class.flags.is_enum_case_class() {
+        return Some(class.struct_properties());
+    }
+    let cases = data_cases(codebase, class);
+
+    (!cases.is_empty()).then(|| cases.into_iter().flat_map(ClassLikeMetadata::struct_properties).collect())
+}
+
+/// The enum with a case that carries data, spec section 20, that `class` is or is a case of.
+pub(crate) fn data_enum(codebase: &CodebaseMetadata, class: &ClassLikeMetadata) -> Option<Word> {
+    if class.flags.is_enum_case_class() {
+        return class.direct_parent_class;
+    }
+
+    (!data_cases(codebase, class).is_empty()).then_some(class.name)
+}
+
+/// The classes the cases of `class` run as, when it is an enum with a case that carries data, spec section 20.
+fn data_cases<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    class: &ClassLikeMetadata,
+) -> Vec<&'codebase ClassLikeMetadata> {
+    class
+        .permitted_inheritors
+        .iter()
+        .flatten()
+        .filter_map(|case| codebase.get_class_like(case.as_bytes()))
+        .filter(|case| case.flags.is_enum_case_class() && case.direct_parent_class == Some(class.name))
+        .collect()
+}
+
+/// Reports each struct or enum case in `key_type` that holds a class instance without `==` and `hash()` at any depth,
+/// spec sections 10 and 20: a `Map` finds such a key, and a `Set` such an element, by a hash of its fields and their
+/// `==`, and a class instance has neither unless its class declares `operator ==`. A struct that declares
+/// `operator ==` is held through it and its `hash()`, so it holds what it likes. A class key is `map_key_error`'s to
+/// report. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's `Dictionary` needs `Hashable`. `in_set`
+/// names a `Set` element. Returns whether it reported one.
 pub(crate) fn report_class_held_by_key<A>(
     context: &mut Context<'_, '_, A>,
     key_type: &TUnion,
@@ -231,9 +270,9 @@ where
 {
     let codebase = context.codebase;
     let structs = key_type.types.iter().filter_map(|atomic| match atomic {
-        TAtomic::Object(TObject::Named(object)) if !declares_equality(codebase, object.name) => {
-            codebase.get_class_like(object.name.as_bytes()).filter(|class_like| class_like.flags.is_struct())
-        }
+        TAtomic::Object(TObject::Named(object)) if !declares_equality(codebase, object.name) => codebase
+            .get_class_like(object.name.as_bytes())
+            .filter(|class_like| value_properties(codebase, class_like).is_some()),
         _ => None,
     });
     let mut reported = false;
@@ -276,9 +315,10 @@ where
                 } else {
                     format!("`{class}` keys this `Map`.")
                 }))
-                .with_note(
-                    "A struct key is found by a hash of its fields and their `==`, and a class instance has neither unless its class declares `operator ==` with `hash()`.",
-                ),
+                .with_note(format!(
+                    "{} key is found by a hash of its fields and their `==`, and a class instance has neither unless its class declares `operator ==` with `hash()`.",
+                    if r#struct.flags.is_struct() { "A struct" } else { "An enum case" }
+                )),
         );
         reported = true;
     }
@@ -286,39 +326,33 @@ where
     reported
 }
 
-/// The first property of `r#struct`, in declaration order, whose type holds a class instance at any depth, with the
-/// part that holds it and whether it is the property's own type: a class, an interface, a function or `Any`, also
-/// inside a collection or a struct, which `visiting` holds while it is read. An enum case is a value.
+/// The first property of `value`, a struct, an enum case or an enum with a case that carries data, in declaration
+/// order, whose type holds a class instance at any depth, with the part that holds it and whether it is the property's
+/// own type: a class, an interface, a function or `Any`, also inside a collection, a struct or a case, which `visiting`
+/// holds while it is read. A plain enum case is a value.
 fn held_class(
     codebase: &CodebaseMetadata,
-    r#struct: &ClassLikeMetadata,
+    value: &ClassLikeMetadata,
     visiting: &mut Vec<Word>,
 ) -> Option<(Word, TAtomic, bool)> {
-    let mut properties: Vec<_> = r#struct
-        .properties
-        .iter()
-        .filter(|(_, property)| !property.flags.is_static() && !property.flags.is_virtual_property())
-        .collect();
-    properties.sort_by_key(|(_, property)| property.name_span.map(|span| span.start.offset));
-
-    properties.into_iter().find_map(|(name, property)| {
+    value_properties(codebase, value)?.into_iter().find_map(|property| {
         let r#type = &property.type_metadata.as_ref()?.type_union;
         let held = class_part(codebase, r#type, visiting)?;
         let is_direct = r#type.types.contains(&held);
 
-        Some((*name, held, is_direct))
+        Some((property.name.0, held, is_direct))
     })
 }
 
 /// The part of `r#type` that can be a class instance without `==` and `hash()`, or none when every value of it has
 /// them. A struct that declares `operator ==` has them whatever it holds, and so does a class that declares or inherits
-/// `operator ==`, which the checker requires `hash()` beside.
+/// `operator ==`, which the checker requires `hash()` beside. A struct or an enum case has them when its fields do.
 fn class_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut Vec<Word>) -> Option<TAtomic> {
     r#type.types.iter().find_map(|atomic| match atomic {
         TAtomic::Object(TObject::Named(object)) => {
             // A type that names no class is reported where it is written.
             let class_like = codebase.get_class_like(object.name.as_bytes())?;
-            if !class_like.flags.is_struct() {
+            if value_properties(codebase, class_like).is_none() {
                 let has_equality = codebase.get_declaring_method(object.name.as_bytes(), b"op_Equality").is_some();
 
                 return (!has_equality).then(|| atomic.clone());

@@ -9459,6 +9459,11 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
 /// abstract class CheckoutState
 /// {
 ///     public function label(): string { return 'checkout'; }
+///     public static function op_Equality(mixed $a, mixed $b): bool
+///     {
+///         if ($a instanceof \App\CheckoutState\Paying && $b instanceof \App\CheckoutState\Paying) { return $a->gateway === $b->gateway; }
+///         return $a === $b;
+///     }
 /// }
 /// final class CheckoutState\Open extends \App\CheckoutState
 /// {
@@ -9466,7 +9471,7 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
 ///     private function __construct() {}
 ///     public static function instance(): self { return self::$instance ??= new self(); }
 /// }
-/// final class CheckoutState\Paying extends \App\CheckoutState
+/// final class CheckoutState\Paying extends \App\CheckoutState implements \Sharp\Struct
 /// {
 ///     public function __construct(public readonly string $gateway) {}
 /// }
@@ -9474,16 +9479,20 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
 /// {
 ///     public function open(): \App\CheckoutState { return \App\CheckoutState\Open::instance(); }
 ///     public function pay(): \App\CheckoutState { return new \App\CheckoutState\Paying(gateway: 'stripe'); }
+///     public function same(\App\CheckoutState $a, \App\CheckoutState $b): bool { return \App\CheckoutState::op_Equality($a, $b); }
 /// }
 /// ```
 ///
 /// Spec section 20: an enum with a case that carries data is an abstract class, `[64]`
 /// `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS`, and each case a final subclass named in the enum's namespace. A plain case is the
-/// one object its class's `instance()` gives, and `CheckoutState.Paying(…)` creates its case.
+/// one object its class's `instance()` gives, and `CheckoutState.Paying(…)` creates its case. An enum compares by value,
+/// sections 19 and 20, so `==` runs the enum's `op_Equality`, which compares two of the same case that carries data
+/// field by field and anything else as identical, as a struct's does. A case that carries data implements
+/// `\Sharp\Struct`, so a `Map` or a `Set` hashes it by its fields, as it hashes a struct.
 #[test]
 fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
     let lowered = Lowered::new(
-        "namespace App;\n\npublic enum CheckoutState\n{\n    case Open;\n    case Paying(string gateway);\n\n    public string label() => \"checkout\";\n}\n\npublic class Shop\n{\n    public CheckoutState open() => CheckoutState.Open;\n    public CheckoutState pay() => CheckoutState.Paying(gateway: \"stripe\");\n}\n",
+        "namespace App;\n\npublic enum CheckoutState\n{\n    case Open;\n    case Paying(string gateway);\n\n    public string label() => \"checkout\";\n}\n\npublic class Shop\n{\n    public CheckoutState open() => CheckoutState.Open;\n    public CheckoutState pay() => CheckoutState.Paying(gateway: \"stripe\");\n    public bool same(CheckoutState a, CheckoutState b) => a == b;\n}\n",
     );
 
     assert_eq!(
@@ -9511,6 +9520,54 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                       RETURN
                         ZVAL "checkout"
                     ZVAL [1] "string"
+                    null
+                  METHOD [17] "op_Equality" @3-3
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "mixed"
+                        ZVAL "a"
+                        null
+                        null
+                        null
+                        null
+                      PARAM
+                        ZVAL [1] "mixed"
+                        ZVAL "b"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      IF
+                        IF_ELEM
+                          AND
+                            INSTANCEOF
+                              VAR
+                                ZVAL "a"
+                              ZVAL "App\\CheckoutState\\Paying"
+                            INSTANCEOF
+                              VAR
+                                ZVAL "b"
+                              ZVAL "App\\CheckoutState\\Paying"
+                          STMT_LIST
+                            RETURN
+                              BINARY_OP [16]
+                                PROP
+                                  VAR
+                                    ZVAL "a"
+                                  ZVAL "gateway"
+                                PROP
+                                  VAR
+                                    ZVAL "b"
+                                  ZVAL "gateway"
+                      RETURN
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "a"
+                          VAR
+                            ZVAL "b"
+                    ZVAL [1] "bool"
                     null
                 null
                 null
@@ -9551,7 +9608,8 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                 null
               CLASS [32] "CheckoutState\\Paying" @6-6
                 ZVAL "App\\CheckoutState"
-                null
+                NAME_LIST
+                  ZVAL "Sharp\\Struct"
                 STMT_LIST
                   METHOD [1] "__construct" @6-6
                     PARAM_LIST
@@ -9568,7 +9626,7 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                     null
                 null
                 null
-              CLASS "Shop" @11-15
+              CLASS "Shop" @11-16
                 null
                 null
                 STMT_LIST
@@ -9595,6 +9653,35 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                               ZVAL "gateway"
                               ZVAL "stripe"
                     ZVAL "App\\CheckoutState"
+                    null
+                  METHOD [1] "same" @15-15
+                    PARAM_LIST
+                      PARAM
+                        ZVAL "App\\CheckoutState"
+                        ZVAL "a"
+                        null
+                        null
+                        null
+                        null
+                      PARAM
+                        ZVAL "App\\CheckoutState"
+                        ZVAL "b"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_CALL
+                          ZVAL "App\\CheckoutState"
+                          ZVAL "op_Equality"
+                          ARG_LIST
+                            VAR
+                              ZVAL "a"
+                            VAR
+                              ZVAL "b"
+                    ZVAL [1] "bool"
                     null
                 null
                 null
@@ -21461,8 +21548,10 @@ const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(
 ///
 ///     public static function op_Equality(mixed $a, mixed $b): bool
 ///     {
-///         if (!$a instanceof \App\Point || !$b instanceof \App\Point) { return $a === $b; }
-///         return $a->x === $b->x && $a->y === $b->y && \App\Money::op_Equality($a->total, $b->total);
+///         if ($a instanceof \App\Point && $b instanceof \App\Point) {
+///             return $a->x === $b->x && $a->y === $b->y && \App\Money::op_Equality($a->total, $b->total);
+///         }
+///         return $a === $b;
 ///     }
 /// }
 /// ```
@@ -21618,57 +21707,55 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
                     STMT_LIST
                       IF
                         IF_ELEM
-                          OR
-                            UNARY_OP [14]
-                              INSTANCEOF
-                                VAR
-                                  ZVAL "a"
-                                ZVAL "App\\Point"
-                            UNARY_OP [14]
-                              INSTANCEOF
-                                VAR
-                                  ZVAL "b"
-                                ZVAL "App\\Point"
+                          AND
+                            INSTANCEOF
+                              VAR
+                                ZVAL "a"
+                              ZVAL "App\\Point"
+                            INSTANCEOF
+                              VAR
+                                ZVAL "b"
+                              ZVAL "App\\Point"
                           STMT_LIST
                             RETURN
-                              BINARY_OP [16]
-                                VAR
-                                  ZVAL "a"
-                                VAR
-                                  ZVAL "b"
+                              AND
+                                AND
+                                  BINARY_OP [16]
+                                    PROP
+                                      VAR
+                                        ZVAL "a"
+                                      ZVAL "x"
+                                    PROP
+                                      VAR
+                                        ZVAL "b"
+                                      ZVAL "x"
+                                  BINARY_OP [16]
+                                    PROP
+                                      VAR
+                                        ZVAL "a"
+                                      ZVAL "y"
+                                    PROP
+                                      VAR
+                                        ZVAL "b"
+                                      ZVAL "y"
+                                STATIC_CALL
+                                  ZVAL "App\\Money"
+                                  ZVAL "op_Equality"
+                                  ARG_LIST
+                                    PROP
+                                      VAR
+                                        ZVAL "a"
+                                      ZVAL "total"
+                                    PROP
+                                      VAR
+                                        ZVAL "b"
+                                      ZVAL "total"
                       RETURN
-                        AND
-                          AND
-                            BINARY_OP [16]
-                              PROP
-                                VAR
-                                  ZVAL "a"
-                                ZVAL "x"
-                              PROP
-                                VAR
-                                  ZVAL "b"
-                                ZVAL "x"
-                            BINARY_OP [16]
-                              PROP
-                                VAR
-                                  ZVAL "a"
-                                ZVAL "y"
-                              PROP
-                                VAR
-                                  ZVAL "b"
-                                ZVAL "y"
-                          STATIC_CALL
-                            ZVAL "App\\Money"
-                            ZVAL "op_Equality"
-                            ARG_LIST
-                              PROP
-                                VAR
-                                  ZVAL "a"
-                                ZVAL "total"
-                              PROP
-                                VAR
-                                  ZVAL "b"
-                                ZVAL "total"
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "a"
+                          VAR
+                            ZVAL "b"
                     ZVAL [1] "bool"
                     null
                 null
