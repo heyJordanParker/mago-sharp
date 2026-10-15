@@ -540,7 +540,12 @@ fn scan_hooks<'arena, A>(
         let mut hook_metadata =
             scan_property_hook(hook, property, type_context, context, scope, Some(class_like_metadata.original_name));
         class_like_metadata.issues.extend(hook_metadata.take_issues());
-        property.hooks.insert(hook_metadata.name, hook_metadata);
+        // An observer is the `set` hook only when the property has no `set` body, which is the hook otherwise.
+        if hook.is_observer() {
+            property.hooks.entry(hook_metadata.name).or_insert(hook_metadata);
+        } else {
+            property.hooks.insert(hook_metadata.name, hook_metadata);
+        }
     }
 
     let is_virtual = if is_sharp {
@@ -592,8 +597,12 @@ where
 {
     let is_get = hook.name.value == b"get";
     // A PHP# `init` accessor's body runs as the `set` hook it lowers to, and the property's `INIT` flag keeps that it
-    // writes only while the object is created.
-    let is_set = if context.program.dialect.is_sharp() { hook.is_setter() } else { hook.name.value == b"set" };
+    // writes only while the object is created. An observer runs inside that `set` hook too, spec section 6.2.
+    let is_set = if context.program.dialect.is_sharp() {
+        hook.is_setter() || hook.is_observer()
+    } else {
+        hook.name.value == b"set"
+    };
     let name = if is_set { word(b"set") } else { word(hook.name.value) };
     let is_abstract = matches!(hook.body, PropertyHookBody::Abstract(_));
     let has_explicit_parameter = hook.parameter_list.is_some();

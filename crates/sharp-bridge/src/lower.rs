@@ -2569,9 +2569,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A property's hook list, or null when it needs none: an auto-property is plain storage. Each body is a hook. An
     /// auto accessor beside a body that uses `field` is PHP's backing store, so it is no hook, and beside bodies that
-    /// never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does. The `set` hook
-    /// of a `Map` or a `Set`, whose type `holds` names, also takes the PHP array plain PHP writes, and the body first
-    /// crosses it, as a parameter's is.
+    /// never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does. The observers
+    /// are no hooks of their own: they run inside the `set` hook, which an auto `set` beside one always has. The `set`
+    /// hook of a `Map` or a `Set`, whose type `holds` names, also takes the PHP array plain PHP writes, and the body
+    /// first crosses it, as a parameter's is.
     fn hooks(&mut self, variable: &DirectVariable, accessors: Option<&PropertyHookList>, holds: Option<&Hint>) -> u32 {
         let Some(accessors) = accessors.filter(|accessors| {
             accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
@@ -2580,17 +2581,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
 
         let uses_field = self.names.uses_field(accessors);
+        let named = |name: &[u8]| accessors.hooks.iter().find(|accessor| accessor.name.value == name);
+        let (will_set, did_set) = (named(b"willSet"), named(b"didSet"));
         self.accessor_bodies(variable.name, |lowering| {
             let mut hooks = Vec::new();
-            for accessor in &accessors.hooks {
+            for accessor in accessors.hooks.iter().filter(|accessor| !accessor.is_observer()) {
+                let observed = accessor.is_setter() && (will_set.is_some() || did_set.is_some());
                 let mut body = match &accessor.body {
-                    PropertyHookBody::Concrete(PropertyHookConcreteBody::Block(block)) => lowering.block(block),
-                    PropertyHookBody::Concrete(PropertyHookConcreteBody::Expression(body)) => {
-                        lowering.short_body(accessor.name.value, body)
-                    }
-                    PropertyHookBody::Abstract(_) if uses_field => continue,
+                    PropertyHookBody::Concrete(body) => lowering.accessor_body(accessor.name.value, body),
+                    PropertyHookBody::Abstract(_) if uses_field && !observed => continue,
                     PropertyHookBody::Abstract(_) => lowering.storage_body(accessor),
                 };
+                if observed {
+                    body = lowering.observed(accessor, will_set, body, did_set);
+                }
                 let mut parameters = NULL;
                 if accessor.is_setter()
                     && let Some(hint) = holds
@@ -2660,6 +2664,37 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The body of `get => expr;`, the short body php-src's grammar builds, on the arrow's line. A `set` with an
     /// expression body is the statement list `set { expr; }`, because PHP stores the result of `set => expr;`.
+    /// The body an accessor named `accessor` writes: a block, or `=> expr;`.
+    fn accessor_body(&mut self, accessor: &[u8], body: &PropertyHookConcreteBody) -> u32 {
+        match body {
+            PropertyHookConcreteBody::Block(block) => self.block(block),
+            PropertyHookConcreteBody::Expression(body) => self.short_body(accessor, body),
+        }
+    }
+
+    /// The `set` hook of a property with observers, spec section 6.2: `willSet`, then `write`, the `set` body or the
+    /// storage write, then `didSet`, so both run on every write, the constructor's and the initial value's included.
+    fn observed(
+        &mut self,
+        setter: &PropertyHook,
+        will_set: Option<&PropertyHook>,
+        write: u32,
+        did_set: Option<&PropertyHook>,
+    ) -> u32 {
+        let mut body = |observer: &PropertyHook| {
+            let PropertyHookBody::Concrete(body) = &observer.body else {
+                unreachable!("semantics refuses an observer without a body");
+            };
+
+            self.accessor_body(observer.name.value, body)
+        };
+        let before = will_set.map(&mut body);
+        let after = did_set.map(&mut body);
+        let statements: Vec<u32> = before.into_iter().chain([write]).chain(after).collect();
+
+        self.node(SHARP_AST_STMT_LIST, 0, self.line(setter), &statements)
+    }
+
     fn short_body(&mut self, accessor: &[u8], body: &PropertyHookConcreteExpressionBody) -> u32 {
         let line = self.line(body.arrow);
         let expression = self.expression(body.expression);

@@ -311,12 +311,13 @@ impl<'arena> Property<'arena> {
     }
 
     /// Returns `true` when a PHP# property's initial value runs at the start of the constructor instead of being
-    /// PHP's default: a value that is not a constant expression, or any value of a property that runs as `readonly`,
-    /// which takes no default.
+    /// PHP's default: a value that is not a constant expression, any value of a property that runs as `readonly`,
+    /// which takes no default, or any value of a property with an observer, which runs on that write too (spec
+    /// section 6.2).
     #[must_use]
     pub fn initial_value_runs_in_constructor(&self) -> bool {
         self.initial_value().is_some_and(|value| {
-            matches!(self, Property::Hooked(hooked) if hooked.hook_list.is_readonly())
+            matches!(self, Property::Hooked(hooked) if hooked.hook_list.is_readonly() || hooked.hook_list.hooks.iter().any(PropertyHook::is_observer))
                 || !value.is_constant(&PHPVersion::PHP85, false)
         })
     }
@@ -351,6 +352,13 @@ impl PropertyHook<'_> {
     #[must_use]
     pub fn is_setter(&self) -> bool {
         self.name.value == b"set" || self.name.value == b"init"
+    }
+
+    /// Returns `true` for a PHP# change observer, `willSet` or `didSet`, which runs before or after each write of its
+    /// property, inside the `set` hook (spec section 6.2), and takes `value` as `set` does.
+    #[must_use]
+    pub fn is_observer(&self) -> bool {
+        self.name.value == b"willSet" || self.name.value == b"didSet"
     }
 }
 

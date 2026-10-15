@@ -432,13 +432,22 @@ where
                 let receiver = self.roots(access.object);
                 self.change(receiver.clone(), span, place);
                 let arguments = vec![value.map(|value| self.roots(value)).unwrap_or_default()];
-                for callee in self.accessors(access.object, &access.property, b"set") {
-                    self.summary.calls.push(Call {
-                        callee,
-                        span,
-                        receiver: receiver.clone(),
-                        arguments: arguments.clone(),
-                    });
+                for set in self.accessors(access.object, &access.property, b"set") {
+                    // The write runs the observers inside the `set` hook too, spec section 6.2. A property without one
+                    // has no such body, and a call of a body without a summary adds nothing.
+                    let Body::Accessor(class, property, _) = set else {
+                        unreachable!("an accessor's body is an accessor body");
+                    };
+                    let observers = [b"willSet".as_slice(), b"didSet"]
+                        .map(|observer| Body::Accessor(class, property, word(observer)));
+                    for callee in std::iter::once(set).chain(observers) {
+                        self.summary.calls.push(Call {
+                            callee,
+                            span,
+                            receiver: receiver.clone(),
+                            arguments: arguments.clone(),
+                        });
+                    }
                 }
             }
             Expression::Access(Access::NullSafeProperty(access)) => {

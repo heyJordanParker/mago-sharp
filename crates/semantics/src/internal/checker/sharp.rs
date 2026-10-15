@@ -2767,12 +2767,17 @@ fn report_parameter_accessor_bodies(
             continue;
         };
 
+        let (given, annotation) = if accessor.is_observer() {
+            (format!("`{}`", BytesDisplay(accessor.name.value)), "An observer on a parameter.")
+        } else {
+            ("an accessor body".to_owned(), "An accessor body on a parameter.")
+        };
         context.report(
             Issue::error(format!(
-                "Declare `{}` in the class body to give it an accessor body: a member declared on a constructor parameter takes access levels and attributes only.",
+                "Declare `{}` in the class body to give it {given}: a member declared on a constructor parameter takes access levels and attributes only.",
                 BytesDisplay(parameter.variable.name)
             ))
-            .with_annotation(Annotation::primary(body.span()).with_message("An accessor body on a parameter.")),
+            .with_annotation(Annotation::primary(body.span()).with_message(annotation)),
         );
     }
 }
@@ -2913,8 +2918,17 @@ fn check_accessors(
             report_not_supported(
                 accessor.span(),
                 "accessor",
-                "A PHP# property's accessors are `get` and `set` or `init`, each written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private`, `protected` or `internal`.",
+                "A PHP# property's accessors are `get` and `set` or `init`, each written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private`, `protected` or `internal`. The observers `willSet` and `didSet` take a body.",
                 context,
+            );
+        } else if accessor.is_observer() && !accessors.hooks.iter().any(|hook| hook.name.value == b"set") {
+            let observer = BytesDisplay(name);
+            context.report(
+                Issue::error(format!("`{observer}` needs a `set` accessor: it runs on each write through `set`."))
+                    .with_annotation(Annotation::primary(accessor.name.span).with_message("Declared here."))
+                    .with_help(format!(
+                        "Write `set;` beside it, as in `public string name {{ get; set; {observer} => this.touch(); }} = \"\";`."
+                    )),
             );
         } else if declared.contains(&name) {
             context.report(
@@ -2953,14 +2967,15 @@ fn check_accessors(
     }
 }
 
-/// Whether the slice has an accessor: `get`, `set` or `init` without attributes, `&` or a parameter list, where only
-/// `set` and `init` take an access modifier, `private`, `protected`, `internal` or `public`, which `check_accessors`
-/// compares with the property's.
+/// Whether the slice has an accessor: `get`, `set` or `init`, or an observer with a body, `willSet` or `didSet`
+/// (spec section 6.2), without attributes, `&` or a parameter list, where only `set` and `init` take an access
+/// modifier, `private`, `protected`, `internal` or `public`, which `check_accessors` compares with the property's.
 fn is_slice_accessor(accessor: &PropertyHook) -> bool {
     accessor.attribute_lists.is_empty()
         && accessor.ampersand.is_none()
         && accessor.parameter_list.is_none()
         && match accessor.modifiers.as_slice() {
+            [] if accessor.is_observer() => matches!(accessor.body, PropertyHookBody::Concrete(_)),
             [] => accessor.name.value == b"get" || accessor.is_setter(),
             [Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_)] => {
                 accessor.is_setter()
@@ -2984,20 +2999,41 @@ fn report_no_storage(property: &DirectVariable, span: Span, context: &mut Contex
 /// Checks the bodies of a property's accessors: the returns PHP's hooks allow, `field` in a lambda, and the property
 /// read through `this` inside its own accessor.
 fn check_accessor_bodies(accessors: &PropertyHookList, property: &[u8], context: &mut Context<'_, '_, '_>) {
+    let observed_after = accessors.hooks.iter().any(|accessor| accessor.name.value == b"didSet");
     for accessor in accessors.hooks.iter().filter(|accessor| is_slice_accessor(accessor)) {
         if let PropertyHookBody::Concrete(PropertyHookConcreteBody::Block(block)) = &accessor.body {
-            check_accessor_returns(accessor.name.value, block, context);
+            check_accessor_returns(accessor.name.value, observed_after, block, context);
         }
 
         check_accessor_node(Node::PropertyHookBody(&accessor.body), property, false, context);
+        if accessor.name.value == b"willSet" {
+            check_will_set(Node::PropertyHookBody(&accessor.body), accessor.name.span, context);
+        }
     }
 }
 
 /// php-src gives a `get` hook the property's type and a `set` hook `void`, so a `get` block returns a value and a
-/// `set` or `init` block, which runs as the `set` hook, returns none. A lambda's returns are its own.
-fn check_accessor_returns(accessor: &[u8], block: &Block, context: &mut Context<'_, '_, '_>) {
+/// `set` or `init` block, which runs as the `set` hook, returns none. The observers run inside that `set` hook, before
+/// and after the write (spec section 6.2), so `willSet` cannot return, as that would stop the write, and neither can
+/// a `set` body that `didSet`, `observed_after`, runs after. A lambda's returns are its own.
+fn check_accessor_returns(accessor: &[u8], observed_after: bool, block: &Block, context: &mut Context<'_, '_, '_>) {
     for r#return in mago_syntax::utils::find_returns_in_block(block) {
         match (accessor, &r#return.value) {
+            (b"willSet", _) => context.report(
+                Issue::error("`willSet` cannot return: the write runs after it.")
+                    .with_annotation(Annotation::primary(r#return.span()).with_message("Returns here."))
+                    .with_help("Let the body run to its end. To refuse a value, throw instead."),
+            ),
+            (b"set", _) if observed_after => context.report(
+                Issue::error("A `set` accessor beside `didSet` cannot return: `didSet` runs after it.")
+                    .with_annotation(Annotation::primary(r#return.span()).with_message("Returns here."))
+                    .with_help("Let the body run to its end, so `didSet` runs after each write."),
+            ),
+            (b"didSet", Some(value)) => context.report(
+                Issue::error("`didSet` must not return a value.")
+                    .with_annotation(Annotation::primary(value.span()).with_message("Returned here."))
+                    .with_note("It runs inside the `set` hook, which PHP gives the return type `void`."),
+            ),
             (b"get", None) => context.report(
                 Issue::error("A `get` accessor must return a value.")
                     .with_annotation(Annotation::primary(r#return.span()).with_message("Returns no value."))
@@ -3056,6 +3092,41 @@ fn check_accessor_node(node: Node<'_, '_>, property: &[u8], in_lambda: bool, con
     }
 
     ensure_sufficient_stack(|| node.visit_children(|child| check_accessor_node(child, property, in_lambda, context)));
+}
+
+/// Spec section 6.2: `willSet` runs before the write and cannot change it, so it never writes `value`, the local its
+/// name declares at `value`. What `field` holds before a property's first write is not decided, so `field` in it is
+/// not supported yet.
+fn check_will_set(node: Node<'_, '_>, value: Span, context: &mut Context<'_, '_, '_>) {
+    let target = match node {
+        Node::Assignment(assignment) => Some(assignment.lhs),
+        Node::UnaryPrefix(UnaryPrefix {
+            operator: UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_),
+            operand,
+        })
+        | Node::UnaryPostfix(UnaryPostfix { operand, .. }) => Some(*operand),
+        _ => None,
+    };
+
+    if let Some(Expression::ConstantAccess(target)) = target
+        && matches!(context.names.binding(&target.name), Some(Binding::Local(local)) if local.declaration == value)
+    {
+        context.report(
+            Issue::error("`willSet` cannot change `value`: the write after it stores `value` as written.")
+                .with_annotation(Annotation::primary(target.span()).with_message("Changed here."))
+                .with_help("Change the value in a `set` body, as in `set => field = value.trim();`."),
+        );
+    } else if let Node::ConstantAccess(access) = node
+        && context.names.binding(&access.name) == Some(Binding::Field)
+    {
+        context.report(
+            Issue::error("`field` in `willSet` is not supported yet in PHP#.")
+                .with_annotation(Annotation::primary(access.span()).with_message("Not supported yet."))
+                .with_note("Before a property's first write its storage holds no old value, and what `willSet` reads there is not decided yet. `didSet` reads `field`, the new value."),
+        );
+    }
+
+    ensure_sufficient_stack(|| node.visit_children(|child| check_will_set(child, value, context)));
 }
 
 /// Reports each `this` in an initial value. A constant initial value is the member's default, and any other runs at

@@ -15753,6 +15753,41 @@ fn a_getter_with_an_effect_compiles_and_a_law_reading_it_is_refused() {
     );
 }
 
+/// Spec section 6.2: an observer runs inside the `set` hook on each write, the constructor's included, so a write of
+/// the property carries its effects, and a law that builds the object is refused naming the observer's call.
+#[test]
+fn a_write_of_a_property_carries_its_observers_effects() {
+    let quiet = (
+        "app/Shop/Tag.sharp",
+        "namespace App.Shop;\n\npublic class Tag\n{\n    public string name { get; set; didSet => this.name.length; } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n}\n",
+    );
+    let timed = (
+        "app/Shop/Tag.sharp",
+        "namespace App.Shop;\n\npublic class Tag\n{\n    public string name { get; set; didSet => global.now(); } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n}\n",
+    );
+    let law = (
+        "app/Shop/Labels.sharp",
+        "namespace App.Shop;\n\npublic class Labels\n{\n    law named(int size) => new Tag().name.length > size;\n}\n",
+    );
+
+    assert_eq!(effect_issues(&[quiet, law, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[timed, law, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Labels.sharp:5:28 impure-law: Law `named` reaches `Tag.name`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
+        ]
+    );
+}
+
+/// Spec section 6.2: an observer sees `value`, the written value, and `didSet` sees `field`, the stored one, each of
+/// the property's type, so passing either where an `int` goes is the error a `set` body's is.
+#[test]
+fn an_observer_sees_value_and_field_of_the_property_type() {
+    let sharp = "namespace Demo;\n\nclass Tag\n{\n    public string name { get; set; willSet => this.size(value); didSet => this.size(field); } = \"\";\n\n    private void size(int count)\n    {\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Tag.sharp", sharp), &[]), ["5:57 invalid-argument", "5:85 invalid-argument"]);
+}
+
 /// Spec section 6.5: a `lazy` body may have any effect, so one calling a method with the effect `Database` compiles. A
 /// read of it carries `Database`, so a law reading it is refused. The value the property keeps is the language's write,
 /// so it is no write of `this`, but a `lazy` body that writes `this` itself is refused as any getter is.

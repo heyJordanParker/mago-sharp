@@ -315,8 +315,10 @@ where
         return Ok(());
     };
 
-    // A PHP# `init` body runs as the `set` hook it lowers to, under which the codex records it.
-    let hook_name = if context.dialect.is_sharp() && hook.is_setter() { b"set".as_slice() } else { hook.name.value };
+    // A PHP# `init` body runs as the `set` hook it lowers to, under which the codex records it, and so does an observer,
+    // spec section 6.2.
+    let is_set = context.dialect.is_sharp() && (hook.is_setter() || hook.is_observer());
+    let hook_name = if is_set { b"set".as_slice() } else { hook.name.value };
     let parameter_name = hook.parameter_list.as_ref().and_then(|p| p.parameters.first()).map(|p| word(p.variable.name));
     let mut hook_block_context =
         hook_block_context(hook_name, parameter_name, property_name, context, parent_block_context)?;
@@ -366,7 +368,9 @@ where
         }
         PropertyHookConcreteBody::Expression(expr_body) => FunctionLikeBody::Expression(expr_body.expression),
     };
-    record_accessor_summary(hook_name, property_name, parameters, code, context, parent_block_context, artifacts);
+    // An observer keeps a summary of its own, which each write runs beside the `set` body's.
+    let accessor = if hook.is_observer() { hook.name.value } else { hook_name };
+    record_accessor_summary(accessor, property_name, parameters, code, context, parent_block_context, artifacts);
 
     Ok(())
 }

@@ -1795,6 +1795,128 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 }
 
 /// ```php
+/// public string $name { set { $this->log($value); $this->name = $value; $this->log($this->name); } }
+/// public int $count { set { $this->count = $value * 2; $this->log('count'); } }
+///
+/// public function __construct()
+/// {
+///     $this->name = '';
+///     $this->count = 0;
+/// }
+/// ```
+///
+/// Spec section 6.2: the observers are no hooks of their own. The `set` hook runs `willSet`, then the `set` body or the
+/// storage write an auto `set` is, then `didSet`. They run on every write, so an initial value, constant or not, is a
+/// write at the start of the constructor instead of PHP's default.
+#[test]
+fn observers_run_inside_the_set_hook() {
+    let lowered = Lowered::new(
+        "class Report\n{\n    public string name { get; set; willSet => this.log(value); didSet => this.log(field); } = \"\";\n    public int count { get; set { field = value * 2; } didSet { this.log(\"count\"); } } = 0;\n\n    public void log(Any? text)\n    {\n    }\n}\n",
+    );
+
+    assert_eq!(
+        property_groups(&lowered),
+        [
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "string"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "name"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "set" @3-3
+                          null
+                          null
+                          STMT_LIST
+                            STMT_LIST
+                              METHOD_CALL
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "log"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "value"
+                            STMT_LIST
+                              ASSIGN
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "name"
+                                VAR
+                                  ZVAL "value"
+                            STMT_LIST
+                              METHOD_CALL
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "log"
+                                ARG_LIST
+                                  PROP
+                                    VAR
+                                      ZVAL "this"
+                                    ZVAL "name"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "count"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "set" @4-4
+                          null
+                          null
+                          STMT_LIST
+                            STMT_LIST
+                              ASSIGN
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "count"
+                                BINARY_OP [3]
+                                  VAR
+                                    ZVAL "value"
+                                  ZVAL 2
+                            STMT_LIST
+                              METHOD_CALL
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "log"
+                                ARG_LIST
+                                  ZVAL "count"
+                          null
+                          null
+                  null
+            "#},
+        ]
+    );
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("__construct"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "name"
+                ZVAL ""
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "count"
+                ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
 /// public int $size { get => $this->size; set { $this->size = $value; } }
 /// ```
 ///

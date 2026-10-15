@@ -3579,6 +3579,30 @@ fn an_access_level_on_get_is_an_error_naming_a_method_that_reads_it() {
     );
 }
 
+/// Spec section 6.2: `willSet` and `didSet` each take a body and need `set`, as they run inside it on each write.
+/// `willSet` cannot change or stop the write, so it neither writes `value` nor returns, and a `set` body cannot return
+/// before `didSet`. What `field` holds in `willSet` before the first write is not decided, so it is not supported yet.
+/// A member declared on a constructor parameter takes no observer, as section 9 says.
+#[test]
+fn observers_take_a_body_beside_set_and_cannot_change_or_stop_the_write() {
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public string name { get; set; willSet => this.log(value); didSet { this.log(field); } } = \"\";\n    public int count { get; set { if (value < 0) { return; } field = value; } didSet => this.log(\"count\"); } = 0;\n    public int total { get; willSet => this.log(\"total\"); } = 0;\n    public int size { get; init; didSet => this.log(\"size\"); }\n    public int rank { get; set; willSet { value = 2; value++; return; } } = 0;\n    public int level { get; set; willSet => this.log(field); didSet; } = 0;\n\n    public Report(public string title { get; set; didSet => this.log(value); }) { }\n\n    private void log(Any? text) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "6:52 A `set` accessor beside `didSet` cannot return: `didSet` runs after it.",
+            "7:29 `willSet` needs a `set` accessor: it runs on each write through `set`.",
+            "8:34 `didSet` needs a `set` accessor: it runs on each write through `set`.",
+            "9:63 `willSet` cannot return: the write runs after it.",
+            "9:43 `willSet` cannot change `value`: the write after it stores `value` as written.",
+            "9:54 `willSet` cannot change `value`: the write after it stores `value` as written.",
+            "10:62 This accessor is not supported yet in PHP#.",
+            "10:54 `field` in `willSet` is not supported yet in PHP#.",
+            "12:58 Declare `title` in the class body to give it `didSet`: a member declared on a constructor parameter takes access levels and attributes only.",
+        ]
+    );
+}
+
 /// Spec section 6.1: `get` and `set` take a body, written `=> expr;` or as a block, which uses `field` for the
 /// property's storage and `value` for the incoming value. Each accessor keeps its own access level.
 #[test]
