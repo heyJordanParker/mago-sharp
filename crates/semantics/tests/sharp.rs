@@ -3397,16 +3397,18 @@ fn a_get_only_nullable_property_without_an_initial_value_is_in_the_slice() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 6: a get-only static is set once, by its initial value, which runs once after its class is declared
+/// when it isn't constant, as any static's does. A generic class's statics start as a copy of constant initial values
+/// for each type argument, so one that runs as code is not supported yet there.
 #[test]
-fn a_static_member_outside_the_slice_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n}\n";
+fn a_static_member_takes_any_initial_value_and_is_get_only_or_settable() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n}\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "7:23 A get-only static property is not supported yet in PHP#.",
-            "8:32 A static member's initial value that is not constant is not supported yet in PHP#.",
-            "9:45 A static member's initial value that is not constant is not supported yet in PHP#.",
+            "7:23 Give `id` an initial value, or make it `int?`: no constructor sets a static.",
+            "15:32 A static member of a generic class with an initial value that runs as code is not supported yet in PHP#.",
         ]
     );
 }
@@ -3544,7 +3546,7 @@ fn properties_outside_the_slice_are_not_supported_yet() {
         [
             "8:12 Property `Report.d` cannot be declared abstract",
             "5:9 A property without `public`, `protected` or `private` is not supported yet in PHP#.",
-            "6:23 A get-only static property is not supported yet in PHP#.",
+            "6:23 Give `b` an initial value, or make it `int?`: no constructor sets a static.",
             "7:20 Only `set` and `init` take an access level: `get` reads `c` at the property's own level.",
             "10:16 An initial value before the accessors is not supported yet in PHP#.",
             "11:25 This accessor is not supported yet in PHP#.",

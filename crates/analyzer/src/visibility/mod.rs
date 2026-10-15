@@ -437,23 +437,12 @@ where
         && !property_metadata.hooks.contains_key(&word(b"set"))
         && property_metadata.flags.is_virtual_property()
     {
-        // PHP# states a property get-only with `{ get; }`, and names it as it reads: `orderId` of `OrderEvent`.
         if context.dialect.is_sharp() {
-            let class = display_class_like_name(context, declaring_class_metadata.original_name);
-            let property = display_property_name(context, property_name);
-
-            context.collector.report_with_code(
-                IssueCode::InvalidPropertyWrite,
-                Issue::error(format!("`{property}` of `{class}` is get-only."))
-                    .with_annotation(
-                        Annotation::primary(member_span.unwrap_or(access_span)).with_message("Written here."),
-                    )
-                    .with_annotation(
-                        Annotation::secondary(
-                            property_metadata.span.or(property_metadata.name_span).unwrap_or(access_span),
-                        )
-                        .with_message("Declared get-only here."),
-                    ),
+            report_get_only_write(
+                context,
+                declaring_class_metadata,
+                property_metadata,
+                member_span.unwrap_or(access_span),
             );
 
             return false;
@@ -475,6 +464,13 @@ where
                 )
                 .with_help("Add a set hook to make this property writable."),
         );
+
+        return false;
+    }
+
+    // Spec section 6: a get-only static is set once, by its initial value, so its own class writes it nowhere either.
+    if context.dialect.is_sharp() && flags.is_static() && flags.is_readonly() {
+        report_get_only_write(context, declaring_class_metadata, property_metadata, member_span.unwrap_or(access_span));
 
         return false;
     }
@@ -554,6 +550,30 @@ where
     }
 
     is_visible
+}
+
+/// Reports a write at `span` to a PHP# property stated get-only with `{ get; }`, named as it reads: `orderId` of
+/// `OrderEvent`.
+fn report_get_only_write<A>(
+    context: &mut Context<'_, '_, A>,
+    declaring_class: &ClassLikeMetadata,
+    property: &PropertyMetadata,
+    span: Span,
+) where
+    A: Arena,
+{
+    let class = display_class_like_name(context, declaring_class.original_name);
+    let name = display_property_name(context, property.name.0);
+
+    context.collector.report_with_code(
+        IssueCode::InvalidPropertyWrite,
+        Issue::error(format!("`{name}` of `{class}` is get-only."))
+            .with_annotation(Annotation::primary(span).with_message("Written here."))
+            .with_annotation(
+                Annotation::secondary(property.span.or(property.name_span).unwrap_or(span))
+                    .with_message("Declared get-only here."),
+            ),
+    );
 }
 
 /// Reports a write to a `readonly` property from a scope that cannot initialize it.

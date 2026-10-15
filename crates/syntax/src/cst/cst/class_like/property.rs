@@ -11,6 +11,7 @@ use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::modifier::Modifier;
+use crate::cst::cst::modifier::ModifierSequenceExt;
 use crate::cst::cst::terminator::Terminator;
 use crate::cst::cst::type_hint::Hint;
 use crate::cst::cst::variable::DirectVariable;
@@ -310,16 +311,34 @@ impl<'arena> Property<'arena> {
         }
     }
 
-    /// Returns `true` when a PHP# property's initial value runs at the start of the constructor instead of being
-    /// PHP's default: a value that is not a constant expression, any value of a property that runs as `readonly`,
-    /// which takes no default, or any value of a property with an observer, which runs on that write too (spec
-    /// section 6.2).
+    /// Returns `true` when a PHP# instance property's initial value runs at the start of the constructor instead of
+    /// being PHP's default: a value that is not a constant expression, any value of a property that runs as
+    /// `readonly`, which takes no default, or any value of a property with an observer, which runs on that write too
+    /// (spec section 6.2). A static member's runs once, after its class is declared.
     #[must_use]
     pub fn initial_value_runs_in_constructor(&self) -> bool {
-        self.initial_value().is_some_and(|value| {
-            matches!(self, Property::Hooked(hooked) if hooked.hook_list.is_readonly() || hooked.hook_list.hooks.iter().any(PropertyHook::is_observer))
-                || !value.is_constant(&PHPVersion::PHP85, false)
-        })
+        !self.modifiers().contains_static()
+            && self.initial_value().is_some_and(|value| {
+                matches!(self, Property::Hooked(hooked) if hooked.hook_list.is_readonly())
+                    || self.is_observed()
+                    || !value.is_constant(&PHPVersion::PHP85, false)
+            })
+    }
+
+    /// Returns `true` when a PHP# static member's initial value runs once, after its class is declared, instead of
+    /// being PHP's default: a value that is not a constant expression, or any value of a property with an observer.
+    #[must_use]
+    pub fn initial_value_runs_after_class(&self) -> bool {
+        self.modifiers().contains_static()
+            && self
+                .initial_value()
+                .is_some_and(|value| self.is_observed() || !value.is_constant(&PHPVersion::PHP85, false))
+    }
+
+    /// Returns `true` when a PHP# property has a change observer, `willSet` or `didSet` (spec section 6.2).
+    #[must_use]
+    pub fn is_observed(&self) -> bool {
+        matches!(self, Property::Hooked(hooked) if hooked.hook_list.hooks.iter().any(PropertyHook::is_observer))
     }
 }
 

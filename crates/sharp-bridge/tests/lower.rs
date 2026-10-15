@@ -1795,6 +1795,110 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 }
 
 /// ```php
+/// class Report
+/// {
+///     public private(set) static int $size = 3;
+///     public private(set) static \Lib\Calc $calc;
+///     private static string $name;
+/// }
+///
+/// \Closure::bind(static function () { self::$calc = new \Lib\Calc(1); self::$name = trim(' a '); }, null, \App\Tenant\Report::class)();
+/// ```
+///
+/// Spec section 6: PHP has no `readonly` static, so a get-only static is `private(set)`, `[4113]` being
+/// `ZEND_ACC_PRIVATE_SET | ZEND_ACC_STATIC | ZEND_ACC_PUBLIC`, and the analyzer refuses every write of it. PHP gives a
+/// static only a constant default, so an initial value that isn't constant runs once, right after the class is
+/// declared, in a closure bound to the class's scope, which writes a `private(set)` static too.
+#[test]
+fn a_static_initial_value_that_is_not_constant_runs_once_after_its_class() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int size { get; } = 3;\n    public static Calc calc { get; } = new Calc(1);\n    private static string name = global.trim(\" a \");\n}\n",
+        &[CALC_CLASS],
+    );
+
+    assert_eq!(
+        lowered.render(lowered.root()),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App\\Tenant"
+                null
+              CLASS "Report" @5-10
+                null
+                null
+                STMT_LIST
+                  PROP_GROUP [4113]
+                    ZVAL [1] "int"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "size"
+                        ZVAL 3
+                        null
+                        null
+                    null
+                  PROP_GROUP [4113]
+                    ZVAL "Lib\\Calc"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "calc"
+                        null
+                        null
+                        null
+                    null
+                  PROP_GROUP [32788]
+                    ZVAL [1] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "name"
+                        null
+                        null
+                        null
+                    null
+                null
+                null
+              CALL
+                STATIC_CALL
+                  ZVAL "Closure"
+                  ZVAL "bind"
+                  ARG_LIST
+                    CLOSURE [16] "" @8-8
+                      PARAM_LIST
+                      null
+                      STMT_LIST
+                        ASSIGN
+                          STATIC_PROP
+                            ZVAL [1] "self"
+                            ZVAL "calc"
+                          NEW
+                            ZVAL "Lib\\Calc"
+                            ARG_LIST
+                              ZVAL 1
+                        ASSIGN
+                          STATIC_PROP
+                            ZVAL [1] "self"
+                            ZVAL "name"
+                          CALL
+                            ZVAL "trim"
+                            ARG_LIST
+                              ZVAL " a "
+                      null
+                      null
+                    ZVAL null
+                    CLASS_NAME
+                      ZVAL "App\\Tenant\\Report"
+                ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
 /// public string $name { set { $this->log($value); $this->name = $value; $this->log($this->name); } }
 /// public int $count { set { $this->count = $value * 2; $this->log('count'); } }
 ///

@@ -76,6 +76,7 @@ use mago_syntax::cst::InterpolatedString;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LiteralStringPart;
 use mago_syntax::cst::LocalDeclaration;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MatchArm;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -621,7 +622,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // An `extern` declaration tells only the checker what plain PHP does, and a module's laws are checked and
             // never run. A module's bindings are the table the file returns last, in `program`.
             Statement::Use(_) | Statement::Extern(_) | Statement::Module(_) => {}
-            Statement::Class(class) => statements.push(self.class(class)),
+            Statement::Class(class) => {
+                statements.push(self.class(class));
+                statements.extend(self.static_initial_values(&class.members, &class.name));
+            }
             Statement::Interface(interface) => statements.push(self.interface(interface)),
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
             Statement::Event(event) => statements.push(self.event(event)),
@@ -2550,7 +2554,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let hint = self.property_hint(hint, variable.name, line);
         let name = self.string(0, line, variable.name);
         let default = match property.initial_value() {
-            Some(value) if !property.initial_value_runs_in_constructor() => self.expression(value),
+            Some(value)
+                if !property.initial_value_runs_in_constructor() && !property.initial_value_runs_after_class() =>
+            {
+                self.expression(value)
+            }
             None if is_null_by_default(property, self.names) => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
             _ => NULL,
         };
@@ -2878,6 +2886,57 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `$this->name = value;` on the line of the member's name.
+    /// The statement that sets each static member of the class named `name` whose initial value runs once after the
+    /// class is declared, as PHP gives a static only a constant default:
+    /// `\Closure::bind(static function () { self::$a = …; }, null, \App\Report::class)();`. The closure runs in the
+    /// class's scope, so it writes a `private(set)` static too. None when each static's initial value is its default.
+    fn static_initial_values(&mut self, members: &Sequence<ClassLikeMember>, name: &LocalIdentifier) -> Option<u32> {
+        let properties: Vec<&Property> = members
+            .iter()
+            .filter_map(|member| match member {
+                ClassLikeMember::Property(property) if property.initial_value_runs_after_class() => Some(property),
+                _ => None,
+            })
+            .collect();
+        let first = properties.first()?;
+        let line = self.line(first.first_variable());
+        let mut statements = Vec::new();
+        for property in &properties {
+            let variable = property.first_variable();
+            let Some(value) = property.initial_value() else {
+                unreachable!("a static whose initial value runs after its class has one");
+            };
+            let line = self.line(variable);
+            let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+            let member = self.string(0, line, variable.name);
+            let target = self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, member]);
+            let value = self.expression(value);
+            statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[target, value]));
+        }
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let span = first.span();
+        let closure = self.declaration(
+            SHARP_AST_CLOSURE,
+            ZEND_ACC_STATIC,
+            span,
+            span,
+            b"",
+            &[parameters, NULL, body, NULL, NULL],
+        );
+
+        let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+        let class = self.string(ZEND_NAME_FQ, line, self.names.get(name));
+        let class = self.node(SHARP_AST_CLASS_NAME, 0, line, &[class]);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[closure, null, class]);
+        let closure_class = self.string(ZEND_NAME_FQ, line, b"Closure");
+        let bind = self.string(0, line, b"bind");
+        let bound = self.node(SHARP_AST_STATIC_CALL, 0, line, &[closure_class, bind, arguments]);
+        let no_arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+
+        Some(self.node(SHARP_AST_CALL, 0, line, &[bound, no_arguments]))
+    }
+
     fn initial_value(&mut self, variable: &DirectVariable, value: &Expression) -> u32 {
         let line = self.line(variable);
         let this = self.variable(variable.span, b"this");
@@ -6151,6 +6210,11 @@ fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
 /// so a private property, or a protected one with `protected(set)`, takes none, and the flags carry only what the
 /// engine keeps.
 fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, names: &ResolvedNames) -> u32 {
+    // PHP has no `readonly` static, so a get-only static auto-property is `private(set)`, which its class's initializer
+    // writes once, and the analyzer refuses every other write.
+    if accessors.is_readonly() && modifiers.contains_static() {
+        return if modifiers.contains_private() { 0 } else { ZEND_ACC_PRIVATE_SET };
+    }
     if accessors.is_readonly() {
         return ZEND_ACC_READONLY;
     }

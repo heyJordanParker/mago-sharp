@@ -6131,6 +6131,18 @@ fn a_settable_property_that_is_not_nullable_needs_a_value_as_a_get_only_one_does
     );
 }
 
+/// Spec section 6: a get-only static is set once, by its initial value, so a write of it is an error inside its class
+/// as outside it. An initial value that isn't constant is checked against the static's type as any other.
+#[test]
+fn a_get_only_static_is_set_only_by_its_initial_value() {
+    let sharp = "namespace Demo;\n\nclass Registry\n{\n    public static int size { get; } = 3;\n    public static string label { get; } = global.trim(\" a \");\n    public static int wrong { get; } = global.trim(\"b\");\n\n    public static void reset()\n    {\n        Registry.size = 4;\n    }\n}\n\nclass Caller\n{\n    public static void run()\n    {\n        Registry.size = 5;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Registry.sharp", sharp), &[]),
+        ["7:40 invalid-property-default-value", "11:18 invalid-property-write", "19:18 invalid-property-write"]
+    );
+}
+
 /// Spec section 9.1: the main constructor sets a get-only property once, so a named constructor that sets it again is
 /// an error. One the main constructor leaves unset is the named constructor's to set, once.
 #[test]

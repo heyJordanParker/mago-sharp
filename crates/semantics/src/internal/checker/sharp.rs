@@ -965,6 +965,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                     let variable = property.first_variable();
                     check_declared_name(variable.name, variable.span, context);
                     report_static_without_initial_value(property, context);
+                    report_generic_static_initial_value(property, context);
 
                     Some(FieldOrProperty)
                 }
@@ -2565,16 +2566,6 @@ fn is_slice_property(property: &Property, version: &PHPVersion) -> Result<(), Bo
         }
 
         if let Property::Hooked(auto_property) = property
-            && auto_property.hook_list.is_get_only()
-        {
-            return Err(Box::new(not_supported(
-                property.first_variable().span,
-                "A get-only static property is not supported yet in PHP#.",
-                "A get-only property runs as `readonly`, and PHP has no `readonly` static property.",
-            )));
-        }
-
-        if let Property::Hooked(auto_property) = property
             && let Some(init) = auto_property.hook_list.setter().filter(|setter| setter.name.value == b"init")
         {
             return Err(Box::new(
@@ -2582,16 +2573,6 @@ fn is_slice_property(property: &Property, version: &PHPVersion) -> Result<(), Bo
                     .with_annotation(Annotation::primary(init.span()).with_message("Declared here."))
                     .with_help("Write `set;`, or `private set;` to set it only inside its class."),
             ));
-        }
-
-        if let Some(value) = property.initial_value()
-            && !value.is_constant(version, false)
-        {
-            return Err(Box::new(not_supported(
-                value.span(),
-                "A static member's initial value that is not constant is not supported yet in PHP#.",
-                "An initial value that is not constant runs in the constructor, which a static member does not wait for.",
-            )));
         }
     }
 
@@ -2780,6 +2761,25 @@ fn report_parameter_accessor_bodies(
             .with_annotation(Annotation::primary(body.span()).with_message(annotation)),
         );
     }
+}
+
+/// Reports a static member of a generic class whose initial value runs as code. Each type argument's statics start as a
+/// copy of the constant initial values, spec section 11, and the engine runs no code on that first use.
+fn report_generic_static_initial_value(property: &Property, context: &mut Context<'_, '_, '_>) {
+    if !property.initial_value_runs_after_class()
+        || enclosing_class(context.program, property.span()).is_none_or(|class| class.type_parameters.is_none())
+    {
+        return;
+    }
+    let Some(value) = property.initial_value() else {
+        return;
+    };
+
+    context.report(
+        Issue::error("A static member of a generic class with an initial value that runs as code is not supported yet in PHP#.")
+            .with_annotation(Annotation::primary(value.span()).with_message("Not supported yet."))
+            .with_note("Each type argument's statics start as a copy of constant initial values, and the engine runs no code on that first use."),
+    );
 }
 
 /// Reports a static field or a static property with storage that has no initial value and isn't `T?`, spec section 6.
