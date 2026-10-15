@@ -12,12 +12,12 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 
 use crate::code::IssueCode;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::FunctionCallHook;
 use crate::plugin::hook::HookResult;
+use crate::plugin::hook::NamedCall;
 use crate::plugin::provider::Provider;
 use crate::plugin::provider::ProviderMeta;
 
@@ -34,12 +34,8 @@ impl Provider for IntdivHook {
 }
 
 impl FunctionCallHook for IntdivHook {
-    fn after_function_call(&self, call: &FunctionCall<'_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
-        let Expression::Identifier(identifier) = call.function else {
-            return Ok(());
-        };
-
-        if !identifier.value().eq_ignore_ascii_case(b"intdiv") {
+    fn after_function_call(&self, call: &NamedCall<'_, '_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
+        if !call.calls(&[b"intdiv"]) {
             return Ok(());
         }
 
@@ -66,7 +62,7 @@ impl FunctionCallHook for IntdivHook {
             IssueCode::InvalidOperand,
             Issue::error("Call to `intdiv()` with a zero divisor.")
                 .with_annotation(Annotation::primary(divisor_expr.span()).with_message("This divisor is zero"))
-                .with_annotation(Annotation::secondary(call.function.span()).with_message("In this `intdiv()` call"))
+                .with_annotation(Annotation::secondary(call.span).with_message("In this `intdiv()` call"))
                 .with_note(format!("`{call_text}` throws `DivisionByZeroError` at runtime."))
                 .with_help(format!("Guard the call with `{guard}` or restrict the divisor's type to exclude zero.")),
         );
@@ -75,7 +71,7 @@ impl FunctionCallHook for IntdivHook {
     }
 }
 
-fn lookup_divisor_argument<'arena>(call: &FunctionCall<'arena>) -> Option<&'arena Expression<'arena>> {
+fn lookup_divisor_argument<'arena>(call: &NamedCall<'_, 'arena>) -> Option<&'arena Expression<'arena>> {
     let mut seen_positional = 0;
     for argument in call.argument_list.arguments.iter() {
         match argument {

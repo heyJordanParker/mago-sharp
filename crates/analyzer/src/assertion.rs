@@ -55,11 +55,10 @@ use crate::context::assertion::AssertionContext;
 use crate::expression::binary::comparison::get_comparison_method;
 use crate::expression::binary::comparison::mixes_numbers;
 use crate::expression::binary::comparison::sharp_refusal;
+use crate::plugin::hook::NamedCall;
 use crate::resolver::class_name::get_class_name_from_atomic;
-use crate::utils::expression::NamedCall;
 use crate::utils::expression::get_expression_id;
 use crate::utils::expression::get_index_id;
-use crate::utils::expression::get_named_call;
 use crate::utils::expression::get_non_nullsafe_expression_id;
 use crate::utils::misc::unwrap_expression;
 
@@ -126,7 +125,7 @@ where
             // Collect `@assert` assertions.
             if_types.extend(process_custom_assertions(call.span(), artifacts));
 
-            let named_call = get_named_call(assertion_context.resolved_names, assertion_context.codebase, call);
+            let named_call = NamedCall::from_call(assertion_context.resolved_names, assertion_context.codebase, call);
 
             // If the function does not have any, try collecting
             // assertions for special functions.
@@ -286,7 +285,7 @@ where
         return None;
     };
 
-    get_named_call(assertion_context.resolved_names, assertion_context.codebase, call)
+    NamedCall::from_call(assertion_context.resolved_names, assertion_context.codebase, call)
 }
 
 fn process_custom_assertions(expression_span: Span, artifacts: &AnalysisArtifacts) -> WordMap<AssertionSet> {

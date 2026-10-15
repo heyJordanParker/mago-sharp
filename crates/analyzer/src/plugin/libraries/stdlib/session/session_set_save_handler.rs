@@ -2,13 +2,12 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::Argument;
-use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 
 use crate::code::IssueCode;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::FunctionCallHook;
 use crate::plugin::hook::HookResult;
+use crate::plugin::hook::NamedCall;
 use crate::plugin::provider::Provider;
 use crate::plugin::provider::ProviderMeta;
 
@@ -37,12 +36,8 @@ impl Provider for SessionSetSaveHandlerHook {
 }
 
 impl FunctionCallHook for SessionSetSaveHandlerHook {
-    fn after_function_call(&self, call: &FunctionCall<'_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
-        let Expression::Identifier(identifier) = call.function else {
-            return Ok(());
-        };
-
-        if !identifier.value().eq_ignore_ascii_case(b"session_set_save_handler") {
+    fn after_function_call(&self, call: &NamedCall<'_, '_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
+        if !call.calls(&[b"session_set_save_handler"]) {
             return Ok(());
         }
 
@@ -87,7 +82,7 @@ impl FunctionCallHook for SessionSetSaveHandlerHook {
                             Annotation::primary(span).with_message("Unexpected argument provided here"),
                         )
                         .with_annotation(
-                            Annotation::secondary(call.function.span()).with_message("For this function call"),
+                            Annotation::secondary(call.span).with_message("For this function call"),
                         )
                         .with_note(format!(
                             "When the first argument is a `SessionHandlerInterface`, `session_set_save_handler()` expects at most 2 arguments, but received {}.",
@@ -112,7 +107,7 @@ impl FunctionCallHook for SessionSetSaveHandlerHook {
                                 .with_message(format!("Only {} argument(s) provided", arguments.len())),
                         )
                         .with_annotation(
-                            Annotation::secondary(call.function.span()).with_message("For this function call"),
+                            Annotation::secondary(call.span).with_message("For this function call"),
                         )
                         .with_note(format!(
                             "The callable form of `session_set_save_handler()` requires at least 6 arguments ({callbacks}), but only {} were provided.",

@@ -70,6 +70,7 @@ use crate::expression::is_refused_match;
 use crate::expression::match_arm_hints;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
+use crate::plugin::hook::NamedCall;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_types;
@@ -78,7 +79,6 @@ use crate::utils::docblock::populate_docblock_variables_excluding;
 use crate::utils::expression::expression_has_observable_side_effect;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_function_like_id_from_call;
-use crate::utils::expression::get_named_call;
 use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_function_like_identifier;
@@ -882,7 +882,7 @@ fn detect_unused_statement_expressions<'ast, 'arena, A>(
             "A binary operation used as a statement likely has no effect."
         }
         Expression::Call(call) => {
-            let Some(function) = get_named_call(context.resolved_names, context.codebase, call)
+            let Some(function) = NamedCall::from_call(context.resolved_names, context.codebase, call)
                 .and_then(|call| context.codebase.get_function(call.name.as_bytes()))
             else {
                 return;

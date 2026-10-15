@@ -16,13 +16,11 @@ use mago_names::binding::Binding;
 use mago_names::binding::php_variable_name;
 use mago_span::HasSpan;
 use mago_syntax::cst::Access;
-use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::ArrayAccess;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::MethodCall;
@@ -43,9 +41,9 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::plugin::hook::NamedCall;
 use crate::resolver::static_property::StaticProperty;
 use crate::utils::misc::unwrap_expression;
-use crate::utils::names::namespace_function_name;
 
 pub mod array;
 pub mod variable;
@@ -558,57 +556,6 @@ pub fn get_index_id<'ast, 'arena>(
     })
 }
 
-/// A call of a function by its name: PHP's `name(…)`, and PHP#'s `global.name(…)` and `Pdf.render(…)`, which call a
-/// plain PHP function through its namespace. Every check that finds a call by its function's name reads this view, so
-/// the PHP# call gets each check PHP's call gets.
-pub(crate) struct NamedCall<'ast, 'arena> {
-    /// The full name of the function the call runs.
-    pub name: Word,
-    pub argument_list: &'ast ArgumentList<'arena>,
-}
-
-impl NamedCall<'_, '_> {
-    /// Whether the call runs one of `functions`, each a full name in any case.
-    pub fn calls(&self, functions: &[&[u8]]) -> bool {
-        functions.iter().any(|function| self.name.as_bytes().eq_ignore_ascii_case(function))
-    }
-}
-
-/// The call `call` makes of a function by its name, or `None` when it makes no such call.
-pub(crate) fn get_named_call<'ast, 'arena>(
-    resolved_names: &ResolvedNames<'_>,
-    codebase: &CodebaseMetadata,
-    call: &'ast Call<'arena>,
-) -> Option<NamedCall<'ast, 'arena>> {
-    match call {
-        Call::Function(FunctionCall { function: Expression::Identifier(identifier), argument_list }) => {
-            Some(NamedCall { name: function_name(resolved_names, codebase, identifier), argument_list })
-        }
-        Call::Method(call) => Some(NamedCall {
-            name: namespace_function_name(resolved_names, codebase, call)?,
-            argument_list: &call.argument_list,
-        }),
-        _ => None,
-    }
-}
-
-/// The function PHP's `name(…)` runs: a name the file imports or writes fully qualified as the binder resolved it, and
-/// any other name in the file's namespace when the namespace has that function, else in the root namespace when the
-/// root has it. A function neither has keeps the name in the file's namespace.
-fn function_name(resolved_names: &ResolvedNames<'_>, codebase: &CodebaseMetadata, identifier: &Identifier<'_>) -> Word {
-    let full_name = resolved_names.get(identifier);
-    if resolved_names.is_imported(identifier) {
-        return word(full_name);
-    }
-
-    let name = identifier.value();
-    if !codebase.function_exists(full_name) && !name.contains(&b'\\') && codebase.function_exists(name) {
-        return word(name);
-    }
-
-    word(full_name)
-}
-
 pub fn get_function_like_id_from_call<'ast, 'arena>(
     call: &'ast Call<'arena>,
     resolved_names: &'ast ResolvedNames<'arena>,
@@ -624,7 +571,7 @@ pub fn get_static_functionlike_id_from_call<'ast, 'arena>(
     resolved_names: &'ast ResolvedNames<'arena>,
     codebase: &CodebaseMetadata,
 ) -> Option<FunctionLikeIdentifier> {
-    if let Some(named_call) = get_named_call(resolved_names, codebase, call) {
+    if let Some(named_call) = NamedCall::from_call(resolved_names, codebase, call) {
         return Some(FunctionLikeIdentifier::Function(named_call.name));
     }
 

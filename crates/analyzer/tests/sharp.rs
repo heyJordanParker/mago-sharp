@@ -12,6 +12,7 @@ use mago_allocator::LocalArena;
 use mago_analyzer::Analyzer;
 use mago_analyzer::analysis_result::AnalysisResult;
 use mago_analyzer::artifacts::AnalysisArtifacts;
+use mago_analyzer::code::IssueCode;
 use mago_analyzer::effects::EffectSummary;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::plugin::PluginRegistry;
@@ -20,7 +21,9 @@ use mago_analyzer::plugin::context::InvocationInfo;
 use mago_analyzer::plugin::context::ProviderContext;
 use mago_analyzer::plugin::hook::ExpressionHook;
 use mago_analyzer::plugin::hook::ExpressionHookResult;
+use mago_analyzer::plugin::hook::FunctionCallHook;
 use mago_analyzer::plugin::hook::HookResult;
+use mago_analyzer::plugin::hook::NamedCall;
 use mago_analyzer::plugin::hook::StaticCall;
 use mago_analyzer::plugin::hook::StaticMethodCallHook;
 use mago_analyzer::plugin::provider::Provider;
@@ -33,6 +36,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::scanner::scan_program;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::get_int;
 use mago_codex::ttype::union::TUnion;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
@@ -42,6 +46,7 @@ use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_prelude::Prelude;
+use mago_reporting::Annotation;
 use mago_reporting::AnnotationKind;
 use mago_reporting::Issue;
 use mago_reporting::Level;
@@ -4133,6 +4138,99 @@ fn static_call_hooks_see_a_sharp_static_call_as_its_parts_as_in_php() {
     );
 }
 
+/// Reports each call by name it sees, skips the analysis of `strtolower`, and gives `strtoupper` the type `int`.
+#[derive(Clone, Default)]
+struct FunctionCallSkipper;
+
+impl Provider for FunctionCallSkipper {
+    fn meta() -> &'static ProviderMeta {
+        static META: ProviderMeta =
+            ProviderMeta::new("test::function-call", "function call", "Skips calls of two functions.");
+
+        &META
+    }
+}
+
+impl FunctionCallHook for FunctionCallSkipper {
+    fn before_function_call(
+        &self,
+        call: &NamedCall<'_, '_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> HookResult<ExpressionHookResult> {
+        context.report(
+            IssueCode::InvalidArgument,
+            Issue::error(format!("Saw `{}`.", call.name)).with_annotation(Annotation::primary(call.span)),
+        );
+
+        Ok(if call.calls(&[b"strtoupper"]) {
+            ExpressionHookResult::SkipWithType(get_int())
+        } else if call.calls(&[b"strtolower"]) {
+            ExpressionHookResult::Skip
+        } else {
+            ExpressionHookResult::Continue
+        })
+    }
+}
+
+/// A function call hook sees PHP#'s `global.strtoupper("a")` as PHP's `\strtoupper('a')`: what it reports, the
+/// analysis it skips, and the type it gives the call. A call it does not skip, `strrev`, reaches the hooks after the
+/// analysis too. With no function call hook the call is analyzed as usual.
+#[test]
+fn function_call_hooks_see_a_global_call_as_php_call() {
+    let sharp = "namespace Demo;\n\nclass Probe\n{\n    public Any? up() => global.strtoupper(\"a\");\n\n    public Any? down() => global.strtolower(\"a\");\n\n    public Any? same() => global.strrev(\"a\");\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Probe\n{\n    public function up(): mixed\n    {\n        return \\strtoupper('a');\n    }\n\n    public function down(): mixed\n    {\n        return \\strtolower('a');\n    }\n\n    public function same(): mixed\n    {\n        return \\strrev('a');\n    }\n}\n";
+    let mut registry = PluginRegistry::default();
+    registry.register_function_call_hook(FunctionCallSkipper);
+    let seen = |registry: &PluginRegistry, analyzed: (&'static str, &'static str), up: &str, down: &str| {
+        let (issues, artifacts) = analyze_with_artifacts(registry, settings(), analyzed, &[]);
+        let type_at = |text: &str| {
+            let start = analyzed.1.find(text).unwrap() as u32;
+            artifacts
+                .expression_types
+                .get(&(start, start + text.len() as u32))
+                .map(|r#type| r#type.get_id().to_string())
+        };
+        let messages: Vec<String> =
+            issues.iter().map(|issue| format!("{} {}", located(analyzed.1, issue), issue.message)).collect();
+
+        (messages, type_at(up), type_at(down))
+    };
+
+    assert_eq!(
+        seen(&registry, ("src/Demo/Probe.sharp", sharp), "global.strtoupper(\"a\")", "global.strtolower(\"a\")"),
+        (
+            vec![
+                "5:25 invalid-argument Saw `strtoupper`.".to_string(),
+                "7:27 invalid-argument Saw `strtolower`.".to_string(),
+                "9:27 invalid-argument Saw `strrev`.".to_string()
+            ],
+            Some("int".to_string()),
+            None
+        )
+    );
+    assert_eq!(
+        seen(&registry, ("src/Demo/Probe.php", php), "\\strtoupper('a')", "\\strtolower('a')"),
+        (
+            vec![
+                "9:16 invalid-argument Saw `strtoupper`.".to_string(),
+                "14:16 invalid-argument Saw `strtolower`.".to_string(),
+                "19:16 invalid-argument Saw `strrev`.".to_string()
+            ],
+            Some("int".to_string()),
+            None
+        )
+    );
+    assert_eq!(
+        seen(
+            &PluginRegistry::default(),
+            ("src/Demo/Probe.sharp", sharp),
+            "global.strtoupper(\"a\")",
+            "global.strtolower(\"a\")"
+        ),
+        (vec![], Some("uppercase-non-empty-string".to_string()), Some("lowercase-non-empty-string".to_string()))
+    );
+}
+
 #[test]
 fn a_lambda_reads_and_writes_the_locals_around_it_as_its_php_closure_does() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        let count = 0;\n        const add = (int a, int b) => a + b + extra;\n        const increment = () => { count += 1; };\n        increment();\n        return add(count, 1);\n    }\n}\n";
@@ -4421,6 +4519,40 @@ fn a_plain_php_function_called_through_global_is_checked_as_in_php() {
 
             (codes(&sharp_issues) != expected || codes(&php_issues) != expected)
                 .then(|| format!("{sharp_body} gives {sharp_issues:?}, and PHP gives {php_issues:?}"))
+        })
+        .collect();
+
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// A plugin's function call hook checks every call of its function by the name the call runs: PHP's `intdiv()` and
+/// `\intdiv()`, and PHP#'s `global.intdiv()`. Each row is a file, the call `run` returns, and the codes the hooks report
+/// on it.
+#[test]
+fn a_function_call_hook_checks_every_call_of_its_function() {
+    let rows = [
+        ("src/Demo/Probe.sharp", "global.intdiv(5, 0)", "invalid-operand"),
+        ("src/Demo/Probe.php", "\\intdiv(5, 0)", "invalid-operand"),
+        ("src/Demo/Probe.sharp", "global.setcookie(\"a\", \"b\", [\"path\": \"/\"], \"/\")", "too-many-arguments"),
+        ("src/Demo/Probe.sharp", "global.session_set_cookie_params([\"lifetime\": 0], \"/\")", "too-many-arguments"),
+        ("src/Demo/Probe.sharp", "global.session_set_save_handler(() => true)", "too-few-arguments"),
+    ];
+
+    let wrong: Vec<String> = rows
+        .into_iter()
+        .filter_map(|(path, call, expected)| {
+            let code: &'static str = if Path::new(path).extension().is_some_and(|extension| extension == "sharp") {
+                format!("namespace Demo;\n\nclass Probe\n{{\n    public Any? run() => {call};\n}}\n").leak()
+            } else {
+                format!("<?php\n\nnamespace Demo;\n\nclass Probe\n{{\n    public function run(): mixed\n    {{\n        return {call};\n    }}\n}}\n").leak()
+            };
+            let all = issues((path, code), &[]);
+            let hooked: Vec<&str> = codes(&all)
+                .into_iter()
+                .filter(|code| matches!(*code, "invalid-operand" | "too-many-arguments" | "too-few-arguments"))
+                .collect();
+
+            (hooked != [expected]).then(|| format!("{call} gives {all:?}"))
         })
         .collect();
 

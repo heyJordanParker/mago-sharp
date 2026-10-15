@@ -322,7 +322,7 @@ pub mod utils {
         use mago_syntax::walker::Walker;
 
         use crate::context::Context;
-        use crate::utils::expression::get_named_call;
+        use crate::plugin::hook::NamedCall;
 
         #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
         pub(super) enum VariableReference<'arena> {
@@ -688,7 +688,7 @@ pub mod utils {
         {
             fn walk_in_call(&self, call: &'ast Call<'arena>, context: &mut (bool, &Context<'_, 'arena, A>)) {
                 context.0 = context.0
-                    || get_named_call(context.1.resolved_names, context.1.codebase, call)
+                    || NamedCall::from_call(context.1.resolved_names, context.1.codebase, call)
                         .is_some_and(|call| call.calls(&[self.0]));
             }
 

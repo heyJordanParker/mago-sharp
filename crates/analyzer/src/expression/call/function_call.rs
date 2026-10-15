@@ -40,6 +40,7 @@ use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
+use crate::plugin::hook::NamedCall;
 use crate::resolver::extension::is_imported_by_default;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::display_atomic;
@@ -58,25 +59,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
     where
         A: Arena,
     {
-        if context.plugin_registry.has_function_call_hooks() {
-            let mut hook_context = HookContext::new(context, block_context, artifacts);
-            let result = context.plugin_registry.before_function_call(self, &mut hook_context)?;
-            for reported in hook_context.take_issues() {
-                context.collector.report_with_code(reported.code, reported.issue);
-            }
-
-            match result {
-                ExpressionHookResult::Continue => {}
-                ExpressionHookResult::Skip => {
-                    return Ok(());
-                }
-                ExpressionHookResult::SkipWithType(ty) => {
-                    artifacts.set_expression_type(&self.span(), ty);
-                    return Ok(());
-                }
-            }
-        }
-
         let mut template_result = TemplateResult::default();
         let (invocation_targets, encountered_invalid_targets) = resolve_targets(
             context,
@@ -108,16 +90,56 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
             artifacts.set_rc_expression_type(self, callee_type);
         }
 
-        if context.plugin_registry.has_function_call_hooks() {
-            let mut hook_context = HookContext::new(context, block_context, artifacts);
-            context.plugin_registry.after_function_call(self, &mut hook_context)?;
-            for reported in hook_context.take_issues() {
-                context.collector.report_with_code(reported.code, reported.issue);
-            }
-        }
-
         Ok(())
     }
+}
+
+/// Analyzes `call` with `analyze`, between the function call hooks. A hook before it may skip the analysis and give
+/// the call its type, and the hooks after it see the analyzed call.
+pub(super) fn analyze_with_function_call_hooks<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    call: &NamedCall<'_, 'arena>,
+    analyze: impl FnOnce(
+        &mut Context<'ctx, 'arena, A>,
+        &mut BlockContext<'ctx>,
+        &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    if !context.plugin_registry.has_function_call_hooks() {
+        return analyze(context, block_context, artifacts);
+    }
+
+    let mut hook_context = HookContext::new(context, block_context, artifacts);
+    let result = context.plugin_registry.before_function_call(call, &mut hook_context)?;
+    for reported in hook_context.take_issues() {
+        context.collector.report_with_code(reported.code, reported.issue);
+    }
+
+    match result {
+        ExpressionHookResult::Continue => {}
+        ExpressionHookResult::Skip => {
+            return Ok(());
+        }
+        ExpressionHookResult::SkipWithType(ty) => {
+            artifacts.set_expression_type(&call.span, ty);
+            return Ok(());
+        }
+    }
+
+    analyze(context, block_context, artifacts)?;
+
+    let mut hook_context = HookContext::new(context, block_context, artifacts);
+    context.plugin_registry.after_function_call(call, &mut hook_context)?;
+    for reported in hook_context.take_issues() {
+        context.collector.report_with_code(reported.code, reported.issue);
+    }
+
+    Ok(())
 }
 
 /// Analyzes `Name.member(…)` as a call of the plain PHP function `function`, which

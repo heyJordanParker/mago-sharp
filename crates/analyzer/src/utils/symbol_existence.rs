@@ -14,7 +14,7 @@ use mago_word::ascii_lowercase_word;
 
 use crate::artifacts::AnalysisArtifacts;
 use crate::context::block::BlockContext;
-use crate::utils::expression::get_named_call;
+use crate::plugin::hook::NamedCall;
 
 /// Extracts `function_exists` and `defined` calls from a condition expression.
 pub fn extract_function_constant_existence(
@@ -46,7 +46,7 @@ pub fn extract_function_constant_existence(
             extract(rhs, block_context, negated);
         }
         Expression::Call(call) if !negated => {
-            let Some(call) = get_named_call(resolved_names, codebase, call) else {
+            let Some(call) = NamedCall::from_call(resolved_names, codebase, call) else {
                 return;
             };
 
