@@ -6,6 +6,7 @@ use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
@@ -267,6 +268,12 @@ where
 #[must_use]
 pub(crate) fn article(name: &str) -> &'static str {
     if name.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) { "an" } else { "a" }
+}
+
+/// [`article`] at the start of a sentence: "An" before a vowel, and "A" otherwise.
+#[must_use]
+pub(crate) fn sentence_article(name: &str) -> &'static str {
+    if article(name) == "an" { "An" } else { "A" }
 }
 
 /// Returns the variable `id` as the analyzed file writes it. The analyzer keys a variable, a parameter and a read
@@ -694,6 +701,20 @@ where
     } else {
         format!("{class_name}::{member_name}")
     }
+}
+
+/// The case of an enum with data that the class `class` runs as, written through its enum as code the analyzed file
+/// writes, as `PaymentResult.Paid`. `None` for any other class.
+#[must_use]
+pub(crate) fn display_enum_case<A>(context: &Context<'_, '_, A>, class: &ClassLikeMetadata) -> Option<String>
+where
+    A: Arena,
+{
+    let enum_name = class.direct_parent_class.filter(|_| class.flags.is_enum_case_class())?;
+    let r#enum = context.codebase.get_class_like(enum_name.as_bytes())?;
+    let case = class.original_name.as_bytes().rsplit(|&byte| byte == b'\\').next().unwrap_or_default();
+
+    Some(display_code_member(context, r#enum.original_name, word(case)))
 }
 
 /// The member `member_name` of the class `class_name` as code the analyzed file writes: `Status.cases()` in a `.sharp`

@@ -689,7 +689,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         (Node::FunctionLikeParameter(parameter), Place::Event) => {
-            check_event_parameter(parameter, Place::Event, context)
+            check_property_parameter(parameter, Place::Event, context)
         }
         (Node::Module(module), File) => check_module_file_name(module, context),
         (Node::ModuleMember(_), Place::Module) => Some(Place::Module),
@@ -964,7 +964,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // A case's data are its fields, which run as the public get-only properties of the case's class, as an
         // event's parameters do.
         (Node::EnumCaseDataItem(_), Enum) => Some(Place::Case),
-        (Node::FunctionLikeParameter(parameter), Place::Case) => check_event_parameter(parameter, Place::Case, context),
+        (Node::FunctionLikeParameter(parameter), Place::Case) => check_property_parameter(parameter, Place::Case, context),
         (Node::EnumCaseBackedItem(_), Enum) => Some(Constant),
         // Spec section 13: a field or a property keeps its value with `{ get; }`, and only a computed property's type,
         // the value each read gives, takes `readonly`.
@@ -1537,33 +1537,37 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::PatternMatchArmBody(_),
             Body,
         ) => Some(Body),
-        // Spec section 21: a pattern takes types and constants only, and a local's value is compared in `when`. The
-        // binder binds a bare name of a type pattern to the local of that name, so the name reports here.
+        // Spec section 21: a pattern takes types and constants only, and a local's value is compared in `when`, which
+        // the analyzer's error writes with the value's type. The binder binds a bare name of a type pattern to the
+        // local of that name. The value is no constant expression, so the walk stops here.
         (
-            Node::Pattern(
-                pattern @ Pattern::Type(TypePattern { hint: Hint::Identifier(name), fields: None, properties: None, variable: None }),
-            ),
+            Node::Pattern(Pattern::Type(TypePattern {
+                hint: Hint::Identifier(name),
+                fields: None,
+                properties: None,
+                variable: None,
+            })),
             Body | Place::Pattern,
-        ) if report_pattern_reads(Node::Identifier(name), pattern.span(), b"==", context) =>
-        {
+        ) if reads_code(Node::Identifier(name), context) => None,
+        (Node::Pattern(Pattern::Value(value)), Body | Place::Pattern) if reads_code(Node::Expression(value), context) => {
             None
         }
-        (Node::Pattern(Pattern::Value(value)), Body | Place::Pattern)
-            if report_pattern_reads(Node::Expression(value), value.span(), b"==", context) =>
-        {
-            None
-        }
-        (Node::ComparisonPattern(comparison), Place::Pattern)
-            if report_pattern_reads(
-                Node::Expression(comparison.value),
-                comparison.value.span(),
-                context.get_code_snippet(comparison.operator),
-                context,
-            ) =>
-        {
+        (Node::ComparisonPattern(comparison), Place::Pattern) if reads_code(Node::Expression(comparison.value), context) => {
             None
         }
         (Node::Pattern(_), Body | Place::Pattern) => Some(Place::Pattern),
+        // Spec section 21: a pattern creates a variable only through a typed declaration. Its properties are still
+        // checked.
+        (Node::PropertiesPattern(PropertiesPattern { variable: Some(variable), .. }), Place::Pattern) => {
+            context.report(
+                Issue::error(
+                    "A pattern creates a variable only through a typed declaration: write the type, as in `Response { status: 200 } r`.",
+                )
+                .with_annotation(Annotation::primary(variable.span).with_message("Declared without a type.")),
+            );
+
+            Some(Place::Pattern)
+        }
         (Node::Hint(Hint::Nullable(_)), Place::Pattern) => {
             context.report(
                 Issue::error("A type pattern is never nullable: null never matches a type.")
@@ -2482,7 +2486,7 @@ fn check_extern_event(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> O
 /// `place`, which runs as a public get-only property of the class the event or the case runs as: a type, a name and
 /// an optional default. PHP refuses a variadic promoted property, and the declaration decides the property's access,
 /// so a modifier, accessors and `...` are refused. The rest is checked as a method's parameter.
-fn check_event_parameter(
+fn check_property_parameter(
     parameter: &FunctionLikeParameter,
     place: Place,
     context: &mut Context<'_, '_, '_>,
@@ -3060,40 +3064,21 @@ fn report_this_in_initializer(initializer: &ConstructorInitializer, context: &mu
     );
 }
 
-/// Reports each local, parameter and `this` that `node`, the value of a pattern at `value`, reads, and returns whether
-/// it reported one. Spec section 21 compares such a value in `when`, so the report writes that `when` with the pattern's
-/// `operator`.
-fn report_pattern_reads(node: Node<'_, '_>, value: Span, operator: &[u8], context: &mut Context<'_, '_, '_>) -> bool {
-    let mut reported = false;
-    if let Node::Identifier(name) = node {
-        let what = match context.names.binding(name) {
-            Some(Binding::Local(Local { kind: LocalKind::Parameter, .. })) => Some("a parameter"),
-            Some(Binding::Local(_)) => Some("a local"),
-            Some(Binding::This) => Some("the object the method runs on"),
-            // `check_constant_access` reports a bare member with its own error, which says to write `this.`.
-            Some(Binding::Member) => return true,
-            _ => None,
-        };
-        if let Some(what) = what {
-            let name_text = BytesDisplay(name.value());
-            let operator = BytesDisplay(operator);
-            let value_text = BytesDisplay(context.get_code_snippet(value));
-            context.report(
-                Issue::error(format!(
-                    "`{name_text}` is {what}: compare its value in `when`, as in `int n when n {operator} {value_text}`."
-                ))
-                .with_annotation(Annotation::primary(name.span()).with_message("Read here."))
-                .with_note("A pattern takes types and constants only, such as `Circle`, `200` or `Status.Paid`."),
-            );
-            reported = true;
-        }
+/// Whether `node`, the value of a pattern, reads a local, a parameter, `this` or a bare member. Spec section 21 takes
+/// types and constants only in a pattern. The analyzer reports a local, a parameter and `this` with the `when` that
+/// compares it, typed as the value it compares, and `check_constant_access` reports a bare member, which says to write
+/// `this.`.
+fn reads_code(node: Node<'_, '_>, context: &Context<'_, '_, '_>) -> bool {
+    if let Node::Identifier(name) = node
+        && matches!(context.names.binding(name), Some(Binding::Local(_) | Binding::This | Binding::Member))
+    {
+        return true;
     }
 
-    ensure_sufficient_stack(|| {
-        node.visit_children(|child| reported |= report_pattern_reads(child, value, operator, context));
-    });
+    let mut reads = false;
+    ensure_sufficient_stack(|| node.visit_children(|child| reads |= reads_code(child, context)));
 
-    reported
+    reads
 }
 
 /// Reports each `this` in `node` with `message` and `help`, and returns whether it reported one.

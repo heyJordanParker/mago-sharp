@@ -60,6 +60,7 @@ use crate::statement::class_like::r#struct::declares_equality;
 use crate::statement::class_like::r#struct::value_properties;
 use crate::utils::expression::get_literal_array_key;
 use crate::utils::misc::unwrap_expression;
+use crate::utils::names::article;
 use crate::utils::names::display_bool;
 use crate::utils::names::display_type;
 use crate::utils::quoted_source;
@@ -1403,7 +1404,7 @@ where
     }
     let r#type = declared
         .map_or_else(|| "Any?".to_owned(), |r#type| display_operand(context, &r#type.type_union.to_non_nullable()));
-    let article = if r#type.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" };
+    let article = article(&r#type);
     let why = match reason {
         Some(Refusal::Instance) => "which declares no `operator ==`",
         Some(Refusal::Collection) => "and `==` on a collection is not supported yet",

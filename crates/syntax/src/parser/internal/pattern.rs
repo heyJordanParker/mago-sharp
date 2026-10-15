@@ -103,14 +103,12 @@ where
                 pattern: self.parse_pattern()?,
                 right_parenthesis: self.stream.eat_span(T![")"])?,
             }),
+            // Spec section 21: a pattern creates a variable only through a typed declaration, so the semantic check
+            // refuses a name after a properties pattern without a type.
             T!["{"] => {
                 let properties = self.parse_properties_pattern()?;
-                // Spec section 21: a pattern creates a variable only through a typed declaration.
-                if let Some(variable) = self.parse_pattern_variable()? {
-                    self.errors.push(ParseError::UntypedPatternVariableInSharp(variable.span));
-                }
 
-                Pattern::Properties(properties)
+                Pattern::Properties(PropertiesPattern { variable: self.parse_pattern_variable()?, ..properties })
             }
             T!["==" | "<" | "<=" | ">" | ">="] => {
                 let span = self.stream.consume_span()?;
@@ -193,6 +191,7 @@ where
             left_brace: properties.open,
             properties: properties.sequence,
             right_brace: properties.close,
+            variable: None,
         })
     }
 

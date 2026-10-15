@@ -41,8 +41,7 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         | ParseError::StructHeaderTypeInSharp(..)
         | ParseError::NestedTypeInSharp(..)
         | ParseError::NamedConstructorTypeParametersInSharp(..)
-        | ParseError::MiscasedKeywordInSharp(..)
-        | ParseError::UntypedPatternVariableInSharp(..) => ErrorKind::UnexpectedToken,
+        | ParseError::MiscasedKeywordInSharp(..) => ErrorKind::UnexpectedToken,
         ParseError::UnclosedLiteralString(..) => ErrorKind::UnclosedLiteralString,
         ParseError::RecursionLimitExceeded(..) | ParseError::NestingTooDeepInSharp(..) => {
             ErrorKind::RecursionLimitExceeded

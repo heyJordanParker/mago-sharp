@@ -4918,8 +4918,9 @@ fn a_null_safe_call_of_a_function_is_in_the_slice() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// Spec section 21: a pattern takes types and constants only, as in C#, and a local's value is compared in `when`. A
-/// pattern's value is a constant value, so a static member of a class the file declares is the error a default gets.
+/// Spec section 21: a pattern takes types and constants only, as in C#, and a local's value is compared in `when`, which
+/// the analyzer's error writes with the value's type. A pattern's value is a constant value, so a bare member is the
+/// error a body gets and a static member of a class the file declares is the error a default gets.
 #[test]
 fn a_pattern_reads_no_local() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 10;\n    private static int ceiling = 5;\n    private int limit = 3;\n\n    public void run(int extra, Any? value)\n    {\n        const top = 10;\n        let label = match (value) {\n            top => \"local\",\n            extra => \"parameter\",\n            default => \"other\",\n        };\n        let tested = value is this.limit;\n        tested = value is < top;\n        tested = value is 2 + extra;\n        tested = value is -limit;\n        tested = value is Report.ceiling;\n        tested = value is Report.MAX or -10 or \"10\" or 2 + 8;\n    }\n}\n";
@@ -4927,11 +4928,6 @@ fn a_pattern_reads_no_local() {
     assert_eq!(
         issues(code),
         [
-            "13:13 `top` is a local: compare its value in `when`, as in `int n when n == top`.",
-            "14:13 `extra` is a parameter: compare its value in `when`, as in `int n when n == extra`.",
-            "17:31 `this` is the object the method runs on: compare its value in `when`, as in `int n when n == this.limit`.",
-            "18:29 `top` is a local: compare its value in `when`, as in `int n when n < top`.",
-            "19:31 `extra` is a parameter: compare its value in `when`, as in `int n when n == 2 + extra`.",
             "20:28 Write `this.limit`: members of the same object are always written with `this.`.",
             "21:27 `Report.ceiling` is a static member, which a constant value cannot read.",
         ]
@@ -4949,6 +4945,23 @@ fn a_leave_after_null_coalesce_is_in_the_slice_and_returns_as_its_method_does() 
         [
             "12:28 Method `Report.run` with return type must return a value.",
             "19:35 Method `Report.log` with return type of `void` must not return a value.",
+        ]
+    );
+}
+
+/// Spec section 21: a pattern creates a variable only through a typed declaration, so a name after a properties pattern
+/// without a type is an error, and the rest of the file is still checked.
+#[test]
+fn a_properties_pattern_without_a_type_takes_no_name() {
+    let code = leak(method(
+        "        const ok = extra is { status: 200 } response;\n        let typed = extra is Report { status: 200 } report;\n        $leftover = 1;\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:45 A pattern creates a variable only through a typed declaration: write the type, as in `Response { status: 200 } r`.",
+            "9:9 PHP# variables have no `$`: write `leftover`.",
         ]
     );
 }

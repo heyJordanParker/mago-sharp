@@ -11,6 +11,7 @@ use mago_syntax::walker::Walker;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::statement::class_like::r#struct::value_properties;
+use crate::utils::names::sentence_article;
 use crate::utils::quoted_source;
 
 /// Spec section 13: `readonly` holds only types PHP# checks, and only a value something can change. So each `readonly`
@@ -53,7 +54,7 @@ where
                 context,
                 readonly,
                 readonly.hint.span(),
-                format!("A `{fix}` never changes, so `readonly` changes nothing: write `{fix}`."),
+                format!("{} `{fix}` never changes, so `readonly` changes nothing: write `{fix}`.", sentence_article(&fix)),
             );
         }
     }

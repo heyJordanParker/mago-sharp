@@ -28,6 +28,9 @@ use mago_codex::ttype::get_null;
 use mago_codex::ttype::get_true;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
+use mago_names::binding::Binding;
+use mago_names::binding::Local;
+use mago_names::binding::LocalKind;
 use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -87,10 +90,14 @@ use crate::statement::class_like::override_attribute;
 use crate::statement::get_type_from_hint;
 use crate::statement::report_erased_type_test;
 use crate::statement::report_hint_type_arguments;
+use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::misc::check_for_paradox;
+use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
+use crate::utils::names::display_enum_case;
 use crate::utils::names::display_member;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_missing_imports;
 use crate::utils::quoted_source;
 
@@ -410,6 +417,15 @@ pub(crate) fn analyze_php_shape<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    // Its PHP would read such a name as a class, so the form is refused as a whole.
+    if report_pattern_reads(node, context, block_context, artifacts) {
+        if let Node::Expression(expression) = node {
+            artifacts.set_expression_type(expression, TUnion::from_atomic(TAtomic::Error));
+        }
+
+        return Ok(());
+    }
+
     let tests_function_type = hints.iter().any(|hint| names_function_type(hint));
     let mut is_refused = false;
     for hint in hints {
@@ -579,8 +595,7 @@ where
     if let Some((value, hint, test)) = redundant_test {
         let value_text = quoted_source(context, value.span());
         let hint_text = quoted_source(context, hint);
-        let article =
-            if hint_text.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+        let article = article(&hint_text);
         let (consequence, help) = if let Node::Expression(Expression::As(_)) = node {
             ("changes nothing", format!("Write `{value_text}` alone."))
         } else {
@@ -841,16 +856,10 @@ where
     }
     left_classes.sort_by_key(|class| (class.span.file_id, class.span.start.offset));
     for class in left_classes {
-        // A case is written through its enum, as `PaymentResult.Paid`.
-        let enum_name = class.direct_parent_class.filter(|_| class.flags.is_enum_case_class());
-        missing.push(match enum_name.and_then(|name| context.codebase.get_class_like(name.as_bytes())) {
-            Some(r#enum) => {
-                let case = class.original_name.as_bytes().rsplit(|&byte| byte == b'\\').next().unwrap_or_default();
-
-                display_code_member(context, r#enum.original_name, word(case))
-            }
-            None => display_class_like_name(context, class.original_name).to_string(),
-        });
+        missing.push(
+            display_enum_case(context, class)
+                .unwrap_or_else(|| display_class_like_name(context, class.original_name).to_string()),
+        );
     }
 
     if atomics().any(|atomic| matches!(atomic, TAtomic::Null)) {
@@ -1116,6 +1125,86 @@ fn holds_list_pattern(pattern: &Pattern<'_>) -> bool {
         Pattern::Parenthesized(parenthesized) => holds_list_pattern(parenthesized.pattern),
         Pattern::Type(_) | Pattern::Value(_) | Pattern::Comparison(_) | Pattern::Properties(_) => false,
     }
+}
+
+/// Reports each local, parameter and `this` that a pattern of a PHP# `is` or `match` reads, and returns whether it
+/// reported one. Spec section 21 takes types and constants only in a pattern and compares a value read from code in
+/// `when`, so the report writes that `when` with the type of the value the pattern compares and the pattern's
+/// operator, as `int n when n == top`. A bare member is the semantic check's error.
+fn report_pattern_reads<'ctx, 'arena, A>(
+    node: Node<'_, 'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> bool
+where
+    A: Arena,
+{
+    // Each value a pattern compares with: a bare name, which the binder binds to a local of that name, or a value.
+    let compared = node.filter_map(|node| match node {
+        Node::Pattern(Pattern::Type(TypePattern {
+            hint: Hint::Identifier(name),
+            fields: None,
+            properties: None,
+            variable: None,
+        })) => Some((Node::Identifier(name), None, "==".to_owned())),
+        Node::Pattern(Pattern::Value(value)) => Some((Node::Expression(value), Some(*value), "==".to_owned())),
+        Node::ComparisonPattern(comparison) => Some((
+            Node::Expression(comparison.value),
+            Some(comparison.value),
+            String::from_utf8_lossy(comparison.operator.as_bytes()).into_owned(),
+        )),
+        _ => None,
+    });
+
+    let mut reported = false;
+    for (value, expression, operator) in compared {
+        let reads = value.filter_map(|node| match node {
+            Node::Identifier(name) => match context.resolved_names.binding(*name) {
+                Some(Binding::Local(Local { kind: LocalKind::Parameter, .. })) => Some((*name, "a parameter")),
+                Some(Binding::Local(_)) => Some((*name, "a local")),
+                Some(Binding::This) => Some((*name, "the object the method runs on")),
+                _ => None,
+            },
+            _ => None,
+        });
+        if reads.is_empty() {
+            continue;
+        }
+
+        // The value's own type, as the pattern's binding of it would be typed. The value is read where `when` would
+        // read it, and its issues wait until the pattern is written so.
+        let compared_type = match (expression, value) {
+            (Some(expression), _) => {
+                let mut value_context = block_context.clone();
+                let _ = context.record(|context| expression.analyze(context, &mut value_context, artifacts));
+
+                artifacts.get_expression_type(expression).cloned()
+            }
+            (None, Node::Identifier(name)) => get_bare_name_variable_id(name, context.resolved_names)
+                .and_then(|id| block_context.locals.get(&id))
+                .map(|local| (**local).clone()),
+            (None, _) => None,
+        };
+        let mut compared_type = compared_type.unwrap_or_else(get_mixed).to_non_nullable();
+        compared_type.widen_literals();
+        let type_text = display_sharp_type(context, &compared_type);
+        let value_text = quoted_source(context, value.span());
+        for (name, what) in reads {
+            let name_text = quoted_source(context, name.span());
+            context.collector.report_with_code(
+                IssueCode::ReplacedBySyntax,
+                Issue::error(format!(
+                    "`{name_text}` is {what}: compare its value in `when`, as in `{type_text} n when n {operator} {value_text}`."
+                ))
+                .with_annotation(Annotation::primary(name.span()).with_message("Read here."))
+                .with_note("A pattern takes types and constants only, such as `Circle`, `200` or `Status.Paid`."),
+            );
+            reported = true;
+        }
+    }
+
+    reported
 }
 
 /// Reports each case pattern of a PHP# `is` or `match` that `php_shape` builds no PHP for, spec section 21: one whose

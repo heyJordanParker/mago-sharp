@@ -80,6 +80,7 @@ use crate::utils::expression::is_this;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
+use crate::utils::names::display_enum_case;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_type;
 use crate::utils::names::readonly_writer;
@@ -1249,7 +1250,22 @@ where
     // the object is created, so it cannot set one, as C# refuses with CS8852. The property's own accessor body writes
     // its storage through `field`, on `this` only.
     // A struct never changes, spec section 10: every property is set only while the struct is created, `init` or not.
+    // An enum case never changes either, spec section 20: its fields are set only while the case is made.
     let is_struct = declaring_class_metadata.flags.is_struct();
+    if for_assignment
+        && context.dialect.is_sharp()
+        && let Some(case) = display_enum_case(context, declaring_class_metadata)
+    {
+        context.collector.report_with_code(
+            IssueCode::InvalidPropertyWrite,
+            Issue::error(format!("An enum case never changes; return a changed copy made with `{case}(…)`."))
+                .with_annotation(Annotation::primary(selector.span()).with_message("Written here."))
+                .with_note("A case's fields are set only while it is made."),
+        );
+        result.has_error_path = true;
+
+        return None;
+    }
     if for_assignment && context.dialect.is_sharp() && (is_struct || property_metadata.flags.is_init()) {
         let writes_its_storage = is_backing_store_access(object_expr, prop_name, block_context, context.resolved_names);
         let creates_this = is_created_object(object_expr)

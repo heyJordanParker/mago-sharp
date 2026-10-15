@@ -2175,6 +2175,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 for property in node.properties.iter() {
                     f(Node::PropertyPattern(property));
                 }
+                if let Some(variable) = &node.variable {
+                    f(Node::LocalIdentifier(variable));
+                }
             }
             Node::PropertyPattern(node) => {
                 f(Node::LocalIdentifier(&node.name));

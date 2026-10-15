@@ -529,6 +529,8 @@ where
             Pattern::Parenthesized(parenthesized) => {
                 self.test(parenthesized.pattern, parenthesized.left_parenthesis, subject)?
             }
+            // A name without a type is the semantic check's error, and the form has no PHP.
+            Pattern::Properties(PropertiesPattern { variable: Some(_), .. }) => return None,
             Pattern::Properties(properties) => {
                 let function = called_functions(Node::PropertiesPattern(properties)).next()?;
                 let read = self.read(subject, pattern.span());

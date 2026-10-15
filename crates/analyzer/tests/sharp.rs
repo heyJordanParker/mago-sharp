@@ -4784,6 +4784,18 @@ fn a_data_case_never_changes_so_readonly_changes_nothing() {
             "A `List<CheckoutState>` never changes, so `readonly` changes nothing: write `List<CheckoutState>`.",
         ]
     );
+
+    // A case's field is set only while the case is made, so a write names the copy to make, as a struct's does, and a
+    // name that starts with a vowel takes "An".
+    let event = "namespace App;\n\nenum Event\n{\n    case Started;\n    case Moved(int x, int y);\n}\n";
+    let moves = "namespace App;\n\npublic class Moves\n{\n    public void seen(readonly Event seen) { }\n\n    public void moved(Event.Moved moved)\n    {\n        moved.x = 3;\n    }\n}\n";
+    assert_eq!(
+        messages(("src/App/Moves.sharp", moves), &[("src/App/Event.sharp", event)]),
+        [
+            "An enum case never changes; return a changed copy made with `Event.Moved(…)`.",
+            "An `Event` never changes, so `readonly` changes nothing: write `Event`.",
+        ]
+    );
 }
 
 /// Spec section 21: a case pattern tests the case's class, and its fields by position bind the case's fields, typed as
@@ -4869,6 +4881,13 @@ fn leave_on_null_leaves_the_method_or_the_loop() {
     assert_eq!(
         issues(("src/Demo/Report.sharp", wrong), &[]),
         ["5:60 invalid-return-statement", "7:55 invalid-continue", "9:43 redundant-null-coalesce"]
+    );
+
+    // PHP# has no `switch`, so a `break` outside a loop names only the loop.
+    let outside = "namespace Demo;\n\nclass Report\n{\n    public static int stop(int? price) => price ?? break;\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", outside), &[]),
+        ["5:52 invalid-break A `break` stands only inside a loop. | "]
     );
 
     // A loop's condition or increment leaves that loop, as the engine runs it: its `?? break` ends the loop, and its
@@ -18362,4 +18381,26 @@ fn plain_php_messages_show_a_readonly_type_as_its_php_type() {
 
     assert!(messages.iter().all(|message| !message.contains("readonly")), "{messages:#?}");
     assert_eq!(messages.len(), 5, "{messages:#?}");
+}
+
+/// Spec section 21: a pattern takes types and constants only, as in C#, and a local's value is compared in `when`. The
+/// error writes that `when` with the type of the value the pattern compares, wherever the pattern stands, and the
+/// form is not analyzed further.
+#[test]
+fn a_pattern_reads_no_local_and_names_the_when_that_compares_it() {
+    let delivery = "namespace App;\n\nenum Delivery\n{\n    case Noted(string note);\n}\n";
+    let code = "namespace App;\n\nclass Post\n{\n    private int limit = 3;\n\n    public string run(Delivery delivery, Any? value, string code, int extra)\n    {\n        const top = 10.5;\n        let label = match (value) {\n            top => \"local\",\n            extra => \"parameter\",\n            default => \"other\",\n        };\n        let tested = value is this.limit;\n        tested = value is < top;\n        tested = value is 2 + extra;\n        tested = delivery is Delivery.Noted(code);\n        tested = delivery is Delivery.Noted { note: code };\n        return label;\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/App/Post.sharp", code), &[("src/App/Delivery.sharp", delivery)]),
+        [
+            "11:13 replaced-by-syntax `top` is a local: compare its value in `when`, as in `float n when n == top`. | ",
+            "12:13 replaced-by-syntax `extra` is a parameter: compare its value in `when`, as in `int n when n == extra`. | ",
+            "15:31 replaced-by-syntax `this` is the object the method runs on: compare its value in `when`, as in `int n when n == this.limit`. | ",
+            "16:29 replaced-by-syntax `top` is a local: compare its value in `when`, as in `float n when n < top`. | ",
+            "17:31 replaced-by-syntax `extra` is a parameter: compare its value in `when`, as in `int n when n == 2 + extra`. | ",
+            "18:45 replaced-by-syntax `code` is a parameter: compare its value in `when`, as in `string n when n == code`. | ",
+            "19:53 replaced-by-syntax `code` is a parameter: compare its value in `when`, as in `string n when n == code`. | ",
+        ]
+    );
 }

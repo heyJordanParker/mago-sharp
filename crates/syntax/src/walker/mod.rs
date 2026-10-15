@@ -2542,6 +2542,10 @@ generate_ast_walker! {
         for property_pattern in &properties_pattern.properties {
             walker.walk_property_pattern(property_pattern, context);
         }
+
+        if let Some(variable) = &properties_pattern.variable {
+            walker.walk_local_identifier(variable, context);
+        }
     }
 
     'arena PropertyPattern as property_pattern => {

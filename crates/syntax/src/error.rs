@@ -111,9 +111,6 @@ pub enum ParseError {
     /// A PHP# keyword written in another case, as in `Return 5;`, with the keyword as PHP# writes it, at the keyword.
     /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are.
     MiscasedKeywordInSharp(&'static str, Span),
-    /// A name after a PHP# properties pattern without a type, as in `{ status: 200 } r`, at the name. Spec section
-    /// 21: a pattern creates a variable only through a typed declaration.
-    UntypedPatternVariableInSharp(Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -157,8 +154,7 @@ impl HasFileId for ParseError {
             | ParseError::NestedTypeInSharp(_, _, span)
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
-            | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::UntypedPatternVariableInSharp(span) => span.file_id,
+            | ParseError::MiscasedKeywordInSharp(_, span) => span.file_id,
         }
     }
 }
@@ -206,8 +202,7 @@ impl HasSpan for ParseError {
             | ParseError::NestedTypeInSharp(_, _, span)
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
-            | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::UntypedPatternVariableInSharp(span) => *span,
+            | ParseError::MiscasedKeywordInSharp(_, span) => *span,
         }
     }
 }
@@ -356,10 +351,6 @@ impl std::fmt::Display for ParseError {
                 "A named constructor takes its class's type arguments and declares none of its own.".to_string()
             }
             ParseError::MiscasedKeywordInSharp(keyword, _) => format!("Write the keyword `{keyword}` in lowercase."),
-            ParseError::UntypedPatternVariableInSharp(_) => {
-                "A pattern creates a variable only through a typed declaration: write the type, as in `Response { status: 200 } r`."
-                    .to_string()
-            }
         };
 
         write!(f, "{message}")
@@ -418,8 +409,7 @@ impl From<&ParseError> for Issue {
             | ParseError::EventBodyInSharp(..)
             | ParseError::NestedTypeInSharp(..)
             | ParseError::StructHeaderTypeInSharp(..)
-            | ParseError::MiscasedKeywordInSharp(..)
-            | ParseError::UntypedPatternVariableInSharp(..) => Issue::error(error.to_string())
+            | ParseError::MiscasedKeywordInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             // A generic class's static method takes the class's type arguments, so its help declares none of its own.

@@ -18,7 +18,6 @@ use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::reference::ReferenceOrigin;
-use mago_codex::symbol::SymbolKind;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
@@ -93,6 +92,7 @@ use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::utils::missing_type_hints;
 use crate::utils::names::and_list;
+use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
@@ -210,7 +210,7 @@ fn report_class_like_named_as_a_namespace<A>(
         (class_like_metadata.original_name.to_string(), inside.original_name.to_string())
     };
     let kind = class_like_metadata.kind.as_str();
-    let article = if matches!(class_like_metadata.kind, SymbolKind::Enum | SymbolKind::Interface) { "an" } else { "a" };
+    let article = article(kind);
 
     context.collector.report_with_code(
         IssueCode::NameAlreadyInUse,

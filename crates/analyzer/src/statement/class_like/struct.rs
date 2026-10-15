@@ -25,6 +25,7 @@ use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::override_attribute;
 use crate::statement::class_like::report_duplicate_definition;
+use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_sharp_type;
 use mago_word::Word;
@@ -283,7 +284,7 @@ where
 
         let class = display_class_like_name(context, r#struct.original_name);
         let held_name = display_sharp_type(context, &TUnion::from_atomic(held.clone()));
-        let article = if held_name.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" };
+        let article = article(&held_name);
         let what = match &held {
             TAtomic::Object(TObject::Named(named)) => {
                 match context.codebase.get_class_like(named.name.as_bytes()).map(|class_like| class_like.kind) {

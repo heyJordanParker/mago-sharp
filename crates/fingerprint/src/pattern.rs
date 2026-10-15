@@ -186,6 +186,10 @@ impl Fingerprintable for PropertiesPattern<'_> {
         for property in &self.properties {
             property.fingerprint_with_hasher(hasher, resolved_names, options);
         }
+        if let Some(variable) = &self.variable {
+            "variable".hash(hasher);
+            variable.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
     }
 }
 

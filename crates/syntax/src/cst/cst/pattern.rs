@@ -125,6 +125,9 @@ pub struct PropertiesPattern<'arena> {
     pub left_brace: Span,
     pub properties: TokenSeparatedSequence<'arena, PropertyPattern<'arena>>,
     pub right_brace: Span,
+    /// A name written after a properties pattern without a type, as in `{ status: 200 } r`, which the semantic check
+    /// refuses, since a pattern creates a variable only through a typed declaration. A type pattern holds its own name.
+    pub variable: Option<LocalIdentifier<'arena>>,
 }
 
 /// Represents one property of a properties pattern and the pattern its value matches, as in `status: 200`.
@@ -270,7 +273,7 @@ impl HasSpan for ParenthesizedPattern<'_> {
 
 impl HasSpan for PropertiesPattern<'_> {
     fn span(&self) -> Span {
-        self.left_brace.join(self.right_brace)
+        self.left_brace.join(self.variable.map_or(self.right_brace, |variable| variable.span))
     }
 }
 

@@ -4833,19 +4833,17 @@ fn a_type_with_properties_is_one_pattern_that_may_bind() {
         ]
     );
 
-    const UNTYPED: &str = "class Report\n{\n    void run()\n    {\n        response is { status: 200 } ok;\n        lines->count();\n    }\n}\n";
+    // The parser reads a name after a properties pattern without a type, and the semantic check refuses it, so the
+    // rest of the file is still checked.
+    const UNTYPED: &str = "class Report\n{\n    void run()\n    {\n        response is { status: 200 } ok;\n    }\n}\n";
     let untyped = parse(&arena, "src/Report.sharp", UNTYPED);
-    let errors: Vec<(String, &str)> =
-        untyped.errors.iter().map(|error| (error.to_string(), source(UNTYPED, error))).collect();
+    assert!(untyped.errors.is_empty(), "{:#?}", untyped.errors);
+    let Expression::Is(Is { pattern: Pattern::Properties(properties), .. }) = expression(&method_body(untyped)[0]) else {
+        panic!("expected `is` with a properties pattern");
+    };
     assert_eq!(
-        errors,
-        [
-            (
-                "A pattern creates a variable only through a typed declaration: write the type, as in `Response { status: 200 } r`.".to_owned(),
-                "ok"
-            ),
-            ("`->` is PHP syntax: PHP# writes member access with `.`".to_owned(), "->"),
-        ]
+        (source(UNTYPED, properties), properties.variable.as_ref().map(|variable| source(UNTYPED, variable))),
+        ("{ status: 200 } ok", Some("ok"))
     );
 }
 
