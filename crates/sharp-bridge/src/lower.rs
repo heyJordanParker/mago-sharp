@@ -6093,8 +6093,8 @@ fn without_readonly<'hint, 'arena>(hint: &'hint Hint<'arena>) -> &'hint Hint<'ar
 
 /// Whether a member without an initial value starts as null, as in C# and Swift: a field, or a property with storage
 /// and `set`, of a nullable type. A get-only property with storage is set only where `readonly` allows, and
-/// `readonly` takes no default, so the checker refuses one of a nullable type without an initial value. A property
-/// without storage is virtual, and PHP refuses a default on a virtual property.
+/// `readonly` takes no default, so the checker holds one without an initial value to a constructor that sets it on
+/// every path. A property without storage is virtual, and PHP refuses a default on a virtual property.
 fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
     matches!(property.hint(), Some(Hint::Nullable(_)))
         && match property {

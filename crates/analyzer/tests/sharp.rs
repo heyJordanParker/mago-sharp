@@ -1037,7 +1037,9 @@ fn field_value_and_a_get_body_have_the_property_type_as_in_php() {
 }
 
 /// A property whose accessors all have bodies that never use `field` has no storage, so nothing initializes it, as
-/// PHP's virtual property. Every other property is backed, and is initialized as a field is.
+/// PHP's virtual property. Every other property is backed, and is initialized as a field is. Spec section 6.1 holds a
+/// settable backed property that isn't `T?` to a value from the start, so PHP#'s own error names `count` and `total`
+/// beside PHP's missing constructor.
 #[test]
 fn only_a_property_with_storage_needs_initializing_as_in_php() {
     let sharp = "namespace Demo;\n\nclass Store\n{\n    public int open { get => 1; }\n    public int named { get => this.open; set => this.save(value); }\n    public int count { get => field; set => field = value; }\n    public int total { get; set => field = value; }\n\n    public void save(int value)\n    {\n    }\n}\n";
@@ -1047,8 +1049,8 @@ fn only_a_property_with_storage_needs_initializing_as_in_php() {
     let sharp_issues = issues_with(settings(), ("src/Demo/Store.sharp", sharp), &[]);
     let php_issues = issues_with(settings(), ("src/Demo/Store.php", php), &[]);
 
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
-    assert!(!sharp_issues.is_empty(), "the backed properties need initializing: {php_issues:?}");
+    assert_eq!(php_issues, ["5:7 missing-constructor"]);
+    assert_eq!(sharp_issues, ["7:16 uninitialized-property", "8:16 uninitialized-property", "3:7 missing-constructor"]);
 }
 
 /// A get-only property whose `get` body uses `field` is set where a get-only auto-property is: once, in the
@@ -6107,6 +6109,24 @@ fn a_get_only_property_no_constructor_sets_is_an_error() {
         [
             "6:16 uninitialized-property `count` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
             "31:16 uninitialized-property `y` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
+        ]
+    );
+}
+
+/// Spec section 6.1: a settable property that isn't `T?` holds a value from the start, so one with storage and no
+/// initial value that no constructor sets on every path is an error, as a get-only one is. A `T?` one starts as null,
+/// a computed one has no storage, and a `required` or `init` one is set where its object is created. A get-only `T?`
+/// property is held to the same check, and needs no initial value when every path through the constructor sets it.
+#[test]
+fn a_settable_property_that_is_not_nullable_needs_a_value_as_a_get_only_one_does() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public int views { get; private set; }\n    public int likes { get; set; } = 0;\n    public int shares { get; set; }\n    public int clicks { get; set; }\n    public string? note { get; set; }\n    public int doubled { get => this.likes * 2; set => this.likes = value / 2; }\n    public required int stock { get; set; }\n    public int code { get; init; }\n    public string? label { get; }\n    public string? tag { get; }\n\n    public Order(bool big, string? label)\n    {\n        this.shares = 1;\n        this.label = label;\n        if (big) {\n            this.clicks = 1;\n            this.tag = \"big\";\n        }\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Order.sharp", sharp), &[]),
+        [
+            "8:16 uninitialized-property `clicks` is never set: set it in the main constructor, or give it an initial value. | ",
+            "14:20 uninitialized-property `tag` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
+            "5:16 uninitialized-property `views` is never set: set it in the main constructor, or give it an initial value. | ",
         ]
     );
 }
@@ -13138,7 +13158,7 @@ fn a_message_names_an_accessor_as_sharp_writes_it() {
 #[test]
 fn a_message_names_an_inherited_accessor_as_sharp_writes_it() {
     let library = "<?php\n\nnamespace Lib;\n\ninterface Priced\n{\n    public int $total { get; }\n}\n\nclass Counter\n{\n    public int $count = 0 {\n        final get => $this->count;\n    }\n}\n\ninterface Shared\n{\n    public array $items { &get; }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Counter;\nimport Lib.Priced;\nimport Lib.Shared;\n\npublic class Order : Priced\n{\n}\n\npublic class Tally : Counter\n{\n    public override int count { get => 1; set; }\n}\n\npublic class Bag : Shared\n{\n    public List<int> items { get => []; }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Counter;\nimport Lib.Priced;\nimport Lib.Shared;\n\npublic class Order : Priced\n{\n}\n\npublic class Tally : Counter\n{\n    public override int count { get => 1; set; } = 0;\n}\n\npublic class Bag : Shared\n{\n    public List<int> items { get => []; }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Counter;\nuse Lib\\Priced;\nuse Lib\\Shared;\n\nclass Order implements Priced\n{\n}\n\nclass Tally extends Counter\n{\n    public int $count {\n        get => 1;\n    }\n}\n\nclass Bag implements Shared\n{\n    public array $items {\n        get => [];\n    }\n}\n";
     let others = [("src/Lib/Library.php", library)];
 

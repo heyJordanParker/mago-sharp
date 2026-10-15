@@ -960,7 +960,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         (Node::ClassLikeMember(ClassLikeMember::Property(property)), Class) => {
-            match is_slice_property(property, &context.version, context.names) {
+            match is_slice_property(property, &context.version) {
                 Ok(()) => {
                     let variable = property.first_variable();
                     check_declared_name(variable.name, variable.span, context);
@@ -2545,7 +2545,7 @@ fn report_optional_before_required(parameters: &FunctionLikeParameterList, conte
 /// body and no initial value. The analyzer checks an override against its parent.
 ///
 /// A `lazy` property is computed, spec section 6.5: `lazy T name => expr;` is its only form.
-fn is_slice_property(property: &Property, version: &PHPVersion, names: &ResolvedNames) -> Result<(), Box<Issue>> {
+fn is_slice_property(property: &Property, version: &PHPVersion) -> Result<(), Box<Issue>> {
     let not_supported = |span: Span, message: &str, note: &str| {
         Issue::error(message)
             .with_annotation(Annotation::primary(span).with_message("Not supported yet."))
@@ -2729,17 +2729,6 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
                     &format!(
                         "A constant initial value is the property's default, while any other would run the `{setter}` body at the start of the constructor."
                     ),
-                )))
-            } else if auto_property.initial_value.is_none()
-                && auto_property.modifiers.get_abstract().is_none()
-                && matches!(auto_property.hint, Some(Hint::Nullable(_)))
-                && auto_property.hook_list.is_get_only()
-                && names.has_storage(&auto_property.hook_list)
-            {
-                Err(Box::new(not_supported(
-                    property.first_variable().span,
-                    "A get-only nullable property without an initial value is not supported yet in PHP#.",
-                    "A get-only property runs as PHP's `readonly`, which takes no default, so it cannot start as null: give it an initial value, as in `public int? total { get; } = null;`, or a `set` accessor.",
                 )))
             } else {
                 Ok(())

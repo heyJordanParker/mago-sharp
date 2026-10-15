@@ -1339,7 +1339,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
 #[test]
 fn an_auto_property_is_a_property_with_its_set_visibility() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    public int total { get; protected set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n\n    public Report()\n    {\n        this.id = 1;\n        this.hidden = 2;\n    }\n}\n",
+        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    public int total { get; protected set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n\n    public Report()\n    {\n        this.name = \"\";\n        this.id = 1;\n        this.total = 0;\n        this.hidden = 2;\n    }\n}\n",
     );
     let groups: Vec<(u32, String)> = lowered
         .nodes()
@@ -1538,7 +1538,7 @@ fn property_groups(lowered: &Lowered) -> Vec<String> {
 #[test]
 fn accessor_bodies_are_property_hooks() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n    public int slug { get; init => field = value * 2; }\n\n    public Report()\n    {\n        this.guarded = 1;\n    }\n\n    public void resize(int to)\n    {\n    }\n}\n",
+        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n    public int slug { get; init => field = value * 2; }\n\n    public Report()\n    {\n        this.name = \"\";\n        this.count = 0;\n        this.size = 0;\n        this.guarded = 1;\n    }\n\n    public void resize(int to)\n    {\n    }\n}\n",
     );
 
     assert_eq!(
@@ -1803,7 +1803,7 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 #[test]
 fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public int size { get => this.read(); set; }\n\n    public int read()\n    {\n        return 1;\n    }\n}\n",
+        "class Report\n{\n    public int size { get => this.read(); set; }\n\n    public Report()\n    {\n        this.size = 1;\n    }\n\n    public int read()\n    {\n        return 1;\n    }\n}\n",
     );
 
     assert_eq!(
@@ -8355,7 +8355,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
                 init { field = value; }
             }
 
-            public int count { get; set; }
+            public int count { get; set; } = 0;
 
             private Function<Box<Order>()> maker = () => new Box<Order>();
 
@@ -12415,7 +12415,7 @@ fn position_current_in_a_get_body_names_its_property() {
 #[test]
 fn position_current_in_a_set_body_names_its_property() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public string folder => Position.current().directory;\n    public string title { get; set { field = Position.current().function; } }\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public string folder => Position.current().directory;\n    public string title { get; set { field = Position.current().function; } }\n\n    public Report()\n    {\n        this.title = \"\";\n    }\n}\n",
     );
 
     assert_eq!(positions(&lowered), ["5:29 App.Tenant.Report.folder", "6:46 App.Tenant.Report.title"]);
@@ -21222,7 +21222,7 @@ const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(
 /// `op_Equality` the bridge writes: two instances of the struct are equal when each property equals its pair by the
 /// property's own `==`, and any other pair, `null` included, is equal only when identical. The parameters take `mixed`,
 /// so an `Any?` compares with a struct. A static field and a computed property hold no part of the value, so `==`
-/// compares neither. A struct that declares `operator ==` gets no `op_Equality` of the bridge's: `==` calls its own,
+/// compares neither. The static field `made` is `[32788]`, `ZEND_ACC_FIELD | ZEND_ACC_STATIC | ZEND_ACC_PRIVATE`. A struct that declares `operator ==` gets no `op_Equality` of the bridge's: `==` calls its own,
 /// whatever it holds.
 #[test]
 fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
@@ -21283,7 +21283,7 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
                     STMT_LIST
                     null
                     null
-                  PROP_GROUP [20]
+                  PROP_GROUP [32788]
                     ZVAL [1] "int"
                     PROP_DECL
                       PROP_ELEM

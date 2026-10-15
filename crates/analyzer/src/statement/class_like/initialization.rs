@@ -6,9 +6,12 @@ use mago_word::WordSet;
 
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
+use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::Span;
+use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::Property;
 use mago_word::Word;
 use mago_word::word;
 
@@ -22,9 +25,13 @@ use crate::utils::names::display_property_name;
 /// Reports a PHP# get-only property that nothing sets, spec section 6.1: no initial value, and no constructor, main or
 /// named, that assigns it on every path. A get-only property can be set nowhere else, and neither can a struct's
 /// property no object initializer sets, spec section 10: any but a public `init` one, which is required where the
-/// struct is created. A class's `init` property is set where its object is created.
-pub fn check_get_only_initialization<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
-where
+/// struct is created. A class's `init` property is set where its object is created. A settable property that isn't
+/// `T?`, of `members`, holds a value from the start, so it needs one the same way, while a `T?` one starts as null.
+pub fn check_get_only_initialization<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    members: &[ClassLikeMember<'_>],
+) where
     A: Arena,
 {
     if !context.dialect.is_sharp() || class_like_metadata.flags.is_abstract() || !class_like_metadata.kind.is_class() {
@@ -41,9 +48,19 @@ where
         .filter_map(|constructor| constructor.method_metadata.as_ref())
         .flat_map(|constructor| constructor.assigned_properties.iter().copied())
         .collect();
+    let settable: WordSet = members
+        .iter()
+        .filter_map(|member| match member {
+            ClassLikeMember::Property(Property::Hooked(property)) => property.hook_list.setter().map(|_| property),
+            _ => None,
+        })
+        .map(|property| php_variable_name(property.item.variable().name))
+        .collect();
     for (name, property) in class_like_metadata.properties.iter().sorted_by_key(|(name, _)| **name) {
         let get_only = property.flags.is_readonly() && !property.flags.is_init();
-        let never_set = (get_only || (class_like_metadata.flags.is_struct() && !property.flags.is_required()))
+        let set_later = settable.contains(name) && !property.flags.is_init() && !property.flags.is_required();
+        let struct_only = class_like_metadata.flags.is_struct() && !property.flags.is_required();
+        let never_set = (get_only || set_later || struct_only)
             && !property.flags.is_promoted_property()
             && !property.flags.has_default()
             && !property.flags.is_static()
@@ -63,6 +80,8 @@ where
                 " get-only and",
                 "A get-only property is set only while its object is created, and no constructor sets it on every path.",
             )
+        } else if set_later {
+            ("", "A property that isn't `T?` holds a value from the start, and no constructor sets it on every path.")
         } else {
             ("", "Only the struct sets this property, and no constructor sets it on every path.")
         };

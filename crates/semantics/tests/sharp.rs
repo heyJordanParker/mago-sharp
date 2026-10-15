@@ -3388,17 +3388,13 @@ fn a_void_field_reports_only_the_php_error() {
     );
 }
 
+/// Spec section 6.1: a get-only `T?` property without an initial value is set by the constructor, which the analyzer
+/// checks on every path, so semantics takes it.
 #[test]
-fn a_get_only_nullable_property_without_an_initial_value_is_not_supported_yet() {
+fn a_get_only_nullable_property_without_an_initial_value_is_in_the_slice() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int? total { get; }\n    private (int|string)? key { get; }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:17 A get-only nullable property without an initial value is not supported yet in PHP#.",
-            "6:27 A get-only nullable property without an initial value is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
@@ -3412,22 +3408,6 @@ fn a_static_member_outside_the_slice_is_not_supported_yet() {
             "8:32 A static member's initial value that is not constant is not supported yet in PHP#.",
             "9:45 A static member's initial value that is not constant is not supported yet in PHP#.",
         ]
-    );
-}
-
-#[test]
-fn a_get_only_nullable_property_without_an_initial_value_names_the_initial_value_or_set_to_write() {
-    let notes: Vec<Vec<String>> =
-        check("src/Report.sharp", "namespace App.Tenant;\n\nclass Report\n{\n    public int? total { get; }\n}\n")
-            .into_iter()
-            .map(|issue| issue.notes)
-            .collect();
-
-    assert_eq!(
-        notes,
-        [[
-            "A get-only property runs as PHP's `readonly`, which takes no default, so it cannot start as null: give it an initial value, as in `public int? total { get; } = null;`, or a `set` accessor."
-        ]]
     );
 }
 
