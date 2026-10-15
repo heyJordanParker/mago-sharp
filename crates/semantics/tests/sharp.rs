@@ -281,7 +281,10 @@ fn a_bare_member_in_a_law_is_written_through_the_class_name() {
 fn a_law_and_a_method_named_alike_are_a_duplicate_member() {
     let code = "namespace App.Shared;\n\npublic class Money\n{\n    public bool positive(int a) => a > 0;\n\n    law positive(int a) => a > 0 || a <= 0;\n}\n";
 
-    assert_eq!(issues(code), ["7:9 class method `Money.positive` has already been defined"]);
+    assert_eq!(
+        issues(code),
+        ["7:9 `Money.positive` is declared twice: a class has one method per name, with no overloading by argument types."]
+    );
 }
 
 #[test]
@@ -1198,7 +1201,10 @@ fn a_named_constructor_shares_no_name_with_a_method() {
         issues(before),
         ["8:18 The named constructor `Order.copy` cannot share its name with the method `Order.Copy`."]
     );
-    assert_eq!(issues(law), ["8:18 class method `Order.copy` has already been defined"]);
+    assert_eq!(
+        issues(law),
+        ["8:18 `Order.copy` is declared twice: a class has one method per name, with no overloading by argument types."]
+    );
 }
 
 /// Spec section 9.1: only a class has constructors, so an interface, an enum and a static class declare no named one.
@@ -1766,12 +1772,36 @@ fn int_float_and_bool_outside_the_sharp_namespace_are_reserved() {
     );
 }
 
+/// Spec section 22: a class has one method per name, so PHP# has no overloading by argument types. A second method of
+/// one name, whatever it takes or however its name is cased, is an error that says to name each by what it takes.
+#[test]
+fn a_class_has_one_method_per_name_and_no_overloading() {
+    let code = "namespace App.Tenant;\n\nclass Access\n{\n    public void grant(User user) { }\n\n    public void grant(Tenant tenant) { }\n\n    public void Grant() { }\n}\n";
+    let fixed = "namespace App.Tenant;\n\nclass Access\n{\n    public void grantUserAccess(User user) { }\n\n    public void grantTenantAccess(Tenant tenant) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:17 `Access.grant` is declared twice: a class has one method per name, with no overloading by argument types.",
+            "9:17 `Access.Grant` is declared twice: a class has one method per name, with no overloading by argument types.",
+        ]
+    );
+    assert_eq!(
+        check("src/Access.sharp", code).remove(0).help.as_deref(),
+        Some("Give each a name that says what it takes, as in `grantUserAccess` and `grantTenantAccess`.")
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
+}
+
 #[test]
 fn methods_whose_names_differ_only_in_case_are_an_error() {
     let code = "class Report\n{\n    public int run() { return 1; }\n\n    public int Run() { return 2; }\n}\n";
 
     // The PHP checks already reject this, so PHP# adds no second error.
-    assert_eq!(issues(code), ["5:16 class method `Report.Run` has already been defined"]);
+    assert_eq!(
+        issues(code),
+        ["5:16 `Report.Run` is declared twice: a class has one method per name, with no overloading by argument types."]
+    );
 
     let php = "<?php\n\nclass Report\n{\n    public function run(): int { return 1; }\n\n    public function Run(): int { return 2; }\n}\n";
     assert_eq!(issues_in("src/Report.php", php), ["7:21 class method `Report::Run` has already been defined"]);
@@ -2885,9 +2915,9 @@ fn two_members_of_one_static_class_cannot_share_a_name_across_its_extensions() {
     assert_eq!(
         issues(code),
         [
-            "13:20 class method `Sizes.size` has already been defined",
-            "14:21 class method `Sizes.blank` has already been defined",
-            "17:23 class method `Sizes.size` has already been defined",
+            "13:20 `Sizes.size` is declared twice: a class has one method per name, with no overloading by argument types.",
+            "14:21 `Sizes.blank` is declared twice: a class has one method per name, with no overloading by argument types.",
+            "17:23 `Sizes.size` is declared twice: a class has one method per name, with no overloading by argument types.",
         ]
     );
 }
@@ -5127,7 +5157,7 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
         worded("src/Demo/Order.sharp", code),
         [
             "property `Order.count` has already been defined | property `Order.count` previously defined here. | class `Order` defined here.",
-            "class method `Order.total` has already been defined | previous definition | class `Order` defined here.",
+            "`Order.total` is declared twice: a class has one method per name, with no overloading by argument types. | Declared again here. | Declared first here.",
         ]
     );
 }

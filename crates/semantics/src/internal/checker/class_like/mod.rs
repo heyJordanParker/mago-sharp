@@ -1366,6 +1366,18 @@ pub fn check_members<'ast, 'arena>(
                             .with_annotation(Annotation::primary(name_span).with_message("Declared here."))
                             .with_annotation(Annotation::secondary(previous).with_message("Declared first here.")),
                     );
+                } else if context.program.dialect.is_sharp() {
+                    // Spec section 22: a class has one method per name, so PHP# has no overloading by argument types.
+                    context.report(
+                        Issue::error(format!(
+                            "`{method_display}` is declared twice: a class has one method per name, with no overloading by argument types."
+                        ))
+                        .with_annotation(Annotation::primary(name_span).with_message("Declared again here."))
+                        .with_annotation(Annotation::secondary(previous).with_message("Declared first here."))
+                        .with_help(
+                            "Give each a name that says what it takes, as in `grantUserAccess` and `grantTenantAccess`.",
+                        ),
+                    );
                 } else {
                     context.report(
                         Issue::error(format!("{class_like_kind} method `{method_display}` has already been defined"))
