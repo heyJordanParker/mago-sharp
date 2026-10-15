@@ -185,6 +185,7 @@ enum NodeKind: string
     case ObjectInitializer = 'ObjectInitializer';
     case NamedValue = 'NamedValue';
     case GenericClass = 'GenericClass';
+    case SuperOf = 'SuperOf';
     case LiteralFloat = 'LiteralFloat';
     case LiteralInteger = 'LiteralInteger';
     case LiteralString = 'LiteralString';

@@ -221,8 +221,10 @@ where
     }
 
     // A PHP# method is closed unless it is `virtual`, abstract or an `override`, spec section 22, so the analyzer
-    // reads it as final. The engine still runs it as an open PHP method.
+    // reads it as final. The engine still runs it as an open PHP method. An interface method is open, and its default
+    // body is a body each class may replace.
     if context.program.dialect.is_sharp()
+        && !class_like_metadata.kind.is_interface()
         && !method_metadata.is_abstract
         && !method_metadata.is_constructor
         && method_metadata.visibility != Visibility::Private

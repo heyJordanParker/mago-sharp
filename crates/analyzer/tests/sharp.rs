@@ -1336,13 +1336,13 @@ fn a_header_names_the_base_class_and_the_interfaces_as_in_php() {
     assert_eq!(issues(("src/Demo/Page.sharp", sharp), &others), Vec::<String>::new());
 }
 
-/// A header with two classes, a trait, a missing name, a final class, an enum or an interface whose method the class
-/// lacks reports what its PHP twin's `extends` and `implements` report.
+/// A header with two classes, a missing name, a final class, an enum or an interface whose method the class lacks
+/// reports what its PHP twin's `extends` and `implements` report.
 #[test]
 fn a_header_reports_what_extends_and_implements_report_in_php() {
-    let library = "<?php\n\nnamespace Lib;\n\ninterface Named\n{\n    public function name(): string;\n}\n\nclass Entity\n{\n}\n\nclass Other\n{\n}\n\ntrait Mixin\n{\n}\n\nfinal class Sealed\n{\n}\n\nenum Suit\n{\n    case Hearts;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Entity;\nimport Lib.Mixin;\nimport Lib.Named;\nimport Lib.Other;\nimport Lib.Sealed;\nimport Lib.Suit;\n\npublic class Twice : Entity, Other\n{\n}\n\npublic class Blend : Mixin\n{\n}\n\npublic class Lost : Missing\n{\n}\n\npublic class Closed : Sealed\n{\n}\n\npublic class Suited : Suit\n{\n}\n\npublic class Partial : Named\n{\n}\n\npublic interface Wide : Entity\n{\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Entity;\nuse Lib\\Mixin;\nuse Lib\\Named;\nuse Lib\\Other;\nuse Lib\\Sealed;\nuse Lib\\Suit;\n\nclass Twice extends Entity implements Other\n{\n}\n\nclass Blend implements Mixin\n{\n}\n\nclass Lost implements Missing\n{\n}\n\nclass Closed extends Sealed\n{\n}\n\nclass Suited implements Suit\n{\n}\n\nclass Partial implements Named\n{\n}\n\ninterface Wide extends Entity\n{\n}\n";
+    let library = "<?php\n\nnamespace Lib;\n\ninterface Named\n{\n    public function name(): string;\n}\n\nclass Entity\n{\n}\n\nclass Other\n{\n}\n\nfinal class Sealed\n{\n}\n\nenum Suit\n{\n    case Hearts;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Entity;\nimport Lib.Named;\nimport Lib.Other;\nimport Lib.Sealed;\nimport Lib.Suit;\n\npublic class Twice : Entity, Other\n{\n}\n\npublic class Lost : Missing\n{\n}\n\npublic class Closed : Sealed\n{\n}\n\npublic class Suited : Suit\n{\n}\n\npublic class Partial : Named\n{\n}\n\npublic interface Wide : Entity\n{\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Entity;\nuse Lib\\Named;\nuse Lib\\Other;\nuse Lib\\Sealed;\nuse Lib\\Suit;\n\nclass Twice extends Entity implements Other\n{\n}\n\nclass Lost implements Missing\n{\n}\n\nclass Closed extends Sealed\n{\n}\n\nclass Suited implements Suit\n{\n}\n\nclass Partial implements Named\n{\n}\n\ninterface Wide extends Entity\n{\n}\n";
     let others = [("src/Lib/Named.php", library)];
 
     let sharp_issues = issues(("src/Demo/Twice.sharp", sharp), &others);
@@ -1352,7 +1352,6 @@ fn a_header_reports_what_extends_and_implements_report_in_php() {
         codes(&php_issues),
         [
             "invalid-implement",
-            "invalid-implement",
             "non-existent-class-like",
             "extend-final-class",
             "invalid-implement",
@@ -1361,6 +1360,297 @@ fn a_header_reports_what_extends_and_implements_report_in_php() {
         ]
     );
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
+}
+
+/// Plain PHP traits for spec section 22's header: one with a field and a method, one whose method collides with it,
+/// one that asks for an abstract method of another arity, and one that asks for a method a class must give.
+const HAS_LABEL: &str = "<?php\n\nnamespace Lib;\n\ntrait HasLabel\n{\n    public string $name = 'order';\n\n    public function describe(): string\n    {\n        return 'labeled ' . $this->name;\n    }\n}\n\ntrait HasTitle\n{\n    public function describe(): string\n    {\n        return 'titled';\n    }\n}\n\ntrait Measured\n{\n    abstract public function describe(int $width): string;\n}\n\ntrait Priced\n{\n    abstract public function price(): int;\n}\n";
+
+/// A header names a plain PHP trait, and the class uses it as `use HasLabel;` does, spec section 22: it calls the
+/// trait's method and reads its field through `this.`, and passes itself where the trait is the type, as a parameter
+/// and as a `List<HasLabel>` element. Its subclass does the same, and plain PHP's `instanceof HasLabel` holds for both.
+#[test]
+fn a_header_trait_gives_the_class_its_members_and_its_type_as_use_does_in_php() {
+    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\n\npublic class Order : HasLabel\n{\n    public string title()\n    {\n        return this.describe() + this.name + Order.show(this);\n    }\n\n    public static string show(HasLabel labeled)\n    {\n        return labeled.describe();\n    }\n}\n\npublic class RushOrder : Order\n{\n    public string rushed()\n    {\n        return this.describe() + this.name + Order.show(this);\n    }\n\n    public int counted()\n    {\n        List<HasLabel> all = [this];\n        return all.count();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\HasLabel;\n\nclass Order\n{\n    use HasLabel;\n\n    public function title(): string\n    {\n        return $this->describe() . $this->name . Order::show($this);\n    }\n\n    public static function show(HasLabel $labeled): string\n    {\n        return $labeled->describe();\n    }\n}\n\nclass RushOrder extends Order\n{\n    public function rushed(): string\n    {\n        return $this->describe() . $this->name . Order::show($this);\n    }\n\n    public function counted(): int\n    {\n        $all = [$this];\n        return count($all);\n    }\n}\n";
+    let caller = "<?php\n\nnamespace App;\n\nuse Demo\\Order;\nuse Demo\\RushOrder;\nuse Lib\\HasLabel;\n\nfunction label(Order $order, RushOrder $rush, object $any): string\n{\n    if ($any instanceof HasLabel) {\n        return $any->describe();\n    }\n\n    return $order instanceof HasLabel && $rush instanceof HasLabel ? 'both' : 'none';\n}\n";
+    let library = ("src/Lib/HasLabel.php", HAS_LABEL);
+
+    assert_eq!(issues(("src/Demo/Order.php", php), &[library]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Order.sharp", sharp), &[library]), Vec::<String>::new());
+    assert_eq!(
+        issues(("src/App/label.php", caller), &[library, ("src/Demo/Order.sharp", sharp)]),
+        issues(("src/App/label.php", caller), &[library, ("src/Demo/Order.php", php)]),
+    );
+}
+
+/// A header trait may stand alone or come before the base class, an enum's header may name a trait without fields, as
+/// an enum's `use` does, and a struct's and an event's headers name one too: a trait works everywhere an interface
+/// does, spec section 22.
+#[test]
+fn a_header_trait_stands_anywhere_in_a_class_header_and_in_an_enum_header() {
+    let sharp = "namespace Demo;\n\nimport Lib.Entity;\nimport Lib.HasLabel;\nimport Lib.HasTitle;\n\npublic class Alone : HasTitle\n{\n}\n\npublic class First : HasTitle, Entity\n{\n    public string shown() => this.describe() + this.kind();\n}\n\npublic enum Kind : HasTitle\n{\n    case One;\n\n    public string shown() => this.describe();\n}\n\npublic struct Stamp : HasLabel\n{\n    public Stamp(public int at { get; }) { }\n\n    public string shown() => this.describe();\n}\n\npublic event Copied(int id) : HasTitle;\n";
+    let library = "<?php\n\nnamespace Lib;\n\nclass Entity\n{\n    public function kind(): string\n    {\n        return 'entity';\n    }\n}\n";
+
+    assert_eq!(
+        issues(
+            ("src/Demo/Alone.sharp", sharp),
+            &[("src/Lib/HasLabel.php", HAS_LABEL), ("src/Lib/Entity.php", library)]
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// Spec section 22: a generic plain PHP trait takes its type arguments in a header, as `@use HasFactory<OrderFactory>`
+/// gives them, and its methods return them.
+#[test]
+fn a_generic_header_trait_takes_its_type_arguments() {
+    let library = "<?php\n\nnamespace Lib;\n\nabstract class Model {}\n\nclass Factory {}\n\nclass OrderFactory extends Factory {}\n\n/**\n * @template TFactory of Factory\n */\ntrait HasFactory\n{\n    /** @return TFactory */\n    public static function factory()\n    {\n        throw new \\LogicException('stub');\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.HasFactory;\nimport Lib.Model;\nimport Lib.OrderFactory;\n\npublic class Order : Model, HasFactory<OrderFactory>\n{\n    public static OrderFactory make() => Order.factory();\n}\n";
+
+    assert_eq!(messages(("src/Demo/Order.sharp", sharp), &[("src/Lib/HasFactory.php", library)]), Vec::<String>::new());
+}
+
+/// A header trait's abstract method the class leaves out, one whose arity differs from another trait's, and a trait
+/// field the class declares again with another type, as a field or a computed property, each report what the PHP
+/// twin's `use` reports.
+#[test]
+fn a_header_trait_reports_what_use_reports_in_php() {
+    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\nimport Lib.Measured;\nimport Lib.Priced;\n\npublic class Narrow : HasLabel, Measured\n{\n}\n\npublic class Clash : HasLabel\n{\n    private int name = 1;\n}\n\npublic class Unpriced : Priced\n{\n}\n\npublic class Computed : HasLabel\n{\n    public int name => 1;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\HasLabel;\nuse Lib\\Measured;\nuse Lib\\Priced;\n\nclass Narrow\n{\n    use HasLabel, Measured;\n}\n\nclass Clash\n{\n    use HasLabel;\n\n    private int $name = 1;\n}\n\nclass Unpriced\n{\n    use Priced;\n}\n\nclass Computed\n{\n    use HasLabel;\n\n    public int $name { get => 1; }\n}\n";
+    let others = [("src/Lib/HasLabel.php", HAS_LABEL)];
+
+    let sharp_issues = issues(("src/Demo/Narrow.sharp", sharp), &others);
+    let php_issues = issues(("src/Demo/Narrow.php", php), &others);
+
+    assert!(!php_issues.is_empty());
+    assert_eq!(codes(&sharp_issues), codes(&php_issues), "{sharp_issues:?} {php_issues:?}");
+    assert!(sharp_issues.contains(&"22:5 incompatible-property-override".to_owned()), "{sharp_issues:?}");
+}
+
+/// Spec section 22: an interface's default body sees only the interface's own members, a PHP# class that implements
+/// the interface gets the body, and a plain PHP class gets it only by using the trait `<Interface>\Defaults`. Without
+/// the trait, the plain PHP class leaves each method abstract, as PHP finds it.
+#[test]
+fn a_default_body_sees_only_its_interface_and_a_plain_php_class_gets_it_through_the_defaults_trait() {
+    let sharp = "namespace App;\n\npublic interface HasDesign\n{\n    string designColumn { get; }\n    string designKey() => `design:${this.designColumn}`;\n    string designId() => `design:${this.id}`;\n}\n\npublic class Page : HasDesign\n{\n    public int id => 7;\n    public string designColumn => \"design\";\n    public string shown() => this.designKey();\n}\n";
+    let php = "<?php\n\nnamespace Legacy;\n\nuse App\\HasDesign;\n\nclass LegacyPage implements HasDesign\n{\n    use HasDesign\\Defaults;\n\n    public string $designColumn = 'design';\n}\n\nclass Bare implements HasDesign\n{\n    public string $designColumn = 'design';\n}\n";
+
+    assert_eq!(issues(("src/App/HasDesign.sharp", sharp), &[]), ["7:41 non-existent-property", "7:34 invalid-operand"]);
+    assert_eq!(
+        issues(("src/Legacy/LegacyPage.php", php), &[("src/App/HasDesign.sharp", sharp)]),
+        ["14:7 unimplemented-abstract-method", "14:7 unimplemented-abstract-method"]
+    );
+}
+
+/// Spec section 22: a generic interface's default bodies read the type arguments each class gives the interface, in its
+/// header or through an interface that extends it, as a class's own methods do.
+#[test]
+fn a_generic_interface_gives_each_class_its_default_bodies_with_its_type_arguments() {
+    let sharp = "namespace Demo;\n\npublic interface Keyed<TKey>\n{\n    TKey key();\n\n    List<TKey> keys() => [this.key()];\n\n    TKey first() => this.keys()[0];\n}\n\npublic interface Named<TName> : Keyed<TName>\n{\n}\n\npublic class Order : Keyed<int>\n{\n    public int key() => 7;\n}\n\npublic class Tag : Named<string>\n{\n    public string key() => \"seven\";\n}\n\npublic static class Uses\n{\n    public static List<int> orderKeys() => new Order().keys();\n\n    public static string tagFirst() => new Tag().first();\n\n    public static string wrong() => new Order().first();\n}\n";
+
+    assert_eq!(issues(("src/Demo/Keyed.sharp", sharp), &[]), ["32:37 invalid-return-statement"]);
+
+    // A default body reads the interface's type parameters while the code runs, as the class gives them.
+    let reads = "namespace Demo;\n\npublic class Box<TValue>\n{\n    public TValue? value = null;\n}\n\npublic interface Held<TItem>\n{\n    bool holds(Any value) => value is TItem;\n\n    Box<TItem> boxed() => new Box<TItem>();\n}\n";
+    assert_eq!(messages(("src/Demo/Held.sharp", reads), &[]), Vec::<String>::new());
+}
+
+/// Spec section 22: a PHP# enum implements a plain PHP interface that extends `BackedEnum`. The engine writes the
+/// enum's `from` and `tryFrom`, which take `int|string` as PHP's own do, so neither is checked against `BackedEnum`'s.
+#[test]
+fn a_backed_enum_implements_a_plain_php_interface_that_extends_backed_enum() {
+    let library = "<?php\n\nnamespace Lib;\n\ninterface Aligned extends \\BackedEnum\n{\n    public function label(): string;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Aligned;\n\npublic enum Align : string, Aligned\n{\n    case Left = \"left\";\n    case Right = \"right\";\n\n    public string label() => \"align\";\n}\n\npublic enum Level : int, Aligned\n{\n    case Low = 1;\n\n    public string label() => \"level\";\n}\n";
+
+    assert_eq!(issues(("src/Demo/Align.sharp", sharp), &[("src/Lib/Aligned.php", library)]), Vec::<String>::new());
+}
+
+/// Spec section 22: implementing an abstract interface method takes no `override`, as the spec's `Page` implements
+/// `HasDesign`, and replacing a default body or a header trait's method replaces a method, so it takes `override`, as
+/// replacing a computed property's default body does.
+#[test]
+fn override_replaces_a_default_body_or_a_trait_method_and_never_marks_an_implementation() {
+    let sharp = "namespace Demo;\n\nimport Lib.HasTitle;\n\npublic interface Labeled\n{\n    string label();\n    string shout() => \"hey\";\n}\n\npublic class Implementer : Labeled\n{\n    public override string label() => \"x\";\n}\n\npublic class Replacer : Labeled\n{\n    public string label() => \"x\";\n    public string shout() => \"mine\";\n}\n\npublic class Fine : Labeled\n{\n    public string label() => \"x\";\n    public override string shout() => \"mine\";\n}\n\npublic class TraitReplacer : HasTitle\n{\n    public string describe() => \"mine\";\n}\n\npublic class TraitOverrider : HasTitle\n{\n    public override string describe() => \"mine\";\n}\n\npublic interface Tagged\n{\n    string tag => \"t\";\n}\n\npublic class TagReplacer : Tagged\n{\n    public string tag => \"mine\";\n}\n\npublic class TagOverrider : Tagged\n{\n    public override string tag => \"mine\";\n}\n";
+    let others = [("src/Lib/HasLabel.php", HAS_LABEL)];
+
+    assert_eq!(
+        issues(("src/Demo/Labeled.sharp", sharp), &others),
+        [
+            "13:12 invalid-override-attribute",
+            "19:19 missing-override-attribute",
+            "30:19 missing-override-attribute",
+            "45:19 missing-override-attribute"
+        ]
+    );
+    assert_eq!(
+        messages(("src/Demo/Labeled.sharp", sharp), &others)[0],
+        "`Implementer.label` implements `Labeled.label`, which takes no `override`."
+    );
+}
+
+/// `super.m()` calls the parent's body, spec section 22, so a parent's abstract method, PHP# or plain PHP, has none to
+/// call, and PHP would throw `Error` at runtime.
+#[test]
+fn super_of_an_abstract_method_is_an_error() {
+    let sharp = "namespace Demo;\n\nimport Lib.Report;\n\npublic abstract class Shape\n{\n    public abstract string draw();\n    public virtual string name() => \"shape\";\n}\n\npublic class Square : Shape\n{\n    public override string draw() => super.draw();\n    public override string name() => super.name();\n}\n\npublic class Sales : Report\n{\n    protected override string render() => super.render();\n}\n";
+    let library =
+        "<?php\n\nnamespace Lib;\n\nabstract class Report\n{\n    abstract protected function render(): string;\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Shape.sharp", sharp), &[("src/Lib/Report.php", library)]),
+        [
+            "`Shape.draw` is abstract, so `super.draw()` has no body to run.",
+            "`Report.render` is abstract, so `super.render()` has no body to run.",
+        ]
+    );
+}
+
+/// Replacing a closed PHP# method names `virtual`, which the parent leaves out, not `final`, which nobody wrote, and a
+/// header with two classes says so, spec section 22.
+#[test]
+fn a_closed_method_and_a_header_with_two_classes_speak_sharp() {
+    let sharp = "namespace Demo;\n\nimport Lib.Other;\n\npublic class Base\n{\n    public string save() => \"saved\";\n}\n\npublic class Child : Base\n{\n    public override string save() => \"child\";\n}\n\npublic class Quiet : Base\n{\n    public string save() => \"quiet\";\n}\n\npublic class Twice : Base, Other\n{\n}\n";
+    let library = "<?php\n\nnamespace Lib;\n\nclass Other\n{\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Base.sharp", sharp), &[("src/Lib/Other.php", library)]),
+        [
+            "`Base.save` is not `virtual`, so no subclass replaces it.",
+            "`Base.save` is not `virtual`, so no subclass replaces it.",
+            "`Twice` names two base classes, `Base` and `Other`.",
+        ]
+    );
+}
+
+/// Spec section 22 gives a class one method per name: when two places give the class a body for one method, two
+/// header traits, two interfaces' default bodies, or a default body beside the base class's method, the class writes
+/// the method itself. Until it does, the class is an error that names both places. A computed property two interfaces
+/// give a default body, or one interface beside the base class's property, is one too.
+#[test]
+fn a_class_that_gets_one_method_from_two_places_writes_it() {
+    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\nimport Lib.HasTitle;\n\npublic class Twice : HasLabel, HasTitle\n{\n}\n\npublic interface Described\n{\n    string describe() => \"described\";\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n}\n\npublic class Base\n{\n    public virtual string describe() => \"base\";\n}\n\npublic class Beside : Base, Described\n{\n}\n\npublic class Written : Described, Told\n{\n    public override string describe() => \"written\";\n}\n\npublic class WrittenOverBase : Base, Described\n{\n    public override string describe() => super.describe();\n}\n\npublic interface Tagged\n{\n    string tag => \"t\";\n}\n\npublic interface Labelled\n{\n    string tag => \"l\";\n}\n\npublic class Tags : Tagged, Labelled\n{\n}\n\npublic class TagBase\n{\n    public string tag => \"base\";\n}\n\npublic class TagBeside : TagBase, Tagged\n{\n}\n";
+    let others = [("src/Lib/HasLabel.php", HAS_LABEL)];
+
+    assert_eq!(
+        issues(("src/Demo/Twice.sharp", sharp), &others),
+        [
+            "6:14 ambiguous-inherited-member",
+            "20:14 ambiguous-inherited-member",
+            "29:14 ambiguous-inherited-member",
+            "53:14 ambiguous-inherited-member",
+            "62:14 ambiguous-inherited-member"
+        ]
+    );
+    assert_eq!(
+        messages(("src/Demo/Twice.sharp", sharp), &others),
+        [
+            "`Twice` gets `describe` from both `HasLabel` and `HasTitle`: write `describe` in `Twice`.",
+            "`Both` gets `describe` from both `Described` and `Told`: write `describe` in `Both`.",
+            "`Beside` gets `describe` from both `Base` and `Described`: write `describe` in `Beside`.",
+            "`Tags` gets `tag` from both `Labelled` and `Tagged`: write `tag` in `Tags`.",
+            "`TagBeside` gets `tag` from both `TagBase` and `Tagged`: write `tag` in `TagBeside`.",
+        ]
+    );
+
+    // A header trait replaces the base class's method, as PHP's `use` does, and Laravel's `SoftDeletes` and
+    // `HasUniqueStringIds` replace `Model`'s. A header trait's property beside a default body is two places.
+    let library = "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public function forceDelete() { return 'model force'; }\n    protected function performDeleteOnModel() { return 'model delete'; }\n    public function getKeyType() { return 'int'; }\n    public function getIncrementing() { return true; }\n}\n\ntrait SoftDeletes\n{\n    public function forceDelete() { return 'soft force'; }\n    protected function performDeleteOnModel() { return 'soft delete'; }\n}\n\ntrait HasUniqueStringIds\n{\n    public function getKeyType() { return 'string'; }\n    public function getIncrementing() { return false; }\n}\n\ntrait HasTag\n{\n    public string $tag = 'trait tag';\n}\n";
+    let laravel = "namespace Demo;\n\nimport Lib.HasTag;\nimport Lib.HasUniqueStringIds;\nimport Lib.Model;\nimport Lib.SoftDeletes;\n\npublic class Post : Model, SoftDeletes, HasUniqueStringIds\n{\n}\n\npublic interface Labelled\n{\n    string tag => \"interface tag\";\n}\n\npublic class TagClash : HasTag, Labelled\n{\n}\n";
+    let library = [("src/Lib/Model.php", library)];
+
+    assert_eq!(
+        messages(("src/Demo/Post.sharp", laravel), &library),
+        ["`TagClash` gets `tag` from both `Labelled` and `HasTag`: write `tag` in `TagClash`."]
+    );
+}
+
+/// Spec section 22: a sub-interface replaces its parent's default body with `override`, as a class replaces a method,
+/// and the most specific interface's body wins, as in Java, C# and Kotlin. Giving an abstract parent method a body takes
+/// no `override`.
+#[test]
+fn a_sub_interface_replaces_its_parents_default_body_with_override() {
+    let sharp = "namespace Demo;\n\npublic interface Shows\n{\n    string label() => \"shows\";\n}\n\npublic interface ShowsMore : Shows\n{\n    override string label() => \"more\";\n}\n\npublic interface ShowsLess : Shows\n{\n    string label() => \"less\";\n}\n\npublic interface Named\n{\n    string name();\n}\n\npublic interface DefaultNamed : Named\n{\n    string name() => \"default\";\n}\n\npublic class Fancy : ShowsMore\n{\n    public string again() => super<Shows>.label() + super<ShowsMore>.label();\n}\n\npublic class Listed : ShowsMore, Shows\n{\n}\n\npublic class Person : DefaultNamed\n{\n}\n\npublic static class Uses\n{\n    public static string fancy() => new Fancy().label();\n}\n";
+
+    assert_eq!(issues(("src/Demo/Shows.sharp", sharp), &[]), ["15:12 missing-override-attribute"]);
+}
+
+/// Spec section 22: PHP# code never names an interface's trait of default bodies, so an import, a header and a test
+/// that name `Greets.Defaults` are each an error.
+#[test]
+fn sharp_code_never_names_the_trait_of_default_bodies() {
+    let sharp = "namespace Probe;\n\nimport Probe.Greets.Defaults;\n\npublic interface Greets\n{\n    string greet() => \"hello\";\n}\n\npublic class Sneaky : Defaults\n{\n    public static bool marked(Any value) => value is Defaults;\n}\n";
+
+    assert_eq!(
+        issues(("src/Probe/Greets.sharp", sharp), &[]),
+        ["3:8 invalid-trait-use", "10:23 invalid-trait-use", "12:54 invalid-trait-use"]
+    );
+    assert_eq!(
+        messages(("src/Probe/Greets.sharp", sharp), &[])[0],
+        "`Greets.Defaults` holds the default bodies of `Greets`, which PHP# code never names: implement `Greets`."
+    );
+}
+
+/// Spec sections 20 and 22: an enum has no property, as PHP gives an enum none, so it implements no interface that
+/// gives a computed property a default body, and an interface's default methods are its methods.
+#[test]
+fn an_enum_gets_no_computed_property_from_a_default_body() {
+    let sharp = "namespace Demo;\n\npublic interface Tagged\n{\n    string tag => \"t\";\n\n    string label() => \"l\";\n}\n\npublic enum Mood : Tagged\n{\n    case Calm;\n}\n\npublic enum Verdict : Tagged\n{\n    case Pending;\n    case Ruled(string by);\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Tagged.sharp", sharp), &[]),
+        [
+            "Enum `Mood` cannot have properties, and `Tagged` gives it the computed property `tag`.",
+            "Enum `Verdict` cannot have properties, and `Tagged` gives it the computed property `tag`.",
+        ]
+    );
+}
+
+/// Spec section 22: `super.name()` and `super<Told>.describe()` run a method on `this`, so a static method, which has
+/// no `this`, calls neither, and a static `super.make()` still runs the base class's static method.
+#[test]
+fn a_static_method_calls_no_instance_method_through_super() {
+    let sharp = "namespace Demo;\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Ancestor\n{\n    public virtual string name() => \"parent\";\n\n    public static string make() => \"made\";\n}\n\npublic class Heir : Ancestor, Told\n{\n    public static string again() => super.name();\n\n    public static string told() => super<Told>.describe();\n\n    public static string remake() => super.make();\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Heir.sharp", sharp), &[]),
+        [
+            "`Ancestor.name` runs on `this`, and a static method has no `this`.",
+            "`Told.describe` runs on `this`, and a static method has no `this`.",
+        ]
+    );
+}
+
+/// Spec section 22: inside its own methods, a class reuses one interface's default body with `super<HasLabel>`. It is
+/// an error when the class does not implement the interface, when the interface gives the method no default body, and
+/// outside a class. A subclass of a PHP# class that implements the interface reuses it too, and a subclass of a plain
+/// PHP one can't, since only a PHP# class keeps each default body under a name its subclasses call. `super<Told>` as a
+/// value is the semantics checker's error, and the analysis adds none.
+#[test]
+fn super_of_an_interface_reuses_its_default_body_in_a_class_that_implements_it() {
+    let library =
+        "<?php\n\nnamespace Lib;\n\nclass Legacy implements \\Demo\\Told\n{\n    use \\Demo\\Told\\Defaults;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Legacy;\n\npublic interface Described\n{\n    string describe() => \"described\";\n    string title();\n    string shout() => super<Told>.describe();\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n    public override string describe() => super<Described>.describe() + super<Told>.describe();\n    public string title() => super<Described>.title();\n}\n\npublic class Stranger\n{\n    public string describe() => super<Told>.describe();\n}\n\npublic class Base : Told\n{\n}\n\npublic class Child : Base\n{\n    public string again() => super<Told>.describe();\n}\n\npublic class Heir : Legacy\n{\n    public string again() => super<Told>.describe();\n}\n\npublic class Holder : Told\n{\n    public Any? held() => super<Told>;\n}\n";
+    let others = [("src/Lib/Legacy.php", library)];
+
+    assert_eq!(
+        messages(("src/Demo/Described.sharp", sharp), &others),
+        [
+            "`super<Told>` reuses a default body only in the methods of a class that implements `Told`.",
+            "`Described.title` has no default body, so `super<Described>.title()` has nothing to run.",
+            "`Stranger` does not implement `Told`, so `super<Told>` has no default body to reuse.",
+            "`super<Told>` reuses a default body a PHP# class keeps, and `Legacy`, which implements `Told`, is plain PHP.",
+        ]
+    );
+    assert_eq!(
+        issues(("src/Demo/Described.sharp", sharp), &others),
+        [
+            "9:23 parent-outside-class-scope",
+            "20:30 abstract-super-call",
+            "25:33 invalid-parent-type",
+            "39:30 invalid-parent-type",
+        ]
+    );
 }
 
 /// A generic type in a header links its class by the name before its type arguments, so the class calls the base's
@@ -18097,7 +18387,7 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
     assert_eq!(
         worded(based, &ORDER_EVENTS),
         [
-            "7:30 invalid-event An event's header names interfaces only, and `Base` is not one. | Named here. | No event extends another: a family of events shares an interface."
+            "7:30 invalid-event An event's header names interfaces and traits only, and `Base` is neither. | Named here. | No event extends another: a family of events shares an interface."
         ]
     );
     assert_eq!(messages(twice, &ORDER_EVENTS), ["Event `Moved` is already defined elsewhere."]);

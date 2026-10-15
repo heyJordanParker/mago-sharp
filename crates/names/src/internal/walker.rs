@@ -78,6 +78,7 @@ use mago_syntax::cst::StaticMethodCall;
 use mago_syntax::cst::StaticMethodPartialApplication;
 use mago_syntax::cst::StaticPropertyAccess;
 use mago_syntax::cst::Struct;
+use mago_syntax::cst::SuperOf;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUse;
 use mago_syntax::cst::TryCatchClause;
@@ -1344,6 +1345,11 @@ where
 
         self.resolved_names.insert_at(interface.name.span, classlike, false);
         self.enter_type_parameters(interface.type_parameters.as_ref());
+
+        // A default body, spec section 22, writes the interface's members with `this.`, as a class method does.
+        if self.sharp {
+            self.class_members.push(class_member_names(&interface.members));
+        }
     }
 
     fn walk_out_interface(
@@ -1351,6 +1357,9 @@ where
         _interface: &'ast Interface<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
+        if self.sharp {
+            self.class_members.pop();
+        }
         self.exit_type_parameters();
     }
 
@@ -1515,6 +1524,12 @@ where
             self.resolved_names.report_binding_error(BindingError::LocalAsType { name: span, local });
             self.resolved_names.bind(span, Binding::Local(local));
         }
+    }
+
+    fn walk_in_super_of(&mut self, super_of: &'ast SuperOf<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let (name, imported) = self.resolve_class(context, super_of.interface.value());
+
+        self.resolved_names.insert_at(super_of.interface.span(), name, imported);
     }
 
     fn walk_in_name_of(&mut self, name_of: &'ast NameOf<'arena>, context: &mut NameResolutionContext<'arena, A>) {

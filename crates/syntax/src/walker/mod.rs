@@ -236,6 +236,7 @@ use crate::cst::cst::StaticMethodPartialApplication;
 use crate::cst::cst::StaticPropertyAccess;
 use crate::cst::cst::StringPart;
 use crate::cst::cst::Struct;
+use crate::cst::cst::SuperOf;
 use crate::cst::cst::Switch;
 use crate::cst::cst::SwitchBody;
 use crate::cst::cst::SwitchBraceDelimitedBody;
@@ -2120,6 +2121,7 @@ generate_ast_walker! {
             Expression::NameOf(name_of) => walker.walk_name_of(name_of, context),
             Expression::With(with) => walker.walk_with(with, context),
             Expression::GenericClass(generic_class) => walker.walk_generic_class(generic_class, context),
+            Expression::SuperOf(super_of) => walker.walk_super_of(super_of, context),
             Expression::Error(_) => {
                 // Nothing to walk for error expressions
             }
@@ -3009,6 +3011,11 @@ generate_ast_walker! {
     'arena GenericClass as generic_class => {
         walker.walk_expression(generic_class.class, context);
         walker.walk_type_argument_list(&generic_class.type_arguments, context);
+    }
+
+    'arena SuperOf as super_of => {
+        walker.walk_keyword(&super_of.super_, context);
+        walker.walk_identifier(&super_of.interface, context);
     }
 
     'arena NameOf as name_of => {

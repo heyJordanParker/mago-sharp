@@ -282,7 +282,12 @@ fn a_bare_member_in_a_law_is_written_through_the_class_name() {
 fn a_law_and_a_method_named_alike_are_a_duplicate_member() {
     let code = "namespace App.Shared;\n\npublic class Money\n{\n    public bool positive(int a) => a > 0;\n\n    law positive(int a) => a > 0 || a <= 0;\n}\n";
 
-    assert_eq!(issues(code), ["7:9 class method `Money.positive` has already been defined"]);
+    assert_eq!(
+        issues(code),
+        [
+            "7:9 `Money.positive` is declared twice: a class has one method per name, with no overloading by argument types."
+        ]
+    );
 }
 
 #[test]
@@ -1086,6 +1091,46 @@ fn an_interface_declares_methods_without_an_access_modifier_or_a_body() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 22: an interface method gives a default body, as a block or an expression, and so does a computed
+/// property, which runs on each read and so takes no `static` or `lazy`. The body is checked as a class member's body
+/// is. A plain PHP interface method with a body is still PHP's error.
+#[test]
+fn an_interface_member_gives_a_default_body_checked_as_a_class_member_body() {
+    let code = "namespace App;\n\npublic interface HasDesign\n{\n    string designColumn { get; }\n    string designKey() => `design:${this.designColumn}`;\n    string designName()\n    {\n        return this.designColumn;\n    }\n    string designTag => `tag:${this.designColumn}`;\n}\n";
+    assert_eq!(issues(code), Vec::<String>::new());
+
+    let refused = "namespace App;\n\ninterface HasDesign\n{\n    string designColumn { get; }\n    string designKey()\n    {\n        return designColumn;\n    }\n    string designLabel() => $label;\n    string designTag => designColumn;\n    static string designKind => \"kind\";\n}\n";
+    assert_eq!(
+        issues(refused),
+        [
+            "8:16 Write `this.designColumn`: members of the same object are always written with `this.`.",
+            "10:29 PHP# variables have no `$`: write `label`.",
+            "11:25 Write `this.designColumn`: members of the same object are always written with `this.`.",
+            "12:5 An interface property takes no modifier but `override`: its default body runs on each read."
+        ]
+    );
+
+    let php = "<?php\n\ninterface HasDesign\n{\n    public function designKey(): string\n    {\n        return 'design';\n    }\n}\n";
+    assert_eq!(
+        issues_in("src/HasDesign.php", php),
+        [
+            "5:21 Interface method `HasDesign::designKey` cannot have a body.",
+            "6:5 Interface method `HasDesign::designKey` is implicitly abstract and cannot have a concrete body."
+        ]
+    );
+}
+
+/// Spec section 22: every field is declared in the class that owns it, so an interface holds none.
+#[test]
+fn an_interface_holds_no_fields() {
+    let code = "namespace App;\n\ninterface Counted\n{\n    private int count = 0;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["5:5 An interface holds no fields: the class that implements `Counted` declares `count`."]
+    );
+}
+
 #[test]
 fn a_class_or_an_interface_names_its_base_class_and_interfaces_after_a_colon() {
     let code = "namespace App.Tenant;\n\nimport Lib.Entity;\n\npublic interface Linkable : Named\n{\n    string link();\n}\n\npublic class Page : Entity, Linkable\n{\n    public string link()\n    {\n        return \"page\";\n    }\n}\n";
@@ -1107,7 +1152,16 @@ fn a_method_opens_with_virtual_and_replaces_with_override() {
 fn super_calls_the_parent_method() {
     let code = "namespace App.Tenant;\n\npublic class Thumbnail : Image\n{\n    public override int size()\n    {\n        let base = super.count;\n        return super.size() + base;\n    }\n}\n";
 
-    assert_eq!(issues(code), ["7:20 This expression is not supported yet in PHP#."]);
+    assert_eq!(issues(code), ["7:20 `super` only calls a method, as in `super.label()` or `super<HasLabel>.label()`."]);
+}
+
+/// Spec section 22: `super<HasLabel>.label()` calls one interface's default body. As `super`, `super<HasLabel>` is only
+/// the object of a call.
+#[test]
+fn super_of_an_interface_calls_its_default_body() {
+    let code = "namespace App;\n\npublic class Both : HasLabel, HasTitle\n{\n    public override string label()\n    {\n        let held = super<HasLabel>;\n        return super<HasLabel>.label() + super<HasTitle>.label();\n    }\n}\n";
+
+    assert_eq!(issues(code), ["7:20 `super` only calls a method, as in `super.label()` or `super<HasLabel>.label()`."]);
 }
 
 /// Spec section 9.1: the main constructor passes control to its base class with `: super(…)`, whose arguments are a
@@ -1122,7 +1176,7 @@ fn the_main_constructor_passes_control_with_super_and_its_arguments_cannot_use_t
             "10:28 The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`.",
             "15:35 `this` is not available before the constructor runs: pass a parameter instead.",
             "15:41 `this` is not available before the constructor runs: pass a parameter instead.",
-            "20:34 This expression is not supported yet in PHP#.",
+            "20:34 `super` only calls a method, as in `super.label()` or `super<HasLabel>.label()`.",
             "25:52 `this` is not available before the constructor runs: pass a parameter instead.",
             "25:88 `this` is not available before the constructor runs: pass a parameter instead.",
             "30:40 `this` is not available before the constructor runs: pass a parameter instead.",
@@ -1193,7 +1247,12 @@ fn a_named_constructor_shares_no_name_with_a_method() {
         issues(before),
         ["8:18 The named constructor `Order.copy` cannot share its name with the method `Order.Copy`."]
     );
-    assert_eq!(issues(law), ["8:18 class method `Order.copy` has already been defined"]);
+    assert_eq!(
+        issues(law),
+        [
+            "8:18 `Order.copy` is declared twice: a class has one method per name, with no overloading by argument types."
+        ]
+    );
 }
 
 /// Spec section 9.1: only a class has constructors, so an interface, an enum and a static class declare no named one.
@@ -1487,7 +1546,7 @@ fn a_type_an_interface_method_cannot_take_names_what_it_has() {
     assert_eq!(
         check("src/Report.sharp", code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
         [[
-            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body."
+            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body or a default body."
         ]]
     );
 }
@@ -1604,11 +1663,19 @@ fn an_internal_accessor_is_narrower_only_than_a_public_property() {
     assert_eq!(issues(code), [error(7, 27, "set"), error(8, 28, "set"), error(9, 27, "set"), error(10, 27, "set")]);
 }
 
+/// Spec section 22: an interface method is public and takes no modifier but `override`, which a sub-interface's body
+/// writes when it replaces its parent's default body, and which the analysis checks.
 #[test]
 fn another_modifier_on_an_interface_method_is_an_error() {
-    let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    static float unit();\n}\n";
+    let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    static float unit();\n    virtual float area();\n    override float size();\n}\n";
 
-    assert_eq!(issues(code), ["5:5 An interface method takes no modifier: every interface method is public."]);
+    assert_eq!(
+        issues(code),
+        [
+            "5:5 An interface method takes no modifier but `override`: every interface method is public.",
+            "6:5 An interface method takes no modifier but `override`: every interface method is public.",
+        ]
+    );
 }
 
 #[test]
@@ -1894,12 +1961,38 @@ fn int_float_and_bool_outside_the_sharp_namespace_are_reserved() {
     );
 }
 
+/// Spec section 22: a class has one method per name, so PHP# has no overloading by argument types. A second method of
+/// one name, whatever it takes or however its name is cased, is an error that says to name each by what it takes.
+#[test]
+fn a_class_has_one_method_per_name_and_no_overloading() {
+    let code = "namespace App.Tenant;\n\nclass Access\n{\n    public void grant(User user) { }\n\n    public void grant(Tenant tenant) { }\n\n    public void Grant() { }\n}\n";
+    let fixed = "namespace App.Tenant;\n\nclass Access\n{\n    public void grantUserAccess(User user) { }\n\n    public void grantTenantAccess(Tenant tenant) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:17 `Access.grant` is declared twice: a class has one method per name, with no overloading by argument types.",
+            "9:17 `Access.Grant` is declared twice: a class has one method per name, with no overloading by argument types.",
+        ]
+    );
+    assert_eq!(
+        check("src/Access.sharp", code).remove(0).help.as_deref(),
+        Some("Give each a name that says what it takes, as in `grantUserAccess` and `grantTenantAccess`.")
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
+}
+
 #[test]
 fn methods_whose_names_differ_only_in_case_are_an_error() {
     let code = "class Report\n{\n    public int run() { return 1; }\n\n    public int Run() { return 2; }\n}\n";
 
     // The PHP checks already reject this, so PHP# adds no second error.
-    assert_eq!(issues(code), ["5:16 class method `Report.Run` has already been defined"]);
+    assert_eq!(
+        issues(code),
+        [
+            "5:16 `Report.Run` is declared twice: a class has one method per name, with no overloading by argument types."
+        ]
+    );
 
     let php = "<?php\n\nclass Report\n{\n    public function run(): int { return 1; }\n\n    public function Run(): int { return 2; }\n}\n";
     assert_eq!(issues_in("src/Report.php", php), ["7:21 class method `Report::Run` has already been defined"]);
@@ -2623,11 +2716,25 @@ fn a_protected_or_private_class_reports_only_the_php_error() {
     );
 }
 
+/// Spec section 22: `final override` stops an override chain. A PHP# method is closed unless it is `virtual`, so every
+/// other modifier that can't change what a subclass may do is an error that says why.
 #[test]
-fn a_final_method_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nfinal class Report\n{\n    final public int run()\n    {\n        return 1;\n    }\n}\n\nabstract class Shape\n{\n    abstract public int area();\n}\n";
+fn final_marks_only_an_override_and_a_modifier_that_cant_matter_is_an_error() {
+    let code = "namespace App.Tenant;\n\npublic abstract class Middle : Root\n{\n    public final override string kind() => \"middle\";\n    public final string name() => \"middle\";\n    private virtual string secret() => \"middle\";\n    public virtual override string label() => \"middle\";\n    public abstract virtual string draw();\n    public static virtual string make() => \"middle\";\n    public virtual Middle() { }\n}\n\npublic final class Closed\n{\n    public virtual string open() => \"closed\";\n}\n\npublic final class Leaf : Middle\n{\n    public final override string label() => \"leaf\";\n}\n\npublic enum Shade\n{\n    case Light;\n    public virtual string label() => \"light\";\n}\n";
 
-    assert_eq!(issues(code), ["5:5 This modifier is not supported yet in PHP#."]);
+    assert_eq!(
+        issues(code),
+        [
+            "6:12 `final` marks only an override: a PHP# method is already closed unless it is `virtual`.",
+            "7:13 A `private` method is never replaced, so `virtual` can't matter.",
+            "8:12 An override is already open to the subclasses below it, so `virtual` can't matter.",
+            "9:21 An `abstract` method is already open to the subclasses below it, so `virtual` can't matter.",
+            "11:12 A constructor is never replaced, so `virtual` can't matter.",
+            "16:12 `Closed` is `final`, so no subclass replaces its methods, and `virtual` can't matter.",
+            "21:12 `Leaf` is `final`, so no subclass replaces its methods, and `final` can't matter.",
+            "27:12 `Shade` is an enum, so no subclass replaces its methods, and `virtual` can't matter."
+        ]
+    );
 }
 
 #[test]
@@ -3099,9 +3206,9 @@ fn two_members_of_one_static_class_cannot_share_a_name_across_its_extensions() {
     assert_eq!(
         issues(code),
         [
-            "13:20 class method `Sizes.size` has already been defined",
-            "14:21 class method `Sizes.blank` has already been defined",
-            "17:23 class method `Sizes.size` has already been defined",
+            "13:20 `Sizes.size` is declared twice: a class has one method per name, with no overloading by argument types.",
+            "14:21 `Sizes.blank` is declared twice: a class has one method per name, with no overloading by argument types.",
+            "17:23 `Sizes.size` is declared twice: a class has one method per name, with no overloading by argument types.",
         ]
     );
 }
@@ -4746,14 +4853,14 @@ fn a_spread_in_attribute_arguments_reports_only_the_php_error() {
 }
 
 #[test]
-fn implements_or_a_member_modifier_in_an_enum_is_not_supported_yet() {
+fn implements_in_an_enum_is_not_supported_yet_and_a_final_enum_method_is_an_error() {
     let code = "namespace App.Tenant;\n\nimport Lib.Shape;\n\nenum Status : string implements Shape\n{\n    case Active = \"a\";\n\n    final public string label()\n    {\n        return this.name;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "5:22 This `implements` clause is not supported yet in PHP#.",
-            "9:5 This modifier is not supported yet in PHP#.",
+            "9:5 `final` marks only an override: a PHP# method is already closed unless it is `virtual`.",
         ]
     );
 }
@@ -5689,7 +5796,7 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
         worded("src/Demo/Order.sharp", code),
         [
             "property `Order.count` has already been defined | property `Order.count` previously defined here. | class `Order` defined here.",
-            "class method `Order.total` has already been defined | previous definition | class `Order` defined here.",
+            "`Order.total` is declared twice: a class has one method per name, with no overloading by argument types. | Declared again here. | Declared first here.",
         ]
     );
     assert_eq!(
@@ -5697,7 +5804,9 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
             "src/Demo/Spot.sharp",
             "namespace Demo;\n\npublic struct Spot\n{\n    public int x() => 1;\n\n    public int x() => 2;\n}\n"
         ),
-        ["struct method `Spot.x` has already been defined | previous definition | struct `Spot` defined here."]
+        [
+            "`Spot.x` is declared twice: a class has one method per name, with no overloading by argument types. | Declared again here. | Declared first here."
+        ]
     );
 }
 

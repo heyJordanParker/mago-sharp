@@ -48,6 +48,7 @@ use crate::cst::cst::pipe::Pipe;
 use crate::cst::cst::r#return::Return;
 use crate::cst::cst::string::CompositeString;
 use crate::cst::cst::string::StringPart;
+use crate::cst::cst::super_of::SuperOf;
 use crate::cst::cst::throw::Throw;
 use crate::cst::cst::type_hint::Hint;
 use crate::cst::cst::type_of::TypeOf;
@@ -125,6 +126,7 @@ pub enum Expression<'arena> {
     NameOf(NameOf<'arena>),
     With(With<'arena>),
     GenericClass(GenericClass<'arena>),
+    SuperOf(SuperOf<'arena>),
     Error(Span),
 }
 
@@ -496,6 +498,7 @@ impl<'arena> Expression<'arena> {
             Expression::NameOf(_) => NodeKind::NameOf,
             Expression::With(_) => NodeKind::With,
             Expression::GenericClass(_) => NodeKind::GenericClass,
+            Expression::SuperOf(_) => NodeKind::SuperOf,
             Expression::Error(_) => NodeKind::Error,
         }
     }
@@ -561,6 +564,7 @@ impl HasSpan for Expression<'_> {
             Expression::NameOf(expression) => expression.span(),
             Expression::With(expression) => expression.span(),
             Expression::GenericClass(expression) => expression.span(),
+            Expression::SuperOf(expression) => expression.span(),
             Expression::Error(span) => *span,
         })
     }

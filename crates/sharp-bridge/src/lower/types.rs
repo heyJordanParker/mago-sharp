@@ -2,9 +2,11 @@ use mago_analyzer::CodebasePatternNames;
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::artifacts::CallTarget;
 use mago_analyzer::effects::Effects;
+use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleMetadata;
@@ -37,6 +39,7 @@ use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
 use mago_word::word;
@@ -76,6 +79,7 @@ pub struct Declaration {
 pub enum DeclarationKind {
     Class,
     Interface,
+    Trait,
     /// `backed` is whether each case has a backing value.
     Enum {
         backed: bool,
@@ -161,6 +165,8 @@ impl<'analysis> Types<'analysis> {
 
         let kind = if metadata.kind.is_interface() {
             DeclarationKind::Interface
+        } else if metadata.kind.is_trait() {
+            DeclarationKind::Trait
         } else if metadata.kind.is_enum() {
             DeclarationKind::Enum { backed: metadata.enum_type.is_some() }
         } else {
@@ -168,6 +174,114 @@ impl<'analysis> Types<'analysis> {
         };
 
         Declaration { kind, class: metadata.original_name, name: metadata.original_name, public: true }
+    }
+
+    /// The traits the fully qualified class-like name `class` uses itself, spec section 22: the traits its `header`
+    /// names, then the traits of default bodies [`CodebaseMetadata::get_defaults_traits`] gives it. A subclass does not
+    /// use its parent's traits again, as `ClassLikeMetadata::used_traits` lists them.
+    #[must_use]
+    pub fn used_traits(&self, class: &[u8], header: Option<&Inheritance>) -> Vec<Word> {
+        let mut traits: Vec<Word> = header
+            .into_iter()
+            .flat_map(Inheritance::names)
+            .filter_map(|name| self.codebase.get_trait(self.names.get(&name)))
+            .map(|header_trait| header_trait.original_name)
+            .collect();
+        let metadata = self.scanned(class);
+        traits.extend(self.codebase.get_defaults_traits(metadata).iter().map(|defaults| defaults.original_name));
+
+        traits
+    }
+
+    /// The metadata of the fully qualified class-like name `class`, which the bridge lowers.
+    fn scanned(&self, class: &[u8]) -> &'analysis ClassLikeMetadata {
+        let Some(metadata) = self.codebase.get_class_like(class) else {
+            unreachable!(
+                "the codex scans each class-like the bridge lowers, `{}` included",
+                String::from_utf8_lossy(class)
+            );
+        };
+
+        metadata
+    }
+
+    /// The computed properties with a default body, spec section 22, that the fully qualified class-like name `class`
+    /// gives itself: each one an interface whose trait [`CodebaseMetadata::get_defaults_traits`] gives it declares and
+    /// the class does not, by its name with `$` and its interface's full name.
+    #[must_use]
+    pub fn default_body_properties(&self, class: &[u8]) -> Vec<(Word, Word)> {
+        let metadata = self.scanned(class);
+        let interfaces = self.defaults_interfaces(metadata);
+        let mut properties = Vec::new();
+        for (_, interface) in &interfaces {
+            for (name, property) in &interface.properties {
+                if property.hooks.values().any(|accessor| !accessor.is_abstract)
+                    && metadata.declaring_property_ids.get(name) != Some(&metadata.name)
+                    && Self::replacing(&interfaces, interface, |other| {
+                        other.declaring_property_ids.get(name) == Some(&other.name)
+                    })
+                    .is_none()
+                {
+                    properties.push((*name, interface.original_name));
+                }
+            }
+        }
+
+        properties
+    }
+
+    /// The default bodies the fully qualified class-like name `class` uses itself, spec section 22: each method of the
+    /// traits [`CodebaseMetadata::get_defaults_traits`] gives it, with its trait, its interface's full name, and the
+    /// trait of a sub-interface whose body replaces it, in declaration order.
+    #[must_use]
+    pub fn default_bodies(&self, class: &[u8]) -> Vec<(Word, Word, Word, Option<Word>)> {
+        let metadata = self.scanned(class);
+        let interfaces = self.defaults_interfaces(metadata);
+
+        interfaces
+            .iter()
+            .flat_map(|(defaults, interface)| {
+                // A computed property's default body is already the protected `designKey@App\HasDesign`.
+                defaults.methods.iter().filter(|method| !method.as_bytes().contains(&b'@')).filter_map(|method| {
+                    let body = self.codebase.get_method(defaults.name.as_bytes(), method.as_bytes())?;
+                    let replacing = Self::replacing(&interfaces, interface, |other| {
+                        self.codebase
+                            .get_method(
+                                defaults_trait_name(other.original_name.as_bytes()).as_bytes(),
+                                method.as_bytes(),
+                            )
+                            .is_some()
+                    });
+
+                    Some((defaults.original_name, interface.original_name, body.original_name, replacing))
+                })
+            })
+            .collect()
+    }
+
+    /// The traits of default bodies `metadata` uses, each beside its interface.
+    fn defaults_interfaces(
+        &self,
+        metadata: &ClassLikeMetadata,
+    ) -> Vec<(&'analysis ClassLikeMetadata, &'analysis ClassLikeMetadata)> {
+        self.codebase
+            .get_defaults_traits(metadata)
+            .into_iter()
+            .filter_map(|defaults| Some((defaults, self.codebase.get_defaults_interface(defaults)?)))
+            .collect()
+    }
+
+    /// The trait of the sub-interface among `interfaces` whose own body, which `gives` tells, replaces `interface`'s
+    /// default body, as the most specific interface's does in Java, C# and Kotlin.
+    fn replacing(
+        interfaces: &[(&ClassLikeMetadata, &ClassLikeMetadata)],
+        interface: &ClassLikeMetadata,
+        gives: impl Fn(&ClassLikeMetadata) -> bool,
+    ) -> Option<Word> {
+        interfaces
+            .iter()
+            .find(|(_, other)| other.all_parent_interfaces.contains(&interface.name) && gives(other))
+            .map(|(defaults, _)| defaults.original_name)
     }
 
     /// The bounds of the fully qualified class name `class` when it is a PHP# generic class, whose objects carry their
@@ -600,7 +714,8 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// `r#type` as the type text an entry check tests a value from plain PHP against, when part of it is a PHP# class
-    /// with a type argument the check can test, or a class value of one, since PHP's own `string` type checks no class
+    /// with a type argument the check can test, a plain PHP trait, whose PHP type is `object`, or a class value of a
+    /// generic class, since PHP's own `string` type checks no class
     /// value, a type parameter of the class, or, with `collections`, a collection whose elements the check can test,
     /// since PHP's own `array` type checks none. None for a type only a plain PHP docblock writes, such as
     /// `array<array-key, int>`, since the engine reads the check as PHP#. None otherwise: plain PHP's generics are
@@ -615,6 +730,40 @@ impl<'analysis> Types<'analysis> {
                         if matches!(parameter.defining_entity, GenericParent::FunctionLike(_))
                 )
             })
+        };
+        // A plain PHP trait is PHP's `object`, spec section 22, alone or in an intersection, so the check tests that a
+        // class uses it.
+        let names_trait = |atomic: &TAtomic| {
+            let TAtomic::Object(TObject::Named(object)) = atomic else {
+                return false;
+            };
+
+            std::iter::once(atomic).chain(object.get_intersection_types().unwrap_or_default()).any(|part| {
+                matches!(part, TAtomic::Object(TObject::Named(part)) if self.codebase.get_trait(part.name.as_bytes()).is_some())
+            })
+        };
+        // A method's own type parameter matches any value from plain PHP, so one bounded by a trait checks its bound.
+        let bounded_by_trait = |atomic: &TAtomic| match atomic {
+            TAtomic::GenericParameter(parameter)
+                if matches!(parameter.defining_entity, GenericParent::FunctionLike(_))
+                    && parameter.constraint.types.iter().any(names_trait) =>
+            {
+                Some(parameter.constraint.types.to_vec())
+            }
+            _ => None,
+        };
+        let bounded;
+        let r#type = if r#type.types.iter().any(|atomic| bounded_by_trait(atomic).is_some()) {
+            bounded = TUnion::from_vec(
+                r#type
+                    .types
+                    .iter()
+                    .flat_map(|atomic| bounded_by_trait(atomic).unwrap_or_else(|| vec![atomic.clone()]))
+                    .collect(),
+            );
+            &bounded
+        } else {
+            r#type
         };
         let constrains = |r#type: &TUnion| !r#type.is_mixed() && !is_method_parameter(r#type);
         let is_sharp_generic = |object: &TNamedObject| {
@@ -634,7 +783,7 @@ impl<'analysis> Types<'analysis> {
                 _ => false,
             })
             || r#type.types.iter().any(|atomic| match atomic {
-                TAtomic::Object(TObject::Named(object)) => is_sharp_generic(object),
+                TAtomic::Object(TObject::Named(object)) => is_sharp_generic(object) || names_trait(atomic),
                 // A `Class<PaginatedList>` names no type arguments, so PHP's `string` type is the whole of its check. A
                 // `Class<int>` or a `Class<int|string>` takes only the text `typeof` gives its type, which PHP's `string`
                 // type doesn't check.

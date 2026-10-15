@@ -42,6 +42,7 @@ use crate::cst::cst::Return;
 use crate::cst::cst::StaticMethodCall;
 use crate::cst::cst::StaticMethodPartialApplication;
 use crate::cst::cst::StaticPropertyAccess;
+use crate::cst::cst::SuperOf;
 use crate::cst::cst::Terminator;
 use crate::cst::cst::UnaryPostfix;
 use crate::cst::cst::UnaryPostfixOperator;
@@ -343,9 +344,20 @@ where
             return Ok(self.arena.alloc(Expression::NameOf(self.parse_name_of()?)));
         }
 
-        // `super.label()` calls the parent's method, spec section 22, as PHP's `parent::label()`.
-        if self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"super" && next == Some(T!["."]) {
-            return Ok(self.arena.alloc(Expression::Parent(self.expect_any_keyword()?)));
+        // `super.label()` calls the parent's method, spec section 22, as PHP's `parent::label()`, and
+        // `super<HasLabel>.label()` calls the interface `HasLabel`'s default body.
+        if self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"super" {
+            if next == Some(T!["."]) {
+                return Ok(self.arena.alloc(Expression::Parent(self.expect_any_keyword()?)));
+            }
+            if next == Some(T!["<"]) {
+                return Ok(self.arena.alloc(Expression::SuperOf(SuperOf {
+                    super_: self.expect_any_keyword()?,
+                    left_angle_bracket: self.stream.eat_span(T!["<"])?,
+                    interface: self.parse_identifier()?,
+                    right_angle_bracket: self.stream.eat_span(T![">"])?,
+                })));
+            }
         }
 
         Ok(self.arena.alloc(match (token.kind, next) {

@@ -357,6 +357,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
 
                     Ok(())
                 }
+                // The semantics checker refuses `super<HasLabel>` anywhere but as the object of a call.
+                Expression::SuperOf(_) => {
+                    artifacts.set_expression_type(&self, get_never());
+
+                    Ok(())
+                }
                 Expression::Identifier(identifier) => {
                     if !identifier.is_local() {
                         unreachable!(
@@ -436,9 +442,13 @@ where
 
         // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any`, of a
         // function type or of a union is `instanceof` a name spanning the whole type, and narrows to the type written,
-        // which the analysis records as the type the test reads.
+        // which the analysis records as the type the test reads. So is a test of a plain PHP trait, spec section 22,
+        // since no value is `instanceof` one.
         let reads_type_arguments = match hint {
-            Hint::Identifier(name) => context.resolved_names.is_type_parameter(name),
+            Hint::Identifier(name) => {
+                context.resolved_names.is_type_parameter(name)
+                    || context.codebase.get_trait(context.resolved_names.get(name)).is_some()
+            }
             Hint::Generic(_) | Hint::Mixed(_) | Hint::Function(_) | Hint::Union(_) => has_type_test(hint),
             _ => false,
         };

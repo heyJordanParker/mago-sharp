@@ -168,10 +168,12 @@ const OBJECT: &[u8] = b"Object";
 ///   `public`, no header and no constructor, and only constants and static members. The bridge lowers it to a final
 ///   PHP class.
 /// - An interface: an optional `public`, a name, optional type parameters, an optional `: Interface` header, methods
-///   and properties, with no attributes, other modifiers or `extends`. An interface method has optional type
-///   parameters, parameters, a return type and no body, as spec section 29 writes `Money quote(Cart cart);`, and a
-///   property is written `int orderId { get; }` or `List<string> claims { get; set; }`. Every interface member is public, written bare, so an access modifier
-///   on one is an error, and so is any other modifier on a method.
+///   and properties, with no attributes, other modifiers, `extends` or fields. An interface method has optional type
+///   parameters, parameters, a return type and no body, as spec section 29 writes `Money quote(Cart cart);`, or a
+///   default body, a block or `=> expr;`, as spec section 22 writes `string designKey() => …;`, checked as a class
+///   method's body. A property is written `int orderId { get; }` or `List<string> claims { get; set; }`. Every
+///   interface member is public, written bare, so an access modifier on one is an error, and so is any other modifier
+///   on a method.
 /// - Type parameters, as spec section 11 declares them: on a class, an interface and a method, as in
 ///   `<out TItem : DatabaseEntity & Shareable, TKey>`. A name is `T`, or `T` and an uppercase ASCII letter, as in
 ///   `TItem`, and any other name is an error, as C# names them. A list that declares a name twice is an error. `in` and
@@ -234,9 +236,11 @@ const OBJECT: &[u8] = b"Object";
 ///   expression body, as in `public string slug => Str.slug(name);`. Its expression is a method body's expression and
 ///   runs on each read, or once when `lazy`. A `static` one runs as a hidden static method of its class, because PHP
 ///   has no hooks on a static property.
-/// - A method: `public`, `protected` or `private`, an optional `static`, `virtual` or `override`, optional type
-///   parameters, parameters, a return type and a body, or `abstract` and no body. The analyzer decides `virtual` and `override`, as spec section 22
-///   writes them. Its name does not start with `__`, which PHP reserves for magic methods, and is not its class's name,
+/// - A method: `public`, `protected` or `private`, an optional `static`, `virtual` or `override`, `final` beside
+///   `override`, optional type parameters, parameters, a return type and a body, or `abstract` and no body. The analyzer
+///   decides where `virtual` and `override` replace a method, as spec section 22 writes them, and
+///   `check_method_modifiers` refuses one that can't matter. Its name does not start with `__`, which PHP reserves for
+///   magic methods, and is not its class's name,
 ///   compared ignoring case, which PHP# gives to the constructor, nor, compared ignoring case, a property's of its
 ///   class.
 /// - An operator, as spec section 19 writes `public static Money operator +(Money a, Money b) => …;`: `public static`,
@@ -337,7 +341,8 @@ const OBJECT: &[u8] = b"Object";
 ///   short name, without a member read or called on it. `new` and each method call, `super.` and
 ///   `Self.` calls included, take type arguments, as in `new PaginatedList<Order>(rows)` and
 ///   `Json.decode<WebhookPayload>(body)`, each a method body's type but `void`. `new Self(...)` in an enum is an error,
-///   because an enum has no constructor. `Self.name` read or written is not supported yet, as `super.name` is not.
+///   because an enum has no constructor. `Self.name` read or written is not supported yet, and `super`
+///   is only the object of a method call, spec section 22.
 ///   PHP's own check reports a positional argument after a spread and a spread after a named argument, and
 ///   `check_function_call` reports `assert` with a spread as its only argument, after which PHP adds a positional
 ///   description. `?.` never follows a class. A function is the global function of that name, PHP's own or one a
@@ -819,11 +824,40 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         (Node::ClassLikeMember(ClassLikeMember::Method(_)), Interface) => Some(Interface),
+        // Spec section 22: a computed property's expression is its default body, as a method's body is, and runs on
+        // each read of the object it is read on, so an interface property takes no `static` or `lazy`.
+        (Node::ClassLikeMember(ClassLikeMember::Property(Property::Computed(property))), Interface) => {
+            for modifier in property
+                .modifiers
+                .iter()
+                .filter(|modifier| !modifier.is_visibility() && !matches!(modifier, Modifier::Override(_)))
+            {
+                context.report(
+                    Issue::error("An interface property takes no modifier but `override`: its default body runs on each read.")
+                        .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier.")),
+                );
+            }
+            check_declared_name(property.variable.name, property.variable.span, context);
+
+            Some(FieldOrProperty)
+        }
         // An interface states a property its classes give, as `OrderEvent` states `orderId`, spec section 15.
         (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
             if is_interface_property(property) =>
         {
             Some(FieldOrProperty)
+        }
+        // Spec section 22: every field is declared in the class that owns it.
+        (Node::ClassLikeMember(ClassLikeMember::Property(field @ Property::Plain(_))), Interface) => {
+            let interface = BytesDisplay(enclosing_class_like_name(context.program, field.span()).unwrap_or_default());
+            let variable = field.first_variable().name;
+            let name = BytesDisplay(variable.strip_prefix(b"$").unwrap_or(variable));
+            context.report(
+                Issue::error(format!("An interface holds no fields: the class that implements `{interface}` declares `{name}`."))
+                    .with_annotation(Annotation::primary(field.span()).with_message("Declared in the interface.")),
+            );
+
+            None
         }
         // An interface member is public, written bare. A method's modifiers are in its signature, and an interface
         // property, which `is_interface_property` keeps whatever its access modifier, walks as a property.
@@ -840,9 +874,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // Spec section 22: a sub-interface's body replaces its parent's default body with `override`.
+        (Node::Modifier(Modifier::Override(_)), Signature) => None,
         (Node::Modifier(modifier), Signature) => {
             context.report(
-                Issue::error("An interface method takes no modifier: every interface method is public.")
+                Issue::error("An interface method takes no modifier but `override`: every interface method is public.")
                     .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier.")),
             );
 
@@ -863,8 +899,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 context,
             ),
         },
-        // A body's block is not in the place, so `MethodBody` admits only `MethodAbstractBody`. The analyzer's
-        // `check_listener` refuses an interface method that listens.
+        // A body, a block or an expression, is the method's default body. The analyzer's `check_listener` refuses an
+        // interface method that listens.
         (
             Node::FunctionLikeReturnTypeHint(_) | Node::On(_) | Node::MethodBody(_) | Node::MethodAbstractBody(_),
             Signature,
@@ -1219,6 +1255,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 check_method_uses(method, context);
                 check_abstract_access(method, context);
                 check_iterator_returns(method, context);
+                check_method_modifiers(method, context);
                 check_extern(method, context)
             }
             Err((message, help)) => report_refusal(
@@ -1241,6 +1278,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Modifier::Abstract(_)
                 | Modifier::Virtual(_)
                 | Modifier::Override(_)
+                // `check_method_modifiers` decides where `final` and `virtual` can matter.
+                | Modifier::Final(_)
                 // The parser keeps `required` on the constructor only.
                 | Modifier::Required(_)
                 // `check_extern` decides where an `extern` method goes.
@@ -1410,8 +1449,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         (Node::FunctionLikeParameterDefaultValue(_), Parameter) => Some(Constant),
-        (Node::Block(_), Method | Body) => Some(Body),
-        (Node::MethodExpressionBody(_), Method) => Some(Body),
+        // An interface method's body is its default body, spec section 22, checked as a class method's body.
+        (Node::Block(_), Method | Signature | Body) => Some(Body),
+        (Node::MethodExpressionBody(_), Method | Signature) => Some(Body),
         (Node::TryCatchClause(_), Body) => Some(TryCatchClause),
         // A generic class's type arguments in a catch clause are a parameter's types, alone or in a union.
         (Node::Hint(Hint::Generic(_)), TryCatchClause) => Some(Parameter),
@@ -1982,8 +2022,21 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        // `super.label()` calls the parent's method, spec section 22. `super` is no value of its own.
-        (Node::MethodCall(call), Body) if matches!(call.object, Expression::Parent(_)) => Some(SuperCall),
+        // `super.label()` calls the parent's method, and `super<HasLabel>.label()` the interface `HasLabel`'s default
+        // body, spec section 22. Neither `super` is a value of its own.
+        (Node::MethodCall(call), Body) if matches!(call.object, Expression::Parent(_) | Expression::SuperOf(_)) => {
+            Some(SuperCall)
+        }
+        (Node::Expression(Expression::SuperOf(_)), SuperCall) => None,
+        (Node::Expression(expression @ Expression::SuperOf(_)), Body)
+        | (Node::Expression(expression @ Expression::Parent(Keyword { value: b"super", .. })), Body) => {
+            context.report(
+                Issue::error("`super` only calls a method, as in `super.label()` or `super<HasLabel>.label()`.")
+                    .with_annotation(Annotation::primary(expression.span()).with_message("Written here.")),
+            );
+
+            None
+        }
         // `Self.make()` calls a static method of the class a static method is called on, spec section 25.
         (Node::MethodCall(call), Body) if let Expression::Self_(keyword) = call.object => {
             if !is_sharp_self(keyword) {
@@ -2094,6 +2147,66 @@ fn is_slice_method(method: &Method, program: &Program) -> Result<(), (&'static s
     };
 
     Err(refusal)
+}
+
+/// Reports a method's `final` or `virtual` that can't change what a subclass may do, spec section 22. A PHP# method is
+/// closed unless it is `virtual`, so `final` marks only an override, and `virtual` is an error on a method no subclass
+/// replaces: a private method, a constructor, an abstract method or an override, which are open already, and every
+/// method of a class-like no class extends. `check_extension` reports every modifier of an extension member.
+fn check_method_modifiers(method: &Method, context: &mut Context<'_, '_, '_>) {
+    let start = method.span().start;
+    if enclosing_class(context.program, method.span()).is_some_and(|class| {
+        class
+            .members
+            .iter()
+            .any(|member| matches!(member, ClassLikeMember::Extension(extension) if extension.span().contains(&start)))
+    }) {
+        return;
+    }
+
+    let sealed_by = file_statements(context.program).find_map(|statement| match statement {
+        Statement::Class(class)
+            if class.span().contains(&start)
+                && (class.modifiers.contains_final() || class.modifiers.contains_static()) =>
+        {
+            let modifier = if class.modifiers.contains_final() { "final" } else { "static" };
+            Some(format!("`{}` is `{modifier}`", BytesDisplay(class.name.value)))
+        }
+        Statement::Enum(r#enum) if r#enum.span().contains(&start) => {
+            Some(format!("`{}` is an enum", BytesDisplay(r#enum.name.value)))
+        }
+        _ => None,
+    });
+
+    let is_override = method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Override(_)));
+    for modifier in &method.modifiers {
+        let message = match modifier {
+            Modifier::Final(_) if !is_override => {
+                "`final` marks only an override: a PHP# method is already closed unless it is `virtual`.".to_owned()
+            }
+            Modifier::Final(_) | Modifier::Virtual(_) if let Some(sealed_by) = &sealed_by => {
+                let word = BytesDisplay(modifier.get_keyword().value);
+                format!("{sealed_by}, so no subclass replaces its methods, and `{word}` can't matter.")
+            }
+            Modifier::Virtual(_) if method.modifiers.contains_private() => {
+                "A `private` method is never replaced, so `virtual` can't matter.".to_owned()
+            }
+            Modifier::Virtual(_) if method.return_type_hint.is_none() => {
+                "A constructor is never replaced, so `virtual` can't matter.".to_owned()
+            }
+            Modifier::Virtual(_) if is_override => {
+                "An override is already open to the subclasses below it, so `virtual` can't matter.".to_owned()
+            }
+            Modifier::Virtual(_) if method.modifiers.contains_abstract() => {
+                "An `abstract` method is already open to the subclasses below it, so `virtual` can't matter.".to_owned()
+            }
+            _ => continue,
+        };
+
+        context.report(
+            Issue::error(message).with_annotation(Annotation::primary(modifier.span()).with_message("Remove it.")),
+        );
+    }
 }
 
 /// Whether the slice has an interface method, with the refusal's message and note when it does not. `enter` reports a
@@ -5028,7 +5141,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# interface has an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
         }
         Place::Signature => {
-            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body."
+            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body or a default body."
         }
         Place::Enum => {
             "A PHP# enum has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."

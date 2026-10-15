@@ -383,6 +383,8 @@ final class AnalyzerCodeModuleGenerator
         'missing-service',
         'service-cycle',
         'captive-service',
+        'ambiguous-inherited-member',
+        'abstract-super-call',
         'internal-access',
         'too-wide-member',
         'missing-readonly-marker',

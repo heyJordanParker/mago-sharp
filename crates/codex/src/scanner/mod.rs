@@ -33,12 +33,14 @@ use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Method;
+use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Program;
+use mago_syntax::cst::Property;
 use mago_syntax::cst::Return;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
@@ -62,13 +64,16 @@ use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 use mago_word::word;
 
+use crate::defaults_trait_name;
 use crate::identifier::method::MethodIdentifier;
 use crate::metadata::CodebaseMetadata;
+use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::r#extern::ExternMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::ttype::TypeMetadata;
+use crate::misc::GenericParent;
 use crate::scanner::class_alias::scan_class_like_alias;
 use crate::scanner::class_like::register_anonymous_class;
 use crate::scanner::class_like::register_class;
@@ -86,12 +91,15 @@ use crate::scanner::function_like::scan_function;
 use crate::scanner::function_like::scan_initial_values_constructor;
 use crate::scanner::function_like::scan_method;
 use crate::scanner::property::scan_promoted_property;
+use crate::symbol::SymbolKind;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::generic::TGenericParameter;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
+use crate::ttype::template::TemplateResult;
+use crate::ttype::template::inferred_type_replacer;
 use crate::ttype::union::TUnion;
 use crate::ttype::wrap_atomic;
 
@@ -411,6 +419,100 @@ impl Scanner {
 
         self.codebase.class_likes.entry(current_class).or_insert(class_like_metadata);
         self.codebase.function_likes.entry(method_id).or_insert(function_like_metadata);
+    }
+
+    /// Registers the trait that holds a PHP# interface's default bodies, spec section 22, named by
+    /// [`defaults_trait_name`], with each method of the interface that has a body, when the interface gives a method or
+    /// a computed property one. The interface's own methods stay
+    /// abstract, as the PHP interface's are, so a class gets a default body only through the trait: the populator gives
+    /// it to each PHP# class that implements the interface, and a plain PHP class writes `use HasDesign\Defaults;`.
+    fn register_defaults_trait<'arena, A>(&mut self, interface: &Interface<'arena>, context: &Context<'_, 'arena, A>)
+    where
+        A: Arena,
+    {
+        let Some(interface_metadata) = self.stack.last().and_then(|interface| self.codebase.class_likes.get(interface))
+        else {
+            return;
+        };
+        let interface_name = interface_metadata.name;
+        let original_name = defaults_trait_name(interface_metadata.original_name.as_bytes());
+        let name = ascii_lowercase_word(original_name.as_bytes());
+        let mut defaults = ClassLikeMetadata::new(
+            name,
+            original_name,
+            interface_metadata.span,
+            interface_metadata.name_span,
+            MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,
+        );
+        defaults.kind = SymbolKind::Trait;
+
+        // A generic interface's trait takes its type parameters, as `@template` on a trait does, and each default body
+        // reads the trait's, so a class gives the bodies the type arguments it gives the interface, as `@use` does.
+        let mut reparent = TemplateResult::default();
+        for (parameter, template) in &interface_metadata.template_types {
+            let of_trait = TGenericParameter::new(
+                *parameter,
+                Arc::new(template.constraint.clone()),
+                GenericParent::ClassLike(name),
+            );
+            reparent.add_lower_bound(
+                *parameter,
+                GenericParent::ClassLike(interface_name),
+                wrap_atomic(TAtomic::GenericParameter(of_trait)),
+            );
+        }
+        for (parameter, template) in &interface_metadata.template_types {
+            let constraint = inferred_type_replacer::replace(&template.constraint, &reparent, &self.codebase);
+            let default = template
+                .default
+                .as_ref()
+                .map(|default| inferred_type_replacer::replace(default, &reparent, &self.codebase));
+            defaults.add_template_type(
+                *parameter,
+                GenericTemplate::new(GenericParent::ClassLike(name), constraint).with_default(default),
+            );
+        }
+
+        for member in &interface.members {
+            let ClassLikeMember::Method(method) = member else {
+                continue;
+            };
+            if matches!(method.body, MethodBody::Abstract(_)) {
+                continue;
+            }
+
+            let method_name = ascii_lowercase_word(method.name.value);
+            let Some(signature) = self.codebase.function_likes.get(&(interface_name, method_name)) else {
+                continue;
+            };
+            let mut body = signature.clone();
+            reparent_types(&mut body, &reparent, &self.codebase);
+            if let Some(method_metadata) = &mut body.method_metadata {
+                method_metadata.is_abstract = false;
+            }
+            if let Some(method_metadata) = self
+                .codebase
+                .function_likes
+                .get_mut(&(interface_name, method_name))
+                .and_then(|signature| signature.method_metadata.as_mut())
+            {
+                method_metadata.is_abstract = true;
+            }
+
+            let method_identifier = MethodIdentifier::new(name, method_name);
+            defaults.methods.insert(method_name);
+            defaults.add_declaring_method_id(method_name, method_identifier);
+            defaults.inheritable_method_ids.insert(method_name, method_identifier);
+            self.codebase.function_likes.insert((name, method_name), body);
+        }
+
+        // A computed property's default body runs as a method of the trait too, which the analysis never calls.
+        let gives_property =
+            interface.members.iter().any(|member| matches!(member, ClassLikeMember::Property(Property::Computed(_))));
+        if !defaults.methods.is_empty() || gives_property {
+            self.codebase.symbols.add_symbol_name(name, SymbolKind::Trait);
+            self.codebase.class_likes.insert(name, defaults);
+        }
     }
 
     /// Registers an extension member as the static method it runs as, marked with `flag`, spec section 26. A member of
@@ -1071,8 +1173,29 @@ where
     }
 
     #[inline]
-    fn walk_out_interface(&mut self, _interface: &'arena Interface<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+    fn walk_out_interface(&mut self, interface: &'arena Interface<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if context.program.dialect.is_sharp() {
+            self.register_defaults_trait(interface, context);
+        }
+
         finalize_class_like(self, context);
+    }
+}
+
+/// Replaces, in each type `method` declares, the type parameters `reparent` binds with the ones it binds them to.
+fn reparent_types(method: &mut FunctionLikeMetadata, reparent: &TemplateResult, codebase: &CodebaseMetadata) {
+    let replace = |type_metadata: &mut Option<TypeMetadata>| {
+        if let Some(type_metadata) = type_metadata {
+            type_metadata.type_union = inferred_type_replacer::replace(&type_metadata.type_union, reparent, codebase);
+        }
+    };
+
+    replace(&mut method.return_type_declaration_metadata);
+    replace(&mut method.return_type_metadata);
+    for parameter in &mut method.parameters {
+        replace(&mut parameter.type_declaration_metadata);
+        replace(&mut parameter.type_metadata);
+        replace(&mut parameter.out_type);
     }
 }
 

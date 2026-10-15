@@ -247,6 +247,7 @@ where
         analyze_statements(statements, &mut context, &mut block_context, &mut artifacts)?;
         if program.dialect.is_sharp() {
             statement::class_like::enum_case::report_dotted_types(program, &mut context);
+            statement::class_like::enum_case::report_defaults_trait_names(program, &mut context);
             effects::check::check_uses(&mut context, &block_context, &mut artifacts, program);
             readonly_types::check_readonly_types(&mut context, program);
         }

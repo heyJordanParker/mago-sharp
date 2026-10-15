@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use mago_allocator::LocalArena;
+use mago_codex::defaults_trait_name;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::metadata::module::ModuleKind;
@@ -190,6 +191,7 @@ use crate::sharp_kind::SHARP_AST_MATCH_ARM;
 use crate::sharp_kind::SHARP_AST_MATCH_ARM_LIST;
 use crate::sharp_kind::SHARP_AST_METHOD;
 use crate::sharp_kind::SHARP_AST_METHOD_CALL;
+use crate::sharp_kind::SHARP_AST_METHOD_REFERENCE;
 use crate::sharp_kind::SHARP_AST_NAME_LIST;
 use crate::sharp_kind::SHARP_AST_NAMED_ARG;
 use crate::sharp_kind::SHARP_AST_NAMESPACE;
@@ -219,6 +221,9 @@ use crate::sharp_kind::SHARP_AST_STATIC_CALL;
 use crate::sharp_kind::SHARP_AST_STATIC_PROP;
 use crate::sharp_kind::SHARP_AST_STMT_LIST;
 use crate::sharp_kind::SHARP_AST_THROW;
+use crate::sharp_kind::SHARP_AST_TRAIT_ADAPTATIONS;
+use crate::sharp_kind::SHARP_AST_TRAIT_ALIAS;
+use crate::sharp_kind::SHARP_AST_TRAIT_PRECEDENCE;
 use crate::sharp_kind::SHARP_AST_TRY;
 use crate::sharp_kind::SHARP_AST_TYPE;
 use crate::sharp_kind::SHARP_AST_TYPE_INTERSECTION;
@@ -228,6 +233,7 @@ use crate::sharp_kind::SHARP_AST_UNARY_OP;
 use crate::sharp_kind::SHARP_AST_UNARY_PLUS;
 use crate::sharp_kind::SHARP_AST_UNPACK;
 use crate::sharp_kind::SHARP_AST_UNSET;
+use crate::sharp_kind::SHARP_AST_USE_TRAIT;
 use crate::sharp_kind::SHARP_AST_VAR;
 use crate::sharp_kind::SHARP_AST_VERIFY_TYPE_ARGS;
 use crate::sharp_kind::SHARP_AST_WHILE;
@@ -265,6 +271,7 @@ const ZEND_ACC_FINAL: u32 = 1 << 5;
 const ZEND_ACC_ABSTRACT: u32 = 1 << 6;
 const ZEND_ACC_EXPLICIT_ABSTRACT_CLASS: u32 = 1 << 6;
 const ZEND_ACC_INTERFACE: u32 = 1 << 0;
+const ZEND_ACC_TRAIT: u32 = 1 << 1;
 const ZEND_ACC_READONLY: u32 = 1 << 7;
 const ZEND_ACC_PROTECTED_SET: u32 = 1 << 11;
 const ZEND_ACC_PRIVATE_SET: u32 = 1 << 12;
@@ -288,6 +295,7 @@ const IS_LONG: u32 = 4;
 const IS_DOUBLE: u32 = 5;
 const IS_STRING: u32 = 6;
 const IS_ARRAY: u32 = 7;
+const IS_OBJECT: u32 = 8;
 const ZEND_ARRAY_SYNTAX_SHORT: u32 = 3;
 const ZEND_ADD: u32 = 1;
 const ZEND_SUB: u32 = 2;
@@ -656,10 +664,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // An `extern` declaration tells only the checker what plain PHP does, and a module's laws are checked and
             // never run. A module's bindings are the table the file returns last, in `program`.
             Statement::Use(_) | Statement::Extern(_) | Statement::Module(_) => {}
-            Statement::Class(class) => {
-                statements.push(self.class(class));
+            Statement::Class(class) => statements.push(self.class(class)),
+            Statement::Interface(interface) => {
+                statements.push(self.interface(interface));
+                statements.extend(self.defaults(interface));
             }
-            Statement::Interface(interface) => statements.push(self.interface(interface)),
             Statement::Enum(r#enum) if r#enum.has_data_case() => self.data_enum(r#enum, statements),
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
             Statement::Event(event) => statements.push(self.event(event)),
@@ -838,6 +847,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.extend(self.statics_store(class));
         }
         members.extend(self.class_metadata(self.line(class.name)));
+        members.splice(0..0, self.trait_members(class.inheritance.as_ref(), class.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
         let attributes = self.attributes(&class.attribute_lists, None, None);
 
@@ -851,8 +861,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// A struct is a final class, spec section 10, whose members are a class's, with its header and `\Sharp\Struct`
-    /// as its interface list and, unless it declares `operator ==`, the `op_Equality` that compares it by value, as
+    /// A struct is a final class, spec section 10, whose members are a class's, with its header's interfaces and
+    /// `\Sharp\Struct` as its interface list, its header's traits as its `use`, and, unless it declares `operator ==`, the `op_Equality` that compares it by value, as
     /// php-src's grammar builds
     /// `final class Username implements \App\HasLabel, \Sharp\Struct`. The engine lets only a `.sharp` class implement
     /// `\Sharp\Struct`, and hashes a `Map` key or a `Set` element by its fields only for one that does.
@@ -874,11 +884,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
         members.extend(self.class_metadata(self.line(r#struct.name.span)));
+        members.splice(0..0, self.trait_members(r#struct.inheritance.as_ref(), r#struct.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
         let attributes = self.attributes(&r#struct.attribute_lists, None, None);
         let mut interfaces = Vec::new();
+        // A header trait is the `use` above, spec section 22.
         for name in r#struct.inheritance.iter().flat_map(Inheritance::names) {
-            interfaces.push(self.string(ZEND_NAME_FQ, self.line(name), self.names.get(&name)));
+            let full_name = self.names.get(&name);
+            if self.types.class_declaration(full_name).kind != DeclarationKind::Trait {
+                interfaces.push(self.string(ZEND_NAME_FQ, self.line(name), full_name));
+            }
         }
         let line = self.line(r#struct.name.span);
         interfaces.push(self.string(ZEND_NAME_FQ, line, b"Sharp\\Struct"));
@@ -1764,41 +1779,45 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A class header's names as PHP's `extends` name and `implements` name list, with the parent's full name: the name
-    /// the checker found to be a class is the parent, and the rest are interfaces. Either is null when the header names
-    /// none.
+    /// the checker found to be a class is the parent, the interfaces are the list, and a trait is in the class's `use`.
+    /// Either is null when the header names none.
     fn class_header(&mut self, inheritance: &Inheritance) -> (u32, u32, Option<&'lowering [u8]>) {
         let mut parent = NULL;
         let mut parent_name = None;
-        let mut interfaces = Vec::new();
         for name in inheritance.names() {
             let full_name = self.names.get(&name);
-            let index = self.string(ZEND_NAME_FQ, self.line(name), full_name);
-            match self.types.class_declaration(full_name).kind {
-                DeclarationKind::Class => (parent, parent_name) = (index, Some(full_name)),
-                DeclarationKind::Interface => interfaces.push(index),
-                kind => unreachable!("the checker refuses a {kind:?} in a class header"),
+            if self.types.class_declaration(full_name).kind == DeclarationKind::Class {
+                parent = self.string(ZEND_NAME_FQ, self.line(name), full_name);
+                parent_name = Some(full_name);
             }
         }
 
-        let interfaces = if interfaces.is_empty() {
-            NULL
-        } else {
-            self.node(SHARP_AST_NAME_LIST, 0, self.line(inheritance), &interfaces)
-        };
-
-        (parent, interfaces, parent_name)
+        (parent, self.name_list(inheritance), parent_name)
     }
 
-    /// A header's names, which PHP compiles as the interface list.
+    /// A header's interfaces, which PHP compiles as the interface list, or null when it names none. A class's base
+    /// class is its parent, and a trait is in its `use`.
     fn name_list(&mut self, inheritance: &Inheritance) -> u32 {
-        let names: Vec<u32> =
-            inheritance.names().map(|name| self.string(ZEND_NAME_FQ, self.line(name), self.names.get(&name))).collect();
+        let mut names = Vec::new();
+        for name in inheritance.names() {
+            let full_name = self.names.get(&name);
+            match self.types.class_declaration(full_name).kind {
+                DeclarationKind::Interface => names.push(self.string(ZEND_NAME_FQ, self.line(name), full_name)),
+                DeclarationKind::Class | DeclarationKind::Trait => {}
+                kind => unreachable!("the checker refuses a {kind:?} in a header"),
+            }
+        }
+
+        if names.is_empty() {
+            return NULL;
+        }
 
         self.node(SHARP_AST_NAME_LIST, 0, self.line(inheritance), &names)
     }
 
-    /// An interface is a class declaration with `ZEND_ACC_INTERFACE`, and its methods are `public`, as php-src's
-    /// grammar builds `interface Measured { public function area(): float; }`.
+    /// An interface is a class declaration with `ZEND_ACC_INTERFACE` whose methods are `public` and abstract, as
+    /// php-src's grammar builds `interface Measured { public function area(): float; }`. Its default bodies are in the
+    /// trait `defaults` lowers.
     fn interface(&mut self, interface: &Interface) -> u32 {
         self.class = self.names.get(&interface.name);
         let mut members = Vec::new();
@@ -1807,11 +1826,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 members.push(self.interface_property(property));
                 continue;
             }
+            if let ClassLikeMember::Property(Property::Computed(computed)) = member {
+                members.push(self.defaulted_property(computed.variable.name, computed.span(), NULL));
+                continue;
+            }
             let ClassLikeMember::Method(method) = member else {
                 unreachable!("check_slice refuses the interface member `{member}`");
             };
 
-            members.push(self.method(method, ZEND_ACC_PUBLIC, &[]));
+            members.push(self.signature(method));
         }
 
         members.extend(self.class_metadata(self.line(interface.name)));
@@ -1826,6 +1849,119 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             interface.name.value,
             &[NULL, header, members, NULL, NULL],
         )
+    }
+
+    /// The trait that holds an interface's default bodies, spec section 22, on the interface's lines, as php-src's
+    /// grammar builds `trait Defaults { … }`. It is named `HasDesign\Defaults` for the interface `HasDesign`, and the
+    /// engine declares it in the file's namespace, so every name in a body resolves as it does in the interface. Each
+    /// default body is a method, in source order: a method's is `public`, and a computed property's is
+    /// `protected function 'designKey@App\HasDesign'(): string`, which the property of each class that gets it runs. A
+    /// generic interface's trait has the header `App.Keyed<$0>`. An interface without a default body has no trait.
+    fn defaults(&mut self, interface: &Interface) -> Option<u32> {
+        self.class = self.names.get(&interface.name);
+        let mut members = Vec::new();
+        let interface_name = word(self.class);
+        for member in &interface.members {
+            match member {
+                ClassLikeMember::Method(method) if !matches!(method.body, MethodBody::Abstract(_)) => {
+                    members.push(self.method(method, ZEND_ACC_PUBLIC, &[]));
+                }
+                ClassLikeMember::Property(Property::Computed(computed)) => {
+                    let line = self.line(&computed.body);
+                    let value = self.accessor_bodies(computed.variable.name, |lowering| {
+                        lowering.expression(computed.body.expression)
+                    });
+                    let value = self.node(SHARP_AST_RETURN, 0, line, &[value]);
+                    let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[value]);
+                    let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+                    let return_type = computed.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
+                    let name = super_alias(interface_name, word(computed.variable.name));
+                    members.push(self.declaration(
+                        SHARP_AST_METHOD,
+                        ZEND_ACC_PROTECTED,
+                        computed.span(),
+                        &computed.body,
+                        &name,
+                        &[parameters, NULL, body, return_type, NULL],
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        if members.is_empty() {
+            return None;
+        }
+
+        // A generic interface's trait names the interface with its type parameters as its header, `Demo.Held<$0>`, so
+        // the engine counts a body's `$i` among the interface's type arguments the class gives.
+        if let Some(parameters) = &interface.type_parameters {
+            let line = self.line(interface.name);
+            let indexes: Vec<String> = (0..parameters.parameters.len()).map(|index| format!("${index}")).collect();
+            let header = format!("{}<{}>", interface_name.as_str_lossy().replace('\\', "."), indexes.join(", "));
+            let header = self.string(0, line, header.as_bytes());
+            members.push(self.node(SHARP_AST_SHARP_CLASS_METADATA, 0, line, &[header, NULL, NULL]));
+        }
+        let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);
+        let name = defaults_trait_name(interface.name.value);
+
+        Some(self.declaration(
+            SHARP_AST_CLASS,
+            ZEND_ACC_TRAIT,
+            interface.interface.span,
+            interface.right_brace,
+            name.as_bytes(),
+            &[NULL, NULL, members, NULL, NULL],
+        ))
+    }
+
+    /// The `use` a class, a struct, an enum or an event starts with, as php-src's grammar builds
+    /// `use \Lib\HasSlug, \App\HasDesign\Defaults;`: the traits [`Types::used_traits`] lists, or null when it lists none.
+    /// It gives each default body a protected alias, as `\App\HasLabel\Defaults::label as protected 'label@App\HasLabel';`,
+    /// which `super<HasLabel>.label()` calls in the class and in each subclass, whose own override replaces only
+    /// `label`. The property of each computed property with a default body the class does not declare follows it.
+    fn trait_members(&mut self, header: Option<&Inheritance>, span: Span) -> Vec<u32> {
+        let line = self.line(span);
+        let traits = self.types.used_traits(self.class, header);
+        if traits.is_empty() {
+            return Vec::new();
+        }
+
+        let names: Vec<u32> = traits.iter().map(|name| self.string(ZEND_NAME_FQ, line, name.as_bytes())).collect();
+        let names = self.node(SHARP_AST_NAME_LIST, 0, line, &names);
+        let mut adaptations = Vec::new();
+        for (defaults, interface, method, replacing) in self.types.default_bodies(self.class) {
+            let reference = |lowering: &mut Self, defaults: Word| {
+                let defaults = lowering.string(ZEND_NAME_FQ, line, defaults.as_bytes());
+                let name = lowering.string(0, line, method.as_bytes());
+
+                lowering.node(SHARP_AST_METHOD_REFERENCE, 0, line, &[defaults, name])
+            };
+            // A sub-interface's body replaces this one, `ShowsMore\Defaults::label insteadof Shows\Defaults`.
+            if let Some(replacing) = replacing {
+                let winner = reference(self, replacing);
+                let replaced = self.string(ZEND_NAME_FQ, line, defaults.as_bytes());
+                let replaced = self.node(SHARP_AST_NAME_LIST, 0, line, &[replaced]);
+                adaptations.push(self.node(SHARP_AST_TRAIT_PRECEDENCE, 0, line, &[winner, replaced]));
+            }
+            let reference = reference(self, defaults);
+            let alias = self.string(0, line, &super_alias(interface, method));
+            adaptations.push(self.node(SHARP_AST_TRAIT_ALIAS, ZEND_ACC_PROTECTED, line, &[reference, alias]));
+        }
+        let adaptations =
+            if adaptations.is_empty() { NULL } else { self.node(SHARP_AST_TRAIT_ADAPTATIONS, 0, line, &adaptations) };
+        let mut members = vec![self.node(SHARP_AST_USE_TRAIT, 0, line, &[names, adaptations])];
+        for (property, interface) in self.types.default_body_properties(self.class) {
+            let name = property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes());
+            let this = self.variable(span, b"this");
+            let method = self.string(0, line, &super_alias(interface, word(name)));
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+            let call = self.node(SHARP_AST_METHOD_CALL, 0, line, &[this, method, arguments]);
+            let body = self.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[call]);
+            members.push(self.defaulted_property(name, span, body));
+        }
+
+        members
     }
 
     /// An interface property is `public` with the abstract hook `get`, as php-src's grammar builds
@@ -1843,15 +1979,34 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
     }
 
+    /// A computed property with a default body, spec section 22: in its interface, `public mixed $designKey { get; }`,
+    /// and in a class that gets the body, `body`, `public mixed $designKey { get => $this->{'designKey@App\HasDesign'}(); }`,
+    /// which runs the trait's method that holds it. Its PHP type is `mixed`, since the class's file has no type to
+    /// write, so an override, or a plain PHP class, writes the property with its own type, as a `get` hook narrows it,
+    /// and the trait's method checks the value the body gives.
+    fn defaulted_property(&mut self, name: &[u8], span: Span, body: u32) -> u32 {
+        let line = self.line(span);
+        let hint = self.php_type(&PhpType::Mixed, line);
+        let name = self.string(0, line, name);
+        let hook = self.hook(b"get", span, span, NULL, body);
+        let hooks = self.node(SHARP_AST_STMT_LIST, 0, line, &[hook]);
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
+        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+
+        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
+    }
+
     /// An event is a final class, whose constructor promotes each parameter to a `public readonly` property, with its
     /// header as its interface list, as php-src's grammar builds
     /// `final class OrderPaid implements \App\OrderEvent { public function __construct(public readonly int $orderId) {} }`.
     /// The constructor spans the event's name and parameters.
     fn event(&mut self, event: &Event) -> u32 {
         self.class = self.names.get(&event.name);
-        let mut members = vec![self.promoted_constructor(event.name.span, &event.parameter_list)];
+        let line = self.line(&event.parameter_list);
+        let mut members = self.trait_members(event.inheritance.as_ref(), event.parameter_list.span());
+        members.push(self.promoted_constructor(event.name.span, &event.parameter_list));
         members.extend(self.class_metadata(self.line(event.name)));
-        let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(&event.parameter_list), &members);
+        let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
         let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
 
         self.declaration(
@@ -1924,6 +2079,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             .collect();
         let cases: Vec<&[u8]> = cases.iter().map(Vec::as_slice).collect();
         members.push(self.value_equality(r#enum.name.span, &cases));
+        members.splice(0..0, self.trait_members(r#enum.inheritance.as_ref(), r#enum.left_brace));
 
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
         let attributes = self.attributes(&r#enum.attribute_lists, None, None);
@@ -2028,6 +2184,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         members.extend(self.class_metadata(self.line(r#enum.name)));
+        members.splice(0..0, self.trait_members(r#enum.inheritance.as_ref(), r#enum.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
         let attributes = self.attributes(&r#enum.attribute_lists, None, None);
         let header = r#enum.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
@@ -2066,7 +2223,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// other abstract method has no statement list. A method with statements makes each `Set` parameter a `Set` before
     /// them. A constructor's `: super(…)` runs after them as `parent::__construct(…)`, and does nothing when no
     /// constructor exists above the class.
-    fn method(&mut self, method: &Method, mut flags: u32, first_statements: &[u32]) -> u32 {
+    fn method(&mut self, method: &Method, flags: u32, first_statements: &[u32]) -> u32 {
+        self.method_declaration(method, flags, Some(first_statements))
+    }
+
+    /// An interface's method is `public` with no statement list, as php-src's grammar builds
+    /// `public function designKey(): string;`, spec section 22. Its default body is in the trait `defaults` lowers.
+    fn signature(&mut self, method: &Method) -> u32 {
+        self.method_declaration(method, ZEND_ACC_PUBLIC, None)
+    }
+
+    /// A method with `flags`, whose body starts with `first_statements`, or which has no body when they are `None`.
+    fn method_declaration(&mut self, method: &Method, mut flags: u32, first_statements: Option<&[u32]>) -> u32 {
         // Spec section 5: a method with no access modifier is `private`, while PHP makes it `public`.
         if flags & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE) == 0 {
             flags |= ZEND_ACC_PRIVATE;
@@ -2087,26 +2255,35 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let metadata = self.types.method_metadata(self.class, php_method_name(method));
         parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
-        let mut statements = if matches!(method.body, MethodBody::Abstract(_)) && first_statements.is_empty() {
-            Vec::new()
-        } else {
-            self.collection_parameters(&method.parameter_list.parameters)
+        let body = match first_statements {
+            None => NULL,
+            Some(first_statements) => {
+                let mut statements = if matches!(method.body, MethodBody::Abstract(_)) && first_statements.is_empty() {
+                    Vec::new()
+                } else {
+                    self.collection_parameters(&method.parameter_list.parameters)
+                };
+                statements.extend_from_slice(first_statements);
+                if let Some(initializer) = &method.initializer
+                    && self.types.parent_constructor(self.class).is_some()
+                {
+                    let parameters = self.types.parent_constructor_parameters(self.class);
+                    let callee =
+                        self.types.parent_constructor(self.class).filter(|constructor| constructor.flags.is_sharp());
+                    let line = self.line(initializer);
+                    let construct =
+                        self.call(&initializer.argument_list, None, parameters, callee, |this, arguments| {
+                            this.parent_construct(line, arguments)
+                        });
+                    statements.push(construct);
+                }
+                self.returns = method.return_type_hint.as_ref().map(|return_type| self.hint_type(&return_type.hint));
+                let body = self.method_body(&method.body, method.returns_value(), statements);
+                self.returns = None;
+
+                body
+            }
         };
-        statements.extend_from_slice(first_statements);
-        if let Some(initializer) = &method.initializer
-            && self.types.parent_constructor(self.class).is_some()
-        {
-            let parameters = self.types.parent_constructor_parameters(self.class);
-            let callee = self.types.parent_constructor(self.class).filter(|constructor| constructor.flags.is_sharp());
-            let line = self.line(initializer);
-            let construct = self.call(&initializer.argument_list, None, parameters, callee, |this, arguments| {
-                this.parent_construct(line, arguments)
-            });
-            statements.push(construct);
-        }
-        self.returns = method.return_type_hint.as_ref().map(|return_type| self.hint_type(&return_type.hint));
-        let body = self.method_body(&method.body, method.returns_value(), statements);
-        self.returns = None;
         let (start, return_type) = match &method.return_type_hint {
             Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
             None => (method.name.span, NULL),
@@ -2120,7 +2297,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.function_type(return_type, function_type, self.line(start))
         };
         self.static_type_parameters = None;
-        let r#override = method.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
+        // A sub-interface's body that replaces its parent's default body runs as a method of its trait of default
+        // bodies, which has no parent, so only the interface's signature carries `#[\Override]`.
+        let r#override =
+            method.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_))).filter(|_| {
+                first_statements.is_none()
+                    || self.types.class_declaration(self.class).kind != DeclarationKind::Interface
+            });
         let attributes = self.attributes(&method.attribute_lists, r#override, None);
 
         self.declaration(
@@ -3637,7 +3820,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `Map` or a `Set` is the engine's `\Sharp\Map` or `\Sharp\Set`, and an `Iterable` is PHP's `iterable`. A generic class type is its class, and `Class<T>` is `string`, because plain PHP receives a class
     /// value as its class-name string (spec section 25). A function type runs as PHP's `\Closure`. A type parameter is
     /// its bound, or `mixed` without one, as the PHP twin written with `@template` declares it, and the classes a bound
-    /// joins with `&` are one intersection.
+    /// joins with `&` are one intersection. A plain PHP trait is `object`, because no value is `instanceof` a trait, and
+    /// its PHP# type text checks it, spec section 22: in an intersection it leaves PHP's type to the classes beside it.
     fn erase<'hint>(&self, hint: &'hint Hint<'_>) -> PhpType<'hint>
     where
         'arena: 'hint,
@@ -3657,18 +3841,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         None => unreachable!("the binder binds `{name}` to a type parameter the file declares"),
                     }
                 }
+                _ if self.types.class_declaration(self.names.get(name)).kind == DeclarationKind::Trait => {
+                    PhpType::Keyword(IS_OBJECT)
+                }
                 _ => PhpType::Classes(vec![self.names.get(name)]),
             },
-            Hint::Intersection(intersection) => {
-                let (PhpType::Classes(mut classes), PhpType::Classes(right)) =
-                    (self.erase(intersection.left), self.erase(intersection.right))
-                else {
-                    unreachable!("check_slice joins only classes with `&`");
-                };
-                classes.extend(right);
+            // A plain PHP trait leaves the intersection, and the PHP# type text checks it.
+            Hint::Intersection(intersection) => match (self.erase(intersection.left), self.erase(intersection.right)) {
+                (PhpType::Classes(mut classes), PhpType::Classes(right)) => {
+                    classes.extend(right);
 
-                PhpType::Classes(classes)
-            }
+                    PhpType::Classes(classes)
+                }
+                (classes @ PhpType::Classes(_), PhpType::Keyword(IS_OBJECT))
+                | (PhpType::Keyword(IS_OBJECT), classes @ (PhpType::Classes(_) | PhpType::Keyword(IS_OBJECT))) => {
+                    classes
+                }
+                _ => unreachable!("check_slice joins only classes and traits with `&`"),
+            },
             Hint::Self_(_) => PhpType::Keyword(IS_STATIC),
             Hint::Generic(generic) if built_in_generic_arity(generic.name.value).is_none() => {
                 PhpType::Classes(vec![self.names.get(&generic.name)])
@@ -6476,6 +6666,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `Pdf.render(html)` and `global.now()` call the plain PHP function the checker found, spec section 23, which
     /// takes each `Map` and `Set` as [`Self::call`] crosses them.
     fn method_call(&mut self, expression: &Expression, call: &MethodCall) -> u32 {
+        if let Expression::SuperOf(_) = call.object {
+            return self.super_of_call(expression, call);
+        }
         if let Some(function) = self.types.namespace_function(expression) {
             let line = self.line(call);
             let function = self.string(ZEND_NAME_FQ, line, function.as_bytes());
@@ -6592,6 +6785,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let full_name = self.names.get(&class.name);
 
         (self.string(ZEND_NAME_FQ, line, full_name), vec![full_name])
+    }
+
+    /// `super<HasLabel>.label()`, spec section 22: a call on `$this` of the protected alias of the `HasLabel\Defaults`
+    /// method that the class's `use` declares, `$this->{'label@App\HasLabel'}()`, as PHP runs a trait's method that the
+    /// class replaced only through an alias.
+    fn super_of_call(&mut self, expression: &Expression, call: &MethodCall) -> u32 {
+        let Expression::SuperOf(super_of) = call.object else {
+            unreachable!("`super_of_call` lowers a call on `super<…>`");
+        };
+        let line = self.line(call);
+        let interface = word(self.names.get(&super_of.interface));
+        let method = self.types.call_target(expression).name;
+        let object = self.variable(super_of.span(), b"this");
+        let method = self.string(0, self.line(&call.method), &super_alias(interface, method));
+        let type_arguments = self.types.call_type_arguments(expression);
+        let parameters = self.types.call_parameters(expression);
+        let callee = self.types.sharp_callee(expression);
+
+        self.call(&call.argument_list, type_arguments, parameters, callee, |this, arguments| {
+            this.node(SHARP_AST_METHOD_CALL, 0, line, &[object, method, arguments])
+        })
     }
 
     /// The member `extension`, which an extension adds, spec section 26, called with `arguments` or read on `receiver`:
@@ -7218,6 +7432,12 @@ fn is_current_position(class: &[u8], call: &MethodCall) -> bool {
         && call.argument_list.arguments.is_empty()
 }
 
+/// The name of the protected alias a class gives the default body of `method` that `interface` gives, spec section 22,
+/// as `label@App\HasLabel`. No PHP# member name holds `@`, so it can't clash with one.
+fn super_alias(interface: Word, method: Word) -> Vec<u8> {
+    [method.as_bytes(), b"@", interface.as_bytes()].concat()
+}
+
 /// Whether a static property runs accessors, decision 3: a computed one, or one with an accessor body or an observer.
 /// [`Lowering::static_accessors`] lowers it.
 fn runs_static_accessors(property: &Property) -> bool {
@@ -7266,6 +7486,8 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             Modifier::Private(_) => ZEND_ACC_PRIVATE,
             Modifier::Static(_) => ZEND_ACC_STATIC,
             Modifier::Abstract(_) => ZEND_ACC_ABSTRACT,
+            // The checker keeps `final` on an override only, spec section 22, where it stops the override chain.
+            Modifier::Final(_) => ZEND_ACC_FINAL,
             // PHP methods are open to overriding, and `method` lowers `override` to `#[\Override]`. PHP has no
             // `required` constructor, and the checker proves every subclass keeps one `new Self(…)` can call. `method`
             // gives an `extern` method the body that calls its native function. `property` gives a `lazy` property
@@ -7275,8 +7497,7 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::Required(_)
             | Modifier::Extern(_)
             | Modifier::Lazy(_) => 0,
-            Modifier::Final(_)
-            | Modifier::Readonly(_)
+            Modifier::Readonly(_)
             | Modifier::PublicSet(_)
             | Modifier::ProtectedSet(_)
             | Modifier::PrivateSet(_)

@@ -108,7 +108,8 @@ where
             continue;
         };
 
-        if named.kind.is_interface() {
+        // A plain PHP trait works everywhere an interface does, spec section 22.
+        if named.kind.is_interface() || named.kind.is_trait() {
             continue;
         }
 
@@ -122,7 +123,7 @@ where
             ))
             .with_annotation(Annotation::primary(type_name.span()).with_message("Named here."))
             .with_note(format!(
-                "`{}`'s header names the interfaces it implements.",
+                "`{}`'s header names the interfaces it implements and the traits it uses.",
                 display_class_like_name(context, class_like_metadata.original_name)
             )),
         );

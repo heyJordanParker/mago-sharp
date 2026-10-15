@@ -3497,6 +3497,34 @@ fn header_names<'arena>(inheritance: &Inheritance<'arena>) -> Vec<&'arena [u8]> 
     inheritance.names().map(|name| name.value()).collect()
 }
 
+/// Spec section 22: `super<HasLabel>.label()` calls one interface's default body, so `super<HasLabel>` is the object of
+/// the call, and `super.label()` keeps calling the parent's.
+#[test]
+fn super_of_an_interface_is_the_object_of_a_call_of_its_default_body() {
+    const CODE: &str = "class Both\n{\n    string label()\n    {\n        super<HasLabel>.label();\n        super.label();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Both.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [interface_call, parent_call] = method_body(program) else {
+        panic!("expected two statements, got {:#?}", method_body(program));
+    };
+    let Expression::Call(Call::Method(MethodCall { object: Expression::SuperOf(super_of), .. })) =
+        expression(interface_call)
+    else {
+        panic!("expected `super<HasLabel>.label()`, got {interface_call:#?}");
+    };
+    assert_eq!(super_of.interface.value(), b"HasLabel");
+    assert_eq!(source(CODE, super_of), "super<HasLabel>");
+    assert!(
+        matches!(
+            expression(parent_call),
+            Expression::Call(Call::Method(MethodCall { object: Expression::Parent(_), .. }))
+        ),
+        "{parent_call:#?}"
+    );
+}
+
 /// `nameof(Order.total)` names a class by its short name and one of its properties, spec section 6.3. In PHP it stays
 /// a function call.
 #[test]

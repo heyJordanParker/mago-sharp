@@ -9,6 +9,7 @@ use mago_allocator::Arena;
 
 use mago_bytes::BytesDisplay;
 use mago_codex::context::ScopeContext;
+use mago_codex::defaults_trait_name;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
@@ -69,7 +70,6 @@ use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Trait;
-use mago_syntax::cst::TraitUse;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
@@ -182,6 +182,8 @@ fn report_class_like_named_as_a_namespace<A>(
     }
 
     let sharp = context.dialect.is_sharp();
+    // Spec section 22: PHP# code never names an interface's trait of default bodies, so the rule leaves it out.
+    let defaults = ascii_lowercase_word(defaults_trait_name(name).as_bytes());
     let Some(inside) = context
         .codebase
         .class_likes
@@ -193,6 +195,7 @@ fn report_class_like_named_as_a_namespace<A>(
                 class_like_metadata.permitted_inheritors.as_ref().is_some_and(|cases| cases.contains(&other.name));
 
             (sharp || other.flags.is_sharp())
+                && other.name != defaults
                 && !is_own_case
                 && other.name.as_bytes().strip_prefix(name).is_some_and(|rest| rest.starts_with(b"\\"))
         })
@@ -775,14 +778,15 @@ where
         .iter()
         .flat_map(|inheritance| inheritance.types.iter())
         .filter_map(|type_name| Some((type_name, codebase.get_class_like(context.resolved_names.get(type_name))?)))
-        .filter(|(_, named)| !named.kind.is_interface())
+        // A plain PHP trait works everywhere an interface does, spec section 22.
+        .filter(|(_, named)| !named.kind.is_interface() && !named.kind.is_trait())
         .collect();
 
     for (type_name, named) in &named_class_likes {
         context.collector.report_with_code(
             IssueCode::InvalidEvent,
             Issue::error(format!(
-                "An event's header names interfaces only, and `{}` is not one.",
+                "An event's header names interfaces and traits only, and `{}` is neither.",
                 display_class_like_name(context, named.original_name)
             ))
             .with_annotation(Annotation::primary(type_name.span()).with_message("Named here."))
@@ -1164,11 +1168,12 @@ where
         extends_ast.iter().flat_map(|e| e.types.iter()).copied().collect();
     let mut implemented_types: Vec<Identifier<'arena>> =
         implements_ast.iter().flat_map(|i| i.types.iter()).copied().collect();
+    let mut header_traits: Vec<Identifier<'arena>> = Vec::new();
 
-    // A PHP# header, `: Base, IFace`, names an interface's parents, or a class's parent among its interfaces: the
-    // one class the populator linked as the parent. A generic type there, as in `: PaginatedList<Order>`, names its
-    // class before its type arguments, and the checker refuses any other type there. `List`, `Map` and `Class` have no
-    // resolved name, because no class is one.
+    // A PHP# header, `: Base, IFace, Trait`, names an interface's parents, or a class's or an enum's parent and traits
+    // among its interfaces: the one class the populator linked as the parent, and every trait, which it uses. A generic
+    // type there, as in `: PaginatedList<Order>`, names its class before its type arguments, and the checker refuses
+    // any other type there. `List`, `Map` and `Class` have no resolved name, because no class is one.
     for type_name in inheritance_ast.iter().flat_map(|inheritance| inheritance.names()) {
         let Some(resolved) = context.resolved_names.resolve(&type_name) else {
             continue;
@@ -1178,8 +1183,25 @@ where
                 .direct_parent_class
                 .is_some_and(|parent| parent.as_bytes().eq_ignore_ascii_case(resolved));
 
-        if is_parent { extended_types.push(type_name) } else { implemented_types.push(type_name) }
+        if is_parent {
+            extended_types.push(type_name);
+        } else if context.codebase.get_trait(resolved).is_some() {
+            header_traits.push(type_name);
+        } else {
+            implemented_types.push(type_name);
+        }
     }
+
+    // The traits of a PHP# header compose as one `use` statement does, before the class's own `use` statements.
+    let trait_uses: Vec<(Span, Vec<&Identifier<'arena>>)> = inheritance_ast
+        .filter(|_| !header_traits.is_empty())
+        .map(|inheritance| (inheritance.span(), header_traits.iter().collect()))
+        .into_iter()
+        .chain(members.iter().filter_map(|member| match member {
+            ClassLikeMember::TraitUse(trait_use) => Some((trait_use.span(), trait_use.trait_names.iter().collect())),
+            _ => None,
+        }))
+        .collect();
 
     if class_like_metadata.flags.is_sharp() {
         check_sharp_reached_twice(context, class_like_metadata, inheritance_ast, &mut checked_signatures);
@@ -1187,10 +1209,14 @@ where
     check_class_like_extends(context, class_like_metadata, &extended_types);
     check_class_like_implements(context, artifacts, class_like_metadata, &implemented_types, &mut checked_signatures);
 
-    for member in members {
-        if let ClassLikeMember::TraitUse(used_trait) = member {
-            check_class_like_use(context, class_like_metadata, used_trait);
-        }
+    for (_, used_types) in &trait_uses {
+        check_class_like_use(context, class_like_metadata, used_types);
+    }
+
+    if context.dialect.is_sharp() && (class_like_metadata.kind.is_class() || class_like_metadata.kind.is_enum()) {
+        let header_traits: Vec<Word> =
+            header_traits.iter().map(|header_trait| word(context.resolved_names.get(header_trait))).collect();
+        check_members_given_twice(context, class_like_metadata, &header_traits, name_span.unwrap_or(declaration_span));
     }
 
     let has_complete_hierarchy = !class_like_metadata.has_incomplete_hierarchy();
@@ -1369,11 +1395,11 @@ where
     if !class_like_metadata.kind.is_trait() {
         check_inherited_operators(context, class_like_metadata, members, &mut checked_signatures);
         check_abstract_method_signatures(context, artifacts, class_like_metadata, &mut checked_signatures);
-        check_trait_method_conflicts(context, class_like_metadata, members);
+        check_trait_method_conflicts(context, class_like_metadata, &trait_uses);
     }
 
-    check_trait_property_conflicts(context, class_like_metadata, members);
-    check_readonly_class_trait_properties(context, class_like_metadata, members);
+    check_trait_property_conflicts(context, class_like_metadata, &trait_uses, members);
+    check_readonly_class_trait_properties(context, class_like_metadata, &trait_uses);
     if class_like_metadata.flags.is_sharp() {
         check_sharp_template_variance(context, class_like_metadata, inheritance_ast);
         check_sharp_serializable(context, class_like_metadata);
@@ -1919,6 +1945,26 @@ fn check_class_like_implements<'ctx, 'arena, A>(
             let implemented_kind_prefix =
                 if implemented_metadata.kind.is_class() || implemented_metadata.kind.is_trait() { "a" } else { "an" };
 
+            // A PHP# class header names one class, which the populator linked as the parent.
+            if context.dialect.is_sharp()
+                && implemented_metadata.kind.is_class()
+                && let Some(parent) = class_like_metadata
+                    .direct_parent_class
+                    .and_then(|parent| context.codebase.get_class_like(parent.as_bytes()))
+            {
+                let parent_name = display_class_like_name(context, parent.original_name);
+                context.collector.report_with_code(
+                    IssueCode::InvalidImplement,
+                    Issue::error(format!(
+                        "`{using_name}` names two base classes, `{parent_name}` and `{implemented_name}`."
+                    ))
+                    .with_annotation(Annotation::primary(implemented_type.span()).with_message("A second class."))
+                    .with_note("A class has one base class, and its header's other names are interfaces and traits."),
+                );
+
+                continue;
+            }
+
             if !implemented_metadata.kind.is_interface() {
                 context.collector.report_with_code(
                     IssueCode::InvalidImplement,
@@ -2038,7 +2084,7 @@ fn check_class_like_implements<'ctx, 'arena, A>(
 fn check_class_like_use<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    trait_use: &TraitUse<'arena>,
+    used_types: &[&Identifier<'arena>],
 ) where
     A: Arena,
 {
@@ -2048,8 +2094,8 @@ fn check_class_like_use<'ctx, 'arena, A>(
     let using_name = display_class_like_name(context, class_like_metadata.original_name);
     let using_class_span = class_like_metadata.name_span.unwrap_or(class_like_metadata.span);
 
-    for used_type in &trait_use.trait_names {
-        let used_type_str = context.resolved_names.get(&used_type);
+    for &used_type in used_types {
+        let used_type_str = context.resolved_names.get(used_type);
         let used_trait_metadata = context.codebase.get_class_like(used_type_str);
 
         let Some(used_trait_metadata) = used_trait_metadata else {
@@ -3048,28 +3094,17 @@ fn check_abstract_method_signatures<'ctx, A>(
     }
 }
 
-fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
+fn check_trait_method_conflicts<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    members: &'ast [ClassLikeMember<'arena>],
+    trait_uses: &[(Span, Vec<&Identifier<'arena>>)],
 ) where
     A: Arena,
 {
-    let mut trait_uses: Vec<(&'ast TraitUse<'arena>, Vec<Word>)> = Vec::new();
-
-    for member in members {
-        if let ClassLikeMember::TraitUse(trait_use) = member {
-            let mut trait_names = Vec::new();
-            for trait_name_id in &trait_use.trait_names {
-                let (trait_fqcn, _) = context.scope.resolve(NameKind::Default, trait_name_id.value());
-                trait_names.push(word(&trait_fqcn));
-            }
-            trait_uses.push((trait_use, trait_names));
-        }
-    }
+    let trait_uses = resolve_trait_uses(context, trait_uses);
 
     for i in 0..trait_uses.len() {
-        let (first_trait_use, first_traits) = &trait_uses[i];
+        let (first_trait_use_span, first_traits) = &trait_uses[i];
 
         for k in 0..first_traits.len() {
             for l in (k + 1)..first_traits.len() {
@@ -3113,8 +3148,6 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
                             );
 
                             for incompatibility in issues {
-                                let trait_use_span = first_trait_use.span();
-
                                 report_signature_compatibility_issue(
                                     context,
                                     class_like_metadata,
@@ -3122,7 +3155,7 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
                                     *method_name,
                                     second_method,
                                     incompatibility,
-                                    trait_use_span,
+                                    *first_trait_use_span,
                                 );
                             }
                         }
@@ -3131,7 +3164,7 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
             }
         }
 
-        for (second_trait_use, second_traits) in trait_uses.iter().skip(i + 1) {
+        for (second_trait_use_span, second_traits) in trait_uses.iter().skip(i + 1) {
             for first_trait_fqcn in first_traits {
                 let Some(first_trait_metadata) = context.codebase.get_class_like(first_trait_fqcn.as_ref()) else {
                     continue;
@@ -3174,8 +3207,6 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
                                 );
 
                                 for incompatibility in issues {
-                                    let second_trait_use_span = second_trait_use.span();
-
                                     report_signature_compatibility_issue(
                                         context,
                                         class_like_metadata,
@@ -3183,7 +3214,7 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
                                         *method_name,
                                         second_method,
                                         incompatibility,
-                                        second_trait_use_span,
+                                        *second_trait_use_span,
                                     );
                                 }
                             }
@@ -3195,25 +3226,15 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
     }
 }
 
-fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
+fn check_trait_property_conflicts<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    members: &'ast [ClassLikeMember<'arena>],
+    trait_uses: &[(Span, Vec<&Identifier<'arena>>)],
+    members: &[ClassLikeMember<'arena>],
 ) where
     A: Arena,
 {
-    let mut trait_uses: Vec<(&'ast TraitUse<'arena>, Vec<Word>)> = Vec::new();
-
-    for member in members {
-        if let ClassLikeMember::TraitUse(trait_use) = member {
-            let mut trait_names = Vec::new();
-            for trait_name_id in &trait_use.trait_names {
-                let (trait_fqcn, _) = context.scope.resolve(NameKind::Default, trait_name_id.value());
-                trait_names.push(word(&trait_fqcn));
-            }
-            trait_uses.push((trait_use, trait_names));
-        }
-    }
+    let trait_uses = resolve_trait_uses(context, trait_uses);
 
     let mut class_properties: IndexMap<Word, &PropertyMetadata> = IndexMap::new();
     for (property_name, property_metadata) in class_like_metadata.properties.iter().sorted_by_key(|(k, _)| *k) {
@@ -3225,7 +3246,7 @@ fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
     }
 
     for i in 0..trait_uses.len() {
-        let (first_trait_use, first_traits) = &trait_uses[i];
+        let (first_trait_use_span, first_traits) = &trait_uses[i];
 
         for k in 0..first_traits.len() {
             for l in (k + 1)..first_traits.len() {
@@ -3255,14 +3276,14 @@ fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
                         *property_name,
                         *first_trait_fqcn,
                         *second_trait_fqcn,
-                        first_trait_use.span(),
+                        *first_trait_use_span,
                         conflict,
                     );
                 }
             }
         }
 
-        for (second_trait_use, second_traits) in trait_uses.iter().skip(i + 1) {
+        for (second_trait_use_span, second_traits) in trait_uses.iter().skip(i + 1) {
             for first_trait_fqcn in first_traits {
                 let Some(first_trait_metadata) = context.codebase.get_class_like(first_trait_fqcn.as_ref()) else {
                     continue;
@@ -3291,7 +3312,7 @@ fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
                             *property_name,
                             *first_trait_fqcn,
                             *second_trait_fqcn,
-                            second_trait_use.span(),
+                            *second_trait_use_span,
                             conflict,
                         );
                     }
@@ -3318,16 +3339,17 @@ fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
                     .find_map(|member| {
                         if let ClassLikeMember::Property(prop) = member {
                             match prop {
+                                // A PHP# property's name has no `$`, which PHP's name has.
                                 Property::Plain(plain_prop) => {
                                     for item in &plain_prop.items {
-                                        let var_name = Word::from(item.variable().name);
+                                        let var_name = php_variable_name(item.variable().name);
                                         if var_name == *property_name {
                                             return Some(prop.span());
                                         }
                                     }
                                 }
                                 Property::Hooked(_) | Property::Computed(_) => {
-                                    let var_name = Word::from(prop.first_variable().name);
+                                    let var_name = php_variable_name(prop.first_variable().name);
                                     if var_name == *property_name {
                                         return Some(prop.span());
                                     }
@@ -3336,7 +3358,7 @@ fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
                         }
                         None
                     })
-                    .unwrap_or_else(|| first_trait_use.span());
+                    .unwrap_or(*first_trait_use_span);
 
                 report_trait_property_conflict(
                     context,
@@ -3426,6 +3448,26 @@ fn report_trait_property_conflict<A>(
 {
     let conflict_description = conflict.describe();
     let issue_code = conflict.get_issue_code();
+
+    // A PHP# class's header traits, spec section 22, are named as PHP# writes classes, and a member has no `$`.
+    if context.dialect.is_sharp() {
+        let display = |name: Word| {
+            let original = context.codebase.get_class_like(name.as_bytes()).map_or(name, |class| class.original_name);
+            display_class_like_name(context, original)
+        };
+        let (class, first, second) = (display(class_name), display(trait1_name), display(trait2_name));
+        let property = mago_bytes::BytesDisplay(mago_bytes::trim_start_byte(property_name.as_bytes(), b'$'));
+
+        context.collector.report_with_code(
+            issue_code,
+            Issue::error(format!(
+                "`{class}` gets `{property}` from both `{first}` and `{second}`, which declare it differently: {conflict_description}."
+            ))
+            .with_annotation(Annotation::primary(conflict_span).with_message("Declared differently.")),
+        );
+
+        return;
+    }
 
     context.collector.report_with_code(
         issue_code,
@@ -3599,15 +3641,15 @@ fn check_interface_method_signatures<'ctx, A>(
 ) where
     A: Arena,
 {
-    let interface_fqcn_str: &[u8] = interface_metadata.name.as_ref();
-    if should_skip_enum_builtin_interface(class_like_metadata, interface_fqcn_str) {
-        return;
-    }
-
     for (method_name_atom, interface_method_id) in &interface_metadata.declaring_method_ids {
         let method_name_str = method_name_atom.as_ref();
         let interface_fqcn_word = interface_method_id.get_class_name();
         let interface_fqcn_str = interface_fqcn_word.as_bytes();
+        // `BackedEnum` and `UnitEnum` declare the enum's methods the engine writes, also through an interface that
+        // extends them.
+        if should_skip_enum_builtin_interface(class_like_metadata, interface_fqcn_str) {
+            continue;
+        }
 
         let Some(interface_method) = context.codebase.get_declaring_method(interface_fqcn_str, method_name_str) else {
             continue;
@@ -3907,6 +3949,23 @@ fn report_signature_compatibility_issue<'ctx, A>(
         // subclass, a test double included, overrides it.
         SignatureCompatibilityIssue::FinalMethodOverride
             if !context.dialect.is_sharp() && parent_class.flags.is_sharp() => {}
+        // A PHP# method is closed unless it is `virtual`, spec section 22, and only an override is written `final`.
+        SignatureCompatibilityIssue::FinalMethodOverride if parent_class.flags.is_sharp() => {
+            let reason = if parent_class.overridden_method_ids.contains_key(&method_name) {
+                "is `final`"
+            } else {
+                "is not `virtual`"
+            };
+            context.collector.report_with_code(
+                IssueCode::OverrideFinalMethod,
+                Issue::error(format!("`{parent_display}` {reason}, so no subclass replaces it."))
+                    .with_annotation(Annotation::primary(primary_span).with_message("Replaced here."))
+                    .with_annotation(
+                        Annotation::secondary(parent_class_span)
+                            .with_message(format!("`{parent_display}` is declared here.")),
+                    ),
+            );
+        }
         SignatureCompatibilityIssue::FinalMethodOverride => {
             context.collector.report_with_code(
                 IssueCode::OverrideFinalMethod,
@@ -5462,7 +5521,7 @@ fn check_class_like_constants<'ctx, 'arena, A>(
 fn check_readonly_class_trait_properties<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    members: &[ClassLikeMember<'arena>],
+    trait_uses: &[(Span, Vec<&Identifier<'arena>>)],
 ) where
     A: Arena,
 {
@@ -5470,36 +5529,217 @@ fn check_readonly_class_trait_properties<'ctx, 'arena, A>(
         return;
     }
 
-    for member in members {
-        if let ClassLikeMember::TraitUse(trait_use) = member {
-            for trait_name_id in &trait_use.trait_names {
-                let (trait_fqcn, _) = context.scope.resolve(NameKind::Default, trait_name_id.value());
-                let trait_fqcn = word(&trait_fqcn);
+    for trait_name_id in trait_uses.iter().flat_map(|(_, trait_names)| trait_names) {
+        let trait_fqcn = word(context.resolved_names.get(*trait_name_id));
+        let properties =
+            context.codebase.get_class_like(trait_fqcn.as_ref()).map(|trait_metadata| &trait_metadata.properties);
 
-                let Some(trait_metadata) = context.codebase.get_class_like(trait_fqcn.as_ref()) else {
-                    continue;
-                };
-
-                for (property_name, property) in &trait_metadata.properties {
-                    if !property.flags.is_readonly() {
-                        context.collector.report_with_code(
-                            IssueCode::InvalidTraitUse,
-                            Issue::error(format!(
-                                "Readonly class `{}` cannot use trait `{}` which has non-readonly property `{}`",
-                                class_like_metadata.name, trait_fqcn, property_name
-                            ))
-                            .with_annotation(Annotation::primary(trait_name_id.span()).with_message("Trait used here"))
-                            .with_note("All properties in a trait used by a readonly class must be declared readonly.")
-                            .with_help(format!(
-                                "Add the `readonly` modifier to property `{}` in trait `{}`.",
-                                property_name, trait_fqcn
-                            )),
-                        );
-                    }
-                }
+        for (property_name, property) in properties.into_iter().flatten() {
+            if !property.flags.is_readonly() {
+                context.collector.report_with_code(
+                    IssueCode::InvalidTraitUse,
+                    Issue::error(format!(
+                        "Readonly class `{}` cannot use trait `{}` which has non-readonly property `{}`",
+                        class_like_metadata.name, trait_fqcn, property_name
+                    ))
+                    .with_annotation(Annotation::primary(trait_name_id.span()).with_message("Trait used here"))
+                    .with_note("All properties in a trait used by a readonly class must be declared readonly.")
+                    .with_help(format!(
+                        "Add the `readonly` modifier to property `{}` in trait `{}`.",
+                        property_name, trait_fqcn
+                    )),
+                );
             }
         }
     }
+}
+
+/// Spec section 22 gives a class one method per name. Reports each method that two places give a PHP# class-like a
+/// body for, unless the class writes the method itself: two of its header traits and the traits of its interfaces'
+/// default bodies, which PHP refuses, or a default body and the base class, whose body PHP would replace. A header
+/// trait replaces the base class's method, as PHP's `use` does. A computed property's default body beside another
+/// default body, a header trait's property or the base class's property is reported alike, and an enum, which has no
+/// property, gets none.
+fn check_members_given_twice<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    header_traits: &[Word],
+    name_span: Span,
+) where
+    A: Arena,
+{
+    let mut traits: Vec<&ClassLikeMetadata> =
+        header_traits.iter().filter_map(|header_trait| context.codebase.get_trait(header_trait.as_bytes())).collect();
+    traits.extend(context.codebase.get_defaults_traits(class_like_metadata));
+    traits.sort_unstable_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+
+    let has_body = |class: &ClassLikeMetadata, method: Word| {
+        class
+            .declaring_method_ids
+            .get(&method)
+            .and_then(|method_id| context.codebase.get_method_by_id(method_id))
+            .filter(|method| {
+                method
+                    .method_metadata
+                    .as_ref()
+                    .is_some_and(|method| !method.is_abstract && !method.visibility.is_private())
+            })
+    };
+    let parent =
+        class_like_metadata.direct_parent_class.and_then(|parent| context.codebase.get_class_like(parent.as_bytes()));
+
+    let mut methods: Vec<Word> =
+        traits.iter().flat_map(|trait_metadata| trait_metadata.declaring_method_ids.keys().copied()).collect();
+    methods.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    methods.dedup();
+
+    let class_name = display_class_like_name(context, class_like_metadata.original_name);
+    for method in methods {
+        if class_like_metadata.methods.contains(&method) {
+            continue;
+        }
+
+        let mut bodies = Vec::new();
+        let mut original_name = method;
+        for giver in traits.iter().copied() {
+            if let Some(body) = has_body(giver, method) {
+                original_name = body.original_name;
+                bodies.push(
+                    context
+                        .codebase
+                        .get_defaults_interface(giver)
+                        .map_or((giver, false), |interface| (interface, true)),
+                );
+            }
+        }
+        let gives_default = bodies.iter().any(|(_, default)| *default);
+        // A sub-interface's default body replaces its parent's, as the most specific interface's does in Java, C# and
+        // Kotlin.
+        let mut givers: Vec<Word> = bodies
+            .iter()
+            .filter(|(giver, default)| {
+                !*default
+                    || !bodies.iter().any(|(other, other_default)| {
+                        *other_default && other.all_parent_interfaces.contains(&giver.name)
+                    })
+            })
+            .map(|(giver, _)| giver.original_name)
+            .collect();
+        // The base class's body counts only against a default body: a header trait replaces it, as PHP's `use` does.
+        if gives_default && let Some(parent) = parent.filter(|parent| has_body(parent, method).is_some()) {
+            givers.insert(0, parent.original_name);
+        }
+
+        let [first, second, ..] = givers.as_slice() else {
+            continue;
+        };
+        let (first, second) = (display_class_like_name(context, *first), display_class_like_name(context, *second));
+        context.collector.report_with_code(
+            IssueCode::AmbiguousInheritedMember,
+            Issue::error(format!(
+                "`{class_name}` gets `{original_name}` from both `{first}` and `{second}`: write `{original_name}` in `{class_name}`."
+            ))
+            .with_annotation(Annotation::primary(name_span).with_message(format!("`{class_name}` has one `{original_name}`.")))
+            .with_help(format!("Declare `{original_name}` in `{class_name}`, and call `super<{second}>.{original_name}()` in it to reuse one body.")),
+        );
+    }
+
+    // A computed property's default body is a body too, and against one, a header trait's property and the base
+    // class's property are each one.
+    let mut properties: Vec<(Word, &ClassLikeMetadata, bool)> = traits
+        .iter()
+        .flat_map(|giver| {
+            let interface = context.codebase.get_defaults_interface(giver);
+            let owner = interface.unwrap_or(giver);
+            owner
+                .properties
+                .iter()
+                .filter(move |(_, property)| {
+                    interface.is_none() || property.hooks.values().any(|accessor| !accessor.is_abstract)
+                })
+                .map(move |(name, _)| (*name, owner, interface.is_some()))
+        })
+        .collect();
+    properties.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    for given in properties.chunk_by(|left, right| left.0 == right.0) {
+        let name = given[0].0;
+        if !given.iter().any(|(_, _, default)| *default)
+            || class_like_metadata.declaring_property_ids.get(&name) == Some(&class_like_metadata.name)
+        {
+            continue;
+        }
+        let property = mago_bytes::BytesDisplay(mago_bytes::trim_start_byte(name.as_bytes(), b'$'));
+        // An enum has no property, its own or a default body's, as PHP gives an enum none. An enum with a case that
+        // carries data runs as the class its cases extend.
+        if class_like_metadata.kind.is_enum()
+            || class_like_metadata.permitted_inheritors.iter().flatten().any(|inheritor| {
+                context
+                    .codebase
+                    .get_class_like(inheritor.as_bytes())
+                    .is_some_and(|case| case.flags.is_enum_case_class())
+            })
+        {
+            let Some((_, interface, _)) = given.iter().find(|(_, _, default)| *default) else {
+                unreachable!("the group holds a default body");
+            };
+            let interface = display_class_like_name(context, interface.original_name);
+            context.collector.report_with_code(
+                IssueCode::InvalidImplement,
+                Issue::error(format!(
+                    "Enum `{class_name}` cannot have properties, and `{interface}` gives it the computed property `{property}`."
+                ))
+                .with_annotation(Annotation::primary(name_span).with_message(format!("`{class_name}` gets `{property}` here.")))
+                .with_help(format!("Make `{property}` a method of `{interface}`, or implement `{interface}` in a class.")),
+            );
+
+            continue;
+        }
+        // A sub-interface's default body replaces its parent's here too.
+        let givers: Vec<Word> = parent
+            .filter(|parent| parent.properties.contains_key(&name))
+            .map(|parent| parent.original_name)
+            .into_iter()
+            .chain(
+                given
+                    .iter()
+                    .filter(|(_, giver, default)| {
+                        !*default
+                            || !given.iter().any(|(_, other, other_default)| {
+                                *other_default && other.all_parent_interfaces.contains(&giver.name)
+                            })
+                    })
+                    .map(|(_, giver, _)| giver.original_name),
+            )
+            .collect();
+        let [first, second, ..] = givers.as_slice() else {
+            continue;
+        };
+        let (first, second) = (display_class_like_name(context, *first), display_class_like_name(context, *second));
+        context.collector.report_with_code(
+            IssueCode::AmbiguousInheritedMember,
+            Issue::error(format!(
+                "`{class_name}` gets `{property}` from both `{first}` and `{second}`: write `{property}` in `{class_name}`."
+            ))
+            .with_annotation(Annotation::primary(name_span).with_message(format!("`{class_name}` has one `{property}`.")))
+            .with_help(format!("Declare `{property}` in `{class_name}`.")),
+        );
+    }
+}
+
+/// The fully qualified names of the traits in each group of `trait_uses`, beside the span the group's errors point at.
+fn resolve_trait_uses<A>(
+    context: &Context<'_, '_, A>,
+    trait_uses: &[(Span, Vec<&Identifier<'_>>)],
+) -> Vec<(Span, Vec<Word>)>
+where
+    A: Arena,
+{
+    trait_uses
+        .iter()
+        .map(|(span, trait_names)| {
+            (*span, trait_names.iter().map(|trait_name| word(context.resolved_names.get(*trait_name))).collect())
+        })
+        .collect()
 }
 
 #[cfg(test)]

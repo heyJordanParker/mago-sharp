@@ -10784,6 +10784,709 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
     );
 }
 
+/// ```php
+/// public function seed(object $owner): bool { return $owner instanceof \Lib\HasLabel; }
+/// ```
+///
+/// Spec section 22: a plain PHP trait is a type, and no PHP value is `instanceof` a trait. So a trait type is PHP's
+/// `object`, and its PHP# type text, as #102 writes it, makes a call from plain PHP check the argument, a `List` of it
+/// checks each element, and `is` reads it while the code runs, as the engine's test finds a trait any class up the
+/// chain uses. A method's type parameter bounded by the trait checks a call from plain PHP against its bound, and in an
+/// intersection bound, `Greeter & HasLabel`, PHP's type is the class beside the trait.
+#[test]
+fn a_trait_type_is_object_and_its_test_reads_the_trait() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.HasLabel;\n\npublic class Seeder\n{\n    public bool seed(HasLabel owner, List<HasLabel> owners, Any other) => other is HasLabel;\n}\n",
+        &[(
+            "src/Lib/HasLabel.php",
+            "<?php namespace Lib; trait HasLabel { public function label(): string { return 'label'; } }",
+        )],
+    );
+
+    assert_eq!(
+        lowered.declared("seed"),
+        indoc! {r#"
+            METHOD [1] "seed" @7-7
+              PARAM_LIST
+                PARAM
+                  TYPE [8]
+                  ZVAL "owner"
+                  null
+                  null
+                  null
+                  null
+                PARAM
+                  TYPE [7]
+                  ZVAL "owners"
+                  null
+                  null
+                  null
+                  null
+                PARAM
+                  ZVAL [1] "mixed"
+                  ZVAL "other"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  null
+                  ZVAL "Lib.HasLabel, List<Lib.HasLabel>, Any?"
+              null
+              STMT_LIST
+                RETURN
+                  SHARP_IS_TYPE
+                    VAR
+                      ZVAL "other"
+                    ZVAL "Lib.HasLabel"
+              SHARP_TYPE_ARGS
+                ZVAL [1] "bool"
+                ZVAL "Function<bool(Lib.HasLabel, List<Lib.HasLabel>, Any)>"
+              null
+        "#}
+    );
+
+    // A method's type parameter bounded by the trait checks its bound, and the trait leaves an intersection to the
+    // classes beside it.
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.HasLabel;\n\npublic interface Greeter\n{\n    string hi();\n}\n\npublic class Seeder\n{\n    public string bound<T : HasLabel>(T owner) => owner.label();\n\n    public string both<T : Greeter & HasLabel>(T owner) => owner.hi() + owner.label();\n}\n",
+        &[(
+            "src/Lib/HasLabel.php",
+            "<?php namespace Lib; trait HasLabel { public function label(): string { return 'label'; } }",
+        )],
+    );
+
+    assert_eq!(
+        [lowered.declared("bound"), lowered.declared("both")].concat(),
+        indoc! {r#"
+            METHOD [1] "bound" @12-12
+              PARAM_LIST
+                PARAM
+                  TYPE [8]
+                  ZVAL "owner"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  ZVAL "Lib.HasLabel"
+                  ZVAL "Lib.HasLabel"
+              null
+              STMT_LIST
+                RETURN
+                  METHOD_CALL
+                    VAR
+                      ZVAL "owner"
+                    ZVAL "label"
+                    ARG_LIST
+              SHARP_TYPE_ARGS
+                ZVAL [1] "string"
+                ZVAL "string"
+              null
+            METHOD [1] "both" @14-14
+              PARAM_LIST
+                PARAM
+                  ZVAL "App\\Greeter"
+                  ZVAL "owner"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  ZVAL "App.Greeter & Lib.HasLabel"
+                  ZVAL "App.Greeter & Lib.HasLabel"
+              null
+              STMT_LIST
+                RETURN
+                  BINARY_OP [8]
+                    METHOD_CALL
+                      VAR
+                        ZVAL "owner"
+                      ZVAL "hi"
+                      ARG_LIST
+                    METHOD_CALL
+                      VAR
+                        ZVAL "owner"
+                      ZVAL "label"
+                      ARG_LIST
+              SHARP_TYPE_ARGS
+                ZVAL [1] "string"
+                ZVAL "string"
+              null
+        "#}
+    );
+}
+
+/// ```php
+/// class Both implements \App\Described, \App\Told
+/// {
+///     use \App\Described\Defaults, \App\Told\Defaults {
+///         \App\Described\Defaults::describe as protected `describe@App\Described`;
+///         \App\Told\Defaults::describe as protected `describe@App\Told`;
+///     }
+///     public function describe(): string
+///     {
+///         return $this->{'describe@App\Described'}() . $this->{'describe@App\Told'}();
+///     }
+/// }
+/// ```
+///
+/// Spec section 22: `super<Described>.describe()` runs `Described`'s default body through a protected alias of the
+/// trait's method, `[2]` `ZEND_ACC_PROTECTED`, that the `use` of each class that uses the trait declares, so a
+/// subclass calls it too. Its name joins the method and the interface with `@`, which no PHP# member name holds, so it
+/// can't clash with one.
+#[test]
+fn super_of_an_interface_calls_a_protected_alias_of_its_default_body() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic interface Described\n{\n    string describe() => \"described\";\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n    public override string describe() => super<Described>.describe() + super<Told>.describe();\n}\n",
+    );
+    let class = lowered
+        .nodes()
+        .iter()
+        .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == "Both")
+        .expect("the source declares `Both`");
+
+    assert_eq!(
+        lowered.render(lowered.child(class as u32, 2)),
+        indoc! {r#"
+            STMT_LIST
+              USE_TRAIT
+                NAME_LIST
+                  ZVAL "App\\Described\\Defaults"
+                  ZVAL "App\\Told\\Defaults"
+                TRAIT_ADAPTATIONS
+                  TRAIT_ALIAS [2]
+                    METHOD_REFERENCE
+                      ZVAL "App\\Described\\Defaults"
+                      ZVAL "describe"
+                    ZVAL "describe@App\\Described"
+                  TRAIT_ALIAS [2]
+                    METHOD_REFERENCE
+                      ZVAL "App\\Told\\Defaults"
+                      ZVAL "describe"
+                    ZVAL "describe@App\\Told"
+              METHOD [1] "describe" @15-15
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    BINARY_OP [8]
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "describe@App\\Described"
+                        ARG_LIST
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "describe@App\\Told"
+                        ARG_LIST
+                SHARP_TYPE_ARGS
+                  ZVAL [1] "string"
+                  ZVAL "Function<string()>"
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Override"
+                      null
+        "#}
+    );
+}
+
+/// ```php
+/// namespace App;
+/// interface HasDesign {
+///     public string $designColumn { get; }
+///     public function designKey(): string;
+///     public function title(): string;
+/// }
+/// trait HasDesign\Defaults {
+///     public function designKey(): string { return $this->designColumn; }
+/// }
+/// interface Labeled { public function label(): string; }
+/// trait Labeled\Defaults { public function label(): string { return 'labeled'; } }
+/// abstract class Page extends \Lib\Model { use \Lib\HasSlug, \App\HasDesign\Defaults; }
+/// class Child extends \App\Page { }
+/// enum Shade implements \App\Labeled { use \App\Labeled\Defaults; case Light; }
+/// final class Painted implements \App\Labeled { use \App\Labeled\Defaults; public function __construct(…) {} }
+/// ```
+///
+/// Spec section 22: a PHP# interface with default bodies is a PHP interface whose methods are all abstract, `[1]`
+/// `ZEND_ACC_INTERFACE`, then the trait `[2]` `ZEND_ACC_TRAIT` named `HasDesign\Defaults`, which the engine declares in
+/// the file's namespace and which holds each default body as a public method. A class's header traits and the traits of
+/// the default bodies of the interfaces it implements first are one `use`, its first member, and a subclass of a class
+/// that already uses them uses none. The `use` gives each default body the protected alias `super<Labeled>` calls,
+/// `[2]` `ZEND_ACC_PROTECTED`. An enum, an event, a struct and the class of an enum with a case that carries data use
+/// them too.
+#[test]
+fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interface_and_its_trait() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.HasSlug;\nimport Lib.Model;\n\npublic interface HasDesign\n{\n    string designColumn { get; }\n    string designKey() => this.designColumn;\n    string title();\n}\n\npublic interface Labeled\n{\n    string label() => \"labeled\";\n}\n\npublic abstract class Page : Model, HasSlug, HasDesign\n{\n}\n\npublic abstract class Child : Page\n{\n}\n\npublic enum Shade : Labeled\n{\n    case Light;\n}\n\npublic event Painted(int id) : Labeled;\n",
+        &[(
+            "src/Lib/Model.php",
+            "<?php namespace Lib; abstract class Model {} trait HasSlug { public function slug(): string { return 'slug'; } }",
+        )],
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App"
+                null
+              CLASS [1] "HasDesign" @6-11
+                null
+                null
+                STMT_LIST
+                  PROP_GROUP [1]
+                    ZVAL [1] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "designColumn"
+                        null
+                        null
+                        STMT_LIST
+                          PROPERTY_HOOK "get" @8-8
+                            null
+                            null
+                            null
+                            null
+                            null
+                    null
+                  METHOD [1] "designKey" @9-9
+                    PARAM_LIST
+                    null
+                    null
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "Function<string()>"
+                    null
+                  METHOD [1] "title" @10-10
+                    PARAM_LIST
+                    null
+                    null
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "string"
+                    null
+                null
+                null
+              CLASS [2] "HasDesign\\Defaults" @6-11
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "designKey" @9-9
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "designColumn"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "Function<string()>"
+                    null
+                null
+                null
+              CLASS [1] "Labeled" @13-16
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "label" @15-15
+                    PARAM_LIST
+                    null
+                    null
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "Function<string()>"
+                    null
+                null
+                null
+              CLASS [2] "Labeled\\Defaults" @13-16
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "label" @15-15
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ZVAL "labeled"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "Function<string()>"
+                    null
+                null
+                null
+              CLASS [64] "Page" @18-20
+                ZVAL "Lib\\Model"
+                NAME_LIST
+                  ZVAL "App\\HasDesign"
+                STMT_LIST
+                  USE_TRAIT
+                    NAME_LIST
+                      ZVAL "Lib\\HasSlug"
+                      ZVAL "App\\HasDesign\\Defaults"
+                    TRAIT_ADAPTATIONS
+                      TRAIT_ALIAS [2]
+                        METHOD_REFERENCE
+                          ZVAL "App\\HasDesign\\Defaults"
+                          ZVAL "designKey"
+                        ZVAL "designKey@App\\HasDesign"
+                null
+                null
+              CLASS [64] "Child" @22-24
+                ZVAL "App\\Page"
+                null
+                STMT_LIST
+                null
+                null
+              CLASS [268435488] "Shade" @26-29
+                null
+                NAME_LIST
+                  ZVAL "App\\Labeled"
+                STMT_LIST
+                  USE_TRAIT
+                    NAME_LIST
+                      ZVAL "App\\Labeled\\Defaults"
+                    TRAIT_ADAPTATIONS
+                      TRAIT_ALIAS [2]
+                        METHOD_REFERENCE
+                          ZVAL "App\\Labeled\\Defaults"
+                          ZVAL "label"
+                        ZVAL "label@App\\Labeled"
+                  ENUM_CASE
+                    ZVAL "Light"
+                    null
+                    null
+                    null
+                null
+                null
+              CLASS [32] "Painted" @31-31
+                null
+                NAME_LIST
+                  ZVAL "App\\Labeled"
+                STMT_LIST
+                  USE_TRAIT
+                    NAME_LIST
+                      ZVAL "App\\Labeled\\Defaults"
+                    TRAIT_ADAPTATIONS
+                      TRAIT_ALIAS [2]
+                        METHOD_REFERENCE
+                          ZVAL "App\\Labeled\\Defaults"
+                          ZVAL "label"
+                        ZVAL "label@App\\Labeled"
+                  METHOD [1] "__construct" @31-31
+                    PARAM_LIST
+                      PARAM [129]
+                        ZVAL [1] "int"
+                        ZVAL "id"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    null
+                    null
+                null
+                null
+        "#}
+    );
+
+    // A struct and an enum with a case that carries data, whose class runs each case's class's methods, start with
+    // the same `use`.
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic interface Labeled\n{\n    string label() => \"labeled\";\n}\n\npublic struct Badge : Labeled\n{\n}\n\npublic enum Mark : Labeled\n{\n    case Plain;\n    case Tagged(string tag);\n}\n",
+    );
+    for name in ["Badge", "Mark"] {
+        let class = lowered
+            .nodes()
+            .iter()
+            .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == name)
+            .expect("the source declares the class");
+
+        assert_eq!(
+            lowered.render(lowered.child(lowered.child(class as u32, 2), 0)),
+            indoc! {r#"
+                USE_TRAIT
+                  NAME_LIST
+                    ZVAL "App\\Labeled\\Defaults"
+                  TRAIT_ADAPTATIONS
+                    TRAIT_ALIAS [2]
+                      METHOD_REFERENCE
+                        ZVAL "App\\Labeled\\Defaults"
+                        ZVAL "label"
+                      ZVAL "label@App\\Labeled"
+            "#},
+            "{name}"
+        );
+    }
+
+    // A struct's header trait is its `use`, never an interface.
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.HasLabel;\n\npublic struct Seal : HasLabel\n{\n    public Seal(public int at { get; }) { }\n}\n",
+        &[(
+            "src/Lib/HasLabel.php",
+            "<?php namespace Lib; trait HasLabel { public function label(): string { return 'label'; } }",
+        )],
+    );
+    let seal = lowered
+        .nodes()
+        .iter()
+        .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == "Seal")
+        .expect("the source declares the struct") as u32;
+
+    assert_eq!(
+        [lowered.render(lowered.child(seal, 1)), lowered.render(lowered.child(lowered.child(seal, 2), 0))].concat(),
+        indoc! {r#"
+            NAME_LIST
+              ZVAL "Sharp\\Struct"
+            USE_TRAIT
+              NAME_LIST
+                ZVAL "Lib\\HasLabel"
+              null
+        "#}
+    );
+}
+
+/// ```php
+/// class Fancy implements \App\ShowsMore {
+///     use \App\Shows\Defaults, \App\ShowsMore\Defaults {
+///         \App\ShowsMore\Defaults::label insteadof \App\Shows\Defaults;
+///         \App\Shows\Defaults::label as protected `label@App\Shows`;
+///         \App\ShowsMore\Defaults::label as protected `label@App\ShowsMore`;
+///     }
+/// }
+/// ```
+///
+/// Spec section 22: a sub-interface's default body replaces its parent's, so the class's `use` takes it `insteadof`
+/// the parent's, which `super<Shows>` still reaches through its alias.
+#[test]
+fn a_sub_interfaces_default_body_runs_instead_of_its_parents() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic interface Shows\n{\n    string label() => \"shows\";\n\n    string tag => \"s\";\n}\n\npublic interface ShowsMore : Shows\n{\n    override string label() => \"more\";\n\n    override string tag => \"m\";\n}\n\npublic class Fancy : ShowsMore\n{\n}\n",
+    );
+    let class = |name: &str| {
+        lowered
+            .nodes()
+            .iter()
+            .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == name)
+            .expect("the source declares the class") as u32
+    };
+
+    // The trait's body has no parent, so only the interface's signature carries `#[\Override]`.
+    assert_eq!(
+        [
+            lowered.render(lowered.child(lowered.child(lowered.child(class("ShowsMore"), 2), 0), 4)),
+            lowered.render(lowered.child(lowered.child(lowered.child(class("ShowsMore\\Defaults"), 2), 0), 4)),
+        ]
+        .concat(),
+        indoc! {r#"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Override"
+                  null
+            null
+        "#}
+    );
+    // A computed property's body of the sub-interface replaces its parent's too.
+    assert_eq!(
+        lowered.render(lowered.child(lowered.child(lowered.child(lowered.child(class("Fancy"), 2), 1), 1), 0)),
+        indoc! {r#"
+            PROP_ELEM
+              ZVAL "tag"
+              null
+              null
+              STMT_LIST
+                PROPERTY_HOOK "get" @18-18
+                  null
+                  null
+                  PROPERTY_HOOK_SHORT_BODY
+                    METHOD_CALL
+                      VAR
+                        ZVAL "this"
+                      ZVAL "tag@App\\ShowsMore"
+                      ARG_LIST
+                  null
+                  null
+        "#}
+    );
+    assert_eq!(
+        lowered.render(lowered.child(lowered.child(class("Fancy"), 2), 0)),
+        indoc! {r#"
+            USE_TRAIT
+              NAME_LIST
+                ZVAL "App\\Shows\\Defaults"
+                ZVAL "App\\ShowsMore\\Defaults"
+              TRAIT_ADAPTATIONS
+                TRAIT_PRECEDENCE
+                  METHOD_REFERENCE
+                    ZVAL "App\\ShowsMore\\Defaults"
+                    ZVAL "label"
+                  NAME_LIST
+                    ZVAL "App\\Shows\\Defaults"
+                TRAIT_ALIAS [2]
+                  METHOD_REFERENCE
+                    ZVAL "App\\Shows\\Defaults"
+                    ZVAL "label"
+                  ZVAL "label@App\\Shows"
+                TRAIT_ALIAS [2]
+                  METHOD_REFERENCE
+                    ZVAL "App\\ShowsMore\\Defaults"
+                    ZVAL "label"
+                  ZVAL "label@App\\ShowsMore"
+        "#}
+    );
+}
+
+/// Lowers, in PHP:
+///
+/// ```php
+/// interface Tagged { public mixed $tag { get; } }
+/// trait Tagged\Defaults { protected function `tag@App\Tagged`(): string { return 'tagged'; } }
+/// final class Note implements \App\Tagged {
+///     use \App\Tagged\Defaults;
+///     public mixed $tag { get => $this->{'tag@App\Tagged'}(); }
+/// }
+/// final class Own implements \App\Tagged { use \App\Tagged\Defaults; public string $tag { get => 'own'; } }
+/// final class Kept implements \App\Tagged { use \App\Tagged\Defaults; public string $tag = 'kept'; }
+/// interface Keyed { public function key(): mixed; }
+/// trait Keyed\Defaults { /* header App.Keyed<$0> */ public function holds(mixed $value): bool { … } }
+/// ```
+///
+/// Spec section 22: an interface's computed property is `[1]` `ZEND_ACC_PUBLIC` `mixed` with an abstract `get` in the
+/// interface, and its default body is the trait's `[2]` `ZEND_ACC_PROTECTED` method, which keeps the type. Each class
+/// that gets the body declares the `mixed` property, running that method, after its `use`, and a class that overrides
+/// it, computed or stored, declares its own with its type, as a `get` hook narrows a `mixed` one. A generic interface's
+/// trait names the interface with its type parameters
+/// as its header, so the engine counts a default body's `$0` among the interface's type arguments.
+#[test]
+fn an_interface_computed_property_runs_its_default_body_through_a_protected_method_of_the_trait() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic interface Tagged\n{\n    string tag => \"tagged\";\n}\n\npublic class Note : Tagged\n{\n}\n\npublic class Own : Tagged\n{\n    public override string tag => \"own\";\n}\n\npublic class Kept : Tagged\n{\n    public override string tag { get; set; } = \"kept\";\n}\n\npublic interface Keyed<TKey>\n{\n    TKey key();\n\n    bool holds(Any value) => value is TKey;\n}\n",
+    );
+    let class = |name: &str| {
+        lowered
+            .nodes()
+            .iter()
+            .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == name)
+            .expect("the source declares the class") as u32
+    };
+
+    assert_eq!(
+        [
+            lowered.render(lowered.child(class("Tagged"), 2)),
+            lowered.render(lowered.child(class("Tagged\\Defaults"), 2)),
+            lowered.render(lowered.child(class("Note"), 2)),
+            lowered.render(lowered.child(lowered.child(class("Own"), 2), 1)),
+            lowered.render(lowered.child(lowered.child(class("Kept"), 2), 1)),
+            lowered.render(lowered.child(lowered.child(class("Keyed\\Defaults"), 2), 1)),
+        ]
+        .concat(),
+        indoc! {r#"
+            STMT_LIST
+              PROP_GROUP [1]
+                ZVAL [1] "mixed"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "tag"
+                    null
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "get" @5-5
+                        null
+                        null
+                        null
+                        null
+                        null
+                null
+            STMT_LIST
+              METHOD [2] "tag@App\\Tagged" @5-5
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    ZVAL "tagged"
+                ZVAL [1] "string"
+                null
+            STMT_LIST
+              USE_TRAIT
+                NAME_LIST
+                  ZVAL "App\\Tagged\\Defaults"
+                null
+              PROP_GROUP [1]
+                ZVAL [1] "mixed"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "tag"
+                    null
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "get" @9-9
+                        null
+                        null
+                        PROPERTY_HOOK_SHORT_BODY
+                          METHOD_CALL
+                            VAR
+                              ZVAL "this"
+                            ZVAL "tag@App\\Tagged"
+                            ARG_LIST
+                        null
+                        null
+                null
+            PROP_GROUP [1]
+              ZVAL [1] "string"
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "tag"
+                  null
+                  null
+                  STMT_LIST
+                    PROPERTY_HOOK "get" @14-14
+                      null
+                      null
+                      PROPERTY_HOOK_SHORT_BODY
+                        ZVAL "own"
+                      null
+                      null
+              ATTRIBUTE_LIST
+                ATTRIBUTE_GROUP
+                  ATTRIBUTE
+                    ZVAL "Override"
+                    null
+            PROP_GROUP [1]
+              ZVAL [1] "string"
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "tag"
+                  ZVAL "kept"
+                  null
+                  null
+              ATTRIBUTE_LIST
+                ATTRIBUTE_GROUP
+                  ATTRIBUTE
+                    ZVAL "Override"
+                    null
+            SHARP_CLASS_METADATA
+              ZVAL "App.Keyed<$0>"
+              null
+              null
+        "#}
+    );
+}
+
 /// Spec section 15: an `on` clause adds nothing to its class, because `mago compile` lists each listener in
 /// `.sharp/listeners.php`, so a listener lowers to its method alone.
 #[test]
@@ -11327,6 +12030,54 @@ fn virtual_lowers_to_nothing_and_override_to_the_override_attribute() {
                         ATTRIBUTE
                           ZVAL "Deprecated"
                           null
+                      ATTRIBUTE_GROUP
+                        ATTRIBUTE
+                          ZVAL "Override"
+                          null
+                null
+                null
+        "#}
+    );
+}
+
+/// ```php
+/// #[\Override] final public function name(): string { return 'thumbnail'; }
+/// ```
+///
+/// `final override` stops an override chain, spec section 22, so it lowers to PHP's `final`, and the engine refuses a
+/// plain PHP subclass that replaces the method too.
+#[test]
+fn final_override_lowers_to_a_final_method_with_the_override_attribute() {
+    let lowered = Lowered::with(
+        "class Thumbnail : Image\n{\n    public final override string name()\n    {\n        return \"thumbnail\";\n    }\n}\n",
+        &[("src/Image.php", "<?php class Image { public function name(): string { return 'image'; } }")],
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              CLASS "Thumbnail" @1-7
+                ZVAL "Image"
+                null
+                STMT_LIST
+                  METHOD [33] "name" @3-6
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ZVAL "thumbnail"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "Function<string()>"
+                    ATTRIBUTE_LIST
                       ATTRIBUTE_GROUP
                         ATTRIBUTE
                           ZVAL "Override"
