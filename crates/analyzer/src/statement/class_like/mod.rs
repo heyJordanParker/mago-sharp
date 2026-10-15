@@ -3640,15 +3640,15 @@ fn check_interface_method_signatures<'ctx, A>(
 ) where
     A: Arena,
 {
-    let interface_fqcn_str: &[u8] = interface_metadata.name.as_ref();
-    if should_skip_enum_builtin_interface(class_like_metadata, interface_fqcn_str) {
-        return;
-    }
-
     for (method_name_atom, interface_method_id) in &interface_metadata.declaring_method_ids {
         let method_name_str = method_name_atom.as_ref();
         let interface_fqcn_word = interface_method_id.get_class_name();
         let interface_fqcn_str = interface_fqcn_word.as_bytes();
+        // `BackedEnum` and `UnitEnum` declare the enum's methods the engine writes, also through an interface that
+        // extends them.
+        if should_skip_enum_builtin_interface(class_like_metadata, interface_fqcn_str) {
+            continue;
+        }
 
         let Some(interface_method) = context.codebase.get_declaring_method(interface_fqcn_str, method_name_str) else {
             continue;

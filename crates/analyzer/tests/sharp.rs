@@ -1445,6 +1445,16 @@ fn a_generic_interface_gives_each_class_its_default_bodies_with_its_type_argumen
     assert_eq!(messages(("src/Demo/Held.sharp", reads), &[]), Vec::<String>::new());
 }
 
+/// Spec section 22: a PHP# enum implements a plain PHP interface that extends `BackedEnum`. The engine writes the
+/// enum's `from` and `tryFrom`, which take `int|string` as PHP's own do, so neither is checked against `BackedEnum`'s.
+#[test]
+fn a_backed_enum_implements_a_plain_php_interface_that_extends_backed_enum() {
+    let library = "<?php\n\nnamespace Lib;\n\ninterface Aligned extends \\BackedEnum\n{\n    public function label(): string;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Aligned;\n\npublic enum Align : string, Aligned\n{\n    case Left = \"left\";\n    case Right = \"right\";\n\n    public string label() => \"align\";\n}\n\npublic enum Level : int, Aligned\n{\n    case Low = 1;\n\n    public string label() => \"level\";\n}\n";
+
+    assert_eq!(issues(("src/Demo/Align.sharp", sharp), &[("src/Lib/Aligned.php", library)]), Vec::<String>::new());
+}
+
 /// Spec section 22: implementing an abstract interface method takes no `override`, as the spec's `Page` implements
 /// `HasDesign`, and replacing a default body or a header trait's method replaces a method, so it takes `override`, as
 /// replacing a computed property's default body does.
