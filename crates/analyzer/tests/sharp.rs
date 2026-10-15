@@ -7372,13 +7372,29 @@ fn a_null_safe_access_on_an_index_reads_a_missing_key_as_null() {
 
 /// Spec section 12: "`x[i] = v` on a `List` replaces the element at `i`, and throws `OutOfRangeException` past the
 /// end. Appending is `add`." So `=`, `+=`, `++` and `--` write a `List` index, on a local, a parameter, a property
-/// and an element of another `List`, and PHP's `list[] = v` is refused. A write into a `List`'s element is a change
-/// through its index, which the index change rule decides.
+/// and an element of another `List`, and PHP's `list[] = v` is refused with the `add` to write. A write into a `List`'s
+/// element is a change through its index, which the index change rule decides. PHP# has no `x[] = v` on any collection,
+/// so a `Map` or a `Set` refuses it too.
 #[test]
 fn an_index_write_replaces_a_list_element_and_list_append_is_add() {
-    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public List<int> held { get; private set; } = [];\n\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        sizes[1]++;\n        --sizes[1];\n        grid[0][1] = 1;\n        this.held[0] = 2;\n        groups[\"b\"] = [1];\n        sizes[] = 3;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public List<int> held { get; private set; } = [];\n\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups, Set<int> tags, Map<int, string> names)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        sizes[1]++;\n        --sizes[1];\n        grid[0][1] = 1;\n        this.held[0] = 2;\n        groups[\"b\"] = [1];\n        sizes[] = 3;\n        this.held[] = 4;\n        grid[0][] = 5;\n        groups[] = [1];\n        tags[] = 1;\n        names[] = \"a\";\n    }\n}\n";
+    let list = "A `List` grows with `add`: `list[] = value` is PHP syntax.";
+    let map = "A `Map` writes a key with `map[key] = value`: `map[] = value` is PHP syntax.";
 
-    assert_eq!(issues(("src/Demo/Sizes.sharp", sharp), &[]), ["16:9 invalid-array-access"]);
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            format!("16:9 invalid-array-access {list}"),
+            format!("17:9 invalid-array-access {list}"),
+            format!("18:9 invalid-array-access {list}"),
+            format!("19:9 invalid-array-access {map}"),
+            "20:9 invalid-array-access A `Set<int>` has no index.".to_owned(),
+            format!("21:9 invalid-array-access {map}"),
+        ]
+    );
 }
 
 /// A `List`'s keys are the `int`s from 0 to its last index, so a read whose index may be anything else is an error,

@@ -4347,17 +4347,21 @@ fn php_keeps_every_form_of_yield() {
 #[test]
 fn a_literal_element_outside_the_slice_is_not_supported_yet() {
     let code = leak(method(
-        "        const reference = [&extra];\n        const missing = [, extra];\n        let list = [1];\n        list[] = 2;\n        return 1;\n",
+        "        const reference = [&extra];\n        const missing = [, extra];\n        return 1;\n",
     ));
 
     assert_eq!(
         issues(code),
-        [
-            "7:28 This operator is not supported yet in PHP#.",
-            "8:26 This construct is not supported yet in PHP#.",
-            "10:9 This write target is not supported yet in PHP#.",
-        ]
+        ["7:28 This operator is not supported yet in PHP#.", "8:26 This construct is not supported yet in PHP#."]
     );
+}
+
+/// PHP's `x[] = v` is the analyzer's to refuse, by the collection it writes: a `List` grows with `add`.
+#[test]
+fn an_append_is_left_to_the_analyzer() {
+    let code = leak(method("        let list = [1];\n        list[] = 2;\n        this.rows[] = 3;\n        return 1;\n"));
+
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// The analyzer decides whether a spread is a `List`'s or a `Map`'s, since the spread value's type does.

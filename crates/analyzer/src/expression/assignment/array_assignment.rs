@@ -924,6 +924,25 @@ where
                     .with_help("Give the place one collection type."),
                 );
             }
+        } else if context.dialect.is_sharp()
+            && !through_copy
+            && array_target.get_index().is_none()
+            && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
+        {
+            // A `Map` takes the key it is written with, so an append is refused once, and is then read as a write of
+            // the `Map`'s own key type, which no second issue refuses. `get_array_target_type_given_index` refuses
+            // one on a `Set`, which has no index.
+            context.collector.report_with_code(
+                IssueCode::InvalidArrayAccess,
+                Issue::error("A `Map` writes a key with `map[key] = value`: `map[] = value` is PHP syntax.")
+                    .with_annotation(Annotation::primary(array_target.span()).with_message("This appends to a `Map`.")),
+            );
+            array_target_index_type = written_type.types.iter().find_map(|atomic| match atomic {
+                TAtomic::Array(TArray::Keyed(TKeyedArray { parameters: Some((key, _)), .. })) => {
+                    Some(Rc::new(key.as_ref().clone()))
+                }
+                _ => None,
+            });
         }
 
         let new_index_type = array_target_index_type.unwrap_or(Rc::new(get_non_negative_int()));

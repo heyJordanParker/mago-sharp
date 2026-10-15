@@ -1763,6 +1763,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Body | Constant,
         ) => Some(place),
         (Node::Expression(Expression::ArrayAccess(_)) | Node::ArrayAccess(_), Body) => Some(Body),
+        // `is_slice_target` passes PHP's `x[] = v` to the analyzer, which refuses it, and refuses `x[]` read as a value.
+        (Node::Expression(Expression::ArrayAppend(_)) | Node::ArrayAppend(_), Body) => Some(Body),
         (Node::ConstantAccess(_), Body) => Some(Body),
         // `typeof(Self)` is the class a static method is called on, as `Self` is in `new Self(…)`.
         (Node::TypeOf(TypeOf { r#type: Hint::Self_(keyword), .. }), Body) if is_sharp_self(keyword) => None,
@@ -3940,8 +3942,8 @@ fn report_hidden_pattern_variables(pattern: &Pattern, hidden: bool, context: &mu
 }
 
 /// Whether the slice can write an expression: a local, a parameter, `field`, a member written `object.name`, or an
-/// index of one of them, as in `counts["a"]`. A member written by its bare name passes, because
-/// `check_constant_access` reports it with the name to write instead.
+/// index of one of them, as in `counts["a"]`, or PHP's append to one, as in `items[]`. A member written by its bare name
+/// passes, because `check_constant_access` reports it with the name to write instead.
 fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
     match target {
         Expression::ConstantAccess(access) => {
@@ -3949,6 +3951,8 @@ fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
         }
         Expression::Access(Access::Property(_)) => true,
         Expression::ArrayAccess(access) => is_slice_target(access.array, context),
+        // The analyzer refuses `x[] = v` with the PHP# form for the collection it writes, as `add` for a `List`.
+        Expression::ArrayAppend(append) => is_slice_target(append.array, context),
         _ => false,
     }
 }
