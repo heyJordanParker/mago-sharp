@@ -15962,6 +15962,80 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 }
 
 /// ```php
+/// return (\is_array($crossing#1 = \Lib\Calc::prices()) ? \Sharp\Map::from($crossing#1) : $crossing#1)->has(5)
+///     && (\is_array($crossing#1 = \Lib\Calc::maybe()) ? … : $crossing#1)?->has(5) == true;
+/// ```
+///
+/// Spec section 12: a plain PHP array a `Map` method reads becomes the `\Sharp\Map` first, as it does where a typed
+/// local holds it, null-safe or not, so the method runs on the `Map` and a key keeps its type.
+#[test]
+fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
+    assert_eq!(
+        body_in(
+            "bool run()",
+            "        return Calc.prices().has(5) && Calc.maybe()?.has(5) == true;\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib;\nfinal class Calc { /** @return array<array-key, int> */ public static function prices(): array { return []; } /** @return array<array-key, int>|null */ public static function maybe(): ?array { return null; } }",
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                AND
+                  METHOD_CALL
+                    CONDITIONAL
+                      CALL
+                        ZVAL "is_array"
+                        ARG_LIST
+                          ASSIGN
+                            VAR
+                              ZVAL "crossing#1"
+                            STATIC_CALL
+                              ZVAL "Lib\\Calc"
+                              ZVAL "prices"
+                              ARG_LIST
+                      STATIC_CALL
+                        ZVAL "Sharp\\Map"
+                        ZVAL "from"
+                        ARG_LIST
+                          VAR
+                            ZVAL "crossing#1"
+                      VAR
+                        ZVAL "crossing#1"
+                    ZVAL "has"
+                    ARG_LIST
+                      ZVAL 5
+                  BINARY_OP [16]
+                    NULLSAFE_METHOD_CALL
+                      CONDITIONAL
+                        CALL
+                          ZVAL "is_array"
+                          ARG_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "crossing#1"
+                              STATIC_CALL
+                                ZVAL "Lib\\Calc"
+                                ZVAL "maybe"
+                                ARG_LIST
+                        STATIC_CALL
+                          ZVAL "Sharp\\Map"
+                          ZVAL "from"
+                          ARG_LIST
+                            VAR
+                              ZVAL "crossing#1"
+                        VAR
+                          ZVAL "crossing#1"
+                      ZVAL "has"
+                      ARG_LIST
+                        ZVAL 5
+                    ZVAL true
+        "#}
+    );
+}
+
+/// ```php
 /// $names = \VERIFY_TYPE_ARGS(\Lib\Calc::lazy(), 'Iterable<string>', 'Lib\Calc::lazy()');
 /// return Report::tally(\VERIFY_TYPE_ARGS(\Lib\Calc::lazy(), …)) + \Lib\Calc::lazy()->count();
 /// ```
@@ -18047,12 +18121,13 @@ fn is_and_as_of_any_or_a_union_are_the_engine_test_of_its_type() {
 
 /// ```php
 /// $numbers = <is List<int>>($extra);
-/// $kept = <is Map<string, int>>($extra) ? $extra : null;
+/// $kept = \is_array($crossing#1 = <is Map<string, int>>($extra) ? $extra : null) ? new \Sharp\Map(…) : $crossing#1;
 /// $tags = <is Set<string>>($extra);
 /// ```
 ///
 /// `is` and `as` of a `List`, a `Map` or a `Set` are the engine's test of the type, as a generic class's are, which
-/// walks every element.
+/// walks every element. The test passes a PHP array whose elements fit, so the local `as` gives it to becomes the `Map`
+/// first, as a typed local does.
 #[test]
 fn is_and_as_of_a_collection_are_the_engine_test_of_its_type() {
     assert_eq!(
@@ -18074,13 +18149,69 @@ fn is_and_as_of_a_collection_are_the_engine_test_of_its_type() {
                 VAR
                   ZVAL "kept"
                 CONDITIONAL
-                  SHARP_IS_TYPE
-                    VAR
-                      ZVAL "extra"
-                    ZVAL "Map<string, int>"
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "crossing#1"
+                        CONDITIONAL
+                          SHARP_IS_TYPE
+                            VAR
+                              ZVAL "extra"
+                            ZVAL "Map<string, int>"
+                          VAR
+                            ZVAL "extra"
+                          ZVAL null
+                  NEW
+                    ZVAL "Sharp\\Map"
+                    ARG_LIST
+                      CALL
+                        ZVAL "array_merge"
+                        ARG_LIST
+                          ARRAY [3]
+                          UNPACK
+                            CALL
+                              ZVAL "array_map"
+                              ARG_LIST
+                                ARROW_FUNC "" @10-10
+                                  PARAM_LIST
+                                    PARAM
+                                      null
+                                      ZVAL "key#2"
+                                      null
+                                      null
+                                      null
+                                      null
+                                    PARAM
+                                      null
+                                      ZVAL "value#3"
+                                      null
+                                      null
+                                      null
+                                      null
+                                  null
+                                  ARRAY [3]
+                                    ARRAY_ELEM
+                                      CAST [6]
+                                        VAR
+                                          ZVAL "key#2"
+                                      null
+                                    ARRAY_ELEM
+                                      VAR
+                                        ZVAL "value#3"
+                                      null
+                                  null
+                                  null
+                                CALL
+                                  ZVAL "array_keys"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "crossing#1"
+                                VAR
+                                  ZVAL "crossing#1"
                   VAR
-                    ZVAL "extra"
-                  ZVAL null
+                    ZVAL "crossing#1"
               ASSIGN
                 VAR
                   ZVAL "tags"

@@ -3837,7 +3837,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &elements)
             }
         };
-        let declared = local.hint.map(|hint| self.hint_type(hint));
+        // A local declared without a type takes the type of its value, so a PHP array plain PHP gives becomes the `Map`
+        // or `Set` PHP# reads it as here, as for a typed local, and a method that changes it changes the local.
+        let declared = match local.hint {
+            Some(hint) => Some(self.hint_type(hint)),
+            None => Some(self.types.expression_type(local.value).clone())
+                .filter(|inferred| self.may_be_php_array(local.value) && self.crossing_array(inferred).is_some()),
+        };
         let value = self.crossed_value(local.value, declared.as_ref());
         if let Some(declared) = declared {
             self.local_types.insert(local.target.span().start.offset, declared);
@@ -4432,7 +4438,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
 
                 let is_property_call = tested && self.is_property_call(expression, call.object);
-                let object = if tested { self.expression(call.object) } else { self.null_safe_object(call.object) };
+                let object = if self.reads_plain_map(expression, call.object) {
+                    let r#type = self.types.expression_type(call.object).clone();
+
+                    self.crossed_value(call.object, Some(&r#type))
+                } else if tested {
+                    self.expression(call.object)
+                } else {
+                    self.null_safe_object(call.object)
+                };
                 let method = self.member(&call.method);
                 if self.types.collection_method(expression).is_some() {
                     let arguments = self.collection_arguments(&call.argument_list);
@@ -6492,6 +6506,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             (None, object) => match self.class_value(object) {
                 Some((class, _)) => (SHARP_AST_STATIC_CALL, class),
+                None if self.reads_plain_map(expression, object) => {
+                    let r#type = self.types.expression_type(object).clone();
+
+                    (SHARP_AST_METHOD_CALL, self.crossed_value(object, Some(&r#type)))
+                }
                 None => (SHARP_AST_METHOD_CALL, self.receiver(object)),
             },
         };
@@ -6901,6 +6920,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.temporaries = taken;
 
         crossed
+    }
+
+    /// Whether the method call `call` runs a `Map` method that reads its receiver `object`, as [`Types::reads_map`]
+    /// says, on a value that can be a PHP array, as [`Self::may_be_php_array`] says. That PHP array becomes the
+    /// `\Sharp\Map` first, as [`Self::crossed_value`] makes it where a typed local holds it, so its keys keep their
+    /// `string`s. A method that changes its receiver still runs on the PHP array, which the engine refuses, since a
+    /// `Map` made of a copy of it would drop the change.
+    fn reads_plain_map(&self, call: &Expression, object: &Expression) -> bool {
+        self.types.reads_map(call)
+            && self.may_be_php_array(object)
+            && self.crossing_array(self.types.expression_type(object)).is_some()
     }
 
     /// Whether `value` can be a PHP array PHP# types as a `Map` or a `Set`: what plain PHP gives, a call of it or a
