@@ -15504,6 +15504,29 @@ fn a_method_value_of_a_method_without_a_body_has_its_uses_where_it_runs() {
     );
 }
 
+/// A method value of plain PHP has the effects its `extern` declares wherever it runs, as a call of the method does:
+/// passed to a `uses f` parameter, or to plain PHP, which may run what it is given.
+#[test]
+fn a_plain_php_method_value_has_its_extern_s_effects_where_it_runs() {
+    let stub = (
+        "app/Stubs/Meter.sharp",
+        "namespace App.Stubs;\n\nimport Lib.Meter;\n\nextern Meter.read uses Clock;\nextern global.call_user_func;\n",
+    );
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\nimport Lib.Meter;\n\npublic class Pricing\n{\n    public Pricing(private Meter meter) { }\n\n    public static int carried(Function<int()> body) uses body => body();\n\n    public int carriedRead => Pricing.carried(this.meter.read);\n\n    public int calledRead => global.call_user_func(this.meter.read);\n\n    law viaUses(Pricing pricing) => pricing.carriedRead > 0;\n\n    law viaPlain(Pricing pricing) => pricing.calledRead > 0;\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[METER, stub]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, METER, stub]),
+        [
+            "app/Shop/Pricing.sharp:15:37 impure-law: Law `viaUses` reaches `Pricing.carriedRead`, which calls `Meter.read` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:17:38 impure-law: Law `viaPlain` reaches `Pricing.calledRead`, which calls `Meter.read` with the effect `Clock`. Laws hold only over pure code.",
+        ]
+    );
+}
+
 /// A name in `uses` that is no effect is refused with the effects its file can name: the named standard effects in the
 /// spec's order, then each `foreign` class of the standard library, of the file's namespace and of its imports, then
 /// `Events`. A `foreign` class the file cannot name stays out, so the message changes only with what the file reads.

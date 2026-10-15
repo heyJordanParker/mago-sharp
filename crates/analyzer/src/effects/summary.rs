@@ -1082,16 +1082,19 @@ where
                 continue;
             };
 
+            // A method value has the effects a call of its method has.
+            let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+            let cause = (class_name, metadata.original_name);
             if !codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|declaring| declaring.flags.is_sharp())
             {
+                if !is_prelude_stub(declaring_class) {
+                    self.plain_php(extern_of(codebase, class, ascii_lowercase_word(name.value)), span, cause);
+                }
+
                 continue;
             }
 
-            // A method without a body has the effects its `uses` lists, as a call of it does.
             if metadata.method_metadata.as_ref().is_some_and(|method| method.is_abstract) {
-                let class_name =
-                    codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
-                let cause = (class_name, metadata.original_name);
                 for effect in &metadata.uses {
                     self.summary.effects.push((Effect::Foreign(*effect), span, cause));
                 }
