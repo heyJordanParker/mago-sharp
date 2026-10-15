@@ -404,50 +404,50 @@ where
     if assignment_depth == 0 || does_always_break {
         continue_context = loop_context.clone();
 
-        artifacts.set_loop_scope(loop_scope.clone());
-        for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
-            let Some(clauses) = pre_condition_clauses.get(condition_offset) else {
-                continue;
-            };
+        loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
+            for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
+                let Some(clauses) = pre_condition_clauses.get(condition_offset) else {
+                    continue;
+                };
 
-            apply_pre_condition_to_loop_context(
-                context,
-                pre_condition,
-                clauses,
-                &mut continue_context,
-                loop_parent_context,
-                artifacts,
-                is_do,
-                !pre_conditions_applied,
-            )?;
-        }
-
-        pre_conditions_applied = true;
-        if !pre_conditions.is_empty() {
-            // SAFETY: `artifacts.loop_scope` is set to `Some(loop_scope)` immediately before entering
-            // this branch (it was placed there for the pre-condition analysis), so taking it now is sound.
-            loop_scope = unsafe { artifacts.take_loop_scope_unchecked() };
-            if loop_scope.truthy_pre_conditions {
-                always_enters_loop.set(true);
+                apply_pre_condition_to_loop_context(
+                    context,
+                    pre_condition,
+                    clauses,
+                    &mut continue_context,
+                    loop_parent_context,
+                    artifacts,
+                    is_do,
+                    !pre_conditions_applied,
+                )?;
             }
 
-            artifacts.set_loop_scope(loop_scope.clone());
+            Ok(())
+        })?;
+
+        pre_conditions_applied = true;
+        if !pre_conditions.is_empty() && loop_scope.truthy_pre_conditions {
+            always_enters_loop.set(true);
         }
 
-        let body = body_to_analyze(context, &continue_context, artifacts, pre_conditions, statements, is_do, keyword);
-        analyze_statements(body, context, &mut continue_context, artifacts)?;
-        loop_scope = unsafe {
-            // SAFETY: we know the loop scope will remain in the context.
-            artifacts.take_loop_scope_unchecked()
-        };
+        loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
+            let body =
+                body_to_analyze(context, &continue_context, artifacts, pre_conditions, statements, is_do, keyword);
+
+            analyze_statements(body, context, &mut continue_context, artifacts)
+        })?;
 
         update_loop_scope_contexts(&loop_scope, loop_context, &mut continue_context, loop_parent_context, context);
 
-        loop_context.flags.set_inside_loop_expressions(true);
-        for post_expression in post_expressions {
-            post_expression.analyze(context, loop_context, artifacts)?;
-        }
-        loop_context.flags.set_inside_loop_expressions(true);
+        loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
+            loop_context.flags.set_inside_loop_expressions(true);
+            for post_expression in post_expressions {
+                post_expression.analyze(context, loop_context, artifacts)?;
+            }
+            loop_context.flags.set_inside_loop_expressions(true);
+
+            Ok(())
+        })?;
     } else {
         let original_parent_context = loop_parent_context.clone();
 
@@ -455,44 +455,38 @@ where
 
         let (result, mut recorded_issues) = context.record(|context| {
             if !is_do {
-                artifacts.set_loop_scope(loop_scope);
-                for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
-                    apply_pre_condition_to_loop_context(
-                        context,
-                        pre_condition,
-                        unsafe {
-                            // SAFETY: we know the pre_condition_clauses will contain
-                            // the clauses for the pre_condition at condition_offset.
-                            pre_condition_clauses.get_unchecked(condition_offset)
-                        },
-                        loop_context,
-                        loop_parent_context,
-                        artifacts,
-                        is_do,
-                        !pre_conditions_applied,
-                    )?;
-                }
+                loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
+                    for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
+                        apply_pre_condition_to_loop_context(
+                            context,
+                            pre_condition,
+                            unsafe {
+                                // SAFETY: we know the pre_condition_clauses will contain
+                                // the clauses for the pre_condition at condition_offset.
+                                pre_condition_clauses.get_unchecked(condition_offset)
+                            },
+                            loop_context,
+                            loop_parent_context,
+                            artifacts,
+                            is_do,
+                            !pre_conditions_applied,
+                        )?;
+                    }
+
+                    Ok(())
+                })?;
 
                 pre_conditions_applied = true;
-
-                // SAFETY: `artifacts.loop_scope` was set above before analyzing pre-conditions; taking it
-                // back into the local `loop_scope` binding is sound because no other code path consumes it.
-                loop_scope = unsafe { artifacts.take_loop_scope_unchecked() };
             }
 
             let mut continue_context = loop_context.clone();
 
-            loop_scope = {
-                artifacts.set_loop_scope(loop_scope);
+            loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
                 let body =
                     body_to_analyze(context, &continue_context, artifacts, pre_conditions, statements, is_do, keyword);
-                analyze_statements(body, context, &mut continue_context, artifacts)?;
 
-                unsafe {
-                    // SAFETY: we know the loop scope will remain in the context.
-                    artifacts.take_loop_scope_unchecked()
-                }
-            };
+                analyze_statements(body, context, &mut continue_context, artifacts)
+            })?;
 
             update_loop_scope_contexts(
                 &loop_scope,
@@ -502,35 +496,39 @@ where
                 context,
             );
 
-            if is_do {
-                inner_do_context = Some(continue_context.clone());
+            loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
+                if is_do {
+                    inner_do_context = Some(continue_context.clone());
 
-                for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
-                    always_assigned_before_loop_body_variables.extend(apply_pre_condition_to_loop_context(
-                        context,
-                        pre_condition,
-                        unsafe {
-                            // SAFETY: we know the pre_condition_clauses will contain
-                            // the clauses for the pre_condition at condition_offset.
-                            pre_condition_clauses.get_unchecked(condition_offset)
-                        },
-                        &mut continue_context,
-                        loop_parent_context,
-                        artifacts,
-                        is_do,
-                        !pre_conditions_applied,
-                    )?);
+                    for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
+                        always_assigned_before_loop_body_variables.extend(apply_pre_condition_to_loop_context(
+                            context,
+                            pre_condition,
+                            unsafe {
+                                // SAFETY: we know the pre_condition_clauses will contain
+                                // the clauses for the pre_condition at condition_offset.
+                                pre_condition_clauses.get_unchecked(condition_offset)
+                            },
+                            &mut continue_context,
+                            loop_parent_context,
+                            artifacts,
+                            is_do,
+                            !pre_conditions_applied,
+                        )?);
+                    }
+
+                    pre_conditions_applied = true;
                 }
 
-                pre_conditions_applied = true;
-            }
+                continue_context.flags.set_inside_loop_expressions(true);
+                for post_expression in &post_expressions {
+                    post_expression.analyze(context, &mut continue_context, artifacts)?;
+                }
 
-            continue_context.flags.set_inside_loop_expressions(true);
-            for post_expression in &post_expressions {
-                post_expression.analyze(context, &mut continue_context, artifacts)?;
-            }
+                continue_context.flags.set_inside_loop_expressions(false);
 
-            continue_context.flags.set_inside_loop_expressions(false);
+                Ok(())
+            })?;
 
             Result::<_, AnalysisError>::Ok((loop_scope, continue_context))
         });
@@ -722,11 +720,15 @@ where
 
             // if there are no changes to the types, no need to re-examine
             if !has_changes {
-                continue_context.flags.set_inside_loop_expressions(true);
-                for post_expression in &post_expressions {
-                    post_expression.analyze(context, &mut continue_context, artifacts)?;
-                }
-                continue_context.flags.set_inside_loop_expressions(false);
+                loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
+                    continue_context.flags.set_inside_loop_expressions(true);
+                    for post_expression in &post_expressions {
+                        post_expression.analyze(context, &mut continue_context, artifacts)?;
+                    }
+                    continue_context.flags.set_inside_loop_expressions(false);
+
+                    Ok(())
+                })?;
 
                 break;
             }
@@ -739,32 +741,36 @@ where
             continue_context.by_reference_constraints.clone_from(&pre_loop_context.by_reference_constraints);
 
             let (result, new_recorded_issues) = context.record(|context| -> Result<LoopScope, AnalysisError> {
-                for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
-                    if is_do {
-                        context.collector.start_recording();
+                let loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
+                    for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
+                        if is_do {
+                            context.collector.start_recording();
+                        }
+
+                        let result = apply_pre_condition_to_loop_context(
+                            context,
+                            pre_condition,
+                            unsafe {
+                                // SAFETY: we know the pre_condition_clauses will contain
+                                // the clauses for the pre_condition at condition_offset.
+                                pre_condition_clauses.get_unchecked(condition_offset)
+                            },
+                            &mut continue_context,
+                            loop_parent_context,
+                            artifacts,
+                            is_do,
+                            !pre_conditions_applied,
+                        );
+
+                        if is_do {
+                            context.collector.finish_recording();
+                        }
+
+                        result?;
                     }
 
-                    let result = apply_pre_condition_to_loop_context(
-                        context,
-                        pre_condition,
-                        unsafe {
-                            // SAFETY: we know the pre_condition_clauses will contain
-                            // the clauses for the pre_condition at condition_offset.
-                            pre_condition_clauses.get_unchecked(condition_offset)
-                        },
-                        &mut continue_context,
-                        loop_parent_context,
-                        artifacts,
-                        is_do,
-                        !pre_conditions_applied,
-                    );
-
-                    if is_do {
-                        context.collector.finish_recording();
-                    }
-
-                    result?;
-                }
+                    Ok(())
+                })?;
 
                 pre_conditions_applied = true;
 
@@ -790,8 +796,7 @@ where
 
                 clean_nodes(statements, artifacts);
 
-                let loop_scope = {
-                    artifacts.set_loop_scope(loop_scope);
+                let loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
                     let body = body_to_analyze(
                         context,
                         &continue_context,
@@ -801,13 +806,9 @@ where
                         is_do,
                         keyword,
                     );
-                    analyze_statements(body, context, &mut continue_context, artifacts)?;
 
-                    unsafe {
-                        // SAFETY: we know the loop scope will remain in the context.
-                        artifacts.take_loop_scope_unchecked()
-                    }
-                };
+                    analyze_statements(body, context, &mut continue_context, artifacts)
+                })?;
 
                 update_loop_scope_contexts(
                     &loop_scope,
@@ -817,36 +818,38 @@ where
                     context,
                 );
 
-                if is_do {
-                    inner_do_context = Some(continue_context.clone());
+                in_loop_scope(artifacts, loop_scope, |artifacts| {
+                    if is_do {
+                        inner_do_context = Some(continue_context.clone());
 
-                    for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
-                        apply_pre_condition_to_loop_context(
-                            context,
-                            pre_condition,
-                            unsafe {
-                                // SAFETY: we know the pre_condition_clauses will contain
-                                // the clauses for the pre_condition at condition_offset.
-                                pre_condition_clauses.get_unchecked(condition_offset)
-                            },
-                            &mut continue_context,
-                            loop_parent_context,
-                            artifacts,
-                            is_do,
-                            !pre_conditions_applied,
-                        )?;
+                        for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
+                            apply_pre_condition_to_loop_context(
+                                context,
+                                pre_condition,
+                                unsafe {
+                                    // SAFETY: we know the pre_condition_clauses will contain
+                                    // the clauses for the pre_condition at condition_offset.
+                                    pre_condition_clauses.get_unchecked(condition_offset)
+                                },
+                                &mut continue_context,
+                                loop_parent_context,
+                                artifacts,
+                                is_do,
+                                !pre_conditions_applied,
+                            )?;
+                        }
+
+                        pre_conditions_applied = true;
                     }
 
-                    pre_conditions_applied = true;
-                }
+                    continue_context.flags.set_inside_loop_expressions(true);
+                    for post_expression in &post_expressions {
+                        post_expression.analyze(context, &mut continue_context, artifacts)?;
+                    }
+                    continue_context.flags.set_inside_loop_expressions(false);
 
-                continue_context.flags.set_inside_loop_expressions(true);
-                for post_expression in &post_expressions {
-                    post_expression.analyze(context, &mut continue_context, artifacts)?;
-                }
-                continue_context.flags.set_inside_loop_expressions(false);
-
-                Ok(loop_scope)
+                    Ok(())
+                })
             });
 
             loop_scope = result?;
@@ -1314,6 +1317,22 @@ where
     loop_scope.condition_never_finishes = true;
 
     &[]
+}
+
+/// Runs `analyze` on a part of the loop, its condition, body or increments, with `loop_scope` as the innermost loop
+/// scope, and returns the scope with what that part recorded. PHP# writes `?? break` and `?? continue` inside an
+/// expression, so a condition or an increment can leave the loop as its body can, and each leaves this loop, never an
+/// outer one.
+fn in_loop_scope(
+    artifacts: &mut AnalysisArtifacts,
+    loop_scope: LoopScope,
+    analyze: impl FnOnce(&mut AnalysisArtifacts) -> Result<(), AnalysisError>,
+) -> Result<LoopScope, AnalysisError> {
+    artifacts.set_loop_scope(loop_scope);
+    analyze(artifacts)?;
+
+    // SAFETY: the scope set above is still the innermost, since every part of a loop takes back the scopes it sets.
+    Ok(unsafe { artifacts.take_loop_scope_unchecked() })
 }
 
 fn apply_pre_condition_to_loop_context<'ctx, 'arena, A>(

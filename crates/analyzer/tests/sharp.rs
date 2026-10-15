@@ -4859,6 +4859,11 @@ fn leave_on_null_leaves_the_method_or_the_loop() {
         issues(("src/Demo/Report.sharp", wrong), &[]),
         ["5:60 invalid-return-statement", "7:55 invalid-continue", "9:43 redundant-null-coalesce"]
     );
+
+    // A loop's condition or increment leaves that loop, as the engine runs it: its `?? break` ends the loop, and its
+    // `?? continue` starts the loop's next round.
+    let condition = "namespace Demo;\n\nclass Report\n{\n    public static int counted(List<List<int?>> rows)\n    {\n        let total = 0;\n        for (const values of rows) {\n            for (let i = 0; i < 10 && (values[i] ?? break) > 0; i += 1) {\n                total += 1;\n            }\n        }\n        return total;\n    }\n\n    public static int read(List<int?> values)\n    {\n        let i = 0;\n        while (i < 3 && (values[i] ?? break) > 0) {\n            i += 1;\n        }\n        return i;\n    }\n\n    public static int skipped(List<int?> values)\n    {\n        let i = 0;\n        for (; i < 3 && (values[i] ?? continue) > 0; i += 1) {\n        }\n        return i;\n    }\n\n    public static int stepped(List<int?> values)\n    {\n        let i = 0;\n        for (; i < 3; i = values[i] ?? break) {\n        }\n        return i;\n    }\n\n    public static int after(List<int?> values)\n    {\n        let i = 0;\n        do {\n            i += 1;\n        } while ((values[i] ?? break) > 0);\n        return i;\n    }\n}\n";
+    assert_eq!(refusals(("src/Demo/Report.sharp", condition), &[]), Vec::<String>::new());
 }
 
 /// Spec section 21: a list pattern tests the count, then each element against its pattern, and its rest takes the
