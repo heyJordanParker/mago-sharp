@@ -82,6 +82,36 @@ use crate::utils::names::is_prelude_stub;
 use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 
+/// Whether `parameter` is a function parameter its method's `uses` names, spec section 29: a call has the effects of
+/// the function it passes there, so that function is held to no effect list.
+fn is_uses_parameter(parameter: InvocationTargetParameter<'_>) -> bool {
+    matches!(parameter, InvocationTargetParameter::FunctionLike(metadata) if metadata.flags.is_uses_parameter())
+}
+
+/// The type an argument for `parameter`, of the type `parameter_type`, meets: a `uses` parameter takes a function with
+/// any effects, so its function types list none to compare.
+fn met_parameter_type<'parameter>(
+    parameter: InvocationTargetParameter<'_>,
+    parameter_type: &'parameter TUnion,
+) -> Cow<'parameter, TUnion> {
+    if !is_uses_parameter(parameter) {
+        return Cow::Borrowed(parameter_type);
+    }
+
+    let types = parameter_type
+        .types
+        .iter()
+        .map(|atomic| match atomic {
+            TAtomic::Callable(TCallable::Signature(signature)) => {
+                TAtomic::Callable(TCallable::Signature(TCallableSignature { effects: None, ..signature.clone() }))
+            }
+            atomic => atomic.clone(),
+        })
+        .collect();
+
+    Cow::Owned(parameter_type.clone_with_types(types))
+}
+
 /// The type `parameter` of a PHP# function declares, when that type names a type parameter of the function itself,
 /// spec section 11. Such a type parameter takes a readonly value only where the parameter writes `readonly`, spec
 /// section 13, so the declared type is what an argument meets. A class's type parameter is filled by the receiver.
@@ -841,11 +871,12 @@ where
                         context,
                         artifacts,
                         &argument_value_type,
-                        &final_parameter_type,
+                        &met_parameter_type(parameter_ref, &final_parameter_type),
                         *argument_offset,
                         argument_expression,
                         &invocation.target,
                     )
+                    && !is_uses_parameter(parameter_ref)
                 {
                     record_function_values(
                         context,

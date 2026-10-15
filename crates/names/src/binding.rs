@@ -5,6 +5,7 @@ use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Extension;
+use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::FunctionLikeReturnTypeHint;
 use mago_syntax::cst::Hint;
@@ -26,6 +27,16 @@ use mago_syntax::cst::Uses;
 use mago_word::Word;
 use mago_word::concat_word;
 use mago_word::word;
+
+/// Whether `name`, written in a method's `uses`, names `parameter` and the parameter has a function type, nullable or
+/// not, as `f` in `apply(Function<int(int)> f) uses f` does: a function parameter, never an effect, spec section 29.
+fn names_function(parameter: &FunctionLikeParameter<'_>, name: &LocalIdentifier<'_>) -> bool {
+    parameter.variable.name == name.value
+        && matches!(
+            parameter.hint,
+            Some(Hint::Function(_) | Hint::Nullable(NullableHint { hint: Hint::Function(_), .. }))
+        )
+}
 
 /// Returns the PHP variable a PHP# local, parameter or `this` runs as: `total` runs as `$total`.
 ///
@@ -148,17 +159,17 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
     /// nullable or not, as `f` in `apply(Function<int(int)> f) uses f`, whose effects a call takes from the function
     /// it passes.
     pub fn uses_effects(&self) -> impl Iterator<Item = &'ast LocalIdentifier<'arena>> + '_ {
-        let parameters = self.parameter_list;
+        self.uses
+            .into_iter()
+            .flat_map(|uses| uses.names.iter())
+            .filter(move |name| !self.parameter_list.parameters.iter().any(|parameter| names_function(parameter, name)))
+    }
 
-        self.uses.into_iter().flat_map(|uses| uses.names.iter()).filter(move |name| {
-            !parameters.parameters.iter().any(|parameter| {
-                parameter.variable.name == name.value
-                    && matches!(
-                        parameter.hint,
-                        Some(Hint::Function(_) | Hint::Nullable(NullableHint { hint: Hint::Function(_), .. }))
-                    )
-            })
-        })
+    /// Whether the method's `uses` names `parameter`, one of its function-typed parameters, spec section 29: each call
+    /// of the method has the effects of the function it passes there.
+    #[must_use]
+    pub fn uses_parameter(&self, parameter: &FunctionLikeParameter<'arena>) -> bool {
+        self.uses.into_iter().flat_map(|uses| uses.names.iter()).any(|name| names_function(parameter, name))
     }
 
     /// The parts of an operator, named at its symbol, or none for an operator a class cannot declare, which semantics

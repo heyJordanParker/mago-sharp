@@ -15452,6 +15452,58 @@ fn a_method_with_a_body_names_a_function_parameter_in_uses() {
     }
 }
 
+/// Spec section 29: a method that writes `uses f` has, at each call, its body's own effects plus the effects of the
+/// function passed as `f`: a lambda's, a method value's method's, or a function value's type's. The function passed is
+/// not held to `f`'s type, a `uses g` that forwards it to another `uses f` carries it on, and a method without a body
+/// carries it as one with a body does. A call of `f` in the body adds nothing, since each caller adds what it passes.
+#[test]
+fn a_call_of_a_method_with_uses_f_has_the_effects_of_the_function_passed_as_f() {
+    let mapper = (
+        "app/Shop/Mapper.sharp",
+        "namespace App.Shop;\n\npublic interface Mapper\n{\n    int apply(Function<int()> f) uses f;\n}\n",
+    );
+    let runner = ("app/Shop/Runner.sharp", "namespace App.Shop;\n\npublic interface Runner\n{\n    int go();\n}\n");
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing : Runner\n{\n    public Pricing(private Function<int() uses Clock> tick, private Mapper mapper) { }\n\n    public static int carried(Function<int()> body) uses body => body();\n\n    public static int forwarded(Function<int()> body) uses body => Pricing.carried(body);\n\n    public int stamp() => global.now();\n\n    public int go() => Pricing.carried(() => global.now());\n\n    public int pure => Pricing.carried(() => 1) + Pricing.forwarded(() => 2) + this.mapper.apply(() => 3);\n\n    public int viaLambda => Pricing.carried(() => global.now());\n\n    public int viaMethodValue => Pricing.carried(this.stamp);\n\n    public int viaFunctionValue => Pricing.carried(this.tick);\n\n    public int viaForwarded => Pricing.forwarded(() => global.now());\n\n    public int viaDeclaration => this.mapper.apply(() => global.now());\n\n    law pure(Pricing pricing) => pricing.pure > 0;\n\n    law lambda(Pricing pricing) => pricing.viaLambda > 0;\n\n    law methodValue(Pricing pricing) => pricing.viaMethodValue > 0;\n\n    law functionValue(Pricing pricing) => pricing.viaFunctionValue > 0;\n\n    law relayed(Pricing pricing) => pricing.viaForwarded > 0;\n\n    law declaration(Pricing pricing) => pricing.viaDeclaration > 0;\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[mapper, runner, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, mapper, runner, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Pricing.sharp:29:36 impure-law: Law `lambda` reaches `Pricing.viaLambda`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:31:41 impure-law: Law `methodValue` reaches `Pricing.stamp`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:33:43 impure-law: Law `functionValue` reaches `Pricing.viaFunctionValue`, which calls `this.tick` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:35:37 impure-law: Law `relayed` reaches `Pricing.viaForwarded`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:37:41 impure-law: Law `declaration` reaches `Pricing.viaDeclaration`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:13:46 incompatible-effects: `Pricing.go` calls `global.now`, which has the effect `Clock`, so the pure `Runner.go` cannot accept it.",
+        ]
+    );
+}
+
+/// A method value of a method without a body has the effects its `uses` lists wherever it runs, as a call of the
+/// method does: passed to a `uses f` parameter, or to plain PHP, which may run what it is given.
+#[test]
+fn a_method_value_of_a_method_without_a_body_has_its_uses_where_it_runs() {
+    let rates =
+        ("app/Shop/Rates.sharp", "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate() uses Clock;\n}\n");
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Rates rates) { }\n\n    public static int carried(Function<int()> body) uses body => body();\n\n    public int carriedRate => Pricing.carried(this.rates.rate);\n\n    public int calledRate => global.call_user_func(this.rates.rate);\n\n    law viaUses(Pricing pricing) => pricing.carriedRate > 0;\n\n    law viaPlain(Pricing pricing) => pricing.calledRate > 0;\n}\n",
+    );
+    let stub = ("app/Stubs/Builtins.sharp", "namespace App.Stubs;\n\nextern global.call_user_func;\n");
+
+    assert_eq!(issues(pricing, &[rates, stub]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, rates, stub]),
+        [
+            "app/Shop/Pricing.sharp:13:37 impure-law: Law `viaUses` reaches `Pricing.carriedRate`, which calls `Rates.rate` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:15:38 impure-law: Law `viaPlain` reaches `Pricing.calledRate`, which calls `Rates.rate` with the effect `Clock`. Laws hold only over pure code.",
+        ]
+    );
+}
+
 /// A name in `uses` that is no effect is refused with the effects its file can name: the named standard effects in the
 /// spec's order, then each `foreign` class of the standard library, of the file's namespace and of its imports, then
 /// `Events`. A `foreign` class the file cannot name stays out, so the message changes only with what the file reads.

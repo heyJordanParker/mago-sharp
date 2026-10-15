@@ -139,7 +139,16 @@ where
         .parameters
         .iter()
         .filter_map(|p| {
-            scan_function_like_parameter(p, Some(class_like_metadata.original_name), &type_context, context, scope)
+            let mut parameter = scan_function_like_parameter(
+                p,
+                Some(class_like_metadata.original_name),
+                &type_context,
+                context,
+                scope,
+            )?;
+            parameter.flags.set(MetadataFlags::USES_PARAMETER, method.uses_parameter(p));
+
+            Some(parameter)
         })
         .collect();
     // Spec section 13: a method marked `readonly` keeps `this` readonly, and so do `int hash()` and `string toString()`,

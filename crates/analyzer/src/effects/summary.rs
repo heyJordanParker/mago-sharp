@@ -273,11 +273,29 @@ where
         scope: Arc::clone(&scope),
     };
 
+    // A method's `uses` parameters, whose functions each caller runs as part of its call.
+    let uses_parameters = match body {
+        Body::Method(class, method) => context
+            .codebase
+            .get_method(class.as_bytes(), method.as_bytes())
+            .map(|metadata| {
+                metadata
+                    .parameters
+                    .iter()
+                    .zip(&parameters)
+                    .filter(|(parameter, _)| parameter.flags.is_uses_parameter())
+                    .map(|(_, declaration)| *declaration)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
     let mut recorder = Recorder {
         context,
         artifacts,
         class,
         parameters,
+        uses_parameters,
         locals: HashMap::default(),
         lambdas: HashMap::default(),
         subjects: Vec::new(),
@@ -335,6 +353,9 @@ where
     class: Word,
     /// Where each parameter of the body is declared, by index.
     parameters: Vec<Span>,
+    /// Where each parameter the method's `uses` names is declared, spec section 29: a call of its function adds no
+    /// effect here, since each caller of the method adds the effects of the function it passes.
+    uses_parameters: Vec<Span>,
     /// The roots of each local and lambda parameter, by where it is declared.
     locals: HashMap<Span, Roots>,
     /// The lambda literal each local holds, by where the local is declared.
@@ -618,18 +639,8 @@ where
         parameters: &[FunctionLikeParameterMetadata],
     ) -> Vec<Roots> {
         let mut roots = vec![Roots::new(); parameters.len()];
-        let last = parameters.len().saturating_sub(1);
         for (position, argument) in arguments.arguments.iter().enumerate() {
-            let index = match argument {
-                Argument::Named(named) => {
-                    let name = php_variable_name(named.name.value);
-                    parameters.iter().position(|parameter| parameter.name.0 == name).unwrap_or(position)
-                }
-                // Arguments past the last parameter are its variadic values.
-                Argument::Positional(_) => position.min(last),
-            };
-
-            if let Some(parameter_roots) = roots.get_mut(index) {
+            if let Some(parameter_roots) = roots.get_mut(parameter_index(argument, position, parameters)) {
                 parameter_roots.extend(self.roots(argument.value()));
             }
         }
@@ -643,7 +654,12 @@ where
             return Some(lambda);
         }
 
-        let name = match callee.unparenthesized() {
+        self.lambdas.get(&self.local(callee)?.declaration).copied()
+    }
+
+    /// The local or parameter an expression names.
+    fn local(&self, expression: &Expression<'arena>) -> Option<Local> {
+        let name = match expression.unparenthesized() {
             Expression::ConstantAccess(name) => &name.name,
             Expression::Identifier(name) => name,
             _ => return None,
@@ -652,7 +668,12 @@ where
             return None;
         };
 
-        self.lambdas.get(&local.declaration).copied()
+        Some(local)
+    }
+
+    /// Whether an expression names one of the method's `uses` parameters.
+    fn is_uses_parameter(&self, expression: &Expression<'arena>) -> bool {
+        self.local(expression).is_some_and(|local| self.uses_parameters.contains(&local.declaration))
     }
 
     /// Walks a lambda's body as part of the call that runs it, with its parameters given `parameter_roots`.
@@ -728,6 +749,7 @@ where
         }
 
         if let Some(function) = function
+            && !self.is_uses_parameter(function)
             && let Some(function_type) = self.artifacts.get_expression_type(function)
         {
             let cause = (empty_word(), self.text(function.span()));
@@ -861,6 +883,9 @@ where
 
         let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
         let cause = (class_name, metadata.original_name);
+        let receiver_roots = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
+        let roots = self.argument_roots(arguments, &metadata.parameters);
+        self.uses_arguments(arguments, &metadata.parameters, &receiver_roots, &roots);
         if let Some(effect) = foreign_class(codebase, class) {
             self.summary.effects.push((Effect::Foreign(effect), span, cause));
 
@@ -868,8 +893,7 @@ where
         }
 
         if codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|declaring| declaring.flags.is_sharp()) {
-            // A method without a body has the effects its `uses` lists, which each implementation is held to, spec
-            // section 29.
+            // A method without a body has the effects its `uses` lists, which each implementation is held to.
             if metadata.method_metadata.as_ref().is_some_and(|method| method.is_abstract) {
                 for effect in &metadata.uses {
                     self.summary.effects.push((Effect::Foreign(*effect), span, cause));
@@ -882,9 +906,7 @@ where
                 ascii_lowercase_word(declaring_class.as_bytes()),
                 ascii_lowercase_word(method_name.as_bytes()),
             );
-            let receiver = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
-            let arguments = self.argument_roots(arguments, &metadata.parameters);
-            self.summary.calls.push(Call { callee, span, receiver, arguments });
+            self.summary.calls.push(Call { callee, span, receiver: receiver_roots, arguments: roots });
 
             return;
         }
@@ -898,29 +920,54 @@ where
         self.callbacks(arguments);
     }
 
+    /// Records each function a call of a PHP# method passes to a parameter the method's `uses` names, spec section 29,
+    /// since the call has that function's effects. The method may run it on its receiver, with the roots `receiver`,
+    /// and on anything it is given, with the roots `roots` by parameter.
+    fn uses_arguments(
+        &mut self,
+        arguments: &'ast ArgumentList<'arena>,
+        parameters: &[FunctionLikeParameterMetadata],
+        receiver: &Roots,
+        roots: &[Roots],
+    ) {
+        let reached: Roots = roots.iter().flatten().chain(receiver).copied().collect();
+        for (position, argument) in arguments.arguments.iter().enumerate() {
+            if parameters
+                .get(parameter_index(argument, position, parameters))
+                .is_some_and(|parameter| parameter.flags.is_uses_parameter())
+            {
+                self.passed_function(argument.value(), &reached);
+            }
+        }
+    }
+
     /// Records the function values plain PHP is given, as `global.array_map(x => …, list)` gives one, since plain PHP
-    /// may run each: a lambda runs here, a method value calls its method, and any other function value has the effects
-    /// its function type lists.
+    /// may run each.
     fn callbacks(&mut self, arguments: &'ast ArgumentList<'arena>) {
         for argument in arguments.arguments.iter() {
-            let value = argument.value();
-            if let Some(lambda) = self.lambda(value) {
-                self.inline(lambda, |_| Roots::new());
+            self.passed_function(argument.value(), &Roots::new());
+        }
+    }
 
-                continue;
-            }
+    /// Records `value`, a function passed to code that may run it on values with the roots `reached`: a lambda runs
+    /// here, a method value calls its method, and any other function value has the effects its function type lists.
+    fn passed_function(&mut self, value: &'ast Expression<'arena>, reached: &Roots) {
+        if let Some(lambda) = self.lambda(value) {
+            self.inline(lambda, |_| reached.clone());
 
-            let span = value.span();
-            if let Expression::Access(Access::Property(access)) = value.unparenthesized() {
-                self.method_value(access, span, &Roots::new());
-            }
+            return;
+        }
 
-            // A value the analysis gave no type passes no function type's effects.
-            let effects = self.artifacts.get_expression_type(value).map(declared_effects).unwrap_or_default();
-            let cause = (empty_word(), self.text(span));
-            for effect in effects {
-                self.summary.effects.push((Effect::Foreign(effect), span, cause));
-            }
+        let span = value.span();
+        if let Expression::Access(Access::Property(access)) = value.unparenthesized() {
+            self.method_value(access, span, reached);
+        }
+
+        // A value the analysis gave no type passes no function type's effects.
+        let effects = self.artifacts.get_expression_type(value).map(declared_effects).unwrap_or_default();
+        let cause = (empty_word(), self.text(span));
+        for effect in effects {
+            self.summary.effects.push((Effect::Foreign(effect), span, cause));
         }
     }
 
@@ -963,13 +1010,13 @@ where
                 return;
             };
 
-            let arguments = instantiation
-                .argument_list
-                .as_ref()
-                .map(|arguments| self.argument_roots(arguments, &metadata.parameters))
-                .unwrap_or_default();
+            let mut roots = Vec::new();
+            if let Some(arguments) = &instantiation.argument_list {
+                roots = self.argument_roots(arguments, &metadata.parameters);
+                self.uses_arguments(arguments, &metadata.parameters, &Roots::new(), &roots);
+            }
             let callee = Body::Method(ascii_lowercase_word(declaring.name.as_bytes()), constructor);
-            self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
+            self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: roots });
         } else if !is_prelude_stub(class.name) {
             let declaration = extern_of(codebase, class.name, constructor);
             self.plain_php(declaration, span, (declaring.original_name, empty_word()));
@@ -1035,12 +1082,27 @@ where
                 continue;
             };
 
-            if codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|declaring| declaring.flags.is_sharp()) {
-                let callee =
-                    Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), ascii_lowercase_word(name.value));
-                let arguments = vec![elements.clone(); metadata.parameters.len()];
-                self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments });
+            if !codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|declaring| declaring.flags.is_sharp())
+            {
+                continue;
             }
+
+            // A method without a body has the effects its `uses` lists, as a call of it does.
+            if metadata.method_metadata.as_ref().is_some_and(|method| method.is_abstract) {
+                let class_name =
+                    codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+                let cause = (class_name, metadata.original_name);
+                for effect in &metadata.uses {
+                    self.summary.effects.push((Effect::Foreign(*effect), span, cause));
+                }
+
+                continue;
+            }
+
+            let callee =
+                Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), ascii_lowercase_word(name.value));
+            let arguments = vec![elements.clone(); metadata.parameters.len()];
+            self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments });
         }
     }
 }
@@ -1269,6 +1331,18 @@ fn foreign_class(codebase: &CodebaseMetadata, class: Word) -> Option<Word> {
         .chain(metadata.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(parent.as_bytes())))
         .find(|metadata| metadata.flags.is_foreign())
         .map(|metadata| metadata.original_name)
+}
+
+/// The index of the parameter of `parameters` that `argument`, at `position` in its call, is given to: the one it
+/// names, or the one at its position. Arguments past the last parameter are its variadic values.
+fn parameter_index(argument: &Argument<'_>, position: usize, parameters: &[FunctionLikeParameterMetadata]) -> usize {
+    match argument {
+        Argument::Named(named) => {
+            let name = php_variable_name(named.name.value);
+            parameters.iter().position(|parameter| parameter.name.0 == name).unwrap_or(position)
+        }
+        Argument::Positional(_) => position.min(parameters.len().saturating_sub(1)),
+    }
 }
 
 /// The lambda an expression is, unparenthesized.
