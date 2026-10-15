@@ -3559,7 +3559,10 @@ pub(super) mod testing {
 
         let union = decode_complete_union(&mut PayloadReader::new(&payload), 0).unwrap();
 
-        assert!(matches!(union.types.as_ref(), [TAtomic::Iterable(TIterable { holds_map_entries: false, .. })]), "{union:?}");
+        assert!(
+            matches!(union.types.as_ref(), [TAtomic::Iterable(TIterable { holds_map_entries: false, .. })]),
+            "{union:?}"
+        );
         assert_eq!(union.get_id().to_string(), "iterable<mixed, scalar>");
     }
 

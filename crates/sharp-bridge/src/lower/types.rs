@@ -404,7 +404,10 @@ impl<'analysis> Types<'analysis> {
     /// The type text of the result of the method `class::method`, as [`FunctionType::result`] writes it.
     pub(crate) fn method_result(&self, class: &[u8], method: &[u8]) -> Option<String> {
         let Some(metadata) = self.codebase.get_method(class, method) else {
-            unreachable!("the codebase holds every method a PHP# file declares, not {}", String::from_utf8_lossy(method));
+            unreachable!(
+                "the codebase holds every method a PHP# file declares, not {}",
+                String::from_utf8_lossy(method)
+            );
         };
 
         self.result_text(metadata.return_type_metadata.as_ref().map(|r#type| &r#type.type_union))

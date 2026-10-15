@@ -2520,8 +2520,10 @@ fn check_abstract_access(method: &Method, context: &mut Context<'_, '_, '_>) {
     }
 
     context.report(
-        Issue::error("A subclass implements an abstract method, so it is `public` or `protected`: write `protected abstract`.")
-            .with_annotation(Annotation::primary(method.name.span).with_message("Declared here.")),
+        Issue::error(
+            "A subclass implements an abstract method, so it is `public` or `protected`: write `protected abstract`.",
+        )
+        .with_annotation(Annotation::primary(method.name.span).with_message("Declared here.")),
     );
 }
 
@@ -5978,7 +5980,7 @@ fn check_yield(r#yield: &Yield, context: &mut Context<'_, '_, '_>) {
 fn enclosing_iterator_method<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> Option<&'ast Method<'arena>> {
     let members = match enclosing_extension(program, span) {
         Some(extension) => &extension.members,
-        None => &enclosing_class(program, span)?.members,
+        None => enclosing_class(program, span)?.members,
     };
     let method = members.iter().find_map(|member| match member {
         ClassLikeMember::Method(method) if method.span().contains(&span.start) => Some(method),
@@ -5997,10 +5999,9 @@ fn enclosing_iterator_method<'ast, 'arena>(program: &'ast Program<'arena>, span:
 /// Whether a method's declared return type is `Iterable<T>`. A method that yields gives one, which is never null, so
 /// `Iterable<T>?` is not one.
 fn returns_iterable(method: &Method) -> bool {
-    method
-        .return_type_hint
-        .as_ref()
-        .is_some_and(|return_type| matches!(&return_type.hint, Hint::Generic(generic) if generic.name.value == b"Iterable"))
+    method.return_type_hint.as_ref().is_some_and(
+        |return_type| matches!(&return_type.hint, Hint::Generic(generic) if generic.name.value == b"Iterable"),
+    )
 }
 
 /// Reports `return value;` in a method that returns `Iterable<T>` and yields, outside the lambdas in it. Its values

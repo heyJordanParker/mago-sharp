@@ -2659,7 +2659,8 @@ fn a_method_without_an_access_modifier_compiles() {
 #[test]
 fn an_abstract_method_states_public_or_protected() {
     let code = "namespace App.Tenant;\n\npublic abstract class Report\n{\n    abstract int size();\n    private abstract int count();\n    protected abstract int total();\n    public abstract int sum();\n    internal abstract int mean();\n}\n";
-    let message = "A subclass implements an abstract method, so it is `public` or `protected`: write `protected abstract`.";
+    let message =
+        "A subclass implements an abstract method, so it is `public` or `protected`: write `protected abstract`.";
 
     assert_eq!(issues(code), [format!("5:18 {message}"), format!("6:26 {message}")]);
 }
@@ -4361,9 +4362,8 @@ fn php_keeps_every_form_of_yield() {
 
 #[test]
 fn a_literal_element_outside_the_slice_is_not_supported_yet() {
-    let code = leak(method(
-        "        const reference = [&extra];\n        const missing = [, extra];\n        return 1;\n",
-    ));
+    let code =
+        leak(method("        const reference = [&extra];\n        const missing = [, extra];\n        return 1;\n"));
 
     assert_eq!(
         issues(code),
@@ -4374,7 +4374,8 @@ fn a_literal_element_outside_the_slice_is_not_supported_yet() {
 /// PHP's `x[] = v` is the analyzer's to refuse, by the collection it writes: a `List` grows with `add`.
 #[test]
 fn an_append_is_left_to_the_analyzer() {
-    let code = leak(method("        let list = [1];\n        list[] = 2;\n        this.rows[] = 3;\n        return 1;\n"));
+    let code =
+        leak(method("        let list = [1];\n        list[] = 2;\n        this.rows[] = 3;\n        return 1;\n"));
 
     assert_eq!(issues(code), Vec::<String>::new());
 }

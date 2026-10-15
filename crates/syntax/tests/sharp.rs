@@ -2515,7 +2515,10 @@ fn for_in_without_const_is_the_parse_error_that_names_of() {
 
     let errors: Vec<(String, &str)> =
         program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
-    assert_eq!(errors, [("PHP# loops over a collection with `of`, as in `for (const line of lines)`.".to_owned(), "in")]);
+    assert_eq!(
+        errors,
+        [("PHP# loops over a collection with `of`, as in `for (const line of lines)`.".to_owned(), "in")]
+    );
     assert_eq!(method_body(program).len(), 2, "{:#?}", method_body(program));
 }
 

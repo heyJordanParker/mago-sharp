@@ -493,9 +493,13 @@ fn report_unpacked_non_tuple<A>(
         None => value_type.clone(),
     };
     let quoted = quoted_source(context, value.span());
-    let mut issue = Issue::error(format!("Only a tuple unpacks, and `{quoted}` is a `{}`.", display_type(context, &shown)))
-        .with_annotation(Annotation::primary(value.span()).with_message("Unpacked here."));
-    if shown.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none()))
+    let mut issue =
+        Issue::error(format!("Only a tuple unpacks, and `{quoted}` is a `{}`.", display_type(context, &shown)))
+            .with_annotation(Annotation::primary(value.span()).with_message("Unpacked here."));
+    if shown
+        .types
+        .iter()
+        .all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none()))
     {
         issue = issue.with_help(format!("A `List` may hold fewer elements: read them by index, as in `{quoted}[0]`."));
     }

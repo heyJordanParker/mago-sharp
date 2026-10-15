@@ -34,7 +34,7 @@ where
 
     /// Whether the `for` header after `(` is TypeScript's `for (x in y)`, which declares no loop variable.
     pub(crate) fn is_at_for_in_without_keyword(&mut self) -> Result<bool, ParseError> {
-        if !self.dialect.is_sharp() || !self.stream.peek_kind(0)?.is_some_and(|kind| kind == T![Identifier]) {
+        if !self.dialect.is_sharp() || self.stream.peek_kind(0)?.is_none_or(|kind| kind != T![Identifier]) {
             return Ok(false);
         }
 

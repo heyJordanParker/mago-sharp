@@ -3794,7 +3794,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 (self.variable(span, &key_name), self.variable(span, &value_name), Some(entry))
             }
             ForOfTarget::Value(value) => (NULL, variable(self, value), None),
-            ForOfTarget::Unpack(unpack) if holds_map => (variable(self, &unpack.first), variable(self, &unpack.second), None),
+            ForOfTarget::Unpack(unpack) if holds_map => {
+                (variable(self, &unpack.first), variable(self, &unpack.second), None)
+            }
             ForOfTarget::Unpack(unpack) => {
                 let elements = [&unpack.first, &unpack.second].map(|part| {
                     let part = variable(self, part);
