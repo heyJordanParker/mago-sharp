@@ -6,6 +6,7 @@ use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 
 use crate::metadata::CodebaseMetadata;
+use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::constant::ConstantMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::reference::ReferenceSource;
@@ -342,13 +343,32 @@ fn populate_codebase_inner(
 }
 
 /// Sets the permitted inheritors of each PHP# sealed interface, spec section 20.1: the classes and enums of its
-/// namespace that implement it. A class elsewhere is then not permitted to implement it, and a `match` over it covers
-/// the set. A new implementer changes the set without changing the interface, so this runs on every population.
+/// namespace that implement it, directly or through an interface that extends it. A class elsewhere is then not
+/// permitted to implement it, and a `match` over it covers the set. A new implementer changes the set without changing
+/// the interface, so this runs on every population, before the hierarchy gives each class its interfaces.
 fn populate_sealed_interfaces(codebase: &mut CodebaseMetadata) {
     fn namespace(name: &Word) -> &[u8] {
         let name = name.as_bytes();
 
         &name[..name.iter().rposition(|&byte| byte == b'\\').unwrap_or(0)]
+    }
+
+    /// Whether `class_like` declares `interface` among its interfaces, or one of them extends it.
+    fn implements(codebase: &CodebaseMetadata, class_like: &ClassLikeMetadata, interface: Word) -> bool {
+        let mut pending: Vec<Word> = class_like.direct_parent_interfaces.iter().copied().collect();
+        let mut seen = WordSet::default();
+        while let Some(parent) = pending.pop() {
+            if parent == interface {
+                return true;
+            }
+            if seen.insert(parent)
+                && let Some(parent) = codebase.class_likes.get(&parent)
+            {
+                pending.extend(parent.direct_parent_interfaces.iter().copied());
+            }
+        }
+
+        false
     }
 
     let sealed: Vec<Word> =
@@ -360,12 +380,19 @@ fn populate_sealed_interfaces(codebase: &mut CodebaseMetadata) {
             .iter()
             .filter(|(name, metadata)| {
                 (metadata.kind.is_class() || metadata.kind.is_enum())
-                    && metadata.direct_parent_interfaces.contains(&interface)
                     && namespace(name) == namespace(&interface)
+                    && implements(codebase, metadata, interface)
             })
             .map(|(name, _)| *name)
             .collect();
 
+        // Each member holds the set too, as a member of an enum's does, so a `match` knows it for one of the set. An
+        // interface that extends the sealed one holds none: its own implementers are only a part of the set.
+        for implementer in &implementers {
+            if let Some(metadata) = codebase.class_likes.get_mut(implementer) {
+                metadata.permitted_inheritors.get_or_insert_default().extend(implementers.iter().copied());
+            }
+        }
         if let Some(metadata) = codebase.class_likes.get_mut(&interface) {
             metadata.permitted_inheritors = Some(implementers);
         }

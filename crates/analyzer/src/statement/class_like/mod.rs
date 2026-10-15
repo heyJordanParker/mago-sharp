@@ -1961,10 +1961,19 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                 );
             }
 
-            if !class_like_metadata.is_permitted_to_inherit(implemented_metadata)
-                && implemented_metadata.flags.is_sealed()
-            {
-                report_outside_implementer(context, class_like_metadata, implemented_metadata, implemented_type.span());
+            // A sealed interface counts its implementers through the interfaces that extend it, spec section 20.1.
+            let sealed = std::iter::once(implemented_metadata)
+                .chain(
+                    implemented_metadata
+                        .all_parent_interfaces
+                        .iter()
+                        .filter_map(|interface| context.codebase.get_class_like(interface.as_bytes())),
+                )
+                .find(|interface| {
+                    interface.flags.is_sealed() && !class_like_metadata.is_permitted_to_inherit(interface)
+                });
+            if let Some(sealed) = sealed {
+                report_outside_implementer(context, class_like_metadata, sealed, implemented_type.span());
             } else if !class_like_metadata.is_permitted_to_inherit(implemented_metadata) {
                 context.collector.report_with_code(
                     IssueCode::InvalidImplement,

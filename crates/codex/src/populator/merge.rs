@@ -86,7 +86,11 @@ fn merge_interface_metadata(
     metadata.all_parent_interfaces.extend(parent_interface_metadata.all_parent_interfaces.iter().copied());
     metadata.invalid_dependencies.extend(parent_interface_metadata.invalid_dependencies.iter().copied());
 
-    if let Some(inheritors) = &parent_interface_metadata.permitted_inheritors {
+    // `populate_sealed_interfaces` gives a PHP# sealed interface's set to each of its members, and an interface that
+    // extends it holds none, since its own implementers are only a part of the set, spec section 20.1.
+    if let Some(inheritors) = &parent_interface_metadata.permitted_inheritors
+        && !parent_interface_metadata.flags.is_sealed()
+    {
         metadata.permitted_inheritors.get_or_insert_default().extend(inheritors.iter().copied());
     }
 

@@ -4669,6 +4669,30 @@ fn a_sealed_interface_is_implemented_only_in_its_namespace() {
             "5:23 invalid-implement `App.Shop.Banner` cannot implement the sealed interface `App.Interaction`: its implementers sit in the namespace `App`. | Move the class into the namespace `App`, or implement another interface."
         ]
     );
+
+    // An interface of the namespace that extends it is one way in: the namespace's classes that implement it join the
+    // set, which a `match` over the sealed interface then covers, and a class elsewhere is refused as an implementer.
+    let gesture =
+        ("src/App/Gesture.sharp", "namespace App;\n\npublic interface Gesture : Interaction\n{\n    int fingers();\n}\n");
+    let swipe = (
+        "src/App/Swipe.sharp",
+        "namespace App;\n\npublic class Swipe : Gesture\n{\n    public string name() => \"swipe\";\n    public int fingers() => 2;\n}\n",
+    );
+    let pinch = "namespace App.Shop;\n\nimport App.Gesture;\n\npublic class Pinch : Gesture\n{\n    public string name() => \"pinch\";\n    public int fingers() => 2;\n}\n";
+    let shop = "namespace App;\n\nclass Shop\n{\n    public string half(Interaction interaction) => match (interaction) {\n        PopupInteraction popup => popup.name(),\n    };\n\n    public string all(Interaction interaction) => match (interaction) {\n        PopupInteraction popup => popup.name(),\n        Swipe swipe => swipe.name(),\n    };\n}\n";
+    assert_eq!(refusals(swipe, &[INTERACTION, gesture]), Vec::<String>::new());
+    assert_eq!(
+        refusals(("src/App/Shop/Pinch.sharp", pinch), &[INTERACTION, gesture]),
+        [
+            "5:22 invalid-implement `App.Shop.Pinch` cannot implement the sealed interface `App.Interaction`: its implementers sit in the namespace `App`. | Move the class into the namespace `App`, or implement another interface."
+        ]
+    );
+    assert_eq!(
+        refusals(("src/App/Shop.sharp", shop), &[INTERACTION, POPUP_INTERACTION, gesture, swipe]),
+        [
+            "5:52 match-not-exhaustive This `match` misses `Swipe`. | Add an arm for each value it misses, or add `default => …` as the last arm."
+        ]
+    );
 }
 
 /// Spec section 20: each case of an enum with a case that carries data is a type of its own. `PaymentResult.Declined(…)`
