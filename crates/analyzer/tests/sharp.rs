@@ -18301,6 +18301,32 @@ const EVENTS: (&str, &str) = (
     include_str!("../../../../composer/library/Sharp/Events.sharp"),
 );
 
+/// The standard library's `Scope`, as `sharp/composer/` ships it.
+const SCOPE: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Scope.sharp",
+    include_str!("../../../../composer/library/Sharp/Scope.sharp"),
+);
+
+/// Spec section 32: the standard library's `Scope` analyzes clean, `Scope.run` returns what its body returns with no
+/// cast, and has its body's effects, so a pure body keeps its caller pure and a body that reads the environment does
+/// not.
+#[test]
+fn scope_run_returns_what_its_body_returns_and_has_its_effects() {
+    let worker = (
+        "app/Jobs/Worker.sharp",
+        "namespace App.Jobs;\n\nimport Sharp.Scope;\n\npublic class Worker\n{\n    public Worker(private Environment environment) { }\n\n    public int counted => Scope.run(() => 1);\n\n    public string home => Scope.run(() => this.environment.require(\"HOME\"));\n\n    law pure(Worker worker) => worker.counted > 0;\n\n    law reads(Worker worker) => worker.home != \"\";\n}\n",
+    );
+
+    assert_eq!(worded(SCOPE, &[]), Vec::<String>::new());
+    assert_eq!(issues(worker, &[SCOPE, ENVIRONMENT]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[worker, SCOPE, ENVIRONMENT]),
+        [
+            "app/Jobs/Worker.sharp:15:33 impure-law: Law `reads` reaches `Worker.home`, which calls `Environment.require` with the effect `Environment`. Laws hold only over pure code.",
+        ]
+    );
+}
+
 /// A class whose `watch` starts a listener with `Events.on<TEvent>` for the type `listened`, and holds its handle.
 fn watching(listened: &str) -> (&'static str, &'static str) {
     let code = format!(
