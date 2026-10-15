@@ -246,8 +246,8 @@ public class Report
         for (const Calc? none = null; none === null; ) {
             break;
         }
-        for (const value of Calc.values()) {
-            total += value;
+        for (const entry of Calc.values()) {
+            total += entry[1];
         }
         for (let [key, value] of Calc.values()) {
             total += key * value;

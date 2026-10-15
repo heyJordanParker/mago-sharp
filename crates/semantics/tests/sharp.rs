@@ -4141,6 +4141,30 @@ fn a_return_with_a_value_in_a_method_that_yields_is_an_error() {
     assert_eq!(issues(code), ["12:9 A method that yields cannot return a value: write `return;` to end it."]);
 }
 
+/// Spec section 30: a tuple type, with or without element names, goes wherever a type goes, its element types are the
+/// slice's types, and `const` or `let` unpacks a tuple into a local per element.
+#[test]
+fn a_tuple_type_and_an_unpacked_tuple_are_in_the_slice() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private [Money, int] pair;\n\n    public [Money total, int count, Date since] summarize([string, List<Plan>] entry, [int, int]? range, Map<string, [int, Order?]> rows)\n    {\n        [Money, int] kept = this.pair;\n        const [total, count] = kept;\n        let [money, items] = kept;\n        return [total, count, new Date()];\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Spec section 30: "The checker suggests a struct past four" elements, which reads each by its name. A tuple's element
+/// is a value, so it is never `void`.
+#[test]
+fn a_tuple_past_four_elements_suggests_a_struct_and_holds_no_void() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public [int, int, int, int] four() { return [1, 2, 3, 4]; }\n\n    public [int a, int b, int c, int d, int e] five() { return [1, 2, 3, 4, 5]; }\n\n    public void run([int, void] pair) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:12 A tuple of 5 elements is hard to read: declare a struct, whose fields have names.",
+            "9:27 A tuple's element cannot be `void`: `void` is only a return type.",
+        ]
+    );
+}
+
 #[test]
 fn php_keeps_every_form_of_yield() {
     let code = "<?php\n\nfunction rows(): iterable\n{\n    $sent = yield 1;\n    yield 2 => $sent;\n    yield from [3];\n    yield;\n    return 4;\n}\n";
@@ -5487,7 +5511,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         ),
         (
             body,
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`.",
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`.",
         ),
     ] {
         assert_eq!(

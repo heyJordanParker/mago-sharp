@@ -22,6 +22,10 @@ pub struct TIterable {
     /// Additional types intersected with this iterable (e.g., `&Other` in `iterable<K, V>&Other`).
     /// Contains boxed atomic types (`TAtomic`) because intersections can involve various types.
     pub intersection_types: Option<Vec<TAtomic>>,
+
+    /// Whether it holds a keyed array by its entries, the tuples `[TKey, TValue]`, as PHP#'s `Iterable<T>` holds a
+    /// `Map`, spec section 12, where PHP's `iterable` holds an array by its values.
+    pub map_entries: bool,
 }
 
 impl TIterable {
@@ -34,7 +38,13 @@ impl TIterable {
     #[inline]
     #[must_use]
     pub fn new(key_type: Arc<TUnion>, value_type: Arc<TUnion>) -> Self {
-        Self { key_type, value_type, intersection_types: None }
+        Self { key_type, value_type, intersection_types: None, map_entries: false }
+    }
+
+    /// Creates PHP#'s `Iterable<T>` of `value_type`, spec section 12, which holds a `Map` by its entries.
+    #[must_use]
+    pub fn sharp(value_type: Arc<TUnion>) -> Self {
+        Self { map_entries: true, ..Self::of_value(value_type) }
     }
 
     /// Creates a new iterable type with the given value type,

@@ -7,6 +7,7 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::IntersectionHint;
 use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::ParenthesizedHint;
+use mago_syntax::cst::TupleHint;
 use mago_syntax::cst::TypeArgumentList;
 use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::TypeParameterList;
@@ -86,6 +87,7 @@ impl Fingerprintable for Hint<'_> {
             Hint::Iterable(_) => "iterable".hash(hasher),
             Hint::Generic(g) => g.fingerprint_with_hasher(hasher, resolved_names, options),
             Hint::Function(f) => f.fingerprint_with_hasher(hasher, resolved_names, options),
+            Hint::Tuple(t) => t.fingerprint_with_hasher(hasher, resolved_names, options),
             Hint::Readonly(r) => {
                 "readonly".hash(hasher);
                 r.hint.fingerprint_with_hasher(hasher, resolved_names, options);
@@ -111,6 +113,24 @@ impl Fingerprintable for FunctionHint<'_> {
         }
 
         self.uses.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for TupleHint<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "tuple".hash(hasher);
+        for element in &self.elements {
+            element.hint.fingerprint_with_hasher(hasher, resolved_names, options);
+            element.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
     }
 }
 

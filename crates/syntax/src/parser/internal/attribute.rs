@@ -28,11 +28,11 @@ where
         self.dialect.is_sharp() && !self.state.within_block
     }
 
-    /// The token that opens the next attribute list: `#[`, or `[` in PHP#.
+    /// The token that opens the next attribute list: `#[`, or in PHP# a `[` that opens no tuple type.
     fn attribute_list_open(&mut self) -> Result<Option<TokenKind>, ParseError> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["#["]) => Some(T!["#["]),
-            Some(T!["["]) if self.dialect.is_sharp() => Some(T!["["]),
+            Some(T!["["]) if self.dialect.is_sharp() && !self.is_at_tuple_hint()? => Some(T!["["]),
             _ => None,
         })
     }

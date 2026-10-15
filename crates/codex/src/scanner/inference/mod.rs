@@ -608,6 +608,7 @@ where
                 known_elements: Some(entries),
                 element_type: Arc::new(get_never()),
                 non_empty: !elements.is_empty(),
+                tuple_names: None,
             }))))
         }
         Expression::Array(Array { elements, .. }) | Expression::LegacyArray(LegacyArray { elements, .. })

@@ -128,6 +128,28 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
+    /// Whether the collection `expression` may hold a `Map`, whose element a loop reads as its entry, spec section 17.
+    pub(crate) fn holds_map(&self, expression: &Expression) -> bool {
+        self.expression_type(expression).types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
+    }
+
+    /// The position of the element `access` reads by its name in the tuple its object holds, spec section 30, or `None`
+    /// when the object holds no tuple. The checker refuses a name the tuple does not write.
+    pub(crate) fn tuple_element_index(&self, access: &PropertyAccess) -> Option<usize> {
+        let ClassLikeMemberSelector::Identifier(name) = &access.property else {
+            return None;
+        };
+        // A class a static member is read on has no type.
+        let TAtomic::Array(TArray::List(list)) = self.artifacts.get_expression_type(access.object)?.types.first()?
+        else {
+            return None;
+        };
+
+        list.tuple_elements()?
+            .iter()
+            .position(|(_, element)| element.is_some_and(|element| element.as_bytes() == name.value))
+    }
+
     /// The declaration the fully qualified class name `class` resolves to.
     #[must_use]
     pub fn class_declaration(&self, class: &[u8]) -> Declaration {
@@ -511,6 +533,8 @@ impl<'analysis> Types<'analysis> {
                     constrains(element)
                 }
                 Some(SharpType::Map(key, value)) => constrains(key) || constrains(value),
+                // PHP's `array` type checks neither a tuple's length nor its elements.
+                Some(SharpType::Tuple(_)) => true,
                 _ => false,
             })
             || r#type.types.iter().any(|atomic| match atomic {
@@ -1181,7 +1205,8 @@ enum Parameter {
 }
 
 /// `r#type` in the one PHP# spelling the engine parses, the type text of php-sharp's decision 72: a class by its full
-/// dotted name as it is declared, the built-in types, `List<T>`, `Map<K, V>`, `Set<T>`, `Iterable<T>`, `Class<T>`,
+/// dotted name as it is declared, the built-in types, `List<T>`, `Map<K, V>`, `Set<T>`, `Iterable<T>`, a tuple as
+/// `[A, B]`, `Class<T>`,
 /// `Function<R(P1, P2)>`, a type parameter as `Any?`, `T?`, `(A|B)?`, `A & B`, and an intersection in parentheses
 /// inside a union or a nullable type, `(A & B)|C` and `(A & B)?`. Union and intersection members are sorted by their
 /// text, and a space comes only after a comma and around `&`.
@@ -1272,6 +1297,10 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
         SharpType::Set(element_type) => format!("Set<{}>", type_text(element_type)),
         SharpType::Map(key, value) => format!("Map<{}>", list(&mut [key, value].into_iter())),
         SharpType::Iterable(value) => format!("Iterable<{}>", type_text(value)),
+        // A tuple's element names are the checker's, so the engine reads only its element types.
+        SharpType::Tuple(tuple) => {
+            format!("[{}]", list(&mut tuple.tuple_elements().into_iter().flatten().map(|(element, _)| element)))
+        }
         SharpType::Parameter(generic) => {
             parameter_text(generic.parameter_name, generic.defining_entity, &|| type_text(&generic.constraint))
         }

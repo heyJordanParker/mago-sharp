@@ -24,6 +24,10 @@ pub struct TList {
     pub known_count: Option<usize>,
     /// Flag indicating if the list is known to contain at least one element.
     pub non_empty: bool,
+    /// `Some` when the list is a PHP# tuple, spec section 30, a sealed shape of `known_elements`, with the name each
+    /// element is written with, or `None` for one written without. A list literal's shape is no tuple until a tuple
+    /// type takes it.
+    pub tuple_names: Option<Vec<Option<Word>>>,
 }
 
 impl PartialEq for TList {
@@ -37,7 +41,7 @@ impl PartialEq for TList {
             return false;
         }
 
-        if self.known_count != other.known_count {
+        if self.known_count != other.known_count || self.tuple_names != other.tuple_names {
             return false;
         }
 
@@ -59,7 +63,7 @@ impl TList {
     #[inline]
     #[must_use]
     pub fn new(element_type: Arc<TUnion>) -> Self {
-        Self { element_type, known_elements: None, known_count: None, non_empty: false }
+        Self { element_type, known_elements: None, known_count: None, non_empty: false, tuple_names: None }
     }
 
     /// Creates new metadata for a list type with specified known elements.
@@ -81,13 +85,33 @@ impl TList {
             },
             non_empty: known_elements.values().any(|(optional, _)| !*optional),
             known_elements: Some(known_elements),
+            tuple_names: None,
         }
+    }
+
+    /// Creates the PHP# tuple of `elements`, spec section 30: each element's type, with the name it is written with,
+    /// or `None` for one written without.
+    #[must_use]
+    pub fn tuple(elements: Vec<(TUnion, Option<Word>)>) -> Self {
+        let (types, names): (Vec<TUnion>, Vec<Option<Word>>) = elements.into_iter().unzip();
+        let known_elements = types.into_iter().map(|element| (false, element)).enumerate().collect();
+
+        Self { tuple_names: Some(names), ..Self::from_known_elements(known_elements) }
+    }
+
+    /// The type and the name of each element of a PHP# tuple, or `None` for a list that is no tuple.
+    #[must_use]
+    pub fn tuple_elements(&self) -> Option<Vec<(&TUnion, Option<Word>)>> {
+        let names = self.tuple_names.as_ref()?;
+        let elements = self.known_elements.as_ref()?;
+
+        Some(elements.values().map(|(_, element)| element).zip(names.iter().copied()).collect())
     }
 
     #[inline]
     #[must_use]
     pub fn new_non_empty(element_type: Arc<TUnion>) -> Self {
-        Self { element_type, known_elements: None, known_count: None, non_empty: true }
+        Self { element_type, known_elements: None, known_count: None, non_empty: true, tuple_names: None }
     }
 
     /// Returns a reference to the general element type (`TUnion`).
@@ -113,6 +137,7 @@ impl TList {
             known_elements: self.known_elements.clone(),
             known_count: self.known_count,
             non_empty: true,
+            tuple_names: self.tuple_names.clone(),
         }
     }
 

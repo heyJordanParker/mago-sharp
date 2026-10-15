@@ -5,6 +5,7 @@ use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
 use crate::cst::cst::ForColonDelimitedBody;
 use crate::cst::cst::ForOfTarget;
+use crate::cst::cst::LocalTarget;
 use crate::cst::cst::Statement;
 use crate::cst::sequence::Sequence;
 use crate::cst::sequence::TokenSeparatedSequence;
@@ -36,7 +37,7 @@ where
                 return Ok(Statement::ForOf(self.parse_for_of(r#for, left_parenthesis, keyword, target)?));
             }
 
-            Some(self.parse_local_declaration_value(Some(keyword), variable.hint, variable.name)?)
+            Some(self.parse_local_declaration_value(Some(keyword), variable.hint, LocalTarget::Name(variable.name))?)
         } else if self.is_at_local_declaration()? {
             Some(self.parse_local_declaration()?)
         } else {

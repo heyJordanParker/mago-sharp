@@ -268,6 +268,8 @@ enum NodeKind: string
     case NullableHint = 'NullableHint';
     case GenericHint = 'GenericHint';
     case FunctionHint = 'FunctionHint';
+    case TupleHint = 'TupleHint';
+    case TupleElementHint = 'TupleElementHint';
     case ReadonlyHint = 'ReadonlyHint';
     case TypeArgumentList = 'TypeArgumentList';
     case TypeParameterList = 'TypeParameterList';
@@ -277,6 +279,8 @@ enum NodeKind: string
     case UnionHint = 'UnionHint';
     case Unset = 'Unset';
     case LocalDeclaration = 'LocalDeclaration';
+    case LocalTarget = 'LocalTarget';
+    case LocalUnpack = 'LocalUnpack';
     case Is = 'Is';
     case As = 'As';
     case Pattern = 'Pattern';

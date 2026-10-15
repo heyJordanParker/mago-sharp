@@ -313,6 +313,7 @@ pub fn combine(types: Vec<TAtomic>, codebase: &CodebaseMetadata, options: Combin
             element_type: Arc::new(list_parameter),
             non_empty: combination.flags.contains(CombinationFlags::LIST_ARRAY_ALWAYS_FILLED),
             known_count: None,
+            tuple_names: None,
         }));
     }
 
@@ -663,7 +664,7 @@ fn scrape_type_properties(
         std::mem::swap(&mut sealed_arrays, &mut combination.sealed_arrays);
         for array in std::iter::once(array).chain(sealed_arrays) {
             match array {
-                TArray::List(TList { element_type, known_elements, non_empty, known_count: _ }) => {
+                TArray::List(TList { element_type, known_elements, non_empty, known_count: _, tuple_names: _ }) => {
                     if combination.flags.contains(CombinationFlags::HAS_KEYED_ARRAY)
                         && !combination.flags.contains(CombinationFlags::KEYED_ARRAY_SOMETIMES_FILLED)
                         && combination.keyed_array_parameters.is_none()

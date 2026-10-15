@@ -14531,21 +14531,22 @@ fn a_typed_for_counter_is_the_assignment_of_its_value() {
 }
 
 /// ```php
-/// foreach (<check Map<int, int>>(\Lib\Calc::make(2)) as $value) {
-///     $extra += $value;
+/// foreach (<check Map<int, int>>(\Lib\Calc::make(2)) as $key#1 => $value#2) {
+///     $entry = [$key#1, $value#2];
+///     $extra += $entry[1];
 /// }
 /// foreach (<check Map<int, int>>(\Lib\Calc::make(3)) as $key => $value) {
 /// }
 /// ```
 ///
 /// `FOREACH` takes the collection, the value variable, the key variable or null, and the body. The map a plain PHP
-/// docblock claims is checked entry by entry first.
+/// docblock claims is checked entry by entry first, and one loop variable over it is each entry.
 #[test]
 fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
     assert_eq!(
         body_in(
             RUN,
-            "        for (const value of Calc.make(2)) {\n            extra += value;\n        }\n        for (let [key, value] of Calc.make(3)) {\n        }\n        return extra;\n",
+            "        for (const entry of Calc.make(2)) {\n            extra += entry[1];\n        }\n        for (let [key, value] of Calc.make(3)) {\n        }\n        return extra;\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; final class Calc { /** @return array<int, int> */ public static function make(int $n): array { return [$n => $n]; } }",
@@ -14563,14 +14564,30 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
                   ZVAL "Map<int, int>"
                   ZVAL "Lib\\Calc::make()"
                 VAR
-                  ZVAL "value"
-                null
+                  ZVAL "value#2"
+                VAR
+                  ZVAL "key#1"
                 STMT_LIST
-                  ASSIGN_OP [1]
+                  ASSIGN
                     VAR
-                      ZVAL "extra"
-                    VAR
-                      ZVAL "value"
+                      ZVAL "entry"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        VAR
+                          ZVAL "key#1"
+                        null
+                      ARRAY_ELEM
+                        VAR
+                          ZVAL "value#2"
+                        null
+                  STMT_LIST
+                    ASSIGN_OP [1]
+                      VAR
+                        ZVAL "extra"
+                      DIM
+                        VAR
+                          ZVAL "entry"
+                        ZVAL 1
               FOREACH
                 VERIFY_TYPE_ARGS
                   STATIC_CALL
@@ -14588,6 +14605,219 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
               RETURN
                 VAR
                   ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
+/// $pair = [1, 'a']; [$count, $label] = $pair;
+/// ```
+///
+/// Spec section 30: a tuple is a PHP list while the code runs, so a tuple literal is a list literal, and unpacking one
+/// is PHP's list assignment, an `ASSIGN` of an `ARRAY` of `ARRAY_ELEM`s, as php-src's grammar builds `[$a, $b] = $c`.
+#[test]
+fn an_unpacked_tuple_is_a_list_assignment() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void run()\n    {\n        [int, string] pair = [1, \"a\"];\n        const [count, label] = pair;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "pair"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL 1
+                    null
+                  ARRAY_ELEM
+                    ZVAL "a"
+                    null
+              ASSIGN
+                ARRAY [3]
+                  ARRAY_ELEM
+                    VAR
+                      ZVAL "count"
+                    null
+                  ARRAY_ELEM
+                    VAR
+                      ZVAL "label"
+                    null
+                VAR
+                  ZVAL "pair"
+        "#}
+    );
+}
+
+/// ```php
+/// foreach ($plans as $key#1 => $value#2) { $entry = [$key#1, $value#2]; }
+/// foreach ($rows as [$name, $count]) { }
+/// foreach ($plans as $name => $plan) { }
+/// ```
+///
+/// Spec sections 17 and 30: a loop variable is each element, and a `Map`'s element is its entry, so one variable over a
+/// `Map` is the tuple of each key and value, which a `Sharp\Map` and a PHP array both give a `foreach` of both. `[a, b]`
+/// unpacks each two-element tuple of any other collection, as PHP's `foreach ($rows as [$a, $b])` does, and reads a
+/// `Map`'s key and value.
+#[test]
+fn a_loop_over_a_map_reads_each_entry_and_a_loop_unpacks_each_tuple() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Map<string, int> plans, List<[string, int]> rows)\n    {\n        for (const entry of plans) {\n        }\n        for (const [name, count] of rows) {\n        }\n        for (const [name, plan] of plans) {\n        }\n    }\n}\n",
+    );
+
+    // The class's generated `parse` loops over the fields after them.
+    let loops: Vec<String> = lowered
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_FOREACH)
+        .map(|(index, _)| lowered.render(index as u32))
+        .take(3)
+        .collect();
+
+    assert_eq!(
+        loops,
+        [
+            indoc! {r#"
+                FOREACH
+                  VAR
+                    ZVAL "plans"
+                  VAR
+                    ZVAL "value#2"
+                  VAR
+                    ZVAL "key#1"
+                  STMT_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "entry"
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          VAR
+                            ZVAL "key#1"
+                          null
+                        ARRAY_ELEM
+                          VAR
+                            ZVAL "value#2"
+                          null
+                    STMT_LIST
+            "#},
+            indoc! {r#"
+                FOREACH
+                  VAR
+                    ZVAL "rows"
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      VAR
+                        ZVAL "name"
+                      null
+                    ARRAY_ELEM
+                      VAR
+                        ZVAL "count"
+                      null
+                  null
+                  STMT_LIST
+            "#},
+            indoc! {r#"
+                FOREACH
+                  VAR
+                    ZVAL "plans"
+                  VAR
+                    ZVAL "plan"
+                  VAR
+                    ZVAL "name"
+                  STMT_LIST
+            "#},
+        ]
+    );
+}
+
+/// ```php
+/// $entries = $entries instanceof \Sharp\Map ? \Sharp\Sequence::from($entries) : $entries;
+/// yield from \Sharp\Sequence::from($plans);
+/// return \Sharp\Sequence::from($plans);
+/// $kept = \Sharp\Sequence::from($plans);
+/// ```
+///
+/// Spec section 12: a `Map<TKey, TValue>` is an `Iterable<[TKey, TValue]>` of its entries, so a `Map` that lands in an
+/// `Iterable` place, a local, a return or `yield ...`, is the `Sequence` that reads its entries. A parameter takes any
+/// caller's `Map` the same way before the body runs.
+#[test]
+fn a_map_that_lands_in_an_iterable_gives_its_entries() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public int count(Iterable<[string, int]> entries) { return 1; }\n\n    public Iterable<[string, int]> all(Map<string, int> plans) { yield ...plans; }\n\n    public Iterable<[string, int]> some(Map<string, int> plans) { return plans; }\n\n    public void run(Map<string, int> plans)\n    {\n        Iterable<[string, int]> kept = plans;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body_of("count"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "entries"
+                CONDITIONAL
+                  INSTANCEOF
+                    VAR
+                      ZVAL "entries"
+                    ZVAL "Sharp\\Map"
+                  STATIC_CALL
+                    ZVAL "Sharp\\Sequence"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "entries"
+                  VAR
+                    ZVAL "entries"
+              RETURN
+                ZVAL 1
+        "#}
+    );
+    // Each body first makes the object of a PHP array plain PHP passes as `plans`, and its last statement takes the
+    // entries, a child of that statement.
+    let entries = concat!(
+        "    STATIC_CALL\n",
+        "      ZVAL \"Sharp\\\\Sequence\"\n",
+        "      ZVAL \"from\"\n",
+        "      ARG_LIST\n",
+        "        VAR\n",
+        "          ZVAL \"plans\"\n",
+    );
+    for (method, statement) in
+        [("all", "  YIELD_FROM\n"), ("some", "  RETURN\n"), ("run", "  ASSIGN\n    VAR\n      ZVAL \"kept\"\n")]
+    {
+        let body = lowered.body_of(method);
+
+        assert!(body.ends_with(&format!("{statement}{entries}")), "{method}:\n{body}");
+    }
+}
+
+/// ```php
+/// return $summary[1] . $pair[0];
+/// ```
+///
+/// Spec section 30: a named element of a tuple, which runs as a PHP list, is the index read of its position, and an
+/// index read of a tuple is one already.
+#[test]
+fn a_named_tuple_element_is_an_index_read_of_its_position() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public string run([int total, string label] summary, [string, int] pair)\n    {\n        return summary.label + pair[0];\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [8]
+                  DIM
+                    VAR
+                      ZVAL "summary"
+                    ZVAL 1
+                  DIM
+                    VAR
+                      ZVAL "pair"
+                    ZVAL 0
         "#}
     );
 }

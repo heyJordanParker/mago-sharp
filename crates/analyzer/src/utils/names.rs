@@ -476,8 +476,9 @@ where
     display_sharp_type(context, &TUnion::from_vec(general))
 }
 
-/// Returns `union` as PHP# writes the type: `List<int>`, `Map<string, int>`, `int?`, `(int|string)?`, `Any?`, a class
-/// as [`sharp_class_like_name`] names it, a type parameter by its name, an intersection as `A & B`, a function type as
+/// Returns `union` as PHP# writes the type: `List<int>`, `Map<string, int>`, a tuple as `[Money total, int]`, `int?`,
+/// `(int|string)?`, `Any?`, a class as [`sharp_class_like_name`] names it, a type parameter by its name, an
+/// intersection as `A & B`, a function type as
 /// `Function<void(int)>` or `Function<Charge(Cart) uses Http>` with each effect named as a class is, `Class<Order>`,
 /// `Object`, `Iterable<int>`, and a literal as `1` or `"text"`. A refinement that
 /// PHP# cannot write is the type that holds it, such as `int` for a `positive-int` and `int|string` for an
@@ -518,6 +519,18 @@ where
     A: Arena,
 {
     let written = match atomic {
+        // Spec section 30: a tuple as it is written, each element's type and its name when it has one.
+        TAtomic::Array(TArray::List(list)) if let Some(elements) = list.tuple_elements() => {
+            let elements: Vec<String> = elements
+                .into_iter()
+                .map(|(element, name)| match name {
+                    Some(name) => format!("{} {name}", display_sharp_type(context, element)),
+                    None => display_sharp_type(context, element),
+                })
+                .collect();
+
+            format!("[{}]", elements.join(", "))
+        }
         TAtomic::Array(array) => {
             let (key, value) = get_array_parameters(array, context.codebase);
             match array {

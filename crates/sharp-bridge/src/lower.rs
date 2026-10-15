@@ -11,6 +11,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
@@ -60,7 +61,9 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extension;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
+use mago_syntax::cst::ForOf;
 use mago_syntax::cst::ForOfTarget;
+use mago_syntax::cst::ForOfVariable;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
@@ -76,6 +79,8 @@ use mago_syntax::cst::Leave;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LiteralStringPart;
 use mago_syntax::cst::LocalDeclaration;
+use mago_syntax::cst::LocalIdentifier;
+use mago_syntax::cst::LocalTarget;
 use mago_syntax::cst::MatchArm;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -3050,7 +3055,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Hint::Generic(generic) if generic.name.value == b"Map" => PhpType::Classes(vec![b"Sharp\\Map"]),
             Hint::Generic(generic) if generic.name.value == b"Set" => PhpType::Classes(vec![b"Sharp\\Set"]),
             Hint::Generic(generic) if generic.name.value == b"Iterable" => PhpType::Named(b"iterable"),
-            Hint::Generic(_) => PhpType::Keyword(IS_ARRAY),
+            // Spec section 30: a tuple runs as a PHP list.
+            Hint::Generic(_) | Hint::Tuple(_) => PhpType::Keyword(IS_ARRAY),
             Hint::Function(_) => PhpType::Classes(vec![b"Closure"]),
             _ => unreachable!("check_slice refuses the type `{hint}`"),
         }
@@ -3100,19 +3106,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::LocalDeclaration(local) => self.local(local),
             Statement::If(r#if) => self.r#if(r#if),
             Statement::For(r#for) => self.r#for(r#for),
-            Statement::ForOf(for_of) => {
-                let collection = self.expression(for_of.expression);
-                let (key, value) = match &for_of.target {
-                    ForOfTarget::Value(value) => (NULL, self.variable(value.name.span, value.name.value)),
-                    ForOfTarget::KeyValue(pair) => (
-                        self.variable(pair.key.name.span, pair.key.name.value),
-                        self.variable(pair.value.name.span, pair.value.name.value),
-                    ),
-                };
-                let body = self.loop_body(for_of.body);
-
-                self.node(SHARP_AST_FOREACH, 0, self.line(for_of), &[collection, value, key, body])
-            }
+            Statement::ForOf(for_of) => self.for_of(for_of),
             Statement::While(r#while) => {
                 let WhileBody::Statement(body) = &r#while.body else {
                     unreachable!("check_slice refuses a colon-delimited `while`");
@@ -3143,6 +3137,54 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_RETURN, 0, self.line(r#return), &[value])
     }
 
+    /// A `for … of` is the `foreach` of its collection. A loop variable is each element, spec sections 17 and 30, and a
+    /// `Map`'s element is its entry, so one variable over a `Map` is `[$key, $value]` built from both, which a
+    /// `Sharp\Map` and a PHP array give alike: `foreach ($plans as $key => $value) { $entry = [$key, $value]; … }`.
+    /// `[a, b]` reads a `Map`'s key and value, and unpacks each two-element tuple of any other collection, as
+    /// `foreach ($rows as [$a, $b])`.
+    fn for_of(&mut self, for_of: &ForOf) -> u32 {
+        let line = self.line(for_of);
+        let holds_map = self.types.holds_map(for_of.expression);
+        let collection = self.expression(for_of.expression);
+        let variable =
+            |this: &mut Self, variable: &ForOfVariable| this.variable(variable.name.span, variable.name.value);
+        let taken = self.temporaries;
+        let (key, value, entry) = match &for_of.target {
+            ForOfTarget::Value(entry) if holds_map => {
+                let span = entry.name.span;
+                let (key_name, value_name) = (self.hidden("key"), self.hidden("value"));
+                let elements = [&key_name, &value_name].map(|name| {
+                    let part = self.variable(span, name);
+
+                    self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[part, NULL])
+                });
+                let tuple = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &elements);
+                let entry = variable(self, entry);
+                let entry = self.node(SHARP_AST_ASSIGN, 0, line, &[entry, tuple]);
+
+                (self.variable(span, &key_name), self.variable(span, &value_name), Some(entry))
+            }
+            ForOfTarget::Value(value) => (NULL, variable(self, value), None),
+            ForOfTarget::KeyValue(pair) if holds_map => (variable(self, &pair.key), variable(self, &pair.value), None),
+            ForOfTarget::KeyValue(pair) => {
+                let elements = [&pair.key, &pair.value].map(|part| {
+                    let part = variable(self, part);
+
+                    self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[part, NULL])
+                });
+
+                (NULL, self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &elements), None)
+            }
+        };
+        let mut body = self.loop_body(for_of.body);
+        if let Some(entry) = entry {
+            body = self.node(SHARP_AST_STMT_LIST, 0, line, &[entry, body]);
+        }
+        self.temporaries = taken;
+
+        self.node(SHARP_AST_FOREACH, 0, line, &[collection, value, key, body])
+    }
+
     fn loop_body(&mut self, body: &Statement) -> u32 {
         self.loop_depth += 1;
         let body = self.statement(body);
@@ -3151,25 +3193,56 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         body
     }
 
-    /// A `let` or `const` local is the assignment of its value to its variable. Spec section 3 gives each loop pass
-    /// its own local, and PHP reuses one variable, so a local in a loop body that a lambda captures by reference is
-    /// `{ unset($local); $local = value; }`, and the lambda of each pass keeps its own.
+    /// A `let` or `const` local is the assignment of its value to its variable, and an unpacked tuple, spec section 30,
+    /// is PHP's list assignment of a tuple's elements, `[$total, $count] = $summary;`, as a tuple is a PHP list. Spec
+    /// section 3 gives each loop pass its own local, and PHP reuses one variable, so a local in a loop body that a
+    /// lambda captures by reference is `{ unset($local); $local = value; }`, and the lambda of each pass keeps its own.
     fn local(&mut self, local: &LocalDeclaration) -> u32 {
         let line = self.line(local);
-        let variable = self.variable(local.name.span, local.name.value);
+        let target = match &local.target {
+            LocalTarget::Name(name) => self.variable(name.span, name.value),
+            LocalTarget::Unpack(unpack) => {
+                let elements: Vec<u32> = unpack
+                    .names
+                    .iter()
+                    .map(|name| {
+                        let variable = self.variable(name.span, name.value);
+
+                        self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[variable, NULL])
+                    })
+                    .collect();
+
+                self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &elements)
+            }
+        };
         let declared = local.hint.map(|hint| self.hint_type(hint));
         let value = self.crossed_value(local.value, declared.as_ref());
         if let Some(declared) = declared {
-            self.local_types.insert(local.name.span.start.offset, declared);
+            self.local_types.insert(local.target.span().start.offset, declared);
         }
-        let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, value]);
-        if self.loop_depth == 0 || !self.by_reference.contains(&local.name.span.start.offset) {
+        let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[target, value]);
+        if self.loop_depth == 0 {
+            return assignment;
+        }
+        let captured: Vec<&LocalIdentifier> = local
+            .target
+            .names()
+            .into_iter()
+            .filter(|name| self.by_reference.contains(&name.span.start.offset))
+            .collect();
+        if captured.is_empty() {
             return assignment;
         }
 
-        let variable = self.variable(local.name.span, local.name.value);
-        let unset = self.node(SHARP_AST_UNSET, 0, line, &[variable]);
-        let unset = self.node(SHARP_AST_STMT_LIST, 0, line, &[unset]);
+        let unsets: Vec<u32> = captured
+            .into_iter()
+            .map(|name| {
+                let variable = self.variable(name.span, name.value);
+
+                self.node(SHARP_AST_UNSET, 0, line, &[variable])
+            })
+            .collect();
+        let unset = self.node(SHARP_AST_STMT_LIST, 0, line, &unsets);
 
         self.node(SHARP_AST_STMT_LIST, 0, line, &[unset, assignment])
     }
@@ -3619,6 +3692,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CONST, 0, line, &[constant])
             }
+            // Spec section 30: a named element of a tuple, which runs as a PHP list, is the index read of its position.
+            Expression::Access(Access::Property(access))
+                if let Some(index) = self.types.tuple_element_index(access) =>
+            {
+                let object = self.expression(access.object);
+                let index = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = index as i64);
+
+                self.node(SHARP_AST_DIM, 0, line, &[object, index])
+            }
             // `Class.y`, and `y` read through a class value, is the fetch of the member the checker found on the class:
             // a constant or enum case, a static property, or a static method as a first-class callable.
             Expression::Access(Access::Property(access)) => match self.names.static_property_class(access) {
@@ -3740,8 +3822,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_YIELD, 0, line, &[value, NULL])
             }
+            // Spec section 12: `yield ...plans` gives a `Map`'s entries.
             Expression::Yield(Yield::Spread(spread)) => {
-                let iterator = self.expression(spread.iterator);
+                let iterator = if self.types.holds_map(spread.iterator) {
+                    self.map_entries(spread.iterator)
+                } else {
+                    self.expression(spread.iterator)
+                };
 
                 self.node(SHARP_AST_YIELD_FROM, 0, line, &[iterator])
             }
@@ -3903,15 +3990,52 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 && self.types.is_lazy_operation(object.unparenthesized());
         let mut sequence = self.expression(object);
         if !is_sequence {
-            let class = self.string(ZEND_NAME_FQ, line, b"Sharp\\Sequence");
-            let from = self.string(0, line, b"from");
-            let source = self.node(SHARP_AST_ARG_LIST, 0, line, &[sequence]);
-            sequence = self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, from, source]);
+            sequence = self.sequence_from(line, sequence);
         }
         let method = self.member(method);
         let arguments = self.arguments(arguments);
 
         self.node(SHARP_AST_METHOD_CALL, 0, line, &[sequence, method, arguments])
+    }
+
+    /// The `Map` `value` as the `Iterable<[TKey, TValue]>` of its entries, spec section 12, a `Sequence` of the object a
+    /// PHP array plain PHP gave becomes first: `\Sharp\Sequence::from($plans)`.
+    fn map_entries(&mut self, value: &Expression) -> u32 {
+        let line = self.line(value.span());
+        let own = self.types.expression_type(value).clone();
+        let map = self.crossed_value(value, Some(&own));
+
+        self.sequence_from(line, map)
+    }
+
+    /// `$name = $name instanceof \Sharp\Map ? \Sharp\Sequence::from($name) : $name;`, the statement that gives the
+    /// parameter `parameter` a `Map` argument's entries, when it is a PHP# `Iterable<T>`, which holds a `Map` by its
+    /// entries, spec section 12. A plain PHP caller's `Map` is a checking `Sequence` of them already.
+    fn map_entries_parameter(&mut self, parameter: &FunctionLikeParameter) -> Option<u32> {
+        let hint = parameter.hint.as_ref()?;
+        if parameter.is_variadic() || !holds_entries(&self.hint_type(hint)) {
+            return None;
+        }
+
+        let line = self.line(parameter);
+        let variable = &parameter.variable;
+        let [tested, source, kept, place] = [(); 4].map(|()| self.variable(variable.span, variable.name));
+        let class = self.string(ZEND_NAME_FQ, line, b"Sharp\\Map");
+        let is_map = self.node(SHARP_AST_INSTANCEOF, 0, line, &[tested, class]);
+        let entries = self.sequence_from(line, source);
+        let value = self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_map, entries, kept]);
+
+        Some(self.node(SHARP_AST_ASSIGN, 0, line, &[place, value]))
+    }
+
+    /// `\Sharp\Sequence::from($source)`, the `Iterable<T>` that reads `source` lazily, spec section 12: a `Map`'s
+    /// entries `[key, value]`, and every other collection's elements.
+    fn sequence_from(&mut self, line: u32, source: u32) -> u32 {
+        let class = self.string(ZEND_NAME_FQ, line, b"Sharp\\Sequence");
+        let from = self.string(0, line, b"from");
+        let source = self.node(SHARP_AST_ARG_LIST, 0, line, &[source]);
+
+        self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, from, source])
     }
 
     /// Whether both operands of an operator are strings or both ints, the two cases where spec section 24's operators
@@ -4884,6 +5008,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut statements = Vec::new();
         for parameter in parameters {
             let Some(r#type) = self.crossing_type(parameter) else {
+                statements.extend(self.map_entries_parameter(parameter));
                 if self.promoted_beside && parameter.is_promoted_property() {
                     let place = self.parameter_place(parameter);
                     let value = self.variable(parameter.variable.span, parameter.variable.name);
@@ -6009,6 +6134,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if let (Expression::Array(array), Some(true)) = (value.unparenthesized(), declared.and_then(table_kind)) {
             return self.set_literal(array);
         }
+        if declared.is_some_and(holds_entries) && self.types.holds_map(value) {
+            return self.map_entries(value);
+        }
         let Some(r#type) =
             declared.filter(|declared| self.may_be_php_array(value) && self.crossing_array(declared).is_some())
         else {
@@ -6393,6 +6521,19 @@ fn table_kind(r#type: &TUnion) -> Option<bool> {
         TAtomic::Array(TArray::Set(_)) => Some(true),
         TAtomic::Array(TArray::Keyed(_)) => Some(false),
         _ => None,
+    })
+}
+
+/// Whether `r#type` is a PHP# `Iterable<T>`, which holds a `Map` by its entries, spec section 12, whose `T` can be an
+/// entry: a tuple, `Any` or a type parameter. The checker refuses a `Map` for any other `T`.
+fn holds_entries(r#type: &TUnion) -> bool {
+    r#type.types.iter().any(|atomic| match atomic {
+        TAtomic::Iterable(iterable @ TIterable { map_entries: true, .. }) => {
+            iterable.get_value_type().types.iter().any(|value| {
+                value.is_mixed() || matches!(value, TAtomic::GenericParameter(_) | TAtomic::Array(TArray::List(_)))
+            })
+        }
+        _ => false,
     })
 }
 

@@ -146,6 +146,7 @@ pub static MIXED_ITERABLE_ATOMIC: LazyLock<TAtomic> = LazyLock::new(|| {
         key_type: Arc::new(get_mixed()),
         value_type: Arc::new(get_mixed()),
         intersection_types: None,
+        map_entries: false,
     })
 });
 

@@ -1126,7 +1126,7 @@ fn uses_after_a_function_type_stays_a_name() {
         panic!("expected one local, got {:#?}", method_body(program));
     };
     assert_eq!(local.hint.map(|hint| source(LOCAL, hint)), Some("Function<int(int)>"));
-    assert_eq!(source(LOCAL, &local.name), "uses");
+    assert_eq!(source(LOCAL, &local.target), "uses");
 }
 
 /// A `.sharp` file has no `<?php` or `?>`, so a nullable last type argument ends the type, as in `Map<string, Any?>`.
@@ -1618,7 +1618,7 @@ fn a_local_and_a_field_can_have_a_collection_type_written() {
                 panic!("expected a local, got {statement:#?}");
             };
 
-            (source(CODE, local.hint.expect("a type")), source(CODE, &local.name))
+            (source(CODE, local.hint.expect("a type")), source(CODE, &local.target))
         })
         .collect();
     assert_eq!(locals, [("List<Line>", "lines"), ("Map<string, List<int>>?", "groups")]);
@@ -1862,12 +1862,12 @@ fn let_and_const_declare_locals_with_an_initializer() {
     assert_eq!(label.keyword.expect("a keyword").value, b"let");
     assert!(label.hint.is_none());
     assert!(!label.is_const());
-    assert_eq!(label.name.value, b"label");
+    assert_eq!(source(CODE, &label.target), "label");
     assert!(matches!(label.value, Expression::Literal(Literal::String(_))));
     assert_eq!(source(CODE, label), "let label = \"one\";");
     assert_eq!(base.keyword.expect("a keyword").value, b"const");
     assert!(base.is_const());
-    assert_eq!(base.name.value, b"base");
+    assert_eq!(source(CODE, &base.target), "base");
 }
 
 #[test]
@@ -1888,7 +1888,7 @@ fn a_local_can_be_declared_with_its_type_written() {
                 source(CODE, local),
                 source(CODE, local.hint.as_ref().expect("a type")),
                 local.is_const(),
-                source(CODE, &local.name),
+                source(CODE, &local.target),
             )
         })
         .collect();
@@ -1925,6 +1925,116 @@ fn a_local_can_be_declared_with_a_union_type_written() {
         .collect();
 
     assert_eq!(types, ["int|string", "Calc|int?|float", "int|bool"]);
+}
+
+/// Each element of a tuple type, as written: its type and its name, when it has one.
+fn tuple_type<'a>(code: &'a str, hint: &Hint) -> Vec<(&'a str, Option<&'a str>)> {
+    let Hint::Tuple(tuple) = hint else {
+        panic!("expected a tuple type, got {hint:#?}");
+    };
+
+    tuple
+        .elements
+        .iter()
+        .map(|element| (source(code, &element.hint), element.name.as_ref().map(|name| source(code, name))))
+        .collect()
+}
+
+/// Spec section 30: a tuple type writes its element types in TypeScript's brackets, each type first and its name
+/// optional, wherever a type goes.
+#[test]
+fn a_tuple_type_writes_its_element_types_in_brackets_each_with_an_optional_name() {
+    const CODE: &str = "class Report\n{\n    private [Money, int] pair;\n    public [Money total, int count, Date since] summarize([string, List<Plan>] entry, [int, int]? range) { return [total, count, since]; }\n    public void run()\n    {\n        [Money, int] pair = [total, 1];\n        const [string key, Plan plan]? none = null;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [
+        ClassLikeMember::Property(Property::Plain(field)),
+        ClassLikeMember::Method(summarize),
+        ClassLikeMember::Method(run),
+    ] = class_members(program).as_slice()
+    else {
+        panic!("expected a field and two methods, got {:#?}", class_members(program));
+    };
+    assert_eq!(tuple_type(CODE, field.hint.as_ref().expect("a type")), [("Money", None), ("int", None)]);
+    let return_type = &summarize.return_type_hint.as_ref().expect("a return type").hint;
+    assert_eq!(source(CODE, return_type), "[Money total, int count, Date since]");
+    assert_eq!(
+        tuple_type(CODE, return_type),
+        [("Money", Some("total")), ("int", Some("count")), ("Date", Some("since"))]
+    );
+    let [entry, range] = summarize.parameter_list.parameters.as_slice() else {
+        panic!("expected two parameters, got {:#?}", summarize.parameter_list.parameters);
+    };
+    assert_eq!(tuple_type(CODE, entry.hint.as_ref().expect("a type")), [("string", None), ("List<Plan>", None)]);
+    let Some(Hint::Nullable(range)) = &range.hint else {
+        panic!("expected a nullable type, got {:#?}", range.hint);
+    };
+    assert_eq!(tuple_type(CODE, range.hint), [("int", None), ("int", None)]);
+
+    let MethodBody::Concrete(body) = &run.body else {
+        panic!("expected a method body, got {:#?}", run.body);
+    };
+    let locals: Vec<(&str, &str)> = body
+        .statements
+        .iter()
+        .map(|statement| {
+            let Statement::LocalDeclaration(local) = statement else {
+                panic!("expected a local, got {statement:#?}");
+            };
+
+            (source(CODE, local.hint.expect("a type")), source(CODE, &local.target))
+        })
+        .collect();
+    assert_eq!(locals, [("[Money, int]", "pair"), ("[string key, Plan plan]?", "none")]);
+}
+
+/// Spec section 30: `const [total, count] = summary;` unpacks a tuple into one local per element, with `let` or
+/// `const`, as TypeScript writes it.
+#[test]
+fn const_or_let_unpacks_a_tuple_into_a_local_per_element() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        const [total, count, since] = order.summarize();\n        let [money, items] = order.totals();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let unpacked: Vec<(&str, bool, Vec<&str>)> = method_body(program)
+        .iter()
+        .map(|statement| {
+            let Statement::LocalDeclaration(local) = statement else {
+                panic!("expected a local, got {statement:#?}");
+            };
+            let LocalTarget::Unpack(unpack) = &local.target else {
+                panic!("expected an unpack, got {:#?}", local.target);
+            };
+
+            (source(CODE, local), local.is_const(), unpack.names.iter().map(|name| source(CODE, name)).collect())
+        })
+        .collect();
+    assert_eq!(
+        unpacked,
+        [
+            ("const [total, count, since] = order.summarize();", true, vec!["total", "count", "since"]),
+            ("let [money, items] = order.totals();", false, vec!["money", "items"]),
+        ]
+    );
+}
+
+/// A statement that starts with a list literal stays an expression, as it is unless a name and `=` follow its `]`.
+#[test]
+fn a_list_literal_that_starts_a_statement_stays_an_expression() {
+    const CODE: &str =
+        "class Report\n{\n    void run()\n    {\n        [total, 1].count();\n        [total, 1];\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    assert!(
+        method_body(program).iter().all(|statement| matches!(statement, Statement::Expression(_))),
+        "{:#?}",
+        method_body(program)
+    );
 }
 
 #[test]
@@ -2085,7 +2195,7 @@ fn a_for_loop_declares_its_counter_with_let_or_const() {
     };
 
     let declaration = counted.declaration.as_ref().expect("a declaration");
-    assert_eq!(declaration.name.value, b"i");
+    assert_eq!(source(CODE, &declaration.target), "i");
     assert!(!declaration.is_const());
     assert_eq!(source(CODE, declaration), "let i = 0;");
     assert_eq!(source(CODE, &counted.initializations_semicolon), ";");

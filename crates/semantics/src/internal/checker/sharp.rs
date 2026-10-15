@@ -64,6 +64,7 @@ use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::LocalIdentifier;
+use mago_syntax::cst::LocalTarget;
 use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -101,6 +102,7 @@ use mago_syntax::cst::Struct;
 use mago_syntax::cst::Terminator;
 use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::TryFinallyClause;
+use mago_syntax::cst::TupleHint;
 use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::TypePattern;
@@ -257,7 +259,9 @@ const OBJECT: &[u8] = b"Object";
 ///   not supported yet, because as a default it gives the caller's position, spec section 27, which waits for typed
 ///   compilation.
 /// - Types: `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter in scope written by its short name,
-///   generic types of these, function types `Function<R(P1, P2)>` of these, and `void` as a return type, a function
+///   generic types of these, function types `Function<R(P1, P2)>` of these, tuple types `[Money total, int count]` of
+///   these but `void`, spec section 30, whose element names are optional and past four of which `check_tuple`
+///   suggests a struct, and `void` as a return type, a function
 ///   type's too. A generic type is `List<T>` and `Map<TKey, TValue>` of spec section 12, `Class<T>` of section 25,
 ///   whose type argument is any one type, a nullable or union type included, as `typeof` takes it, and a class with
 ///   one or more type arguments of section 11, as in `PaginatedList<Order>`, whose arity and bounds the analyzer
@@ -292,7 +296,8 @@ const OBJECT: &[u8] = b"Object";
 ///   `if (!tenant.active) { throw new InactiveTenant(tenant); }` too. A catch clause names one or more classes separated
 ///   by `|`, and an optional variable written without `$`, which lives until the clause's block ends. A local
 ///   statement can have its type written, as in `Money? total = null;` or `const int base = 2;`, from the types
-///   above but `void`. An expression statement whose operator is binary, as in `flags | MASK;`, is an error that
+///   above but `void`, or unpack a tuple into a local per element with `let` or `const`, as in
+///   `const [total, count] = summary;`, spec section 30. An expression statement whose operator is binary, as in `flags | MASK;`, is an error that
 ///   names its compound assignment or its result, because the result is never used, except `??` and an assignment
 ///   that PHP's `and`, `or` and `xor` bind looser than.
 /// - `yield value;` and `yield ...other;`, spec section 12: statements of a method that returns `Iterable<T>` or
@@ -1135,6 +1140,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // `is_slice_type` refuses for its parameters, and `Self` in it is an error, because `Self` is a method's return
         // type only.
         (Node::FunctionHint(_), FieldOrProperty | Method | Parameter | Body) => Some(Parameter),
+        // A tuple's element types are checked as a parameter's type is, so `Self` in one is an error.
+        (Node::TupleHint(tuple), FieldOrProperty | Method | Signature | Parameter | Body) => check_tuple(tuple, context),
+        (Node::TupleElementHint(_), Parameter) => Some(Parameter),
         // The effects an `extern`, a function type or a method without a body lists, spec section 29, which the
         // analyzer's `check_uses` decides, because an effect is a `foreign` class any file may declare.
         (Node::Uses(_), File | Parameter | Method | Signature) => Some(place),
@@ -1422,6 +1430,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::Return(_)
             | Node::Emit(_)
             | Node::LocalDeclaration(_)
+            | Node::LocalTarget(_)
+            | Node::LocalUnpack(_)
             | Node::If(_)
             | Node::IfBody(IfBody::Statement(_))
             | Node::IfStatementBody(_)
@@ -3688,10 +3698,33 @@ fn is_slice_type(hint: &Hint) -> bool {
         | Hint::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
         | Hint::Nullable(_) => true,
         Hint::Mixed(any) => any.value == ANY,
-        Hint::Generic(_) => true,
+        Hint::Generic(_) | Hint::Tuple(_) => true,
         Hint::Function(function) => !function.parameters.iter().any(|parameter| matches!(parameter, Hint::Void(_))),
         _ => false,
     }
+}
+
+/// Decides a tuple type, spec section 30: its elements are values, so none is `void`, and past four elements the
+/// checker suggests a struct, whose fields have names where the code reads them.
+fn check_tuple(tuple: &TupleHint, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    let count = tuple.elements.len();
+    if count > 4 {
+        context.report(
+            Issue::warning(format!("A tuple of {count} elements is hard to read: declare a struct, whose fields have names."))
+                .with_annotation(Annotation::primary(tuple.span()).with_message("Written here."))
+                .with_help("A struct reads each value by its field's name, as in `public struct Totals { public Money total { get; init; } }`."),
+        );
+    }
+    if let Some(void) = tuple.elements.iter().find(|element| matches!(element.hint, Hint::Void(_))) {
+        context.report(
+            Issue::error("A tuple's element cannot be `void`: `void` is only a return type.")
+                .with_annotation(Annotation::primary(void.hint.span()).with_message("Written here.")),
+        );
+
+        return None;
+    }
+
+    Some(Place::Parameter)
 }
 
 /// Refuses the expression at `span` in a constant value: it reads a type argument, which only the running code has.
@@ -4721,16 +4754,16 @@ fn supported(place: Place) -> &'static str {
         Place::Module => unreachable!("a module holds only its header, bindings and laws, and `enter` takes each one"),
         Place::Extension => unreachable!("`enter` places an extension's keyword, receiver and every member of it"),
         Place::FieldOrProperty => {
-            "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
+            "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }
         Place::ClassConstant => {
             "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any` or a class, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
         }
         Place::Method => {
-            "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, optional type parameters as in `<TItem : DatabaseEntity>`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."
+            "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, optional type parameters as in `<TItem : DatabaseEntity>`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, a tuple as in `[Money, int]` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."
         }
         Place::Parameter => {
-            "A PHP# parameter has a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional default. The last parameter can be variadic, as in `int ...values`."
+            "A PHP# parameter has a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional default. The last parameter can be variadic, as in `int ...values`."
         }
         Place::Lambda => {
             "A PHP# lambda is a bare arrow after one name or parenthesized parameters, each with an optional type, and its body is an expression or a block, as in `(a, b) => a + b`. The last parameter can be variadic, as in `(int ...values) => count(values)`."
@@ -4742,7 +4775,7 @@ fn supported(place: Place) -> &'static str {
         | Place::SuperCall
         | Place::SelfCall
         | Place::RefusedPart(_) => {
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
         }
         Place::Attribute => {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
@@ -4821,11 +4854,14 @@ fn check_const_write(target: &Expression, write: &str, context: &mut Context<'_,
 /// reason.
 #[inline]
 pub fn check_local_declaration(local_declaration: &LocalDeclaration, context: &mut Context<'_, '_, '_>) {
-    check_local_name(local_declaration.name.value, local_declaration.name.span, "local", context);
-
-    if local_declaration.hint.is_some() {
-        return;
+    for name in local_declaration.target.names() {
+        check_local_name(name.value, name.span, "local", context);
     }
+
+    // An unpacked tuple gives each local the type of its element.
+    let (None, LocalTarget::Name(name)) = (local_declaration.hint, &local_declaration.target) else {
+        return;
+    };
 
     let (start, hint, value) = match local_declaration.value {
         Expression::Array(literal) if literal.elements.is_empty() && literal.colon.is_some() => {
@@ -4838,7 +4874,7 @@ pub fn check_local_declaration(local_declaration: &LocalDeclaration, context: &m
     };
 
     let keyword = if local_declaration.is_const() { "const " } else { "" };
-    let name = BytesDisplay(local_declaration.name.value);
+    let name = BytesDisplay(name.value);
 
     context.report(
         Issue::error(format!("{start} needs a type: write `{keyword}{hint} {name} = {value}`.")).with_annotation(
@@ -5708,7 +5744,7 @@ fn check_lambda_captures(lambda: Node<'_, '_>, context: &mut Context<'_, '_, '_>
 fn is_loop_variable(program: &Program, local: &Local) -> bool {
     let declares = |node: &Node<'_, '_>| match node {
         Node::For(r#for) => {
-            r#for.declaration.as_ref().is_some_and(|declaration| declaration.name.span == local.declaration)
+            r#for.declaration.as_ref().is_some_and(|declaration| declaration.target.span() == local.declaration)
         }
         Node::ForOf(for_of) => for_of.target.names().into_iter().any(|name| name.span == local.declaration),
         _ => false,

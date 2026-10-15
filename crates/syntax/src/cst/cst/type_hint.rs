@@ -46,7 +46,33 @@ pub enum Hint<'arena> {
     Iterable(LocalIdentifier<'arena>),
     Generic(GenericHint<'arena>),
     Function(FunctionHint<'arena>),
+    Tuple(TupleHint<'arena>),
     Readonly(ReadonlyHint<'arena>),
+}
+
+/// Represents a PHP# tuple type, as spec section 30 writes it in TypeScript's brackets: a fixed number of element
+/// types, each with an optional name after it.
+///
+/// # Examples
+///
+/// ```csharp
+/// [Money total, int count]
+/// [string, Plan]
+/// ```
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TupleHint<'arena> {
+    pub left_bracket: Span,
+    pub elements: TokenSeparatedSequence<'arena, TupleElementHint<'arena>>,
+    pub right_bracket: Span,
+}
+
+/// Represents one element of a PHP# tuple type: its type, and its name when it is written, as in `Money total`.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TupleElementHint<'arena> {
+    pub hint: Hint<'arena>,
+    pub name: Option<LocalIdentifier<'arena>>,
 }
 
 /// Represents a PHP# readonly type, as spec section 13 writes `readonly` before a type: a value of it is only read.
@@ -406,8 +432,21 @@ impl HasSpan for Hint<'_> {
             | Hint::Iterable(identifier) => identifier.span(),
             Hint::Generic(generic) => generic.span(),
             Hint::Function(function) => function.span(),
+            Hint::Tuple(tuple) => tuple.span(),
             Hint::Readonly(readonly) => readonly.span(),
         }
+    }
+}
+
+impl HasSpan for TupleHint<'_> {
+    fn span(&self) -> Span {
+        self.left_bracket.join(self.right_bracket)
+    }
+}
+
+impl HasSpan for TupleElementHint<'_> {
+    fn span(&self) -> Span {
+        self.name.as_ref().map_or_else(|| self.hint.span(), |name| self.hint.span().join(name.span))
     }
 }
 

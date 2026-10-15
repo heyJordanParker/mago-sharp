@@ -419,6 +419,7 @@ where
             known_elements: None,
             known_count: None,
             non_empty: false,
+            tuple_names: None,
         }));
     }
 
@@ -455,6 +456,7 @@ where
                 known_elements: None,
                 known_count: None,
                 non_empty: true,
+                tuple_names: None,
             });
         } else {
             match array {
@@ -622,6 +624,7 @@ where
                             known_elements: list.known_elements.clone(),
                             known_count: None,
                             non_empty: true,
+                            tuple_names: None,
                         })));
                     }
                     TArray::Keyed(keyed_array) => {
@@ -696,6 +699,7 @@ where
                                 )])),
                                 known_count: None,
                                 non_empty: true,
+                                tuple_names: None,
                             })));
                         } else {
                             collection_types.push(TAtomic::Array(TArray::List(TList {
@@ -703,6 +707,7 @@ where
                                 known_elements: None,
                                 known_count: None,
                                 non_empty: true,
+                                tuple_names: None,
                             })));
                         }
                     }
@@ -745,6 +750,7 @@ where
                                 known_elements: None,
                                 known_count: None,
                                 non_empty: true,
+                                tuple_names: None,
                             })));
                         }
                     }
@@ -756,6 +762,7 @@ where
                         known_elements: None,
                         known_count: None,
                         non_empty: true,
+                        tuple_names: None,
                     })));
                 }
                 _ => (),

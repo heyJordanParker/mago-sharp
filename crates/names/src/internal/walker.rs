@@ -1287,7 +1287,9 @@ where
     ) {
         let kind = if local_declaration.is_const() { LocalKind::Const } else { LocalKind::Let };
 
-        self.declare(local_declaration.name.value, local_declaration.name.span, kind);
+        for name in local_declaration.target.names() {
+            self.declare(name.value, name.span, kind);
+        }
     }
 
     fn walk_in_method_call(

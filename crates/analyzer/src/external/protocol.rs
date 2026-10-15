@@ -2763,7 +2763,7 @@ fn decode_complete_atomic(reader: &mut PayloadReader<'_>, depth: usize) -> Resul
             let key_type = Arc::new(decode_complete_union(reader, depth + 1)?);
             let value_type = Arc::new(decode_complete_union(reader, depth + 1)?);
             let intersection_types = decode_optional_complete_atomics(reader, depth + 1)?;
-            TAtomic::Iterable(TIterable { key_type, value_type, intersection_types })
+            TAtomic::Iterable(TIterable { key_type, value_type, intersection_types, map_entries: false })
         }
         SNAPSHOT_RESOURCE => TAtomic::Resource(TResource::new(match reader.read_u8("resource state")? {
             0 => None,
@@ -3073,7 +3073,7 @@ fn decode_complete_array(reader: &mut PayloadReader<'_>, depth: usize) -> Result
             };
 
             let non_empty = reader.read_bool("list non-empty flag")?;
-            TArray::List(TList { element_type, known_elements, known_count, non_empty })
+            TArray::List(TList { element_type, known_elements, known_count, non_empty, tuple_names: None })
         }
         2 => {
             let known_items = if reader.read_bool("known array items presence")? {

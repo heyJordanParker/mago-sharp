@@ -155,6 +155,8 @@ use crate::cst::cst::LiteralString;
 use crate::cst::cst::LiteralStringPart;
 use crate::cst::cst::LocalDeclaration;
 use crate::cst::cst::LocalIdentifier;
+use crate::cst::cst::LocalTarget;
+use crate::cst::cst::LocalUnpack;
 use crate::cst::cst::MagicConstant;
 use crate::cst::cst::Match;
 use crate::cst::cst::MatchArm;
@@ -262,6 +264,8 @@ use crate::cst::cst::TraitUseSpecification;
 use crate::cst::cst::Try;
 use crate::cst::cst::TryCatchClause;
 use crate::cst::cst::TryFinallyClause;
+use crate::cst::cst::TupleElementHint;
+use crate::cst::cst::TupleHint;
 use crate::cst::cst::TypeArgumentList;
 use crate::cst::cst::TypeOf;
 use crate::cst::cst::TypeParameter;
@@ -557,6 +561,8 @@ pub enum NodeKind {
     NullableHint,
     GenericHint,
     FunctionHint,
+    TupleHint,
+    TupleElementHint,
     ReadonlyHint,
     TypeArgumentList,
     TypeParameterList,
@@ -566,6 +572,8 @@ pub enum NodeKind {
     UnionHint,
     Unset,
     LocalDeclaration,
+    LocalTarget,
+    LocalUnpack,
     Is,
     As,
     Pattern,
@@ -854,6 +862,8 @@ pub enum Node<'ast, 'arena> {
     NullableHint(&'ast NullableHint<'arena>),
     GenericHint(&'ast GenericHint<'arena>),
     FunctionHint(&'ast FunctionHint<'arena>),
+    TupleHint(&'ast TupleHint<'arena>),
+    TupleElementHint(&'ast TupleElementHint<'arena>),
     ReadonlyHint(&'ast ReadonlyHint<'arena>),
     TypeArgumentList(&'ast TypeArgumentList<'arena>),
     TypeParameterList(&'ast TypeParameterList<'arena>),
@@ -863,6 +873,8 @@ pub enum Node<'ast, 'arena> {
     UnionHint(&'ast UnionHint<'arena>),
     Unset(&'ast Unset<'arena>),
     LocalDeclaration(&'ast LocalDeclaration<'arena>),
+    LocalTarget(&'ast LocalTarget<'arena>),
+    LocalUnpack(&'ast LocalUnpack<'arena>),
     Is(&'ast Is<'arena>),
     As(&'ast As<'arena>),
     Pattern(&'ast Pattern<'arena>),
@@ -1245,6 +1257,8 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::NullableHint(_) => NodeKind::NullableHint,
             Self::GenericHint(_) => NodeKind::GenericHint,
             Self::FunctionHint(_) => NodeKind::FunctionHint,
+            Self::TupleHint(_) => NodeKind::TupleHint,
+            Self::TupleElementHint(_) => NodeKind::TupleElementHint,
             Self::ReadonlyHint(_) => NodeKind::ReadonlyHint,
             Self::TypeArgumentList(_) => NodeKind::TypeArgumentList,
             Self::TypeParameterList(_) => NodeKind::TypeParameterList,
@@ -1254,6 +1268,8 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::UnionHint(_) => NodeKind::UnionHint,
             Self::Unset(_) => NodeKind::Unset,
             Self::LocalDeclaration(_) => NodeKind::LocalDeclaration,
+            Self::LocalTarget(_) => NodeKind::LocalTarget,
+            Self::LocalUnpack(_) => NodeKind::LocalUnpack,
             Self::Is(_) => NodeKind::Is,
             Self::As(_) => NodeKind::As,
             Self::Pattern(_) => NodeKind::Pattern,
@@ -3069,8 +3085,20 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Hint::Iterable(local_identifier) => f(Node::LocalIdentifier(local_identifier)),
                 Hint::Generic(generic_hint) => f(Node::GenericHint(generic_hint)),
                 Hint::Function(function_hint) => f(Node::FunctionHint(function_hint)),
+                Hint::Tuple(tuple_hint) => f(Node::TupleHint(tuple_hint)),
                 Hint::Readonly(readonly_hint) => f(Node::ReadonlyHint(readonly_hint)),
             },
+            Node::TupleHint(node) => {
+                for element in node.elements.iter() {
+                    f(Node::TupleElementHint(element));
+                }
+            }
+            Node::TupleElementHint(node) => {
+                f(Node::Hint(&node.hint));
+                if let Some(name) = &node.name {
+                    f(Node::LocalIdentifier(name));
+                }
+            }
             Node::GenericHint(node) => {
                 f(Node::LocalIdentifier(&node.name));
                 f(Node::TypeArgumentList(&node.type_arguments));
@@ -3134,9 +3162,18 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 if let Some(hint) = &node.hint {
                     f(Node::Hint(hint));
                 }
-                f(Node::LocalIdentifier(&node.name));
+                f(Node::LocalTarget(&node.target));
                 f(Node::Expression(node.value));
                 f(Node::Terminator(&node.terminator));
+            }
+            Node::LocalTarget(node) => match node {
+                LocalTarget::Name(name) => f(Node::LocalIdentifier(name)),
+                LocalTarget::Unpack(unpack) => f(Node::LocalUnpack(unpack)),
+            },
+            Node::LocalUnpack(node) => {
+                for name in node.names.iter() {
+                    f(Node::LocalIdentifier(name));
+                }
             }
             Node::DirectVariable(_) => {}
             Node::IndirectVariable(node) => f(Node::Expression(node.expression)),
@@ -3445,6 +3482,8 @@ impl HasSpan for Node<'_, '_> {
             Self::NullableHint(node) => node.span(),
             Self::GenericHint(node) => node.span(),
             Self::FunctionHint(node) => node.span(),
+            Self::TupleHint(node) => node.span(),
+            Self::TupleElementHint(node) => node.span(),
             Self::ReadonlyHint(node) => node.span(),
             Self::TypeArgumentList(node) => node.span(),
             Self::TypeParameterList(node) => node.span(),
@@ -3454,6 +3493,8 @@ impl HasSpan for Node<'_, '_> {
             Self::UnionHint(node) => node.span(),
             Self::Unset(node) => node.span(),
             Self::LocalDeclaration(node) => node.span(),
+            Self::LocalTarget(node) => node.span(),
+            Self::LocalUnpack(node) => node.span(),
             Self::Is(node) => node.span(),
             Self::As(node) => node.span(),
             Self::Pattern(node) => node.span(),

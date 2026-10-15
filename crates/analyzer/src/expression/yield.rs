@@ -1,11 +1,14 @@
 use mago_allocator::Arena;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_iterable_parameters;
+use mago_codex::ttype::get_map_entry;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_non_negative_int;
 use mago_codex::ttype::get_null;
@@ -327,8 +330,13 @@ where
             }
 
             (generator.0, generator.1)
-        } else if let Some(parameters) = get_iterable_parameters(atomic, context.codebase) {
-            parameters
+        } else if let Some((key, value)) = get_iterable_parameters(atomic, context.codebase) {
+            // Spec section 12: `yield ...plans` gives a `Map`'s entries, as every PHP# `Iterable<T>` holds a `Map`.
+            if context.dialect.is_sharp() && matches!(atomic, TAtomic::Array(TArray::Keyed(_))) {
+                (key.clone(), get_map_entry(key, value))
+            } else {
+                (key, value)
+            }
         } else {
             context.collector.report_with_code(
                 IssueCode::YieldFromNonIterable,
@@ -468,7 +476,7 @@ where
                     r#return = Some(get_mixed());
                 } else {
                     // `check_slice` lets only `Iterable<T>` and `Iterable<T>?` yield in PHP#, so its error is the `?`.
-                    let declared = display_type(context, &iterable_type);
+                    let declared = display_type(context, iterable_type);
                     let (note, help) = if context.dialect.is_sharp() {
                         (
                             "A method that yields produces an `Iterable<T>`, which is never null.",

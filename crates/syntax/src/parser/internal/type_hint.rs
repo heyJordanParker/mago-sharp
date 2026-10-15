@@ -13,6 +13,8 @@ use crate::cst::cst::LocalIdentifier;
 use crate::cst::cst::NullableHint;
 use crate::cst::cst::ParenthesizedHint;
 use crate::cst::cst::ReadonlyHint;
+use crate::cst::cst::TupleElementHint;
+use crate::cst::cst::TupleHint;
 use crate::cst::cst::TypeArgumentList;
 use crate::cst::cst::TypeParameter;
 use crate::cst::cst::TypeParameterBound;
@@ -31,6 +33,9 @@ where
 {
     pub(crate) fn is_at_type_hint(&mut self) -> Result<bool, ParseError> {
         if self.is_at_generic_hint()? || self.is_at_function_hint()? || self.is_at_readonly_hint()? {
+            return Ok(true);
+        }
+        if self.is_at_tuple_hint()? {
             return Ok(true);
         }
 
@@ -94,6 +99,7 @@ where
                 Hint::Nullable(nullable)
             }
             T!["("] => Hint::Parenthesized(self.parse_parenthesized_type_hint()?),
+            T!["["] if self.dialect.is_sharp() => Hint::Tuple(self.parse_tuple_hint()?),
             _ if self.is_at_php_keyword(T!["array"])? => Hint::Array(self.expect_any_keyword()?),
             _ if self.is_at_php_keyword(T!["callable"])? => Hint::Callable(self.expect_any_keyword()?),
             T!["null"] => Hint::Null(self.expect_any_keyword()?),
@@ -252,6 +258,82 @@ where
                 )
             }
             None => false,
+        })
+    }
+
+    /// Whether a PHP# tuple type starts here, which PHP# writes in the brackets that also open an attribute list and a
+    /// list: a `[` whose closing `]`, and an optional `?` written right after it, are followed by a name and then by
+    /// `(`, `,`, `)`, `=`, `;` or `{`, as in `[Money, int] totals()` or `[Money, int] pair = …`. After an attribute list,
+    /// a type and a name follow, as in `[Searchable] string name`, and after a list an operator or `.`.
+    pub(crate) fn is_at_tuple_hint(&self) -> Result<bool, ParseError> {
+        if !self.dialect.is_sharp() {
+            return Ok(false);
+        }
+
+        let mut tokens = self.stream.peek_tokens();
+        if !matches!(tokens.next().transpose()?, Some(token) if token.kind == T!["["]) {
+            return Ok(false);
+        }
+        let mut depth = 1usize;
+        let mut closing = None;
+        for token in tokens.by_ref() {
+            let token = token?;
+            match token.kind {
+                T!["["] => depth += 1,
+                T!["]"] => {
+                    depth -= 1;
+                    if depth == 0 {
+                        closing = Some(token);
+                        break;
+                    }
+                }
+                T![";" | "{" | "}"] => return Ok(false),
+                _ => {}
+            }
+        }
+        let Some(closing) = closing else {
+            return Ok(false);
+        };
+
+        let mut name = tokens.next().transpose()?;
+        if let Some(question_mark) = name
+            && question_mark.kind == T!["?"]
+            && question_mark.start.offset == closing.start.offset + 1
+        {
+            name = tokens.next().transpose()?;
+        }
+        if !name.is_some_and(|name| name.kind.is_identifier_maybe_reserved()) {
+            return Ok(false);
+        }
+
+        Ok(tokens.next().transpose()?.is_some_and(|after| matches!(after.kind, T!["(" | "," | ")" | "=" | ";" | "{"])))
+    }
+
+    /// Parses a PHP# tuple type, spec section 30: element types in brackets, each followed by its optional name, as in
+    /// `[Money total, int count]`.
+    fn parse_tuple_hint(&mut self) -> Result<TupleHint<'arena>, ParseError> {
+        let left_bracket = self.stream.eat_span(T!["["])?;
+        let mut elements = Vec::new_in(self.arena);
+        let mut commas = Vec::new_in(self.arena);
+        loop {
+            let hint = self.parse_type_hint()?;
+            let name = if self.stream.peek_kind(0)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) {
+                Some(self.parse_local_identifier()?)
+            } else {
+                None
+            };
+            elements.push(TupleElementHint { hint, name });
+            if !self.stream.is_at(T![","])? {
+                break;
+            }
+
+            commas.push(self.stream.consume()?);
+        }
+
+        Ok(TupleHint {
+            left_bracket,
+            elements: TokenSeparatedSequence::new(elements, commas),
+            right_bracket: self.stream.eat_span(T!["]"])?,
         })
     }
 

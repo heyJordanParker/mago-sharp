@@ -21,6 +21,7 @@ use crate::scanner::Context;
 use crate::ttype::TType;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::array::TArray;
+use crate::ttype::atomic::array::list::TList;
 use crate::ttype::atomic::callable::TCallable;
 use crate::ttype::atomic::callable::TCallableSignature;
 use crate::ttype::atomic::callable::parameter::TCallableParameter;
@@ -292,9 +293,7 @@ fn union_from_hint(
                     }
                     b"Set" => wrap_atomic(TAtomic::Array(TArray::Set(Arc::new(arguments.swap_remove(0))))),
                     // Spec section 12: anything a loop can read, PHP's `iterable` of its elements.
-                    b"Iterable" => {
-                        wrap_atomic(TAtomic::Iterable(TIterable::of_value(Arc::new(arguments.swap_remove(0)))))
-                    }
+                    b"Iterable" => wrap_atomic(TAtomic::Iterable(TIterable::sharp(Arc::new(arguments.swap_remove(0))))),
                     // A class value of one class, or of a type parameter, names it. Of any other type it holds that
                     // whole type, as `Class<int|string>` holds `int|string`, spec section 25.
                     b"Class" => {
@@ -317,6 +316,14 @@ fn union_from_hint(
                 }
             }
         }
+        // Spec section 30: a tuple is the sealed list of its element types, which a PHP list holds while the code runs.
+        Hint::Tuple(tuple) => wrap_atomic(TAtomic::Array(TArray::List(TList::tuple(
+            tuple
+                .elements
+                .iter()
+                .map(|element| (convert(&element.hint), element.name.map(|name| word(name.value))))
+                .collect(),
+        )))),
         // Spec section 14.1: `Function<R(P)>` is PHP's `Closure(P): R`, the only function value PHP# makes, and spec
         // section 29 gives it the effects its `uses` lists.
         Hint::Function(function) => {

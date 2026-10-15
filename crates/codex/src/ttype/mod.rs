@@ -16,6 +16,7 @@ use crate::ttype::atomic::array::list::TList;
 use crate::ttype::atomic::callable::TCallable;
 use crate::ttype::atomic::callable::TCallableSignature;
 use crate::ttype::atomic::generic::TGenericParameter;
+use crate::ttype::atomic::iterable::TIterable;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
 use crate::ttype::atomic::scalar::TScalar;
@@ -1642,6 +1643,28 @@ pub fn get_backed_enum<'codebase>(
     })
 }
 
+/// The value of `input`, whose key is `key` and whose value is `value`, as the iterable `container` reads it.
+///
+/// PHP#'s `Iterable<T>` holds a `Map<TKey, TValue>`, a keyed array, by its entries, as an `Iterable<[TKey, TValue]>`,
+/// spec section 12, and every other input by its values. A plain PHP `iterable` reads every array's values.
+#[must_use]
+pub fn sharp_iterable_value(input: &TAtomic, container: &TAtomic, key: &TUnion, value: TUnion) -> TUnion {
+    if !matches!(
+        (input, container),
+        (TAtomic::Array(TArray::Keyed(_)), TAtomic::Iterable(TIterable { map_entries: true, .. }))
+    ) {
+        return value;
+    }
+
+    get_map_entry(key.clone(), value)
+}
+
+/// The tuple `[TKey, TValue]` a PHP# `Map`'s entry is, spec sections 12 and 30.
+#[must_use]
+pub fn get_map_entry(key: TUnion, value: TUnion) -> TUnion {
+    wrap_atomic(TAtomic::Array(TArray::List(TList::tuple(vec![(key, None), (value, None)]))))
+}
+
 /// A type PHP# can write, by the form its spelling takes. A PHP docblock refinement of one, such as `positive-int`,
 /// `non-empty-string` or `list<int>`, is that type.
 #[derive(Debug, Clone, Copy)]
@@ -1660,6 +1683,8 @@ pub enum SharpType<'atomic> {
     Set(&'atomic TUnion),
     Map(&'atomic TUnion, &'atomic TUnion),
     Iterable(&'atomic TUnion),
+    /// A tuple, spec section 30, whose elements `TList::tuple_elements` gives.
+    Tuple(&'atomic TList),
     Parameter(&'atomic TGenericParameter),
     ClassValue(&'atomic TClassLikeString),
     Function(&'atomic TCallableSignature),
@@ -1681,6 +1706,7 @@ pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
         TAtomic::Object(TObject::Named(object)) => {
             SharpType::Class(object.name, object.get_type_parameters().unwrap_or_default())
         }
+        TAtomic::Array(TArray::List(list)) if list.tuple_names.is_some() => SharpType::Tuple(list),
         TAtomic::Array(TArray::List(list)) => SharpType::List(&list.element_type),
         TAtomic::Array(TArray::Set(element_type)) => SharpType::Set(element_type),
         TAtomic::Array(TArray::Keyed(TKeyedArray { parameters: Some((key, value)), .. })) => SharpType::Map(key, value),
@@ -1706,6 +1732,9 @@ pub fn is_written_in_sharp(union: &TUnion) -> bool {
                         is_written_in_sharp(inner)
                     }
                     Some(SharpType::Map(key, value)) => is_written_in_sharp(key) && is_written_in_sharp(value),
+                    Some(SharpType::Tuple(tuple)) => {
+                        tuple.tuple_elements().into_iter().flatten().all(|(element, _)| is_written_in_sharp(element))
+                    }
                     Some(SharpType::Function(signature)) => {
                         signature.get_return_type().is_none_or(is_written_in_sharp)
                             && signature

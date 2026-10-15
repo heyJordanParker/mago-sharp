@@ -7499,11 +7499,11 @@ fn a_changed_local_that_may_be_a_set_or_a_map_stays_either() {
     );
 }
 
-/// A loop over a local that may be a `Set` or a `Map` reads its elements, as a loop over either does. A `Set` has no
-/// keys, so `[k, v]` is refused, naming the `Set`. PHP reads the keys of either array.
+/// A loop over a local that may be a `Set` or a `Map` reads its elements, a `Map`'s entries included, as a loop over
+/// either does. A `Set` has no keys, so `[k, v]` is refused, naming the `Set`. PHP reads the keys of either array.
 #[test]
 fn a_key_and_value_loop_over_a_local_that_may_be_a_set_or_a_map_is_refused_by_the_set() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        let total = 0;\n        for (const n of tags) {\n            total += n;\n        }\n        for (const [key, n] of tags) {\n            total += n;\n        }\n        return total;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        let total = 0;\n        for (const n of tags) {\n            total += 1;\n        }\n        for (const [key, n] of tags) {\n            total += n;\n        }\n        return total;\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Tags.sharp", sharp), &[]),
@@ -9345,10 +9345,10 @@ fn a_map_has_no_entries_delete_or_filter_values_method() {
 }
 
 /// A loop over a `Map` keyed by a backed enum reads each key back as its case, through the key type the loop writes.
-/// The value's type may be written or left out, and a loop over the values alone needs no key type.
+/// The value's type may be written or left out, and a loop over `values()` needs no key type.
 #[test]
 fn a_loop_over_a_map_keyed_by_a_backed_enum_reads_the_key_as_the_case_it_writes() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int read(Map<Status, int> counts)\n    {\n        let total = 0;\n        for (const [Status status, int n] of counts) {\n            total = total + n + this.weight(status);\n        }\n        for (const [Status status, n] of counts) {\n            total = total + n + this.weight(status);\n        }\n        for (const int n of counts) {\n            total = total + n;\n        }\n\n        return total;\n    }\n\n    private int weight(Status status)\n    {\n        return 1;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int read(Map<Status, int> counts)\n    {\n        let total = 0;\n        for (const [Status status, int n] of counts) {\n            total = total + n + this.weight(status);\n        }\n        for (const [Status status, n] of counts) {\n            total = total + n + this.weight(status);\n        }\n        for (const int n of counts.values()) {\n            total = total + n;\n        }\n\n        return total;\n    }\n\n    private int weight(Status status)\n    {\n        return 1;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
@@ -9864,6 +9864,88 @@ fn a_yielded_spread_of_another_element_type_is_reported_as_php_reports_yield_fro
 
     assert_eq!(sharp_issues, ["9:18 yield-from-invalid-value-type"]);
     assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/OrderImport.php", php), &[])));
+}
+
+/// Spec section 30: "A list literal becomes a tuple when the declared type is a tuple", as a return, an argument, a
+/// local and a field take it, and a literal of another element type or count is the error a return or an argument of
+/// the wrong type is, which names the tuple as the file writes it.
+#[test]
+fn a_list_literal_becomes_a_tuple_where_a_tuple_is_declared() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    private [Money, int] last = [new Money(), 0];\n\n    public [Money total, int count] summarize(Money total) { return [total, 2]; }\n\n    public int count([Money, int] totals) => this.last[1] + totals[1];\n\n    public void run(Money total)\n    {\n        [Money, int] pair = [total, 1];\n        this.count([total, 3]);\n        this.count(pair);\n    }\n\n    public [Money total, int count] swapped(Money total) { return [2, total]; }\n\n    public [Money total, int count] short(Money total) { return [total]; }\n}\n\nclass Money\n{\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Order.sharp", sharp), &[]),
+        ["18:67 invalid-return-statement", "20:65 invalid-return-statement"]
+    );
+    assert_eq!(
+        messages(("src/Demo/Order.sharp", sharp), &[]),
+        [
+            "Invalid return type for method `Order.swapped`: expected `[Money total, int count]`, but found `List<int|Money>`.",
+            "Invalid return type for method `Order.short`: expected `[Money total, int count]`, but found `List<Money>`.",
+        ]
+    );
+}
+
+/// Spec section 30: `const [total, count] = order.summarize();` unpacks a tuple, and each local takes its element's
+/// type, so `count` is no `string`.
+#[test]
+fn an_unpacked_tuple_gives_each_local_its_element_type() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public [Money total, int count] summarize() { return [new Money(), 2]; }\n\n    public void run()\n    {\n        const [total, count] = this.summarize();\n        let [money, items] = this.summarize();\n        Money kept = total;\n        int n = count + items;\n        Money again = money;\n        string label = count;\n    }\n}\n\nclass Money\n{\n}\n";
+
+    assert_eq!(issues(("src/Demo/Order.sharp", sharp), &[]), ["14:24 invalid-local-assignment-value"]);
+}
+
+/// Spec section 30: a named element reads by its name, as in C#, as `summary.total`, and a name the tuple does not
+/// write is an error that lists the names it does.
+#[test]
+fn a_named_tuple_element_reads_by_its_name() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public [Money total, int count] summarize() { return [new Money(), 2]; }\n\n    public [Money, int] totals() { return [new Money(), 2]; }\n\n    public int run()\n    {\n        const summary = this.summarize();\n        Money total = summary.total;\n        int wrong = summary.missing;\n        int also = this.totals().count;\n        return summary.count;\n    }\n}\n\nclass Money\n{\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Order.sharp", sharp), &[]),
+        ["13:29 non-existent-property", "14:34 non-existent-property"]
+    );
+    assert_eq!(
+        messages(("src/Demo/Order.sharp", sharp), &[]),
+        [
+            "`[Money total, int count]` has no element named `missing`: its elements are `total` and `count`.",
+            "`[Money, int]` has no element named `count`: its elements have no names, so unpack it, as in `const [first, second] = …;`.",
+        ]
+    );
+}
+
+/// Spec section 17: "for (const entry of plans) … entry is a [string, Plan] tuple", and `[key, plan]` unpacks it, so
+/// `entry` is no `Plan`.
+#[test]
+fn a_single_loop_variable_over_a_map_is_its_entry_tuple() {
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public void run(Map<string, Plan> plans)\n    {\n        for (const entry of plans) {\n            const [key, plan] = entry;\n            string name = key;\n            Plan kept = plan;\n            [string, Plan] again = entry;\n            Plan wrong = entry;\n        }\n    }\n}\n\nclass Plan\n{\n}\n";
+
+    assert_eq!(issues(("src/Demo/Store.sharp", sharp), &[]), ["12:26 invalid-local-assignment-value"]);
+}
+
+/// Spec section 30: a loop's `[a, b]` unpacks each element, as `const [a, b] = t` unpacks a tuple, so it reads a `List`
+/// or an `Iterable` of two-element tuples as it reads a `Map`'s entries, and a `List` of other elements stays the error
+/// that names `entries()`.
+#[test]
+fn a_loop_unpacks_each_two_element_tuple() {
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public void run(List<[string, Plan]> rows, Iterable<[string, Plan]> more, List<Plan> plans)\n    {\n        for (const [name, plan] of rows) {\n            Plan kept = plan;\n        }\n        for (const [name, plan] of more) {\n            int wrong = name;\n        }\n        for (const [index, plan] of plans) {\n        }\n    }\n}\n\nclass Plan\n{\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Store.sharp", sharp), &[]),
+        ["11:25 invalid-local-assignment-value", "13:37 invalid-iterator"]
+    );
+}
+
+/// Spec section 12: "A `Map<TKey, TValue>` is an `Iterable<[TKey, TValue]>` of its entries", so a `Map` is no
+/// `Iterable` of its values, which `values()` gives, as an argument, a local and `yield ...` take it.
+#[test]
+fn a_map_is_an_iterable_of_its_entries() {
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public int count(Iterable<[string, Plan]> entries) => 1;\n\n    public int tally(Iterable<Plan> plans) => 1;\n\n    public void run(Map<string, Plan> plans)\n    {\n        this.count(plans);\n        this.tally(plans.values());\n        Iterable<[string, Plan]> entries = plans;\n        this.tally(plans);\n    }\n\n    public Iterable<[string, Plan]> all(Map<string, Plan> plans) { yield ...plans; }\n\n    public Iterable<Plan> wrong(Map<string, Plan> plans) { yield ...plans; }\n}\n\nclass Plan\n{\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Store.sharp", sharp), &[]),
+        ["14:20 possibly-invalid-argument", "19:69 yield-from-invalid-value-type"]
+    );
 }
 
 /// An error about `yield ...other;` names `yield ...`, the form the `.sharp` file writes, where PHP's error about the

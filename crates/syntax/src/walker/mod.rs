@@ -149,6 +149,8 @@ use crate::cst::cst::LiteralString;
 use crate::cst::cst::LiteralStringPart;
 use crate::cst::cst::LocalDeclaration;
 use crate::cst::cst::LocalIdentifier;
+use crate::cst::cst::LocalTarget;
+use crate::cst::cst::LocalUnpack;
 use crate::cst::cst::MagicConstant;
 use crate::cst::cst::Match;
 use crate::cst::cst::MatchArm;
@@ -256,6 +258,8 @@ use crate::cst::cst::TraitUseSpecification;
 use crate::cst::cst::Try;
 use crate::cst::cst::TryCatchClause;
 use crate::cst::cst::TryFinallyClause;
+use crate::cst::cst::TupleElementHint;
+use crate::cst::cst::TupleHint;
 use crate::cst::cst::TypeArgumentList;
 use crate::cst::cst::TypeOf;
 use crate::cst::cst::TypeParameter;
@@ -2044,9 +2048,22 @@ generate_ast_walker! {
             walker.walk_hint(hint, context);
         }
 
-        walker.walk_local_identifier(&local_declaration.name, context);
+        walker.walk_local_target(&local_declaration.target, context);
         walker.walk_expression(local_declaration.value, context);
         walker.walk_terminator(&local_declaration.terminator, context);
+    }
+
+    'arena LocalTarget as local_target => {
+        match local_target {
+            LocalTarget::Name(name) => walker.walk_local_identifier(name, context),
+            LocalTarget::Unpack(unpack) => walker.walk_local_unpack(unpack, context),
+        }
+    }
+
+    'arena LocalUnpack as local_unpack => {
+        for name in &local_unpack.names {
+            walker.walk_local_identifier(name, context);
+        }
     }
 
     'arena Expression as expression => {
@@ -3049,10 +3066,26 @@ generate_ast_walker! {
             Hint::Function(function_hint) => {
                 walker.walk_function_hint(function_hint, context);
             }
+            Hint::Tuple(tuple_hint) => {
+                walker.walk_tuple_hint(tuple_hint, context);
+            }
             Hint::Readonly(readonly_hint) => {
                 walker.walk_readonly_hint(readonly_hint, context);
             }
         });
+    }
+
+    'arena TupleHint as tuple_hint => {
+        for element in &tuple_hint.elements {
+            walker.walk_tuple_element_hint(element, context);
+        }
+    }
+
+    'arena TupleElementHint as tuple_element_hint => {
+        walker.walk_hint(&tuple_element_hint.hint, context);
+        if let Some(name) = &tuple_element_hint.name {
+            walker.walk_local_identifier(name, context);
+        }
     }
 
     'arena GenericHint as generic_hint => {
