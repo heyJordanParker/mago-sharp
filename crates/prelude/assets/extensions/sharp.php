@@ -664,3 +664,15 @@ function listen(string $event, \Closure $listener): \Sharp\Listening {}
  * @return list<\Closure(object): void>
  */
 function listenersFor(object $event): array {}
+
+/**
+ * Runs `$body` in a new scope, which keeps each scoped service `$body` builds until it returns or throws, and returns
+ * what `$body` returns. The standard library's `Scope.run` runs it.
+ *
+ * @template T
+ *
+ * @param \Closure(): T $body
+ *
+ * @return T
+ */
+function runScoped(\Closure $body): mixed {}
