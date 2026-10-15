@@ -167,10 +167,13 @@ where
         is_abstract: method.modifiers.contains_abstract(),
         is_static: method.modifiers.contains_static(),
         is_constructor: method_name_str.eq_ignore_ascii_case(b"__construct"),
-        visibility: if let Some(v) = method.modifiers.get_first_visibility() {
-            Visibility::try_from(v).unwrap_or(Visibility::Public)
-        } else {
-            Visibility::Public
+        // Spec section 5: a PHP# method with no access modifier is `private`, outside an interface.
+        visibility: match method.modifiers.get_first_visibility() {
+            Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
+            None if context.program.dialect.is_sharp() && !class_like_metadata.kind.is_interface() => {
+                Visibility::Private
+            }
+            None => Visibility::Public,
         },
         where_constraints: WordMap::default(),
         assigned_properties: WordSet::default(),

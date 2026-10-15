@@ -378,6 +378,14 @@ enum CollectionReceiver<'receiver, 'ast> {
     Value(Reread<'receiver, 'ast>),
 }
 
+/// A write to the element of a `List` at an index.
+enum ListWrite<'write, 'ast> {
+    /// `list[i] = v` or `list[i] op= v`.
+    Assignment(&'write Assignment<'ast>),
+    /// `++list[i]`, `--list[i]`, `list[i]++` or `list[i]--`.
+    Step { decrement: bool, postfix: bool },
+}
+
 /// What a `List`'s search by `==` gives: whether an element equals the value, the index of the first one that does, or
 /// whether `remove` removed it.
 #[derive(Clone, Copy)]
@@ -1960,9 +1968,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// other abstract method has no statement list. A method with statements makes each `Set` parameter a `Set` before
     /// them. A constructor's `: super(…)` runs after them as `parent::__construct(…)`, and does nothing when no
     /// constructor exists above the class.
-    fn method(&mut self, method: &Method, flags: u32, first_statements: &[u32]) -> u32 {
+    fn method(&mut self, method: &Method, mut flags: u32, first_statements: &[u32]) -> u32 {
+        // Spec section 5: a method with no access modifier is `private`, while PHP makes it `public`.
         if flags & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE) == 0 {
-            unreachable!("check_slice refuses a method without an access modifier");
+            flags |= ZEND_ACC_PRIVATE;
         }
 
         self.enter(method.name.value);
@@ -3460,6 +3469,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     return self.operator_call(line, class, name, &[operand]);
                 }
 
+                if let Expression::ArrayAccess(access) = unary.operand
+                    && unary.operator.is_increment_or_decrement()
+                    && self.is_list(access.array)
+                {
+                    let decrement = matches!(unary.operator, UnaryPrefixOperator::PreDecrement(_));
+
+                    return self.list_write(line, access, ListWrite::Step { decrement, postfix: false });
+                }
+
                 let (kind, attr) = prefix_kind(&unary.operator);
                 let operand = if unary.operator.is_increment_or_decrement() {
                     self.target(unary.operand)
@@ -3470,6 +3488,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(kind, attr, line, &[operand])
             }
             Expression::UnaryPostfix(unary) => {
+                if let Expression::ArrayAccess(access) = unary.operand
+                    && self.is_list(access.array)
+                {
+                    let decrement = matches!(unary.operator, UnaryPostfixOperator::PostDecrement(_));
+
+                    return self.list_write(line, access, ListWrite::Step { decrement, postfix: true });
+                }
+
                 let kind = match unary.operator {
                     UnaryPostfixOperator::PostIncrement(_) => SHARP_AST_POST_INC,
                     UnaryPostfixOperator::PostDecrement(_) => SHARP_AST_POST_DEC,
@@ -3479,6 +3505,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(kind, 0, line, &[operand])
             }
             Expression::Assignment(assignment) => {
+                if let Expression::ArrayAccess(access) = assignment.lhs
+                    && self.is_list(access.array)
+                {
+                    return self.list_write(line, access, ListWrite::Assignment(assignment));
+                }
                 if let Expression::ArrayAccess(access) = assignment.lhs
                     && match access.array.unparenthesized() {
                         Expression::ArrayAccess(element) => self.is_list(element.array),
@@ -3499,15 +3530,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
 
                 // A compound assignment to an instance assigns what the operator its class declares returns.
-                if let Some(operator) = compound_operator(&assignment.operator)
-                    && let Some(name) = php_operator_name(&operator, 2)
-                    && let Some(class) = self.types.operator_class(
-                        name,
-                        &[self.types.expression_type(assignment.lhs), self.types.expression_type(assignment.rhs)],
-                    )
-                {
+                if self.declared_compound_operator(assignment).is_some() {
                     return self.compound_assignment(line, assignment, |this, target, value| {
-                        this.operator_call(line, class, name, &[target, value])
+                        this.compound_value(line, assignment, target, value)
                     });
                 }
 
@@ -3520,7 +3545,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     }
                     (AssignmentOperator::Division(_), Operands::Ints) => {
                         self.compound_assignment(line, assignment, |this, target, value| {
-                            this.intdiv(line, target, value)
+                            this.compound_value(line, assignment, target, value)
                         })
                     }
                     (operator, _) => {
@@ -4124,8 +4149,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
     }
 
-    /// A write into the element of a `List`, a place by spec section 12, or into a `Map` a hooked property holds, which
-    /// PHP gives no reference to. Only the engine's collection of the element or the property reaches where it is
+    /// A write into a `Map` that is the element of a `List`, a place by spec section 12, or that a hooked property
+    /// holds, which PHP gives no reference to. Only the engine's collection of the element or the property reaches where it is
     /// stored, through the property's hooks: `list[i][key] = value` is `$list[$i]->put($key, $value)`, which gives the
     /// value, and `list[i][key] ??= value` is `$list[$i][$key] ?? $list[$i]->put($key, $value)`, which holds the index
     /// and the key that run something in hidden variables. `this.hooked[key] = value` is
@@ -4158,6 +4183,104 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         match held {
             Some(held) => self.node(SHARP_AST_COALESCE, 0, line, &[held, put]),
             None => put,
+        }
+    }
+
+    /// A write to the element of a `List` at an index, which spec section 12 makes replace the element and throw
+    /// `OutOfRangeException` past the end, where PHP's write would append or leave a gap. Every form runs the engine's
+    /// `Sharp\Collection::set` on the list, which reaches a local, a property, a hooked property's `set` and the element
+    /// of another `List`, and gives the value it stores: `list[i] = v` is `$list->set($i, $v)`, and `list[i] op= v`
+    /// and `++list[i]` are `$list->set($i, $list[$i] op v)`, whose list and index run once, in hidden variables when
+    /// they run something. `list[i]++` is `$list->set($i, ($old#N = $list[$i]) + 1) ? $old#N : $old#N`, which gives
+    /// the element before the write, as PHP has no expression that runs one and gives another. The checker refuses
+    /// `??=`, which reads the index quietly.
+    fn list_write(&mut self, line: u32, access: &ArrayAccess, write: ListWrite) -> u32 {
+        let reads = !matches!(write, ListWrite::Assignment(Assignment { operator: AssignmentOperator::Assign(_), .. }));
+        let mut list = self.collection_receiver(access.array, reads);
+        let mut index = if reads { self.reread(access.index, "index") } else { Reread::once(access.index) };
+        let place = self.read_collection(&mut list, line, false);
+        let written = self.read(&mut index);
+        let mut element = |lowering: &mut Self| {
+            let list = lowering.read_collection(&mut list, line, false);
+            let index = lowering.read(&mut index);
+
+            lowering.node(SHARP_AST_DIM, 0, line, &[list, index])
+        };
+        let mut old = None;
+        // The variables stay taken until the value is lowered, as in a compound assignment.
+        let value = match write {
+            ListWrite::Assignment(assignment @ Assignment { operator: AssignmentOperator::Assign(_), .. }) => {
+                self.expression(assignment.rhs)
+            }
+            ListWrite::Assignment(assignment) => {
+                let element = element(self);
+                let value = self.expression(assignment.rhs);
+
+                self.compound_value(line, assignment, element, value)
+            }
+            ListWrite::Step { decrement, postfix } => {
+                let mut element = element(self);
+                if postfix {
+                    self.temporaries += 1;
+                    let name = format!("old#{}", self.temporaries).into_bytes();
+                    let variable = self.variable(access.span(), &name);
+                    element = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, element]);
+                    old = Some(name);
+                }
+                let one = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = 1);
+
+                self.node(SHARP_AST_BINARY_OP, if decrement { ZEND_SUB } else { ZEND_ADD }, line, &[element, one])
+            }
+        };
+        if old.is_some() {
+            self.temporaries -= 1;
+        }
+        self.release(index);
+        self.release_collection(list);
+        let set = self.string(0, line, b"set");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[written, value]);
+        let set = self.node(SHARP_AST_METHOD_CALL, 0, line, &[place, set, arguments]);
+        let Some(old) = old else {
+            return set;
+        };
+        let [given, otherwise] = [(); 2].map(|()| self.variable(access.span(), &old));
+
+        self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[set, given, otherwise])
+    }
+
+    /// The class and the PHP name of the operator a compound assignment runs on instances, as `op_Addition` for `+=`,
+    /// or none when its operands are no instances whose class declares it.
+    fn declared_compound_operator(&self, assignment: &Assignment) -> Option<(Word, &'static [u8])> {
+        let operator = compound_operator(&assignment.operator)?;
+        let name = php_operator_name(&operator, 2)?;
+        let types = self.types;
+        let class = types
+            .operator_class(name, &[types.expression_type(assignment.lhs), types.expression_type(assignment.rhs)])?;
+
+        Some((class, name))
+    }
+
+    /// What the compound assignment `assignment` writes, from the lowered `read` of its target and its lowered `value`:
+    /// the operator its operands' class declares, and otherwise spec section 24's: `+` on two strings joins them, and
+    /// `/` on two ints divides toward zero.
+    fn compound_value(&mut self, line: u32, assignment: &Assignment, read: u32, value: u32) -> u32 {
+        if let Some((class, name)) = self.declared_compound_operator(assignment) {
+            return self.operator_call(line, class, name, &[read, value]);
+        }
+
+        match (&assignment.operator, self.operand_types_of(assignment)) {
+            (AssignmentOperator::Addition(_), Operands::Strings) => {
+                self.node(SHARP_AST_BINARY_OP, ZEND_CONCAT, line, &[read, value])
+            }
+            (AssignmentOperator::Division(_), Operands::Ints) => self.intdiv(line, read, value),
+            (AssignmentOperator::Coalesce(_), _) => {
+                unreachable!("the checker refuses `??=` on a `List` index, which reads it quietly")
+            }
+            (operator, _) => {
+                let (_, operation) = assignment_kind(operator);
+
+                self.node(SHARP_AST_BINARY_OP, operation, line, &[read, value])
+            }
         }
     }
 
@@ -5000,6 +5123,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let list = self.read_collection(&mut collection, line, false);
 
                 self.global_call(line, b"count", &[list])
+            }
+            // `getOrNull(i)` is `($list[$i] ?? null)`, the read that gives null past either end.
+            ("List", b"getornull") => {
+                let list = self.read_collection(&mut collection, line, false);
+                let index = self.expression(element());
+                let read = self.node(SHARP_AST_DIM, 0, line, &[list, index]);
+                let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+                self.node(SHARP_AST_COALESCE, 0, line, &[read, null])
+            }
+            // `toSet()` is the `Set` a literal of the elements makes.
+            ("List", b"toset") => {
+                let list = self.read_collection(&mut collection, line, false);
+
+                self.collection_new(line, b"Sharp\\Set", Some(list))
             }
             _ => unreachable!(
                 "INLINED_COLLECTION_METHODS names `({collection_name}, {})`, which has no PHP here",

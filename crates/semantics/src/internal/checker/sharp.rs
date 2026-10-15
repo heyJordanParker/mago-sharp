@@ -1995,8 +1995,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 }
 
 /// Whether the slice has a method, with the refusal's message and note when it does not. Each rule keeps out a method
-/// whose meaning a later slice gives it: PHP's magic methods, PHP#'s `private` default of spec section 5, and a static
-/// constructor. The constructor of spec section 9 is the one method without a return type, named after its class.
+/// whose meaning a later slice gives it: PHP's magic methods and a static constructor. The constructor of spec section 9 is the one method without a return type, named after its class.
 /// `enter` reports a `__Something__` name, which ends as well as starts with `__`.
 fn is_slice_method(method: &Method, program: &Program) -> Result<(), (&'static str, &'static str)> {
     let class_name = enclosing_class(program, method.span()).map(|class| class.name.value);
@@ -2011,13 +2010,6 @@ fn is_slice_method(method: &Method, program: &Program) -> Result<(), (&'static s
         (
             "This method name is not supported yet in PHP#.",
             "PHP reserves method names that start with `__` for its magic methods.",
-        )
-    } else if !method.modifiers.iter().any(|modifier| {
-        matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
-    }) {
-        (
-            "A method without `public`, `protected` or `private` is not supported yet in PHP#.",
-            "A PHP# member without an access modifier is `private`, while PHP makes it `public`.",
         )
     } else if method.return_type_hint.is_some()
         && class_name.is_some_and(|class_name| class_name.eq_ignore_ascii_case(method.name.value))

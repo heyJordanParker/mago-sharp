@@ -416,7 +416,10 @@ where
                                         selector.span(),
                                         classname,
                                         &collection,
-                                        method_name,
+                                        match selector {
+                                            ClassLikeMemberSelector::Identifier(written) => word(written.value),
+                                            _ => method_name,
+                                        },
                                     );
 
                                     result.has_invalid_target = true;
@@ -1592,7 +1595,13 @@ fn report_non_existent_collection_method<A>(
     let mut methods = context
         .codebase
         .get_class_like(classname.as_bytes())
-        .map(|metadata| metadata.methods.iter().map(|method| format!("`{method}`")).collect::<Vec<_>>())
+        .map(|metadata| {
+            metadata
+                .methods
+                .iter()
+                .map(|method| format!("`{}`", display_method_name(context, classname, *method)))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     methods.sort();
 

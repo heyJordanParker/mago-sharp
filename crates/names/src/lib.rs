@@ -33,20 +33,22 @@ mod internal;
 /// Spec section 12 runs them on the collection a local holds, so a call of one on a local writes the local, as
 /// [`ResolvedNames::is_written`] reports. The binder knows no types, so a call of a method of these names on an object
 /// writes its local too, which captures it by reference, as harmless.
-pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "insert", "remove", "clear"];
+pub const CHANGING_COLLECTION_METHODS: [&str; 4] = ["add", "insert", "remove", "clear"];
 
 /// The methods of a PHP# `List` the bridge lowers from the checker's types, as `(collection, method)` pairs.
 ///
 /// Each lowers to PHP functions or operators on the array. A `List` is a PHP array, which has no methods, so the
 /// checker refuses one on a value that can also be an object, whose own method would not run. A `Map` and a `Set` are
 /// engine objects, whose every method runs on `Sharp\Collection`.
-pub const INLINED_COLLECTION_METHODS: [(&str, &str); 6] = [
+pub const INLINED_COLLECTION_METHODS: [(&str, &str); 8] = [
     ("List", "count"),
+    ("List", "getOrNull"),
     ("List", "contains"),
     ("List", "indexOf"),
     ("List", "last"),
     ("List", "remove"),
     ("List", "clear"),
+    ("List", "toSet"),
 ];
 
 /// The class-likes directly in `Sharp` that a bare name in a `.sharp` file names by default, spec section 23, and that

@@ -2324,7 +2324,6 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             format!("23:35 PHP# has no `__LINE__`: {line}"),
             "23:45 A by-reference parameter is not supported yet in PHP#.".to_owned(),
             format!("23:54 PHP# has no `__LINE__`: {line}"),
-            "27:9 A method without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.".to_owned(),
             "29:18 This type is not supported yet in PHP#.".to_owned(),
             "30:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
@@ -2580,17 +2579,13 @@ fn a_method_name_starting_with_two_underscores_is_not_supported_yet() {
     );
 }
 
+/// Spec section 5: a member without an access modifier is `private`, as `void reserve(string sku, int count)` in
+/// section 12's `map-string-keys` is.
 #[test]
-fn a_method_without_an_access_modifier_is_not_supported_yet() {
+fn a_method_without_an_access_modifier_compiles() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    int run() { return 1; }\n    static int make() { return 1; }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:9 A method without `public`, `protected` or `private` is not supported yet in PHP#.",
-            "6:16 A method without `public`, `protected` or `private` is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]

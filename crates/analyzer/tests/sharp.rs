@@ -6982,7 +6982,7 @@ fn a_static_field_a_constant_and_a_computed_property_of_type_any_never_hold_null
 
 #[test]
 fn a_collection_of_any_never_holds_null_and_a_collection_of_any_question_mark_may() {
-    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    private Map<string, Any> sure = [:];\n    private Map<string, Any?> maybe = [:];\n\n    public void keep(string key, Any? value, Any held, List<Any> items)\n    {\n        this.sure[key] = value;\n        this.sure = [key: value];\n        items.add(value);\n        items.set(0, value);\n        this.maybe[key] = value;\n        this.maybe = [key: value];\n        this.sure[key] = held;\n        items.add(held);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    private Map<string, Any> sure = [:];\n    private Map<string, Any?> maybe = [:];\n\n    public void keep(string key, Any? value, Any held, List<Any> items)\n    {\n        this.sure[key] = value;\n        this.sure = [key: value];\n        items.add(value);\n        items[0] = value;\n        this.maybe[key] = value;\n        this.maybe = [key: value];\n        this.sure[key] = held;\n        items.add(held);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Inbox.sharp", sharp), &[]),
@@ -6990,7 +6990,7 @@ fn a_collection_of_any_never_holds_null_and_a_collection_of_any_question_mark_ma
             "10:9 invalid-property-assignment-value",
             "11:21 invalid-property-assignment-value",
             "12:19 mixed-argument",
-            "13:22 mixed-argument",
+            "13:9 invalid-local-assignment-value",
         ]
     );
 }
@@ -7035,16 +7035,15 @@ fn a_null_safe_access_on_an_index_reads_a_missing_key_as_null() {
     assert_eq!(issues(("src/Demo/Shelf.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// Writing `x[i] = v` to a `List` could leave a gap in its keys, so spec section 12 writes a `List` with `set` and
-/// `add`. A write into a `List`'s element is a change through its index, which the index change rule decides.
+/// Spec section 12: "`x[i] = v` on a `List` replaces the element at `i`, and throws `OutOfRangeException` past the
+/// end. Appending is `add`." So `=`, `+=`, `++` and `--` write a `List` index, on a local, a parameter, a property
+/// and an element of another `List`, and PHP's `list[] = v` is refused. A write into a `List`'s element is a change
+/// through its index, which the index change rule decides.
 #[test]
-fn an_index_write_to_a_list_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        grid[0][1] = 1;\n        groups[\"b\"] = [1];\n    }\n}\n";
+fn an_index_write_replaces_a_list_element_and_list_append_is_add() {
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public List<int> held { get; private set; } = [];\n\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        sizes[1]++;\n        --sizes[1];\n        grid[0][1] = 1;\n        this.held[0] = 2;\n        groups[\"b\"] = [1];\n        sizes[] = 3;\n    }\n}\n";
 
-    assert_eq!(
-        issues(("src/Demo/Sizes.sharp", sharp), &[]),
-        ["7:9 invalid-array-access", "8:9 invalid-array-access", "9:9 invalid-array-access"]
-    );
+    assert_eq!(issues(("src/Demo/Sizes.sharp", sharp), &[]), ["16:9 invalid-array-access"]);
 }
 
 /// A `List`'s keys are the `int`s from 0 to its last index, so a read whose index may be anything else is an error,
@@ -7243,12 +7242,12 @@ fn an_emptied_static_list_property_stays_a_list() {
     assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["11:30 invalid-iterator"]);
 }
 
-/// An index write to a static `Map` property is typed by the property, public or private, as an index write to an
-/// instance property is, and a `List` or a `Set` static property changes through its methods. A value of the wrong
+/// An index write to a static `Map` or `List` property is typed by the property, public or private, as an index write
+/// to an instance property is, and a `Set` static property changes through its methods. A value of the wrong
 /// type is refused for both.
 #[test]
 fn an_index_write_to_a_static_collection_is_typed_by_its_property() {
-    let sharp = "namespace Demo;\n\nclass Statics\n{\n    private static Map<string, int> shared = [:];\n    public static Map<string, int> open = [:];\n    private static List<int> sizes = [0];\n    private static Set<string> seen = [];\n    private Map<string, int> own = [:];\n\n    public static int write()\n    {\n        Statics.shared[\"a\"] = 1;\n        Statics.open[\"b\"] = 2;\n        Statics.sizes.set(0, 3);\n        Statics.seen.add(\"c\");\n        Statics.shared[\"d\"] = \"wrong\";\n        return Statics.shared.count() + Statics.open.count() + Statics.sizes.count() + Statics.seen.count();\n    }\n\n    public int writeOwn()\n    {\n        this.own[\"d\"] = \"wrong\";\n        return this.own.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Statics\n{\n    private static Map<string, int> shared = [:];\n    public static Map<string, int> open = [:];\n    private static List<int> sizes = [0];\n    private static Set<string> seen = [];\n    private Map<string, int> own = [:];\n\n    public static int write()\n    {\n        Statics.shared[\"a\"] = 1;\n        Statics.open[\"b\"] = 2;\n        Statics.sizes[0] = 3;\n        Statics.seen.add(\"c\");\n        Statics.shared[\"d\"] = \"wrong\";\n        return Statics.shared.count() + Statics.open.count() + Statics.sizes.count() + Statics.seen.count();\n    }\n\n    public int writeOwn()\n    {\n        this.own[\"d\"] = \"wrong\";\n        return this.own.count();\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Statics.sharp", sharp), &[]),
@@ -7467,7 +7466,7 @@ fn a_collection_property_read_through_a_union_with_a_scalar_is_the_declared_coll
             "12:16 invalid-property-access Attempting to access a property on a non-object type (`int`). | Cannot access property here | This expression has type `int`",
             "12:9 possible-method-access-on-null Attempting to call a method on `null`. | This expression can be `null` | Use the nullsafe operator (`?.`) if `null` is an expected value.",
             "12:26 invalid-argument Invalid argument type for argument #1 of `Set<string>.add`: expected `string`, but found `int`. | This has type `int` | Arguments to this method are incorrect | The provided type `int` is not compatible with the expected type `string`. | Change the argument value to match `string`, or update the parameter's type declaration.",
-            "13:22 non-existent-method Method `get` does not exist on `Set<string>`. | This method selection is invalid | This expression has type `Set<string>` | A `Set<string>` has the methods `add`, `any`, `clear`, `contains`, `count`, `filter`, `first`, `map`, `remove`, `sortedby`, `sumof`, `tolist`.",
+            "13:22 non-existent-method Method `get` does not exist on `Set<string>`. | This method selection is invalid | This expression has type `Set<string>` | A `Set<string>` has the methods `add`, `any`, `clear`, `contains`, `count`, `filter`, `first`, `map`, `remove`, `sortedBy`, `sumOf`, `toList`.",
             "13:9 possible-method-access-on-null Attempting to call a method on `null`. | This expression can be `null` | Use the nullsafe operator (`?.`) if `null` is an expected value.",
         ]
     );
@@ -7537,8 +7536,8 @@ fn a_bare_index_read_of_a_local_that_may_be_a_list_or_a_map_is_an_error() {
     );
 }
 
-/// A local that may be a `List` or a `Map` stays either after it is given the `Map`, so the `List` refuses a write by
-/// index.
+/// A local that may be a `List` or a `Map` stays either after it is given the `Map`. A `List` index write replaces an
+/// element and throws past the end, and a `Map` one inserts a key, so a write by index to it is refused.
 #[test]
 fn a_local_that_may_be_a_list_or_a_map_is_not_written_by_index_after_it_holds_the_map() {
     let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int run(bool ready, List<int> sizes, Map<int, int> counts)\n    {\n        let rows = ready ? sizes : counts;\n        rows = counts;\n        rows[1] = 2;\n        return global.count(rows);\n    }\n}\n";
@@ -7546,14 +7545,13 @@ fn a_local_that_may_be_a_list_or_a_map_is_not_written_by_index_after_it_holds_th
     assert_eq!(
         refusals(("src/Demo/Sizes.sharp", sharp), &[]),
         [
-            "9:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys. | Change an element with `list.set(index, value)`, as `list.set(i, list[i] + 1)` replaces `+=`, `++` and `--`, and append one with `list.add(value)`."
+            "9:9 invalid-array-access A place that may be a `List` or a `Map` is not written by index: a `List` replaces the element at the index, and a `Map` inserts the key. | Give the place one collection type."
         ]
     );
 }
 
-/// A `+=` on a local that may be a `List` or a `Set` is refused as a write by index is: the `Set` has no index, and the
-/// `List` is not written by index. Its read reports the `Set`'s refusal, and its write keeps the `List`'s, which shares
-/// the read's code and place but not its message.
+/// A write and a `+=` on a local that may be a `List` or a `Set` are refused as a write by index is: the `Set` has no
+/// index. The `List` takes the write, so it adds no second issue.
 #[test]
 fn a_compound_write_to_a_local_that_may_be_a_list_or_a_set_is_refused_as_a_write_is() {
     let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public void run(bool ready, List<int> sizes, Set<int> ids)\n    {\n        let x = ready ? sizes : ids;\n        x[0] = 1;\n        x[1] += 1;\n    }\n}\n";
@@ -7563,12 +7561,7 @@ fn a_compound_write_to_a_local_that_may_be_a_list_or_a_set_is_refused_as_a_write
             .iter()
             .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
             .collect::<Vec<_>>(),
-        [
-            "8:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys.",
-            "8:9 invalid-array-access A `Set<int>` has no index.",
-            "9:9 invalid-array-access A `Set<int>` has no index.",
-            "9:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys.",
-        ]
+        ["8:9 invalid-array-access A `Set<int>` has no index.", "9:9 invalid-array-access A `Set<int>` has no index."]
     );
 }
 
@@ -7841,6 +7834,37 @@ fn a_function_type_taking_a_function_type_with_an_effect_is_accepted() {
     let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
+}
+
+/// Spec section 5: a method with no access modifier is `private`, as section 12's `void reserve(string sku, int count)`
+/// is. Another class calling one is refused, and a static one too, as their PHP twins' `private` methods are, while an
+/// interface method stays public.
+#[test]
+fn a_method_without_an_access_modifier_is_private_as_its_php_twin() {
+    let sharp = "namespace App.Shop;\n\npublic class Stock\n{\n    int reserve(string sku) => 1;\n    static int make() => 2;\n\n    public int run() => this.reserve(\"a\") + Stock.make();\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Stock\n{\n    private function reserve(string $sku): int { return 1; }\n    private static function make(): int { return 2; }\n\n    public function run(): int { return $this->reserve(\"a\") + Stock::make(); }\n}\n";
+    let sharp_reader = "namespace App.Shop;\n\npublic class Order\n{\n    public int held(Stock stock) => stock.reserve(\"a\") + Stock.make();\n}\n";
+    let php_reader = "<?php\n\nnamespace App\\Shop;\n\nfinal class Order\n{\n    public function held(Stock $stock): int { return $stock->reserve(\"a\") + Stock::make(); }\n}\n";
+    let named = "namespace App.Shop;\n\npublic interface Named\n{\n    string name();\n}\n";
+    let named_user = "namespace App.Shop;\n\npublic class Label\n{\n    public string of(Named named) => named.name();\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Stock.sharp", sharp), &[]), Vec::<String>::new());
+
+    let sharp_issues = issues(("src/App/Shop/Order.sharp", sharp_reader), &[("src/App/Shop/Stock.sharp", sharp)]);
+    let php_issues = issues(("src/App/Shop/Order.php", php_reader), &[("src/App/Shop/Stock.php", php)]);
+    assert_eq!(
+        sharp_issues,
+        [
+            "5:43 invalid-method-access",
+            "5:64 invalid-method-access",
+            "5:37 mixed-operand",
+            "5:58 mixed-operand",
+            "5:37 mixed-return-statement",
+        ]
+    );
+    assert_eq!(codes(&sharp_issues), codes(&php_issues), "{php_issues:?}");
+
+    assert_eq!(issues(("src/App/Shop/Label.sharp", named_user), &[("src/App/Shop/Named.sharp", named)]), Vec::<String>::new());
 }
 
 /// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, so an
@@ -8155,18 +8179,18 @@ fn a_map_literal_added_to_a_list_of_lists_is_an_error() {
     );
 }
 
-/// A `List`'s `set` takes only a literal of the collection its elements declare: a `List<List<int>>` takes `[1]` and
-/// refuses `[:]`.
+/// A `List` index takes only a literal of the collection its elements declare: a `List<List<int>>` takes `[1]` and
+/// refuses `[:]`, once.
 #[test]
-fn a_map_literal_set_into_a_list_of_lists_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public void fill(List<List<int>> rows)\n    {\n        rows.set(0, [1]);\n        rows.set(0, [:]);\n    }\n}\n";
+fn a_map_literal_written_into_a_list_of_lists_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public void fill(List<List<int>> rows)\n    {\n        rows[0] = [1];\n        rows[0] = [:];\n    }\n}\n";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Grid.sharp", sharp), &[])
             .iter()
             .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
             .collect::<Vec<_>>(),
-        ["8:21 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
+        ["8:19 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
     );
 }
 
@@ -8364,32 +8388,39 @@ fn an_emptied_php_array_property_keeps_the_map_rules() {
     assert_eq!(issues(("src/Demo/Rows.sharp", sharp), &[STORE]), ["20:27 possibly-undefined-array-index"]);
 }
 
-/// A `List` has `add`, `set`, `get`, `entries()`, `contains`, `indexOf`, `last`, `insert`, `remove` and `clear`, and a
-/// `Map` has `get`, `has`, `keys`, `remove` and `filter`, each typed by the elements of the collection it is called on,
-/// as spec section 12 decides. `indexOf` gives `int?`, null when no element matches, `remove` gives `bool`, `keys()`
-/// gives a `List` of the key type, a backed enum included, and a `Map`'s `filter` gives the `Map` it keeps.
+/// A `List` has `add`, `getOrNull`, `entries()`, `contains`, `indexOf`, `last`, `insert`, `remove`, `clear` and
+/// `toSet`, and a `Map` has `get`, `has`, `keys`, `values`, `remove` and `filter`, each typed by the elements of the
+/// collection it is called on, as spec section 12 decides. `getOrNull` and `indexOf` give a nullable type, null when no
+/// element is there, `remove` gives `bool`, `keys()` gives a `List` of the key type, a backed enum included, `values()`
+/// a `List` of the value type, `toSet()` a `Set` of the element type, and a `Map`'s `filter` gives the `Map` it keeps.
+/// A `List` has no `get` or `set`: its index reads and writes it.
 #[test]
 fn collection_methods_take_and_give_the_types_of_their_elements() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> extra)\n    {\n        this.lines.add(line);\n        extra.add(line);\n        extra.set(0, line);\n        this.counts.remove(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.get(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> extra, Map<string, int> counts)\n    {\n        extra.add(1);\n        extra.set(\"a\", new Line(1));\n        counts.add(1);\n        extra.delete(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other;\n    }\n\n    public int change(List<int> sizes)\n    {\n        sizes.insert(0, 1);\n        bool gone = sizes.remove(2);\n        sizes.clear();\n        sizes.insert(\"a\", 1);\n        sizes.insert(0, \"a\");\n        int removed = sizes.remove(1);\n        return removed + (gone ? 1 : 0);\n    }\n\n    public int keyed(Map<string, int> counts, Map<Status, int> tally)\n    {\n        bool had = counts.has(\"a\");\n        List<string> names = counts.keys();\n        List<Status> statuses = tally.keys();\n        Map<string, int> kept = counts.filter(c => c > 0);\n        bool gone = counts.remove(\"a\");\n        int flag = counts.has(\"a\");\n        List<int> numbered = counts.keys();\n        List<string> backing = tally.keys();\n        List<int> renumbered = counts.filter(c => c > 0);\n        int removed = counts.remove(\"a\");\n        return (had || gone ? 1 : 0) + names.count() + statuses.count() + kept.count() + flag + numbered.count() + backing.count() + renumbered.count() + removed;\n    }\n}\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> extra)\n    {\n        this.lines.add(line);\n        extra.add(line);\n        extra[0] = line;\n        this.counts.remove(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.getOrNull(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> extra, Map<string, int> counts)\n    {\n        extra.add(1);\n        extra.set(0, new Line(1));\n        counts.add(1);\n        extra.delete(0);\n        Line? got = extra.get(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        int? maybe = sizes.getOrNull(5);\n        bool notMaybe = sizes.getOrNull(5);\n        Set<int> unique = sizes.toSet();\n        List<int> notSet = sizes.toSet();\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other + (maybe ?? 0) + (notMaybe ? 1 : 0) + unique.count() + notSet.count();\n    }\n\n    public int change(List<int> sizes)\n    {\n        sizes.insert(0, 1);\n        bool gone = sizes.remove(2);\n        sizes.clear();\n        sizes.insert(\"a\", 1);\n        sizes.insert(0, \"a\");\n        int removed = sizes.remove(1);\n        return removed + (gone ? 1 : 0);\n    }\n\n    public int keyed(Map<string, int> counts, Map<Status, int> tally)\n    {\n        bool had = counts.has(\"a\");\n        List<string> names = counts.keys();\n        List<Status> statuses = tally.keys();\n        Map<string, int> kept = counts.filter(c => c > 0);\n        bool gone = counts.remove(\"a\");\n        int flag = counts.has(\"a\");\n        List<int> numbered = counts.keys();\n        List<string> backing = tally.keys();\n        List<int> renumbered = counts.filter(c => c > 0);\n        int removed = counts.remove(\"a\");\n        List<int> values = counts.values();\n        List<string> notValues = counts.values();\n        return (had || gone ? 1 : 0) + names.count() + statuses.count() + kept.count() + flag + numbered.count() + backing.count() + renumbered.count() + removed + values.count() + notValues.count();\n    }\n}\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Order.sharp", sharp), &[]),
         [
             "23:19 invalid-argument",
-            "24:19 invalid-argument",
+            "24:15 non-existent-method",
             "25:16 non-existent-method",
             "26:15 non-existent-method",
-            "34:21 invalid-local-assignment-value",
-            "35:36 invalid-argument",
-            "36:32 too-many-arguments",
-            "45:22 invalid-argument",
-            "46:25 invalid-argument",
-            "47:23 invalid-local-assignment-value",
-            "58:20 invalid-local-assignment-value",
-            "59:30 invalid-local-assignment-value",
-            "60:32 invalid-local-assignment-value",
-            "61:32 invalid-local-assignment-value",
-            "62:23 invalid-local-assignment-value"
+            "27:27 non-existent-method",
+            "27:21 invalid-local-assignment-value",
+            "35:21 invalid-local-assignment-value",
+            "36:36 invalid-argument",
+            "37:32 too-many-arguments",
+            "39:25 invalid-local-assignment-value",
+            "41:28 invalid-local-assignment-value",
+            "50:22 invalid-argument",
+            "51:25 invalid-argument",
+            "52:23 invalid-local-assignment-value",
+            "63:20 invalid-local-assignment-value",
+            "64:30 invalid-local-assignment-value",
+            "65:32 invalid-local-assignment-value",
+            "66:32 invalid-local-assignment-value",
+            "67:23 invalid-local-assignment-value",
+            "69:34 invalid-local-assignment-value"
         ]
     );
 }
@@ -8453,7 +8484,7 @@ fn every_collection_counts_its_elements() {
 /// file has no PHP# collection.
 #[test]
 fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_yet() {
-    let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public int? get(int index) => index > 0 ? index : null;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1) || items.contains(1)) {\n            return items.get(0) ?? 0;\n        }\n        return items.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public bool any(Function<bool(int)> predicate) => true;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1) || items.contains(1)) {\n            return items.any(i => i > 0) ? 1 : 0;\n        }\n        return items.count();\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int>|list<int> $sizes\n     */\n    public function run(ListMethods|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[]);
 
@@ -8469,7 +8500,7 @@ fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_ye
 /// the PHP# type the code wrote instead, as in "`add` doesn't exist on `Map<string, int>`".
 #[test]
 fn a_collection_method_message_names_the_sharp_type() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public void wrong(List<Line> lines, List<int> sizes, Map<string, int> counts)\n    {\n        lines.add(1);\n        sizes.set(\"a\", 1);\n        counts.add(1);\n        sizes.delete(0);\n        counts.get(1.5);\n        sizes.get();\n        sizes.get(0, 1);\n        counts.has(1);\n        counts.remove(1);\n    }\n}\n\nclass Line\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public void wrong(List<Line> lines, List<int> sizes, Map<string, int> counts)\n    {\n        lines.add(1);\n        sizes.getOrNull(\"a\");\n        counts.add(1);\n        sizes.delete(0);\n        counts.get(1.5);\n        sizes.getOrNull();\n        sizes.getOrNull(0, 1);\n        counts.has(1);\n        counts.remove(1);\n    }\n}\n\nclass Line\n{\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Order.sharp", sharp), &[]);
 
     let messages: Vec<&str> = issues.iter().map(|issue| issue.message.as_str()).collect();
@@ -8477,12 +8508,12 @@ fn a_collection_method_message_names_the_sharp_type() {
         messages,
         [
             "Invalid argument type for argument #1 of `List<Line>.add`: expected `Line`, but found `int`.",
-            "Invalid argument type for argument #1 of `List<int>.set`: expected `int`, but found `string`.",
+            "Invalid argument type for argument #1 of `List<int>.getOrNull`: expected `int`, but found `string`.",
             "Method `add` does not exist on `Map<string, int>`.",
             "Method `delete` does not exist on `List<int>`.",
             "Invalid argument type for argument #1 of `Map<string, int>.get`: expected `string`, but found `float`.",
-            "Too few arguments provided for method `List<int>.get`.",
-            "Too many arguments provided for method `List<int>.get`.",
+            "Too few arguments provided for method `List<int>.getOrNull`.",
+            "Too many arguments provided for method `List<int>.getOrNull`.",
             "Invalid argument type for argument #1 of `Map<string, int>.has`: expected `string`, but found `int`.",
             "Invalid argument type for argument #1 of `Map<string, int>.remove`: expected `string`, but found `int`.",
         ]
@@ -8527,7 +8558,7 @@ fn a_method_on_an_untyped_empty_literal_adds_no_issue() {
 /// even where the analyzer knows the elements are literals, as TypeScript's `let a = [5]` is a `number[]`.
 #[test]
 fn collection_methods_take_any_value_of_a_type_the_elements_are_literals_of() {
-    let sharp = "namespace Demo;\n\nclass Tray\n{\n    public List<int> items { get; private set; } = [];\n\n    public void fill()\n    {\n        let sizes = [5];\n        sizes.add(6);\n        this.items = [5];\n        this.items.add(6);\n        this.items.set(0, 7);\n        let names = [\"tea\": true];\n        names.remove(\"pie\");\n        let found = names.get(\"pie\") ?? false;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tray\n{\n    public List<int> items { get; private set; } = [];\n\n    public void fill()\n    {\n        let sizes = [5];\n        sizes.add(6);\n        this.items = [5];\n        this.items.add(6);\n        this.items[0] = 7;\n        let names = [\"tea\": true];\n        names.remove(\"pie\");\n        let found = names.get(\"pie\") ?? false;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tray.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -8537,7 +8568,7 @@ fn collection_methods_take_any_value_of_a_type_the_elements_are_literals_of() {
 /// caller reaches. The runtime never meets a write the checker accepts and it refuses.
 #[test]
 fn a_changing_collection_method_needs_a_place_the_caller_can_write() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<int> lines { get; private set; } = [];\n    public List<int> fixed { get; } = [];\n    public List<int> computed => [1];\n}\n\nclass Shop\n{\n    public int change(Order order, Map<string, List<int>> groups)\n    {\n        order.lines.add(1);\n        order.fixed.add(1);\n        order.computed.add(1);\n        this.make().add(1);\n        this.make().insert(0, 1);\n        this.make().remove(1);\n        this.make().clear();\n        this.counts().remove(\"a\");\n        return order.lines.entries().count() + (order.fixed.get(0) ?? 0) + groups.count();\n    }\n\n    public List<int> make()\n    {\n        return [];\n    }\n\n    public Map<string, int> counts()\n    {\n        return [:];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<int> lines { get; private set; } = [];\n    public List<int> fixed { get; } = [];\n    public List<int> computed => [1];\n}\n\nclass Shop\n{\n    public int change(Order order, Map<string, List<int>> groups)\n    {\n        order.lines.add(1);\n        order.fixed.add(1);\n        order.computed.add(1);\n        this.make().add(1);\n        this.make().insert(0, 1);\n        this.make().remove(1);\n        this.make().clear();\n        this.counts().remove(\"a\");\n        return order.lines.entries().count() + (order.fixed.getOrNull(0) ?? 0) + groups.count();\n    }\n\n    public List<int> make()\n    {\n        return [];\n    }\n\n    public Map<string, int> counts()\n    {\n        return [:];\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Shop.sharp", sharp), &[]),
@@ -8689,18 +8720,18 @@ fn a_changing_method_on_a_null_coalescing_assignment_needs_a_place() {
     );
 }
 
-/// `+=`, `++` and `--` read an index, then write it. On a `Map` the read is bare, and on a `List` the write is, so
-/// both are refused, as Kotlin refuses `map[k] += 1`, and the help writes the form that compiles.
+/// `+=`, `++` and `--` read an index, then write it. On a `Map` the read is bare, so they are refused, as Kotlin
+/// refuses `map[k] += 1`, and the help writes the form that compiles. A `List` read is bare too, and throws on a
+/// missing index, as its write does, so they compile on a `List`.
 #[test]
-fn a_compound_assignment_or_increment_on_an_index_names_the_form_that_compiles() {
+fn a_compound_assignment_or_increment_on_a_map_index_names_the_form_that_compiles() {
     let sharp = "namespace Demo;\n\nclass Counts\n{\n    public void bump(Map<string, int> counts, List<int> sizes)\n    {\n        counts[\"a\"] += 1;\n        counts[\"b\"]++;\n        sizes[0] += 1;\n        sizes[1]--;\n    }\n}\n";
 
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counts.sharp", sharp), &[]);
     let helps: Vec<_> = issues.iter().map(|issue| issue.help.as_deref().unwrap_or("")).collect();
 
-    assert_eq!(issues.len(), 4, "{issues:?}");
-    assert!(helps[..2].iter().all(|help| help.contains("m[k] = (m[k] ?? 0) + 1")), "{helps:?}");
-    assert!(helps[2..].iter().all(|help| help.contains("list.set(i, list[i] + 1)")), "{helps:?}");
+    assert_eq!(issues.len(), 2, "{issues:?}");
+    assert!(helps.iter().all(|help| help.contains("m[k] = (m[k] ?? 0) + 1")), "{helps:?}");
 }
 
 const STATUS: &str = "<?php\n\nnamespace Lib;\n\nenum Status: string\n{\n    case Active = 'active';\n    case Closed = 'closed';\n}\n\nenum Size: int\n{\n    case Small = 1;\n}\n\nenum Pure\n{\n    case One;\n}\n\nfinal class Line\n{\n}\n";
@@ -9723,21 +9754,6 @@ fn an_empty_map_literal_written_as_a_value_of_a_map_of_lists_or_of_sets_is_an_er
             "7:22 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.",
             "10:21 invalid-array-element `[:]` is an empty Map. An empty Set is written `[]`.",
         ]
-    );
-}
-
-/// Pin: a `List` is never written by index, so `[:]` written by index into a `List` of `List`s is refused once, by
-/// that rule, and its literal adds no second issue. PHP writes an array by index.
-#[test]
-fn a_map_literal_written_by_index_into_a_list_of_lists_is_refused_once_by_the_list_write_rule() {
-    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public int fill(List<List<int>> rows)\n    {\n        rows[0] = [:];\n        return rows.count();\n    }\n}\n";
-
-    assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Grid.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
-        ["7:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys."]
     );
 }
 
@@ -11016,7 +11032,6 @@ fn a_static_member_of_a_class_with_type_arguments_has_its_type_arguments_for_its
             "Invalid property assignment value",
             "Invalid argument type for argument #1 of `Counter.track`: expected `Order`, but found `Customer`.",
             "Invalid argument type for argument #1 of `List<List<Order>>.add`: expected `List<Order>`, but found `Order`.",
-            "A `List` is not written by index, because a write could leave a gap in its keys.",
             "Invalid return type for method `Report.wrong`: expected `Customer?`, but found `Order?`.",
         ]
     );

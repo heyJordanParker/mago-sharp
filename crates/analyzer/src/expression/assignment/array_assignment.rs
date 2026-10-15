@@ -100,23 +100,22 @@ where
 
     let mut current_type = root_array_type.clone();
 
-    // A value written into a PHP# `Map` takes only a literal of the collection its value type declares, as a value
-    // written to a declared place does, at any depth, through the `Map`s and the `List` indexes that are places on
-    // the way. A `List` and a `Set` are never written by index, which their own checks refuse. A list literal written
-    // where the value type declares a `Set` is that `Set`, at any depth.
+    // A value written into a PHP# `Map` or `List` takes only a literal of the collection its value type declares, as a
+    // value written to a declared place does, at any depth, through the `Map`s and the `List` indexes that are places
+    // on the way. A `Set` is never written by index, which its own check refuses. A list literal written where the
+    // value type declares a `Set` is that `Set`, at any depth.
     let last_step = array_target_expressions.len() - 1;
     let mut set_literal_type = None;
     if context.dialect.is_sharp()
         && let Some(value) = assign_value
         && let Some(declared) = get_declared_type(context, block_context, artifacts, root_array_expression)
-        && let Some(element) = (0..=last_step).try_fold(declared, |declared, step| {
+        && let Some(element) = (0..=last_step).try_fold(declared, |declared, _| {
             declared
                 .types
                 .iter()
                 .filter_map(|atomic| match atomic {
-                    TAtomic::Array(map @ TArray::Keyed(_)) => Some(get_array_parameters(map, context.codebase).1),
-                    TAtomic::Array(list @ TArray::List(_)) if step < last_step => {
-                        Some(get_array_parameters(list, context.codebase).1)
+                    TAtomic::Array(collection @ (TArray::Keyed(_) | TArray::List(_))) => {
+                        Some(get_array_parameters(collection, context.codebase).1)
                     }
                     _ => None,
                 })
@@ -885,7 +884,7 @@ where
 
         let is_last = i == array_target_expressions.len() - 1;
 
-        // Spec section 12 keeps a PHP# `List`'s keys without gaps, so it changes by `set` and `add`, never by index. A
+        // Spec section 12: `x[i] = v` replaces a `List` element, and throws past the end, so appending is `add`. A
         // write into an element changes it through the index, which a `List` takes and a `Map` refuses, and a write
         // refused there is reported once.
         if context.dialect.is_sharp()
@@ -897,14 +896,27 @@ where
             && !through_copy
             && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
         {
-            context.collector.report_with_code(
-                IssueCode::InvalidArrayAccess,
-                Issue::error("A `List` is not written by index, because a write could leave a gap in its keys.")
-                    .with_annotation(Annotation::primary(array_target.span()).with_message("This writes to a `List`."))
-                    .with_help(
-                        "Change an element with `list.set(index, value)`, as `list.set(i, list[i] + 1)` replaces `+=`, `++` and `--`, and append one with `list.add(value)`.",
-                    ),
-            );
+            if array_target.get_index().is_none() {
+                context.collector.report_with_code(
+                    IssueCode::InvalidArrayAccess,
+                    Issue::error("A `List` grows with `add`: `list[] = value` is PHP syntax.")
+                        .with_annotation(
+                            Annotation::primary(array_target.span()).with_message("This appends to a `List`."),
+                        )
+                        .with_help("Append with `list.add(value)`, and replace an element with `list[i] = value`."),
+                );
+            } else if written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_)))) {
+                context.collector.report_with_code(
+                    IssueCode::InvalidArrayAccess,
+                    Issue::error(
+                        "A place that may be a `List` or a `Map` is not written by index: a `List` replaces the element at the index, and a `Map` inserts the key.",
+                    )
+                    .with_annotation(
+                        Annotation::primary(array_target.span()).with_message("This may be a `List` or a `Map`."),
+                    )
+                    .with_help("Give the place one collection type."),
+                );
+            }
         }
 
         let new_index_type = array_target_index_type.unwrap_or(Rc::new(get_non_negative_int()));

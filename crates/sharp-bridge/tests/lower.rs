@@ -1215,6 +1215,26 @@ fn a_method_is_a_public_function_with_its_return_type_after_its_parameters() {
 }
 
 /// ```php
+/// private function reserve(): int { return 1; }
+/// private static function make(): int { return 2; }
+/// ```
+///
+/// Spec section 5: a method with no access modifier is `private`, `[4]`, and a static one `[20]`, while PHP makes it
+/// `public`.
+#[test]
+fn a_method_without_an_access_modifier_is_a_private_function() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\npublic class Report\n{\n    int reserve() => 1;\n    static int make() => 2;\n}\n",
+    );
+    let members = lowered.child(lowered.child(lowered.root(), 2), 2);
+
+    assert_eq!(
+        lowered.render(members).lines().filter(|line| line.trim_start().starts_with("METHOD")).collect::<Vec<_>>(),
+        ["  METHOD [4] \"reserve\" @5-5", "  METHOD [20] \"make\" @6-6"]
+    );
+}
+
+/// ```php
 /// private int $count = 0;
 /// protected \Lib\Calc $calc;
 /// ```
@@ -4529,7 +4549,7 @@ fn a_list_counts_with_php_count_and_a_map_with_its_method() {
 fn every_inlined_collection_method_lowers_to_php_on_the_array() {
     for (collection, method) in INLINED_COLLECTION_METHODS {
         let argument = match method {
-            "remove" | "contains" | "indexOf" => "1",
+            "remove" | "contains" | "indexOf" | "getOrNull" => "1",
             _ => "",
         };
         let body = Lowered::new(&format!(
@@ -4544,6 +4564,45 @@ fn every_inlined_collection_method_lowers_to_php_on_the_array() {
 
         assert_ne!(root, "METHOD_CALL", "{collection}.{method}:\n{body}");
     }
+}
+
+/// ```php
+/// $found = $sizes[$extra] ?? null;
+/// $unique = new \Sharp\Set($sizes);
+/// ```
+///
+/// Spec section 12: `getOrNull(i)` is the safe read, which gives null past either end, and `toSet()` is the `Set` a
+/// literal of the elements makes, each element once.
+#[test]
+fn get_or_null_and_to_set_lower_to_php_on_the_array() {
+    assert_eq!(
+        body_in(
+            "void run(List<int> sizes, int extra)",
+            "        let found = sizes.getOrNull(extra);\n        let unique = sizes.toSet();\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "found"
+                COALESCE
+                  DIM
+                    VAR
+                      ZVAL "sizes"
+                    VAR
+                      ZVAL "extra"
+                  ZVAL null
+              ASSIGN
+                VAR
+                  ZVAL "unique"
+                NEW
+                  ZVAL "Sharp\\Set"
+                  ARG_LIST
+                    VAR
+                      ZVAL "sizes"
+        "#}
+    );
 }
 
 /// ```php
@@ -6043,6 +6102,178 @@ fn a_write_into_a_map_a_hooked_property_holds_puts_it_through_the_property() {
                   ARG_LIST
                     ZVAL "c"
                     ZVAL 3
+        "#}
+    );
+}
+
+/// ```php
+/// $sizes->set(0, $extra);
+/// $grid[$extra]->set(1, 2);
+/// ```
+///
+/// Spec section 12: `x[i] = v` on a `List` replaces the element at `i`, and throws `OutOfRangeException` past the end,
+/// where PHP's write would append or leave a gap. So it is the engine's `set` on the list, a local or an element of
+/// another `List`.
+#[test]
+fn a_list_index_write_replaces_the_element_through_set() {
+    assert_eq!(
+        body_in(
+            "void run(List<int> sizes, List<List<int>> grid, int extra)",
+            "        sizes[0] = extra;\n        grid[extra][1] = 2;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                VAR
+                  ZVAL "sizes"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 0
+                  VAR
+                    ZVAL "extra"
+              METHOD_CALL
+                DIM
+                  VAR
+                    ZVAL "grid"
+                  VAR
+                    ZVAL "extra"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 1
+                  ZVAL 2
+        "#}
+    );
+}
+
+/// ```php
+/// $sizes->set(${'index#1'} = $this->at(), $sizes[${'index#1'}] + $extra);
+/// $sizes->set(0, $sizes[0] + 1);
+/// return ($sizes->set(1, (${'old#1'} = $sizes[1]) - 1)) ? ${'old#1'} : ${'old#1'};
+/// ```
+///
+/// `list[i] op= v`, `++list[i]` and `--list[i]` write what the operator gives on the element, through `set`, which
+/// gives the value it stores. An index that runs something runs once, in a hidden variable. `list[i]++` and `list[i]--`
+/// give the element before the write, which a hidden variable holds, as PHP has no expression that runs one and gives
+/// another.
+#[test]
+fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
+    assert_eq!(
+        body_in(
+            "int run(List<int> sizes, int extra)",
+            "        sizes[this.at()] += extra;\n        ++sizes[0];\n        return sizes[1]--;\n    }\n\n    private int at()\n    {\n        return 0;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                VAR
+                  ZVAL "sizes"
+                ZVAL "set"
+                ARG_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "index#1"
+                    METHOD_CALL
+                      VAR
+                        ZVAL "this"
+                      ZVAL "at"
+                      ARG_LIST
+                  BINARY_OP [1]
+                    DIM
+                      VAR
+                        ZVAL "sizes"
+                      VAR
+                        ZVAL "index#1"
+                    VAR
+                      ZVAL "extra"
+              METHOD_CALL
+                VAR
+                  ZVAL "sizes"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 0
+                  BINARY_OP [1]
+                    DIM
+                      VAR
+                        ZVAL "sizes"
+                      ZVAL 0
+                    ZVAL 1
+              RETURN
+                CONDITIONAL [1]
+                  METHOD_CALL
+                    VAR
+                      ZVAL "sizes"
+                    ZVAL "set"
+                    ARG_LIST
+                      ZVAL 1
+                      BINARY_OP [2]
+                        ASSIGN
+                          VAR
+                            ZVAL "old#1"
+                          DIM
+                            VAR
+                              ZVAL "sizes"
+                            ZVAL 1
+                        ZVAL 1
+                  VAR
+                    ZVAL "old#1"
+                  VAR
+                    ZVAL "old#1"
+        "#}
+    );
+}
+
+/// ```php
+/// $this->held->set(0, $extra);
+/// (${'receiver#1'} = $this->me())->held->set(0, ${'receiver#1'}->held[0] * 2);
+/// ```
+///
+/// PHP gives no reference to a hooked property, so a write into the `List` one holds reaches it, and its `set` hook,
+/// only through the engine's collection of the property, as a write into a `Map` there does. An object that runs
+/// something runs once, in a hidden variable.
+#[test]
+fn a_write_into_a_list_a_hooked_property_holds_sets_it_through_the_property() {
+    assert_eq!(
+        child_body(
+            "void run(int extra)",
+            "        this.held[0] = extra;\n        this.me().held[0] *= 2;\n    }\n\n    private Report me()\n    {\n        return this;\n",
+            "<?php namespace App\\Tenant; class Base { /** @var list<int> */ public array $held = [0] { set { $this->held = $value; } } }"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "held"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 0
+                  VAR
+                    ZVAL "extra"
+              METHOD_CALL
+                PROP
+                  ASSIGN
+                    VAR
+                      ZVAL "receiver#1"
+                    METHOD_CALL
+                      VAR
+                        ZVAL "this"
+                      ZVAL "me"
+                      ARG_LIST
+                  ZVAL "held"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 0
+                  BINARY_OP [3]
+                    DIM
+                      PROP
+                        VAR
+                          ZVAL "receiver#1"
+                        ZVAL "held"
+                      ZVAL 0
+                    ZVAL 2
         "#}
     );
 }

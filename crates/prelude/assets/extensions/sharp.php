@@ -218,20 +218,20 @@ final class ListMethods
     public function add(mixed $value): void {}
 
     /**
-     * Replaces the element at `$index`.
-     *
-     * @param T $value
-     *
-     * @throws \OutOfRangeException when `$index` is not an index of the list.
-     */
-    public function set(int $index, mixed $value): void {}
-
-    /**
      * @return T|null the element at `$index`, or null when `$index` is not an index of the list.
      *
      * @mutation-free
      */
-    public function get(int $index): mixed {}
+    public function getOrNull(int $index): mixed {}
+
+    /**
+     * The analyzer types the result `Set<T>`, which a docblock cannot write.
+     *
+     * @return list<T> the set of the elements, each once, in the order they first appear.
+     *
+     * @mutation-free
+     */
+    public function toSet(): array {}
 
     /**
      * @return array<int, T> each index with its element, for `for (const [i, x] of list.entries())`.
@@ -424,6 +424,13 @@ final class MapMethods
      * @mutation-free
      */
     public function keys(): array {}
+
+    /**
+     * @return list<V> the values, in the order of their keys.
+     *
+     * @mutation-free
+     */
+    public function values(): array {}
 
     /**
      * @return int how many entries the map holds.
