@@ -10282,6 +10282,26 @@ fn a_loop_unpacks_each_two_element_tuple() {
     );
 }
 
+/// Spec section 30 unpacks a tuple, whose type gives its length, so `const [a, b] = value` takes nothing else. A `List`
+/// may hold fewer elements than it unpacks, as `List<int> xs = [1]` does, so it is read by index instead.
+#[test]
+fn a_local_unpack_takes_only_a_tuple() {
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public int run(List<int> xs, Map<string, int> counts, [int, string] pair, [int, string]? maybe)\n    {\n        const [a, b] = xs;\n        const [c, d] = counts;\n        const [e, f] = pair;\n        const [g, h] = maybe;\n        List<int> ys = [1];\n        const [p, q] = ys;\n        return a + c + e + g + q;\n    }\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Store.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {} {}", located(sharp, issue), issue.message, issue.help.as_deref().unwrap_or("")))
+            .collect::<Vec<_>>(),
+        [
+            "7:24 invalid-destructuring-source Only a tuple unpacks, and `xs` is a `List<int>`. A `List` may hold fewer elements: read them by index, as in `xs[0]`.",
+            "8:24 invalid-destructuring-source Only a tuple unpacks, and `counts` is a `Map<string, int>`. ",
+            "10:24 invalid-destructuring-source Only a tuple unpacks, and `maybe` is a `[int, string]?`. ",
+            "12:24 invalid-destructuring-source Only a tuple unpacks, and `ys` is a `List<int>`. A `List` may hold fewer elements: read them by index, as in `ys[0]`.",
+        ]
+    );
+}
+
 /// Spec section 12: "A `Map<TKey, TValue>` is an `Iterable<[TKey, TValue]>` of its entries", so a `Map` is no
 /// `Iterable` of its values, which `values()` gives, as an argument, a local and `yield ...` take it.
 #[test]

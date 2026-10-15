@@ -20,6 +20,7 @@ use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::union::populate_union_type;
 use mago_codex::ttype::wrap_atomic;
@@ -78,6 +79,7 @@ use crate::expression::match_arm_hints;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::NamedCall;
+use crate::resolver::method::get_declared_collection;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_types;
@@ -90,6 +92,8 @@ use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_function_like_identifier;
 use crate::utils::names::display_sharp_type;
+use crate::utils::names::display_type;
+use crate::utils::quoted_source;
 use crate::visibility::check_internal_reach;
 
 pub mod attributes;
@@ -405,6 +409,30 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LocalDeclaration<'arena> {
             }
         };
 
+        // Spec section 30 unpacks a tuple, whose type gives its length, so an unpack of any other value is refused once,
+        // before PHP's destructuring reads it, and its locals take no type, so their later uses report nothing again.
+        let unpacked_type = match self.target {
+            LocalTarget::Unpack(_) => {
+                let was_inside_general_use = block_context.flags.inside_general_use();
+                block_context.flags.set_inside_general_use(true);
+                self.value.analyze(context, block_context, artifacts)?;
+                block_context.flags.set_inside_general_use(was_inside_general_use);
+
+                let value_type = artifacts.get_expression_type(self.value).cloned().unwrap_or_else(get_mixed);
+                if !is_unpackable(&value_type) {
+                    report_unpacked_non_tuple(context, block_context, artifacts, self.value, &value_type);
+                    for variable_id in variable_ids {
+                        block_context.locals.insert(variable_id, Rc::new(wrap_atomic(TAtomic::Error)));
+                    }
+
+                    return Ok(());
+                }
+
+                Some(value_type)
+            }
+            LocalTarget::Name(_) => None,
+        };
+
         analyze_assignment(
             context,
             block_context,
@@ -412,8 +440,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LocalDeclaration<'arena> {
             Some(self.target.span().join(self.value.span())),
             target,
             None,
-            Some(self.value),
-            None,
+            unpacked_type.is_none().then_some(self.value),
+            unpacked_type,
         )?;
 
         if let Some((local_type, _)) = local_type {
@@ -437,6 +465,42 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LocalDeclaration<'arena> {
 
         Ok(())
     }
+}
+
+/// Whether `const [a, b] = value` may unpack a value of the type `value_type`: a tuple, or a value whose refusal was
+/// already reported.
+fn is_unpackable(value_type: &TUnion) -> bool {
+    value_type.types.iter().all(|atomic| match atomic {
+        TAtomic::Array(TArray::List(list)) => list.tuple_names.is_some(),
+        atomic => matches!(atomic, TAtomic::Error),
+    })
+}
+
+/// Reports `const [a, b] = value` where `value`, of the type `value_type`, is no tuple, naming the collection its place
+/// is declared as. A `List` is read by index instead, since it may hold fewer elements than the unpack names.
+fn report_unpacked_non_tuple<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+    value: &Expression<'_>,
+    value_type: &TUnion,
+) where
+    A: Arena,
+{
+    let shown = match get_declared_collection(context, block_context, artifacts, value) {
+        Some(declared) if value_type.has_null() => declared.as_nullable(),
+        Some(declared) => declared,
+        None => value_type.clone(),
+    };
+    let quoted = quoted_source(context, value.span());
+    let mut issue = Issue::error(format!("Only a tuple unpacks, and `{quoted}` is a `{}`.", display_type(context, &shown)))
+        .with_annotation(Annotation::primary(value.span()).with_message("Unpacked here."));
+    if shown.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none()))
+    {
+        issue = issue.with_help(format!("A `List` may hold fewer elements: read them by index, as in `{quoted}[0]`."));
+    }
+
+    context.collector.report_with_code(IssueCode::InvalidDestructuringSource, issue);
 }
 
 /// Binds the local `variable_id` to its written type, or unbinds it when none is written, and returns the written type
