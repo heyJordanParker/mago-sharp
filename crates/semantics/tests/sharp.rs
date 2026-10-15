@@ -1106,7 +1106,7 @@ fn an_interface_member_gives_a_default_body_checked_as_a_class_member_body() {
             "8:16 Write `this.designColumn`: members of the same object are always written with `this.`.",
             "10:29 PHP# variables have no `$`: write `label`.",
             "11:25 Write `this.designColumn`: members of the same object are always written with `this.`.",
-            "12:5 An interface property takes no modifier: its default body runs on each read."
+            "12:5 An interface property takes no modifier but `override`: its default body runs on each read."
         ]
     );
 
@@ -1663,6 +1663,8 @@ fn an_internal_accessor_is_narrower_only_than_a_public_property() {
     assert_eq!(issues(code), [error(7, 27, "set"), error(8, 28, "set"), error(9, 27, "set"), error(10, 27, "set")]);
 }
 
+/// Spec section 22: an interface method is public and takes no modifier but `override`, which a sub-interface's body
+/// writes when it replaces its parent's default body, and which the analysis checks.
 #[test]
 fn another_modifier_on_an_interface_method_is_an_error() {
     let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    static float unit();\n    virtual float area();\n    override float size();\n}\n";
@@ -1670,9 +1672,8 @@ fn another_modifier_on_an_interface_method_is_an_error() {
     assert_eq!(
         issues(code),
         [
-            "5:5 An interface method takes no modifier: every interface method is public.",
-            "6:5 An interface method takes no modifier: every interface method is public.",
-            "7:5 An interface method takes no modifier: every interface method is public."
+            "5:5 An interface method takes no modifier but `override`: every interface method is public.",
+            "6:5 An interface method takes no modifier but `override`: every interface method is public.",
         ]
     );
 }

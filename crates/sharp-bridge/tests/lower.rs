@@ -10466,7 +10466,8 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
 /// Spec section 22: a plain PHP trait is a type, and no PHP value is `instanceof` a trait. So a trait type is PHP's
 /// `object`, and its PHP# type text, as #102 writes it, makes a call from plain PHP check the argument, a `List` of it
 /// checks each element, and `is` reads it while the code runs, as the engine's test finds a trait any class up the
-/// chain uses.
+/// chain uses. A method's type parameter bounded by the trait checks a call from plain PHP against its bound, and in an
+/// intersection bound, `Greeter & HasLabel`, PHP's type is the class beside the trait.
 #[test]
 fn a_trait_type_is_object_and_its_test_reads_the_trait() {
     let lowered = Lowered::with(
@@ -10516,6 +10517,72 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
               SHARP_TYPE_ARGS
                 ZVAL [1] "bool"
                 ZVAL "Function<bool(Lib.HasLabel, List<Lib.HasLabel>, Any)>"
+              null
+        "#}
+    );
+
+    // A method's type parameter bounded by the trait checks its bound, and the trait leaves an intersection to the
+    // classes beside it.
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.HasLabel;\n\npublic interface Greeter\n{\n    string hi();\n}\n\npublic class Seeder\n{\n    public string bound<T : HasLabel>(T owner) => owner.label();\n\n    public string both<T : Greeter & HasLabel>(T owner) => owner.hi() + owner.label();\n}\n",
+        &[(
+            "src/Lib/HasLabel.php",
+            "<?php namespace Lib; trait HasLabel { public function label(): string { return 'label'; } }",
+        )],
+    );
+
+    assert_eq!(
+        [lowered.declared("bound"), lowered.declared("both")].concat(),
+        indoc! {r#"
+            METHOD [1] "bound" @12-12
+              PARAM_LIST
+                PARAM
+                  TYPE [8]
+                  ZVAL "owner"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  ZVAL "Lib.HasLabel"
+                  ZVAL "Lib.HasLabel"
+              null
+              STMT_LIST
+                RETURN
+                  METHOD_CALL
+                    VAR
+                      ZVAL "owner"
+                    ZVAL "label"
+                    ARG_LIST
+              ZVAL [1] "string"
+              null
+            METHOD [1] "both" @14-14
+              PARAM_LIST
+                PARAM
+                  ZVAL "App\\Greeter"
+                  ZVAL "owner"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  ZVAL "App.Greeter & Lib.HasLabel"
+                  ZVAL "App.Greeter & Lib.HasLabel"
+              null
+              STMT_LIST
+                RETURN
+                  BINARY_OP [8]
+                    METHOD_CALL
+                      VAR
+                        ZVAL "owner"
+                      ZVAL "hi"
+                      ARG_LIST
+                    METHOD_CALL
+                      VAR
+                        ZVAL "owner"
+                      ZVAL "label"
+                      ARG_LIST
+              ZVAL [1] "string"
               null
         "#}
     );
@@ -10834,31 +10901,128 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
             "{name}"
         );
     }
+
+    // A struct's header trait is its `use`, never an interface.
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.HasLabel;\n\npublic struct Seal : HasLabel\n{\n    public Seal(public int at { get; }) { }\n}\n",
+        &[(
+            "src/Lib/HasLabel.php",
+            "<?php namespace Lib; trait HasLabel { public function label(): string { return 'label'; } }",
+        )],
+    );
+    let seal = lowered
+        .nodes()
+        .iter()
+        .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == "Seal")
+        .expect("the source declares the struct") as u32;
+
+    assert_eq!(
+        [lowered.render(lowered.child(seal, 1)), lowered.render(lowered.child(lowered.child(seal, 2), 0))].concat(),
+        indoc! {r#"
+            NAME_LIST
+              ZVAL "Sharp\\Struct"
+            USE_TRAIT
+              NAME_LIST
+                ZVAL "Lib\\HasLabel"
+              null
+        "#}
+    );
+}
+
+/// ```php
+/// class Fancy implements \App\ShowsMore {
+///     use \App\Shows\Defaults, \App\ShowsMore\Defaults {
+///         \App\ShowsMore\Defaults::label insteadof \App\Shows\Defaults;
+///         \App\Shows\Defaults::label as protected `label@App\Shows`;
+///         \App\ShowsMore\Defaults::label as protected `label@App\ShowsMore`;
+///     }
+/// }
+/// ```
+///
+/// Spec section 22: a sub-interface's default body replaces its parent's, so the class's `use` takes it `insteadof`
+/// the parent's, which `super<Shows>` still reaches through its alias.
+#[test]
+fn a_sub_interfaces_default_body_runs_instead_of_its_parents() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic interface Shows\n{\n    string label() => \"shows\";\n}\n\npublic interface ShowsMore : Shows\n{\n    override string label() => \"more\";\n}\n\npublic class Fancy : ShowsMore\n{\n}\n",
+    );
+    let class = |name: &str| {
+        lowered
+            .nodes()
+            .iter()
+            .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == name)
+            .expect("the source declares the class") as u32
+    };
+
+    // The trait's body has no parent, so only the interface's signature carries `#[\Override]`.
+    assert_eq!(
+        [
+            lowered.render(lowered.child(lowered.child(lowered.child(class("ShowsMore"), 2), 0), 4)),
+            lowered.render(lowered.child(lowered.child(lowered.child(class("ShowsMore\\Defaults"), 2), 0), 4)),
+        ]
+        .concat(),
+        indoc! {r#"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Override"
+                  null
+            null
+        "#}
+    );
+    assert_eq!(
+        lowered.render(lowered.child(lowered.child(class("Fancy"), 2), 0)),
+        indoc! {r#"
+            USE_TRAIT
+              NAME_LIST
+                ZVAL "App\\Shows\\Defaults"
+                ZVAL "App\\ShowsMore\\Defaults"
+              TRAIT_ADAPTATIONS
+                TRAIT_PRECEDENCE
+                  METHOD_REFERENCE
+                    ZVAL "App\\ShowsMore\\Defaults"
+                    ZVAL "label"
+                  NAME_LIST
+                    ZVAL "App\\Shows\\Defaults"
+                TRAIT_ALIAS [2]
+                  METHOD_REFERENCE
+                    ZVAL "App\\Shows\\Defaults"
+                    ZVAL "label"
+                  ZVAL "label@App\\Shows"
+                TRAIT_ALIAS [2]
+                  METHOD_REFERENCE
+                    ZVAL "App\\ShowsMore\\Defaults"
+                    ZVAL "label"
+                  ZVAL "label@App\\ShowsMore"
+        "#}
+    );
 }
 
 /// Lowers, in PHP:
 ///
 /// ```php
-/// interface Tagged { public $tag { get; } }
+/// interface Tagged { public mixed $tag { get; } }
 /// trait Tagged\Defaults { protected function `tag@App\Tagged`(): string { return 'tagged'; } }
 /// final class Note implements \App\Tagged {
 ///     use \App\Tagged\Defaults;
-///     public $tag { get => $this->{'tag@App\Tagged'}(); }
+///     public mixed $tag { get => $this->{'tag@App\Tagged'}(); }
 /// }
-/// final class Own implements \App\Tagged { use \App\Tagged\Defaults; public $tag { get => 'own'; } }
+/// final class Own implements \App\Tagged { use \App\Tagged\Defaults; public string $tag { get => 'own'; } }
+/// final class Kept implements \App\Tagged { use \App\Tagged\Defaults; public string $tag = 'kept'; }
 /// interface Keyed { public function key(): mixed; }
 /// trait Keyed\Defaults { /* header App.Keyed<$0> */ public function holds(mixed $value): bool { … } }
 /// ```
 ///
-/// Spec section 22: an interface's computed property is `[1]` `ZEND_ACC_PUBLIC` with an abstract `get` and no PHP type
-/// in the interface, and its default body is the trait's `[2]` `ZEND_ACC_PROTECTED` method, which keeps the type. Each
-/// class that gets the body declares the property, running that method, after its `use`, and a class that overrides it
-/// declares its own, with no PHP type either. A generic interface's trait names the interface with its type parameters
+/// Spec section 22: an interface's computed property is `[1]` `ZEND_ACC_PUBLIC` `mixed` with an abstract `get` in the
+/// interface, and its default body is the trait's `[2]` `ZEND_ACC_PROTECTED` method, which keeps the type. Each class
+/// that gets the body declares the `mixed` property, running that method, after its `use`, and a class that overrides
+/// it, computed or stored, declares its own with its type, as a `get` hook narrows a `mixed` one. A generic interface's
+/// trait names the interface with its type parameters
 /// as its header, so the engine counts a default body's `$0` among the interface's type arguments.
 #[test]
 fn an_interface_computed_property_runs_its_default_body_through_a_protected_method_of_the_trait() {
     let lowered = Lowered::new(
-        "namespace App;\n\npublic interface Tagged\n{\n    string tag => \"tagged\";\n}\n\npublic class Note : Tagged\n{\n}\n\npublic class Own : Tagged\n{\n    public override string tag => \"own\";\n}\n\npublic interface Keyed<TKey>\n{\n    TKey key();\n\n    bool holds(Any value) => value is TKey;\n}\n",
+        "namespace App;\n\npublic interface Tagged\n{\n    string tag => \"tagged\";\n}\n\npublic class Note : Tagged\n{\n}\n\npublic class Own : Tagged\n{\n    public override string tag => \"own\";\n}\n\npublic class Kept : Tagged\n{\n    public override string tag { get; set; } = \"kept\";\n}\n\npublic interface Keyed<TKey>\n{\n    TKey key();\n\n    bool holds(Any value) => value is TKey;\n}\n",
     );
     let class = |name: &str| {
         lowered
@@ -10874,13 +11038,14 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
             lowered.render(lowered.child(class("Tagged\\Defaults"), 2)),
             lowered.render(lowered.child(class("Note"), 2)),
             lowered.render(lowered.child(lowered.child(class("Own"), 2), 1)),
+            lowered.render(lowered.child(lowered.child(class("Kept"), 2), 1)),
             lowered.render(lowered.child(lowered.child(class("Keyed\\Defaults"), 2), 1)),
         ]
         .concat(),
         indoc! {r#"
             STMT_LIST
               PROP_GROUP [1]
-                null
+                ZVAL [1] "mixed"
                 PROP_DECL
                   PROP_ELEM
                     ZVAL "tag"
@@ -10909,7 +11074,7 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
                   ZVAL "App\\Tagged\\Defaults"
                 null
               PROP_GROUP [1]
-                null
+                ZVAL [1] "mixed"
                 PROP_DECL
                   PROP_ELEM
                     ZVAL "tag"
@@ -10929,7 +11094,7 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
                         null
                 null
             PROP_GROUP [1]
-              null
+              ZVAL [1] "string"
               PROP_DECL
                 PROP_ELEM
                   ZVAL "tag"
@@ -10943,6 +11108,19 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
                         ZVAL "own"
                       null
                       null
+              ATTRIBUTE_LIST
+                ATTRIBUTE_GROUP
+                  ATTRIBUTE
+                    ZVAL "Override"
+                    null
+            PROP_GROUP [1]
+              ZVAL [1] "string"
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "tag"
+                  ZVAL "kept"
+                  null
+                  null
               ATTRIBUTE_LIST
                 ATTRIBUTE_GROUP
                   ATTRIBUTE

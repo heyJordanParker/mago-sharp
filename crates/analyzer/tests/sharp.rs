@@ -1384,11 +1384,12 @@ fn a_header_trait_gives_the_class_its_members_and_its_type_as_use_does_in_php() 
     );
 }
 
-/// A header trait may stand alone or come before the base class, and an enum's header may name a trait without
-/// fields, as an enum's `use` does: a trait works everywhere an interface does, spec section 22.
+/// A header trait may stand alone or come before the base class, an enum's header may name a trait without fields, as
+/// an enum's `use` does, and a struct's and an event's headers name one too: a trait works everywhere an interface
+/// does, spec section 22.
 #[test]
 fn a_header_trait_stands_anywhere_in_a_class_header_and_in_an_enum_header() {
-    let sharp = "namespace Demo;\n\nimport Lib.Entity;\nimport Lib.HasTitle;\n\npublic class Alone : HasTitle\n{\n}\n\npublic class First : HasTitle, Entity\n{\n    public string shown() => this.describe() + this.kind();\n}\n\npublic enum Kind : HasTitle\n{\n    case One;\n\n    public string shown() => this.describe();\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Entity;\nimport Lib.HasLabel;\nimport Lib.HasTitle;\n\npublic class Alone : HasTitle\n{\n}\n\npublic class First : HasTitle, Entity\n{\n    public string shown() => this.describe() + this.kind();\n}\n\npublic enum Kind : HasTitle\n{\n    case One;\n\n    public string shown() => this.describe();\n}\n\npublic struct Stamp : HasLabel\n{\n    public Stamp(public int at { get; }) { }\n\n    public string shown() => this.describe();\n}\n\npublic event Copied(int id) : HasTitle;\n";
     let library = "<?php\n\nnamespace Lib;\n\nclass Entity\n{\n    public function kind(): string\n    {\n        return 'entity';\n    }\n}\n";
 
     assert_eq!(
@@ -1398,6 +1399,16 @@ fn a_header_trait_stands_anywhere_in_a_class_header_and_in_an_enum_header() {
         ),
         Vec::<String>::new()
     );
+}
+
+/// Spec section 22: a generic plain PHP trait takes its type arguments in a header, as `@use HasFactory<OrderFactory>`
+/// gives them, and its methods return them.
+#[test]
+fn a_generic_header_trait_takes_its_type_arguments() {
+    let library = "<?php\n\nnamespace Lib;\n\nabstract class Model {}\n\nclass Factory {}\n\nclass OrderFactory extends Factory {}\n\n/**\n * @template TFactory of Factory\n */\ntrait HasFactory\n{\n    /** @return TFactory */\n    public static function factory()\n    {\n        throw new \\LogicException('stub');\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.HasFactory;\nimport Lib.Model;\nimport Lib.OrderFactory;\n\npublic class Order : Model, HasFactory<OrderFactory>\n{\n    public static OrderFactory make() => Order.factory();\n}\n";
+
+    assert_eq!(messages(("src/Demo/Order.sharp", sharp), &[("src/Lib/HasFactory.php", library)]), Vec::<String>::new());
 }
 
 /// A header trait's abstract method the class leaves out, one whose arity differs from another trait's, and a trait
@@ -1539,6 +1550,73 @@ fn a_class_that_gets_one_method_from_two_places_writes_it() {
             "`Beside` gets `describe` from both `Base` and `Described`: write `describe` in `Beside`.",
             "`Tags` gets `tag` from both `Labelled` and `Tagged`: write `tag` in `Tags`.",
             "`TagBeside` gets `tag` from both `TagBase` and `Tagged`: write `tag` in `TagBeside`.",
+        ]
+    );
+
+    // A header trait replaces the base class's method, as PHP's `use` does, and Laravel's `SoftDeletes` and
+    // `HasUniqueStringIds` replace `Model`'s. A header trait's property beside a default body is two places.
+    let library = "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public function forceDelete() { return 'model force'; }\n    protected function performDeleteOnModel() { return 'model delete'; }\n    public function getKeyType() { return 'int'; }\n    public function getIncrementing() { return true; }\n}\n\ntrait SoftDeletes\n{\n    public function forceDelete() { return 'soft force'; }\n    protected function performDeleteOnModel() { return 'soft delete'; }\n}\n\ntrait HasUniqueStringIds\n{\n    public function getKeyType() { return 'string'; }\n    public function getIncrementing() { return false; }\n}\n\ntrait HasTag\n{\n    public string $tag = 'trait tag';\n}\n";
+    let laravel = "namespace Demo;\n\nimport Lib.HasTag;\nimport Lib.HasUniqueStringIds;\nimport Lib.Model;\nimport Lib.SoftDeletes;\n\npublic class Post : Model, SoftDeletes, HasUniqueStringIds\n{\n}\n\npublic interface Labelled\n{\n    string tag => \"interface tag\";\n}\n\npublic class TagClash : HasTag, Labelled\n{\n}\n";
+    let library = [("src/Lib/Model.php", library)];
+
+    assert_eq!(
+        messages(("src/Demo/Post.sharp", laravel), &library),
+        ["`TagClash` gets `tag` from both `Labelled` and `HasTag`: write `tag` in `TagClash`."]
+    );
+}
+
+/// Spec section 22: a sub-interface replaces its parent's default body with `override`, as a class replaces a method,
+/// and the most specific interface's body wins, as in Java, C# and Kotlin. Giving an abstract parent method a body takes
+/// no `override`.
+#[test]
+fn a_sub_interface_replaces_its_parents_default_body_with_override() {
+    let sharp = "namespace Demo;\n\npublic interface Shows\n{\n    string label() => \"shows\";\n}\n\npublic interface ShowsMore : Shows\n{\n    override string label() => \"more\";\n}\n\npublic interface ShowsLess : Shows\n{\n    string label() => \"less\";\n}\n\npublic interface Named\n{\n    string name();\n}\n\npublic interface DefaultNamed : Named\n{\n    string name() => \"default\";\n}\n\npublic class Fancy : ShowsMore\n{\n    public string again() => super<Shows>.label() + super<ShowsMore>.label();\n}\n\npublic class Listed : ShowsMore, Shows\n{\n}\n\npublic class Person : DefaultNamed\n{\n}\n\npublic static class Uses\n{\n    public static string fancy() => new Fancy().label();\n}\n";
+
+    assert_eq!(issues(("src/Demo/Shows.sharp", sharp), &[]), ["15:12 missing-override-attribute"]);
+}
+
+/// Spec section 22: PHP# code never names an interface's trait of default bodies, so an import, a header and a test
+/// that name `Greets.Defaults` are each an error.
+#[test]
+fn sharp_code_never_names_the_trait_of_default_bodies() {
+    let sharp = "namespace Probe;\n\nimport Probe.Greets.Defaults;\n\npublic interface Greets\n{\n    string greet() => \"hello\";\n}\n\npublic class Sneaky : Defaults\n{\n    public static bool marked(Any value) => value is Defaults;\n}\n";
+
+    assert_eq!(
+        issues(("src/Probe/Greets.sharp", sharp), &[]),
+        ["3:8 invalid-trait-use", "10:23 invalid-trait-use", "12:54 invalid-trait-use"]
+    );
+    assert_eq!(
+        messages(("src/Probe/Greets.sharp", sharp), &[])[0],
+        "`Greets.Defaults` holds the default bodies of `Greets`, which PHP# code never names: implement `Greets`."
+    );
+}
+
+/// Spec sections 20 and 22: an enum has no property, as PHP gives an enum none, so it implements no interface that
+/// gives a computed property a default body, and an interface's default methods are its methods.
+#[test]
+fn an_enum_gets_no_computed_property_from_a_default_body() {
+    let sharp = "namespace Demo;\n\npublic interface Tagged\n{\n    string tag => \"t\";\n\n    string label() => \"l\";\n}\n\npublic enum Mood : Tagged\n{\n    case Calm;\n}\n\npublic enum Verdict : Tagged\n{\n    case Pending;\n    case Ruled(string by);\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Tagged.sharp", sharp), &[]),
+        [
+            "Enum `Mood` cannot have properties, and `Tagged` gives it the computed property `tag`.",
+            "Enum `Verdict` cannot have properties, and `Tagged` gives it the computed property `tag`.",
+        ]
+    );
+}
+
+/// Spec section 22: `super.name()` and `super<Told>.describe()` run a method on `this`, so a static method, which has
+/// no `this`, calls neither, and a static `super.make()` still runs the base class's static method.
+#[test]
+fn a_static_method_calls_no_instance_method_through_super() {
+    let sharp = "namespace Demo;\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Ancestor\n{\n    public virtual string name() => \"parent\";\n\n    public static string make() => \"made\";\n}\n\npublic class Heir : Ancestor, Told\n{\n    public static string again() => super.name();\n\n    public static string told() => super<Told>.describe();\n\n    public static string remake() => super.make();\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Heir.sharp", sharp), &[]),
+        [
+            "`Ancestor.name` runs on `this`, and a static method has no `this`.",
+            "`Told.describe` runs on `this`, and a static method has no `this`.",
         ]
     );
 }
@@ -17892,7 +17970,7 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
     assert_eq!(
         worded(based, &ORDER_EVENTS),
         [
-            "7:30 invalid-event An event's header names interfaces only, and `Base` is not one. | Named here. | No event extends another: a family of events shares an interface."
+            "7:30 invalid-event An event's header names interfaces and traits only, and `Base` is neither. | Named here. | No event extends another: a family of events shares an interface."
         ]
     );
     assert_eq!(messages(twice, &ORDER_EVENTS), ["Event `Moved` is already defined elsewhere."]);

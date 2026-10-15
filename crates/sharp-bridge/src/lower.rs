@@ -214,6 +214,7 @@ use crate::sharp_kind::SHARP_AST_STMT_LIST;
 use crate::sharp_kind::SHARP_AST_THROW;
 use crate::sharp_kind::SHARP_AST_TRAIT_ADAPTATIONS;
 use crate::sharp_kind::SHARP_AST_TRAIT_ALIAS;
+use crate::sharp_kind::SHARP_AST_TRAIT_PRECEDENCE;
 use crate::sharp_kind::SHARP_AST_TRY;
 use crate::sharp_kind::SHARP_AST_TYPE;
 use crate::sharp_kind::SHARP_AST_TYPE_INTERSECTION;
@@ -842,8 +843,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// A struct is a final class, spec section 10, whose members are a class's, with its header and `\Sharp\Struct`
-    /// as its interface list and, unless it declares `operator ==`, the `op_Equality` that compares it by value, as
+    /// A struct is a final class, spec section 10, whose members are a class's, with its header's interfaces and
+    /// `\Sharp\Struct` as its interface list, its header's traits as its `use`, and, unless it declares `operator ==`, the `op_Equality` that compares it by value, as
     /// php-src's grammar builds
     /// `final class Username implements \App\HasLabel, \Sharp\Struct`. The engine lets only a `.sharp` class implement
     /// `\Sharp\Struct`, and hashes a `Map` key or a `Set` element by its fields only for one that does.
@@ -869,8 +870,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
         let attributes = self.attributes(&r#struct.attribute_lists, None, None);
         let mut interfaces = Vec::new();
+        // A header trait is the `use` above, spec section 22.
         for name in r#struct.inheritance.iter().flat_map(Inheritance::names) {
-            interfaces.push(self.string(ZEND_NAME_FQ, self.line(name), self.names.get(&name)));
+            let full_name = self.names.get(&name);
+            if self.types.class_declaration(full_name).kind != DeclarationKind::Trait {
+                interfaces.push(self.string(ZEND_NAME_FQ, self.line(name), full_name));
+            }
         }
         let line = self.line(r#struct.name.span);
         interfaces.push(self.string(ZEND_NAME_FQ, line, b"Sharp\\Struct"));
@@ -1907,17 +1912,28 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let names: Vec<u32> = traits.iter().map(|name| self.string(ZEND_NAME_FQ, line, name.as_bytes())).collect();
         let names = self.node(SHARP_AST_NAME_LIST, 0, line, &names);
         let mut adaptations = Vec::new();
-        for (defaults, interface, method) in self.types.default_bodies(self.class) {
-            let defaults = self.string(ZEND_NAME_FQ, line, defaults.as_bytes());
-            let name = self.string(0, line, method.as_bytes());
-            let reference = self.node(SHARP_AST_METHOD_REFERENCE, 0, line, &[defaults, name]);
+        for (defaults, interface, method, replacing) in self.types.default_bodies(self.class) {
+            let reference = |lowering: &mut Self, defaults: Word| {
+                let defaults = lowering.string(ZEND_NAME_FQ, line, defaults.as_bytes());
+                let name = lowering.string(0, line, method.as_bytes());
+
+                lowering.node(SHARP_AST_METHOD_REFERENCE, 0, line, &[defaults, name])
+            };
+            // A sub-interface's body replaces this one, `ShowsMore\Defaults::label insteadof Shows\Defaults`.
+            if let Some(replacing) = replacing {
+                let winner = reference(self, replacing);
+                let replaced = self.string(ZEND_NAME_FQ, line, defaults.as_bytes());
+                let replaced = self.node(SHARP_AST_NAME_LIST, 0, line, &[replaced]);
+                adaptations.push(self.node(SHARP_AST_TRAIT_PRECEDENCE, 0, line, &[winner, replaced]));
+            }
+            let reference = reference(self, defaults);
             let alias = self.string(0, line, &super_alias(interface, method));
             adaptations.push(self.node(SHARP_AST_TRAIT_ALIAS, ZEND_ACC_PROTECTED, line, &[reference, alias]));
         }
         let adaptations =
             if adaptations.is_empty() { NULL } else { self.node(SHARP_AST_TRAIT_ADAPTATIONS, 0, line, &adaptations) };
         let mut members = vec![self.node(SHARP_AST_USE_TRAIT, 0, line, &[names, adaptations])];
-        for (property, interface) in self.types.default_properties(self.class) {
+        for (property, interface) in self.types.default_body_properties(self.class) {
             let name = property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes());
             let this = self.variable(span, b"this");
             let method = self.string(0, line, &super_alias(interface, word(name)));
@@ -1945,19 +1961,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
     }
 
-    /// A computed property with a default body, spec section 22: in its interface, `public $designKey { get; }`, and in
-    /// a class that gets the body, `body`, `public $designKey { get => $this->{'designKey@App\HasDesign'}(); }`, which
-    /// runs the trait's method that holds it. It has no PHP type, since the class's file has none to write, so an
-    /// override of either may write any, and the trait's method checks the value the body gives.
+    /// A computed property with a default body, spec section 22: in its interface, `public mixed $designKey { get; }`,
+    /// and in a class that gets the body, `body`, `public mixed $designKey { get => $this->{'designKey@App\HasDesign'}(); }`,
+    /// which runs the trait's method that holds it. Its PHP type is `mixed`, since the class's file has no type to
+    /// write, so an override, or a plain PHP class, writes the property with its own type, as a `get` hook narrows it,
+    /// and the trait's method checks the value the body gives.
     fn defaulted_property(&mut self, name: &[u8], span: Span, body: u32) -> u32 {
         let line = self.line(span);
+        let hint = self.php_type(&PhpType::Mixed, line);
         let name = self.string(0, line, name);
         let hook = self.hook(b"get", span, span, NULL, body);
         let hooks = self.node(SHARP_AST_STMT_LIST, 0, line, &[hook]);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
 
-        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[NULL, declaration, NULL])
+        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
     }
 
     /// An event is a final class, whose constructor promotes each parameter to a `public readonly` property, with its
@@ -2257,7 +2275,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.function_type(return_type, function_type, self.line(start))
         };
         self.static_type_parameters = None;
-        let r#override = method.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
+        // A sub-interface's body that replaces its parent's default body runs as a method of its trait of default
+        // bodies, which has no parent, so only the interface's signature carries `#[\Override]`.
+        let r#override =
+            method.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_))).filter(|_| {
+                first_statements.is_none()
+                    || self.types.class_declaration(self.class).kind != DeclarationKind::Interface
+            });
         let attributes = self.attributes(&method.attribute_lists, r#override, None);
 
         self.declaration(
@@ -2963,8 +2987,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             {
                 NULL
             }
-            // A computed property's default body runs as a property with no PHP type, spec section 22.
-            (Some(_), _) if self.types.has_default_property(self.class, variable.name) => NULL,
             _ => self.hint(hint),
         };
         let line = self.line(variable);
@@ -3772,7 +3794,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// value as its class-name string (spec section 25). A function type runs as PHP's `\Closure`. A type parameter is
     /// its bound, or `mixed` without one, as the PHP twin written with `@template` declares it, and the classes a bound
     /// joins with `&` are one intersection. A plain PHP trait is `object`, because no value is `instanceof` a trait, and
-    /// its PHP# type text checks it, spec section 22.
+    /// its PHP# type text checks it, spec section 22: in an intersection it leaves PHP's type to the classes beside it.
     fn erase<'hint>(&self, hint: &'hint Hint<'_>) -> PhpType<'hint>
     where
         'arena: 'hint,
@@ -3797,16 +3819,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 _ => PhpType::Classes(vec![self.names.get(name)]),
             },
-            Hint::Intersection(intersection) => {
-                let (PhpType::Classes(mut classes), PhpType::Classes(right)) =
-                    (self.erase(intersection.left), self.erase(intersection.right))
-                else {
-                    unreachable!("check_slice joins only classes with `&`");
-                };
-                classes.extend(right);
+            // A plain PHP trait leaves the intersection, and the PHP# type text checks it.
+            Hint::Intersection(intersection) => match (self.erase(intersection.left), self.erase(intersection.right)) {
+                (PhpType::Classes(mut classes), PhpType::Classes(right)) => {
+                    classes.extend(right);
 
-                PhpType::Classes(classes)
-            }
+                    PhpType::Classes(classes)
+                }
+                (classes @ PhpType::Classes(_), PhpType::Keyword(IS_OBJECT))
+                | (PhpType::Keyword(IS_OBJECT), classes @ (PhpType::Classes(_) | PhpType::Keyword(IS_OBJECT))) => {
+                    classes
+                }
+                _ => unreachable!("check_slice joins only classes and traits with `&`"),
+            },
             Hint::Self_(_) => PhpType::Keyword(IS_STATIC),
             Hint::Generic(generic) if built_in_generic_arity(generic.name.value).is_none() => {
                 PhpType::Classes(vec![self.names.get(&generic.name)])
@@ -6386,7 +6411,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         (self.string(ZEND_NAME_FQ, line, full_name), vec![full_name])
     }
 
-    /// `super<HasLabel>.label()`, spec section 22: a call on `$this` of the private alias of the `HasLabel\Defaults`
+    /// `super<HasLabel>.label()`, spec section 22: a call on `$this` of the protected alias of the `HasLabel\Defaults`
     /// method that the class's `use` declares, `$this->{'label@App\HasLabel'}()`, as PHP runs a trait's method that the
     /// class replaced only through an alias.
     fn super_of_call(&mut self, expression: &Expression, call: &MethodCall) -> u32 {
@@ -6987,7 +7012,7 @@ fn is_current_position(class: &[u8], call: &MethodCall) -> bool {
         && call.argument_list.arguments.is_empty()
 }
 
-/// The name of the private alias a class gives the default body of `method` that `interface` gives, spec section 22,
+/// The name of the protected alias a class gives the default body of `method` that `interface` gives, spec section 22,
 /// as `label@App\HasLabel`. No PHP# member name holds `@`, so it can't clash with one.
 fn super_alias(interface: Word, method: Word) -> Vec<u8> {
     [method.as_bytes(), b"@", interface.as_bytes()].concat()

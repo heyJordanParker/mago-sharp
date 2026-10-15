@@ -778,14 +778,15 @@ where
         .iter()
         .flat_map(|inheritance| inheritance.types.iter())
         .filter_map(|type_name| Some((type_name, codebase.get_class_like(context.resolved_names.get(type_name))?)))
-        .filter(|(_, named)| !named.kind.is_interface())
+        // A plain PHP trait works everywhere an interface does, spec section 22.
+        .filter(|(_, named)| !named.kind.is_interface() && !named.kind.is_trait())
         .collect();
 
     for (type_name, named) in &named_class_likes {
         context.collector.report_with_code(
             IssueCode::InvalidEvent,
             Issue::error(format!(
-                "An event's header names interfaces only, and `{}` is not one.",
+                "An event's header names interfaces and traits only, and `{}` is neither.",
                 display_class_like_name(context, named.original_name)
             ))
             .with_annotation(Annotation::primary(type_name.span()).with_message("Named here."))
@@ -5554,10 +5555,11 @@ fn check_readonly_class_trait_properties<'ctx, 'arena, A>(
 }
 
 /// Spec section 22 gives a class one method per name. Reports each method that two places give a PHP# class-like a
-/// body for, among its header traits, the traits of its interfaces' default bodies and its base class, unless the
-/// class writes the method itself. PHP refuses two traits' bodies for one method, and runs a trait's body over the base
-/// class's, so neither can stand for the class's one method. A computed property two places give a body for, two
-/// interfaces' default bodies or one and the base class's property, is reported alike.
+/// body for, unless the class writes the method itself: two of its header traits and the traits of its interfaces'
+/// default bodies, which PHP refuses, or a default body and the base class, whose body PHP would replace. A header
+/// trait replaces the base class's method, as PHP's `use` does. A computed property's default body beside another
+/// default body, a header trait's property or the base class's property is reported alike, and an enum, which has no
+/// property, gets none.
 fn check_members_given_twice<A>(
     context: &mut Context<'_, '_, A>,
     class_like_metadata: &ClassLikeMetadata,
@@ -5597,13 +5599,35 @@ fn check_members_given_twice<A>(
             continue;
         }
 
-        let mut givers = Vec::new();
+        let mut bodies = Vec::new();
         let mut original_name = method;
-        for giver in parent.into_iter().chain(traits.iter().copied()) {
+        for giver in traits.iter().copied() {
             if let Some(body) = has_body(giver, method) {
                 original_name = body.original_name;
-                givers.push(context.codebase.get_defaults_interface(giver).unwrap_or(giver).original_name);
+                bodies.push(
+                    context
+                        .codebase
+                        .get_defaults_interface(giver)
+                        .map_or((giver, false), |interface| (interface, true)),
+                );
             }
+        }
+        let gives_default = bodies.iter().any(|(_, default)| *default);
+        // A sub-interface's default body replaces its parent's, as the most specific interface's does in Java, C# and
+        // Kotlin.
+        let mut givers: Vec<Word> = bodies
+            .iter()
+            .filter(|(giver, default)| {
+                !*default
+                    || !bodies.iter().any(|(other, other_default)| {
+                        *other_default && other.all_parent_interfaces.contains(&giver.name)
+                    })
+            })
+            .map(|(giver, _)| giver.original_name)
+            .collect();
+        // The base class's body counts only against a default body: a header trait replaces it, as PHP's `use` does.
+        if gives_default && let Some(parent) = parent.filter(|parent| has_body(parent, method).is_some()) {
+            givers.insert(0, parent.original_name);
         }
 
         let [first, second, ..] = givers.as_slice() else {
@@ -5620,34 +5644,76 @@ fn check_members_given_twice<A>(
         );
     }
 
-    // A computed property's default body is a body too, and the base class's property is one.
-    let mut properties: Vec<(Word, Word)> = traits
+    // A computed property's default body is a body too, and against one, a header trait's property and the base
+    // class's property are each one.
+    let mut properties: Vec<(Word, &ClassLikeMetadata, bool)> = traits
         .iter()
-        .filter_map(|defaults| context.codebase.get_defaults_interface(defaults))
-        .flat_map(|interface| {
-            interface
+        .flat_map(|giver| {
+            let interface = context.codebase.get_defaults_interface(giver);
+            let owner = interface.unwrap_or(giver);
+            owner
                 .properties
                 .iter()
-                .filter(|(_, property)| property.hooks.values().any(|accessor| !accessor.is_abstract))
-                .map(|(name, _)| (*name, interface.original_name))
+                .filter(move |(_, property)| {
+                    interface.is_none() || property.hooks.values().any(|accessor| !accessor.is_abstract)
+                })
+                .map(move |(name, _)| (*name, owner, interface.is_some()))
         })
         .collect();
     properties.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     for given in properties.chunk_by(|left, right| left.0 == right.0) {
         let name = given[0].0;
-        if class_like_metadata.declaring_property_ids.get(&name) == Some(&class_like_metadata.name) {
+        if !given.iter().any(|(_, _, default)| *default)
+            || class_like_metadata.declaring_property_ids.get(&name) == Some(&class_like_metadata.name)
+        {
             continue;
         }
+        let property = mago_bytes::BytesDisplay(mago_bytes::trim_start_byte(name.as_bytes(), b'$'));
+        // An enum has no property, its own or a default body's, as PHP gives an enum none. An enum with a case that
+        // carries data runs as the class its cases extend.
+        if class_like_metadata.kind.is_enum()
+            || class_like_metadata.permitted_inheritors.iter().flatten().any(|inheritor| {
+                context
+                    .codebase
+                    .get_class_like(inheritor.as_bytes())
+                    .is_some_and(|case| case.flags.is_enum_case_class())
+            })
+        {
+            let Some((_, interface, _)) = given.iter().find(|(_, _, default)| *default) else {
+                unreachable!("the group holds a default body");
+            };
+            let interface = display_class_like_name(context, interface.original_name);
+            context.collector.report_with_code(
+                IssueCode::InvalidImplement,
+                Issue::error(format!(
+                    "Enum `{class_name}` cannot have properties, and `{interface}` gives it the computed property `{property}`."
+                ))
+                .with_annotation(Annotation::primary(name_span).with_message(format!("`{class_name}` gets `{property}` here.")))
+                .with_help(format!("Make `{property}` a method of `{interface}`, or implement `{interface}` in a class.")),
+            );
+
+            continue;
+        }
+        // A sub-interface's default body replaces its parent's here too.
         let givers: Vec<Word> = parent
             .filter(|parent| parent.properties.contains_key(&name))
             .map(|parent| parent.original_name)
             .into_iter()
-            .chain(given.iter().map(|(_, interface)| *interface))
+            .chain(
+                given
+                    .iter()
+                    .filter(|(_, giver, default)| {
+                        !*default
+                            || !given.iter().any(|(_, other, other_default)| {
+                                *other_default && other.all_parent_interfaces.contains(&giver.name)
+                            })
+                    })
+                    .map(|(_, giver, _)| giver.original_name),
+            )
             .collect();
         let [first, second, ..] = givers.as_slice() else {
             continue;
         };
-        let property = mago_bytes::BytesDisplay(mago_bytes::trim_start_byte(name.as_bytes(), b'$'));
         let (first, second) = (display_class_like_name(context, *first), display_class_like_name(context, *second));
         context.collector.report_with_code(
             IssueCode::AmbiguousInheritedMember,

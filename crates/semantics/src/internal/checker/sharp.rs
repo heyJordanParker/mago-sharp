@@ -814,9 +814,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // Spec section 22: a computed property's expression is its default body, as a method's body is, and runs on
         // each read of the object it is read on, so an interface property takes no `static` or `lazy`.
         (Node::ClassLikeMember(ClassLikeMember::Property(Property::Computed(property))), Interface) => {
-            for modifier in property.modifiers.iter().filter(|modifier| !modifier.is_visibility()) {
+            for modifier in property
+                .modifiers
+                .iter()
+                .filter(|modifier| !modifier.is_visibility() && !matches!(modifier, Modifier::Override(_)))
+            {
                 context.report(
-                    Issue::error("An interface property takes no modifier: its default body runs on each read.")
+                    Issue::error("An interface property takes no modifier but `override`: its default body runs on each read.")
                         .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier.")),
                 );
             }
@@ -857,9 +861,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // Spec section 22: a sub-interface's body replaces its parent's default body with `override`.
+        (Node::Modifier(Modifier::Override(_)), Signature) => None,
         (Node::Modifier(modifier), Signature) => {
             context.report(
-                Issue::error("An interface method takes no modifier: every interface method is public.")
+                Issue::error("An interface method takes no modifier but `override`: every interface method is public.")
                     .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier.")),
             );
 

@@ -198,6 +198,16 @@ where
                 report_non_static_access(context, &method.method_identifier, method_span);
                 return (true, None);
             }
+            // PHP# runs `super.name()`, `super<HasLabel>.label()` and `Self.name()` on `this`, which a static method
+            // has none of. The call keeps the method's type.
+            if !method.is_static && context.dialect.is_sharp() && block_context.scope.is_static() {
+                report_instance_call_without_this(
+                    context,
+                    defining_class_metadata,
+                    &method.method_identifier,
+                    method_span,
+                );
+            }
 
             if !from_instance
                 && !is_relative
@@ -728,6 +738,32 @@ where
             .with_help(format!(
                 "To call this method, you must first create an instance of the class (e.g., `{instance_call}`)."
             )),
+    );
+}
+
+/// Spec section 22: a static method of a PHP# class calls an instance method of its own class or a parent, or an
+/// interface's default body, which runs on `this`.
+fn report_instance_call_without_this<A>(
+    context: &mut Context<'_, '_, A>,
+    defining_class: &ClassLikeMetadata,
+    method_id: &MethodIdentifier,
+    span: Span,
+) where
+    A: Arena,
+{
+    // A default body is a method of its interface's trait, which PHP# code never names.
+    let class = context.codebase.get_defaults_interface(defining_class).unwrap_or(defining_class);
+    let method = display_member(
+        context,
+        display_class_like_name(context, class.original_name),
+        display_method_name(context, method_id.get_class_name(), method_id.get_method_name()),
+    );
+
+    context.collector.report_with_code(
+        IssueCode::InvalidStaticMethodAccess,
+        Issue::error(format!("`{method}` runs on `this`, and a static method has no `this`."))
+            .with_annotation(Annotation::primary(span).with_message("Called here."))
+            .with_help("Make the calling method an instance method, or call the method on an object."),
     );
 }
 

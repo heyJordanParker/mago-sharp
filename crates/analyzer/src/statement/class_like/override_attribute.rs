@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_codex::defaults_trait_name;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
@@ -13,6 +14,7 @@ use mago_span::HasSpan;
 use mago_syntax::cst::Attribute;
 use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Property;
 use mago_text_edit::TextEdit;
@@ -137,9 +139,26 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             continue;
         };
 
+        // Spec section 22: a sub-interface's body that replaces a parent interface's default body takes `override`, as
+        // a class's replacement does.
+        let replaces_default_body = |parent_method_id: &MethodIdentifier| {
+            metadata.kind.is_interface()
+                && !matches!(method.body, MethodBody::Abstract(_))
+                && context
+                    .codebase
+                    .get_interface(parent_method_id.get_class_name().as_bytes())
+                    .and_then(|parent| {
+                        context.codebase.get_trait(defaults_trait_name(parent.original_name.as_bytes()).as_bytes())
+                    })
+                    .is_some_and(|defaults| {
+                        defaults.declaring_method_ids.contains_key(&parent_method_id.get_method_name())
+                    })
+        };
+
         // Spec section 22: implementing an abstract interface method replaces no body, so it takes no `override`.
         if is_sharp
             && let Some(override_span) = override_span
+            && !parent_class_names.values().any(replaces_default_body)
             && let Some(interface_method) = parent_class_names.values().find(|parent_method_id| {
                 context
                     .codebase
@@ -183,7 +202,9 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             context
                 .codebase
                 .get_class_like(parent_method_id.get_class_name().as_bytes())
-                .filter(|parent_metadata| !is_sharp || !parent_metadata.kind.is_interface())
+                .filter(|parent_metadata| {
+                    !is_sharp || !parent_metadata.kind.is_interface() || replaces_default_body(parent_method_id)
+                })
                 .filter(|_| {
                     !context
                         .codebase
