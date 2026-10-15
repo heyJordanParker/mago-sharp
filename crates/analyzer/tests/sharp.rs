@@ -16193,6 +16193,24 @@ fn a_method_value_of_a_prelude_method_is_pure() {
     assert_eq!(effect_issues(&[shelf]), Vec::<String>::new());
 }
 
+/// A method value of a `foreign` class has that class's effect wherever it runs, as a call of the method has, so a law
+/// that runs `environment.require` through a `uses f` parameter is impure.
+#[test]
+fn a_method_value_of_a_foreign_class_has_its_effect_where_it_runs() {
+    let shelf = (
+        "app/Shop/Shelf.sharp",
+        "namespace App.Shop;\n\npublic class Shelf\n{\n    public Shelf(private Environment environment) { }\n\n    public static string carried(Function<string(string)> body) uses body => body(\"HOME\");\n\n    public string home => Shelf.carried(this.environment.require);\n\n    law reads(Shelf shelf) => shelf.home != \"\";\n}\n",
+    );
+
+    assert_eq!(issues(shelf, &[ENVIRONMENT]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[shelf, ENVIRONMENT]),
+        [
+            "app/Shop/Shelf.sharp:11:31 impure-law: Law `reads` reaches `Shelf.home`, which calls `Environment.require` with the effect `Environment`. Laws hold only over pure code.",
+        ]
+    );
+}
+
 /// A conditional may give either branch, so each lambda in it is held to the place's function type, whichever branch
 /// holds it and whatever the other branch holds.
 #[test]

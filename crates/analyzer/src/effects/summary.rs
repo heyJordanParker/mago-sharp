@@ -194,44 +194,14 @@ pub(crate) fn record_function_values<A>(
             _ => None,
         };
         let runs = match source {
-            Some(FunctionLikeIdentifier::Closure(name)) => Runs::Body(Body::Lambda(name)),
+            Some(FunctionLikeIdentifier::Closure(name)) => Some(Runs::Body(Body::Lambda(name))),
             Some(FunctionLikeIdentifier::Method(class, method)) => {
-                let Some(declaring_class) = codebase.get_declaring_method_class(class.as_bytes(), method.as_bytes())
-                else {
-                    continue;
-                };
-                let Some(declaring) = codebase.get_class_like(declaring_class.as_bytes()) else {
-                    continue;
-                };
-                let Some(metadata) = codebase.get_method(declaring_class.as_bytes(), method.as_bytes()) else {
-                    continue;
-                };
-
-                // `class` is the class the value is read through, where a call's `extern` lookup starts too.
-                let class_name =
-                    codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
-                let callee = (class_name, metadata.original_name);
-                let lowercase_method = ascii_lowercase_word(method.as_bytes());
-                if let Some(effect) = foreign_class(codebase, class) {
-                    Runs::Foreign { callee, effects: vec![Effect::Foreign(effect)] }
-                } else if declaring.flags.is_sharp() && metadata.method_metadata.as_ref().is_some_and(|m| m.is_abstract)
-                {
-                    Runs::Foreign {
-                        callee,
-                        effects: metadata.uses.iter().map(|effect| Effect::Foreign(*effect)).collect(),
-                    }
-                } else if declaring.flags.is_sharp() {
-                    Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), lowercase_method))
-                } else if is_prelude_stub(declaring_class) {
-                    Runs::Foreign { callee, effects: Vec::new() }
-                } else {
-                    Runs::Foreign {
-                        callee,
-                        effects: plain_php_effects(extern_of(codebase, class, lowercase_method), callee),
-                    }
-                }
+                method_value_runs(codebase, class, method.as_bytes())
             }
-            Some(FunctionLikeIdentifier::Function(_)) | None => continue,
+            Some(FunctionLikeIdentifier::Function(_)) | None => None,
+        };
+        let Some(runs) = runs else {
+            continue;
         };
 
         artifacts.function_values.push(FunctionValue {
@@ -242,6 +212,31 @@ pub(crate) fn record_function_values<A>(
             code,
         });
     }
+}
+
+/// What a method value of `method`, read through `class`, runs wherever it is called: the PHP# method's body, or the
+/// effects a call of the method has without one, `None` when `class` has no such method.
+fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: &[u8]) -> Option<Runs> {
+    let declaring_class = codebase.get_declaring_method_class(class.as_bytes(), method)?;
+    let declaring = codebase.get_class_like(declaring_class.as_bytes())?;
+    let metadata = codebase.get_method(declaring_class.as_bytes(), method)?;
+
+    // `class` is the class the value is read through, where a call's `extern` lookup starts too.
+    let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+    let callee = (class_name, metadata.original_name);
+    let lowercase_method = ascii_lowercase_word(method);
+
+    Some(if let Some(effect) = foreign_class(codebase, class) {
+        Runs::Foreign { callee, effects: vec![Effect::Foreign(effect)] }
+    } else if declaring.flags.is_sharp() && metadata.method_metadata.as_ref().is_some_and(|m| m.is_abstract) {
+        Runs::Foreign { callee, effects: metadata.uses.iter().map(|effect| Effect::Foreign(*effect)).collect() }
+    } else if declaring.flags.is_sharp() {
+        Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), lowercase_method))
+    } else if is_prelude_stub(declaring_class) {
+        Runs::Foreign { callee, effects: Vec::new() }
+    } else {
+        Runs::Foreign { callee, effects: plain_php_effects(extern_of(codebase, class, lowercase_method), callee) }
+    })
 }
 
 /// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
@@ -1075,37 +1070,22 @@ where
         let receiver = self.roots(value.object);
         for class in self.object_classes(value.object) {
             let codebase = self.codebase();
-            let Some(declaring_class) = codebase.get_declaring_method_class(class.as_bytes(), name.value) else {
-                continue;
-            };
-            let Some(metadata) = codebase.get_method(declaring_class.as_bytes(), name.value) else {
-                continue;
-            };
-
             // A method value has the effects a call of its method has.
-            let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
-            let cause = (class_name, metadata.original_name);
-            if !codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|declaring| declaring.flags.is_sharp())
-            {
-                if !is_prelude_stub(declaring_class) {
-                    self.plain_php(extern_of(codebase, class, ascii_lowercase_word(name.value)), span, cause);
+            match method_value_runs(codebase, class, name.value) {
+                Some(Runs::Body(callee)) => {
+                    let parameters = codebase
+                        .get_declaring_method(class.as_bytes(), name.value)
+                        .map_or(0, |metadata| metadata.parameters.len());
+                    let arguments = vec![elements.clone(); parameters];
+                    self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments });
                 }
-
-                continue;
-            }
-
-            if metadata.method_metadata.as_ref().is_some_and(|method| method.is_abstract) {
-                for effect in &metadata.uses {
-                    self.summary.effects.push((Effect::Foreign(*effect), span, cause));
+                Some(Runs::Foreign { callee, effects }) => {
+                    for effect in effects {
+                        self.summary.effects.push((effect, span, callee));
+                    }
                 }
-
-                continue;
+                None => {}
             }
-
-            let callee =
-                Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), ascii_lowercase_word(name.value));
-            let arguments = vec![elements.clone(); metadata.parameters.len()];
-            self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments });
         }
     }
 }
