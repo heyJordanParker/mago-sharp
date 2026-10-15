@@ -3509,12 +3509,12 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 /// public static function sized(int $size, string ...$notes): \App\Report
 /// {
 ///     ${'this#1'} = new \App\Report($size);
-///     (function ($size, ...$notes) {
+///     \Sharp\Internal\build(${'this#1'}, function ($size, ...$notes) {
 ///         if ($size === 0) { return; }
 ///         $this->label = parent::describe();
 ///         $read = function () { return $this->label; };
 ///         $skip = function () { return; };
-///     })->call(${'this#1'}, $size, ...$notes);
+///     }, $size, ...$notes);
 ///     return ${'this#1'};
 /// }
 /// ```
@@ -3522,9 +3522,9 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 /// Spec section 9.1: a named constructor is the static method it runs as. `: this(…)` creates the object with the
 /// main constructor, and the body is a closure bound to it, so it runs as a method body on a real `$this`: `super.m()`
 /// is `parent::m()`, `return;` and a lambda's `return;` return nothing, and a lambda reads `$this` as in a method. The
-/// closure takes each parameter, a variadic one spread back out. The method returns the object after its body. The
-/// closure takes `[1073741824]`, `ZEND_ACC_SHARP_BUILDS`, as it still builds the object, so its writes run no
-/// observer, spec section 6.2.
+/// closure takes each parameter, a variadic one spread back out. The method returns the object after its body.
+/// `\Sharp\Internal\build` binds the closure as `Closure::call` does while the object is still being built, so the
+/// body's writes run no observer, spec section 6.2.
 #[test]
 fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
     let lowered = Lowered::new(
@@ -3560,76 +3560,76 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                     ARG_LIST
                       VAR
                         ZVAL "size"
-                METHOD_CALL
-                  CLOSURE [1073741824] "" @16-24
-                    PARAM_LIST
-                      PARAM
-                        null
-                        ZVAL "size"
-                        null
-                        null
-                        null
-                        null
-                      PARAM [16]
-                        null
-                        ZVAL "notes"
-                        null
-                        null
-                        null
-                        null
-                    null
-                    STMT_LIST
-                      IF
-                        IF_ELEM
-                          BINARY_OP [16]
-                            VAR
-                              ZVAL "size"
-                            ZVAL 0
-                          STMT_LIST
-                            RETURN
-                              null
-                      ASSIGN
-                        PROP
-                          VAR
-                            ZVAL "this"
-                          ZVAL "label"
-                        STATIC_CALL
-                          ZVAL [1] "parent"
-                          ZVAL "describe"
-                          ARG_LIST
-                      ASSIGN
-                        VAR
-                          ZVAL "read"
-                        CLOSURE "" @22-22
-                          PARAM_LIST
-                          null
-                          STMT_LIST
-                            RETURN
-                              PROP
-                                VAR
-                                  ZVAL "this"
-                                ZVAL "label"
-                          SHARP_TYPE_ARGS
-                            null
-                            ZVAL "Function<string()>"
-                          null
-                      ASSIGN
-                        VAR
-                          ZVAL "skip"
-                        CLOSURE "" @23-23
-                          PARAM_LIST
-                          null
-                          STMT_LIST
-                            RETURN
-                              null
-                          null
-                          null
-                    null
-                    null
-                  ZVAL "call"
+                CALL
+                  ZVAL "Sharp\\Internal\\build"
                   ARG_LIST
                     VAR
                       ZVAL "this#1"
+                    CLOSURE "" @16-24
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "size"
+                          null
+                          null
+                          null
+                          null
+                        PARAM [16]
+                          null
+                          ZVAL "notes"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      STMT_LIST
+                        IF
+                          IF_ELEM
+                            BINARY_OP [16]
+                              VAR
+                                ZVAL "size"
+                              ZVAL 0
+                            STMT_LIST
+                              RETURN
+                                null
+                        ASSIGN
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "label"
+                          STATIC_CALL
+                            ZVAL [1] "parent"
+                            ZVAL "describe"
+                            ARG_LIST
+                        ASSIGN
+                          VAR
+                            ZVAL "read"
+                          CLOSURE "" @22-22
+                            PARAM_LIST
+                            null
+                            STMT_LIST
+                              RETURN
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "label"
+                            SHARP_TYPE_ARGS
+                              null
+                              ZVAL "Function<string()>"
+                            null
+                        ASSIGN
+                          VAR
+                            ZVAL "skip"
+                          CLOSURE "" @23-23
+                            PARAM_LIST
+                            null
+                            STMT_LIST
+                              RETURN
+                                null
+                            null
+                            null
+                      null
+                      null
                     VAR
                       ZVAL "size"
                     UNPACK
@@ -3717,31 +3717,31 @@ fn a_named_constructor_of_a_generic_class_takes_the_class_type_arguments_as_its_
                       VAR
                         ZVAL "item"
                   ZVAL "#0"
-              METHOD_CALL
-                CLOSURE [1073741824] "" @8-10
-                  PARAM_LIST
-                    PARAM
-                      null
-                      ZVAL "item"
-                      null
-                      null
-                      null
-                      null
-                  null
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "held"
-                      SHARP_IS_TYPE
-                        VAR
-                          ZVAL "item"
-                        ZVAL "$0"
-                  null
-                  null
-                ZVAL "call"
+              CALL
+                ZVAL "Sharp\\Internal\\build"
                 ARG_LIST
                   VAR
                     ZVAL "this#1"
+                  CLOSURE "" @8-10
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "item"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "held"
+                        SHARP_IS_TYPE
+                          VAR
+                            ZVAL "item"
+                          ZVAL "$0"
+                    null
+                    null
                   VAR
                     ZVAL "item"
               RETURN
@@ -22756,16 +22756,18 @@ const SIZE: &str = "namespace App;\n\npublic struct Size\n{\n    public int widt
 /// ```php
 /// public function copies(\App\Size $size, int $depth): \App\Size
 /// {
-///     $made = (function ($value#1, $value#2) { $this->width = $value#1; $this->depth = $value#2; return $this; })
-///         ->call(new \App\Size(), 2, 1);
+///     $made = \Sharp\Internal\build(new \App\Size(),
+///         function ($value#1, $value#2) { $this->width = $value#1; $this->depth = $value#2; return $this; }, 2, 1);
 ///     return (function ($value#1) { return clone($this, ['depth' => $value#1]); })->call($size, $depth);
 /// }
 /// ```
 ///
 /// Spec section 16: an object initializer and `with` run in a closure bound to the object, as a named constructor
 /// runs, so they write an `init` property at its accessor's access wherever the code is. The initializer writes each
-/// value after `new`, and `with` is PHP 8.5's `clone` with the values, which runs each `init` hook on the copy. Each
-/// value is evaluated in the caller, as an argument, and the shorthand `depth` is the local `depth`.
+/// value after `new`, through `\Sharp\Internal\build`, which binds the closure as `Closure::call` does while the
+/// object is still being built, so its writes run no observer (spec section 6.2). `with` is PHP 8.5's `clone` with
+/// the values, which runs each `init` hook on the copy. Each value is evaluated in the caller, as an argument, and the
+/// shorthand `depth` is the local `depth`.
 #[test]
 fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
     assert_eq!(
@@ -22801,49 +22803,49 @@ fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
                 ASSIGN
                   VAR
                     ZVAL "made"
-                  METHOD_CALL
-                    CLOSURE "" @9-9
-                      PARAM_LIST
-                        PARAM
-                          null
-                          ZVAL "value#1"
-                          null
-                          null
-                          null
-                          null
-                        PARAM
-                          null
-                          ZVAL "value#2"
-                          null
-                          null
-                          null
-                          null
-                      null
-                      STMT_LIST
-                        ASSIGN
-                          PROP
-                            VAR
-                              ZVAL "this"
-                            ZVAL "width"
-                          VAR
-                            ZVAL "value#1"
-                        ASSIGN
-                          PROP
-                            VAR
-                              ZVAL "this"
-                            ZVAL "depth"
-                          VAR
-                            ZVAL "value#2"
-                        RETURN
-                          VAR
-                            ZVAL "this"
-                      null
-                      null
-                    ZVAL "call"
+                  CALL
+                    ZVAL "Sharp\\Internal\\build"
                     ARG_LIST
                       NEW
                         ZVAL "App\\Size"
                         ARG_LIST
+                      CLOSURE "" @9-9
+                        PARAM_LIST
+                          PARAM
+                            null
+                            ZVAL "value#1"
+                            null
+                            null
+                            null
+                            null
+                          PARAM
+                            null
+                            ZVAL "value#2"
+                            null
+                            null
+                            null
+                            null
+                        null
+                        STMT_LIST
+                          ASSIGN
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "width"
+                            VAR
+                              ZVAL "value#1"
+                          ASSIGN
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "depth"
+                            VAR
+                              ZVAL "value#2"
+                          RETURN
+                            VAR
+                              ZVAL "this"
+                        null
+                        null
                       ZVAL 2
                       ZVAL 1
                 RETURN

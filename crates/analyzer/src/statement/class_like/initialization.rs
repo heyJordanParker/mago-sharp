@@ -19,14 +19,14 @@ use crate::error::AnalysisError;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_property_name;
 
-/// Reports a PHP# get-only property that nothing sets, spec section 6.1: no initial value, and no constructor, main or
-/// named, that assigns it on every path. A get-only property can be set nowhere else, and neither can a struct's
-/// property no object initializer sets, spec section 10: any but a public `init` one, which is required where the
-/// struct is created. A class's `init` property is set where its object is created. A field or a settable property
-/// with storage holds a value from the start, so it needs one the same way, and a `T?` one has no implicit `null`. A
+/// Reports a PHP# field or property with storage that nothing sets, spec section 6: no initial value, and no
+/// constructor, main or named, that assigns it on every path. A get-only property can be set nowhere else, and
+/// neither can a struct's property no object initializer sets, spec section 10: any but a public `init` one, which is
+/// required where the struct is created. A class's `init` property is set where its object is created. A field or a
+/// settable property holds a value from the start, so it needs one the same way, and a `T?` one has no implicit `null`. A
 /// property the class inherits from a PHP# parent is checked on the class, since an abstract parent leaves it to its
 /// subclasses, and a main constructor runs each parent's through `: super(…)`.
-pub fn check_get_only_initialization<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
+pub fn check_storage_initialization<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
 where
     A: Arena,
 {
@@ -117,7 +117,7 @@ pub fn check_property_initialization<'ctx, A>(
 where
     A: Arena,
 {
-    // PHP# holds every field and property with storage to a value, `check_get_only_initialization`, whatever this
+    // PHP# holds every field and property with storage to a value, `check_storage_initialization`, whatever this
     // setting says, and a `T?` one to an explicit `null`, so this check, which offers a nullable type, runs on PHP only.
     if !context.settings.check_property_initialization || context.dialect.is_sharp() {
         return Ok(());

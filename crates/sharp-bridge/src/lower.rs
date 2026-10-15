@@ -267,7 +267,6 @@ const ZEND_TYPE_NULLABLE: u32 = 1 << 8;
 const IS_STATIC: u32 = 15;
 const ZEND_PARAM_VARIADIC: u32 = 1 << 4;
 const ZEND_PARAM_WIDENED: u32 = 1 << 6;
-const ZEND_ACC_SHARP_BUILDS: u32 = 1 << 30;
 const ZEND_PARENTHESIZED_CONDITIONAL: u32 = 1;
 const ZEND_DIM_IS: u32 = 1;
 const ZEND_BIND_REF: u32 = 1;
@@ -2300,10 +2299,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A named constructor is the static method it runs as, spec section 9.1, as php-src's grammar builds
     /// `public static function fromJson(string $json): \Demo\Artifact { ${'this#1'} = new \Demo\Artifact(…);
-    /// (function ($json) { … })->call(${'this#1'}, $json); return ${'this#1'}; }`: its `: this(…)` creates the object
-    /// with the main constructor, and its body is a closure bound to that object, so it runs as a method body on a real
-    /// `$this`, where `super.m()` and `return;` run as they do in a method. A generic class's static method takes the
-    /// class's type arguments as its own, ends its parameter list with their bounds, and gives them to the object.
+    /// \Sharp\Internal\build(${'this#1'}, function ($json) { … }, $json); return ${'this#1'}; }`: its `: this(…)`
+    /// creates the object with the main constructor, and its body is a closure that `\Sharp\Internal\build` binds to
+    /// that object, as `Closure::call` does, so it runs as a method body on a real `$this`, where `super.m()` and
+    /// `return;` run as they do in a method. The object is still being built while the body runs, so its writes run no
+    /// observer, spec section 6.2. A generic class's static method takes the class's type arguments as its own, ends
+    /// its parameter list with their bounds, and gives them to the object.
     fn named_constructor(&mut self, constructor: &NamedConstructor, initializer: &ConstructorInitializer) -> u32 {
         self.enter(constructor.name.value);
         self.static_type_parameters = self.types.static_type_parameters(self.class);
@@ -2354,18 +2355,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         let closure_parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &closure_parameters);
         let body = self.method_body(&constructor.body, false, Vec::new());
-        // The body still builds the object, so its writes run no observer, spec section 6.2.
         let closure = self.declaration(
             SHARP_AST_CLOSURE,
-            ZEND_ACC_SHARP_BUILDS,
+            0,
             &constructor.body,
             &constructor.body,
             b"",
             &[closure_parameters, NULL, body, NULL, NULL],
         );
-        let call = self.string(0, line, b"call");
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
-        statements.push(self.node(SHARP_AST_METHOD_CALL, 0, line, &[closure, call, arguments]));
+        arguments.insert(1, closure);
+        statements.push(self.global_call(line, b"Sharp\\Internal\\build", &arguments));
 
         let end = self.lines.line(constructor.body.span().end.offset);
         let object = self.variable(constructor.body.span(), b"this#1");
@@ -2473,8 +2472,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return created;
         };
 
-        // `(function ($value#1) { $this->x = $value#1; return $this; })->call(new \App\Point(), 1)`
-        self.bound_to(instantiation.span(), created, initializer, |lowering, span, values| {
+        // `\Sharp\Internal\build(new \App\Point(), function ($value#1) { $this->x = $value#1; return $this; }, 1)`: the
+        // object is built once the initializer ends, so its writes run no observer, spec section 6.2.
+        self.bound_to(instantiation.span(), created, initializer, true, |lowering, span, values| {
             let line = lowering.line(span);
             let mut statements = Vec::new();
             for (name, value) in values {
@@ -2507,7 +2507,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn with(&mut self, with: &With) -> u32 {
         let object = self.expression(with.object);
 
-        self.bound_to(with.span(), object, &with.initializer, |lowering, span, values| {
+        self.bound_to(with.span(), object, &with.initializer, false, |lowering, span, values| {
             let line = lowering.line(span);
             let mut entries = Vec::new();
             for (name, value) in values {
@@ -2525,15 +2525,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Runs the statements `body` writes, as a closure bound to `object`, the object `new` or `with` at `span` creates,
-    /// spec section 16: `(function ($value#1, …) { … })->call($object, …)`. The closure runs with the object's class's
-    /// own access, so a write runs an `init` or `set` accessor wherever the code is, as a named constructor's body runs
-    /// (`Lowering::named_constructor`). Each value of `initializer` runs in the caller, in order after `object`, as an
-    /// argument, and `body` reads it through the hidden parameter it gets beside the property's name.
+    /// spec section 16: `(function ($value#1, …) { … })->call($object, …)`, or, when the closure `builds` the object,
+    /// `\Sharp\Internal\build($object, function ($value#1, …) { … }, …)`, which binds it the same way while the object
+    /// is still being built, so its writes run no observer, spec section 6.2. The closure runs with the object's
+    /// class's own access, so a write runs an `init` or `set` accessor wherever the code is, as a named constructor's
+    /// body runs (`Lowering::named_constructor`). Each value of `initializer` runs in the caller, in order after
+    /// `object`, as an argument, and `body` reads it through the hidden parameter it gets beside the property's name.
     fn bound_to(
         &mut self,
         span: Span,
         object: u32,
         initializer: &ObjectInitializer,
+        builds: bool,
         body: impl FnOnce(&mut Self, Span, Vec<(&[u8], u32)>) -> Vec<u32>,
     ) -> u32 {
         let line = self.line(span);
@@ -2557,6 +2560,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let statements = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let closure =
             self.declaration(SHARP_AST_CLOSURE, 0, span, span, b"", &[parameters, NULL, statements, NULL, NULL]);
+        if builds {
+            arguments.insert(1, closure);
+            return self.global_call(line, b"Sharp\\Internal\\build", &arguments);
+        }
         let call = self.string(0, line, b"call");
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
 
