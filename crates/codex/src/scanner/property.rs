@@ -33,7 +33,6 @@ use crate::scanner::ttype::merge_type_preserving_nullability;
 use crate::scanner::typing_error_issue;
 use crate::scanner::version_claim::TypeOverride;
 use crate::scanner::version_claim::evaluate_version_attributes;
-use crate::ttype::get_null;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::visibility::Visibility;
 
@@ -71,6 +70,12 @@ where
 
     if is_sharp && parameter.hooks.as_ref().is_some_and(is_sharp_init) {
         flags |= MetadataFlags::INIT;
+    }
+
+    if is_sharp {
+        flags |= sharp_internal_flags(&parameter.modifiers, parameter.hooks.as_ref());
+        // Spec section 9: a member a parameter declares without accessors is a field.
+        flags.set(MetadataFlags::FIELD, parameter.hooks.is_none());
     }
 
     if parameter.modifiers.contains_abstract() {
@@ -202,15 +207,13 @@ where
                 .items
                 .iter()
                 .map(|item| {
-                    let (name, name_span, mut has_default, mut default_type) =
+                    let (name, name_span, has_default, default_type) =
                         scan_property_item(item, classname, context, scope);
                     let is_required = is_sharp && is_required(&plain_property.modifiers);
-                    if is_sharp && !has_default && !is_required {
-                        default_type = sharp_null_default(plain_property.hint.as_ref(), name_span);
-                        has_default = default_type.is_some();
-                    }
 
                     let mut item_flags = flags;
+                    // Spec section 6: a PHP# property without accessors is a field.
+                    item_flags.set(MetadataFlags::FIELD, is_sharp);
 
                     if is_required {
                         item_flags |= MetadataFlags::REQUIRED;
@@ -305,11 +308,9 @@ where
                     type_metadata
                 });
             }
+            let is_abstract = hooked_property.modifiers.contains_abstract();
             if is_sharp && is_required(&hooked_property.modifiers) {
                 flags |= MetadataFlags::REQUIRED;
-            } else if is_sharp && !has_default && !hooked_property.hook_list.is_get_only() {
-                default_type = sharp_null_default(hooked_property.hint.as_ref(), name_span);
-                has_default = default_type.is_some();
             }
 
             let read_visibility = match hooked_property.modifiers.get_first_read_visibility() {
@@ -327,8 +328,16 @@ where
                 flags |= MetadataFlags::HAS_DEFAULT;
             }
 
-            if is_sharp && is_sharp_get_only(&hooked_property.hook_list, context) {
+            if is_sharp {
+                flags |= sharp_internal_flags(&hooked_property.modifiers, Some(&hooked_property.hook_list));
+            }
+
+            if is_sharp && !is_abstract && is_sharp_get_only(&hooked_property.hook_list, context) {
                 flags |= MetadataFlags::READONLY;
+            }
+
+            if is_sharp && is_sharp_closed(&hooked_property.modifiers, read_visibility, class_like_metadata) {
+                flags |= MetadataFlags::FINAL;
             }
 
             if is_sharp && is_sharp_init(&hooked_property.hook_list) {
@@ -390,6 +399,18 @@ where
                 None => Visibility::Public,
             };
 
+            if is_sharp && is_sharp_closed(&computed_property.modifiers, read_visibility, class_like_metadata) {
+                flags |= MetadataFlags::FINAL;
+            }
+
+            if is_sharp {
+                flags |= sharp_internal_flags(&computed_property.modifiers, None);
+            }
+
+            if computed_property.modifiers.contains_static() {
+                flags |= MetadataFlags::STATIC;
+            }
+
             let mut metadata =
                 PropertyMetadata::new(VariableIdentifier(php_variable_name(computed_property.variable.name)), flags);
 
@@ -443,6 +464,23 @@ where
     }
 }
 
+/// The flags of a PHP# member's `internal` reach, spec section 5: `INTERNAL` when the member is `internal`, and
+/// `INTERNAL_SET` when its `set` or `init` is. The member runs as PHP's `public`, so its visibility is `public`.
+fn sharp_internal_flags(
+    modifiers: &Sequence<'_, Modifier<'_>>,
+    accessors: Option<&PropertyHookList<'_>>,
+) -> MetadataFlags {
+    let mut flags = MetadataFlags::empty();
+    if modifiers.contains_internal() {
+        flags |= MetadataFlags::INTERNAL_REACH;
+    }
+    if accessors.and_then(PropertyHookList::setter).is_some_and(|setter| setter.modifiers.contains_internal()) {
+        flags |= MetadataFlags::INTERNAL_SET;
+    }
+
+    flags
+}
+
 /// The write visibility of a PHP# property: its `set` or `init` accessor's access modifier, or the property's own for
 /// an accessor without one. An `init` property is written at that level only while its object is created, which the
 /// analyzer checks, as an object initializer and `with` write it, spec section 16. A get-only property runs as
@@ -457,6 +495,22 @@ fn sharp_write_visibility(accessors: &PropertyHookList, read_visibility: Visibil
     }
 }
 
+/// Whether a PHP# property is closed: spec sections 6.1 and 22 open a property only with `virtual`, `abstract` or
+/// `override`, as a method is opened, so the analyzer reads a closed one as final. A private property is never
+/// inherited, and an interface's is always open. A field is open, line 289 of section 6.1. The engine still runs every
+/// property as an open PHP property.
+fn is_sharp_closed(
+    modifiers: &Sequence<'_, Modifier<'_>>,
+    read_visibility: Visibility,
+    class_like_metadata: &ClassLikeMetadata,
+) -> bool {
+    !class_like_metadata.kind.is_interface()
+        && read_visibility != Visibility::Private
+        && !modifiers
+            .iter()
+            .any(|modifier| matches!(modifier, Modifier::Abstract(_) | Modifier::Virtual(_) | Modifier::Override(_)))
+}
+
 /// Whether a PHP# property is written by an `init` accessor, which sets it only while the object is created.
 fn is_sharp_init(accessors: &PropertyHookList) -> bool {
     accessors.setter().is_some_and(|setter| setter.name.value == b"init")
@@ -465,7 +519,7 @@ fn is_sharp_init(accessors: &PropertyHookList) -> bool {
 /// Scans a property's hooks and whether it is virtual. A PHP# accessor without a body is storage, as an
 /// auto-property's is, so only its bodies are hooks. A PHP# property is virtual when no accessor is auto and no body
 /// uses `field`, as the engine lowers it, and a PHP one when no hook reaches `$this->name`. A PHP# interface property
-/// runs as PHP's, so its accessors are abstract hooks.
+/// and an abstract one run as PHP's, so their accessors are abstract hooks.
 fn scan_hooks<'arena, A>(
     hook_list: &'arena PropertyHookList<'arena>,
     property: &mut PropertyMetadata,
@@ -476,7 +530,8 @@ fn scan_hooks<'arena, A>(
 ) where
     A: Arena,
 {
-    let is_sharp = context.program.dialect.is_sharp() && !class_like_metadata.kind.is_interface();
+    let is_sharp =
+        context.program.dialect.is_sharp() && !class_like_metadata.kind.is_interface() && !property.flags.is_abstract();
     for hook in &hook_list.hooks {
         if is_sharp && matches!(hook.body, PropertyHookBody::Abstract(_)) {
             continue;
@@ -485,7 +540,12 @@ fn scan_hooks<'arena, A>(
         let mut hook_metadata =
             scan_property_hook(hook, property, type_context, context, scope, Some(class_like_metadata.original_name));
         class_like_metadata.issues.extend(hook_metadata.take_issues());
-        property.hooks.insert(hook_metadata.name, hook_metadata);
+        // An observer is the `set` hook only when the property has no `set` body, which is the hook otherwise.
+        if hook.is_observer() {
+            property.hooks.entry(hook_metadata.name).or_insert(hook_metadata);
+        } else {
+            property.hooks.insert(hook_metadata.name, hook_metadata);
+        }
     }
 
     let is_virtual = if is_sharp {
@@ -514,16 +574,6 @@ fn is_required(modifiers: &Sequence<Modifier>) -> bool {
     modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_)))
 }
 
-/// The default of a PHP# field or auto-property with `set` of a nullable type written without an initial value: it
-/// starts as null, as in C# and Swift, and the engine gives it the default `null`.
-fn sharp_null_default(hint: Option<&Hint>, name_span: Span) -> Option<TypeMetadata> {
-    matches!(hint, Some(Hint::Nullable(_))).then(|| {
-        let mut type_metadata = TypeMetadata::new(get_null(), name_span);
-        type_metadata.inferred = true;
-        type_metadata
-    })
-}
-
 fn scan_property_hook<'arena, A>(
     hook: &'arena PropertyHook<'arena>,
     property_metadata: &PropertyMetadata,
@@ -537,8 +587,12 @@ where
 {
     let is_get = hook.name.value == b"get";
     // A PHP# `init` accessor's body runs as the `set` hook it lowers to, and the property's `INIT` flag keeps that it
-    // writes only while the object is created.
-    let is_set = if context.program.dialect.is_sharp() { hook.is_setter() } else { hook.name.value == b"set" };
+    // writes only while the object is created. An observer runs inside that `set` hook too, spec section 6.2.
+    let is_set = if context.program.dialect.is_sharp() {
+        hook.is_setter() || hook.is_observer()
+    } else {
+        hook.name.value == b"set"
+    };
     let name = if is_set { word(b"set") } else { word(hook.name.value) };
     let is_abstract = matches!(hook.body, PropertyHookBody::Abstract(_));
     let has_explicit_parameter = hook.parameter_list.is_some();

@@ -180,6 +180,7 @@ enum NodeKind: string
     case Literal = 'Literal';
     case Pipe = 'Pipe';
     case TypeOf = 'TypeOf';
+    case NameOf = 'NameOf';
     case With = 'With';
     case ObjectInitializer = 'ObjectInitializer';
     case NamedValue = 'NamedValue';

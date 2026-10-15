@@ -199,6 +199,20 @@ fn the_class_in_typeof_resolves_like_any_class_name() {
     assert_eq!(binding(&names, CODE, "Order", 0), None);
 }
 
+/// The class in `nameof(Money.amount)` resolves like any class name, and the property is a member's name, never a
+/// local, even when a local has that name.
+#[test]
+fn the_class_in_nameof_resolves_like_any_class_name() {
+    const CODE: &str = "namespace App.Tenant.Store;\n\nimport App.Shared.Money;\n\nclass Report\n{\n    public void total()\n    {\n        const amount = 1;\n        Store.keep(nameof(Money.amount), nameof(Order.total));\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(resolved(&names, CODE, "Money.", 0), b"App\\Shared\\Money");
+    assert_eq!(resolved(&names, CODE, "Order", 0), b"App\\Tenant\\Store\\Order");
+    assert_eq!(binding(&names, CODE, "Order", 0), None);
+    assert_eq!(binding(&names, CODE, "amount", 1), None);
+}
+
 #[test]
 fn a_yielded_value_and_a_yielded_spread_bind_their_names_as_any_value_does() {
     const CODE: &str = "namespace App.Tenant.Store;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield ...pending;\n        yield latest;\n        yield Store.first();\n    }\n}\n";

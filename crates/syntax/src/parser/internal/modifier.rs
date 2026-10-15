@@ -5,6 +5,8 @@ use crate::error::ParseError;
 use crate::parser::Parser;
 use crate::token::Token;
 use mago_allocator::prelude::*;
+use mago_database::file::HasFileId;
+use mago_span::Span;
 
 impl<'arena, A> Parser<'_, 'arena, A>
 where
@@ -19,6 +21,26 @@ where
     /// Whether `token` is spec section 29's `foreign`, which starts a class's modifiers, as `public` does.
     pub(crate) fn is_foreign(&self, token: Token<'_>) -> bool {
         self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"foreign"
+    }
+
+    /// Whether the token `offset` ahead is spec section 5's `internal`.
+    fn is_internal_token_at(&mut self, offset: usize) -> Result<bool, ParseError> {
+        Ok(self.stream.lookahead(offset)?.is_some_and(|token| self.is_internal(token)))
+    }
+
+    /// Consumes a `(` and every token up to its matching `)`, and returns their span.
+    fn skip_parenthesized(&mut self) -> Result<Span, ParseError> {
+        let start = self.stream.eat_span(T!["("])?;
+        let mut depth: usize = 1;
+        loop {
+            let token = self.stream.consume()?;
+            match token.kind {
+                T!["("] => depth += 1,
+                T![")"] if depth == 1 => return Ok(start.join(token.span_for(self.stream.file_id()))),
+                T![")"] => depth -= 1,
+                _ => {}
+            }
+        }
     }
 
     pub(crate) fn parse_modifier_sequence(&mut self) -> Result<Sequence<'arena, Modifier<'arena>>, ParseError> {
@@ -43,6 +65,15 @@ where
             Some(T!["private(set)"]) => Modifier::PrivateSet(self.expect_any_keyword()?),
             Some(T!["protected(set)"]) => Modifier::ProtectedSet(self.expect_any_keyword()?),
             Some(T!["public(set)"]) => Modifier::PublicSet(self.expect_any_keyword()?),
+            // Spec section 5 has no named reach, so `internal(App.Tenant)` names the rule at its parentheses, and the
+            // declaration parses on as `internal`.
+            Some(T![Identifier]) if self.is_internal_token_at(0)? && self.stream.peek_kind(1)? == Some(T!["("]) => {
+                let internal = self.expect_any_keyword()?;
+                let reach = self.skip_parenthesized()?;
+                self.errors.push(ParseError::NamedReachInSharp(reach));
+
+                Modifier::Internal(internal)
+            }
             // A word before `(`, `)`, `,` or `=` is a name, as a call or an untyped lambda parameter, which
             // `parse_parameter` reads the same way.
             Some(T![Identifier])

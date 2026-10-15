@@ -32,6 +32,7 @@ use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
 #[cfg(not(target_arch = "wasm32"))]
 use mago_analyzer::telemetry as analyzer_telemetry;
+use mago_analyzer::too_wide_members;
 use mago_codex::diff::CodebaseDiff;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseEntryKeys;
@@ -94,8 +95,9 @@ struct FileState {
     /// What each PHP# body of the file does by itself. Every run solves the summaries of all files again, so an
     /// unchanged file's getter sees a changed callee without being analyzed again.
     effect_summaries: Vec<EffectSummary>,
-    /// The effect rules' issues in the file, from the last run's solve.
-    effect_issues: IssueCollection,
+    /// The issues in the file of the last run's project passes, which read every file: the effect rules' solve and the
+    /// too-wide warning.
+    project_issues: IssueCollection,
 }
 
 struct SelectiveAnalysisOutput {
@@ -110,8 +112,8 @@ struct SelectiveAnalysisOutput {
     snapshots: Vec<Arc<FileAnalysisSnapshot>>,
     codebase_issues: IssueCollection,
     per_file_effect_summaries: HashMap<FileId, Vec<EffectSummary>>,
-    /// The effect rules' issues of every file, analyzed or skipped.
-    per_file_effect_issues: HashMap<FileId, IssueCollection>,
+    /// The project passes' issues of every file, analyzed or skipped.
+    per_file_project_issues: HashMap<FileId, IssueCollection>,
 }
 
 /// A self-contained incremental analysis service.
@@ -397,7 +399,7 @@ impl IncrementalAnalysisService {
             + self
                 .file_states
                 .values()
-                .map(|s| s.analysis_issues.len() + s.effect_issues.len() + s.codebase_issues.len())
+                .map(|s| s.analysis_issues.len() + s.project_issues.len() + s.codebase_issues.len())
                 .sum::<usize>();
 
         let mut states = self.file_states.iter().collect::<Vec<_>>();
@@ -412,8 +414,8 @@ impl IncrementalAnalysisService {
                 issues.extend(state.analysis_issues.iter().cloned());
             }
 
-            if !state.effect_issues.is_empty() {
-                issues.extend(state.effect_issues.iter().cloned());
+            if !state.project_issues.is_empty() {
+                issues.extend(state.project_issues.iter().cloned());
             }
 
             if !state.codebase_issues.is_empty() {
@@ -424,8 +426,9 @@ impl IncrementalAnalysisService {
         issues
     }
 
-    /// Caches each analyzed file's effect summaries, and gives every file the effect issues of this run's solve.
-    fn store_effects(
+    /// Caches each analyzed file's effect summaries, and gives every file the issues of this run's project passes: the
+    /// effect rules' solve and the too-wide warning.
+    fn store_project_passes(
         &mut self,
         mut summaries: HashMap<FileId, Vec<EffectSummary>>,
         mut issues: HashMap<FileId, IssueCollection>,
@@ -434,7 +437,7 @@ impl IncrementalAnalysisService {
             if let Some(file_summaries) = summaries.remove(file_id) {
                 state.effect_summaries = file_summaries;
             }
-            state.effect_issues = issues.remove(file_id).unwrap_or_default();
+            state.project_issues = issues.remove(file_id).unwrap_or_default();
         }
     }
 
@@ -581,7 +584,7 @@ impl IncrementalAnalysisService {
                     late_symbol_references: SymbolReferences::new(),
                     reads: FileReads::default(),
                     effect_summaries: Vec::new(),
-                    effect_issues: IssueCollection::default(),
+                    project_issues: IssueCollection::default(),
                 },
             );
         }
@@ -598,7 +601,7 @@ impl IncrementalAnalysisService {
             snapshots,
             codebase_issues: all_codebase_issues,
             per_file_effect_summaries,
-            per_file_effect_issues,
+            per_file_project_issues,
         } =
             self.run_analyzer_selective(&mut merged_codebase, symbol_references, &self.settings, &HashSet::default())?;
         #[cfg(test)]
@@ -626,7 +629,7 @@ impl IncrementalAnalysisService {
                 state.reads = reads_by_file.remove(&file_id).unwrap_or_default();
             }
         }
-        self.store_effects(per_file_effect_summaries, per_file_effect_issues);
+        self.store_project_passes(per_file_effect_summaries, per_file_project_issues);
 
         self.codebase = merged_codebase;
         self.symbol_references = std::mem::take(&mut analysis_result.symbol_references);
@@ -1061,7 +1064,7 @@ impl IncrementalAnalysisService {
                 snapshots,
                 codebase_issues: new_codebase_issues,
                 per_file_effect_summaries,
-                per_file_effect_issues,
+                per_file_project_issues,
             } = self.run_analyzer_selective(&mut merged_codebase, symbol_references, &self.settings, &files_to_skip)?;
             #[cfg(test)]
             {
@@ -1130,11 +1133,11 @@ impl IncrementalAnalysisService {
                         late_symbol_references,
                         reads: reads_by_file.remove(&file_id).unwrap_or_default(),
                         effect_summaries: Vec::new(),
-                        effect_issues: IssueCollection::default(),
+                        project_issues: IssueCollection::default(),
                     },
                 );
             }
-            self.store_effects(per_file_effect_summaries, per_file_effect_issues);
+            self.store_project_passes(per_file_effect_summaries, per_file_project_issues);
 
             self.codebase = merged_codebase;
             self.symbol_references = std::mem::take(&mut analysis_result.symbol_references);
@@ -1324,7 +1327,7 @@ impl IncrementalAnalysisService {
             snapshots,
             codebase_issues: new_codebase_issues,
             per_file_effect_summaries,
-            per_file_effect_issues,
+            per_file_project_issues,
         } = self.run_analyzer_selective(&mut merged_codebase, symbol_references, &self.settings, &files_to_skip)?;
         #[cfg(test)]
         {
@@ -1393,11 +1396,11 @@ impl IncrementalAnalysisService {
                     late_symbol_references,
                     reads: reads_by_file.remove(&file_id).unwrap_or_default(),
                     effect_summaries: Vec::new(),
-                    effect_issues: IssueCollection::default(),
+                    project_issues: IssueCollection::default(),
                 },
             );
         }
-        self.store_effects(per_file_effect_summaries, per_file_effect_issues);
+        self.store_project_passes(per_file_effect_summaries, per_file_project_issues);
 
         self.codebase = merged_codebase;
         self.symbol_references = std::mem::take(&mut analysis_result.symbol_references);
@@ -1854,10 +1857,20 @@ impl IncrementalAnalysisService {
         effect_summaries.sort_unstable_by_key(|(file_id, _)| *file_id);
         let effect_summaries: Vec<EffectSummary> =
             effect_summaries.into_iter().flat_map(|(_, summaries)| summaries.iter().cloned()).collect();
-        let mut per_file_effect_issues: HashMap<FileId, IssueCollection> = HashMap::default();
-        for issue in Effects::solve(codebase, &effect_summaries).issues(codebase) {
+        let native_symbol_references = aggregated_result.symbol_references.clone();
+        aggregated_result.symbol_references.extend(external_symbol_references.clone());
+        aggregated_result.symbol_references.extend(late_symbol_references.clone());
+
+        // The too-wide warning reads the uses of every file, the skipped ones' included, and a scan analyzes none.
+        let too_wide = if self.scan_only {
+            IssueCollection::default()
+        } else {
+            too_wide_members(codebase, &aggregated_result.symbol_references)
+        };
+        let mut per_file_project_issues: HashMap<FileId, IssueCollection> = HashMap::default();
+        for issue in Effects::solve(codebase, &effect_summaries).issues(codebase).into_iter().chain(too_wide) {
             match issue.primary_span() {
-                Some(span) => per_file_effect_issues.entry(span.file_id).or_default().push(issue),
+                Some(span) => per_file_project_issues.entry(span.file_id).or_default().push(issue),
                 None => aggregated_result.issues.push(issue),
             }
         }
@@ -1869,7 +1882,7 @@ impl IncrementalAnalysisService {
             self.database.files(),
         );
         aggregated_result.issues = pragma_reconciler.reconcile(std::mem::take(&mut aggregated_result.issues))?;
-        for issues in per_file_issues.values_mut().chain(per_file_effect_issues.values_mut()) {
+        for issues in per_file_issues.values_mut().chain(per_file_project_issues.values_mut()) {
             *issues = pragma_reconciler.reconcile(std::mem::take(issues))?;
         }
         let codebase_issues = if self.scan_only {
@@ -1882,10 +1895,6 @@ impl IncrementalAnalysisService {
                 *pragmas = reconciled.clone();
             }
         }
-
-        let native_symbol_references = aggregated_result.symbol_references.clone();
-        aggregated_result.symbol_references.extend(external_symbol_references.clone());
-        aggregated_result.symbol_references.extend(late_symbol_references.clone());
 
         if after_analysis {
             let analyzed = snapshots.iter().map(|snapshot| snapshot.file_id()).collect::<HashSet<_>>();
@@ -1975,7 +1984,7 @@ impl IncrementalAnalysisService {
             snapshots,
             codebase_issues,
             per_file_effect_summaries,
-            per_file_effect_issues,
+            per_file_project_issues,
         })
     }
 }
@@ -3336,12 +3345,13 @@ mod tests {
     }
 
     /// A body edit changes what every caller's body reaches, so the warm run re-analyzes only the edited file and
-    /// the solve over every cached summary reports the getter in the unchanged file.
+    /// the solve over every cached summary reports the law in the unchanged file, which reaches the edit through a
+    /// getter.
     #[test]
-    fn test_watch_body_edit_reaches_an_unchanged_files_getter() {
+    fn test_watch_body_edit_reaches_an_unchanged_files_law() {
         let order =
             |price: &str| format!("namespace App;\n\npublic class Order\n{{\n    public int price() => {price};\n}}\n");
-        let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n}\n";
+        let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n\n    law totaled(Cart cart) => cart.total > 0;\n}\n";
         let clock = "namespace App.Stubs;\n\nextern now uses Clock;\n";
         let now = "<?php\nfunction now(): int { return time(); }\n";
         let order_id = FileId::new(b"src/Order.sharp");
@@ -3351,26 +3361,26 @@ mod tests {
             ("src/Clock.sharp", clock),
             ("src/now.php", now),
         ]);
-        let impure_getters = |service: &IncrementalAnalysisService| {
+        let impure_laws = |service: &IncrementalAnalysisService| {
             service
                 .collect_all_issues()
                 .iter()
-                .filter(|issue| issue.code.as_deref() == Some("impure-getter"))
+                .filter(|issue| issue.code.as_deref() == Some("impure-law"))
                 .map(|issue| issue.message.clone())
                 .collect::<Vec<_>>()
         };
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
-        assert_eq!(impure_getters(&service), Vec::<String>::new());
+        assert_eq!(impure_laws(&service), Vec::<String>::new());
 
         db.update(order_id, Cow::Owned(order("now()").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
         assert_eq!(
-            impure_getters(&service),
+            impure_laws(&service),
             [
-                "Getter `total` reaches `Order.price`, which calls `global.now` with the effect `Clock`. Getters must be pure."
+                "Law `totaled` reaches `Order.price`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
             ]
         );
         assert_eq!(service.analyzed_files, HashSet::from_iter([order_id]));
@@ -3379,9 +3389,69 @@ mod tests {
         db.update(order_id, Cow::Owned(order("1").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
-        assert_eq!(impure_getters(&service), Vec::<String>::new());
+        assert_eq!(impure_laws(&service), Vec::<String>::new());
         assert_eq!(service.analyzed_files, HashSet::from_iter([order_id]));
         assert_matches_full(&service, &db, "Order.price returns 1 again");
+    }
+
+    /// Spec section 5's too-wide warning reads the uses of every file, so a use another namespace's file adds or drops
+    /// changes the warning in the member's file, which the warm run does not analyze again.
+    #[test]
+    fn test_watch_a_use_in_another_file_decides_the_too_wide_warning() {
+        let cart = "namespace App.Shop;\n\npublic class Cart\n{\n    public int total() => 1;\n}\n";
+        let page = |body: &str| {
+            format!(
+                "namespace App.Web;\n\nimport App.Shop.Cart;\n\nclass Page\n{{\n    public int show(Cart cart) => {body};\n}}\n"
+            )
+        };
+        let page_id = FileId::new(b"src/Web/Page.sharp");
+        // The warning runs in a project, whose files the loader marks from its composer.json.
+        let mut db = make_database(vec![]);
+        for (name, contents) in [("src/Shop/Cart.sharp", cart.to_owned()), ("src/Web/Page.sharp", page("0"))] {
+            let mut file = File::new(
+                Cow::Owned(name.as_bytes().to_vec()),
+                FileType::Host,
+                None,
+                Cow::Owned(contents.into_bytes()),
+            );
+            file.is_project = true;
+            db.add(file);
+        }
+        let too_wide = |service: &IncrementalAnalysisService| {
+            service
+                .collect_all_issues()
+                .iter()
+                .filter(|issue| issue.code.as_deref() == Some("too-wide-member"))
+                .map(|issue| issue.message.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(too_wide(&service), ["`Cart.total` is public, and nothing outside `App.Shop` uses it."]);
+
+        db.update(page_id, Cow::Owned(page("cart.total()").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[page_id])).expect("Incremental analysis failed.");
+        assert_eq!(too_wide(&service), Vec::<String>::new());
+        assert_eq!(service.analyzed_files, HashSet::from_iter([page_id]));
+        assert_matches_full(&service, &db, "Page calls Cart.total");
+
+        // The skipped user's use still counts when only the member's file is analyzed again.
+        let cart_id = FileId::new(b"src/Shop/Cart.sharp");
+        db.update(cart_id, Cow::Owned(cart.replace("=> 1", "=> 2").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[cart_id])).expect("Incremental analysis failed.");
+        assert_eq!(too_wide(&service), Vec::<String>::new());
+        assert_eq!(service.analyzed_files, HashSet::from_iter([cart_id]));
+        assert_matches_full(&service, &db, "Cart.total returns 2");
+
+        db.update(page_id, Cow::Owned(page("0").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[page_id])).expect("Incremental analysis failed.");
+        assert_eq!(too_wide(&service), ["`Cart.total` is public, and nothing outside `App.Shop` uses it."]);
+        assert_eq!(service.analyzed_files, HashSet::from_iter([page_id]));
+        assert_matches_full(&service, &db, "Page no longer calls Cart.total");
     }
 
     /// A body records the effects its `extern` declarations list, so an edit of a declaration changes the summaries
@@ -3389,7 +3459,7 @@ mod tests {
     #[test]
     fn test_watch_extern_edit_reaches_every_caller() {
         let clock = |uses: &str| format!("namespace App.Stubs;\n\nextern now{uses};\n");
-        let report = "namespace App;\n\npublic class Report\n{\n    public int stamp => now();\n}\n";
+        let report = "namespace App;\n\npublic class Report\n{\n    law stamped() => now() > 0;\n}\n";
         let now = "<?php\nfunction now(): int { return time(); }\n";
         let clock_id = FileId::new(b"src/Clock.sharp");
         let mut db = make_database(vec![
@@ -3397,24 +3467,24 @@ mod tests {
             ("src/Report.sharp", report),
             ("src/now.php", now),
         ]);
-        let impure_getters = |service: &IncrementalAnalysisService| {
-            service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-getter")).count()
+        let impure_laws = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-law")).count()
         };
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
-        assert_eq!(impure_getters(&service), 0);
+        assert_eq!(impure_laws(&service), 0);
 
         db.update(clock_id, Cow::Owned(clock(" uses Clock").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[clock_id])).expect("Incremental analysis failed.");
-        assert_eq!(impure_getters(&service), 1);
+        assert_eq!(impure_laws(&service), 1);
         assert_matches_full(&service, &db, "now uses Clock");
 
         db.update(clock_id, Cow::Owned(clock("").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[clock_id])).expect("Incremental analysis failed.");
-        assert_eq!(impure_getters(&service), 0);
+        assert_eq!(impure_laws(&service), 0);
         assert_matches_full(&service, &db, "now is pure again");
     }
 
@@ -3484,7 +3554,7 @@ mod tests {
         let order = |extra: &str| {
             format!("namespace App;\n\npublic class Order\n{{\n    public int price() => now();\n{extra}}}\n")
         };
-        let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n}\n";
+        let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n\n    law totaled(Cart cart) => cart.total > 0;\n}\n";
         let clock = "namespace App.Stubs;\n\nextern now uses Clock;\n";
         let now = "<?php\nfunction now(): int { return time(); }\n";
         let order_id = FileId::new(b"src/Order.sharp");
@@ -3494,18 +3564,18 @@ mod tests {
             ("src/Clock.sharp", clock),
             ("src/now.php", now),
         ]);
-        let impure_getters = |service: &IncrementalAnalysisService| {
-            service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-getter")).count()
+        let impure_laws = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-law")).count()
         };
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
-        assert_eq!(impure_getters(&service), 1);
+        assert_eq!(impure_laws(&service), 1);
 
         db.update(order_id, Cow::Owned(order("\n    public int discount() => 0;\n").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
-        assert_eq!(impure_getters(&service), 1);
+        assert_eq!(impure_laws(&service), 1);
         assert_matches_full(&service, &db, "Order gains discount");
     }
 

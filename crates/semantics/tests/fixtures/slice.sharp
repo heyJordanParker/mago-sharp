@@ -17,15 +17,15 @@ public class Report
     public static string? last { get; private set; } = "none";
     [Field] private int count = 0;
     protected float rate = 2.5 * -global.PHP_INT_MAX;
-    private string label;
+    private string label = "";
     [Field(label: "Views", limit: global.PHP_INT_MAX)] public int views { get; private set; } = 0;
     public string name { get; set; }
     public int id { get; }
     private Calc calc = new Calc(Calc.make(), rate: 2);
     public string slug => global.strtolower(this.name);
     private int|Calc|string key = 1;
-    private (int|string)? code;
-    public Calc? owner { get; set; }
+    private (int|string)? code = null;
+    public Calc? owner { get; set; } = null;
     public int? limit { get; } = null;
     private Map<string, int> sizes = [:];
     public List<Calc> lines { get; private set; } = [];

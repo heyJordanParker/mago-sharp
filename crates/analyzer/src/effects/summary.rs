@@ -54,6 +54,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::context::block::BlockContext;
 use crate::effects::Body;
 use crate::effects::Call;
 use crate::effects::Changed;
@@ -99,6 +100,52 @@ pub(crate) fn record<'ast, 'arena, A>(
     }
     artifacts.effect_summaries.push(summary);
     artifacts.effect_summaries.append(&mut lambdas);
+}
+
+/// Records the `get` and `set` accessors of the property `property` of the class `block_context` is in, which runs
+/// through `behaviors`, each a class and where `via` names it, spec section 6.4. A behavior's `get` and `set` are the
+/// property's accessors, so a read calls each behavior's `get` and a write each one's `set`, on the behavior the object
+/// keeps, and a read or write carries what they do: their effects, and their writes of the behavior's own fields as
+/// writes of `this`, which a `get` never makes (spec section 6.1).
+pub(crate) fn record_behaviors<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    property: Word,
+    behaviors: &[(Word, Span)],
+) where
+    A: Arena,
+{
+    let Some(class) = block_context.scope.get_class_like() else {
+        unreachable!("a property is analyzed in its class's scope");
+    };
+    if !context.dialect.is_sharp() || behaviors.is_empty() {
+        return;
+    }
+
+    let member = word(property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes()));
+    for (accessor, value) in [(b"get".as_slice(), Changed::This), (b"set", Changed::Parameter(0))] {
+        let calls = behaviors
+            .iter()
+            .map(|(behavior, span)| Call {
+                callee: Body::Method(*behavior, word(accessor)),
+                span: *span,
+                receiver: Roots::from([Changed::This]),
+                arguments: vec![Roots::from([value])],
+            })
+            .collect();
+        artifacts.effect_summaries.push(EffectSummary {
+            body: Body::Accessor(class.name, property, word(accessor)),
+            member,
+            effects: Vec::new(),
+            calls,
+            changes: Vec::new(),
+            function_values: Vec::new(),
+            readonly_calls: Vec::new(),
+            imports: Arc::clone(&context.imported_names),
+            scope: Arc::clone(&context.scope),
+        });
+    }
 }
 
 /// Records each lambda and method value `value` holds where a `.sharp` file gives it the place of type `declared` at
@@ -237,6 +284,16 @@ where
         subjects: Vec::new(),
         inlining: Vec::new(),
         grew: false,
+        builds_this: match body {
+            Body::Method(class, method) => {
+                method.as_bytes().eq_ignore_ascii_case(b"__construct")
+                    || context
+                        .codebase
+                        .get_method(class.as_bytes(), method.as_bytes())
+                        .is_some_and(|method| method.flags.is_named_constructor())
+            }
+            _ => false,
+        },
         summary: empty_summary(),
         lambda_summaries: Vec::new(),
     };
@@ -289,6 +346,9 @@ where
     inlining: Vec<Span>,
     /// Whether a local gained a root during this walk.
     grew: bool,
+    /// Whether the body builds `this`: a constructor's or a named constructor's, whose writes of `this` run no
+    /// observer, spec section 6.2.
+    builds_this: bool,
     summary: EffectSummary,
     /// The summary of each lambda written in the body, once, which a function value of the lambda runs.
     lambda_summaries: Vec<EffectSummary>,
@@ -434,13 +494,28 @@ where
                 let receiver = self.roots(access.object);
                 self.change(receiver.clone(), span, place);
                 let arguments = vec![value.map(|value| self.roots(value)).unwrap_or_default()];
-                for callee in self.accessors(access.object, &access.property, b"set") {
-                    self.summary.calls.push(Call {
-                        callee,
-                        span,
-                        receiver: receiver.clone(),
-                        arguments: arguments.clone(),
-                    });
+                // A write of `this` while a constructor builds it runs no observer, spec section 6.2.
+                let builds_this = self.builds_this
+                    && matches!(access.object.unparenthesized(), Expression::ConstantAccess(name)
+                        if self.context.resolved_names.binding(&name.name) == Some(Binding::This));
+                for set in self.accessors(access.object, &access.property, b"set") {
+                    // The write runs the observers inside the `set` hook too, spec section 6.2. A property without one
+                    // has no such body, and a call of a body without a summary adds nothing.
+                    let Body::Accessor(class, property, _) = set else {
+                        unreachable!("an accessor's body is an accessor body");
+                    };
+                    let observers = [b"willSet".as_slice(), b"didSet"]
+                        .map(|observer| Body::Accessor(class, property, word(observer)))
+                        .into_iter()
+                        .filter(|_| !builds_this);
+                    for callee in std::iter::once(set).chain(observers) {
+                        self.summary.calls.push(Call {
+                            callee,
+                            span,
+                            receiver: receiver.clone(),
+                            arguments: arguments.clone(),
+                        });
+                    }
                 }
             }
             Expression::Access(Access::NullSafeProperty(access)) => {
@@ -469,7 +544,8 @@ where
             .collect()
     }
 
-    /// The `accessor` bodies a read or write of `object.property` runs.
+    /// The `accessor` bodies a read or write of `object.property` runs. For `Class.property`, a static's, they are the
+    /// class's own.
     fn accessors(
         &self,
         object: &Expression<'arena>,
@@ -479,19 +555,26 @@ where
         let ClassLikeMemberSelector::Identifier(name) = property else {
             return Vec::new();
         };
+        let classes = match object.unparenthesized() {
+            Expression::ConstantAccess(class)
+                if self.context.resolved_names.binding(&class.name) == Some(Binding::Class) =>
+            {
+                vec![word(self.context.resolved_names.get(&class.name))]
+            }
+            _ => self.object_classes(object),
+        };
 
-        self.object_classes(object).into_iter().filter_map(|class| self.accessor(class, name.value, accessor)).collect()
+        classes.into_iter().filter_map(|class| self.accessor(class, name.value, accessor)).collect()
     }
 
+    /// The `accessor` body of `property` that a read or write through `class` runs, by the class that declares the
+    /// property. It has a summary only where PHP# code gives it one: an accessor body, an observer, or the behaviors
+    /// `via` names, which a property's PHP metadata lists no hook for. A call of a body without one adds nothing.
     fn accessor(&self, class: Word, property: &[u8], accessor: &[u8]) -> Option<Body> {
         let property = php_variable_name(property);
         let declaring = *self.codebase().get_class_like(class.as_bytes())?.declaring_property_ids.get(&property)?;
-        let metadata = self.codebase().get_property(declaring.as_bytes(), property.as_bytes())?;
 
-        metadata
-            .hooks
-            .contains_key(&word(accessor))
-            .then(|| Body::Accessor(ascii_lowercase_word(declaring.as_bytes()), property, word(accessor)))
+        Some(Body::Accessor(ascii_lowercase_word(declaring.as_bytes()), property, word(accessor)))
     }
 
     fn read_property(&mut self, object: &Expression<'arena>, property: &ClassLikeMemberSelector<'arena>, span: Span) {
@@ -1103,9 +1186,8 @@ where
         access: &'ast PropertyAccess<'arena>,
         recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
     ) {
-        if recorder.context.resolved_names.static_property_class(access).is_none() {
-            recorder.read_property(access.object, &access.property, access.span());
-        }
+        // `Class.name` reads a static, which runs its class's `get` body too.
+        recorder.read_property(access.object, &access.property, access.span());
     }
 
     fn walk_in_null_safe_property_access(

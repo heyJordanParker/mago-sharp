@@ -170,6 +170,7 @@ use crate::cst::cst::Modifier;
 use crate::cst::cst::Module;
 use crate::cst::cst::ModuleMember;
 use crate::cst::cst::ModuleParent;
+use crate::cst::cst::NameOf;
 use crate::cst::cst::NamedArgument;
 use crate::cst::cst::NamedConstructor;
 use crate::cst::cst::NamedPlaceholderArgument;
@@ -1266,6 +1267,10 @@ generate_ast_walker! {
         walker.walk_property_item(&hooked_property.item, context);
         walker.walk_property_hook_list(&hooked_property.hook_list, context);
 
+        for behavior in hooked_property.behaviors.iter().flat_map(|behaviors| behaviors.behaviors.iter()) {
+            walker.walk_hint(behavior, context);
+        }
+
         if let Some(initial_value) = &hooked_property.initial_value {
             walker.walk_expression(initial_value.value, context);
         }
@@ -2112,6 +2117,7 @@ generate_ast_walker! {
             Expression::As(r#as) => walker.walk_as(r#as, context),
             Expression::PatternMatch(pattern_match) => walker.walk_pattern_match(pattern_match, context),
             Expression::TypeOf(type_of) => walker.walk_type_of(type_of, context),
+            Expression::NameOf(name_of) => walker.walk_name_of(name_of, context),
             Expression::With(with) => walker.walk_with(with, context),
             Expression::GenericClass(generic_class) => walker.walk_generic_class(generic_class, context),
             Expression::Error(_) => {
@@ -3003,6 +3009,12 @@ generate_ast_walker! {
     'arena GenericClass as generic_class => {
         walker.walk_expression(generic_class.class, context);
         walker.walk_type_argument_list(&generic_class.type_arguments, context);
+    }
+
+    'arena NameOf as name_of => {
+        walker.walk_keyword(&name_of.nameof, context);
+        walker.walk_identifier(&name_of.class, context);
+        walker.walk_local_identifier(&name_of.property, context);
     }
 
     'arena With as with => {

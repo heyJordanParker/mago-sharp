@@ -10,6 +10,7 @@ use crate::cst::cst::Modifier;
 use crate::cst::cst::PlainProperty;
 use crate::cst::cst::Property;
 use crate::cst::cst::PropertyAbstractItem;
+use crate::cst::cst::PropertyBehaviorList;
 use crate::cst::cst::PropertyConcreteItem;
 use crate::cst::cst::PropertyHook;
 use crate::cst::cst::PropertyHookAbstractBody;
@@ -63,27 +64,7 @@ where
 
         let next = self.stream.peek_kind(0)?;
         if matches!(next, Some(T!["{"])) {
-            let hook_list = self.parse_property_hook_list()?;
-            self.skip_via_clause(false)?;
-            let initial_value = if self.dialect.is_sharp() && self.stream.is_at(T!["="])? {
-                Some(PropertyInitialValue {
-                    equals: self.stream.eat_span(T!["="])?,
-                    value: self.parse_expression()?,
-                    semicolon: self.stream.eat_span(T![";"])?,
-                })
-            } else {
-                None
-            };
-
-            return Ok(Property::Hooked(HookedProperty {
-                attribute_lists: attributes,
-                modifiers,
-                var,
-                hint,
-                item,
-                hook_list,
-                initial_value,
-            }));
+            return self.parse_hooked_property(attributes, modifiers, var, hint, item);
         }
 
         Ok(Property::Plain(PlainProperty {
@@ -146,6 +127,53 @@ where
         }))
     }
 
+    /// Parses the rest of a PHP# property written without its type, whose name the caller parsed as a type.
+    pub(crate) fn parse_untyped_property(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+        name: LocalIdentifier<'arena>,
+    ) -> Result<Property<'arena>, ParseError> {
+        let item = PropertyItem::Abstract(PropertyAbstractItem {
+            variable: DirectVariable { span: name.span, name: name.value },
+        });
+
+        self.parse_hooked_property(attributes, modifiers, None, None, item)
+    }
+
+    /// Parses a property's accessors, from its `{`, and the PHP# initial value after them.
+    fn parse_hooked_property(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+        var: Option<Keyword<'arena>>,
+        hint: Option<Hint<'arena>>,
+        item: PropertyItem<'arena>,
+    ) -> Result<Property<'arena>, ParseError> {
+        let hook_list = self.parse_property_hook_list()?;
+        let behaviors = self.parse_optional_behavior_list()?;
+        let initial_value = if self.dialect.is_sharp() && self.stream.is_at(T!["="])? {
+            Some(PropertyInitialValue {
+                equals: self.stream.eat_span(T!["="])?,
+                value: self.parse_expression()?,
+                semicolon: self.stream.eat_span(T![";"])?,
+            })
+        } else {
+            None
+        };
+
+        Ok(Property::Hooked(HookedProperty {
+            attribute_lists: attributes,
+            modifiers,
+            var,
+            hint,
+            item,
+            hook_list,
+            behaviors,
+            initial_value,
+        }))
+    }
+
     fn parse_property_item(&mut self) -> Result<PropertyItem<'arena>, ParseError> {
         Ok(match self.stream.peek_kind(1)? {
             Some(T!["="]) => PropertyItem::Concrete(self.parse_property_concrete_item()?),
@@ -182,28 +210,49 @@ where
         Ok(variable)
     }
 
-    /// Skips a PHP# `via` clause after a property's accessors, spec section 6.4, and reports it once where it starts.
-    /// Its behaviors are names separated by commas. On a parameter a comma also ends the parameter, so a behavior
-    /// there is a name followed by `,` or `)`. In a class body the clause ends with `;`.
-    pub(crate) fn skip_via_clause(&mut self, on_parameter: bool) -> Result<(), ParseError> {
-        if !self.dialect.is_sharp()
-            || !self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"via")
-        {
+    /// Whether a PHP# `via` clause starts here, spec section 6.4.
+    fn is_at_via(&mut self) -> Result<bool, ParseError> {
+        Ok(self.dialect.is_sharp()
+            && self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"via"))
+    }
+
+    /// Parses a PHP# property's behaviors after its accessors, spec section 6.4: `via` and types separated by
+    /// commas, ending with `;` unless an initial value follows.
+    fn parse_optional_behavior_list(&mut self) -> Result<Option<PropertyBehaviorList<'arena>>, ParseError> {
+        if !self.is_at_via()? {
+            return Ok(None);
+        }
+
+        let via = self.stream.consume_span()?;
+        let mut behaviors = self.new_vec();
+        let mut commas = self.new_vec();
+        behaviors.push(self.parse_type_hint()?);
+        while self.stream.is_at(T![","])? {
+            commas.push(self.stream.consume()?);
+            behaviors.push(self.parse_type_hint()?);
+        }
+        let semicolon = if self.stream.is_at(T![";"])? { Some(self.stream.consume_span()?) } else { None };
+
+        Ok(Some(PropertyBehaviorList { via, behaviors: TokenSeparatedSequence::new(behaviors, commas), semicolon }))
+    }
+
+    /// Skips a `via` clause on the constructor parameter `name`, which section 9 refuses, and reports it once where it
+    /// starts. A comma also ends the parameter, so a behavior there is a name followed by `,` or `)`.
+    pub(crate) fn skip_parameter_behaviors(&mut self, name: &[u8]) -> Result<(), ParseError> {
+        if !self.is_at_via()? {
             return Ok(());
         }
 
         let via = self.stream.consume_span()?;
-        self.errors.push(ParseError::NotSupportedYetInSharp("`via`", via));
+        let name = String::from_utf8_lossy(name).into();
+        self.errors.push(ParseError::BehaviorParameterInSharp(name, via));
         self.parse_local_identifier()?;
         while self.stream.is_at(T![","])?
             && self.stream.peek_kind(1)? == Some(T![Identifier])
-            && (!on_parameter || matches!(self.stream.peek_kind(2)?, Some(T![","] | T![")"])))
+            && matches!(self.stream.peek_kind(2)?, Some(T![","] | T![")"]))
         {
             self.stream.consume()?;
             self.parse_local_identifier()?;
-        }
-        if !on_parameter && self.stream.is_at(T![";"])? {
-            self.stream.consume()?;
         }
 
         Ok(())

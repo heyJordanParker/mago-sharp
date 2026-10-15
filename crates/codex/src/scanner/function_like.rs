@@ -167,10 +167,14 @@ where
         is_abstract: method.modifiers.contains_abstract(),
         is_static: method.modifiers.contains_static(),
         is_constructor: method_name_str.eq_ignore_ascii_case(b"__construct"),
-        // Spec section 5: a PHP# method with no access modifier is `private`, outside an interface.
+        // Spec section 5: a PHP# method with no access modifier is `private`, outside an interface. An `internal` one
+        // runs as PHP's `public` one.
         visibility: match method.modifiers.get_first_visibility() {
             Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
-            None if context.program.dialect.is_sharp() && !class_like_metadata.kind.is_interface() => {
+            None if context.program.dialect.is_sharp()
+                && !class_like_metadata.kind.is_interface()
+                && !method.modifiers.contains_internal() =>
+            {
                 Visibility::Private
             }
             None => Visibility::Public,
@@ -209,6 +213,11 @@ where
             method_metadata.is_abstract =
                 !method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_)));
         }
+    }
+
+    // Spec section 5: a PHP# `internal` method runs as PHP's `public` one and reaches its class's namespace.
+    if context.program.dialect.is_sharp() && method.modifiers.contains_internal() {
+        metadata.flags |= MetadataFlags::INTERNAL_REACH;
     }
 
     // A PHP# method is closed unless it is `virtual`, abstract or an `override`, spec section 22, so the analyzer

@@ -267,6 +267,7 @@ final class AnalyzerCodeModuleGenerator
         'incompatible-property-access',
         'incompatible-property-type',
         'invalid-property-write',
+        'invalid-property-behavior',
         'possibly-invalid-property-write',
         'invalid-property-read',
         'deprecated-constant',
@@ -362,7 +363,7 @@ final class AnalyzerCodeModuleGenerator
         'function-import',
         'duplicate-extern',
         'extern-on-sharp',
-        'impure-getter',
+        'getter-writes-this',
         'impure-law',
         'unproven-law',
         'non-existent-law',
@@ -382,6 +383,8 @@ final class AnalyzerCodeModuleGenerator
         'missing-service',
         'service-cycle',
         'captive-service',
+        'internal-access',
+        'too-wide-member',
         'missing-readonly-marker',
     ];
 

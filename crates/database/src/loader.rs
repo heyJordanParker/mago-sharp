@@ -5,6 +5,7 @@ use std::collections::hash_map::Entry;
 use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use foldhash::HashMap;
 use foldhash::HashSet;
@@ -19,6 +20,7 @@ use crate::exclusion::Exclusion;
 use crate::file::File;
 use crate::file::FileId;
 use crate::file::FileType;
+use crate::file::FolderNamespace;
 use crate::matcher::build_glob_set;
 use crate::utils::bytes_to_os_str;
 use crate::utils::bytes_to_path;
@@ -239,12 +241,11 @@ impl<'config> DatabaseLoader<'config> {
 
         db.reserve(tier_specs.len() + self.memory_sources.len());
 
-        let mut standard_library_directories = HashMap::default();
+        let mut manifests = Manifests::default();
         for (file_id, (host_spec, vendored_spec, patch_spec)) in tier_specs {
             if let Some(mut file) = all_files.remove(&file_id) {
                 file.file_type = resolve_file_type(host_spec, vendored_spec, patch_spec);
-                file.is_standard_library =
-                    is_standard_library(&file, &self.configuration.workspace, &mut standard_library_directories);
+                mark_package(&mut file, &self.configuration.workspace, &mut manifests);
                 db.add(file);
             }
         }
@@ -532,57 +533,121 @@ fn bump_spec(slot: &mut Option<usize>, s: usize) {
 /// The package name in the standard library's `composer.json`.
 const STANDARD_LIBRARY_PACKAGE: &str = "heyjordanparker/php-sharp-composer";
 
-/// Whether a file is a PHP# source of the standard library: a `.sharp` file whose nearest `composer.json` names the
-/// standard library's package, vendored or in the package's own repository. `directories` holds the answer of every
-/// directory already looked up, so each directory's `composer.json` is read once.
-pub(crate) fn is_standard_library(file: &File, workspace: &Path, directories: &mut HashMap<PathBuf, bool>) -> bool {
-    if !file.name.ends_with(b".sharp") {
-        return false;
-    }
+/// The nearest `composer.json` of each directory already looked up, so each one is read once.
+pub(crate) type Manifests = HashMap<PathBuf, Option<Arc<Manifest>>>;
 
-    let joined;
-    let path = match &file.path {
-        Some(path) => path.as_path(),
-        None => {
-            joined = workspace.join(bytes_to_path(&file.name));
-            joined.as_path()
-        }
-    };
-
-    path.parent().is_some_and(|directory| is_standard_library_directory(directory, directories))
+/// What a PHP# file's nearest `composer.json` says about it.
+#[derive(Debug, Default)]
+pub(crate) struct Manifest {
+    /// Whether it names the standard library's package.
+    is_standard_library: bool,
+    /// Whether it says `"type": "project"`.
+    is_project: bool,
+    /// Its PSR-4 folders, `autoload`'s and `autoload-dev`'s.
+    folders: Vec<Psr4Folder>,
 }
 
-fn is_standard_library_directory(directory: &Path, directories: &mut HashMap<PathBuf, bool>) -> bool {
-    if let Some(&is_library) = directories.get(directory) {
-        return is_library;
+/// A PSR-4 folder, the namespace it holds, dot-separated, and whether `autoload-dev` maps it.
+#[derive(Debug)]
+struct Psr4Folder {
+    namespace: String,
+    directory: PathBuf,
+    is_test: bool,
+}
+
+/// Marks a `.sharp` file from its nearest `composer.json`: whether it is a PHP# source of the standard library, which
+/// names the standard library's package, vendored or in the package's own repository, whether its package is a
+/// project, and what its PSR-4 folders say about its namespace, from the folder that holds it most closely.
+pub(crate) fn mark_package(file: &mut File, workspace: &Path, manifests: &mut Manifests) {
+    if !file.name.ends_with(b".sharp") {
+        return;
     }
 
-    let manifest = directory.join("composer.json");
-    let is_library = match std::fs::read(&manifest) {
+    let path = file.path.clone().unwrap_or_else(|| workspace.join(bytes_to_path(&file.name)));
+    let Some(manifest) = path.parent().and_then(|directory| nearest_manifest(directory, manifests)) else {
+        return;
+    };
+
+    file.is_standard_library = manifest.is_standard_library;
+    file.is_project = manifest.is_project;
+    file.folder_namespace = manifest
+        .folders
+        .iter()
+        .filter_map(|folder| Some((folder, path.parent()?.strip_prefix(&folder.directory).ok()?)))
+        .min_by_key(|(_, relative)| relative.components().count())
+        .map(|(folder, relative)| {
+            if folder.is_test {
+                return FolderNamespace::Test;
+            }
+
+            let parts = std::iter::once(folder.namespace.clone())
+                .filter(|namespace| !namespace.is_empty())
+                .chain(relative.components().map(|part| part.as_os_str().to_string_lossy().into_owned()));
+
+            FolderNamespace::Namespace(parts.collect::<Vec<_>>().join(".").into_boxed_str())
+        });
+}
+
+fn nearest_manifest(directory: &Path, manifests: &mut Manifests) -> Option<Arc<Manifest>> {
+    if let Some(manifest) = manifests.get(directory) {
+        return manifest.clone();
+    }
+
+    let path = directory.join("composer.json");
+    let manifest = match std::fs::read(&path) {
         Ok(contents) => match serde_json::from_slice::<serde_json::Value>(&contents) {
-            Ok(package) => package.get("name").and_then(serde_json::Value::as_str) == Some(STANDARD_LIBRARY_PACKAGE),
+            Ok(package) => Some(Arc::new(read_manifest(directory, &package))),
             Err(error) => {
                 tracing::warn!(
                     "Failed to parse `{}`: {error}. Its files are not the standard library.",
-                    manifest.display()
+                    path.display()
                 );
 
-                false
+                Some(Arc::new(Manifest::default()))
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            directory.parent().is_some_and(|parent| is_standard_library_directory(parent, directories))
+            directory.parent().and_then(|parent| nearest_manifest(parent, manifests))
         }
         Err(error) => {
-            tracing::warn!("Failed to read `{}`: {error}. Its files are not the standard library.", manifest.display());
+            tracing::warn!("Failed to read `{}`: {error}. Its files are not the standard library.", path.display());
 
-            false
+            Some(Arc::new(Manifest::default()))
         }
     };
 
-    directories.insert(directory.to_path_buf(), is_library);
+    manifests.insert(directory.to_path_buf(), manifest.clone());
 
-    is_library
+    manifest
+}
+
+/// The facts of the `composer.json` in `directory`, as `mago init` reads its PSR-4 folders.
+fn read_manifest(directory: &Path, package: &serde_json::Value) -> Manifest {
+    let mut folders = Vec::new();
+    for (section, is_test) in [("autoload", false), ("autoload-dev", true)] {
+        let Some(map) = package.get(section).and_then(|autoload| autoload.get("psr-4")).and_then(|map| map.as_object())
+        else {
+            continue;
+        };
+
+        for (prefix, directories) in map {
+            let namespace = prefix.trim_matches('\\').replace('\\', ".");
+            let directories = match directories {
+                serde_json::Value::String(path) => vec![path.as_str()],
+                serde_json::Value::Array(paths) => paths.iter().filter_map(serde_json::Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            for path in directories {
+                folders.push(Psr4Folder { namespace: namespace.clone(), directory: directory.join(path), is_test });
+            }
+        }
+    }
+
+    Manifest {
+        is_standard_library: package.get("name").and_then(serde_json::Value::as_str) == Some(STANDARD_LIBRARY_PACKAGE),
+        is_project: package.get("type").and_then(serde_json::Value::as_str) == Some("project"),
+        folders,
+    }
 }
 
 /// Picks the final [`FileType`] for a file that matched configured base paths in one or
@@ -1173,6 +1238,72 @@ mod tests {
                 format!("{library}/library/Sharp/Text.sharp"),
                 format!("{library}/library/Sharp/Text/Slug.sharp"),
                 format!("{library}/library/Sharp/Text/Text.sharp"),
+            ]
+        );
+    }
+
+    /// Spec section 5's too-wide warning runs in a project: a `.sharp` file whose nearest `composer.json` says
+    /// `"type": "project"`. A package without a type is a library, as Composer's default type is.
+    #[test]
+    fn a_sharp_file_belongs_to_a_project_when_its_nearest_composer_json_says_so() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "composer.json", r#"{"name": "acme/app", "type": "project"}"#);
+        create_test_file(&temp_dir, "src/App/Page.sharp", "");
+        create_test_file(&temp_dir, "src/App/Page.php", "<?php");
+        create_test_file(&temp_dir, "vendor/acme/tools/composer.json", r#"{"name": "acme/tools"}"#);
+        create_test_file(&temp_dir, "vendor/acme/tools/src/Tools.sharp", "");
+
+        let mut config = create_test_config(&temp_dir, vec!["src"], vec!["vendor"]);
+        config.extensions = vec![Cow::Borrowed(b"php"), Cow::Borrowed(b"sharp")];
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        let in_project: Vec<String> =
+            db.files().filter(|file| file.is_project).map(|file| name_str(&file.name).into_owned()).collect();
+
+        assert_eq!(in_project, ["src/App/Page.sharp"]);
+    }
+
+    /// Spec section 5: an `autoload` PSR-4 folder maps a `.sharp` file's folder to the namespace it declares, the most
+    /// closely holding folder winning, and an `autoload-dev` folder is a test folder.
+    #[test]
+    fn a_sharp_file_takes_the_namespace_of_its_psr_4_folder() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(
+            &temp_dir,
+            "composer.json",
+            r#"{"autoload": {"psr-4": {"App\\": "app/", "App\\Billing\\": ["billing/"], "": "root/"}}, "autoload-dev": {"psr-4": {"Tests\\": "tests/"}}}"#,
+        );
+        for name in [
+            "app/Order.sharp",
+            "app/Tenant/Store/Order.sharp",
+            "billing/Invoice.sharp",
+            "root/Plain/Tool.sharp",
+            "tests/Tenant/OrderTest.sharp",
+            "lib/Other.sharp",
+            "app/Order.php",
+        ] {
+            create_test_file(&temp_dir, name, "");
+        }
+
+        let mut config = create_test_config(&temp_dir, vec!["app", "billing", "root", "tests", "lib"], vec![]);
+        config.extensions = vec![Cow::Borrowed(b"php"), Cow::Borrowed(b"sharp")];
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        let mut namespaces: Vec<(String, Option<FolderNamespace>)> =
+            db.files().map(|file| (name_str(&file.name).into_owned(), file.folder_namespace.clone())).collect();
+        namespaces.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let namespace = |name: &str| Some(FolderNamespace::Namespace(name.into()));
+
+        assert_eq!(
+            namespaces,
+            [
+                ("app/Order.php".to_owned(), None),
+                ("app/Order.sharp".to_owned(), namespace("App")),
+                ("app/Tenant/Store/Order.sharp".to_owned(), namespace("App.Tenant.Store")),
+                ("billing/Invoice.sharp".to_owned(), namespace("App.Billing")),
+                ("lib/Other.sharp".to_owned(), None),
+                ("root/Plain/Tool.sharp".to_owned(), namespace("Plain")),
+                ("tests/Tenant/OrderTest.sharp".to_owned(), Some(FolderNamespace::Test)),
             ]
         );
     }

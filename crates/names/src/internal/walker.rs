@@ -56,6 +56,7 @@ use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::MethodPartialApplication;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleParent;
+use mago_syntax::cst::NameOf;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
@@ -945,8 +946,8 @@ where
     }
 
     /// A PHP# accessor runs as a function of its own, as PHP runs a hook. Its accessor list declares `field`, the
-    /// storage, apart from any constructor parameter that declares the same property, and `set` or `init` declares
-    /// `value`, the incoming value, as PHP's `set` hook declares `$value`.
+    /// storage, apart from any constructor parameter that declares the same property, and `set`, `init` or an observer
+    /// declares `value`, the incoming value, as PHP's `set` hook declares `$value`.
     fn walk_in_property_hook(
         &mut self,
         hook: &'ast PropertyHook<'arena>,
@@ -958,7 +959,7 @@ where
 
         self.locals.enter_method();
         self.locals.declare(b"field", Local { declaration: accessors, kind: LocalKind::Parameter });
-        if hook.is_setter() && hook.parameter_list.is_none() {
+        if (hook.is_setter() || hook.is_observer()) && hook.parameter_list.is_none() {
             self.locals.declare(b"value", Local { declaration: hook.name.span, kind: LocalKind::Parameter });
         }
     }
@@ -1514,6 +1515,12 @@ where
             self.resolved_names.report_binding_error(BindingError::LocalAsType { name: span, local });
             self.resolved_names.bind(span, Binding::Local(local));
         }
+    }
+
+    fn walk_in_name_of(&mut self, name_of: &'ast NameOf<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let (name, imported) = self.resolve_class(context, name_of.class.value());
+
+        self.resolved_names.insert_at(name_of.class.span(), name, imported);
     }
 
     fn walk_in_static_method_call(

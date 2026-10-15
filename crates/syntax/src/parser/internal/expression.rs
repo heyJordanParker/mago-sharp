@@ -339,6 +339,10 @@ where
             return Ok(self.arena.alloc(Expression::TypeOf(self.parse_type_of()?)));
         }
 
+        if self.is_at_name_of()? {
+            return Ok(self.arena.alloc(Expression::NameOf(self.parse_name_of()?)));
+        }
+
         // `super.label()` calls the parent's method, spec section 22, as PHP's `parent::label()`.
         if self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"super" && next == Some(T!["."]) {
             return Ok(self.arena.alloc(Expression::Parent(self.expect_any_keyword()?)));

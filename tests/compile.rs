@@ -409,14 +409,25 @@ fn compile_names_the_app_module_that_binds_the_dispatcher() {
     assert!(read(root, ".sharp/listeners.php").ends_with("    'dispatcher' => null,\n];\n"));
 }
 
-/// A path the listener table quotes keeps a `'` and a `\` in its name.
+/// A path the listener table quotes keeps a `'` and a `\` in its name. The PSR-4 folder that maps `App` carries both,
+/// since a folder below it names a namespace, which can take neither.
 #[test]
 fn compile_quotes_each_input_path_of_the_listener_table() {
-    let directory = lawful_project(&[("app/it's\\here/Cart.sharp", "namespace App;\n\npublic class Cart\n{\n}\n")]);
+    let directory = lawful_project(&[("it's\\here/Cart.sharp", "namespace App;\n\npublic class Cart\n{\n}\n")]);
     let root = directory.path();
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"it's\\\\here\"]\nincludes = [\"vendor\"]\n",
+    );
+    write(
+        root,
+        "composer.json",
+        "{\n    \"autoload\": {\n        \"psr-4\": {\n            \"App\\\\\": \"it's\\\\here/\"\n        }\n    }\n}\n",
+    );
 
     compile_succeeds(root);
-    let input = input_row(root, "app/it's\\here/*.sharp").replace("it's\\here", "it\\'s\\\\here");
+    let input = input_row(root, "it's\\here/*.sharp").replace("it's\\here", "it\\'s\\\\here");
     assert!(read(root, ".sharp/listeners.php").contains(&input), "{}", read(root, ".sharp/listeners.php"));
 }
 

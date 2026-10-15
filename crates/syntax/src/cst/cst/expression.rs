@@ -40,6 +40,7 @@ use crate::cst::cst::literal::Literal;
 use crate::cst::cst::r#loop::Break;
 use crate::cst::cst::r#loop::Continue;
 use crate::cst::cst::magic_constant::MagicConstant;
+use crate::cst::cst::name_of::NameOf;
 use crate::cst::cst::partial_application::PartialApplication;
 use crate::cst::cst::pattern::As;
 use crate::cst::cst::pattern::Is;
@@ -121,6 +122,7 @@ pub enum Expression<'arena> {
     As(As<'arena>),
     PatternMatch(PatternMatch<'arena>),
     TypeOf(TypeOf<'arena>),
+    NameOf(NameOf<'arena>),
     With(With<'arena>),
     GenericClass(GenericClass<'arena>),
     Error(Span),
@@ -148,6 +150,7 @@ impl<'arena> Expression<'arena> {
             // arguments included, is created while the code runs, spec section 25.
             Self::TypeOf(type_of) => matches!(type_of.r#type, Hint::Identifier(_)),
             Self::GenericClass(generic_class) => generic_class.class.is_constant(version, initialization),
+            Self::NameOf(_) => true,
             Self::ConstantAccess(_) => true,
             Self::Self_(_) => true,
             Self::Parent(_) => true,
@@ -490,6 +493,7 @@ impl<'arena> Expression<'arena> {
             Expression::As(_) => NodeKind::As,
             Expression::PatternMatch(_) => NodeKind::PatternMatch,
             Expression::TypeOf(_) => NodeKind::TypeOf,
+            Expression::NameOf(_) => NodeKind::NameOf,
             Expression::With(_) => NodeKind::With,
             Expression::GenericClass(_) => NodeKind::GenericClass,
             Expression::Error(_) => NodeKind::Error,
@@ -554,6 +558,7 @@ impl HasSpan for Expression<'_> {
             Expression::As(expression) => expression.span(),
             Expression::PatternMatch(expression) => expression.span(),
             Expression::TypeOf(expression) => expression.span(),
+            Expression::NameOf(expression) => expression.span(),
             Expression::With(expression) => expression.span(),
             Expression::GenericClass(expression) => expression.span(),
             Expression::Error(span) => *span,

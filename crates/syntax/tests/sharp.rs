@@ -472,16 +472,15 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required` on a method and `via` are spec syntax outside the slice. Each one is a single error where it starts, and
-/// the class around it still parses.
+/// `required` on a method is spec syntax outside the slice, and `via` on a constructor parameter is section 9's error.
+/// Each one is a single error where it starts, and the class around it still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     for (member, message, start) in [
         ("public required int count() { return 1; }", "`required` is not supported yet in PHP#.", "required"),
-        ("public string name { get; set; } via Trimmed, Tracked;", "`via` is not supported yet in PHP#.", "via"),
         (
             "public Report(public int id { get; } via Tracked, int other) {}",
-            "`via` is not supported yet in PHP#.",
+            "Declare `id` in the class body to give it `via`: a member declared on a constructor parameter takes access levels and attributes only.",
             "via",
         ),
     ] {
@@ -506,6 +505,40 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
                 .any(|member| matches!(member, ClassLikeMember::Method(run) if run.name.value == b"run")),
             "the class keeps parsing after `{member}`"
         );
+    }
+}
+
+/// Spec section 6.4: a property names its behaviors after its accessors, `via` and types separated by commas, which
+/// end with `;`, or before an initial value, which ends with its own. A generic behavior takes its type arguments.
+#[test]
+fn a_property_names_its_behaviors_after_its_accessors() {
+    for (member, behaviors, initial_value) in [
+        ("public string name { get; set; } via Trimmed, Tracked;", ["Trimmed", "Tracked"].as_slice(), None),
+        ("public string name { get; set; } via Trimmed = \"\";", ["Trimmed"].as_slice(), Some("\"\"")),
+        (
+            "public string name { get; set; } via Logged<string>, Trimmed = \"\";",
+            ["Logged<string>", "Trimmed"].as_slice(),
+            Some("\"\""),
+        ),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str =
+            Box::leak(format!("class Report\n{{\n    {member}\n\n    public int run() => 1;\n}}\n").into_boxed_str());
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        assert!(program.errors.is_empty(), "{member}: {:#?}", program.errors);
+        let [ClassLikeMember::Property(Property::Hooked(property)), ClassLikeMember::Method(_)] =
+            class_members(program).as_slice()
+        else {
+            panic!("expected a property and a method for `{member}`, got {:#?}", class_members(program));
+        };
+        let Some(list) = &property.behaviors else {
+            panic!("expected behaviors for `{member}`");
+        };
+        let names: Vec<&str> = list.behaviors.iter().map(|behavior| source(code, behavior)).collect();
+        assert_eq!(names, behaviors, "{member}");
+        assert_eq!(property.initial_value.as_ref().map(|value| source(code, value.value)), initial_value, "{member}");
+        assert_eq!(source(code, property), member, "{member}");
     }
 }
 
@@ -817,6 +850,59 @@ fn a_field_without_a_type_is_a_parse_error_that_names_the_rule() {
         };
         assert!(untyped.hint.is_none(), "{field}");
         assert_eq!(run.name.value, b"run", "{field}");
+    }
+}
+
+/// A property always has a type, an override of a plain PHP parent's property too, spec section 6.1. A bare name
+/// before `{` is the property's name, its accessors and initial value parse, and the class keeps parsing.
+#[test]
+fn internal_with_a_namespace_is_a_parse_error_that_names_the_rule() {
+    let code = "internal(App.Tenant) class Helper\n{\n    internal(App\\Tenant) int count() => 1;\n\n    public int run() => 1;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Helper.sharp", code);
+
+    let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        messages,
+        [
+            "`internal` takes no namespace: move the shared helper to the parent namespace.",
+            "`internal` takes no namespace: move the shared helper to the parent namespace.",
+        ]
+    );
+    let reaches: Vec<&str> = program.errors.iter().map(|error| source(code, error)).collect();
+    assert_eq!(reaches, ["(App.Tenant)", "(App\\Tenant)"]);
+    assert_eq!(class_members(program).len(), 2);
+}
+
+#[test]
+fn a_property_without_a_type_is_a_parse_error_that_names_the_rule() {
+    for (property, name) in [
+        ("protected override table { get; set; } = \"orders\";", "table"),
+        ("public views { get; private set; }", "views"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Order\n{{\n    {property}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Order.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{property}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            error.to_string(),
+            "A PHP# property needs a type, as in `public int views { get; set; }`.",
+            "{property}"
+        );
+        assert_eq!(source(code, error), name, "{property}");
+        let [ClassLikeMember::Property(Property::Hooked(untyped)), ClassLikeMember::Method(run)] =
+            class_members(program).as_slice()
+        else {
+            panic!("expected a property and a method for `{property}`, got {:#?}", class_members(program));
+        };
+        assert!(untyped.hint.is_none(), "{property}");
+        assert_eq!(untyped.item.variable().name, name.as_bytes(), "{property}");
+        assert_eq!(run.name.value, b"run", "{property}");
     }
 }
 
@@ -3362,6 +3448,36 @@ fn typeof_takes_any_type() {
 /// The names a header's entries are written with.
 fn header_names<'arena>(inheritance: &Inheritance<'arena>) -> Vec<&'arena [u8]> {
     inheritance.names().map(|name| name.value()).collect()
+}
+
+/// `nameof(Order.total)` names a class by its short name and one of its properties, spec section 6.3. In PHP it stays
+/// a function call.
+#[test]
+fn nameof_names_a_class_and_a_property() {
+    const CODE: &str =
+        "class Report\n{\n    void run()\n    {\n        query.orderBy(nameof(Order.total));\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [statement] = method_body(program) else {
+        panic!("expected one statement, got {:#?}", method_body(program));
+    };
+    let Expression::Call(Call::Method(order_by)) = expression(statement) else {
+        panic!("expected a method call, got {statement:#?}");
+    };
+    let Some(Expression::NameOf(name_of)) = order_by.argument_list.arguments.first().map(Argument::value) else {
+        panic!("expected `nameof(Order.total)`, got {:#?}", order_by.argument_list.arguments);
+    };
+    assert_eq!(name_of.class.value(), b"Order");
+    assert_eq!(name_of.property.value, b"total");
+    assert_eq!(source(CODE, name_of), "nameof(Order.total)");
+
+    let php = parse(&arena, "src/Report.php", "<?php nameof(Order);");
+    let Some(Statement::Expression(statement)) = php.statements.get(1) else {
+        panic!("expected an expression statement, got {:#?}", php.statements);
+    };
+    assert!(matches!(statement.expression, Expression::Call(Call::Function(_))), "{statement:#?}");
 }
 
 #[test]

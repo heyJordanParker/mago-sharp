@@ -5,6 +5,7 @@ use std::path::Path;
 
 use mago_allocator::LocalArena;
 use mago_database::file::File;
+use mago_database::file::FolderNamespace;
 use mago_names::resolver::NameResolver;
 use mago_php_version::PHPVersion;
 use mago_reporting::Issue;
@@ -100,18 +101,18 @@ fn an_extern_event_names_a_class() {
 }
 
 /// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
-/// `public`, and each parameter is a type, a name and an optional default. An event is a class, so any capitalized word
-/// but a reserved type name names one, as `Print` and `Exit` do, and `Self` is refused.
+/// `public` or `internal`, spec section 5, and each parameter is a type, a name and an optional default. An event is a
+/// class, so any capitalized word but a reserved type name names one, as `Print` and `Exit` do, and `Self` is refused.
 #[test]
-fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
+fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties() {
     let code = "namespace App.Shop;\n\nprivate event Hidden(int id);\nstatic event Shared(int id);\npublic event Typed(public int id, int ...rest);\npublic event Tagged(Set<string> tags);\n[Logged] public event Noted(int id);\npublic event Tracked(int id { get; });\npublic event Maybe(int id, Set<int>? tags);\npublic event Paid(int orderId, string note = \"\") : Placed;\nevent Moved(int id);\ninterface Placed { }\npublic event Empty();\npublic event Print(int id);\npublic event Exit(int code);\npublic event Frozen(readonly int id);\npublic event Scoped(internal int id);\npublic event Self(int id);\n";
     let fixed = "namespace App.Shop;\n\npublic event Moved(int id);\n\nevent Emptied();\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:1 An event takes only `public`.",
-            "4:1 An event takes only `public`.",
+            "3:1 An event takes only `public` or `internal`.",
+            "4:1 An event takes only `public` or `internal`.",
             "5:20 An event's parameter takes no modifier: it is a public get-only property of the event.",
             "5:39 An event's parameter cannot be variadic: it is one property of the event.",
             "6:21 A `Set` parameter of an event is not supported yet in PHP#.",
@@ -928,7 +929,7 @@ fn the_keyword_names_example_reserves_only_the_keywords_php_sharp_uses() {
 /// name the help suggests compiles.
 #[test]
 fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
-    const RESERVED: [&str; 52] = [
+    const RESERVED: [&str; 53] = [
         "let",
         "const",
         "emit",
@@ -949,6 +950,7 @@ fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
         "yield",
         "exit",
         "typeof",
+        "nameof",
         "is",
         "as",
         "import",
@@ -1095,7 +1097,10 @@ fn a_class_or_an_interface_names_its_base_class_and_interfaces_after_a_colon() {
 fn a_method_opens_with_virtual_and_replaces_with_override() {
     let code = "namespace App.Tenant;\n\npublic class Image\n{\n    public virtual int size()\n    {\n        return 1;\n    }\n}\n\npublic class Thumbnail : Image\n{\n    public override int size()\n    {\n        return 2;\n    }\n\n    private virtual int cached;\n}\n";
 
-    assert_eq!(issues(code), ["18:13 This modifier is not supported yet in PHP#."]);
+    assert_eq!(
+        issues(code),
+        ["18:13 A field takes no `virtual`: a subclass overrides a `protected` field with a property already."]
+    );
 }
 
 #[test]
@@ -1513,25 +1518,61 @@ fn an_interface_member_is_public_written_bare() {
     );
 }
 
-/// Spec section 5's `internal` is not supported yet: on a member, a parameter or a declaration it is one error at the
-/// modifier, and the member is not one written without an access modifier.
+/// Spec section 5: a namespace's inside is its folder. A file an `autoload` PSR-4 folder holds declares the namespace
+/// of its folder, or the file declares its way into another namespace, and a test folder's file declares any. A folder
+/// whose name no namespace can take is named to be renamed, since no file could declare its namespace.
 #[test]
-fn internal_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    internal const int MAX = 1;\n    internal int count = 0;\n    internal int views { get; set; } = 0;\n    internal int total => 7;\n    public string name { get; internal set; } = \"\";\n\n    internal Report(internal int size { get; })\n    {\n    }\n\n    internal Report.empty() : this(0)\n    {\n    }\n\n    internal void run()\n    {\n    }\n}\n";
-    let message = "This modifier is not supported yet in PHP#.";
+fn a_file_declares_the_namespace_of_its_folder() {
+    let messages = |folder: Option<FolderNamespace>, code: &'static str| {
+        let arena = LocalArena::new();
+        let mut file = File::ephemeral(Cow::Borrowed(b"app/Tenant/Other/Order.sharp"), Cow::Borrowed(code.as_bytes()));
+        file.folder_namespace = folder;
+        let program = parse_file(&arena, &file);
+        let names = NameResolver::new(&arena).resolve(program);
 
+        SemanticsChecker::new(PHPVersion::new(8, 4, 0))
+            .check(&file, program, &names)
+            .into_iter()
+            .map(|issue| issue.message)
+            .collect::<Vec<_>>()
+    };
+    let other = || Some(FolderNamespace::Namespace("App.Tenant.Other".into()));
+    let error = "This file's folder holds the namespace `App.Tenant.Other`, so the file declares `namespace App.Tenant.Other;`.";
+
+    assert_eq!(messages(other(), "namespace App.Tenant.Other;\n\npublic class Order\n{\n}\n"), Vec::<String>::new());
+    assert_eq!(messages(other(), "namespace App.Tenant.Store;\n\npublic class Order\n{\n}\n"), [error]);
+    assert_eq!(messages(other(), "public class Order\n{\n}\n"), [error]);
     assert_eq!(
-        issues(code),
+        messages(Some(FolderNamespace::Test), "namespace App.Tenant.Store;\n\npublic class Order\n{\n}\n"),
+        Vec::<String>::new()
+    );
+    assert_eq!(messages(None, "namespace App.Tenant.Store;\n\npublic class Order\n{\n}\n"), Vec::<String>::new());
+    assert_eq!(
+        messages(
+            Some(FolderNamespace::Namespace("App.it's\\here".into())),
+            "namespace App;\n\npublic class Order\n{\n}\n"
+        ),
         [
-            format!("5:5 {message}"),
-            format!("6:5 {message}"),
-            format!("7:5 {message}"),
-            format!("8:5 {message}"),
-            "9:31 This accessor is not supported yet in PHP#.".to_owned(),
-            format!("11:5 {message}"),
-            format!("11:21 {message}"),
-            format!("15:5 {message}"),
-            format!("19:5 {message}"),
+            "This file's folder `it's\\here` can't name a namespace: a namespace's inside is its folder, and a namespace takes letters, digits and `_`."
+        ]
+    );
+}
+
+/// Spec section 5's `internal` is an access modifier of a member, a parameter's member, an accessor and a declaration.
+/// A field is `private` or `protected` (section 6), so a field or a constructor parameter without accessors is never
+/// `internal`, as it is never `public`.
+#[test]
+fn internal_is_an_access_modifier() {
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    internal const int MAX = 1;\n    internal int views { get; set; } = 0;\n    internal int total => 7;\n    public string name { get; internal set; } = \"\";\n\n    internal Report(internal int size { get; })\n    {\n    }\n\n    internal Report.empty() : this(0)\n    {\n    }\n\n    internal void run()\n    {\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+
+    let fields = "namespace App.Tenant;\n\npublic class Report\n{\n    internal int count = 0;\n\n    public Report(internal int size)\n    {\n    }\n}\n";
+    assert_eq!(
+        issues(fields),
+        [
+            "5:5 A PHP# field cannot be `internal`: a field is `private` or `protected`.",
+            "7:19 A constructor parameter declared `internal` needs accessors: it is a property, as in `internal int id { get; }`.",
         ]
     );
 
@@ -1543,12 +1584,24 @@ fn internal_is_not_supported_yet() {
     ] {
         let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
 
-        assert_eq!(issues(code), [format!("3:1 {message}")], "{declaration}");
+        assert_eq!(issues(code), Vec::<String>::new(), "{declaration}");
     }
 
     // An anonymous class is not supported yet, and `internal` among its modifiers is no other error.
     let anonymous = leak(method("        const other = new readonly internal class {};\n        return 1;\n"));
     assert_eq!(issues(anonymous), ["7:23 This expression is not supported yet in PHP#."]);
+}
+
+/// An accessor's access modifier reaches strictly less than its property's, as in C#. `internal` reaches a namespace
+/// and `protected` the subclasses, so neither is narrower than the other.
+#[test]
+fn an_internal_accessor_is_narrower_only_than_a_public_property() {
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public int a { get; internal set; } = 0;\n    internal int b { get; private set; } = 0;\n    internal int c { get; protected set; } = 0;\n    protected int d { get; internal set; } = 0;\n    internal int e { get; internal set; } = 0;\n    internal int f { get; public set; } = 0;\n}\n";
+    let error = |line: u32, column: u32, setter: &str| {
+        format!("{line}:{column} The `{setter}` accessor of a PHP# property must be narrower than the property.")
+    };
+
+    assert_eq!(issues(code), [error(7, 27, "set"), error(8, 28, "set"), error(9, 27, "set"), error(10, 27, "set")]);
 }
 
 #[test]
@@ -1568,18 +1621,31 @@ fn an_interface_constant_or_another_interface_modifier_is_not_supported_yet() {
     );
 }
 
-/// An interface states a get-only property its classes give, as `OrderEvent` states the `orderId` its events give,
-/// spec section 15. A `set` accessor or an accessor body is not supported yet.
+/// An interface states a property its classes give, `{ get; }` as `OrderEvent` states the `orderId` its events give,
+/// spec section 15, or `{ get; set; }`, spec section 6.1. An interface member is always public, spec section 5, so an
+/// access modifier on an accessor is the error an access modifier on any interface member is. An accessor body is
+/// not supported yet.
 #[test]
-fn an_interface_property_is_get_only() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n}\n";
+fn an_interface_property_is_get_only_or_settable() {
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n    string tag { get; private set; }\n    string code { protected get; set; }\n    string kind { get; set; init; }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "6:24 Interface virtual property `Named.label` must be abstract.",
             "6:5 This class member is not supported yet in PHP#.",
-            "7:5 This class member is not supported yet in PHP#."
+            "8:23 An interface member is always public, so it takes no access modifier.",
+            "9:19 An interface member is always public, so it takes no access modifier.",
+            "10:5 This class member is not supported yet in PHP#."
+        ]
+    );
+    let helps: Vec<Option<String>> =
+        check("src/Report.sharp", code).into_iter().skip(2).take(2).map(|issue| issue.help).collect();
+    assert_eq!(
+        helps,
+        [
+            Some("Declare `{ get; }` in the interface, and `{ get; private set; }` in the class.".to_owned()),
+            Some("Remove `protected`.".to_owned()),
         ]
     );
 
@@ -2320,7 +2386,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             format!("20:17 PHP# has no `__LINE__`: {line}"),
             "21:15 A constant without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             format!("21:21 PHP# has no `__LINE__`: {line}"),
-            "23:19 A `public` constructor parameter needs accessors: a public member is a property, as in `public int id { get; }`.".to_owned(),
+            "23:19 A constructor parameter declared `public` needs accessors: it is a property, as in `public int id { get; }`.".to_owned(),
             format!("23:35 PHP# has no `__LINE__`: {line}"),
             "23:45 A by-reference parameter is not supported yet in PHP#.".to_owned(),
             format!("23:54 PHP# has no `__LINE__`: {line}"),
@@ -2629,7 +2695,7 @@ fn a_public_constructor_parameter_without_accessors_is_an_error() {
     assert_eq!(
         issues(code),
         [
-            "5:19 A `public` constructor parameter needs accessors: a public member is a property, as in `public int id { get; }`."
+            "5:19 A constructor parameter declared `public` needs accessors: it is a property, as in `public int id { get; }`."
         ]
     );
 }
@@ -2643,7 +2709,7 @@ fn a_promoted_member_follows_the_rules_of_the_same_declaration_in_the_class_body
         [
             "5:30 A PHP# property needs a `get` accessor.",
             "5:63 The `set` accessor of a PHP# property must be narrower than the property.",
-            "5:90 The property `c` has no storage for the constructor to set: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
+            "5:98 Declare `c` in the class body to give it an accessor body: a member declared on a constructor parameter takes access levels and attributes only.",
         ]
     );
 }
@@ -2687,14 +2753,40 @@ fn a_parameter_cannot_be_lazy() {
     );
 }
 
-/// `lazy` is a modifier of spec section 6.5, which the engine cannot run yet on a property or anywhere else.
+/// Spec section 9: a member declared on a constructor parameter takes access levels and attributes only, so each
+/// accessor body is an error, an expression body or a block, on `get`, `set` or `init`. Access levels stay.
 #[test]
-fn lazy_off_a_parameter_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public lazy int total => 1;\n\n    public lazy int run() => 1;\n}\n";
+fn an_accessor_body_on_a_constructor_parameter_is_an_error() {
+    let code = "namespace App.Tenant;\n\nclass Ledger\n{\n    public Ledger(\n        public string name { get; set => field = value.trim(); },\n        public int count { get => field; private set; },\n        public string code { get; init { field = value; } },\n        public int total { get; private set; },\n    ) {}\n}\n";
+    let message = |name: &str| {
+        format!(
+            "Declare `{name}` in the class body to give it an accessor body: a member declared on a constructor parameter takes access levels and attributes only."
+        )
+    };
 
     assert_eq!(
         issues(code),
-        ["5:12 `lazy` is not supported yet in PHP#.", "7:12 `lazy` is not supported yet in PHP#."]
+        [
+            format!("6:39 {}", message("name")),
+            format!("7:32 {}", message("count")),
+            format!("8:40 {}", message("code"))
+        ]
+    );
+}
+
+/// Spec section 6.5: `lazy T name => expr;` is a `lazy` property's only form, so `lazy` with accessors, on a field or
+/// on a method is an error that names it.
+#[test]
+fn lazy_is_a_computed_property() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public lazy int total => 1;\n    public lazy int? found => null;\n    public lazy int views { get; set; } = 0;\n    private lazy int count = 0;\n\n    public lazy int run() => 1;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:12 A `lazy` property computes its value on the first read: write `lazy` with `=>`, as in `lazy Plan views => this.load();`.",
+            "8:13 A `lazy` property computes its value on the first read: write `lazy` with `=>`, as in `lazy Plan count => this.load();`.",
+            "10:12 Only a property is `lazy`, written as in `public lazy Plan plan => this.load();`.",
+        ]
     );
 }
 
@@ -3179,53 +3271,58 @@ fn a_public_field_is_an_error() {
     assert_eq!(issues(code), ["5:5 A PHP# field cannot be `public`: a field is `private` or `protected`."]);
 }
 
-/// A field written `override` replaces a plain PHP parent's property, spec section 6.1, with the parent's access
-/// level, `public` included. The analyzer checks it against the parent.
+/// Spec section 6.1: an override is a property, an auto-property, one with accessor bodies or a computed one, with an
+/// initial value that may be any expression without `this`. The analyzer checks it against the parent.
 #[test]
-fn a_field_may_override_a_parent_property_with_its_access_level_and_a_constant_value() {
-    let code = "namespace App.Store;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override List<string> fillable = [\"number\", \"total\"];\n    public override bool timestamps = false;\n    protected override string table = \"orders\";\n    protected static override int count = 1 + 2;\n}\n";
+fn a_property_overrides_a_parent_property() {
+    let code = "namespace App.Store;\n\nimport Lib.Calc;\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override List<string> fillable { get; set; } = [\"number\", \"total\"];\n    public override bool timestamps { get; set; } = false;\n    protected override string? table { get; set; }\n    protected override int perPage { get; set; } = Calc.make();\n    public override string status { get => field; set => field = value; }\n    public override string slug => \"order\";\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// An override replaces the default of the parent's property, so it writes one: without it, the engine would give the
-/// property PHP's default for an untyped one, `null`, which its written type may not hold.
+/// Spec section 6.1 lines 281 and 289: PHP# has no public fields, and every override is a property, over a plain PHP
+/// parent and over a PHP# parent's field alike, `static` too. The help names the property to write.
 #[test]
-fn an_override_without_an_initial_value_is_an_error() {
-    let code = "namespace App.Store;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override List<string> hidden;\n}\n";
-
-    assert_eq!(
-        issues(code),
-        ["7:37 An override needs an initial value: it replaces the default of the parent's property."]
-    );
-}
-
-/// The parent's constructor may read an overridden property before this class's code runs, so an override's initial
-/// value is constant, which PHP stores as the default.
-#[test]
-fn an_override_whose_initial_value_is_not_constant_is_an_error() {
-    let code = "namespace App.Store;\n\nimport Lib.Calc;\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override List<string> fillable = this.columns();\n    protected override int perPage = Calc.make();\n\n    public List<string> columns() => [\"number\"];\n}\n";
+fn a_field_cannot_override() {
+    let code = "namespace App.Store;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override bool timestamps = false;\n    protected override string table = \"orders\";\n    protected static override int count = 1;\n}\n";
+    let message =
+        |name: &str| format!("An override is a property: give `{name}` accessors, as in `{name} {{ get; set; }}`.");
 
     assert_eq!(
         issues(code),
         [
-            "8:48 The initial value of an override must be constant: the parent's constructor may read it before this class's code runs.",
-            "9:38 The initial value of an override must be constant: the parent's constructor may read it before this class's code runs.",
+            format!("7:12 {}", message("timestamps")),
+            format!("8:15 {}", message("table")),
+            format!("9:22 {}", message("count"))
         ]
     );
 }
 
-/// `override` takes a field, the one member that replaces a plain PHP parent's property. A PHP# parent's property is
-/// overridden as a property, spec section 6.1, which is not supported yet.
+/// Spec sections 6.1 and 22: a PHP# property is closed unless it is `virtual` or `abstract`. An abstract property
+/// declares accessors with no bodies and no initial value, in an abstract class.
 #[test]
-fn an_overriding_property_is_not_supported_yet() {
-    let code = "namespace App.Store;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override int views { get; set; } = 0;\n    public override string slug => \"order\";\n}\n";
+fn a_property_opens_with_virtual_or_abstract() {
+    let code = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    public abstract string kind { get; }\n    public abstract int? sides { get; set; }\n    public virtual string label => \"shape\";\n    public virtual int count { get; set; } = 0;\n    public virtual string title { get => field; set => field = value.trim(); } = \"\";\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A field is storage, so it is neither `virtual` nor `abstract`: a subclass already overrides a `protected` field with
+/// a property (spec section 6.1 line 289). An abstract property has no accessor bodies and no initial value.
+#[test]
+fn virtual_and_abstract_take_a_property_without_a_body() {
+    let code = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    protected virtual int cached = 0;\n    protected abstract int sides;\n    public abstract string kind => \"shape\";\n    public abstract string name { get => \"shape\"; }\n    public abstract int count { get; set; } = 0;\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "7:25 Overriding a property is not supported yet in PHP#.",
-            "8:28 Overriding a property is not supported yet in PHP#.",
+            "6:15 Property `Shape.sides` cannot be declared abstract",
+            "7:12 Property `Shape.kind` cannot be declared abstract",
+            "5:15 A field takes no `virtual`: a subclass overrides a `protected` field with a property already.",
+            "6:15 A field cannot be `abstract`: declare an abstract property, as in `public abstract int total { get; }`.",
+            "7:12 An abstract property has no body: write its accessors with none, as in `{ get; }`.",
+            "8:12 An abstract property has no body: write its accessors with none, as in `{ get; }`.",
+            "9:12 An abstract property has no initial value: the class that implements it gives one.",
         ]
     );
 }
@@ -3272,6 +3369,25 @@ fn a_field_or_a_property_may_be_static_with_a_constant_initial_value() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 6: no constructor sets a static, and a nullable member has no implicit starting value, so a static field
+/// or property with storage has an initial value whatever its type, `= null` included. A property without storage
+/// holds nothing to set.
+#[test]
+fn a_static_needs_an_initial_value_whatever_its_type() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int hits = 0;\n    private static int misses;\n    public static string? region { get; set; }\n    public static string label { get; set; }\n    private static string? cached;\n    private static int|string key;\n    public static int twice { get => 2; }\n    private static string? none = null;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "6:24 Give `misses` an initial value: no constructor sets a static.",
+            "7:27 Give `region` an initial value: no constructor sets a static.",
+            "8:26 Give `label` an initial value: no constructor sets a static.",
+            "9:28 Give `cached` an initial value: no constructor sets a static.",
+            "10:31 Give `key` an initial value: no constructor sets a static.",
+        ]
+    );
+}
+
 #[test]
 fn a_nullable_field_of_a_type_outside_the_slice_is_not_supported_yet() {
     let code =
@@ -3299,46 +3415,28 @@ fn a_void_field_reports_only_the_php_error() {
     );
 }
 
+/// Spec section 6.1: a get-only `T?` property without an initial value is set by the constructor, which the analyzer
+/// checks on every path, so semantics takes it.
 #[test]
-fn a_get_only_nullable_property_without_an_initial_value_is_not_supported_yet() {
+fn a_get_only_nullable_property_without_an_initial_value_is_in_the_slice() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int? total { get; }\n    private (int|string)? key { get; }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:17 A get-only nullable property without an initial value is not supported yet in PHP#.",
-            "6:27 A get-only nullable property without an initial value is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 6: a get-only static is set once, by its initial value, which runs once when a request first uses its
+/// class's statics when it isn't constant, as any static's does. A generic class's statics start as a copy of constant initial values
+/// for each type argument, so one that runs as code is not supported yet there.
 #[test]
-fn a_static_member_outside_the_slice_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n}\n";
+fn a_static_member_takes_any_initial_value_and_is_get_only_or_settable() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n}\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "7:23 A get-only static property is not supported yet in PHP#.",
-            "8:32 A static member's initial value that is not constant is not supported yet in PHP#.",
-            "9:45 A static member's initial value that is not constant is not supported yet in PHP#.",
+            "7:23 Give `id` an initial value: no constructor sets a static.",
+            "15:32 A static member of a generic class with an initial value that runs as code is not supported yet in PHP#.",
         ]
-    );
-}
-
-#[test]
-fn a_get_only_nullable_property_without_an_initial_value_names_the_initial_value_or_set_to_write() {
-    let notes: Vec<Vec<String>> =
-        check("src/Report.sharp", "namespace App.Tenant;\n\nclass Report\n{\n    public int? total { get; }\n}\n")
-            .into_iter()
-            .map(|issue| issue.notes)
-            .collect();
-
-    assert_eq!(
-        notes,
-        [[
-            "A get-only property runs as PHP's `readonly`, which takes no default, so it cannot start as null: give it an initial value, as in `public int? total { get; } = null;`, or a `set` accessor."
-        ]]
     );
 }
 
@@ -3454,15 +3552,12 @@ fn an_expression_body_is_checked_as_a_method_body() {
 }
 
 #[test]
-fn a_static_computed_property_or_one_without_an_access_modifier_is_not_supported_yet() {
+fn a_computed_property_without_an_access_modifier_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int count => 1;\n    int size => 2;\n}\n";
 
     assert_eq!(
         issues(code),
-        [
-            "5:12 A static computed property is not supported yet in PHP#.",
-            "6:9 A property without `public`, `protected` or `private` is not supported yet in PHP#.",
-        ]
+        ["6:9 A property without `public`, `protected` or `private` is not supported yet in PHP#."]
     );
 }
 
@@ -3475,10 +3570,8 @@ fn properties_outside_the_slice_are_not_supported_yet() {
         [
             "8:12 Property `Report.d` cannot be declared abstract",
             "5:9 A property without `public`, `protected` or `private` is not supported yet in PHP#.",
-            "6:23 A get-only static property is not supported yet in PHP#.",
-            "7:20 This accessor is not supported yet in PHP#.",
-            "8:12 This modifier is not supported yet in PHP#.",
-            "9:25 Overriding a property is not supported yet in PHP#.",
+            "6:23 Give `b` an initial value: no constructor sets a static.",
+            "7:20 Only `set` and `init` take an access level: `get` reads `c` at the property's own level.",
             "10:16 An initial value before the accessors is not supported yet in PHP#.",
             "11:25 This accessor is not supported yet in PHP#.",
         ]
@@ -3488,22 +3581,97 @@ fn properties_outside_the_slice_are_not_supported_yet() {
     assert_eq!(issues_in("src/Report.php", php), ["7:5 Property `Report::$d` cannot be declared abstract"]);
 }
 
+/// Spec section 6.1: only `set` and `init` carry their own access level, so `get` reads at the property's level, and an
+/// access level on it is an error that says how to read the property only inside the class.
+#[test]
+fn an_access_level_on_get_is_an_error_naming_a_method_that_reads_it() {
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public int views { protected get; set; } = 0;\n    public int count { public get; private set; } = 0;\n    private int total { get; set; } = 0;\n}\n";
+    let help = |property: &str| {
+        Some(format!(
+            "Write `get;`, and to read `{property}` only inside the class, write a method that reads it there, such as a `private` method that returns `this.{property}`."
+        ))
+    };
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:24 Only `set` and `init` take an access level: `get` reads `views` at the property's own level.",
+            "6:24 Only `set` and `init` take an access level: `get` reads `count` at the property's own level.",
+        ]
+    );
+    assert_eq!(
+        check("src/Report.sharp", code).into_iter().map(|issue| issue.help).collect::<Vec<_>>(),
+        [help("views"), help("count")]
+    );
+}
+
+/// Spec section 6.4: `via` goes on an instance auto-property with `get; set;`, whose storage its behaviors run around,
+/// so it is an error beside an accessor body, and on a get-only, static or interface property. A constructor
+/// parameter takes none, which the parser reports, as section 9 limits it to access levels and attributes.
+#[test]
+fn via_goes_on_an_instance_auto_property_with_get_and_set() {
+    let code = "namespace App.Tenant;\n\nimport App.Trimmed;\nimport App.Tracked;\n\npublic class Report\n{\n    public string name { get; set; } via Trimmed = \"\";\n    public string title { get; set; } via Trimmed, Tracked = \"\";\n    public string? note { get; set; } via Trimmed;\n    public string code { get; set => field = value; } via Trimmed = \"\";\n    public static string label { get; set; } via Trimmed = \"\";\n    public string tag { get; } via Trimmed = \"\";\n}\n\npublic interface Named\n{\n    string name { get; set; } via Trimmed;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "11:55 `via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
+            "12:46 A static property takes no `via`: each object keeps its own behaviors.",
+            "13:32 `via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
+            "18:31 A property without storage takes no `via`: the class that stores the property names its behaviors.",
+        ]
+    );
+
+    // Each behavior names a class, with its type arguments when it is generic, and never another type.
+    let types = "namespace App.Tenant;\n\nimport App.Logged;\n\npublic class Report\n{\n    public string name { get; set; } via Logged<string> = \"\";\n    public string code { get; set; } via string = \"\";\n    public string tag { get; set; } via List<string> = \"\";\n}\n";
+    assert_eq!(
+        issues(types),
+        [
+            "8:42 `string` is no class: `via` names a behavior class, as `via Trimmed` or `via Logged<string>`.",
+            "9:41 `List<string>` is no class: `via` names a behavior class, as `via Trimmed` or `via Logged<string>`.",
+        ]
+    );
+}
+
+/// Spec section 6.2: `willSet` and `didSet` each take a body and need `set`, as they run inside it on each write.
+/// `willSet` cannot change or stop the write, so it neither writes `value` nor returns, and a `set` body cannot return
+/// before `didSet`, nor `didSet` return a value. `field` in `willSet` reads the value the write replaces.
+/// A member declared on a constructor parameter takes no observer, as section 9 says.
+#[test]
+fn observers_take_a_body_beside_set_and_cannot_change_or_stop_the_write() {
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public string name { get; set; willSet => this.log(value); didSet { this.log(field); } } = \"\";\n    public int count { get; set { if (value < 0) { return; } field = value; } didSet => this.log(\"count\"); } = 0;\n    public int total { get; willSet => this.log(\"total\"); } = 0;\n    public int size { get; init; didSet => this.log(\"size\"); }\n    public int rank { get; set; willSet { value = 2; value++; return; } } = 0;\n    public int level { get; set; willSet => this.log(field); didSet; } = 0;\n    public int depth { get; set; didSet { return 1; } } = 0;\n\n    public Report(public string title { get; set; didSet => this.log(value); }) { }\n\n    private void log(Any? text) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "6:52 A `set` accessor beside `didSet` cannot return: `didSet` runs after it.",
+            "7:29 `willSet` needs a `set` accessor: it runs on each write through `set`.",
+            "8:34 `didSet` needs a `set` accessor: it runs on each write through `set`.",
+            "9:63 `willSet` cannot return: the write runs after it.",
+            "9:43 `willSet` cannot change `value`: the write after it stores `value` as written.",
+            "9:54 `willSet` cannot change `value`: the write after it stores `value` as written.",
+            "10:62 This accessor is not supported yet in PHP#.",
+            "11:50 `didSet` must not return a value.",
+            "13:58 Declare `title` in the class body to give it `didSet`: a member declared on a constructor parameter takes access levels and attributes only.",
+        ]
+    );
+}
+
 /// Spec section 6.1: `get` and `set` take a body, written `=> expr;` or as a block, which uses `field` for the
-/// property's storage and `value` for the incoming value. Each accessor keeps its own access level, and a
-/// constructor parameter declares the same property.
+/// property's storage and `value` for the incoming value. Each accessor keeps its own access level.
 #[test]
 fn accessor_bodies_are_in_the_slice() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string name { get => field; set => field = trim(value); }\n    public int count { get; private set { if (value < 0) { throw new Negative(value); } field = value; } }\n    public int total { get { return this.count + 1; } }\n    public string label { get => this.name; set => this.rename(value); }\n    public List<string> tags { get => field; set { field = value; } } = [];\n    public Map<string, int> hits { get => field; set { field = value; field[\"all\"] = 1; field.set(\"one\", 1); } } = [:];\n    public int seen { get => field; set { field += value; field++; } } = 0;\n\n    public Report(public string title { get => field; set => field = value; })\n    {\n    }\n\n    public void rename(string text)\n    {\n        this.name = text;\n        this.tags.add(text);\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string name { get => field; set => field = trim(value); }\n    public int count { get; private set { if (value < 0) { throw new Negative(value); } field = value; } }\n    public int total { get { return this.count + 1; } }\n    public string label { get => this.name; set => this.rename(value); }\n    public List<string> tags { get => field; set { field = value; } } = [];\n    public Map<string, int> hits { get => field; set { field = value; field[\"all\"] = 1; field.set(\"one\", 1); } } = [:];\n    public int seen { get => field; set { field += value; field++; } } = 0;\n\n    public void rename(string text)\n    {\n        this.name = text;\n        this.tags.add(text);\n    }\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// Spec section 24 puts `?` on a property as on a parameter, so a property with accessor bodies takes a nullable type.
 /// A property without storage is computed by its accessors, so it starts as nothing and needs no initial value even
-/// when get-only, and one whose body uses `field` starts as null as an auto-property with `set` does.
+/// when get-only, and one whose body uses `field` has storage, which starts with the value written, `null` included.
 #[test]
 fn nullable_properties_with_accessor_bodies_are_in_the_slice() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; }\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
@@ -3570,50 +3738,42 @@ fn field_in_a_nested_block_gives_storage_and_field_only_in_a_lambda_does_not() {
     );
 }
 
-/// Overriding a parent's property, a plain PHP one included, is outside the slice, with or without accessor bodies.
+/// A property whose accessors all have bodies and never use `field` has no storage, as PHP's virtual property, so an
+/// initial value can't set it. A constructor parameter declares no accessor bodies, so its member always has storage.
 #[test]
-fn a_property_with_accessor_bodies_that_overrides_a_parent_property_is_not_supported_yet() {
-    let code = "namespace App.Store;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public override string status { get => field; set => field = value; }\n}\n";
-
-    assert_eq!(issues(code), ["7:28 Overriding a property is not supported yet in PHP#."]);
-}
-
-/// A property whose accessors all have bodies and never use `field` has no storage, as PHP's virtual property, so
-/// neither an initial value nor a constructor can set it.
-#[test]
-fn an_initial_value_or_a_constructor_parameter_needs_storage() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get => 1; } = 2;\n    public int b { get => field; } = 3;\n    public int c { get; set => this.save(value); } = 4;\n\n    public Report(public int d { get => 1; set => this.save(value); }, public int e { get => field; })\n    {\n    }\n\n    public void save(int value)\n    {\n    }\n}\n";
+fn an_initial_value_needs_storage() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get => 1; } = 2;\n    public int b { get => field; } = 3;\n    public int c { get; set => this.save(value); } = 4;\n\n    public void save(int value)\n    {\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "5:34 The property `a` has no storage for its initial value: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
-            "9:30 The property `d` has no storage for the constructor to set: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
+            "5:34 The property `a` has no storage for its initial value: give it an auto accessor, such as `get;`, or use `field` in an accessor body."
         ]
     );
 }
 
-/// A constant initial value is the property's default, but any other would run the `set` or `init` body in the
-/// constructor.
+/// Spec section 6: an initial value fills the storage without running a `set` or `init` body, so any initial value,
+/// constant or not, goes on a property whose `set` or `init` has a body.
 #[test]
-fn an_initial_value_that_is_not_constant_on_a_property_whose_set_has_a_body_is_not_supported_yet() {
+fn an_initial_value_on_a_property_whose_set_has_a_body_is_in_the_slice() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; set => field = value; } = strlen(\"x\");\n    public int b { get => field; set; } = strlen(\"x\");\n    public int c { get; set => field = value; } = 1;\n    public int d { get; init => field = value; } = strlen(\"x\");\n}\n";
 
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Decision 3: a static property takes accessor bodies, observers and a computed body, as an instance property does,
+/// except in a generic class, whose statics are entries of one table that runs no accessors.
+#[test]
+fn a_static_property_takes_accessors_except_in_a_generic_class() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int b { get; set; didSet => Report.a = 1; } = 0;\n    public static int c => Report.a + 1;\n}\n\nclass Box<T>\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int c => 1;\n    public static int d { get; set; } = 0;\n}\n";
+
     assert_eq!(
         issues(code),
         [
-            "5:51 An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#.",
-            "8:52 An initial value that is not constant, on a property whose `init` has a body, is not supported yet in PHP#.",
+            "12:23 A static property with accessors in a generic class is not supported yet in PHP#.",
+            "13:23 A static property with accessors in a generic class is not supported yet in PHP#.",
         ]
     );
-}
-
-#[test]
-fn a_static_property_with_an_accessor_body_is_not_supported_yet() {
-    let code =
-        "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n}\n";
-
-    assert_eq!(issues(code), ["5:12 A static property with an accessor body is not supported yet in PHP#."]);
 }
 
 /// Spec section 6.1: `init` sets a property while its object is created, and no object creates a static property.
@@ -4279,6 +4439,15 @@ fn typeof_takes_one_type_in_a_method_body() {
 
         assert_eq!(issues(code), expected, "`typeof({type})`");
     }
+}
+
+/// `nameof(X.y)` is a constant string, spec section 6.3, so it is written in a method body, an initial value and an
+/// attribute argument.
+#[test]
+fn nameof_names_a_property_in_a_body_an_initial_value_and_an_attribute() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Index;\n\nclass Report\n{\n    protected string column = nameof(Order.total);\n\n    [Index(nameof(Order.total))]\n    public int run(int extra)\n    {\n        Store.keep(nameof(Order.total));\n        return extra;\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// A member of `typeof(X)` or of a local holding a class value is a static member of the class it holds, as `X.y` is,
@@ -5337,6 +5506,15 @@ fn a_method_named_as_a_property_of_its_class_is_an_error() {
     );
 }
 
+/// A constructor is named after its class, and PHP names it `__construct`, so a property named as its class, in any
+/// case, is no clash, in the class body or declared by a constructor parameter.
+#[test]
+fn a_property_named_as_its_class_is_no_clash_with_the_constructor() {
+    let code = "namespace App.Tenant;\n\nclass Coupon\n{\n    public string coupon { get; }\n\n    public Coupon(string code)\n    {\n        this.coupon = code;\n    }\n}\n\nclass Label\n{\n    public Label(public string label { get; }) {}\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
 #[test]
 fn a_lambda_parameter_outside_the_slice_is_not_supported_yet() {
     let code = leak(method(
@@ -5511,7 +5689,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         ),
         (
             body,
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`.",
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`.",
         ),
     ] {
         assert_eq!(

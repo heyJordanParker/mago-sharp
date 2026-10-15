@@ -207,6 +207,8 @@ pub trait ModifierSequenceExt<'arena> {
     fn contains_protected_set(&self) -> bool;
     fn get_public_set(&self) -> Option<&Modifier<'arena>>;
     fn contains_public_set(&self) -> bool;
+    /// Whether the sequence holds PHP#'s `internal`, spec section 5.
+    fn contains_internal(&self) -> bool;
 }
 
 impl<'arena> ModifierSequenceExt<'arena> for Sequence<'arena, Modifier<'arena>> {
@@ -281,6 +283,11 @@ impl<'arena> ModifierSequenceExt<'arena> for Sequence<'arena, Modifier<'arena>> 
     #[inline]
     fn contains_visibility(&self) -> bool {
         self.iter().any(Modifier::is_visibility)
+    }
+
+    #[inline]
+    fn contains_internal(&self) -> bool {
+        self.iter().any(|modifier| matches!(modifier, Modifier::Internal(..)))
     }
 
     #[inline]

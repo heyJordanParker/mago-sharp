@@ -467,7 +467,7 @@ impl Effects {
     #[must_use]
     pub fn issues(&self, codebase: &CodebaseMetadata) -> IssueCollection {
         let short_name_counts = OnceCell::new();
-        let mut issues = check::getters_must_be_pure(self, codebase, &short_name_counts);
+        let mut issues = check::getters_never_write_this(self, codebase, &short_name_counts);
         issues.extend(check::laws_must_be_pure(self, codebase, &short_name_counts));
         issues.extend(check::function_values_must_fit_their_types(self, codebase, &short_name_counts));
         issues.extend(check::implementations_must_fit_their_declarations(self, codebase, &short_name_counts));
@@ -579,7 +579,7 @@ impl Effects {
                 let metadata = codebase.get_class_like(class.as_bytes())?;
 
                 metadata.all_parent_classes.iter().chain(&metadata.all_parent_interfaces).find_map(|ancestor| {
-                    if runs_listeners(*ancestor, method) {
+                    if accepts_any_effect(*ancestor, method) {
                         return None;
                     }
                     let declaration =
@@ -602,15 +602,33 @@ impl Effects {
         )
     }
 
-    /// Each body with its member as messages name it, the imports and the scope of its file, and why it is impure.
-    fn impure_bodies(&self) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
+    /// Each body that `find` gives a reason for, with its member as messages name it, the imports and the scope of its
+    /// file, and that reason.
+    fn bodies_with<'effects>(
+        &'effects self,
+        find: impl Fn(&Self, Body) -> Option<Impurity> + 'effects,
+    ) -> impl Iterator<Item = (Body, Word, &'effects WordMap<Word>, &'effects NamespaceScope, Impurity)> + 'effects
+    {
         self.bodies.iter().enumerate().filter(|(position, body)| self.index.get(body) == Some(position)).filter_map(
-            |(position, body)| {
-                self.body_impurity(*body).map(|impurity| {
+            move |(position, body)| {
+                find(self, *body).map(|impurity| {
                     (*body, self.names[position].1, &*self.imports[position], &*self.scopes[position], impurity)
                 })
             },
         )
+    }
+
+    /// Each body that is impure, and why, as [`Self::bodies_with`] gives them.
+    fn impure_bodies(&self) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
+        self.bodies_with(Self::body_impurity)
+    }
+
+    /// Each body that changes the object it runs on, and the write that leads to it, as [`Self::bodies_with`] gives
+    /// them: a `get` body never writes `this`, spec section 6.1.
+    fn bodies_changing_this(
+        &self,
+    ) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
+        self.bodies_with(|effects, body| effects.first_item(body, |item| item == Item::Changed(Changed::This)))
     }
 }
 
@@ -631,10 +649,16 @@ fn events() -> Word {
     word(b"Sharp\\Events")
 }
 
-/// Whether `method` of `class` is `Sharp\Dispatcher::dispatch`, the method the engine calls with the listeners of
-/// every event, spec section 15.
-fn runs_listeners(class: Word, method: Word) -> bool {
-    class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Dispatcher") && method.as_bytes().eq_ignore_ascii_case(b"dispatch")
+/// Whether the declaration of `method` in `class` lets an implementation have any effect, because the code that calls
+/// it carries the implementation's effects: `Sharp\Dispatcher::dispatch`, which the engine calls with the listeners of
+/// every event (spec section 15), and `Sharp\Behavior`'s `get` and `set`, which run as the accessors of a property
+/// that names the behavior (spec section 6.4).
+fn accepts_any_effect(class: Word, method: Word) -> bool {
+    let (class, method) = (class.as_bytes(), method.as_bytes());
+
+    (class.eq_ignore_ascii_case(b"Sharp\\Dispatcher") && method.eq_ignore_ascii_case(b"dispatch"))
+        || (class.eq_ignore_ascii_case(b"Sharp\\Behavior")
+            && (method.eq_ignore_ascii_case(b"get") || method.eq_ignore_ascii_case(b"set")))
 }
 
 /// The standard effects that are names and no class, spec section 29, in the spec's order. As `Events` is, each is an

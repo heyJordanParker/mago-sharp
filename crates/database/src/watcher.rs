@@ -30,8 +30,9 @@ use crate::exclusion::Exclusion;
 use crate::file::File;
 use crate::file::FileId;
 use crate::file::FileType;
+use crate::loader::Manifests;
 use crate::loader::calculate_pattern_specificity;
-use crate::loader::is_standard_library;
+use crate::loader::mark_package;
 use crate::loader::resolve_file_type;
 use crate::utils::bytes_to_path;
 
@@ -401,7 +402,7 @@ impl<'config> DatabaseWatcher<'config> {
                 }
                 let all_changed: Vec<ChangedFile> = latest_changes.into_values().collect();
                 let mut changed_ids = Vec::new();
-                let mut standard_library_directories = foldhash::HashMap::default();
+                let mut manifests = Manifests::default();
 
                 for changed_file in &all_changed {
                     changed_ids.push(changed_file.id);
@@ -416,8 +417,7 @@ impl<'config> DatabaseWatcher<'config> {
                             );
                             match File::read(&workspace, &changed_file.path, new_file_type) {
                                 Ok(mut file) => {
-                                    file.is_standard_library =
-                                        is_standard_library(&file, &workspace, &mut standard_library_directories);
+                                    mark_package(&mut file, &workspace, &mut manifests);
                                     self.database.add(file);
                                     tracing::debug!("Added new file to database: {}", changed_file.path.display());
                                 }

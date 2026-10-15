@@ -66,6 +66,8 @@ mod statement;
 mod utils;
 mod visibility;
 
+pub use crate::statement::class_like::unused_members::too_wide_members;
+
 const COLLECTOR_CATEGORIES: &[&str] = &["analysis", "analyzer", "analyser"];
 
 #[derive(Debug)]
