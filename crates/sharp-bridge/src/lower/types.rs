@@ -137,7 +137,7 @@ impl<'analysis> Types<'analysis> {
     /// when the object holds no tuple. The checker refuses a name the tuple does not write.
     pub(crate) fn tuple_element_index(&self, access: &PropertyAccess) -> Option<usize> {
         let ClassLikeMemberSelector::Identifier(name) = &access.property else {
-            return None;
+            unreachable!("check_slice refuses the member name `{}`", access.property);
         };
         // A class a static member is read on has no type.
         let TAtomic::Array(TArray::List(list)) = self.artifacts.get_expression_type(access.object)?.types.first()?

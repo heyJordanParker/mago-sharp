@@ -3534,6 +3534,35 @@ pub(super) mod testing {
         assert!(!writer.finish().is_empty(), "expected an encoded payload");
     }
 
+    /// An external analyzer speaks PHP's types, so an iterable it sends back is PHP's `iterable`, which reads a keyed
+    /// array by its values, and never PHP#'s `Iterable<T>`, which holds a `Map` by its entries.
+    #[test]
+    fn an_iterable_comes_back_as_phps_iterable() {
+        let mut writer = PayloadWriter::new();
+        writer.write_u16(0);
+        writer.write_u32(1);
+        writer.write_u8(SNAPSHOT_ITERABLE);
+        for part in [SNAPSHOT_MIXED, SNAPSHOT_SCALAR] {
+            writer.write_u16(0);
+            writer.write_u32(1);
+            writer.write_u8(part);
+            // A mixed of no flags and no truthiness, and the generic scalar.
+            if part == SNAPSHOT_MIXED {
+                writer.write_u8(0);
+                writer.write_u8(0);
+            } else {
+                writer.write_u8(1);
+            }
+        }
+        writer.write_bool(false);
+        let payload = writer.finish();
+
+        let union = decode_complete_union(&mut PayloadReader::new(&payload), 0).unwrap();
+
+        assert!(matches!(union.types.as_ref(), [TAtomic::Iterable(TIterable { map_entries: false, .. })]), "{union:?}");
+        assert_eq!(union.get_id().to_string(), "iterable<mixed, scalar>");
+    }
+
     /// A class-like string of one type goes as that type and comes back so. The SDK's class-like string holds one
     /// type, so a PHP# class value of several, as `Class<int|string>`, goes as the `class-string` it is while the
     /// code runs.

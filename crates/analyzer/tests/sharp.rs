@@ -10061,17 +10061,19 @@ fn lazy_operations_on_an_iterable_type_their_results_by_the_elements() {
 }
 
 /// A method an `Iterable<T>` does not have is the error a `List` or `Map` gives, naming the type the code wrote and
-/// never the class the analyzer checks it against.
+/// never the class the analyzer checks it against. The method is named as the code wrote it, and a name in braces,
+/// which the checker refuses, as the analyzer read it.
 #[test]
 fn a_method_an_iterable_does_not_have_is_an_error_naming_the_iterable() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool run(Iterable<Order> orders)\n    {\n        orders.toArray();\n        orders.first();\n        return true;\n    }\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool run(Iterable<Order> orders)\n    {\n        orders.toArray();\n        orders.first();\n        orders.{\"toArray\"}();\n        return true;\n    }\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
 
     assert_eq!(
         issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>(),
         [
             "Method `toArray` does not exist on `Iterable<Order>`.",
-            "Method `first` does not exist on `Iterable<Order>`."
+            "Method `first` does not exist on `Iterable<Order>`.",
+            "Method `toarray` does not exist on `Iterable<Order>`."
         ]
     );
     assert_eq!(
@@ -10216,20 +10218,27 @@ fn an_unpacked_tuple_gives_each_local_its_element_type() {
 }
 
 /// Spec section 30: a named element reads by its name, as in C#, as `summary.total`, and a name the tuple does not
-/// write is an error that lists the names it does.
+/// write is an error that lists the names it does. A tuple never changes, so writing an element is an error too.
 #[test]
 fn a_named_tuple_element_reads_by_its_name() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public [Money total, int count] summarize() { return [new Money(), 2]; }\n\n    public [Money, int] totals() { return [new Money(), 2]; }\n\n    public int run()\n    {\n        const summary = this.summarize();\n        Money total = summary.total;\n        int wrong = summary.missing;\n        int also = this.totals().count;\n        return summary.count;\n    }\n}\n\nclass Money\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public [Money total, int count] summarize() { return [new Money(), 2]; }\n\n    public [Money, int] totals() { return [new Money(), 2]; }\n\n    public int run()\n    {\n        const summary = this.summarize();\n        Money total = summary.total;\n        int wrong = summary.missing;\n        int also = this.totals().count;\n        [int count, string] pair = [1, \"a\"];\n        string label = pair.label;\n        summary.total = new Money();\n        return summary.count;\n    }\n}\n\nclass Money\n{\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Order.sharp", sharp), &[]),
-        ["13:29 non-existent-property", "14:34 non-existent-property"]
+        [
+            "13:29 non-existent-property",
+            "14:34 non-existent-property",
+            "16:29 non-existent-property",
+            "17:17 invalid-property-write"
+        ]
     );
     assert_eq!(
         messages(("src/Demo/Order.sharp", sharp), &[]),
         [
             "`[Money total, int count]` has no element named `missing`: its elements are `total` and `count`.",
             "`[Money, int]` has no element named `count`: its elements have no names, so unpack it, as in `const [first, second] = …;`.",
+            "`[int count, string]` has no element named `label`: its one named element is `count`.",
+            "`[Money total, int count]` never changes: build a new tuple instead of writing `total`.",
         ]
     );
 }
@@ -10248,11 +10257,11 @@ fn a_single_loop_variable_over_a_map_is_its_entry_tuple() {
 /// that names `entries()`.
 #[test]
 fn a_loop_unpacks_each_two_element_tuple() {
-    let sharp = "namespace Demo;\n\nclass Store\n{\n    public void run(List<[string, Plan]> rows, Iterable<[string, Plan]> more, List<Plan> plans)\n    {\n        for (const [name, plan] of rows) {\n            Plan kept = plan;\n        }\n        for (const [name, plan] of more) {\n            int wrong = name;\n        }\n        for (const [index, plan] of plans) {\n        }\n    }\n}\n\nclass Plan\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public void run(List<[string, Plan]> rows, Iterable<[string, Plan]> more, List<Plan> plans, List<[string, Plan, int]> triples)\n    {\n        for (const [name, plan] of rows) {\n            Plan kept = plan;\n        }\n        for (const [name, plan] of more) {\n            int wrong = name;\n        }\n        for (const [index, plan] of plans) {\n        }\n        for (const [name, plan] of triples) {\n        }\n    }\n}\n\nclass Plan\n{\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Store.sharp", sharp), &[]),
-        ["11:25 invalid-local-assignment-value", "13:37 invalid-iterator"]
+        ["11:25 invalid-local-assignment-value", "13:37 invalid-iterator", "15:36 invalid-iterator"]
     );
 }
 

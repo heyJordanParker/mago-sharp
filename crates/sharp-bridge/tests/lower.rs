@@ -7034,19 +7034,20 @@ fn a_list_index_write_replaces_the_element_through_set() {
 /// ```php
 /// $sizes->set(${'index#1'} = $this->at(), $sizes[${'index#1'}] + $extra);
 /// $sizes->set(0, $sizes[0] + 1);
+/// $names->set(0, $names[0] . "s");
 /// return ($sizes->set(1, (${'old#1'} = $sizes[1]) - 1)) ? ${'old#1'} : ${'old#1'};
 /// ```
 ///
 /// `list[i] op= v`, `++list[i]` and `--list[i]` write what the operator gives on the element, through `set`, which
-/// gives the value it stores. An index that runs something runs once, in a hidden variable. `list[i]++` and `list[i]--`
-/// give the element before the write, which a hidden variable holds, as PHP has no expression that runs one and gives
-/// another.
+/// gives the value it stores, and `+=` on a `List<string>` element joins the strings, spec section 24. An index that
+/// runs something runs once, in a hidden variable. `list[i]++` and `list[i]--` give the element before the write,
+/// which a hidden variable holds, as PHP has no expression that runs one and gives another.
 #[test]
 fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
     assert_eq!(
         body_in(
-            "int run(List<int> sizes, int extra)",
-            "        sizes[this.at()] += extra;\n        ++sizes[0];\n        return sizes[1]--;\n    }\n\n    private int at()\n    {\n        return 0;\n",
+            "int run(List<int> sizes, int extra, List<string> names)",
+            "        sizes[this.at()] += extra;\n        ++sizes[0];\n        names[0] += \"s\";\n        return sizes[1]--;\n    }\n\n    private int at()\n    {\n        return 0;\n",
             &[]
         ),
         indoc! {r#"
@@ -7084,6 +7085,18 @@ fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
                         ZVAL "sizes"
                       ZVAL 0
                     ZVAL 1
+              METHOD_CALL
+                VAR
+                  ZVAL "names"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 0
+                  BINARY_OP [8]
+                    DIM
+                      VAR
+                        ZVAL "names"
+                      ZVAL 0
+                    ZVAL "s"
               RETURN
                 CONDITIONAL [1]
                   METHOD_CALL
