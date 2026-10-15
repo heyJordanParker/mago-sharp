@@ -2763,7 +2763,7 @@ fn decode_complete_atomic(reader: &mut PayloadReader<'_>, depth: usize) -> Resul
             let key_type = Arc::new(decode_complete_union(reader, depth + 1)?);
             let value_type = Arc::new(decode_complete_union(reader, depth + 1)?);
             let intersection_types = decode_optional_complete_atomics(reader, depth + 1)?;
-            TAtomic::Iterable(TIterable { key_type, value_type, intersection_types, map_entries: false })
+            TAtomic::Iterable(TIterable { key_type, value_type, intersection_types, holds_map_entries: false })
         }
         SNAPSHOT_RESOURCE => TAtomic::Resource(TResource::new(match reader.read_u8("resource state")? {
             0 => None,
@@ -3559,7 +3559,7 @@ pub(super) mod testing {
 
         let union = decode_complete_union(&mut PayloadReader::new(&payload), 0).unwrap();
 
-        assert!(matches!(union.types.as_ref(), [TAtomic::Iterable(TIterable { map_entries: false, .. })]), "{union:?}");
+        assert!(matches!(union.types.as_ref(), [TAtomic::Iterable(TIterable { holds_map_entries: false, .. })]), "{union:?}");
         assert_eq!(union.get_id().to_string(), "iterable<mixed, scalar>");
     }
 

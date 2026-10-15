@@ -183,7 +183,7 @@ pub use crate::cst::cst::r#loop::r#for::For;
 pub use crate::cst::cst::r#loop::r#for::ForBody;
 pub use crate::cst::cst::r#loop::r#for::ForColonDelimitedBody;
 pub use crate::cst::cst::r#loop::for_of::ForOf;
-pub use crate::cst::cst::r#loop::for_of::ForOfKeyValueTarget;
+pub use crate::cst::cst::r#loop::for_of::ForOfUnpackTarget;
 pub use crate::cst::cst::r#loop::for_of::ForOfTarget;
 pub use crate::cst::cst::r#loop::for_of::ForOfVariable;
 pub use crate::cst::cst::r#loop::foreach::Foreach;

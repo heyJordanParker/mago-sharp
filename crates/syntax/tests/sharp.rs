@@ -2362,10 +2362,10 @@ fn for_of_declares_its_loop_variable_or_key_and_value() {
     assert_eq!(source(CODE, values), "for (const line of lines) {\n        }");
 
     assert!(!entries.is_const());
-    let ForOfTarget::KeyValue(pair) = &entries.target else {
-        panic!("expected a key and a value, got {:#?}", entries.target);
+    let ForOfTarget::Unpack(unpack) = &entries.target else {
+        panic!("expected two unpacked parts, got {:#?}", entries.target);
     };
-    assert_eq!((pair.key.name.value, pair.value.name.value), (&b"key"[..], &b"plan"[..]));
+    assert_eq!((unpack.first.name.value, unpack.second.name.value), (&b"key"[..], &b"plan"[..]));
     assert_eq!(source(CODE, &entries.target), "[key, plan]");
     assert!(matches!(entries.expression, Expression::Call(Call::Method(_))));
 }
@@ -2388,20 +2388,20 @@ fn a_const_loop_variable_can_have_its_type_written() {
         panic!("expected four for … of loops and a for loop, got {:#?}", method_body(program));
     };
 
-    let ForOfTarget::KeyValue(pair) = &typed.target else {
-        panic!("expected a key and a value, got {:#?}", typed.target);
+    let ForOfTarget::Unpack(unpack) = &typed.target else {
+        panic!("expected two unpacked parts, got {:#?}", typed.target);
     };
-    assert_eq!(source(CODE, pair.key.hint.expect("a key type")), "Status");
-    assert_eq!(source(CODE, &pair.key), "Status status");
-    assert_eq!(source(CODE, pair.value.hint.expect("a value type")), "int");
-    assert_eq!(pair.value.name.value, b"n");
+    assert_eq!(source(CODE, unpack.first.hint.expect("the first part's type")), "Status");
+    assert_eq!(source(CODE, &unpack.first), "Status status");
+    assert_eq!(source(CODE, unpack.second.hint.expect("the second part's type")), "int");
+    assert_eq!(unpack.second.name.value, b"n");
     assert_eq!(source(CODE, &typed.target), "[Status status, int n]");
 
-    let ForOfTarget::KeyValue(pair) = &key_typed.target else {
-        panic!("expected a key and a value, got {:#?}", key_typed.target);
+    let ForOfTarget::Unpack(unpack) = &key_typed.target else {
+        panic!("expected two unpacked parts, got {:#?}", key_typed.target);
     };
-    assert_eq!(source(CODE, pair.key.hint.expect("a key type")), "Status");
-    assert!(pair.value.hint.is_none());
+    assert_eq!(source(CODE, unpack.first.hint.expect("the first part's type")), "Status");
+    assert!(unpack.second.hint.is_none());
 
     let ForOfTarget::Value(group) = &group.target else {
         panic!("expected one loop variable, got {:#?}", group.target);

@@ -83,7 +83,7 @@ use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
-use crate::utils::with_to_set_help;
+use crate::utils::with_set_conversion_help;
 
 mod array_assignment;
 pub(crate) mod property_assignment;
@@ -851,7 +851,7 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
                         .with_message(format!("`{name}` is declared as `{local_type_str}` here.")),
                 )
                 .with_help(format!("Assign a `{local_type_str}` value, or change the type `{name}` is declared with."));
-            let issue = with_to_set_help(context, source_expression, (&local_type, &assigned_type), issue);
+            let issue = with_set_conversion_help(context, source_expression, (&local_type, &assigned_type), issue);
 
             let (code, issue) = explain_blocked_substitution(
                 context,

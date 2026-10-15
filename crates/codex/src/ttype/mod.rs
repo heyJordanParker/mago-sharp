@@ -1651,7 +1651,7 @@ pub fn get_backed_enum<'codebase>(
 pub fn sharp_iterable_value(input: &TAtomic, container: &TAtomic, key: &TUnion, value: TUnion) -> TUnion {
     if !matches!(
         (input, container),
-        (TAtomic::Array(TArray::Keyed(_)), TAtomic::Iterable(TIterable { map_entries: true, .. }))
+        (TAtomic::Array(TArray::Keyed(_)), TAtomic::Iterable(TIterable { holds_map_entries: true, .. }))
     ) {
         return value;
     }

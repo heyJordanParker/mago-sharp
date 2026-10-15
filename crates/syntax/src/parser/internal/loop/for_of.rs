@@ -4,8 +4,8 @@ use mago_span::Span;
 
 use crate::T;
 use crate::cst::cst::ForOf;
-use crate::cst::cst::ForOfKeyValueTarget;
 use crate::cst::cst::ForOfTarget;
+use crate::cst::cst::ForOfUnpackTarget;
 use crate::cst::cst::ForOfVariable;
 use crate::cst::cst::Keyword;
 use crate::error::ParseError;
@@ -59,15 +59,15 @@ where
         })
     }
 
-    pub(crate) fn parse_for_of_key_value_target(
+    pub(crate) fn parse_for_of_unpack_target(
         &mut self,
         is_const: bool,
-    ) -> Result<ForOfKeyValueTarget<'arena>, ParseError> {
-        Ok(ForOfKeyValueTarget {
+    ) -> Result<ForOfUnpackTarget<'arena>, ParseError> {
+        Ok(ForOfUnpackTarget {
             left_bracket: self.stream.eat_span(T!["["])?,
-            key: self.parse_for_of_variable(is_const)?,
+            first: self.parse_for_of_variable(is_const)?,
             comma: self.stream.eat_span(T![","])?,
-            value: self.parse_for_of_variable(is_const)?,
+            second: self.parse_for_of_variable(is_const)?,
             right_bracket: self.stream.eat_span(T!["]"])?,
         })
     }

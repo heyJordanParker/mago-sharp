@@ -32,18 +32,19 @@ pub struct ForOf<'arena> {
 pub enum ForOfTarget<'arena> {
     /// Each value, as in `const line`.
     Value(ForOfVariable<'arena>),
-    /// Each key and value, as in `const [key, plan]`.
-    KeyValue(ForOfKeyValueTarget<'arena>),
+    /// Each element unpacked, as in `const [key, plan]`.
+    Unpack(ForOfUnpackTarget<'arena>),
 }
 
-/// Represents the key and value of a PHP# `for … of` loop, as in `[key, plan]`.
+/// Represents the two parts a PHP# `for … of` loop unpacks from each element, as in `[key, plan]`: a `Map`'s key and
+/// value, or the two elements of a two-element tuple.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct ForOfKeyValueTarget<'arena> {
+pub struct ForOfUnpackTarget<'arena> {
     pub left_bracket: Span,
-    pub key: ForOfVariable<'arena>,
+    pub first: ForOfVariable<'arena>,
     pub comma: Span,
-    pub value: ForOfVariable<'arena>,
+    pub second: ForOfVariable<'arena>,
     pub right_bracket: Span,
 }
 
@@ -65,16 +66,16 @@ impl ForOf<'_> {
 }
 
 impl<'arena> ForOfTarget<'arena> {
-    /// The variables the loop declares, the key first.
+    /// The variables the loop declares, in the order it writes them.
     #[must_use]
     pub fn variables(&self) -> Vec<&ForOfVariable<'arena>> {
         match self {
             ForOfTarget::Value(value) => vec![value],
-            ForOfTarget::KeyValue(key_value) => vec![&key_value.key, &key_value.value],
+            ForOfTarget::Unpack(unpack) => vec![&unpack.first, &unpack.second],
         }
     }
 
-    /// The names the loop declares, the key first.
+    /// The names the loop declares, in the order it writes them.
     #[must_use]
     pub fn names(&self) -> Vec<&LocalIdentifier<'arena>> {
         self.variables().into_iter().map(|variable| &variable.name).collect()
@@ -91,12 +92,12 @@ impl HasSpan for ForOfTarget<'_> {
     fn span(&self) -> Span {
         match self {
             ForOfTarget::Value(value) => value.span(),
-            ForOfTarget::KeyValue(key_value) => key_value.span(),
+            ForOfTarget::Unpack(unpack) => unpack.span(),
         }
     }
 }
 
-impl HasSpan for ForOfKeyValueTarget<'_> {
+impl HasSpan for ForOfUnpackTarget<'_> {
     fn span(&self) -> Span {
         self.left_bracket.join(self.right_bracket)
     }

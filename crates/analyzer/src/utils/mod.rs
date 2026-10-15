@@ -121,7 +121,7 @@ pub fn report_int_for_float<A>(
 /// Spec section 12: "A `List` variable passed there is a compile error, and where a `Set` is expected the error names
 /// `toSet()`." Gives `issue`, the refusal of `value` of the type `given` where `declared` goes, with the help that
 /// writes the conversion, as "write `picked.toSet()`", and as it is for any other value.
-pub fn with_to_set_help<A>(
+pub fn with_set_conversion_help<A>(
     context: &Context<'_, '_, A>,
     value: Option<&Expression<'_>>,
     (declared, given): (&TUnion, &TUnion),

@@ -609,10 +609,10 @@ where
     };
     let target = match &for_of.target {
         ForOfTarget::Value(value) => ForeachTarget::Value(ForeachValueTarget { value: variable(value) }),
-        ForOfTarget::KeyValue(pair) => ForeachTarget::KeyValue(ForeachKeyValueTarget {
-            key: variable(&pair.key),
-            double_arrow: pair.comma,
-            value: variable(&pair.value),
+        ForOfTarget::Unpack(unpack) => ForeachTarget::KeyValue(ForeachKeyValueTarget {
+            key: variable(&unpack.first),
+            double_arrow: unpack.comma,
+            value: variable(&unpack.second),
         }),
     };
     let foreach = context.arena.alloc(Foreach {

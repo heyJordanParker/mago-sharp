@@ -293,7 +293,7 @@ fn union_from_hint(
                     }
                     b"Set" => wrap_atomic(TAtomic::Array(TArray::Set(Arc::new(arguments.swap_remove(0))))),
                     // Spec section 12: anything a loop can read, PHP's `iterable` of its elements.
-                    b"Iterable" => wrap_atomic(TAtomic::Iterable(TIterable::sharp(Arc::new(arguments.swap_remove(0))))),
+                    b"Iterable" => wrap_atomic(TAtomic::Iterable(TIterable::sharp_of(Arc::new(arguments.swap_remove(0))))),
                     // A class value of one class, or of a type parameter, names it. Of any other type it holds that
                     // whole type, as `Class<int|string>` holds `int|string`, spec section 25.
                     b"Class" => {

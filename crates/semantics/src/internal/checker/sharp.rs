@@ -1481,7 +1481,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::ForBody(ForBody::Statement(_))
             | Node::ForOf(_)
             | Node::ForOfTarget(_)
-            | Node::ForOfKeyValueTarget(_)
+            | Node::ForOfUnpackTarget(_)
             | Node::ForOfVariable(_),
             Body,
         ) => Some(Body),

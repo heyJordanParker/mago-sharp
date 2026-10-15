@@ -86,7 +86,7 @@ use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
 use crate::cst::cst::ForColonDelimitedBody;
 use crate::cst::cst::ForOf;
-use crate::cst::cst::ForOfKeyValueTarget;
+use crate::cst::cst::ForOfUnpackTarget;
 use crate::cst::cst::ForOfTarget;
 use crate::cst::cst::ForOfVariable;
 use crate::cst::cst::Foreach;
@@ -1743,13 +1743,13 @@ generate_ast_walker! {
     'arena ForOfTarget as for_of_target => {
         match for_of_target {
             ForOfTarget::Value(value) => walker.walk_for_of_variable(value, context),
-            ForOfTarget::KeyValue(key_value) => walker.walk_for_of_key_value_target(key_value, context),
+            ForOfTarget::Unpack(unpack) => walker.walk_for_of_unpack_target(unpack, context),
         }
     }
 
-    'arena ForOfKeyValueTarget as for_of_key_value_target => {
-        walker.walk_for_of_variable(&for_of_key_value_target.key, context);
-        walker.walk_for_of_variable(&for_of_key_value_target.value, context);
+    'arena ForOfUnpackTarget as for_of_unpack_target => {
+        walker.walk_for_of_variable(&for_of_unpack_target.first, context);
+        walker.walk_for_of_variable(&for_of_unpack_target.second, context);
     }
 
     'arena ForOfVariable as for_of_variable => {

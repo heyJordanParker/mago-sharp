@@ -3786,9 +3786,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 (self.variable(span, &key_name), self.variable(span, &value_name), Some(entry))
             }
             ForOfTarget::Value(value) => (NULL, variable(self, value), None),
-            ForOfTarget::KeyValue(pair) if holds_map => (variable(self, &pair.key), variable(self, &pair.value), None),
-            ForOfTarget::KeyValue(pair) => {
-                let elements = [&pair.key, &pair.value].map(|part| {
+            ForOfTarget::Unpack(unpack) if holds_map => (variable(self, &unpack.first), variable(self, &unpack.second), None),
+            ForOfTarget::Unpack(unpack) => {
+                let elements = [&unpack.first, &unpack.second].map(|part| {
                     let part = variable(self, part);
 
                     self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[part, NULL])
@@ -7256,7 +7256,7 @@ fn table_kind(r#type: &TUnion) -> Option<bool> {
 /// entry: a tuple, `Any` or a type parameter. The checker refuses a `Map` for any other `T`.
 fn holds_entries(r#type: &TUnion) -> bool {
     r#type.types.iter().any(|atomic| match atomic {
-        TAtomic::Iterable(iterable @ TIterable { map_entries: true, .. }) => {
+        TAtomic::Iterable(iterable @ TIterable { holds_map_entries: true, .. }) => {
             iterable.get_value_type().types.iter().any(|value| {
                 value.is_mixed() || matches!(value, TAtomic::GenericParameter(_) | TAtomic::Array(TArray::List(_)))
             })
