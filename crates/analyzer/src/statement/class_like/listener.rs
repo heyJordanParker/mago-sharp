@@ -19,6 +19,7 @@ use mago_word::Word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::expression::is_refused_type;
 use crate::statement::function_like::report_undefined_type;
 use crate::statement::is_event_class;
 use crate::statement::module::check_listener_services;
@@ -95,18 +96,14 @@ fn check_listed_events<'arena, A>(
     A: Arena,
 {
     let codebase = context.codebase;
+    let listener = format!("`{}`", BytesDisplay(method.name.value));
     let events = method.on.iter().flat_map(|on| on.events.iter());
     for (event, listed) in events.zip(&method_metadata.listens) {
         let message = match codebase.get_class_like(listed.as_bytes()) {
-            Some(class_like) if is_heard(codebase, class_like) => continue,
-            Some(class_like) if class_like.kind.is_interface() => format!(
-                "No event implements `{}`, so `{}` never runs.",
-                display_class_like_name(context, class_like.original_name),
-                BytesDisplay(method.name.value)
-            ),
-            Some(class_like) => {
-                format!("`{}` is not an event.", display_class_like_name(context, class_like.original_name))
-            }
+            Some(class_like) => match unheard_class(context, class_like, &listener) {
+                Some(message) => message,
+                None => continue,
+            },
             None if BUILT_IN_TYPES.iter().any(|built_in| built_in.eq_ignore_ascii_case(event.value)) => {
                 format!("`{}` is not an event.", BytesDisplay(event.value))
             }
@@ -126,6 +123,51 @@ fn check_listed_events<'arena, A>(
                 ),
         );
     }
+}
+
+/// Why a listener of `class_like` never runs, in the words the `on` clause and `Events.on` share, or None when it is
+/// an event or an interface an event implements. `listener` names the listener in the message.
+fn unheard_class<A>(context: &Context<'_, '_, A>, class_like: &ClassLikeMetadata, listener: &str) -> Option<String>
+where
+    A: Arena,
+{
+    if is_heard(context.codebase, class_like) {
+        return None;
+    }
+
+    let name = display_class_like_name(context, class_like.original_name);
+
+    Some(if class_like.kind.is_interface() {
+        format!("No event implements `{name}`, so {listener} never runs.")
+    } else {
+        format!("`{name}` is not an event.")
+    })
+}
+
+/// Spec section 15: `Events.on<T>` takes an event or an interface an event implements, ruling 1, and refuses any other
+/// type the call runs with, written at `at`, with the messages the `on` clause gives. A type parameter is the caller's
+/// to bound, and a class that doesn't exist was reported where it is written.
+pub fn check_events_on<A>(context: &mut Context<'_, '_, A>, listened: &TUnion, at: Span)
+where
+    A: Arena,
+{
+    let listened_class =
+        listened.get_single_named_object().and_then(|named| context.codebase.get_class_like(named.name.as_bytes()));
+    let message = match listened_class {
+        Some(class_like) => unheard_class(context, class_like, "the listener"),
+        None if listened.has_template_types() || is_refused_type(listened) => None,
+        None => Some(format!("`{}` is not an event.", display_sharp_type(context, listened))),
+    };
+    let Some(message) = message else {
+        return;
+    };
+
+    context.collector.report_with_code(
+        IssueCode::InvalidEvent,
+        Issue::error(message).with_annotation(Annotation::primary(at).with_message("Given here.")).with_note(
+            "`Events.on` takes an event, which `event` or `extern event` declares, or an interface an event implements.",
+        ),
+    );
 }
 
 /// Reports a listener that cannot run on an object the container creates, that returns a value, or whose parameters

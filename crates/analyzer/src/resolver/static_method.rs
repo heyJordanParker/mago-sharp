@@ -57,6 +57,8 @@ use crate::visibility::is_method_visible;
 /// 2. Resolving the `method` selector to get potential method names.
 /// 3. Finding matching methods and validating them against static access rules.
 /// 4. Reporting issues like calling a non-static method, or calling a method on an interface.
+///
+/// A PHP# class value, which the call analyzed to find it is one, is `class_is_analyzed`, so it is not analyzed again.
 pub fn resolve_static_method_targets<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -64,13 +66,15 @@ pub fn resolve_static_method_targets<'ctx, 'ast, 'arena, A>(
     class_expr: &'ast Expression<'arena>,
     method_selector: &'ast ClassLikeMemberSelector<'arena>,
     access_span: Span,
+    class_is_analyzed: bool,
 ) -> Result<MethodResolutionResult, AnalysisError>
 where
     A: Arena,
 {
     let mut result = MethodResolutionResult::default();
 
-    let class_resolutions = resolve_classnames_from_expression(context, block_context, artifacts, class_expr, false)?;
+    let class_resolutions =
+        resolve_classnames_from_expression(context, block_context, artifacts, class_expr, class_is_analyzed)?;
     if let Some((class, _)) = bare_generic_class(context, class_expr) {
         report_missing_type_arguments(context, class, class_expr.span());
     }
@@ -632,6 +636,7 @@ where
         is_this: true,
         intersection_types: if intersections.is_empty() { None } else { Some(intersections) },
         remapped_parameters: false,
+        is_readonly: false,
     })
 }
 

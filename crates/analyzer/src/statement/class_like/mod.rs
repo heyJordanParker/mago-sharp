@@ -13,6 +13,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleKind;
+use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
@@ -64,6 +65,7 @@ use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
+use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
@@ -82,6 +84,7 @@ use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_statics;
 use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
+use crate::resolver::extension::class_member;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
 use crate::statement::function_like::FunctionLikeBody;
@@ -96,6 +99,7 @@ use crate::utils::names::display_property_name;
 use crate::utils::names::display_sharp_accessor;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
+use crate::utils::names::sharp_method_declaration;
 use crate::utils::template::find_broken_marker;
 use crate::utils::template::find_template_uses;
 
@@ -107,6 +111,7 @@ pub mod method;
 pub mod method_signature;
 pub mod override_attribute;
 pub mod property;
+pub mod r#struct;
 pub mod unused_members;
 
 /// Reports a duplicate definition issue for class-like types, naming the class-like as the analyzed file writes it.
@@ -157,30 +162,6 @@ fn report_duplicate_definition<A>(
             .with_help(
                 "Consider using namespaces to avoid naming conflicts, or remove one of the duplicate definitions.",
             ),
-    );
-}
-
-/// Refuses a class or enum named `Sharp\Int`, `Sharp\Float` or `Sharp\Bool` in a PHP# file that is not the standard
-/// library's. The semantic checks allow the three reserved names under the namespace `Sharp`, because the engine
-/// compiles the library from `vendor/` knowing only the file, so only the analyzer knows the file's package. The error
-/// carries the semantic checks' reserved-name message.
-fn report_sharp_type_class_outside_library<A>(context: &mut Context<'_, '_, A>, name: &[u8], name_span: Span)
-where
-    A: Arena,
-{
-    if !context.dialect.is_sharp()
-        || context.source_file.is_standard_library
-        || !matches!(name, b"Sharp\\Int" | b"Sharp\\Float" | b"Sharp\\Bool")
-    {
-        return;
-    }
-
-    let class_name = BytesDisplay(&name[b"Sharp\\".len()..]);
-    context.collector.report_with_code(
-        IssueCode::ReservedNameOutsideLibrary,
-        Issue::error(format!("Cannot use `{class_name}` as a class name: it is reserved."))
-            .with_annotation(Annotation::primary(name_span).with_message("Class declared here."))
-            .with_note("PHP# reserves this name for a type."),
     );
 }
 
@@ -530,7 +511,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
         A: Arena,
     {
         let name = context.resolved_names.get(&self.name);
-        report_sharp_type_class_outside_library(context, name, self.name.span);
 
         let Some(class_like_metadata) = context.codebase.get_class_like(name) else {
             tracing::warn!("Class {} not found in codebase", BytesDisplay(name));
@@ -543,6 +523,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
         if class_like_metadata.span != self.span() {
             report_duplicate_definition(context, "Class", "class", name, self.span(), class_like_metadata.span);
             return Ok(());
+        }
+        if context.codebase.parses(name) {
+            r#struct::report_keys_read_twice(context, class_like_metadata, self.name.span);
         }
 
         // Call plugin on_enter_class hooks
@@ -998,7 +981,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
         A: Arena,
     {
         let name = context.resolved_names.get(&self.name);
-        report_sharp_type_class_outside_library(context, name, self.name.span);
 
         let Some(class_like_metadata) = context.codebase.get_class_like(name) else {
             tracing::warn!("Enum {} not found in codebase", BytesDisplay(name));
@@ -1540,12 +1522,17 @@ where
         }
     }
 
+    if context.dialect.is_sharp() && class_like_metadata.flags.is_sharp() {
+        report_statics_named_like_class_members(context, members);
+    }
+
     // Check trait constant overrides AFTER constants have been analyzed
     // so we can compare their inferred values
     check_class_like_constants(context, class_like_metadata, members);
 
     if has_complete_hierarchy {
         crate::readonly::finalize_class_writes(context, artifacts, class_like_metadata);
+        initialization::check_get_only_initialization(context, class_like_metadata);
         initialization::check_property_initialization(
             context,
             artifacts,
@@ -1556,6 +1543,50 @@ where
     }
 
     Ok(())
+}
+
+/// Reports each static of a PHP# class-like named like a member of `Class`, spec section 25, as TypeScript's error 2699
+/// refuses a static named like a member of `Function`: `type.y` through a class value reaches a static method, a
+/// static property, a constant and an enum case alike, and `Class`'s own member wins, so the static would never run. A
+/// member name is compared ignoring case, as PHP calls a method, and the message quotes each name as written.
+fn report_statics_named_like_class_members<A>(context: &mut Context<'_, '_, A>, members: &[ClassLikeMember<'_>])
+where
+    A: Arena,
+{
+    let mut statics: Vec<(&[u8], Span)> = Vec::new();
+    for member in members {
+        match member {
+            ClassLikeMember::Method(method) if method.is_static() => {
+                statics.push((method.name.value, method.name.span));
+            }
+            ClassLikeMember::Property(property) if property.modifiers().iter().any(Modifier::is_static) => {
+                for variable in property.variables() {
+                    statics.push((variable.name.strip_prefix(b"$").unwrap_or(variable.name), variable.span));
+                }
+            }
+            ClassLikeMember::Constant(constant) => {
+                statics.extend(constant.items.iter().map(|item| (item.name.value, item.name.span)));
+            }
+            ClassLikeMember::EnumCase(enum_case) => {
+                statics.push((enum_case.item.name().value, enum_case.item.name().span));
+            }
+            _ => {}
+        }
+    }
+
+    for (name, span) in statics {
+        let Some(member) = class_member(context.codebase, name) else {
+            continue;
+        };
+        let (name, member) = (BytesDisplay(name), member.original_name);
+        context.collector.report_with_code(
+            IssueCode::NameAlreadyInUse,
+            Issue::error(format!(
+                "`type.{name}` on a class value reaches `Class`'s member `{member}`, never this static. Rename it."
+            ))
+            .with_annotation(Annotation::primary(span).with_message("Declared here.")),
+        );
+    }
 }
 
 /// Reports a PHP# class or event, declared at `span`, that does not give the property `property_name` that `parent`
@@ -1725,7 +1756,14 @@ fn check_class_like_extends<'ctx, 'arena, A>(
                 continue;
             }
 
-            if extended_class_metadata.flags.is_static() {
+            if extended_class_metadata.flags.is_struct() {
+                context.collector.report_with_code(
+                    IssueCode::InvalidStruct,
+                    Issue::error(format!("`{extended_name}` is a struct, which can't be inherited."))
+                        .with_annotation(Annotation::primary(extended_type.span()).with_message("Inherited here."))
+                        .with_note("A struct is a value, so no class extends it."),
+                );
+            } else if extended_class_metadata.flags.is_static() {
                 let written_name = BytesDisplay(extended_type.value());
 
                 context.collector.report_with_code(
@@ -1862,7 +1900,8 @@ fn check_class_like_implements<'ctx, 'arena, A>(
         return;
     }
 
-    let using_kind_str = class_like_metadata.kind.as_str();
+    let is_struct = class_like_metadata.flags.is_struct();
+    let using_kind_str = if is_struct { "struct" } else { class_like_metadata.kind.as_str() };
     let using_kind_capitalized =
         format!("{}{}", using_kind_str.chars().next().unwrap().to_uppercase(), &using_kind_str[1..]);
     let using_name = display_class_like_name(context, class_like_metadata.original_name);
@@ -1955,13 +1994,25 @@ fn check_class_like_implements<'ctx, 'arena, A>(
             check_interface_method_signatures(context, class_like_metadata, implemented_metadata, checked_signatures);
         } else {
             let implemented_name = BytesDisplay(implemented_type.value());
+            let (note, help) = if is_struct {
+                ("A struct's header lists the interfaces it implements.", "Check the interface's name and its import.")
+            } else {
+                (
+                    "Mago could not find a definition for this interface. The `implements` keyword is for interfaces only.",
+                    "Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable.",
+                )
+            };
 
             context.collector.report_with_code(
                 IssueCode::NonExistentClassLike,
-                Issue::error(format!("{using_kind_capitalized} `{using_name}` cannot implement unknown type `{implemented_name}`"))
-                    .with_annotation(Annotation::primary(implemented_type.span()).with_message("This type could not be found"))
-                    .with_note("Mago could not find a definition for this interface. The `implements` keyword is for interfaces only.")
-                    .with_help("Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable."),
+                Issue::error(format!(
+                    "{using_kind_capitalized} `{using_name}` cannot implement unknown type `{implemented_name}`"
+                ))
+                .with_annotation(
+                    Annotation::primary(implemented_type.span()).with_message("This type could not be found"),
+                )
+                .with_note(note)
+                .with_help(help),
             );
         }
     }
@@ -2888,6 +2939,9 @@ fn check_abstract_method_signatures<'ctx, A>(
                 continue;
             }
 
+            let declaring_class_name = required_constructor_class(context, class_like_metadata, *method_name_atom)
+                .unwrap_or(declaring_class_name);
+            let declaring_class_name_str = declaring_class_name.as_bytes();
             if !checked_signatures.insert((declaring_class_name, *method_name_atom)) {
                 continue;
             }
@@ -3624,6 +3678,122 @@ where
     true
 }
 
+/// The class whose own constructor is written `required` nearest above the PHP# class `class_like_metadata`, when
+/// `method_name` is the constructor, spec section 25: `new Self(…)` creates any class below it with the arguments that
+/// constructor takes, so each constructor below it is compared with that one, not with its parent's.
+fn required_constructor_class<A>(
+    context: &Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    method_name: Word,
+) -> Option<Word>
+where
+    A: Arena,
+{
+    if !class_like_metadata.flags.is_sharp() || method_name.as_bytes() != b"__construct" {
+        return None;
+    }
+
+    std::iter::successors(class_like_metadata.direct_parent_class, |class| {
+        context.codebase.get_class_like(class.as_bytes())?.direct_parent_class
+    })
+    .find(|class| {
+        context
+            .codebase
+            .get_method(class.as_bytes(), b"__construct")
+            .is_some_and(|constructor| constructor.flags.is_required())
+    })
+}
+
+/// Reports a PHP# constructor that `new Self(…)` cannot call, below a `required` one, by the rule of spec section 25 it
+/// breaks: it must start with the parameters of the `required` constructor, and leave no parameter without a default
+/// that constructor leaves out, whether it adds one or drops the default the `required` constructor gives. The message
+/// names the shortest `new Self(…)`, and the code stays the one the signature check found. A parameter without a type,
+/// which only a file the parser refused declares, reads as `Any?`.
+fn report_required_constructor_mismatch<A>(
+    context: &mut Context<'_, '_, A>,
+    child_name: &Word,
+    parent_name: &Word,
+    child_method: &FunctionLikeMetadata,
+    parent_method: &FunctionLikeMetadata,
+    incompatibility: method_signature::SignatureCompatibilityIssue,
+    primary_span: Span,
+) where
+    A: Arena,
+{
+    use method_signature::SignatureCompatibilityIssue;
+
+    let name = |parameter: &FunctionLikeParameterMetadata| {
+        String::from_utf8_lossy(mago_bytes::trim_start_byte(parameter.name.0.as_bytes(), b'$')).into_owned()
+    };
+    let arguments = parent_method
+        .parameters
+        .iter()
+        .filter(|parameter| !parameter.flags.has_default())
+        .map(name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let keeps_the_start = parent_method
+        .parameters
+        .iter()
+        .enumerate()
+        .all(|(index, parent)| child_method.parameters.get(index).is_some_and(|child| child.name == parent.name));
+    let without_default: Vec<Word> = child_method
+        .parameters
+        .iter()
+        .enumerate()
+        .filter(|(index, child)| {
+            !child.flags.has_default()
+                && parent_method.parameters.get(*index).is_none_or(|parent| parent.flags.has_default())
+        })
+        .map(|(_, child)| word(name(child)))
+        .collect();
+
+    let code = match incompatibility {
+        SignatureCompatibilityIssue::ParameterNameMismatch { .. } => IssueCode::IncompatibleParameterName,
+        SignatureCompatibilityIssue::IncompatibleParameterType { .. } => IssueCode::IncompatibleParameterType,
+        _ => IssueCode::IncompatibleParameterCount,
+    };
+    let leading_type_differs = matches!(incompatibility, SignatureCompatibilityIssue::IncompatibleParameterType { .. });
+    let issue = match without_default.as_slice() {
+        [first, ..] if keeps_the_start && !leading_type_differs => {
+            let fix = if without_default.len() == 1 {
+                format!("give `{first}` a default")
+            } else {
+                "give each a default".to_owned()
+            };
+
+            Issue::error(format!(
+                "`{child_name}`'s constructor gives {} no default, so `new Self({arguments})` cannot call it: {fix}.",
+                and_list(&without_default)
+            ))
+        }
+        _ => {
+            let start = parent_method
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    let r#type =
+                        parameter.type_metadata.as_ref().map_or_else(get_mixed, |r#type| r#type.type_union.clone());
+
+                    format!("{} {}", display_type(context, &r#type), name(parameter))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            Issue::error(format!(
+                "`{child_name}`'s constructor must start with `{start}`, as `{parent_name}`'s does, so `new Self({arguments})` can call it."
+            ))
+        }
+    };
+
+    context.collector.report_with_code(
+        code,
+        issue
+            .with_annotation(Annotation::primary(primary_span).with_message("Declared here."))
+            .with_note("A `required` constructor lets `new Self(…)` create any subclass, so every class below it keeps a constructor `new Self(…)` can call."),
+    );
+}
+
 fn report_signature_compatibility_issue<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     child_class: &'ctx ClassLikeMetadata,
@@ -3639,6 +3809,28 @@ fn report_signature_compatibility_issue<'ctx, A>(
     let parent_name = display_class_like_name(context, parent_class.original_name);
     let child_class_span = child_class.name_span.unwrap_or(child_class.span);
     let parent_class_span = parent_class.name_span.unwrap_or(parent_class.span);
+    if context.dialect.is_sharp()
+        && parent_class.flags.is_sharp()
+        && parent_class.flags.has_consistent_constructor()
+        && method_name.as_bytes().eq_ignore_ascii_case(b"__construct")
+        && let Some(child_constructor) =
+            context.codebase.get_declaring_method(child_class.name.as_bytes(), b"__construct")
+        && let Some(parent_constructor) =
+            context.codebase.get_declaring_method(parent_class.name.as_bytes(), b"__construct")
+    {
+        report_required_constructor_mismatch(
+            context,
+            &child_name,
+            &parent_name,
+            child_constructor,
+            parent_constructor,
+            incompatibility,
+            primary_span,
+        );
+
+        return;
+    }
+
     let (child_display, parent_display) = if context.dialect.is_sharp() {
         let method_name = parent_method.original_name;
 
@@ -3668,6 +3860,22 @@ fn report_signature_compatibility_issue<'ctx, A>(
                     .with_help(format!(
                         "Remove the method `{method_name}()` from `{child_name}`, or remove the final modifier from the parent method."
                     )),
+            );
+        }
+        SignatureCompatibilityIssue::ReadonlyDropped => {
+            let relation = if parent_class.kind.is_interface() { "implements" } else { "overrides" };
+            let declaration = sharp_method_declaration(context, parent_method);
+            context.collector.report_with_code(
+                IssueCode::IncompatibleReadonlyModifier,
+                Issue::error(format!(
+                    "{child_display} {relation} the readonly {parent_display}, so it is readonly too: declare it `{declaration} readonly`."
+                ))
+                .with_annotation(Annotation::primary(primary_span))
+                .with_annotation(
+                    Annotation::secondary(parent_method.name_span.unwrap_or(parent_method.span))
+                        .with_message("Declared `readonly` here."),
+                )
+                .with_note("A call through a readonly value runs any override, so every override keeps `this` readonly."),
             );
         }
         SignatureCompatibilityIssue::StaticModifierMismatch { child_is_static, parent_is_static: _ } => {
@@ -4817,17 +5025,27 @@ fn report_unfit_interface_property<A>(
         report(context, IssueCode::IncompatibleStaticModifier, given, "on each object".to_owned(), help);
     }
 
-    // PHP refuses a readonly, a `private(set)` or a get-only virtual property for one stated with `set`.
+    // PHP refuses a readonly, a `private(set)` or a get-only virtual property for one stated with `set`, and an `init`
+    // property is set only while its object is created.
     let set = word(b"set");
     let given_settable = !property.flags.is_readonly()
+        && !property.flags.is_init()
         && property.write_visibility == Visibility::Public
         && (!property.flags.is_virtual_property() || property.hooks.contains_key(&set));
     if stated.hooks.contains_key(&set) && !given_settable {
-        if owner.flags.is_event() {
+        let never_set_again = if owner.flags.is_event() {
+            Some("an event's properties are set once, by `new`")
+        } else if owner.flags.is_struct() {
+            Some("a struct never changes")
+        } else {
+            None
+        };
+
+        if let Some(reason) = never_set_again {
             context.collector.report_with_code(
                 IssueCode::IncompatiblePropertyAccess,
                 Issue::error(format!(
-                    "`{name}` cannot give `{property_name}`, which `{interface_name}` states with `set`: an event's properties are set once, by `new`."
+                    "`{name}` cannot give `{property_name}`, which `{interface_name}` states with `set`: {reason}."
                 ))
                 .with_annotation(Annotation::primary(property_span).with_message("Given here."))
                 .with_annotation(Annotation::secondary(stated_span).with_message("Stated here.")),

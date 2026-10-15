@@ -40,6 +40,7 @@ use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Return;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::Trivia;
 use mago_syntax::cst::UnaryPrefix;
@@ -52,6 +53,7 @@ use mago_syntax::walker::walk_enum_mut;
 use mago_syntax::walker::walk_event_mut;
 use mago_syntax::walker::walk_interface_mut;
 use mago_syntax::walker::walk_module_mut;
+use mago_syntax::walker::walk_struct_mut;
 use mago_syntax::walker::walk_trait_mut;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -74,6 +76,7 @@ use crate::scanner::class_like::register_enum;
 use crate::scanner::class_like::register_event;
 use crate::scanner::class_like::register_interface;
 use crate::scanner::class_like::register_module;
+use crate::scanner::class_like::register_struct;
 use crate::scanner::class_like::register_trait;
 use crate::scanner::constant::scan_constant;
 use crate::scanner::constant::scan_defined_constant;
@@ -388,10 +391,14 @@ impl Scanner {
             class_like_metadata.inheritable_method_ids.insert(name, method_identifier);
         }
 
-        // PHP#'s `required` constructor is one every subclass keeps, so `new Self(…)` can call it, spec section 25.
+        // PHP#'s `required` constructor is one every subclass keeps, so `new Self(…)` can call it, spec section 25. The
+        // constructor itself is marked, so each class below compares its own with the nearest one written `required`.
         let is_required = method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_)));
         if (method_metadata.is_final || is_required) && is_constructor {
             class_like_metadata.flags |= MetadataFlags::CONSISTENT_CONSTRUCTOR;
+        }
+        if is_required && is_constructor {
+            function_like_metadata.flags |= MetadataFlags::REQUIRED;
         }
 
         self.template_constraints.push(
@@ -838,6 +845,27 @@ where
         finalize_class_like(self, context);
     }
 
+    /// A PHP# struct registers as the final class it runs as, spec section 10.
+    #[inline]
+    fn walk_struct(&mut self, r#struct: &'arena Struct<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if let Some((id, templates, type_aliases, imported_aliases)) =
+            register_struct(&mut self.codebase, r#struct, context, &mut self.scope)
+        {
+            self.apply_polyfill_flag_to_class_like(id);
+            self.file_type_aliases.extend(type_aliases);
+            self.file_imported_aliases.extend(imported_aliases);
+            self.stack.push(id);
+            self.template_constraints.push(templates);
+
+            walk_struct_mut(self, r#struct, context);
+        }
+    }
+
+    #[inline]
+    fn walk_out_struct(&mut self, _struct: &'arena Struct<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        finalize_class_like(self, context);
+    }
+
     /// A PHP# module registers its bindings, spec section 32. A folder's `Module.sharp` also registers as its
     /// namespace's class-like `Module`, which encloses the lambdas of its laws as a class encloses its methods' lambdas.
     #[inline]
@@ -921,15 +949,17 @@ where
         };
         self.register_method(&parts, context);
 
-        // `operator ==` runs as `op_Equality(?Money $a, ?Money $b)`, which lifts `null` itself, so the PHP method
-        // takes `null`. Its body and PHP# callers keep the types the operator declares.
-        if matches!(operator.symbol, BinaryOperator::Equal(_))
-            && let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
+        if let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
             && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, ascii_lowercase_word(parts.name)))
         {
-            for parameter in &mut method.parameters {
-                if let Some(declaration) = &mut parameter.type_declaration_metadata {
-                    declaration.type_union = declaration.type_union.clone().as_nullable();
+            method.flags |= MetadataFlags::OPERATOR;
+            // `operator ==` runs as `op_Equality(?Money $a, ?Money $b)`, which lifts `null` itself, so the PHP method
+            // takes `null`. Its body and PHP# callers keep the types the operator declares.
+            if matches!(operator.symbol, BinaryOperator::Equal(_)) {
+                for parameter in &mut method.parameters {
+                    if let Some(declaration) = &mut parameter.type_declaration_metadata {
+                        declaration.type_union = declaration.type_union.clone().as_nullable();
+                    }
                 }
             }
         }
@@ -960,6 +990,8 @@ where
             method_metadata.is_static = true;
             method_metadata.is_final = false;
             method_metadata.is_abstract = false;
+            method_metadata.assigned_properties =
+                function_like::definitely_assigned_properties(&named_constructor.body, context);
             method.flags |= MetadataFlags::NAMED_CONSTRUCTOR;
             let type_parameters: Vec<TUnion> = class
                 .template_types

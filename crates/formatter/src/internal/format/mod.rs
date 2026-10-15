@@ -1735,6 +1735,9 @@ where
                 Hint::Function(_) => {
                     unreachable!("the formatter refuses a PHP# file, the only one with function types")
                 }
+                Hint::Readonly(_) => {
+                    unreachable!("the formatter refuses a PHP# file, the only one with readonly types")
+                }
             }
         })
     }

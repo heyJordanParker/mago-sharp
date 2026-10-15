@@ -37,26 +37,35 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticPropertyAccess<'arena> {
             block_context,
             artifacts,
             StaticProperty::from_static_property_access(self),
+            false,
         )
     }
 }
 
-/// Analyzes a read of a static property, written `Class::$name` in PHP or `Class.name` in PHP#.
+/// Analyzes a read of a static property, written `Class::$name` in PHP or `Class.name` in PHP#. A PHP# read through a
+/// class value, `type.name`, analyzed its class value to find it is one, so it is `class_is_analyzed`. Such a read
+/// records the type arguments the value carries, as one through `Counter<Order>` records its own, which a memoized read
+/// skips, so it is not memoized.
 pub(crate) fn analyze_static_property_access<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     access: StaticProperty<'_, 'arena>,
+    class_is_analyzed: bool,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
 {
-    let property_access_id = get_static_property_access_expression_id(
-        access,
-        block_context.scope.get_class_like_name(),
-        context.resolved_names,
-        Some(context.codebase),
-    );
+    let property_access_id = (!class_is_analyzed)
+        .then(|| {
+            get_static_property_access_expression_id(
+                access,
+                block_context.scope.get_class_like_name(),
+                context.resolved_names,
+                Some(context.codebase),
+            )
+        })
+        .flatten();
 
     if context.settings.memoize_properties
         && let Some(property_access_id) = &property_access_id
@@ -68,7 +77,8 @@ where
         return Ok(());
     }
 
-    let resolution_result = resolve_static_properties(context, block_context, artifacts, access, false, false)?;
+    let resolution_result =
+        resolve_static_properties(context, block_context, artifacts, access, false, class_is_analyzed)?;
     // A refused class, as `Missing<Order>`, reported itself, so what its member gives reports nothing again.
     if artifacts.get_expression_type(access.class).is_some_and(is_refused_type) {
         artifacts.set_expression_type(&access.span, TUnion::from_atomic(TAtomic::Error));

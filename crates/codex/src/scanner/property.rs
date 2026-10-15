@@ -204,12 +204,17 @@ where
                 .map(|item| {
                     let (name, name_span, mut has_default, mut default_type) =
                         scan_property_item(item, classname, context, scope);
-                    if is_sharp && !has_default {
+                    let is_required = is_sharp && is_required(&plain_property.modifiers);
+                    if is_sharp && !has_default && !is_required {
                         default_type = sharp_null_default(plain_property.hint.as_ref(), name_span);
                         has_default = default_type.is_some();
                     }
 
                     let mut item_flags = flags;
+
+                    if is_required {
+                        item_flags |= MetadataFlags::REQUIRED;
+                    }
 
                     if has_default {
                         item_flags |= MetadataFlags::HAS_DEFAULT;
@@ -300,7 +305,9 @@ where
                     type_metadata
                 });
             }
-            if is_sharp && !has_default && !hooked_property.hook_list.is_get_only() {
+            if is_sharp && is_required(&hooked_property.modifiers) {
+                flags |= MetadataFlags::REQUIRED;
+            } else if is_sharp && !has_default && !hooked_property.hook_list.is_get_only() {
                 default_type = sharp_null_default(hooked_property.hint.as_ref(), name_span);
                 has_default = default_type.is_some();
             }
@@ -437,13 +444,14 @@ where
 }
 
 /// The write visibility of a PHP# property: its `set` or `init` accessor's access modifier, or the property's own for
-/// a `set` without one. A get-only property runs as `readonly`, or as `protected(set)` when its `get` has a body, and
-/// an `init` accessor without one as `protected(set)`, so both are written at `protected` at most.
+/// an accessor without one. An `init` property is written at that level only while its object is created, which the
+/// analyzer checks, as an object initializer and `with` write it, spec section 16. A get-only property runs as
+/// `readonly`, or as `protected(set)` when its `get` has a body, so it is written at `protected` at most.
 fn sharp_write_visibility(accessors: &PropertyHookList, read_visibility: Visibility) -> Visibility {
     let setter = accessors.setter();
     match setter.and_then(|setter| setter.modifiers.first()).and_then(|modifier| Visibility::try_from(modifier).ok()) {
         Some(visibility) => visibility,
-        None if setter.is_some_and(|setter| setter.name.value == b"set") => read_visibility,
+        None if setter.is_some() => read_visibility,
         None if read_visibility == Visibility::Public => Visibility::Protected,
         None => read_visibility,
     }
@@ -498,6 +506,12 @@ where
     A: Arena,
 {
     accessors.is_get_only() && context.resolved_names.has_storage(accessors)
+}
+
+/// Whether a PHP# property is written `required`, spec section 6.1: each creation of its object sets it, so it takes
+/// no `null` default.
+fn is_required(modifiers: &Sequence<Modifier>) -> bool {
+    modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_)))
 }
 
 /// The default of a PHP# field or auto-property with `set` of a nullable type written without an initial value: it

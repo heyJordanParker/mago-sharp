@@ -29,6 +29,7 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_passed_type;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::template::TemplateResult;
@@ -60,6 +61,7 @@ use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::invocation::InvocationTargetParameter;
 use crate::invocation::arguments::analyze_and_store_argument_type;
+use crate::invocation::arguments::check_array_crossing;
 use crate::invocation::arguments::get_unpacked_argument_type;
 use crate::invocation::arguments::report_non_list_spread;
 use crate::invocation::arguments::verify_argument_type;
@@ -74,8 +76,89 @@ use crate::statement::function_like::is_member_read;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::takes_declared_type;
 use crate::utils::expression::get_block_expression_id;
+use crate::utils::names::display_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::names::is_prelude_stub;
+use crate::utils::quoted_source;
+use crate::utils::report_dropped_readonly;
+
+/// The type `parameter` of a PHP# function declares, when that type names a type parameter of the function itself,
+/// spec section 11. Such a type parameter takes a readonly value only where the parameter writes `readonly`, spec
+/// section 13, so the declared type is what an argument meets. A class's type parameter is filled by the receiver.
+fn own_type_parameter_type<'parameter>(
+    invocation: &Invocation<'_, '_, '_>,
+    parameter: &InvocationTargetParameter<'parameter>,
+) -> Option<&'parameter TUnion> {
+    invocation.target.get_function_like_metadata().filter(|function| function.flags.is_sharp())?;
+
+    parameter.get_type().filter(|declared| {
+        declared.get_all_child_nodes().iter().any(|node| {
+            matches!(node, TypeRef::Atomic(TAtomic::GenericParameter(generic))
+                if matches!(generic.defining_entity, GenericParent::FunctionLike(_)))
+        })
+    })
+}
+
+/// Reports `argument`, a value of `argument_type` that would lose its readonly where `parameter` takes `parameter_type`,
+/// spec section 13, with the `readonly` to declare: on the receiver of an extension member, which the message names as
+/// the call, on the parameter of a PHP# method, on the element type of a collection, or on the type argument a class's
+/// type parameter takes. A plain PHP parameter takes no `readonly`, since PHP# does not check plain PHP.
+fn report_readonly_argument<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    invocation: &Invocation<'_, '_, '_>,
+    parameter: InvocationTargetParameter<'_>,
+    (parameter_type, argument_type): (&TUnion, &TUnion),
+    argument: &Expression<'_>,
+) where
+    A: Arena,
+{
+    let target = invocation.target.guess_name(context);
+    let readonly_type = display_type(context, &parameter_type.clone().to_readonly());
+    let function = invocation.target.get_function_like_metadata();
+    let declared_generic = parameter.get_type().is_some_and(|declared| {
+        declared.get_all_child_nodes().iter().any(|node| matches!(node, TypeRef::Atomic(TAtomic::GenericParameter(_))))
+    });
+    let collection_method = matches!(
+        invocation.target.get_function_like_identifier(),
+        Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
+    );
+    let name = parameter.get_name().map(|name| display_variable_name(context, name.0.as_bytes()));
+    let receiver = function
+        .filter(|function| function.flags.is_extension_method())
+        .filter(|function| function.parameters.first().map(|first| first.get_name()) == parameter.get_name());
+    let (action, fix) = if let Some(function) = receiver {
+        let action = format!("call {}.{}", quoted_source(context, argument.span()), function.original_name);
+        let name = name.unwrap_or_default();
+
+        (action, format!(". Declare its receiver `extension({readonly_type} {name})`."))
+    } else {
+        let fix = if collection_method {
+            format!(". Declare the element type `{readonly_type}`.")
+        } else if function.is_some_and(|function| function.flags.is_sharp())
+            && let Some(name) = name
+            && (!declared_generic || own_type_parameter_type(invocation, &parameter).is_some())
+        {
+            format!(". Declare the parameter `{readonly_type} {name}`.")
+        } else if declared_generic {
+            format!(". Declare the type argument `{readonly_type}`.")
+        } else {
+            format!(", and {target} is plain PHP, which PHP# does not check.")
+        };
+
+        (format!("pass {} to {target}", quoted_source(context, argument.span())), fix)
+    };
+
+    report_dropped_readonly(
+        context,
+        block_context,
+        IssueCode::InvalidArgument,
+        argument,
+        (parameter_type, argument_type),
+        &action,
+        &fix,
+    );
+}
 
 fn narrow_class_related_argument<A>(
     context: &Context<'_, '_, A>,
@@ -325,7 +408,6 @@ where
                     *argument_offset,
                     argument_type.1,
                     false,
-                    invocation.target.get_dialect(),
                 ));
             }
         }
@@ -472,7 +554,6 @@ where
                 *argument_offset,
                 argument_type.1,
                 true,
-                invocation.target.get_dialect(),
             ));
         }
     }
@@ -719,6 +800,7 @@ where
                 // whatever class the call goes through, of a function value whose signature PHP# wrote, or of a
                 // `Sharp\` collection method, which PHP# declares as a plain PHP stub only to carry its templates. A
                 // plain PHP method's or closure's parameter takes either literal, whatever its docblock says.
+                let mut refused_crossing = false;
                 if matches!(&invocation.target, InvocationTarget::Callable { signature, .. } if signature.effects.is_some())
                     || invocation.target.get_function_like_metadata().is_some_and(|function| function.flags.is_sharp())
                     || matches!(
@@ -727,17 +809,44 @@ where
                     )
                 {
                     check_sharp_literal_kind(context, argument_expression, &final_parameter_type);
+                } else if context.dialect.is_sharp() {
+                    refused_crossing = check_array_crossing(
+                        context,
+                        &argument_value_type,
+                        parameter_ref,
+                        &final_parameter_type,
+                        *argument_offset,
+                        argument_expression,
+                        &invocation.target,
+                    );
                 }
 
-                if verify_argument_type(
-                    context,
-                    artifacts,
-                    &argument_value_type,
-                    &final_parameter_type,
-                    *argument_offset,
-                    argument_expression,
-                    &invocation.target,
-                ) {
+                if context.dialect.is_sharp()
+                    && let Some(declared) =
+                        [Some(&final_parameter_type), own_type_parameter_type(invocation, &parameter_ref)]
+                            .into_iter()
+                            .flatten()
+                            .find(|declared| declared.drops_readonly_of(&argument_value_type))
+                {
+                    report_readonly_argument(
+                        context,
+                        block_context,
+                        invocation,
+                        parameter_ref,
+                        (declared, &argument_value_type),
+                        argument_expression,
+                    );
+                } else if !refused_crossing
+                    && verify_argument_type(
+                        context,
+                        artifacts,
+                        &argument_value_type,
+                        &final_parameter_type,
+                        *argument_offset,
+                        argument_expression,
+                        &invocation.target,
+                    )
+                {
                     record_function_values(
                         context,
                         artifacts,
@@ -862,13 +971,7 @@ where
             let default_type =
                 unused_parameter.get_default_type().map_or_else(|| Cow::Owned(get_mixed()), Cow::Borrowed);
 
-            infer_unfixed_templates(
-                context,
-                &parameter_type,
-                &default_type,
-                template_result,
-                invocation.target.get_dialect(),
-            );
+            infer_unfixed_templates(context, &parameter_type, &default_type, template_result);
 
             let Some(parameter_name) = unused_parameter.get_name() else {
                 continue;
@@ -934,7 +1037,6 @@ where
                     last_parameter_offset,
                     argument_expression.span(),
                     false,
-                    invocation.target.get_dialect(),
                 ));
             }
         }
@@ -957,13 +1059,11 @@ where
         );
         let return_type = inferred_type_replacer::replace(&return_type, template_result, context.codebase);
 
-        violated_templates.extend(infer_unfixed_templates(
-            context,
-            &return_type,
-            expected_type,
-            template_result,
-            invocation.target.get_dialect(),
-        ));
+        violated_templates.extend(
+            infer_unfixed_templates(context, &return_type, expected_type, template_result)
+                .into_iter()
+                .map(|violation| violation.template_name),
+        );
     }
 
     let mut unbound_templates = WordSet::default();
@@ -1139,6 +1239,22 @@ where
                         && let Some(unpacked_element_type) =
                             get_unpacked_argument_type(context, &argument_value_type, argument_expression.span())
                     {
+                        // Spec section 13: a spread passes each element, so each keeps its readonly.
+                        if context.dialect.is_sharp()
+                            && final_variadic_parameter_type.drops_readonly_of(&unpacked_element_type)
+                        {
+                            report_readonly_argument(
+                                context,
+                                block_context,
+                                invocation,
+                                last_parameter_ref,
+                                (&final_variadic_parameter_type, &unpacked_element_type),
+                                argument_expression,
+                            );
+
+                            continue;
+                        }
+
                         verify_argument_type(
                             context,
                             artifacts,
@@ -1608,7 +1724,6 @@ fn infer_generic_callable_arguments<'ctx, 'arena, A>(
                         argument_offset,
                         *argument_span,
                         false,
-                        invocation.target.get_dialect(),
                     );
                 }
             }
@@ -1682,7 +1797,9 @@ where
     let parameter_type = if context.dialect.is_sharp() && keys_a_map_by_its_function(invocation_target) {
         without_method_template_bounds(&parameter_type)
     } else if invocation_target.get_function_like_metadata().is_some_and(|method| method.flags.is_sharp()) {
-        known_type_or_error(parameter_type)
+        // A plain PHP caller passes a `Map` or a `Set` as the object it runs as, or as a PHP array PHP# turns into one.
+        let parameter_type = known_type_or_error(parameter_type);
+        if context.dialect.is_sharp() { parameter_type } else { get_php_passed_type(&parameter_type, context.codebase) }
     } else {
         parameter_type
     };
@@ -2286,8 +2403,8 @@ where
             TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Literal { value })) => {
                 return Some(*value);
             }
-            TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. }))
-                if let Some(name) = extract_class_name_from_atomic(constraint) =>
+            TAtomic::Scalar(TScalar::ClassLikeString(class_string @ TClassLikeString::OfType { .. }))
+                if let Some(name) = class_string.constraint().and_then(extract_class_name_from_atomic) =>
             {
                 return Some(name);
             }

@@ -48,10 +48,12 @@ use crate::cst::cst::r#return::Return;
 use crate::cst::cst::string::CompositeString;
 use crate::cst::cst::string::StringPart;
 use crate::cst::cst::throw::Throw;
+use crate::cst::cst::type_hint::Hint;
 use crate::cst::cst::type_of::TypeOf;
 use crate::cst::cst::unary::UnaryPostfix;
 use crate::cst::cst::unary::UnaryPrefix;
 use crate::cst::cst::variable::Variable;
+use crate::cst::cst::with::With;
 use crate::cst::cst::r#yield::Yield;
 use crate::cst::node::NodeKind;
 
@@ -119,6 +121,7 @@ pub enum Expression<'arena> {
     As(As<'arena>),
     PatternMatch(PatternMatch<'arena>),
     TypeOf(TypeOf<'arena>),
+    With(With<'arena>),
     GenericClass(GenericClass<'arena>),
     Error(Span),
 }
@@ -141,8 +144,9 @@ impl<'arena> Expression<'arena> {
             Self::Literal(_) => true,
             Self::Identifier(_) => true,
             Self::MagicConstant(_) => true,
-            // A class value with type arguments is created while the code runs, spec section 25.
-            Self::TypeOf(type_of) => type_of.type_arguments.is_none(),
+            // `typeof(Order)` is PHP's `Order::class`. The class value of any other type, `Self` and a class with type
+            // arguments included, is created while the code runs, spec section 25.
+            Self::TypeOf(type_of) => matches!(type_of.r#type, Hint::Identifier(_)),
             Self::GenericClass(generic_class) => generic_class.class.is_constant(version, initialization),
             Self::ConstantAccess(_) => true,
             Self::Self_(_) => true,
@@ -170,7 +174,8 @@ impl<'arena> Expression<'arena> {
             Self::Instantiation(instantiation)
                 if initialization && version.is_supported(Feature::NewInInitializers) =>
             {
-                instantiation.class.is_constant(version, initialization)
+                instantiation.initializer.is_none()
+                    && instantiation.class.is_constant(version, initialization)
                     && instantiation.argument_list.as_ref().is_none_or(|arguments| {
                         arguments.arguments.iter().all(|argument| match &argument {
                             Argument::Positional(positional_argument) => {
@@ -485,6 +490,7 @@ impl<'arena> Expression<'arena> {
             Expression::As(_) => NodeKind::As,
             Expression::PatternMatch(_) => NodeKind::PatternMatch,
             Expression::TypeOf(_) => NodeKind::TypeOf,
+            Expression::With(_) => NodeKind::With,
             Expression::GenericClass(_) => NodeKind::GenericClass,
             Expression::Error(_) => NodeKind::Error,
         }
@@ -548,6 +554,7 @@ impl HasSpan for Expression<'_> {
             Expression::As(expression) => expression.span(),
             Expression::PatternMatch(expression) => expression.span(),
             Expression::TypeOf(expression) => expression.span(),
+            Expression::With(expression) => expression.span(),
             Expression::GenericClass(expression) => expression.span(),
             Expression::Error(span) => *span,
         })

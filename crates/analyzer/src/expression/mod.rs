@@ -109,6 +109,7 @@ pub mod throw;
 pub mod type_of;
 pub mod unary;
 pub mod variable;
+pub mod with;
 pub mod r#yield;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
@@ -291,6 +292,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                     artifacts,
                 ),
                 Expression::TypeOf(expr) => expr.analyze(context, block_context, artifacts),
+                Expression::With(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::GenericClass(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::List(list_expr) => {
                     context.collector.report_with_code(

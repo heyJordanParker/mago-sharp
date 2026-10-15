@@ -77,6 +77,7 @@ enum NodeKind: string
     case NamedConstructor = 'NamedConstructor';
     case ConstructorName = 'ConstructorName';
     case Event = 'Event';
+    case Struct = 'Struct';
     case ComputedProperty = 'ComputedProperty';
     case HookedProperty = 'HookedProperty';
     case PlainProperty = 'PlainProperty';
@@ -177,6 +178,9 @@ enum NodeKind: string
     case Literal = 'Literal';
     case Pipe = 'Pipe';
     case TypeOf = 'TypeOf';
+    case With = 'With';
+    case ObjectInitializer = 'ObjectInitializer';
+    case NamedValue = 'NamedValue';
     case GenericClass = 'GenericClass';
     case LiteralFloat = 'LiteralFloat';
     case LiteralInteger = 'LiteralInteger';
@@ -260,6 +264,7 @@ enum NodeKind: string
     case NullableHint = 'NullableHint';
     case GenericHint = 'GenericHint';
     case FunctionHint = 'FunctionHint';
+    case ReadonlyHint = 'ReadonlyHint';
     case TypeArgumentList = 'TypeArgumentList';
     case TypeParameterList = 'TypeParameterList';
     case TypeParameter = 'TypeParameter';

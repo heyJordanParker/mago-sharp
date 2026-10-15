@@ -50,6 +50,9 @@ pub struct Method<'arena> {
     pub type_parameters: Option<&'arena TypeParameterList<'arena>>,
     pub parameter_list: FunctionLikeParameterList<'arena>,
     pub return_type_hint: Option<FunctionLikeReturnTypeHint<'arena>>,
+    /// A PHP# method's `readonly` after its parameters, which keeps `this` readonly in it, spec section 13. PHP never
+    /// sets it.
+    pub readonly: Option<Keyword<'arena>>,
     /// A PHP# listener's `on` clause. PHP never sets it, so it sits in the arena and keeps every method small.
     pub on: Option<&'arena On<'arena>>,
     /// The effects a PHP# method without a body allows its implementations, spec section 29. PHP never sets it, so it

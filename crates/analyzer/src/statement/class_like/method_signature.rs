@@ -43,17 +43,57 @@ use mago_names::short_name;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureCompatibilityIssue {
     FinalMethodOverride,
-    StaticModifierMismatch { child_is_static: bool, parent_is_static: bool },
-    VisibilityNarrowed { child_visibility: Visibility, parent_visibility: Visibility },
-    ParameterCountMismatch { child_required_count: usize, parent_required_count: usize },
-    MissingVariadicParameter { parameter_index: usize },
-    IncompatibleParameterType { parameter_index: usize, child_type: TUnion, parent_type: TUnion },
-    IncompatibleReturnType { child_type: TUnion, parent_type: TUnion },
-    MissingReturnTypeDeclaration { parent_type: TUnion },
-    ParameterNameMismatch { parameter_index: usize, child_name: Word, parent_name: Word },
-    ErasedParameterNarrowed { parameter_index: usize, child_type: TUnion, parent_type: TUnion, bound: Option<Word> },
-    ChangedTemplateBound { template: Word, child_method: String, parent_method: String, bound: Option<TUnion> },
-    ChangedTemplateCount { child_method: String, parent_method: String, parent_count: usize },
+    StaticModifierMismatch {
+        child_is_static: bool,
+        parent_is_static: bool,
+    },
+    /// Spec section 13: an override or an implementation of a readonly method is readonly too.
+    ReadonlyDropped,
+    VisibilityNarrowed {
+        child_visibility: Visibility,
+        parent_visibility: Visibility,
+    },
+    ParameterCountMismatch {
+        child_required_count: usize,
+        parent_required_count: usize,
+    },
+    MissingVariadicParameter {
+        parameter_index: usize,
+    },
+    IncompatibleParameterType {
+        parameter_index: usize,
+        child_type: TUnion,
+        parent_type: TUnion,
+    },
+    IncompatibleReturnType {
+        child_type: TUnion,
+        parent_type: TUnion,
+    },
+    MissingReturnTypeDeclaration {
+        parent_type: TUnion,
+    },
+    ParameterNameMismatch {
+        parameter_index: usize,
+        child_name: Word,
+        parent_name: Word,
+    },
+    ErasedParameterNarrowed {
+        parameter_index: usize,
+        child_type: TUnion,
+        parent_type: TUnion,
+        bound: Option<Word>,
+    },
+    ChangedTemplateBound {
+        template: Word,
+        child_method: String,
+        parent_method: String,
+        bound: Option<TUnion>,
+    },
+    ChangedTemplateCount {
+        child_method: String,
+        parent_method: String,
+        parent_count: usize,
+    },
 }
 
 /// Validates that a child method signature is compatible with a parent method signature.
@@ -126,6 +166,10 @@ pub fn validate_method_signature_compatibility(
         });
 
         return issues;
+    }
+
+    if dialect.is_sharp() && parent_method.flags.is_readonly() && !child_method.flags.is_readonly() {
+        issues.push(SignatureCompatibilityIssue::ReadonlyDropped);
     }
 
     if is_visibility_narrowed(child_method_meta.visibility, parent_method_meta.visibility) {

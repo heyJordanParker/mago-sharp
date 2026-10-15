@@ -32,6 +32,7 @@ use crate::context::scope::case_scope::CaseScope;
 use crate::context::scope::loop_scope::LoopScope;
 use crate::effects::EffectSummary;
 use crate::effects::FunctionValue;
+use crate::effects::ReadonlyCall;
 use crate::external::Listing;
 use crate::readonly::PendingReadonlyPropertyWrite;
 
@@ -114,6 +115,9 @@ pub struct AnalysisArtifacts {
     /// The function values the analysis gave places whose function types list effects, until the body that gives them
     /// records its summary.
     pub(crate) function_values: Vec<FunctionValue>,
+    /// The calls of PHP# methods without `readonly` through readonly values, until the body that makes them records
+    /// its summary.
+    pub(crate) readonly_calls: Vec<ReadonlyCall>,
     pub(crate) variable_definedness: HashMap<(u32, u32), WordMap<VariableDefinedness>>,
     variable_definedness_targets: Option<Arc<[bool; NodeKind::COUNT]>>,
     pub(crate) pending_readonly_property_writes: Vec<PendingReadonlyPropertyWrite>,
@@ -156,6 +160,7 @@ impl AnalysisArtifacts {
             tested_types: HashMap::default(),
             namespace_constants: HashMap::default(),
             function_values: Vec::new(),
+            readonly_calls: Vec::new(),
             variable_definedness: HashMap::default(),
             variable_definedness_targets: None,
             pending_readonly_property_writes: Vec::new(),

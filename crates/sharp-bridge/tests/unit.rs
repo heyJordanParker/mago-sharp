@@ -44,7 +44,8 @@ use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_bridge::unit::stamp;
 use xxhash_rust::xxh3::xxh3_128;
 
-const SOURCE: &str = "namespace App.Tenant;\n\nclass Report\n{\n    public string title()\n    {\n        return \"weekly\";\n    }\n}\n";
+/// An abstract class, which has no `parse`, so the unit holds only what the source writes.
+const SOURCE: &str = "namespace App.Tenant;\n\nabstract class Report\n{\n    public string title()\n    {\n        return \"weekly\";\n    }\n}\n";
 
 /// The unit the bridge lowers from `source`, which the checker accepts.
 fn lowered(source: &str) -> Unit {
@@ -344,12 +345,12 @@ fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
     }
 }
 
-/// `SOURCE_LISTING` stamps the names of a folder's `.sharp` files, so a file appearing, going or being renamed changes
-/// the stamp, and an edit, a file of another kind, a folder named like a source, a file below the folder, a file named
-/// only `.sharp`, and a dangling link, such as the one Emacs leaves beside an unsaved buffer, leave it, as the engine
-/// leaves them.
+/// `SOURCE_LISTING` stamps the names of a folder's `.sharp` files and of its namespace folders, so a file or a folder
+/// whose name starts with an uppercase letter appearing, going or being renamed changes the stamp, and an edit, a file
+/// of another kind, a lowercase folder named like a source, a file below the folder, a file named only `.sharp`, and a
+/// dangling link, such as the one Emacs leaves beside an unsaved buffer, leave it, as the engine leaves them.
 #[test]
-fn a_source_listing_stamps_the_names_of_the_sharp_files_of_its_folder() {
+fn a_source_listing_stamps_the_names_of_the_sharp_files_and_namespace_folders_of_its_folder() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "app/Report.sharp", SOURCE);
@@ -363,16 +364,20 @@ fn a_source_listing_stamps_the_names_of_the_sharp_files_of_its_folder() {
 
     write(root, "app/Report.sharp", "namespace App;\n");
     write(root, "app/Model.php", "<?php\n");
-    write(root, "app/Deep/Inner.sharp", SOURCE);
+    write(root, "app/deep/Inner.sharp", SOURCE);
     write(root, "app/.sharp", SOURCE);
-    fs::create_dir_all(root.join("app/Folder.sharp")).unwrap();
+    fs::create_dir_all(root.join("app/folder.sharp")).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink("dev@laptop.4242:1760000000", root.join("app/.#Report.sharp")).unwrap();
-    assert_eq!(listing(root), stamped, "no name of a .sharp file of the folder changed");
+    assert_eq!(listing(root), stamped, "no name of a .sharp file or a namespace folder of the folder changed");
 
     write(root, "app/Quiet.sharp", SOURCE);
     assert_ne!(listing(root), stamped, "a file appeared");
     fs::remove_file(root.join("app/Quiet.sharp")).unwrap();
+    write(root, "app/Billing/Audit.sharp", SOURCE);
+    assert_eq!(listing(root).hash, source_hash(b"Billing/\nLoud.sharp\nReport.sharp\n"), "a namespace folder appeared");
+    fs::remove_dir_all(root.join("app/Billing")).unwrap();
+    assert_eq!(listing(root), stamped, "the namespace folder went");
     fs::rename(root.join("app/Loud.sharp"), root.join("app/Lout.sharp")).unwrap();
     assert_ne!(listing(root), stamped, "a file was renamed to a name of the same length");
 

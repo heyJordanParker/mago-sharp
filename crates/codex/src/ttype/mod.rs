@@ -1418,17 +1418,31 @@ pub fn get_iterable_parameters(atomic: &TAtomic, codebase: &CodebaseMetadata) ->
     None
 }
 
-/// Returns the key type plain PHP sees for `key_type`, a key type `dialect` code writes.
+/// Returns the key type `key_type` of `dialect` code as a PHP array holds it.
 ///
-/// A PHP# `Map` keyed by a backed enum holds each case's backing value at runtime, as spec section 12 writes it, so
-/// plain PHP sees a key that holds a backed enum, as [`get_backed_enum`] finds it, as the enum's backing type.
+/// Each backed enum in it, as [`get_backed_enum`] finds it, is its backing type, and each struct and each class that
+/// declares or inherits `operator ==` is `string`. A PHP# `Map` keeps each such key as itself and finds it by its `==` and `hash()`, which a struct has with nothing
+/// declared and a class has when it declares `operator ==`, as the checker requires `hash()` beside it. A plain PHP
+/// array that crosses into a `Map` keyed by a backed enum holds each case's backing value, which this result types.
+/// `is_key_type` says which key types a `Map` takes.
 #[must_use]
 pub fn get_backing_key_type<'key>(
     key_type: &'key TUnion,
     codebase: &CodebaseMetadata,
     dialect: Dialect,
 ) -> Cow<'key, TUnion> {
-    let backing_type = |atomic: &TAtomic| get_backed_enum(atomic, codebase, dialect)?.enum_type.clone();
+    let backing_type = |atomic: &TAtomic| {
+        if let Some(backed_enum) = get_backed_enum(atomic, codebase, dialect) {
+            return backed_enum.enum_type.clone();
+        }
+        let TAtomic::Object(TObject::Named(named_object)) = atomic else {
+            return None;
+        };
+        let name = named_object.name.as_bytes();
+        let is_struct = codebase.get_class_like(name).is_some_and(|class_like| class_like.flags.is_struct());
+
+        (is_struct || codebase.get_declaring_method(name, b"op_Equality").is_some()).then(|| STRING_ATOMIC.clone())
+    };
 
     if !key_type.types.iter().any(|atomic| backing_type(atomic).is_some()) {
         return Cow::Borrowed(key_type);
@@ -1437,6 +1451,150 @@ pub fn get_backing_key_type<'key>(
     Cow::Owned(TUnion::from_vec(
         key_type.types.iter().map(|atomic| backing_type(atomic).unwrap_or_else(|| atomic.clone())).collect(),
     ))
+}
+
+/// Whether every value of `key_type` keys a PHP# `Map` and joins a `Set`.
+///
+/// Spec section 12 keys a `Map` by anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`
+/// and an enum case, which section 19 gives `==` with no code, a struct, and a class that declares or inherits
+/// `operator ==`, which the checker requires `hash()` beside. An intersection keys one when any of its members does,
+/// since each of its values is a value of every member. A class value keys none: it compares by its whole type, type
+/// arguments included, and runs as its plain class name, which `Class<Box<Order>>` and `Class<Box<Invoice>>` share.
+#[must_use]
+pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    let is_key_object = |member: &TAtomic| match member {
+        TAtomic::Object(TObject::Enum(_)) => true,
+        TAtomic::Object(TObject::Named(named_object)) => {
+            let name = named_object.name.as_bytes();
+
+            codebase
+                .get_class_like(name)
+                .is_some_and(|class_like| class_like.kind.is_enum() || class_like.flags.is_struct())
+                || codebase.get_declaring_method(name, b"op_Equality").is_some()
+        }
+        _ => false,
+    };
+
+    key_type.types.iter().all(|atomic| match atomic {
+        TAtomic::Never | TAtomic::Error | TAtomic::Null => true,
+        TAtomic::Scalar(scalar) => matches!(
+            scalar,
+            TScalar::ArrayKey
+                | TScalar::Numeric
+                | TScalar::Integer(_)
+                | TScalar::Float(_)
+                | TScalar::String(_)
+                | TScalar::Bool(_)
+        ),
+        TAtomic::Object(_) => {
+            std::iter::once(atomic).chain(atomic.get_intersection_types().unwrap_or_default()).any(is_key_object)
+        }
+        TAtomic::GenericParameter(parameter) => is_key_type(&parameter.constraint, codebase),
+        _ => false,
+    })
+}
+
+/// The object a PHP# `Map<K, V>` or `Set<T>` runs as, `Sharp\Map<K, V>` or `Sharp\Set<T>`, each key as itself, or
+/// `None` for a `List`, which runs as a PHP array.
+#[must_use]
+pub fn get_collection_object(array: &TArray, codebase: &CodebaseMetadata) -> Option<TAtomic> {
+    let (class, parameters) = match array {
+        TArray::List(_) => return None,
+        TArray::Set(element_type) => ("Sharp\\Set", vec![element_type.as_ref().clone()]),
+        TArray::Keyed(_) => {
+            let (key_type, value_type) = get_array_parameters(array, codebase);
+
+            ("Sharp\\Map", vec![key_type, value_type])
+        }
+    };
+
+    Some(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(word(class), Some(parameters)))))
+}
+
+/// The type plain PHP code receives where a PHP# declaration gives `r#type`.
+///
+/// It is a return, a property or a callback's argument. Each `Map` and `Set` in it, also inside a collection and in a
+/// function's parameters and return, is the object it runs as. A `List` stays a PHP array. A readonly value is the
+/// value it runs as, spec section 13: PHP# checks `readonly` in PHP# code only.
+#[must_use]
+pub fn get_php_received_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    let r#type = r#type.clone().without_readonly();
+    let convert = |inner: &TUnion| get_php_received_type(inner, codebase);
+    let mut types = Vec::with_capacity(r#type.types.len());
+    for atomic in r#type.types.iter() {
+        match atomic {
+            TAtomic::Array(array) => {
+                let array = match array {
+                    TArray::List(list) => {
+                        let mut list = list.clone();
+                        list.element_type = Arc::new(convert(&list.element_type));
+
+                        TArray::List(list)
+                    }
+                    TArray::Keyed(keyed) => {
+                        let mut keyed = keyed.clone();
+                        if let Some((key_type, value_type)) = &mut keyed.parameters {
+                            *key_type = Arc::new(convert(key_type));
+                            *value_type = Arc::new(convert(value_type));
+                        }
+
+                        TArray::Keyed(keyed)
+                    }
+                    TArray::Set(element_type) => TArray::Set(Arc::new(convert(element_type))),
+                };
+                types.push(get_collection_object(&array, codebase).unwrap_or(TAtomic::Array(array)));
+            }
+            TAtomic::Callable(TCallable::Signature(signature)) => {
+                let mut signature = signature.clone();
+                for parameter in signature.get_parameters_mut() {
+                    if let Some(parameter_type) = parameter.get_type_signature_mut() {
+                        *parameter_type = convert(parameter_type);
+                    }
+                }
+                if let Some(return_type) = signature.get_return_type_mut() {
+                    *return_type = convert(return_type);
+                }
+
+                types.push(TAtomic::Callable(TCallable::Signature(signature)));
+            }
+            atomic => types.push(atomic.clone()),
+        }
+    }
+
+    r#type.clone_with_types(types)
+}
+
+/// The type plain PHP code may pass where a PHP# declaration takes `r#type`.
+///
+/// It is an argument or a property write. It takes what plain PHP receives, and where `r#type` itself is a `Map` or a
+/// `Set`, the PHP array PHP# turns into one there, a `List` for a `Set`. That array's keys are the ones PHP holds: a
+/// backed enum's backing values, and an `int` beside a `string`, as PHP holds an all-digit `string` key as an `int`,
+/// which PHP# turns back into the `string`.
+#[must_use]
+pub fn get_php_passed_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    let convert = |inner: &TUnion| Arc::new(get_php_received_type(inner, codebase));
+    let arrays = r#type.types.iter().filter_map(|atomic| match atomic {
+        TAtomic::Array(map @ TArray::Keyed(_)) => {
+            let (key_type, value_type) = get_array_parameters(map, codebase);
+            let mut held_key_type = get_backing_key_type(&key_type, codebase, Dialect::Sharp).into_owned();
+            if held_key_type.has_string() && !held_key_type.has_int() {
+                held_key_type = TUnion::from_vec(held_key_type.types.iter().chain([INT_ATOMIC]).cloned().collect());
+            }
+
+            Some(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                Arc::new(held_key_type),
+                convert(&value_type),
+            ))))
+        }
+        TAtomic::Array(TArray::Set(element_type)) => {
+            Some(TAtomic::Array(TArray::List(TList::new(convert(element_type)))))
+        }
+        _ => None,
+    });
+    let arrays: Vec<TAtomic> = arrays.collect();
+    let received = get_php_received_type(r#type, codebase);
+
+    received.clone_with_types(received.types.iter().cloned().chain(arrays).collect())
 }
 
 /// The backed enum whose cases every value of `atomic` is.
@@ -1474,22 +1632,6 @@ pub fn get_backed_enum<'codebase>(
         TAtomic::Object(object) => backed_enum(object.get_name()?),
         _ => None,
     })
-}
-
-/// The one backed enum every member of `union` but `null` is a case of, as [`get_backed_enum`] finds it in each.
-#[must_use]
-pub fn get_sole_backed_enum<'codebase>(
-    union: &TUnion,
-    codebase: &'codebase CodebaseMetadata,
-    dialect: Dialect,
-) -> Option<&'codebase ClassLikeMetadata> {
-    let mut backed_enums =
-        union.types.iter().filter(|atomic| !atomic.is_null()).map(|atomic| get_backed_enum(atomic, codebase, dialect));
-    let first = backed_enums.next()??;
-
-    backed_enums
-        .all(|backed_enum| backed_enum.is_some_and(|backed_enum| backed_enum.name == first.name))
-        .then_some(first)
 }
 
 /// A type PHP# can write, by the form its spelling takes. A PHP docblock refinement of one, such as `positive-int`,
@@ -1627,8 +1769,8 @@ pub fn get_array_parameters(array_type: &TArray, codebase: &CodebaseMetadata) ->
 
             (key_type, value_type)
         }
-        // A `Set` is keyed by each element, which runs as its backing value when it is a backed enum, as a `Map`'s
-        // key does.
+        // The checker keys a `Set` by each element, which the `Set` finds by its `==` and `hash()`, as a `Map` finds a
+        // key.
         TArray::Set(element_type) => (element_type.as_ref().clone(), element_type.as_ref().clone()),
     }
 }

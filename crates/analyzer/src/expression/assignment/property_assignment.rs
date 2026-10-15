@@ -25,11 +25,15 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
+use crate::expression::access::refuse_statics_of_no_class;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::get_written_literal_type;
+use crate::expression::assignment::static_property_assignment;
 use crate::resolver::method::get_declared_type;
 use crate::resolver::property::resolve_instance_properties;
+use crate::resolver::static_property::StaticProperty;
+use crate::resolver::static_property::StaticPropertyName;
 use crate::utils::expression::get_property_access_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::get_type_diff;
@@ -37,6 +41,8 @@ use crate::utils::int_refused_for_float;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::quoted_source;
+use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
 
@@ -77,6 +83,32 @@ where
         true, // `for_assignment`
     )?;
     block_context.flags.set_inside_assignment(was_inside_assignment);
+
+    // A PHP# write through a class value, `type.count = 1`, writes the static of the class the value holds, as
+    // `Class.count = 1` does, spec section 25. The class value is analyzed by now.
+    if resolution_result.class_value
+        && let ClassLikeMemberSelector::Identifier(name) = &property_access.property
+    {
+        if refuse_statics_of_no_class(context, artifacts, property_access.object, property_access.span()) {
+            return Ok(());
+        }
+        let written = StaticProperty {
+            class: property_access.object,
+            name: StaticPropertyName::Identifier(name),
+            span: property_access.span(),
+        };
+
+        return static_property_assignment::analyze(
+            context,
+            block_context,
+            artifacts,
+            written,
+            assigned_value_type,
+            assigned_value,
+            None,
+            true,
+        );
+    }
 
     // A property a PHP# class declares as a `List`, a `Map` or a `Set`, or a union of them, takes only a literal of a
     // collection it declares, from `=` and from `??=`, and keeps the collection its literal names when one empties it.
@@ -134,15 +166,39 @@ where
 
         let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
 
-        let type_match_found = union_comparator::is_contained_by(
-            context.codebase,
-            assigned_value_type,
-            &resolved_property.property_type,
-            assigned_value_type.ignore_nullable_issues(),
-            assigned_value_type.ignore_falsable_issues(),
-            false,
-            &mut union_comparison_result,
-        );
+        // Spec section 13: a field or a property keeps only a writable value, since `readonly` never goes on one.
+        let mut dropped_readonly = false;
+        if context.dialect.is_sharp()
+            && resolved_property.property_type.drops_readonly_of(assigned_value_type)
+            && let Some(value) = assigned_value
+        {
+            let action = format!(
+                "store {} in {}",
+                quoted_source(context, value.span()),
+                quoted_source(context, property_access.span())
+            );
+            report_dropped_readonly(
+                context,
+                block_context,
+                IssueCode::InvalidPropertyAssignmentValue,
+                value,
+                (&resolved_property.property_type, assigned_value_type),
+                &action,
+                ", and a field or property keeps only a writable value.",
+            );
+            dropped_readonly = true;
+        }
+
+        let type_match_found = !dropped_readonly
+            && union_comparator::is_contained_by(
+                context.codebase,
+                assigned_value_type,
+                &resolved_property.property_type,
+                assigned_value_type.ignore_nullable_issues(),
+                assigned_value_type.ignore_falsable_issues(),
+                false,
+                &mut union_comparison_result,
+            );
 
         if type_match_found && let Some(value_span) = assigned_value_span {
             record_function_values(
@@ -162,7 +218,7 @@ where
             });
         }
 
-        if !type_match_found {
+        if !type_match_found && !dropped_readonly {
             let property_name = match resolved_property.declaring_class_id {
                 Some(class_id) if context.dialect.is_sharp() => {
                     display_sharp_member(display_class_like_name(context, class_id), resolved_property.property_name)

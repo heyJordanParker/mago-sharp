@@ -289,12 +289,7 @@ pub(crate) fn expand_atomic(
             expand_union(codebase, Arc::make_mut(&mut parameter.constraint), options);
         }
         TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
-            let mut atomic_return_type_parts = vec![];
-            expand_atomic(Arc::make_mut(constraint), codebase, options, &mut false, &mut atomic_return_type_parts);
-
-            if !atomic_return_type_parts.is_empty() {
-                *Arc::make_mut(constraint) = atomic_return_type_parts.remove(0);
-            }
+            expand_union(codebase, Arc::make_mut(constraint), options);
         }
         TAtomic::Reference(TReference::Member { class_like_name, member_selector }) => {
             *skip_key = true;
@@ -2205,8 +2200,8 @@ mod tests {
         let code = "<?php class Foo {}";
         let codebase = create_test_codebase(code);
 
-        let constraint = Arc::new(TAtomic::Object(TObject::Named(TNamedObject::new(word("self")))));
-        let class_string = TClassLikeString::OfType { kind: TClassLikeStringKind::Class, constraint };
+        let constraint = TAtomic::Object(TObject::Named(TNamedObject::new(word("self"))));
+        let class_string = TClassLikeString::of_type(TClassLikeStringKind::Class, constraint);
         let input = TUnion::from_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_string)));
 
         let options = options_with_self("Foo");
@@ -2214,7 +2209,7 @@ mod tests {
         expand_union(&codebase, &mut actual, &options);
 
         if let TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) = &actual.types[0]
-            && let TAtomic::Object(TObject::Named(named)) = constraint.as_ref()
+            && let TAtomic::Object(TObject::Named(named)) = constraint.get_single()
         {
             assert_eq!(named.name, ascii_lowercase_word(b"foo"));
         }
@@ -2225,8 +2220,8 @@ mod tests {
         let code = "<?php class Foo {}";
         let codebase = create_test_codebase(code);
 
-        let constraint = Arc::new(TAtomic::Object(TObject::Named(TNamedObject::new(word("static")))));
-        let class_string = TClassLikeString::OfType { kind: TClassLikeStringKind::Class, constraint };
+        let constraint = TAtomic::Object(TObject::Named(TNamedObject::new(word("static"))));
+        let class_string = TClassLikeString::of_type(TClassLikeStringKind::Class, constraint);
         let input = TUnion::from_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_string)));
 
         let options = options_with_static("Foo");
@@ -2234,7 +2229,7 @@ mod tests {
         expand_union(&codebase, &mut actual, &options);
 
         if let TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) = &actual.types[0]
-            && let TAtomic::Object(TObject::Named(named)) = constraint.as_ref()
+            && let TAtomic::Object(TObject::Named(named)) = constraint.get_single()
         {
             assert_eq!(named.name, ascii_lowercase_word(b"foo"));
         }
@@ -2245,8 +2240,8 @@ mod tests {
         let code = "<?php interface MyInterface {}";
         let codebase = create_test_codebase(code);
 
-        let constraint = Arc::new(TAtomic::Object(TObject::Named(TNamedObject::new(word("self")))));
-        let class_string = TClassLikeString::OfType { kind: TClassLikeStringKind::Interface, constraint };
+        let constraint = TAtomic::Object(TObject::Named(TNamedObject::new(word("self"))));
+        let class_string = TClassLikeString::of_type(TClassLikeStringKind::Interface, constraint);
         let input = TUnion::from_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_string)));
 
         let options = options_with_self("MyInterface");
@@ -2257,7 +2252,7 @@ mod tests {
             &actual.types[0]
         {
             assert!(matches!(kind, TClassLikeStringKind::Interface));
-            if let TAtomic::Object(TObject::Named(named)) = constraint.as_ref() {
+            if let TAtomic::Object(TObject::Named(named)) = constraint.get_single() {
                 assert_eq!(named.name, ascii_lowercase_word(b"myinterface"));
             }
         }

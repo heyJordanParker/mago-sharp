@@ -6,8 +6,8 @@
 //! - `x is Calc` is `x instanceof Calc`, and `x is int` is `is_int(x)`, with `is_float`, `is_string` and `is_bool`.
 //! - `x is Calc c` is `($c = x) instanceof Calc`, so `c` holds the value whether or not it matches, and the binder
 //!   keeps it in scope only where it matches.
-//! - `x is 200` is `x === 200`, and `x is < 10` is `x < 10`. A pattern's value is a constant, and a local's value is
-//!   compared in `when`.
+//! - `x is 200` is `x == 200`, and `x is < 10` is `x < 10`. The `==` is spec section 19's, so a struct value matches an
+//!   equal struct. A pattern's value is a constant, and a local's value is compared in `when`.
 //! - `not`, `and` and `or` are `!`, `&&` and `||`.
 //! - `x is { total: > 0 }` is `is_object(x) && x->total > 0`, and `x is Paid { total: > 0 } p` is
 //!   `($p = x) instanceof Paid && $p->total > 0`.
@@ -431,7 +431,7 @@ where
     }
 
     /// The PHP that is `true` when the subject matches `pattern`, reading the subject in evaluation order. `follows`
-    /// is the token the pattern follows. A value's read sits at its start, so `read === value` spans more than the
+    /// is the token the pattern follows. A value's read sits at its start, so `read == value` spans more than the
     /// value: the analyzer keeps one type per span, and the value keeps its own.
     fn test(
         &mut self,
@@ -501,7 +501,7 @@ where
             Pattern::Value(value) => {
                 let read = self.read(subject, follows);
 
-                self.binary(read, BinaryOperator::Identical(start_of(value.span())), value)
+                self.binary(read, BinaryOperator::Equal(start_of(value.span())), value)
             }
             Pattern::Comparison(comparison) => {
                 let read = self.read(subject, pattern.span());

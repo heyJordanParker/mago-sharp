@@ -118,7 +118,7 @@ fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
             "7:1 This construct is not supported yet in PHP#.",
             "8:29 An event's parameter takes no accessors: it is a get-only property of the event.",
             "9:28 A `Set` parameter of an event is not supported yet in PHP#.",
-            "16:21 An event's parameter takes no modifier: it is a public get-only property of the event.",
+            "16:21 An `int` never changes, so `readonly` changes nothing: write `int`.",
             "17:21 An event's parameter takes no modifier: it is a public get-only property of the event.",
             "18:14 Cannot use `Self` as a class name: it is reserved."
         ]
@@ -646,6 +646,24 @@ fn using_a_local_after_its_block_closes_is_an_error() {
     let code = leak(method("        {\n            let inner = 1;\n        }\n        return inner;\n"));
 
     assert_eq!(issues(code), ["10:16 `inner` is used after the block that declares it closes."]);
+}
+
+/// `typeof` takes a type, spec section 25, so a local in scope named in it is an error that names `Class.of`, as each
+/// kind of local declares it. A class of the same name doesn't matter: the local wins, as it does everywhere else.
+#[test]
+fn typeof_of_a_local_is_an_error_that_names_class_of() {
+    let code = leak(method(
+        "        const parameter = typeof(extra);\n        const report = 1;\n        const local = typeof(report);\n        if (extra is int count) {\n            const pattern = typeof(count);\n        }\n        const type = typeof(Report);\n        return 1;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:34 `typeof` takes a type, and `extra` is a local: write `Class.of(extra)`.",
+            "9:30 `typeof` takes a type, and `report` is a local: write `Class.of(report)`.",
+            "11:36 `typeof` takes a type, and `count` is a local: write `Class.of(count)`.",
+        ]
+    );
 }
 
 #[test]
@@ -1217,7 +1235,7 @@ fn self_is_a_return_type_creates_with_a_required_constructor_and_calls_static_me
 
 #[test]
 fn self_is_only_a_return_type() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Self owner;\n    public Self? next { get; set; }\n    public const Self SAME = 1;\n\n    public required Report(Self other, int|Self either)\n    {\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Self owner;\n    public Self? next { get; set; }\n    public const Self SAME = 1;\n\n    public required Report(Self other, int|Self either)\n    {\n        Self copy = new Self(other, either);\n        Self? none = null;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -1227,6 +1245,8 @@ fn self_is_only_a_return_type() {
             "7:18 `Self` is only a return type in PHP#.",
             "9:28 `Self` is only a return type in PHP#.",
             "9:44 `Self` is only a return type in PHP#.",
+            "11:9 `Self` is only a return type in PHP#.",
+            "12:9 `Self` is only a return type in PHP#.",
         ]
     );
 }
@@ -1306,21 +1326,22 @@ fn a_member_of_self_read_or_written_is_not_supported_yet() {
 /// PHP's `self` is removed, spec section 25: a class writes its own name, or `Self` where `Self` goes.
 #[test]
 fn self_names_the_class_and_self_where_it_goes() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n\ninterface Copyable\n{\n    self copy();\n}\n";
+    let code = "namespace App.Tenant;\n\nstruct Spot\n{\n    public self moved() => this;\n}\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n\ninterface Copyable\n{\n    self copy();\n}\n";
     let without_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class.";
     let with_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class, or `Self` for the class a static method is called on.";
 
     assert_eq!(
         issues(code),
         [
-            format!("6:13 {without_self}"),
-            format!("8:28 {without_self}"),
-            format!("12:19 {with_self}"),
-            format!("14:9 {without_self}"),
-            format!("15:20 {with_self}"),
-            format!("16:20 {with_self}"),
-            format!("16:25 {without_self}"),
-            "22:5 PHP# has no `self`: write the class's own name, `Copyable`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
+            "5:12 PHP# has no `self`: write the class's own name, `Spot`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
+            format!("11:13 {without_self}"),
+            format!("13:28 {without_self}"),
+            format!("17:19 {with_self}"),
+            format!("19:9 {without_self}"),
+            format!("20:20 {with_self}"),
+            format!("21:20 {with_self}"),
+            format!("21:25 {without_self}"),
+            "27:5 PHP# has no `self`: write the class's own name, `Copyable`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
         ]
     );
 }
@@ -1348,6 +1369,82 @@ fn required_is_a_modifier_of_the_constructor_only() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public required const int MAX = 1;\n\n    public required Report(int count)\n    {\n    }\n}\n";
 
     assert_eq!(issues(code), ["5:12 This modifier is not supported yet in PHP#."]);
+}
+
+/// Spec section 6.1: a `required` property is set where its object is created, so it has an `init` or a `set` for the
+/// object initializer to call.
+#[test]
+fn a_required_property_has_init_or_set() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public required int count { get; }\n    public required int total { get; init; }\n    public required int size { get; set; }\n    private required int pages;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:12 `count` is required, so it is set when its object is created: give it `init` or `set`.",
+            "8:13 `pages` is required, so it is set when its object is created: give it `init` or `set`.",
+        ]
+    );
+}
+
+/// Spec section 10: every struct is already read-only, and a struct is a value with no subclasses, so `public` is its
+/// only modifier. Each refusal's fix, a plain `public struct`, compiles, and so does a struct's attribute.
+#[test]
+fn a_struct_takes_only_public() {
+    let code = "namespace App.Tenant;\n\npublic readonly struct Size { }\n\nabstract struct Area { }\n\nfinal struct Shape { }\n\npublic struct Width { }\n\n[Stable]\npublic struct Height { }\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:8 Every struct is already read-only: write `struct`.",
+            "5:1 A struct takes only `public`: remove `abstract`.",
+            "7:1 A struct takes only `public`: remove `final`.",
+        ]
+    );
+}
+
+/// Spec section 10: a struct never changes, so its property takes `init`, not `set`, as a declared property or a main
+/// constructor parameter. The fix, `{ get; init; }`, compiles.
+#[test]
+fn a_struct_property_takes_init_not_set() {
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    public int width { get; set; }\n    public int height { get; init; }\n\n    public Size(public int depth { get; set; }, public int weight { get; init; }) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:29 A struct never changes, so `width` takes `init`, not `set`.",
+            "8:41 A struct never changes, so `depth` takes `init`, not `set`.",
+        ]
+    );
+}
+
+/// Spec section 10: a struct can't be inherited, so a member modifier only a subclass reads is refused, on a property,
+/// a method, a constant, a named constructor and a main constructor parameter. The fix, `private`, and a law, which
+/// takes no modifier, compile. An operator is `public static`, so its own rule refuses any other modifier.
+#[test]
+fn a_struct_member_is_private_where_a_class_would_be_protected() {
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    protected int width { get; init; }\n    public virtual int area() => 1;\n    public override string toString() => \"\";\n    private int depth { get; init; }\n    protected const int LIMIT = 1;\n    protected static Size operator +(Size a, Size b) => a;\n\n    public Size(protected int height { get; }) { }\n\n    protected Size.tall() : this(10) { }\n\n    law positive(int a) => a == a;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:5 A struct has no subclasses, so write `private`.",
+            "6:12 A struct has no subclasses, so write `private`.",
+            "7:12 A struct has no subclasses, so write `private`.",
+            "9:5 A struct has no subclasses, so write `private`.",
+            "14:5 A struct has no subclasses, so write `private`.",
+            "12:17 A struct has no subclasses, so write `private`.",
+            "10:27 An operator is `public static`, as in `public static Size operator +(Size a, Size b)`.",
+        ]
+    );
+}
+
+/// Spec section 10: a struct may declare `operator ==`, as a class may, which replaces the `==` that compares each
+/// property with its own `==`. Another operator compiles too.
+#[test]
+fn a_struct_declares_operators_as_a_class_does() {
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    public Size(public int width { get; }) { }\n\n    public static bool operator ==(Size a, Size b) => a.width == b.width;\n\n    public static Size operator +(Size a, Size b) => new Size(a.width + b.width);\n\n    public int hash() => this.width;\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
@@ -2210,7 +2307,7 @@ fn a_method_refused_at_its_name_has_its_body_checked() {
 /// A member refused at its name, a modifier or a type keeps its parameters, initial values and body checked.
 #[test]
 fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    void __get(string name = _SERVER[\"x\"]);\n}\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n        echo \"a\";\n    }\n}\n\nclass Report\n{\n    int count = __LINE__;\n    const int MAX = __LINE__;\n\n    public Report(public int id = __LINE__, &total = __LINE__)\n    {\n    }\n\n    int run()\n    {\n        Map<float, callable> rows = [:];\n        echo \"b\";\n        return 1;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    void __get(string name = _SERVER[\"x\"]);\n}\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n        echo \"a\";\n    }\n}\n\nclass Report\n{\n    int count = __LINE__;\n    const int MAX = __LINE__;\n\n    public Report(public int id = __LINE__, &total = __LINE__)\n    {\n    }\n\n    int run()\n    {\n        Map<Any, callable> rows = [:];\n        echo \"b\";\n        return 1;\n    }\n}\n";
     let line = "write `Position.current().line`.";
 
     assert_eq!(
@@ -2228,8 +2325,8 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "23:45 A by-reference parameter is not supported yet in PHP#.".to_owned(),
             format!("23:54 PHP# has no `__LINE__`: {line}"),
             "27:9 A method without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
-            "29:13 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.".to_owned(),
-            "29:20 This type is not supported yet in PHP#.".to_owned(),
+            "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.".to_owned(),
+            "29:18 This type is not supported yet in PHP#.".to_owned(),
             "30:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
         ]
     );
@@ -2312,9 +2409,9 @@ fn a_constructor_in_a_refused_namespace_is_a_constructor() {
 #[test]
 fn a_map_key_is_refused_once() {
     let code = leak(method(
-        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<float, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<int?, int> counts = [:];\n        return 1;\n",
+        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        return 1;\n",
     ));
-    let key = "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.";
+    let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.";
 
     assert_eq!(
         issues(code),
@@ -2462,13 +2559,10 @@ fn a_protected_or_private_class_reports_only_the_php_error() {
 }
 
 #[test]
-fn a_final_method_and_a_readonly_class_are_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nfinal class Report\n{\n    final public int run()\n    {\n        return 1;\n    }\n}\n\nabstract class Shape\n{\n    abstract public int area();\n}\n\nreadonly class Point\n{\n}\n";
+fn a_final_method_is_not_supported_yet() {
+    let code = "namespace App.Tenant;\n\nfinal class Report\n{\n    final public int run()\n    {\n        return 1;\n    }\n}\n\nabstract class Shape\n{\n    abstract public int area();\n}\n";
 
-    assert_eq!(
-        issues(code),
-        ["5:5 This modifier is not supported yet in PHP#.", "16:1 This modifier is not supported yet in PHP#."]
-    );
+    assert_eq!(issues(code), ["5:5 This modifier is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -2568,7 +2662,7 @@ fn a_promoted_member_outside_the_slice_is_not_supported_yet() {
         [
             "7:21 Promoted properties are not allowed outside of constructors.",
             "5:51 Parameter `b` cannot have the `static` modifier.",
-            "5:27 This modifier is not supported yet in PHP#.",
+            "5:27 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `private int a { get; }`.",
         ]
     );
 
@@ -2754,6 +2848,81 @@ fn an_extension_receiver_is_one_plain_parameter() {
         );
 
         assert_eq!(issues(code.leak()), [format!("5:{column} {refusal}")], "`{receiver}`");
+    }
+}
+
+/// An extension block declares type parameters as a method does, spec section 26, and a call infers them from its
+/// receiver, so each one appears in the receiver's type, as C#'s CS9295 requires. A member's own type parameters are
+/// written on the member.
+#[test]
+fn an_extension_block_type_parameter_appears_in_its_receiver() {
+    for (header, expected) in [
+        ("extension<T>(List<T> items)", vec![]),
+        ("extension<TLeft, TRight>(Map<string, Function<TRight(TLeft)>> items)", vec![]),
+        ("extension<T : Order>(List<T> items)", vec![]),
+        ("extension<TItem>(Function<TItem(Order)> make)", vec![]),
+        (
+            "extension<T>(List<T> items, int count)",
+            vec![
+                "5:17 An extension's receiver is one parameter, with no modifier, default or `...`, as in `extension(string value)`.",
+            ],
+        ),
+        (
+            "extension<T, TOther>(List<T> items)",
+            vec![
+                "5:18 The receiver `List<T>` doesn't use `TOther`: a call infers an extension block's type parameters from its receiver, so each one appears there.",
+            ],
+        ),
+        (
+            "extension<T>(string items)",
+            vec![
+                "5:15 The receiver `string` doesn't use `T`: a call infers an extension block's type parameters from its receiver, so each one appears there.",
+            ],
+        ),
+        (
+            "extension<out T>(List<T> items)",
+            vec![
+                "5:15 An extension block's type parameter takes no `out`: only a class or an interface declares variance, so remove it.",
+            ],
+        ),
+        (
+            "extension<K>(List<K> items)",
+            vec!["5:15 A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`."],
+        ),
+    ] {
+        let code = format!(
+            "namespace App.Shared;\n\npublic static class Lists\n{{\n    {header}\n    {{\n        public int size() => 0;\n    }}\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), expected, "`{header}`");
+    }
+
+    let shadowed = "namespace App.Shared;\n\npublic static class Lists\n{\n    extension<T>(List<T> items)\n    {\n        public T? first<T>() => null;\n        public List<TOut> converted<TOut>() => [];\n    }\n}\n";
+    assert_eq!(
+        issues(shadowed),
+        ["7:25 `T` is already a type parameter of the extension block: give the member's another name."]
+    );
+}
+
+/// A class value's members are `Class`'s own and the statics of the class it holds, spec section 25, so only the
+/// standard library, under `Sharp`, declares an extension of `Class`, nullable or not, and a class value of another
+/// type is any other receiver's member, as `List<Class<Order>>` is.
+#[test]
+fn only_the_standard_library_extends_class() {
+    let refusal = "An extension can't add members to `Class`: a class value's members are `Class`'s own and the statics of the class it holds.";
+    for (namespace, receiver, expected) in [
+        ("App.Shared", "extension<T>(Class<T> type)", vec![format!("5:18 {refusal}")]),
+        ("App.Shared", "extension(Class<Order> type)", vec![format!("5:15 {refusal}")]),
+        ("App.Shared", "extension<T>(Class<T>? type)", vec![format!("5:18 {refusal}")]),
+        ("App.Shared", "extension<T>(List<Class<T>> types)", vec![]),
+        ("Sharp", "extension<T>(Class<T> type)", vec![]),
+        ("Sharp.Data", "extension<T>(Class<T> type)", vec![]),
+    ] {
+        let code = format!(
+            "namespace {namespace};\n\npublic static class Classes\n{{\n    {receiver}\n    {{\n        public string describe() => \"\";\n    }}\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), expected, "`{namespace}`: `{receiver}`");
     }
 }
 
@@ -3088,7 +3257,7 @@ fn fields_outside_the_slice_are_not_supported_yet() {
     assert_eq!(
         issues(code),
         [
-            "5:13 This modifier is not supported yet in PHP#.",
+            "5:13 A field or property is never `readonly`: declare a get-only property, as in `private int count { get; }`.",
             "6:5 A field declaring several names is not supported yet in PHP#.",
         ]
     );
@@ -3816,11 +3985,13 @@ fn a_type_argument_takes_a_question_mark_in_a_signature_and_a_local() {
 
 #[test]
 fn an_interface_method_takes_and_returns_list_and_map_types() {
-    let code = "interface Grouped\n{\n    List<int> sizes(Map<string, List<int>> groups);\n\n    Map<float, int> rounded();\n}\n";
+    let code = "interface Grouped\n{\n    List<int> sizes(Map<string, List<int>> groups);\n\n    Map<Any, int> rounded();\n}\n";
 
     assert_eq!(
         issues(code),
-        ["5:9 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value."]
+        [
+            "5:9 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
+        ]
     );
 }
 
@@ -3878,33 +4049,30 @@ fn a_list_map_set_or_class_with_the_wrong_count_of_type_arguments_names_the_coun
     );
 }
 
-/// The first `Set` slice holds `int`, `string` and backed enums, which run as the keys of a PHP array. A named type
-/// may be a backed enum, which only the analyzer knows, so it passes here.
+/// A `Set`'s element takes exactly what a `Map`'s key takes. A named type may be an enum, a struct or a class that
+/// declares `operator ==`, which only the analyzer knows, so it passes here.
 #[test]
-fn a_set_of_an_element_other_than_int_string_or_a_named_type_is_not_supported_yet() {
+fn a_set_element_takes_what_a_map_key_takes() {
     let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e)\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:55 This type is not supported yet in PHP#.",
-            "3:69 This type is not supported yet in PHP#.",
-            "3:82 This type is not supported yet in PHP#.",
+            "3:86 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
         ]
     );
 }
 
-/// A named key type may have a backing value, which only the analyzer knows, so it passes here.
+/// A key of a built-in type with `==` and `hash()`, nullable or not, keys a `Map`. A named key type may be an enum, a
+/// struct or a class that declares `operator ==`, which only the analyzer knows, so it passes here.
 #[test]
-fn a_map_key_that_is_not_int_string_or_a_named_type_is_an_error() {
-    let code = "class Report\n{\n    public Map<float, int> run(Map<Line, int> a, Map<int?, int> b, Map<string, Map<bool, int>> c)\n    {\n        return [:];\n    }\n}\n";
+fn a_map_key_without_equality_by_its_kind_is_an_error() {
+    let code = "class Report\n{\n    public Map<float, int> run(Map<Line, int> a, Map<int?, int> b, Map<string, Map<bool, int>> c, Map<List<int>, int> d)\n    {\n        return [:];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:16 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
-            "3:54 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
-            "3:84 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+            "3:103 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
         ]
     );
 }
@@ -3990,11 +4158,32 @@ fn new_through_a_class_value_calls_the_constructor_with_its_arguments() {
     );
 }
 
+/// `typeof` takes any one type in a method body, spec section 25: a class, a built-in type, a collection, `Self`, the
+/// class a static method is called on, and a nullable or union type, as C#'s `typeof(int?)` takes one. PHP's `self`,
+/// and a union in parentheses without `?`, are refused as they are in every type.
 #[test]
-fn typeof_names_a_class_in_a_method_body() {
-    let code = leak(method("        Store.keep(typeof(Order));\n        return extra;\n"));
+fn typeof_takes_one_type_in_a_method_body() {
+    for (r#type, expected) in [
+        ("Order", vec![]),
+        ("int", vec![]),
+        ("List<Order>", vec![]),
+        ("Map<string, int>", vec![]),
+        ("Set<int>", vec![]),
+        ("Self", vec![]),
+        ("int?", vec![]),
+        ("int|string", vec![]),
+        ("Order|Line", vec![]),
+        ("(int|string)?", vec![]),
+        ("(Order|Line)", vec!["7:27 This type is not supported yet in PHP#.".to_owned()]),
+        (
+            "self",
+            vec!["7:27 PHP# has no `self`: write the class's own name, `Report`, for the declaring class.".to_owned()],
+        ),
+    ] {
+        let code = leak(method(&format!("        Store.keep(typeof({type}));\n        return extra;\n")));
 
-    assert_eq!(issues(code), Vec::<String>::new());
+        assert_eq!(issues(code), expected, "`typeof({type})`");
+    }
 }
 
 /// A member of `typeof(X)` or of a local holding a class value is a static member of the class it holds, as `X.y` is,
@@ -4401,23 +4590,29 @@ fn in_or_out_is_an_error_only_on_a_method_type_parameter() {
     );
 }
 
-/// A bound is a class or an interface, a generic class type, or several of them joined with `&`, spec section 11. A
-/// union of classes names `&`, which joins several bounds.
+/// A bound is `Object`, a class or an interface, a generic class type, or several classes and interfaces joined with
+/// `&`, spec section 11. `Object` holds any object, as C#'s `where T : class` and TypeScript's `T extends object` do,
+/// and joins no other bound, as mago's own check of an intersection says. A union of classes names `&`, which joins
+/// several bounds.
 #[test]
-fn a_bound_that_is_not_a_class_an_interface_or_a_generic_class_type_is_an_error() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n}\n";
+fn a_bound_that_is_not_object_a_class_an_interface_or_a_generic_class_type_is_an_error() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable, TM : Object>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n    public void j<TN : object>() { }\n    public void k<TO : Object & Shareable>() { }\n    public void l<TP : Object?>() { }\n    public void m<TQ : Object>(TQ value) { }\n}\n";
 
     assert_eq!(
         issues(code),
-        (5..=13)
+        (5..=16)
             .map(|line| match line {
                 8 => "8:24 A bound can't be a union: join several bounds with `&`.".to_owned(),
-                line => format!("{line}:24 A bound is a class or an interface, as in `<TItem : DatabaseEntity>`."),
+                15 => "15:24 Type `Object` cannot be part of an intersection.".to_owned(),
+                line => format!(
+                    "{line}:24 A bound is `Object`, a class or an interface, as in `<TItem : DatabaseEntity>`."
+                ),
             })
             .collect::<Vec<_>>()
     );
-    assert!(check("src/Report.sharp", code).iter().all(|issue| issue.notes
-        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+    assert!(check("src/Report.sharp", code).iter().filter(|issue| issue.message.starts_with("A bound")).all(|issue| issue
+        .notes
+        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
 }
 
 /// A bound's type arguments are a parameter's types, so a `void` among them is refused as one, alone or joined with
@@ -4436,29 +4631,35 @@ fn a_type_argument_of_a_bound_is_never_void() {
     );
 }
 
-/// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes a class, an
-/// interface or a type parameter, a class value may carry its type arguments, a type argument is never `void`, and a
-/// type parameter takes no type arguments, nor does a local before `.`: only a class takes them there. The analyzer
-/// checks a generic class's arity and bounds, and refuses a class value as a `Map` key as it refuses one in a `Map`
-/// literal.
+/// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes any one type, a
+/// class value may carry its type arguments, a type argument is never `void`, and a type parameter takes no type
+/// arguments, nor does a local before `.`: only a class takes them there. The analyzer checks a generic class's arity
+/// and bounds, and refuses a class value as a `Map` key as it refuses one in a `Map` literal.
 #[test]
 fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_takes() {
-    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<Order?, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<List<int>, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "6:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
-            "7:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
-            "8:31 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
+            "6:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
             "9:27 A type argument cannot be `void`: `void` is only a return type.",
             "18:43 A type argument cannot be `void`: `void` is only a return type.",
-            "19:33 A type parameter takes no type arguments: write `typeof(TItem)`.",
+            "19:28 A type parameter takes no type arguments: write `TItem`.",
             "20:28 A type parameter takes no type arguments: write `TItem`.",
             "21:26 `type` is not a class, so it takes no type arguments.",
             "25:29 A type parameter takes no type arguments: write `TItem`.",
         ]
     );
+}
+
+/// `Class<T>` takes any one type in a field, a parameter and a local, spec section 25: a built-in type, a nullable type
+/// and a union, as `typeof` gives them.
+#[test]
+fn class_takes_any_one_type_in_a_field_a_parameter_and_a_local() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Class<int> kind;\n    private Class<int?> maybe;\n\n    public int run(Class<int|string> either, Class<(Order|Line)?> held)\n    {\n        Class<int> t = typeof(int);\n        Class<int|string> u = typeof(int|string);\n        return 0;\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// The type arguments of `new` and of a method call, `super.` and `Self.` calls included, are a method body's types,
@@ -4559,19 +4760,19 @@ fn a_static_member_of_a_generic_class_returns_self() {
 /// follows the same type written alone.
 #[test]
 fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union() {
-    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<Order?, int> c = [:];\n    private Map<Order?, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<int> g;\n    private Class<int>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<List<int>, int> c = [:];\n    private Map<List<int>, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<List<void>> g;\n    private Class<List<void>>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "5:13 A type parameter takes no type arguments: write `TItem`.",
             "6:13 A type parameter takes no type arguments: write `TItem`.",
-            "7:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
-            "8:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+            "7:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
+            "8:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
             "9:23 A type argument cannot be `void`: `void` is only a return type.",
             "10:23 A type argument cannot be `void`: `void` is only a return type.",
-            "11:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
-            "12:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
+            "11:24 A type argument cannot be `void`: `void` is only a return type.",
+            "12:24 A type argument cannot be `void`: `void` is only a return type.",
             "13:27 A type argument cannot be `void`: `void` is only a return type.",
             "14:27 A type argument cannot be `void`: `void` is only a return type.",
         ]
@@ -5023,7 +5224,7 @@ fn a_lambda_parameter_outside_the_slice_is_not_supported_yet() {
         issues(code),
         [
             "7:26 A by-reference parameter is not supported yet in PHP#.",
-            "8:25 This modifier is not supported yet in PHP#.",
+            "8:25 An `int` never changes, so `readonly` changes nothing: write `int`.",
         ]
     );
 }
@@ -5137,8 +5338,8 @@ fn worded(path: &'static str, code: &'static str) -> Vec<String> {
         .collect()
 }
 
-/// A member defined twice is named as PHP# names a member, `Order.total`, and its class by the name the file writes,
-/// `Order`. The PHP twin keeps Mago's `Order::total`, `Order::$count` and `Demo\Order`.
+/// A member defined twice is named as PHP# names a member, `Order.total`, and its class or struct by the name the file
+/// writes, `Order`. The PHP twin keeps Mago's `Order::total`, `Order::$count` and `Demo\Order`.
 #[test]
 fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
     let code = "namespace Demo;\n\npublic class Order\n{\n    private int count = 0;\n\n    private int count = 1;\n\n    public int total() => 1;\n\n    public int total() => 2;\n}\n";
@@ -5157,6 +5358,13 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
             "property `Order.count` has already been defined | property `Order.count` previously defined here. | class `Order` defined here.",
             "class method `Order.total` has already been defined | previous definition | class `Order` defined here.",
         ]
+    );
+    assert_eq!(
+        worded(
+            "src/Demo/Spot.sharp",
+            "namespace Demo;\n\npublic struct Spot\n{\n    public int x() => 1;\n\n    public int x() => 2;\n}\n"
+        ),
+        ["struct method `Spot.x` has already been defined | previous definition | struct `Spot` defined here."]
     );
 }
 
@@ -5365,4 +5573,60 @@ fn an_interface_or_an_enum_declares_no_operator() {
 
     assert_eq!(issues_in("src/Priced.sharp", interface), ["5:5 This class member is not supported yet in PHP#."]);
     assert_eq!(issues_in("src/Suit.sharp", r#enum), ["7:5 This class member is not supported yet in PHP#."]);
+}
+
+/// Spec section 13: `readonly` goes before any type PHP# checks, a value's, and after a method's parameters, `this`'s.
+#[test]
+fn readonly_goes_before_a_value_s_type_and_after_a_method_s_parameters() {
+    let code = "namespace App;\n\npublic interface Quotes\n{\n    readonly Money quote(readonly Cart cart) uses Http readonly;\n}\n\npublic class Shop\n{\n    private Customer owner = new Customer();\n\n    public Shop(readonly Order order) { }\n\n    public readonly Customer customer => this.owner;\n\n    public readonly Customer? buyer(readonly List<readonly Line> lines, Function<Money?(readonly Line, string)> priceOf) readonly\n    {\n        readonly Customer c = this.owner;\n        const free = (readonly Line line) => line.free;\n        return c;\n    }\n}\n\npublic static class OrderLabels\n{\n    extension(readonly Order order)\n    {\n        public string caption() => \"order\";\n    }\n}\n";
+
+    assert_eq!(issues_in("src/Shop.sharp", code), Vec::<String>::new());
+}
+
+/// Spec section 13: a field, a property, a parameter that declares a member and a class keep a value with `{ get; }`,
+/// so `readonly` on one is an error that names it.
+#[test]
+fn readonly_on_storage_names_a_get_only_property() {
+    let code = "namespace App;\n\npublic class Invoice\n{\n    private readonly Money total;\n    public readonly Money due { get; set; }\n    private readonly static int count = 0;\n    protected readonly Money owed;\n\n    public Invoice(public readonly Money paid, private readonly Money left { get; }) { }\n}\n\npublic readonly class Receipt { }\n";
+
+    assert_eq!(
+        issues_in("src/Invoice.sharp", code),
+        [
+            "5:13 A field or property is never `readonly`: declare a get-only property, as in `private Money total { get; }`.",
+            "6:12 A field or property is never `readonly`: declare a get-only property, as in `public Money due { get; }`.",
+            "7:13 A field or property is never `readonly`: declare a get-only property, as in `private int count { get; }`.",
+            "8:15 A field or property is never `readonly`: declare a get-only property, as in `protected Money owed { get; }`.",
+            "10:27 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `public Money paid { get; }`.",
+            "10:56 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `private Money left { get; }`.",
+            "13:8 A class is never `readonly`: declare each of its properties get-only, with `{ get; }`.",
+        ]
+    );
+}
+
+/// Spec section 13: a `readonly` that can't matter is an error, as a `?` that can't matter is: before a type that never
+/// changes, twice, in a pattern, on a method with no `this` to keep, and where the language already reads only.
+#[test]
+fn readonly_that_cannot_matter_is_an_error() {
+    let code = "namespace App;\n\npublic class Report\n{\n    public int count(readonly int a, readonly string? b, readonly bool c, readonly float d) => 0;\n    public void any(readonly Any value) { }\n    public void twice(readonly readonly Order order) { }\n    public bool test(Any value) => value is readonly Order || (value as readonly Order) != null;\n    public static int total() readonly => 0;\n    public Report() readonly { }\n    public int hash() readonly => 1;\n    public string toString() readonly => \"report\";\n    public static bool operator ==(readonly Report a, Report b) => true;\n}\n\npublic enum Suit\n{\n    case Hearts;\n\n    public string label() readonly => \"hearts\";\n}\n\npublic static class Labels\n{\n    extension(Report report)\n    {\n        public string caption() readonly => \"report\";\n    }\n}\n\npublic class Digest\n{\n    public string hash(string text) readonly => text;\n\n    public string toString(int width) readonly => \"digest\";\n}\n";
+
+    assert_eq!(
+        issues_in("src/Report.sharp", code),
+        [
+            "5:22 An `int` never changes, so `readonly` changes nothing: write `int`.",
+            "5:38 A `string?` never changes, so `readonly` changes nothing: write `string?`.",
+            "5:58 A `bool` never changes, so `readonly` changes nothing: write `bool`.",
+            "5:75 A `float` never changes, so `readonly` changes nothing: write `float`.",
+            "6:21 `readonly` holds only types PHP# checks, and `Any` can hold a plain PHP object: write a PHP# type.",
+            "7:32 `readonly` is written once.",
+            "8:45 `is` keeps a value readonly: write `is Order`.",
+            "8:73 `as` keeps a value readonly: write `as Order`.",
+            "9:31 A static method has no `this` to keep readonly: remove `readonly`.",
+            "10:21 A constructor sets `this`, so it is never readonly: remove `readonly`.",
+            "11:23 `hash()` is readonly by definition: remove `readonly`.",
+            "12:30 `toString()` is readonly by definition: remove `readonly`.",
+            "13:36 An operator's operands are readonly by definition: write `Report a`.",
+            "20:27 An enum case never changes, so an enum method needs no `readonly`: remove it.",
+            "27:33 An extension member has no `this`: write `readonly` before its receiver's type, as in `extension(readonly Report report)`.",
+        ]
+    );
 }

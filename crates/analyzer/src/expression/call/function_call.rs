@@ -33,7 +33,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
-use crate::expression::access::analyze_null_safe_value;
+use crate::expression::access::analyze_through_value;
 use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::get_function_like_target;
 use crate::expression::call::get_function_like_target_with_skip;
@@ -146,11 +146,12 @@ where
     let function_type = artifacts.get_expression_type(call.function).cloned().unwrap_or_else(get_mixed);
     check_redundant_nullsafe(context, call.question_mark_dot, call.function, &function_type, true);
 
-    analyze_null_safe_value(
+    analyze_through_value(
         context,
         block_context,
         artifacts,
         call.function,
+        true,
         call.span(),
         |context, block_context, artifacts| {
             let mut template_result = TemplateResult::default();

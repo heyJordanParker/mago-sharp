@@ -6,6 +6,7 @@ use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
@@ -17,6 +18,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
+use mago_names::binding::sharp_operator_symbol;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
@@ -516,7 +518,14 @@ where
                 TArray::Set(_) => format!("Set<{}>", display_sharp_type(context, &value)),
             }
         }
-        TAtomic::Iterable(iterable) => format!("Iterable<{}>", display_sharp_type(context, iterable.get_value_type())),
+        TAtomic::Iterable(iterable) if iterable.get_key_type().is_mixed() => {
+            format!("Iterable<{}>", display_sharp_type(context, iterable.get_value_type()))
+        }
+        TAtomic::Iterable(iterable) => format!(
+            "iterable<{}, {}>",
+            display_sharp_type(context, iterable.get_key_type()),
+            display_sharp_type(context, iterable.get_value_type())
+        ),
         TAtomic::Object(TObject::Any) => "Object".to_owned(),
         TAtomic::Object(object) => {
             let Some(name) = object.get_name() else {
@@ -524,17 +533,25 @@ where
             };
             let name =
                 sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, name);
+            let readonly = if matches!(object, TObject::Named(named) if named.is_readonly) { "readonly " } else { "" };
             match object.get_type_parameters() {
                 Some(parameters) if !parameters.is_empty() => {
                     let parameters: Vec<String> =
                         parameters.iter().map(|parameter| display_sharp_type(context, parameter)).collect();
-                    format!("{name}<{}>", parameters.join(", "))
+                    format!("{readonly}{name}<{}>", parameters.join(", "))
                 }
-                _ => name,
+                _ => format!("{readonly}{name}"),
             }
         }
-        TAtomic::Reference(TReference::Symbol { name, .. }) => {
-            sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *name)
+        TAtomic::Reference(TReference::Symbol { name, is_readonly, .. }) => {
+            let readonly = if *is_readonly { "readonly " } else { "" };
+            let name =
+                sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *name);
+
+            format!("{readonly}{name}")
+        }
+        TAtomic::GenericParameter(parameter) if atomic.is_readonly_value() => {
+            format!("readonly {}", parameter.parameter_name)
         }
         TAtomic::GenericParameter(parameter) => parameter.parameter_name.to_string(),
         TAtomic::Callable(TCallable::Signature(signature)) => {
@@ -561,7 +578,7 @@ where
                 sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *value)
             ),
             TClassLikeString::OfType { constraint, .. } => {
-                format!("Class<{}>", display_sharp_atomic(context, constraint))
+                format!("Class<{}>", display_sharp_type(context, constraint))
             }
             TClassLikeString::Generic { parameter_name, .. } => format!("Class<{parameter_name}>"),
             TClassLikeString::Any { .. } => "Class<Object>".to_owned(),
@@ -609,6 +626,49 @@ where
         sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, class_name),
         format_args!("{property_name}.{hook_name}"),
     )
+}
+
+/// The code a spec section 13 message names as the one that writes, passes or calls through a readonly value: the
+/// method or accessor `function` runs, by the name it declares, `operator ==` for an operator, or `This lambda`.
+#[must_use]
+pub(crate) fn readonly_writer(function: Option<&FunctionLikeMetadata>) -> String {
+    let Some(function) = function else {
+        unreachable!("semantics refuses a statement at file level in a PHP# file, so only a body is analyzed");
+    };
+
+    if matches!(function.kind, FunctionLikeKind::Closure | FunctionLikeKind::ArrowFunction) {
+        "This lambda".to_owned()
+    } else if function.flags.is_operator()
+        && let Some(symbol) = sharp_operator_symbol(function.original_name.as_bytes())
+    {
+        format!("operator {symbol}")
+    } else {
+        function.original_name.to_string()
+    }
+}
+
+/// A PHP# method's declaration up to its parameters, as the analyzed file writes it: `totalIn(string currency)`.
+#[must_use]
+pub(crate) fn sharp_method_declaration<A>(context: &Context<'_, '_, A>, method: &FunctionLikeMetadata) -> String
+where
+    A: Arena,
+{
+    let parameters: Vec<String> = method
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let name = parameter.get_name().0.as_bytes();
+            let name = String::from_utf8_lossy(name.strip_prefix(b"$").unwrap_or(name));
+            // A parameter written without its type, a parse error, shows as written.
+            let declared = parameter
+                .get_type_declaration_metadata()
+                .map(|declared| format!("{} ", display_sharp_type(context, &declared.type_union)));
+
+            format!("{}{name}", declared.unwrap_or_default())
+        })
+        .collect();
+
+    format!("{}({})", method.original_name, parameters.join(", "))
 }
 
 /// The member `member_name` of the class `class_name` as the analyzed file names it: `Box.put` in a `.sharp` file, with

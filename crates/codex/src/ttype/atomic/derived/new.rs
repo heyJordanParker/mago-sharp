@@ -62,22 +62,14 @@ impl TNew {
                 TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Literal { value })) => {
                     resulting_atomics.push(TAtomic::Object(TObject::Named(TNamedObject::new(*value))));
                 }
-                TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
-                    match class_name_of_constraint(constraint.as_ref()) {
-                        Some(name) => {
-                            resulting_atomics.push(TAtomic::Object(TObject::Named(TNamedObject::new(name))));
-                        }
-                        None => resulting_atomics.push(TAtomic::Object(TObject::Any)),
+                TAtomic::Scalar(TScalar::ClassLikeString(
+                    class_string @ (TClassLikeString::OfType { .. } | TClassLikeString::Generic { .. }),
+                )) => match class_string.constraint().and_then(class_name_of_constraint) {
+                    Some(name) => {
+                        resulting_atomics.push(TAtomic::Object(TObject::Named(TNamedObject::new(name))));
                     }
-                }
-                TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic { constraint, .. })) => {
-                    match class_name_of_constraint(constraint.as_ref()) {
-                        Some(name) => {
-                            resulting_atomics.push(TAtomic::Object(TObject::Named(TNamedObject::new(name))));
-                        }
-                        None => resulting_atomics.push(TAtomic::Object(TObject::Any)),
-                    }
-                }
+                    None => resulting_atomics.push(TAtomic::Object(TObject::Any)),
+                },
                 TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Any { .. })) => {
                     resulting_atomics.push(TAtomic::Object(TObject::Any));
                 }

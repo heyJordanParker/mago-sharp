@@ -19,6 +19,65 @@ use crate::error::AnalysisError;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_property_name;
 
+/// Reports a PHP# get-only property that nothing sets, spec section 6.1: no initial value, and no constructor, main or
+/// named, that assigns it on every path. A get-only property can be set nowhere else, and neither can a struct's
+/// property no object initializer sets, spec section 10: any but a public `init` one, which is required where the
+/// struct is created. A class's `init` property is set where its object is created.
+pub fn check_get_only_initialization<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || class_like_metadata.flags.is_abstract() || !class_like_metadata.kind.is_class() {
+        return;
+    }
+
+    let class = class_like_metadata.name.as_bytes();
+    let assigned: WordSet = class_like_metadata
+        .methods
+        .iter()
+        .filter_map(|method| context.codebase.get_method(class, method.as_bytes()))
+        .filter(|method| method.flags.is_named_constructor())
+        .chain(context.codebase.get_declaring_method(class, b"__construct"))
+        .filter_map(|constructor| constructor.method_metadata.as_ref())
+        .flat_map(|constructor| constructor.assigned_properties.iter().copied())
+        .collect();
+    for (name, property) in class_like_metadata.properties.iter().sorted_by_key(|(name, _)| **name) {
+        let get_only = property.flags.is_readonly() && !property.flags.is_init();
+        let never_set = (get_only || (class_like_metadata.flags.is_struct() && !property.flags.is_required()))
+            && !property.flags.is_promoted_property()
+            && !property.flags.has_default()
+            && !property.flags.is_static()
+            && !property.flags.is_virtual_property()
+            && !assigned.contains(name);
+        if !never_set {
+            continue;
+        }
+
+        let Some(span) = property.name_span else {
+            unreachable!("every property a PHP# class declares has its name's span");
+        };
+        let property_name = String::from_utf8_lossy(name.as_bytes().strip_prefix(b"$").unwrap_or(name.as_bytes()));
+
+        let (property_kind, note) = if get_only {
+            (
+                " get-only and",
+                "A get-only property is set only while its object is created, and no constructor sets it on every path.",
+            )
+        } else {
+            ("", "Only the struct sets this property, and no constructor sets it on every path.")
+        };
+
+        context.collector.report_with_code(
+            IssueCode::UninitializedProperty,
+            Issue::error(format!(
+                "`{property_name}` is{property_kind} never set: set it in the main constructor, or give it an initial value."
+            ))
+            .with_annotation(Annotation::primary(span).with_message("Declared here."))
+            .with_note(note),
+        );
+    }
+}
+
 /// Check property initialization for a class-like.
 pub fn check_property_initialization<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
