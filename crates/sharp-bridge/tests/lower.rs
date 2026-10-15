@@ -8697,7 +8697,9 @@ fn a_generic_class_type_is_its_class_and_a_class_value_type_is_string() {
                 null
                 null
                 null
-            ZVAL [256] "Lib\\PaginatedList"
+            SHARP_TYPE_ARGS
+              ZVAL [256] "Lib\\PaginatedList"
+              ZVAL "Lib.PaginatedList<Lib.Order>?"
         "#}
     );
 }
@@ -9177,7 +9179,9 @@ fn a_lambda_takes_union_and_variadic_parameters_and_a_spread_call() {
                     ARG_LIST
                       VAR
                         ZVAL "rest"
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "int"
                   null
               RETURN
                 CALL
@@ -10564,7 +10568,9 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                     PARAM_LIST
                     null
                     null
-                    ZVAL [1] "float"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "float"
+                      ZVAL "float"
                     null
                 null
                 null
@@ -10589,7 +10595,9 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                         null
                     null
                     null
-                    ZVAL [1] "string"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "string"
                     null
                 null
                 null
@@ -10649,7 +10657,9 @@ fn a_static_class_is_a_final_class_whose_extern_method_calls_its_native_function
                           ARG_LIST
                             VAR
                               ZVAL "title"
-                    ZVAL [1] "string"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "string"
                     null
                 null
                 null
@@ -11814,9 +11824,11 @@ fn a_subclass_method_with_a_union_variadic_spreads_it_into_the_parent_method() {
                             UNPACK
                               VAR
                                 ZVAL "amounts"
-                    TYPE_UNION
-                      ZVAL [1] "int"
-                      ZVAL [1] "float"
+                    SHARP_TYPE_ARGS
+                      TYPE_UNION
+                        ZVAL [1] "int"
+                        ZVAL [1] "float"
+                      ZVAL "float|int"
                     ATTRIBUTE_LIST
                       ATTRIBUTE_GROUP
                         ATTRIBUTE
@@ -18963,7 +18975,9 @@ fn a_pure_enum_is_a_final_enum_class_of_unit_cases_without_a_backing_type() {
                               ZVAL "Suit"
                               ZVAL "cases"
                               ARG_LIST
-                    ZVAL [1] "int"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "int"
+                      ZVAL "int"
                     null
                 null
                 null
@@ -20674,7 +20688,8 @@ fn equality_of_two_collections_compares_each_element_with_its_own_equality() {
 /// ```
 ///
 /// Spec section 26: an extension's method is the public static method of its static class that takes the receiver
-/// first, and a computed property is the one that takes only the receiver and returns its expression.
+/// first, and a computed property is the one that takes only the receiver and returns its expression. The method
+/// carries its result type, which a generator's elements are read from, spec section 12.
 #[test]
 fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
     let lowered = Lowered::new(
@@ -20709,7 +20724,9 @@ fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
                           ZVAL "value"
                         VAR
                           ZVAL "separator"
-                  ZVAL [1] "string"
+                  SHARP_TYPE_ARGS
+                    ZVAL [1] "string"
+                    ZVAL "string"
                   null
             "#}
             .to_owned(),
@@ -20817,7 +20834,9 @@ fn a_generic_extension_member_takes_the_type_arguments_of_its_block_and_its_own(
               STMT_LIST
                 RETURN
                   ARRAY [3]
-              TYPE [7]
+              SHARP_TYPE_ARGS
+                TYPE [7]
+                ZVAL "List<#1>"
               null
         "#}
     );

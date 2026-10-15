@@ -2123,15 +2123,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.static_type_parameters = None;
         let r#override = method.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
         let attributes = self.attributes(&method.attribute_lists, r#override, None);
-        // A method whose body yields is a generator, as php-src's grammar flags a function whose body holds a `yield`.
-        let generator = match &method.body {
-            MethodBody::Concrete(block) if block_has_yield(block) => ZEND_ACC_GENERATOR,
-            _ => 0,
-        };
 
         self.declaration(
             SHARP_AST_METHOD,
-            flags | generator,
+            flags | generator_flag(&method.body),
             start,
             method.body.span(),
             php_method_name(method),
@@ -2260,11 +2255,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
                     None => unreachable!("semantics refuses an extension method without a return type"),
                 };
+                // An extension member carries its result type, which a generator's elements are read from, spec
+                // section 12, and no function type, since no function value names it.
+                let result = self.types.method_result(self.class, method.name.value);
+                let return_type = self.carried_type(return_type, result, self.line(start));
                 let attributes = self.attributes(&method.attribute_lists, None, None);
 
                 self.declaration(
                     SHARP_AST_METHOD,
-                    modifier_flags(&method.modifiers) | ZEND_ACC_STATIC,
+                    modifier_flags(&method.modifiers) | ZEND_ACC_STATIC | generator_flag(&method.body),
                     start,
                     method.body.span(),
                     method.name.value,
@@ -5511,18 +5510,26 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The result type of a PHP# method or lambda declaration: a `SHARP_TYPE_ARGS` of `php_type` and `function_type`'s
-    /// text, which `is` tests a closure of it by, or `php_type` alone when no function type takes a closure of it. The
-    /// unit lists the text's fingerprint, or zero without one, since its effects come from other files' bodies.
+    /// text, which `is` tests a closure of it by, or of its result type alone when no function type takes a closure of
+    /// it, or `php_type` alone when PHP# can't write either. The unit lists the function type's fingerprint, or zero
+    /// without one, since its effects come from other files' bodies.
     fn function_type(&mut self, php_type: u32, function_type: FunctionType, line: u32) -> u32 {
-        let FunctionType { name, text } = function_type;
+        let FunctionType { name, text, result } = function_type;
         self.function_types.push(Read {
             name: name.into_bytes(),
             fingerprint: text.as_ref().map_or(0, |text| xxh3_64(text.as_bytes())),
         });
-        let Some(function_type) = text else {
+        // A function whose effects no function type can say carries its result type alone, which a generator's
+        // elements and a map stage's are read from, spec section 12.
+        self.carried_type(php_type, text.or(result), line)
+    }
+
+    /// A `SHARP_TYPE_ARGS` of `php_type` and the type text `carried`, or `php_type` alone without one.
+    fn carried_type(&mut self, php_type: u32, carried: Option<String>, line: u32) -> u32 {
+        let Some(carried) = carried else {
             return php_type;
         };
-        let text = self.type_text(line, &function_type);
+        let text = self.type_text(line, &carried);
 
         self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[php_type, text])
     }
@@ -7180,6 +7187,15 @@ fn lazy_flag_name(property: &[u8]) -> Vec<u8> {
 /// `name#viaN`, the hidden slot of the behavior at `index` of the property `name`, spec section 6.4.
 fn behavior_slot_name(property: &[u8], index: usize) -> Vec<u8> {
     [property, format!("#via{index}").as_bytes()].concat()
+}
+
+/// `ZEND_ACC_GENERATOR` for a method whose body yields, as php-src's grammar flags a function whose body holds a
+/// `yield`, and zero for any other.
+fn generator_flag(body: &MethodBody) -> u32 {
+    match body {
+        MethodBody::Concrete(block) if block_has_yield(block) => ZEND_ACC_GENERATOR,
+        _ => 0,
+    }
 }
 
 /// The flags of a member's modifiers. Every modifier is named, so a new one does not compile until it is decided.

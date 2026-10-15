@@ -401,6 +401,15 @@ impl<'analysis> Types<'analysis> {
         self.function_type(&function, &parameters, result)
     }
 
+    /// The type text of the result of the method `class::method`, as [`FunctionType::result`] writes it.
+    pub(crate) fn method_result(&self, class: &[u8], method: &[u8]) -> Option<String> {
+        let Some(metadata) = self.codebase.get_method(class, method) else {
+            unreachable!("the codebase holds every method a PHP# file declares, not {}", String::from_utf8_lossy(method));
+        };
+
+        self.result_text(metadata.return_type_metadata.as_ref().map(|r#type| &r#type.type_union))
+    }
+
     /// The [`FunctionType`] of the PHP# function `function`, with `parameters` and `result`.
     fn function_type(
         &self,
@@ -408,7 +417,17 @@ impl<'analysis> Types<'analysis> {
         parameters: &[Option<&TUnion>],
         result: Option<&TUnion>,
     ) -> FunctionType {
-        FunctionType { name: function.as_string(), text: self.function_type_text(function, parameters, result) }
+        FunctionType {
+            name: function.as_string(),
+            text: self.function_type_text(function, parameters, result),
+            result: self.result_text(result),
+        }
+    }
+
+    /// The type text of `result`, each class's type parameter as `$i` and the function's own as `#i`, or `None` when it
+    /// is missing or PHP# can't write it.
+    fn result_text(&self, result: Option<&TUnion>) -> Option<String> {
+        result.filter(|result| is_written_in_sharp(result)).map(|result| text(result, self.codebase, Parameter::Index))
     }
 
     /// The type text `Function<R(P1, P2) uses E1, E2>` of the PHP# function `function`, with `parameters` and `result`,
@@ -1221,6 +1240,9 @@ pub(crate) struct FunctionType {
     pub(crate) name: String,
     /// Its type text, `Function<R(P1, P2) uses E1, E2>`, or `None` when no function type can say its type.
     pub(crate) text: Option<String>,
+    /// The type text of its result, which a generator's elements and a map stage's are read from whatever it calls,
+    /// spec section 12, or `None` when PHP# can't write it.
+    pub(crate) result: Option<String>,
 }
 
 /// A parameter of plain PHP code a call runs, which a `Map` or a `Set` crosses into: a declared function's, method's or
