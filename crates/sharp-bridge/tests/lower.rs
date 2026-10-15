@@ -1945,6 +1945,43 @@ fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
 }
 
 /// ```php
+/// public static function {'plan#get'}(): int
+/// {
+///     return \Sharp\Internal\keep('App\Tenant\Report::plan', static fn () => \trim(' a '));
+/// }
+/// ```
+///
+/// Spec section 6.5: a `static lazy` property's `name#get` runs its body on the first read and keeps the value for a
+/// singleton's lifetime, under the key of its class and name.
+#[test]
+fn a_static_lazy_property_keeps_its_value_for_a_singleton_s_lifetime() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public static lazy string plan => global.trim(\" a \");\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("plan#get"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  ZVAL "Sharp\\Internal\\keep"
+                  ARG_LIST
+                    ZVAL "App\\Tenant\\Report::plan"
+                    ARROW_FUNC [16] "" @5-5
+                      PARAM_LIST
+                      null
+                      CALL
+                        ZVAL "trim"
+                        ARG_LIST
+                          ZVAL " a "
+                      null
+                      null
+        "#}
+    );
+}
+
+/// ```php
 /// class Report
 /// {
 ///     public private(set) static int $size = 3;

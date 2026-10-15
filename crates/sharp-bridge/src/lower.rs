@@ -2998,6 +2998,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let getter =
                 accessors.and_then(|accessors| accessors.hooks.iter().find(|accessor| accessor.name.value == b"get"));
             let body = match (property, getter.map(|getter| &getter.body)) {
+                (Property::Computed(computed), _) if is_lazy(&computed.modifiers) => {
+                    let value = lowering.static_lazy_value(computed);
+                    returned(lowering, value)
+                }
                 (Property::Computed(computed), _) => {
                     let value = lowering.expression(computed.body.expression);
                     returned(lowering, value)
@@ -3053,6 +3057,28 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.push(set);
 
         members
+    }
+
+    /// The value a `static lazy` property's `name#get` returns, spec section 6.5:
+    /// `\Sharp\Internal\keep('App\Report::name', static fn () => body)`, which runs the body on the first read and keeps
+    /// its value for a singleton's lifetime.
+    fn static_lazy_value(&mut self, computed: &ComputedProperty) -> u32 {
+        let line = self.line(computed.body.arrow);
+        let key = self.string(0, line, &[self.class, b"::", computed.variable.name].concat());
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let value = self.expression(computed.body.expression);
+        let compute = self.declaration(
+            SHARP_AST_ARROW_FUNC,
+            ZEND_ACC_STATIC,
+            computed.body.arrow,
+            computed.body.expression,
+            b"",
+            &[parameters, NULL, value, NULL, NULL],
+        );
+        let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\keep");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[key, compute]);
+
+        self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
     }
 
     /// The class and the name of `target` when it is `Class.name` for a static property that runs accessors, whose
