@@ -556,7 +556,7 @@ impl Effects {
     }
 
     /// Each body that changes the object it runs on, and the write that leads to it, as [`Self::bodies_with`] gives
-    /// them: a `get` body never writes `this`, as a method marked `readonly` does not, spec sections 6 and 13.
+    /// them: a `get` body never writes `this`, spec section 6.1.
     fn bodies_changing_this(
         &self,
     ) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {

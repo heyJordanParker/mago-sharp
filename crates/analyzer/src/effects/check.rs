@@ -50,9 +50,10 @@ use crate::utils::names::sharp_code_class_name;
 use crate::utils::names::sharp_effect_name;
 use crate::utils::names::sharp_missing_imports;
 
-/// Spec section 6: a `get` body may run anything, and a read carries its effects, but it never writes `this`, as a
-/// method marked `readonly` does not (section 13): neither a write of a field of `this` nor a call of a method that
-/// writes one. A `lazy` property keeps its value through the bridge's write, which is the language's, not the body's.
+/// Spec section 6.1: a `get` body may have any effect, and a read carries it, but it never writes `this`: neither a
+/// write of a field of `this` nor a call of a method that writes one. Unlike a method marked `readonly` (section 13),
+/// it may call a plain PHP method and an unmarked PHP# one. A `lazy` property keeps its value through the bridge's
+/// write, which is the language's, not the body's.
 pub(crate) fn getters_never_write_this(
     effects: &Effects,
     codebase: &CodebaseMetadata,
@@ -71,7 +72,7 @@ pub(crate) fn getters_never_write_this(
             ))
             .with_code(IssueCode::GetterWritesThis.as_str())
             .with_annotation(Annotation::primary(impurity.span))
-            .with_note("A getter reads, as a method marked `readonly` does: it may run anything, but it never changes its object.")
+            .with_note("A getter may have any effect, but it never changes its object.")
             .with_help("Write the change in a method, and call it before the read.")
         })
         .collect()

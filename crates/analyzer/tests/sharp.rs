@@ -15772,10 +15772,18 @@ fn a_lazy_body_with_an_effect_compiles_and_a_read_of_it_has_the_effect() {
     );
 }
 
-/// Spec section 6: a getter never writes `this`, as a method marked `readonly` does not, so a getter that writes a
-/// field of `this`, or calls a method of `this` that writes one, is refused naming the write.
+/// Spec section 6.1: a `get` body may have any effect but never writes `this`, so a getter that writes a field of
+/// `this`, or calls a method of `this` that writes one, is refused naming the write. Unlike a method marked
+/// `readonly`, a getter calls a plain PHP method through `this`, as the spec's accessor over Eloquent's
+/// `getAttribute` does, because PHP# sees no write in it.
 #[test]
 fn a_getter_writing_this_or_calling_a_method_that_writes_it_is_refused() {
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\") as Address; set => this.setAttribute(\"shipping\", value); }\n}\n\nclass Address\n{\n}\n",
+    );
+    assert_eq!(effect_issues(&[order, ("src/Lib/Model.php", MODEL)]), Vec::<String>::new());
+
     let counter = (
         "app/Shop/Counter.sharp",
         "namespace App.Shop;\n\npublic class Counter\n{\n    private int count = 0;\n\n    public int next { get { this.count = this.count + 1; return this.count; } }\n\n    public int bumped => this.bump();\n\n    public int bump()\n    {\n        this.count = this.count + 1;\n        return this.count;\n    }\n}\n",
