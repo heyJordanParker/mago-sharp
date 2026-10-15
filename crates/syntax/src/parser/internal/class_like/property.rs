@@ -216,7 +216,7 @@ where
             && self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"via"))
     }
 
-    /// Parses a PHP# property's behaviors after its accessors, spec section 6.4: `via` and class names separated by
+    /// Parses a PHP# property's behaviors after its accessors, spec section 6.4: `via` and types separated by
     /// commas, ending with `;` unless an initial value follows.
     fn parse_optional_behavior_list(&mut self) -> Result<Option<PropertyBehaviorList<'arena>>, ParseError> {
         if !self.is_at_via()? {
@@ -226,10 +226,10 @@ where
         let via = self.stream.consume_span()?;
         let mut behaviors = self.new_vec();
         let mut commas = self.new_vec();
-        behaviors.push(self.parse_identifier()?);
+        behaviors.push(self.parse_type_hint()?);
         while self.stream.is_at(T![","])? {
             commas.push(self.stream.consume()?);
-            behaviors.push(self.parse_identifier()?);
+            behaviors.push(self.parse_type_hint()?);
         }
         let semicolon = if self.stream.is_at(T![";"])? { Some(self.stream.consume_span()?) } else { None };
 

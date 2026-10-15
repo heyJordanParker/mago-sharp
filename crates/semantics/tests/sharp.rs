@@ -3605,6 +3605,16 @@ fn via_goes_on_an_instance_auto_property_with_get_and_set() {
             "18:31 A property without storage takes no `via`: the class that stores the property names its behaviors.",
         ]
     );
+
+    // Each behavior names a class, with its type arguments when it is generic, and never another type.
+    let types = "namespace App.Tenant;\n\nimport App.Logged;\n\npublic class Report\n{\n    public string name { get; set; } via Logged<string> = \"\";\n    public string code { get; set; } via string = \"\";\n    public string tag { get; set; } via List<string> = \"\";\n}\n";
+    assert_eq!(
+        issues(types),
+        [
+            "8:42 `string` is no class: `via` names a behavior class, as `via Trimmed` or `via Logged<string>`.",
+            "9:41 `List<string>` is no class: `via` names a behavior class, as `via Trimmed` or `via Logged<string>`.",
+        ]
+    );
 }
 
 /// Spec section 6.2: `willSet` and `didSet` each take a body and need `set`, as they run inside it on each write.

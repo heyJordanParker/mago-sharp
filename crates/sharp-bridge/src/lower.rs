@@ -2850,7 +2850,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(variable);
         let mut slots = Vec::new();
         for (index, behavior) in behaviors.behaviors.iter().enumerate() {
-            let hint = self.string(ZEND_NAME_FQ, line, self.names.get(behavior));
+            let hint = self.string(ZEND_NAME_FQ, line, self.behavior_class(behavior));
             let name = self.string(0, line, &behavior_slot_name(variable.name, index));
             let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, NULL]);
             let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
@@ -2861,19 +2861,32 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `$this->{'name#via0'} = new \App\Trimmed();` for each behavior of the property `variable`, which the constructor
-    /// runs before any initial value, spec section 6.4: one instance per object, with no arguments.
+    /// runs before any initial value, spec section 6.4: one instance per object, with no arguments. A generic behavior's
+    /// `new` carries its type arguments, as a generic `new` does.
     fn behavior_creations(&mut self, variable: &DirectVariable, behaviors: &PropertyBehaviorList) -> Vec<u32> {
         let line = self.line(variable);
         let mut creations = Vec::new();
         for (index, behavior) in behaviors.behaviors.iter().enumerate() {
             let slot = self.behavior_slot(line, variable.name, index);
-            let class = self.string(ZEND_NAME_FQ, line, self.names.get(behavior));
+            let name = self.behavior_class(behavior);
+            let class = self.string(ZEND_NAME_FQ, line, name);
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
             let created = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+            let type_arguments = self.types.type_arguments(name, behavior.span());
+            let created = self.with_type_arguments(line, created, type_arguments);
             creations.push(self.node(SHARP_AST_ASSIGN, 0, line, &[slot, created]));
         }
 
         creations
+    }
+
+    /// The full name of the class the behavior `behavior` names, with or without type arguments.
+    fn behavior_class(&self, behavior: &Hint) -> &'lowering [u8] {
+        match behavior {
+            Hint::Identifier(identifier) => self.names.get(identifier),
+            Hint::Generic(generic) => self.names.get(&generic.name),
+            _ => unreachable!("semantics refuses a behavior that names no class"),
+        }
     }
 
     /// `$this->{'name#viaN'}`, the slot of the behavior at `index` of the property `property`.

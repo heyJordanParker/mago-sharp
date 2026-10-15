@@ -8,7 +8,6 @@ use crate::cst::cst::attribute::AttributeList;
 use crate::cst::cst::block::Block;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
-use crate::cst::cst::identifier::Identifier;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::modifier::Modifier;
@@ -94,12 +93,12 @@ pub struct HookedProperty<'arena> {
 /// The behaviors a PHP# auto-property runs its `get` and `set` through, spec section 6.4.
 ///
 /// They follow its accessors: `via Trimmed, Tracked;`, and `via Trimmed = "";` before an initial value, which ends with
-/// its own `;`.
+/// its own `;`. Each names a type, so a generic behavior takes its type arguments, as in `via Logged<string>`.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct PropertyBehaviorList<'arena> {
     pub via: Span,
-    pub behaviors: TokenSeparatedSequence<'arena, Identifier<'arena>>,
+    pub behaviors: TokenSeparatedSequence<'arena, Hint<'arena>>,
     pub semicolon: Option<Span>,
 }
 

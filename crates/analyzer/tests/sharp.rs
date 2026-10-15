@@ -10180,7 +10180,8 @@ fn a_renamed_parameter_is_widened_too() {
 #[test]
 fn a_plain_php_subclass_overrides_a_closed_member_with_no_report() {
     let shape = "namespace App;\n\npublic class Shape\n{\n    protected string title { get; set; } = \"shape\";\n\n    public string name() => this.title;\n}\n";
-    let legacy_title = "<?php\n\nnamespace App;\n\nclass LegacyShape extends Shape\n{\n    protected string $title = 'legacy';\n}\n";
+    let legacy_title =
+        "<?php\n\nnamespace App;\n\nclass LegacyShape extends Shape\n{\n    protected string $title = 'legacy';\n}\n";
     let legacy_name = "<?php\n\nnamespace App;\n\nclass LegacyShape extends Shape\n{\n    public function name(): string\n    {\n        return 'old';\n    }\n}\n";
     let sharp = "namespace App;\n\npublic class Square : Shape\n{\n    protected override string title { get; set; } = \"square\";\n\n    public override string name() => \"square\";\n}\n";
 
@@ -15971,6 +15972,73 @@ fn a_static_property_s_reads_and_writes_carry_its_accessors_effects() {
             "app/Shop/Stamp.sharp:8:27 impure-law: Law `read` reaches `Stamp.now`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
             "app/Shop/Stamp.sharp:10:30 impure-law: Law `written` reaches `Stamp.mark`, which changes `Stamp.last`. Laws hold only over pure code.",
         ]
+    );
+}
+
+const BEHAVIOR_LIBRARY: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+    "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+);
+
+/// Spec section 6.4: a behavior's `get` and `set` are the property's accessors. Each may have any effect, and `set`
+/// writes the behavior's own fields, so `Stamped` compiles. A read of the property carries what `get` does, so a method
+/// that must be pure and reads it is refused naming the effect, and a `get` that writes the behavior's own fields is
+/// refused as any getter writing `this` is.
+#[test]
+fn a_behavior_s_accessors_may_have_any_effect_and_the_property_s_reads_carry_it() {
+    let stamped = (
+        "app/Shop/Stamped.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Behavior;\n\npublic class Stamped : Behavior<int>\n{\n    private int writes = 0;\n\n    public int get(int value) => value + global.now();\n\n    public int set(int value)\n    {\n        this.writes = this.writes + 1;\n        return value;\n    }\n}\n",
+    );
+    let tag = (
+        "app/Shop/Tag.sharp",
+        "namespace App.Shop;\n\npublic class Tag\n{\n    public int stamp { get; set; } via Stamped = 0;\n}\n",
+    );
+    let sizes = (
+        "app/Shop/Sizes.sharp",
+        "namespace App.Shop;\n\npublic interface Sizes\n{\n    int size(Tag tag);\n}\n\npublic class TagSizes : Sizes\n{\n    public int size(Tag tag) => tag.stamp;\n}\n",
+    );
+    let counted = (
+        "app/Shop/Counted.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Behavior;\n\npublic class Counted : Behavior<int>\n{\n    private int reads = 0;\n\n    public int get(int value)\n    {\n        this.reads = this.reads + 1;\n        return value;\n    }\n\n    public int set(int value) => value;\n}\n",
+    );
+    let note = (
+        "app/Shop/Note.sharp",
+        "namespace App.Shop;\n\npublic class Note\n{\n    public int views { get; set; } via Counted = 0;\n}\n",
+    );
+
+    assert_eq!(issues(tag, &[BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[tag, BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[sizes, tag, BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Sizes.sharp:10:33 incompatible-effects: `TagSizes.size` reaches `Stamped.get`, which calls `global.now` with the effect `Clock`, so the pure `Sizes.size` cannot accept it."
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[note, BEHAVIOR_LIBRARY, counted]),
+        [
+            "app/Shop/Note.sharp:5:40 getter-writes-this: Getter `views` reaches `Counted.get`, which changes `this.reads`. A getter never writes `this`. Help: Write the change in a method, and call it before the read."
+        ]
+    );
+}
+
+/// Spec sections 6.4 and 11: `via` names a type, so a generic behavior takes its type arguments as any written type
+/// does. `Logged<string>` is a `Behavior<string>`, and `Logged<int>` on a `string` property names both types.
+#[test]
+fn a_generic_behavior_takes_its_type_arguments() {
+    let logged = (
+        "src/Demo/Logged.sharp",
+        "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Logged<T> : Behavior<T>\n{\n    public T get(T value) => value;\n\n    public T set(T value) => value;\n}\n",
+    );
+    let order = "namespace Demo;\n\npublic class Order\n{\n    public string name { get; set; } via Logged<string> = \"\";\n    public string code { get; set; } via Logged<int> = \"\";\n}\n";
+    let note = "A behavior runs the property's `get` and `set`: it is a class that implements `Behavior` for the property's type, and PHP# creates one for each object with no arguments.";
+
+    assert_eq!(
+        worded(("src/Demo/Order.sharp", order), &[BEHAVIOR_LIBRARY, logged]),
+        [format!(
+            "6:42 invalid-property-behavior `Logged<int>` is a `Behavior<int>`, and `code` is a `string`. | Named here. | {note} | Name a behavior that implements `Behavior<string>`, as `code` is a `string`."
+        )]
     );
 }
 

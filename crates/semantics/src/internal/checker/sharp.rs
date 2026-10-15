@@ -3008,8 +3008,26 @@ fn is_slice_accessor(accessor: &PropertyHook) -> bool {
 }
 
 /// Spec section 6.4: a behavior runs around a property's storage, once per object, so `via` goes on an instance
-/// auto-property with `get; set;` and no accessor body, which a class declares, never an interface.
+/// auto-property with `get; set;` and no accessor body, which a class declares, never an interface. Each behavior is
+/// a class PHP# creates with `new`, so it names one, with its type arguments when it is generic.
 fn check_behaviors(property: &HookedProperty, behaviors: &PropertyBehaviorList, context: &mut Context<'_, '_, '_>) {
+    for behavior in behaviors.behaviors.iter() {
+        let names_class = match behavior {
+            Hint::Identifier(_) => true,
+            Hint::Generic(generic) => built_in_generic_arity(generic.name.value).is_none(),
+            _ => false,
+        };
+        if !names_class {
+            context.report(
+                Issue::error(format!(
+                    "`{}` is no class: `via` names a behavior class, as `via Trimmed` or `via Logged<string>`.",
+                    BytesDisplay(context.get_code_snippet(behavior))
+                ))
+                .with_annotation(Annotation::primary(behavior.span()).with_message("Named here.")),
+            );
+        }
+    }
+
     let accessors = &property.hook_list.hooks;
     let is_auto = |name: &[u8]| {
         accessors

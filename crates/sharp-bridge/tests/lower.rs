@@ -2633,6 +2633,48 @@ fn a_copy_gets_new_behaviors_after_its_parent_s_copy_runs() {
     );
 }
 
+/// Spec sections 6.4 and 11: a generic behavior's `new` carries its type arguments under a `SHARP_TYPE_ARGS`, as a
+/// generic `new` does: `$this->{'level#via0'} = new \App\Kept<int>();`.
+#[test]
+fn a_generic_behavior_is_created_with_its_type_arguments() {
+    let behavior = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Kept<T> : Behavior<T>\n{\n    public T get(T value) => value;\n\n    public T set(T value) => value;\n}\n\npublic class Report\n{\n    public int level { get; set; } via Kept<int> = 1;\n}\n",
+        &[behavior],
+    );
+
+    assert_eq!(
+        lowered.declared("__construct"),
+        indoc! {r#"
+            METHOD [1] "__construct" @12-15
+              PARAM_LIST
+              null
+              STMT_LIST
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "level#via0"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "App\\Kept"
+                      ARG_LIST
+                    ZVAL "int"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "level"
+                  ZVAL 1
+              null
+              null
+        "#}
+    );
+}
+
 /// Spec section 6.2: the observers are no hooks of their own. The `set` hook runs `willSet`, then the `set` body or the
 /// storage write an auto `set` is, then `didSet`. They run on every write, so an initial value, constant or not, is a
 /// write at the start of the constructor instead of PHP's default.

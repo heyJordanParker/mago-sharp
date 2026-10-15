@@ -508,13 +508,18 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     }
 }
 
-/// Spec section 6.4: a property names its behaviors after its accessors, `via` and class names separated by commas,
-/// which end with `;`, or before an initial value, which ends with its own.
+/// Spec section 6.4: a property names its behaviors after its accessors, `via` and types separated by commas, which
+/// end with `;`, or before an initial value, which ends with its own. A generic behavior takes its type arguments.
 #[test]
 fn a_property_names_its_behaviors_after_its_accessors() {
     for (member, behaviors, initial_value) in [
         ("public string name { get; set; } via Trimmed, Tracked;", ["Trimmed", "Tracked"].as_slice(), None),
         ("public string name { get; set; } via Trimmed = \"\";", ["Trimmed"].as_slice(), Some("\"\"")),
+        (
+            "public string name { get; set; } via Logged<string>, Trimmed = \"\";",
+            ["Logged<string>", "Trimmed"].as_slice(),
+            Some("\"\""),
+        ),
     ] {
         let arena = LocalArena::new();
         let code: &'static str =

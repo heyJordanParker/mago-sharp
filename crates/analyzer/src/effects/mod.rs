@@ -511,7 +511,7 @@ impl Effects {
                 let metadata = codebase.get_class_like(class.as_bytes())?;
 
                 metadata.all_parent_classes.iter().chain(&metadata.all_parent_interfaces).find_map(|ancestor| {
-                    if runs_listeners(*ancestor, method) {
+                    if accepts_any_effect(*ancestor, method) {
                         return None;
                     }
                     let declaration =
@@ -581,10 +581,16 @@ fn events() -> Word {
     word(b"Sharp\\Events")
 }
 
-/// Whether `method` of `class` is `Sharp\Dispatcher::dispatch`, the method the engine calls with the listeners of
-/// every event, spec section 15.
-fn runs_listeners(class: Word, method: Word) -> bool {
-    class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Dispatcher") && method.as_bytes().eq_ignore_ascii_case(b"dispatch")
+/// Whether the declaration of `method` in `class` lets an implementation have any effect, because the code that calls
+/// it carries the implementation's effects: `Sharp\Dispatcher::dispatch`, which the engine calls with the listeners of
+/// every event (spec section 15), and `Sharp\Behavior`'s `get` and `set`, which run as the accessors of a property
+/// that names the behavior (spec section 6.4).
+fn accepts_any_effect(class: Word, method: Word) -> bool {
+    let (class, method) = (class.as_bytes(), method.as_bytes());
+
+    (class.eq_ignore_ascii_case(b"Sharp\\Dispatcher") && method.eq_ignore_ascii_case(b"dispatch"))
+        || (class.eq_ignore_ascii_case(b"Sharp\\Behavior")
+            && (method.eq_ignore_ascii_case(b"get") || method.eq_ignore_ascii_case(b"set")))
 }
 
 /// The standard effects that are names and no class, spec section 29, in the spec's order. As `Events` is, each is an

@@ -3842,7 +3842,8 @@ fn report_signature_compatibility_issue<'ctx, A>(
     match incompatibility {
         // PHP# checks only `.sharp` code, and the engine runs a closed PHP# method as an open one, so a plain PHP
         // subclass, a test double included, overrides it.
-        SignatureCompatibilityIssue::FinalMethodOverride if !context.dialect.is_sharp() && parent_class.flags.is_sharp() => {}
+        SignatureCompatibilityIssue::FinalMethodOverride
+            if !context.dialect.is_sharp() && parent_class.flags.is_sharp() => {}
         SignatureCompatibilityIssue::FinalMethodOverride => {
             context.collector.report_with_code(
                 IssueCode::OverrideFinalMethod,
