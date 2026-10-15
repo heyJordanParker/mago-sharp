@@ -27,7 +27,6 @@ use mago_codex::reference::SymbolReferenceKind;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::symbol::SymbolIdentifier;
 use mago_names::display_sharp_member;
-use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
@@ -587,8 +586,9 @@ where
 /// Only a public PHP# class of a project has such members, a file whose nearest `composer.json` says `"type":
 /// "project"`, of the files analyzed: a library's uses are in the projects that install it, which the analysis never
 /// sees. An `internal` class's members reach no further than it does (a member is never more visible than its class),
-/// interface members are exempt because they have no narrower form, and plain PHP has no `internal`. A member that overrides or implements another keeps that one's access, and PHP calls a magic method
-/// other than the constructor itself, so neither warns.
+/// interface members are exempt because they have no narrower form, and plain PHP has no `internal`. A member that
+/// overrides or implements another keeps that one's access, PHP calls a magic method itself, and `new` calls the
+/// constructor, which takes its class's reach, so none of them warns.
 #[must_use]
 pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferences) -> IssueCollection {
     // Each use of a member name: the class the code names it on, and the class or function the code is in, `None`
@@ -607,7 +607,7 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
     for (class_name, class) in &codebase.class_likes {
         if !class.flags.is_user_defined()
             || !class.flags.is_project()
-            || class.flags.is_internal()
+            || class.flags.is_internal_reach()
             || class.kind.is_interface()
         {
             continue;
@@ -654,7 +654,7 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
     for (name, property) in &class.properties {
         if class.declaring_property_ids.get(name) == Some(&class_name)
             && property.read_visibility.is_public()
-            && !property.flags.is_internal()
+            && !property.flags.is_internal_reach()
             && !class.overridden_property_ids.contains_key(name)
             && let Some(span) = property.name_span.or(property.span)
         {
@@ -665,23 +665,22 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
     let methods =
         class.methods.iter().filter_map(|name| Some((name, codebase.function_likes.get(&(class_name, *name))?)));
     for (name, method) in methods {
-        let is_constructor = name.as_bytes() == b"__construct";
         // A method the codex gives the class, such as section 10's `parse`, spans the whole class, and nobody wrote it.
+        // PHP calls a magic method itself, and `new` calls the constructor, which takes the reach of its class.
         if method.span != class.span
             && class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
             && method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_public())
-            && !method.flags.is_internal()
-            && (is_constructor || !name.as_bytes().starts_with(b"__"))
+            && !method.flags.is_internal_reach()
+            && !name.as_bytes().starts_with(b"__")
             && !class.overridden_method_ids.contains_key(name)
         {
-            // C# names a constructor by its class, as in `Cart.Cart`.
-            let label = if is_constructor { word(short_name(class.original_name)) } else { method.original_name };
-            members.push((*name, label, method.name_span.unwrap_or(method.span)));
+            members.push((*name, method.original_name, method.name_span.unwrap_or(method.span)));
         }
     }
 
     for (name, constant) in &class.constants {
-        if class.span.contains(&constant.span) && constant.visibility.is_public() && !constant.flags.is_internal() {
+        if class.span.contains(&constant.span) && constant.visibility.is_public() && !constant.flags.is_internal_reach()
+        {
             members.push((*name, *name, constant.span));
         }
     }

@@ -237,7 +237,8 @@ fn too_wide(files: &[(&'static str, &'static str)]) -> Vec<String> {
 /// it uses is too wide. A use from the namespace or from the class itself is no outside use, and a use from code
 /// outside any class is, since its namespace is unknown. A member that implements an interface keeps the
 /// interface's access, an `internal` member or class reaches no further, a struct's `parse` is no member anyone
-/// wrote, and an interface's members have no narrower form. The constructor is named as C# names it, `Cart.Cart`.
+/// wrote, an interface's members have no narrower form, and `new` calls a constructor, as `Point`'s, at its class's
+/// reach.
 #[test]
 fn a_public_member_nothing_outside_its_namespace_uses_is_too_wide() {
     let cart = "namespace App.Shop;\n\npublic class Cart : Priced\n{\n    public const int LIMIT = 3;\n    public const int FLOOR = 0;\n    public string name { get; set; } = \"\";\n    public string label { get; set; } = \"\";\n    internal string code { get; set; } = \"\";\n    private const int SEED = 1;\n\n    public Cart()\n    {\n    }\n\n    public int total() => this.count();\n    public int count() => 1;\n    public int price() => 2;\n    public int spare() => 3;\n    internal int hidden() => 4;\n}\n";
@@ -260,7 +261,6 @@ fn a_public_member_nothing_outside_its_namespace_uses_is_too_wide() {
             "src/App/Shop/Cart.sharp 6:22 `Cart.FLOOR` is public, and nothing outside `App.Shop` uses it.",
             "src/App/Shop/Cart.sharp 8:19 `Cart.label` is public, and nothing outside `App.Shop` uses it.",
             "src/App/Shop/Cart.sharp 17:16 `Cart.count` is public, and nothing outside `App.Shop` uses it.",
-            "src/App/Shop/Point.sharp 5:12 `Point.Point` is public, and nothing outside `App.Shop` uses it.",
         ]
     );
 }
@@ -6174,9 +6174,9 @@ fn every_required_property_is_set_where_its_object_is_created() {
             .map(|issue| format!("{} {} | {}", located(sharp, issue), issue.message, issue.notes.join(" ")))
             .collect::<Vec<_>>(),
         [
-            "62:17 uninitialized-property `secret` is never set: set it in the main constructor, or give it an initial value. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
-            "63:16 uninitialized-property `serial` is never set: set it in the main constructor, or give it an initial value. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
-            "71:16 uninitialized-property `value` is get-only and never set: set it in the main constructor, or give it an initial value. | A get-only property is set only while its object is created, and no constructor sets it on every path.".to_owned(),
+            "62:17 uninitialized-property `secret` is never set: give `secret` an initial value, or set it on every path through the constructor. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
+            "63:16 uninitialized-property `serial` is never set: give `serial` an initial value, or set it on every path through the constructor. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
+            "71:16 uninitialized-property `value` is get-only and never set: give `value` an initial value, or set it on every path through the constructor. | A get-only property is set only while its object is created, and no constructor sets it on every path.".to_owned(),
             format!("76:28 missing-required-property `new Label` must set `text`, `tone` and `size`. | {note}"),
             format!("78:28 missing-required-property `new Label` must set `tone` and `size`. | {note}"),
             format!("84:31 missing-required-property `new Ticket` must set `price` and `note`. | {note}"),
@@ -6197,8 +6197,8 @@ fn a_get_only_property_no_constructor_sets_is_an_error() {
     assert_eq!(
         refusals(("src/Demo/Total.sharp", sharp), &[]),
         [
-            "6:16 uninitialized-property `count` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
-            "31:16 uninitialized-property `y` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
+            "6:16 uninitialized-property `count` is get-only and never set: give `count` an initial value, or set it on every path through the constructor. | ",
+            "31:16 uninitialized-property `y` is get-only and never set: give `y` an initial value, or set it on every path through the constructor. | ",
         ]
     );
 }
@@ -6214,11 +6214,30 @@ fn a_settable_property_that_is_not_nullable_needs_a_value_as_a_get_only_one_does
     assert_eq!(
         refusals(("src/Demo/Order.sharp", sharp), &[]),
         [
-            "8:16 uninitialized-property `clicks` is never set: set it in the main constructor, or give it an initial value. | ",
-            "14:20 uninitialized-property `tag` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
-            "5:16 uninitialized-property `views` is never set: set it in the main constructor, or give it an initial value. | ",
+            "8:16 uninitialized-property `clicks` is never set: give `clicks` an initial value, or set it on every path through the constructor. | ",
+            "14:20 uninitialized-property `tag` is get-only and never set: give `tag` an initial value, or set it on every path through the constructor. | ",
+            "5:16 uninitialized-property `views` is never set: give `views` an initial value, or set it on every path through the constructor. | ",
         ]
     );
+}
+
+/// Spec section 6: a property a class inherits from an abstract PHP# parent needs a value as one it declares does, so
+/// a concrete class that sets it on no path through its constructor, its parent's run through `: super(…)` included,
+/// is an error on that class, naming the parent that declares it.
+#[test]
+fn an_inherited_property_no_constructor_sets_is_an_error_on_the_class() {
+    let base = "namespace Demo;\n\npublic abstract class Base\n{\n    public int count { get; set; }\n    public int size { get; }\n    public int? note { get; set; }\n}\n";
+    let child = "namespace Demo;\n\npublic class Child : Base\n{\n}\n";
+    let kept = "namespace Demo;\n\npublic abstract class Counted\n{\n    public int count { get; set; }\n\n    public Counted()\n    {\n        this.count = 1;\n    }\n}\n\npublic class Kept : Counted\n{\n    public Kept() : super()\n    {\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Child.sharp", child), &[("src/Demo/Base.sharp", base)]),
+        [
+            "3:14 uninitialized-property `Child` never sets `count`, which it inherits from `Base`: give `count` an initial value, or set it on every path through the constructor. | ",
+            "3:14 uninitialized-property `Child` never sets `size`, which it inherits from `Base`: give `size` an initial value, or set it on every path through the constructor. | ",
+        ]
+    );
+    assert_eq!(refusals(("src/Demo/Kept.sharp", kept), &[]), Vec::<String>::new());
 }
 
 /// Spec section 6: a get-only static is set once, by its initial value, so a write of it is an error inside its class

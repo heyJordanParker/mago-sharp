@@ -35,7 +35,10 @@ pub(crate) fn reaches_internal<A>(
 where
     A: Arena,
 {
-    if !context.dialect.is_sharp() || !class.flags.is_sharp() || !(class.flags.is_internal() || member_is_internal) {
+    if !context.dialect.is_sharp()
+        || !class.flags.is_sharp()
+        || !(class.flags.is_internal_reach() || member_is_internal)
+    {
         return true;
     }
 
@@ -147,7 +150,7 @@ where
         && !check_internal_reach(
             context,
             class,
-            Some(method_metadata.flags.is_internal()),
+            Some(method_metadata.flags.is_internal_reach()),
             |context| display_member(context, class.original_name, BytesDisplay(method_name)),
             member_span.unwrap_or(access_span),
         )
@@ -282,7 +285,7 @@ where
     if !check_internal_reach(
         context,
         declaring_class_metadata,
-        Some(property_metadata.flags.is_internal()),
+        Some(property_metadata.flags.is_internal_reach()),
         |context| display_member(context, declaring_class_metadata.original_name, property_name),
         member_span.unwrap_or(access_span),
     ) {
@@ -404,10 +407,10 @@ where
     if !check_internal_reach(
         context,
         declaring_class_metadata,
-        Some(flags.is_internal() || flags.is_internal_set()),
+        Some(flags.is_internal_reach() || flags.is_internal_set()),
         |context| {
             let property = display_member(context, declaring_class_metadata.original_name, property_name);
-            if flags.is_internal_set() && !flags.is_internal() { format!("{property}.set") } else { property }
+            if flags.is_internal_set() && !flags.is_internal_reach() { format!("{property}.set") } else { property }
         },
         member_span.unwrap_or(access_span),
     ) {

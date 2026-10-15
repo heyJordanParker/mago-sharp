@@ -59,7 +59,7 @@ where
     flags |= MetadataFlags::origin_flags(context.file.file_type);
     // Spec section 5: a PHP# `internal` constant runs as PHP's `public` one and reaches its class's namespace.
     if context.program.dialect.is_sharp() && constant.modifiers.contains_internal() {
-        flags |= MetadataFlags::INTERNAL;
+        flags |= MetadataFlags::INTERNAL_REACH;
     }
 
     let document = parse_docblock(context, constant);

@@ -337,7 +337,7 @@ where
         check_internal_reach(
             context,
             metadata,
-            Some(constant_metadata.flags.is_internal()),
+            Some(constant_metadata.flags.is_internal_reach()),
             |_| display.clone(),
             const_span,
         );

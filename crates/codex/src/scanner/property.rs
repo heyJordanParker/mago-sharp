@@ -75,6 +75,8 @@ where
 
     if is_sharp {
         flags |= sharp_internal_flags(&parameter.modifiers, parameter.hooks.as_ref());
+        // Spec section 9: a member a parameter declares without accessors is a field.
+        flags.set(MetadataFlags::FIELD, parameter.hooks.is_none());
     }
 
     if parameter.modifiers.contains_abstract() {
@@ -215,6 +217,8 @@ where
                     }
 
                     let mut item_flags = flags;
+                    // Spec section 6: a PHP# property without accessors is a field.
+                    item_flags.set(MetadataFlags::FIELD, is_sharp);
 
                     if is_required {
                         item_flags |= MetadataFlags::REQUIRED;
@@ -476,7 +480,7 @@ fn sharp_internal_flags(
 ) -> MetadataFlags {
     let mut flags = MetadataFlags::empty();
     if modifiers.contains_internal() {
-        flags |= MetadataFlags::INTERNAL;
+        flags |= MetadataFlags::INTERNAL_REACH;
     }
     if accessors.and_then(PropertyHookList::setter).is_some_and(|setter| setter.modifiers.contains_internal()) {
         flags |= MetadataFlags::INTERNAL_SET;

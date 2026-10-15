@@ -209,7 +209,7 @@ where
 
     // Spec section 5: a PHP# `internal` method runs as PHP's `public` one and reaches its class's namespace.
     if context.program.dialect.is_sharp() && method.modifiers.contains_internal() {
-        metadata.flags |= MetadataFlags::INTERNAL;
+        metadata.flags |= MetadataFlags::INTERNAL_REACH;
     }
 
     // A PHP# method is closed unless it is `virtual`, abstract or an `override`, spec section 22, so the analyzer

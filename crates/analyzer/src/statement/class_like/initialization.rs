@@ -6,12 +6,9 @@ use mago_word::WordSet;
 
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
-use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::Span;
-use mago_syntax::cst::ClassLikeMember;
-use mago_syntax::cst::Property;
 use mago_word::Word;
 use mago_word::word;
 
@@ -26,12 +23,11 @@ use crate::utils::names::display_property_name;
 /// named, that assigns it on every path. A get-only property can be set nowhere else, and neither can a struct's
 /// property no object initializer sets, spec section 10: any but a public `init` one, which is required where the
 /// struct is created. A class's `init` property is set where its object is created. A settable property that isn't
-/// `T?`, of `members`, holds a value from the start, so it needs one the same way, while a `T?` one starts as null.
-pub fn check_get_only_initialization<A>(
-    context: &mut Context<'_, '_, A>,
-    class_like_metadata: &ClassLikeMetadata,
-    members: &[ClassLikeMember<'_>],
-) where
+/// `T?` holds a value from the start, so it needs one the same way, while a `T?` one starts as null, and a field is
+/// no property. A property the class inherits from a PHP# parent is checked on the class, since an abstract parent
+/// leaves it to its subclasses, and a main constructor runs each parent's through `: super(…)`.
+pub fn check_get_only_initialization<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
+where
     A: Arena,
 {
     if !context.dialect.is_sharp() || class_like_metadata.flags.is_abstract() || !class_like_metadata.kind.is_class() {
@@ -39,26 +35,34 @@ pub fn check_get_only_initialization<A>(
     }
 
     let class = class_like_metadata.name.as_bytes();
+    let parent_constructors = class_like_metadata
+        .all_parent_classes
+        .iter()
+        .filter_map(|parent| context.codebase.get_method(parent.as_bytes(), b"__construct"));
     let assigned: WordSet = class_like_metadata
         .methods
         .iter()
         .filter_map(|method| context.codebase.get_method(class, method.as_bytes()))
         .filter(|method| method.flags.is_named_constructor())
         .chain(context.codebase.get_declaring_method(class, b"__construct"))
+        .chain(parent_constructors)
         .filter_map(|constructor| constructor.method_metadata.as_ref())
         .flat_map(|constructor| constructor.assigned_properties.iter().copied())
         .collect();
-    let settable: WordSet = members
-        .iter()
-        .filter_map(|member| match member {
-            ClassLikeMember::Property(Property::Hooked(property)) => property.hook_list.setter().map(|_| property),
-            _ => None,
-        })
-        .map(|property| php_variable_name(property.item.variable().name))
-        .collect();
-    for (name, property) in class_like_metadata.properties.iter().sorted_by_key(|(name, _)| **name) {
+    for (name, declaring) in class_like_metadata.declaring_property_ids.iter().sorted_by_key(|(name, _)| **name) {
+        let Some((declaring, property)) = context
+            .codebase
+            .get_class_like(declaring.as_bytes())
+            .filter(|declaring| declaring.flags.is_sharp())
+            .and_then(|declaring| Some((declaring, declaring.properties.get(name)?)))
+        else {
+            continue;
+        };
         let get_only = property.flags.is_readonly() && !property.flags.is_init();
-        let set_later = settable.contains(name) && !property.flags.is_init() && !property.flags.is_required();
+        let set_later = !property.flags.is_readonly()
+            && !property.flags.is_field()
+            && !property.flags.is_init()
+            && !property.flags.is_required();
         let struct_only = class_like_metadata.flags.is_struct() && !property.flags.is_required();
         let never_set = (get_only || set_later || struct_only)
             && !property.flags.is_promoted_property()
@@ -70,30 +74,38 @@ pub fn check_get_only_initialization<A>(
             continue;
         }
 
-        let Some(span) = property.name_span else {
-            unreachable!("every property a PHP# class declares has its name's span");
-        };
         let property_name = String::from_utf8_lossy(name.as_bytes().strip_prefix(b"$").unwrap_or(name.as_bytes()));
-
-        let (property_kind, note) = if get_only {
-            (
-                " get-only and",
-                "A get-only property is set only while its object is created, and no constructor sets it on every path.",
-            )
+        let note = if get_only {
+            "A get-only property is set only while its object is created, and no constructor sets it on every path."
         } else if set_later {
-            ("", "A property that isn't `T?` holds a value from the start, and no constructor sets it on every path.")
+            "A property that isn't `T?` holds a value from the start, and no constructor sets it on every path."
         } else {
-            ("", "Only the struct sets this property, and no constructor sets it on every path.")
+            "Only the struct sets this property, and no constructor sets it on every path."
         };
+        let fix = format!("give `{property_name}` an initial value, or set it on every path through the constructor.");
 
-        context.collector.report_with_code(
-            IssueCode::UninitializedProperty,
+        let issue = if declaring.name == class_like_metadata.name {
+            let Some(span) = property.name_span else {
+                unreachable!("every property a PHP# class declares has its name's span");
+            };
+            let kind = if get_only { " get-only and" } else { "" };
+
+            Issue::error(format!("`{property_name}` is{kind} never set: {fix}"))
+                .with_annotation(Annotation::primary(span).with_message("Declared here."))
+        } else {
+            let (Some(span), Some(declared)) = (class_like_metadata.name_span, property.name_span) else {
+                unreachable!("every PHP# class and property it declares has its name's span");
+            };
+            let class_name = display_class_like_name(context, class_like_metadata.original_name);
+            let parent_name = display_class_like_name(context, declaring.original_name);
+
             Issue::error(format!(
-                "`{property_name}` is{property_kind} never set: set it in the main constructor, or give it an initial value."
+                "`{class_name}` never sets `{property_name}`, which it inherits from `{parent_name}`: {fix}"
             ))
             .with_annotation(Annotation::primary(span).with_message("Declared here."))
-            .with_note(note),
-        );
+            .with_annotation(Annotation::secondary(declared).with_message(format!("`{parent_name}` declares it here.")))
+        };
+        context.collector.report_with_code(IssueCode::UninitializedProperty, issue.with_note(note));
     }
 }
 

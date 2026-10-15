@@ -574,7 +574,7 @@ where
     // Spec section 5: a PHP# class-like is `internal` unless it is `public`, so it reaches its namespace and every
     // namespace below it.
     if context.program.dialect.is_sharp() && !modifiers.is_some_and(Sequence::contains_public) {
-        flags |= MetadataFlags::INTERNAL;
+        flags |= MetadataFlags::INTERNAL_REACH;
     }
     flags.set(MetadataFlags::PROJECT, context.program.dialect.is_sharp() && context.file.is_project);
 
