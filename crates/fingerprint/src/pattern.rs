@@ -218,7 +218,9 @@ impl Fingerprintable for ListPattern<'_> {
         self.elements.len().hash(hasher);
         for element in &self.elements {
             match element {
-                ListPatternElement::Pattern(pattern) => pattern.fingerprint_with_hasher(hasher, resolved_names, options),
+                ListPatternElement::Pattern(pattern) => {
+                    pattern.fingerprint_with_hasher(hasher, resolved_names, options)
+                }
                 ListPatternElement::Rest(rest) => rest.fingerprint_with_hasher(hasher, resolved_names, options),
             }
         }

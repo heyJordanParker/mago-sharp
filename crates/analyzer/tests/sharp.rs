@@ -11897,7 +11897,7 @@ fn function_types_are_tested_like_any_type() {
         "src/Lib/Legacy.php",
         "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    public static function doubler(): \\Closure\n    {\n        return fn($x) => $x * 2;\n    }\n}\n",
     );
-    let code = "namespace App;\n\nimport Lib.Legacy;\n\npublic class Shows\n{\n    public int twice(int x) => x * 2;\n\n    public void run()\n    {\n        Any? doubled = (int x) => x * 2;\n        Any? method = this.twice;\n        const a = doubled is Function<int(int)>;\n        const b = doubled as Function<string(string)>;\n        const c = match (method) { Function<int(int)> f => f(1), default => 2 };\n        const d = Legacy.doubler() is Function<int(int)>;\n        const e = Legacy.doubler() as Function<int(int)>;\n        const f = match (Legacy.doubler()) { Function<int(int)> f => f(1), default => 2 };\n    }\n}\n";
+    let code = "namespace App;\n\nimport Lib.Legacy;\n\npublic class Shows\n{\n    public int twice(int x) => x * 2;\n\n    public void run()\n    {\n        Any? doubled = (int x) => x * 2;\n        Any? method = this.twice;\n        const a = doubled is Function<int(int)>;\n        const b = doubled as Function<string(string)>;\n        const c = match (method) { Function<int(int)> f => f(1), default => 2 };\n        const d = Legacy.doubler() is Function<int(int)>;\n        const e = Legacy.doubler() as Function<int(int)>;\n        const f = match (Legacy.doubler()) { Function<int(int)> f => f(1), default => 2 };\n        Legacy.doubler() is Function<int(int)>;\n    }\n}\n";
     let unknown = |line: u32, column: u32| {
         format!(
             "{line}:{column} unknown-function-type The type of `Legacy.doubler()`'s function is unknown: its source declares no parameter or result types."
@@ -11906,7 +11906,7 @@ fn function_types_are_tested_like_any_type() {
 
     assert_eq!(
         written(code, &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shows.sharp", code), &[legacy])),
-        [unknown(16, 19), unknown(17, 19), unknown(18, 26)]
+        [unknown(16, 19), unknown(17, 19), unknown(18, 26), unknown(19, 9)]
     );
 }
 

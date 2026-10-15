@@ -8631,7 +8631,11 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
         assert!(tree.contains(&typed), "{parameter}: {tree}");
     }
     // Each of the eight properties above, and no other: a method's result type holds its function type instead.
-    assert_eq!(tree.matches("SHARP_TYPE_ARGS\n          ZVAL [256] \"App\\\\Box\"\n          ZVAL \"App.").count(), 8, "{tree}");
+    assert_eq!(
+        tree.matches("SHARP_TYPE_ARGS\n          ZVAL [256] \"App\\\\Box\"\n          ZVAL \"App.").count(),
+        8,
+        "{tree}"
+    );
     // PHP's typed property check runs the check, so a property takes no `set` hook for it: only a written `set` or
     // `init` body is a hook.
     assert!(!tree.contains("VERIFY_TYPE_ARGS ["), "{tree}");

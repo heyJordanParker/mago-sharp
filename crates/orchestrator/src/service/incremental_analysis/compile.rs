@@ -179,8 +179,9 @@ impl IncrementalAnalysisService {
     /// An accepted file's inputs are its own source, `composer.lock`, and each file outside `vendor/` whose edit makes
     /// the warm path re-analyze it: each file whose signature edit reaches it through the cascade or reaches a symbol
     /// its extension hooks or providers read, every file when they listed names, each file that declares a class alias
-    /// or a patch, and each file that declares a method whose return it reads from that method's body, along every
-    /// chain of such returns, with that file's own inputs.
+    /// or a patch, and each file that declares a method whose return it reads from that method's body or a body its
+    /// calls reach, whose effects its functions' types list, along every chain of such returns and calls, with that
+    /// file's own inputs.
     ///
     /// A file that states a law also lists its proof file and every source its laws reach. A file that declares a
     /// module or a listener also lists the module files its check resolves services through, each folder's
@@ -273,7 +274,7 @@ impl IncrementalAnalysisService {
         let mut refused = check(translations, &namespaces)
             .map_err(|error| OrchestratorError::General(format!("The Lean step failed: {error}.")))?;
 
-        let mut reads = self.reads();
+        let mut reads = self.reads(&effects);
         let read_by_every_file: HashSet<FileId> = self
             .codebase
             .class_like_alias_declarations()
@@ -291,8 +292,8 @@ impl IncrementalAnalysisService {
         for (file, LoweredUnit { namespace_classes, reaches_extension, .. }) in
             files.iter().filter_map(|file| Some((file, lowered.get(&file.id)?.as_ref().ok()?)))
         {
-            // A method whose return comes from its body can return another such method's return, so the body files
-            // close over the body files of each file they hold.
+            // A method whose return comes from its body can return another such method's return, and a body has the
+            // effects of each body it calls, so the body files close over the body files of each file they hold.
             let mut body_files: HashSet<FileId> = HashSet::default();
             let mut pending = vec![file.id];
             while let Some(next) = pending.pop() {
@@ -376,6 +377,7 @@ impl IncrementalAnalysisService {
                 (Ok(LoweredUnit { unit, .. }), None) => {
                     let (mut reads, _) = reads.remove(&file.id).unwrap_or_default();
                     reads.inlined = unit.inlined().to_vec();
+                    reads.function_types = unit.function_types().to_vec();
                     let key = key(source_hash(&file.contents), &reads);
 
                     let paths = input_paths.remove(&file.id).unwrap_or_default();
@@ -406,9 +408,10 @@ impl IncrementalAnalysisService {
     }
 
     /// What each file's analysis read from other files: each declaration it read through its signature, each method
-    /// whose return is taken from its body, with the files that declare those methods, and each declaration and set of
-    /// names its extensions read.
-    fn reads(&self) -> HashMap<FileId, (Reads, HashSet<FileId>)> {
+    /// whose return is taken from its body, and each declaration and set of names its extensions read. With them, the
+    /// files whose bodies it read: those that declare those methods, and those whose bodies its calls reach, which
+    /// `effects` solved its functions' effects from.
+    fn reads(&self, effects: &Effects) -> HashMap<FileId, (Reads, HashSet<FileId>)> {
         let mut declarations: HashMap<SymbolIdentifier, (FileId, u64)> = HashMap::default();
         for (file_id, signature) in &self.codebase.file_signatures {
             for node in &signature.ast_nodes {
@@ -492,6 +495,9 @@ impl IncrementalAnalysisService {
                     .listed
                     .push(Read { name: listing_name(listing), fingerprint: listing.answer(&self.codebase) });
             }
+        }
+        for (file_id, callee_files) in effects.callee_files(&self.codebase) {
+            reads.entry(file_id).or_default().1.extend(callee_files);
         }
 
         reads
@@ -1262,6 +1268,42 @@ mod tests {
         assert!(title.windows(b"strtoupper".len()).any(|window| window == b"strtoupper"), "the form is inlined");
         accepted(&before, TEXT_PATH);
         assert_ne!(compiled_key(title), compiled_key(accepted(&after, "app/Title.sharp")));
+    }
+
+    /// Spec section 21: a lambda's function type lists the effects of each body it calls, in any file, so the file
+    /// of each body a call reaches is an input, along every chain of calls, and a body edit that changes the effects
+    /// changes the caller's key. One that keeps them keeps it.
+    #[test]
+    fn a_body_edit_that_changes_a_callees_effects_changes_the_callers_key() {
+        let meter = "namespace App;\n\npublic foreign class Meter\n{\n    public int now() => 7;\n}\n";
+        let clerk = |count: &str| {
+            format!(
+                "namespace App;\n\npublic class Clerk\n{{\n    public int count(Meter meter) => this.tally(meter);\n\n    public int tally(Meter meter) => {count};\n}}\n"
+            )
+        };
+        let desk = "namespace App;\n\npublic class Desk\n{\n    public Any? counter(Clerk clerk, Meter meter) => () => clerk.count(meter);\n}\n";
+        let compiled = |count: &str| {
+            let clerk = clerk(count);
+            let files = [("app/Meter.sharp", meter), ("app/Clerk.sharp", clerk.as_str()), ("app/Desk.sharp", desk)];
+
+            compile(&mut analyzed(&project(&files)), empty_stamp)
+        };
+
+        let pure = compiled("1");
+        let kept = compiled("2");
+        let metered = compiled("meter.now()");
+        let (pure, kept, metered) = (
+            accepted(&pure, "app/Desk.sharp"),
+            accepted(&kept, "app/Desk.sharp"),
+            accepted(&metered, "app/Desk.sharp"),
+        );
+        let spells = |bytes: &[u8], text: &[u8]| bytes.windows(text.len()).any(|window| window == text);
+
+        assert!(input_paths(pure).contains(&"app/Clerk.sharp".to_string()), "{:?}", input_paths(pure));
+        assert!(spells(pure, b"Function<int()>"));
+        assert!(spells(metered, b"Function<int() uses App.Meter>"));
+        assert_eq!(compiled_key(pure), compiled_key(kept));
+        assert_ne!(compiled_key(pure), compiled_key(metered));
     }
 
     /// One edit to the shop project, and the files the edit truly reaches.

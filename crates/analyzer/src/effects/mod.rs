@@ -9,9 +9,11 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use foldhash::HashMap;
+use foldhash::HashSet;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_database::file::FileId;
 use mago_names::display_sharp_member;
 use mago_names::scope::NamespaceScope;
 use mago_reporting::IssueCollection;
@@ -257,6 +259,8 @@ pub struct Effects {
     function_values: Vec<(FunctionValue, usize)>,
     /// Each call of a method without `readonly` through a readonly value, with the position of the body that makes it.
     readonly_calls: Vec<(ReadonlyCall, usize)>,
+    /// The file of each call, with the position of each body it reaches.
+    calls: Vec<(FileId, Vec<usize>)>,
 }
 
 impl Effects {
@@ -368,7 +372,43 @@ impl Effects {
                 .enumerate()
                 .flat_map(|(position, summary)| summary.readonly_calls.iter().map(move |call| (call.clone(), position)))
                 .collect(),
+            calls: summaries
+                .iter()
+                .zip(targets)
+                .flat_map(|(summary, targets)| {
+                    summary.calls.iter().zip(targets).map(|(call, targets)| (call.span.file_id, targets))
+                })
+                .collect(),
         }
+    }
+
+    /// The files whose PHP# bodies a call in each file reaches, an override a call can run included, so an edit of
+    /// one can change the effects of the calling file's functions. A method, an accessor and an initial value are in
+    /// their class's file. A lambda adds none: a body calls it only where its own file writes it.
+    #[must_use]
+    pub fn callee_files(&self, codebase: &CodebaseMetadata) -> HashMap<FileId, HashSet<FileId>> {
+        let file_of = |body: Body| match body {
+            Body::Method(class, method) => {
+                codebase.get_method(class.as_bytes(), method.as_bytes()).map(|method| method.span.file_id)
+            }
+            Body::Accessor(class, _, _) | Body::InitialValue(class, _) => {
+                codebase.get_class_like(class.as_bytes()).map(|class| class.span.file_id)
+            }
+            Body::Lambda(_) => None,
+        };
+
+        let mut files: HashMap<FileId, HashSet<FileId>> = HashMap::default();
+        for (caller, targets) in &self.calls {
+            for &target in targets {
+                if let Some(callee) = file_of(self.bodies[target])
+                    && callee != *caller
+                {
+                    files.entry(*caller).or_default().insert(callee);
+                }
+            }
+        }
+
+        files
     }
 
     /// Why `method` is impure, as a sentence's predicate that names classes as the method's file does, or `None` when

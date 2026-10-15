@@ -122,6 +122,7 @@ use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_syntax_core::utils::parse_literal_integer_as_float;
 use mago_word::Word;
 use mago_word::word;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::Unit;
 use crate::kind::SHARP_T_FILE;
@@ -232,6 +233,7 @@ pub(crate) mod types;
 
 use types::Declaration;
 use types::DeclarationKind;
+use types::FunctionType;
 use types::PlainParameter;
 use types::Types;
 use types::agreed_kind;
@@ -490,6 +492,8 @@ struct Lowering<'lowering, 'arena> {
     property: Vec<u8>,
     /// Each inline form the lowering copied, with its fingerprint, as often as it copied it.
     inlined: Vec<Read>,
+    /// Each function type the lowering spelled for a method or lambda of the file, with its text's fingerprint.
+    function_types: Vec<Read>,
     /// The declared return type of the method being lowered, which a value it returns crosses into. A lambda declares
     /// none.
     returns: Option<TUnion>,
@@ -530,6 +534,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             static_type_parameters: None,
             property: Vec::new(),
             inlined: Vec::new(),
+            function_types: Vec::new(),
             returns: None,
             local_types: HashMap::default(),
             promoted_beside: false,
@@ -592,8 +597,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.nodes[root as usize].end_line = self.lines.last();
         self.inlined.sort();
         self.inlined.dedup();
+        self.function_types.sort();
 
-        Unit { nodes: self.nodes, children: self.children, root, texts: self.texts, inlined: self.inlined }
+        Unit {
+            nodes: self.nodes,
+            children: self.children,
+            root,
+            texts: self.texts,
+            inlined: self.inlined,
+            function_types: self.function_types,
+        }
     }
 
     fn strict_types(&mut self) -> u32 {
@@ -4475,7 +4488,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 statements.push(lowering.statement(statement));
             }
 
-            (lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(&closure.body), &statements), lowering.lambda_type(lambda))
+            (
+                lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(&closure.body), &statements),
+                lowering.lambda_type(lambda),
+            )
         });
         let uses = self.closure_uses(lambda, captures_type_arguments);
 
@@ -4491,11 +4507,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.function_type(NULL, function_type, self.line(lambda))
     }
 
-    /// The result type of a PHP# method or lambda declaration: a `SHARP_TYPE_ARGS` of `php_type` and `function_type`,
-    /// the function's whole type, which `is` tests a closure of it by, or `php_type` alone when no function type takes
-    /// a closure of it.
-    fn function_type(&mut self, php_type: u32, function_type: Option<String>, line: u32) -> u32 {
-        let Some(function_type) = function_type else {
+    /// The result type of a PHP# method or lambda declaration: a `SHARP_TYPE_ARGS` of `php_type` and `function_type`'s
+    /// text, which `is` tests a closure of it by, or `php_type` alone when no function type takes a closure of it. The
+    /// unit lists the text's fingerprint, or zero without one, since its effects come from other files' bodies.
+    fn function_type(&mut self, php_type: u32, function_type: FunctionType, line: u32) -> u32 {
+        let FunctionType { name, text } = function_type;
+        self.function_types.push(Read {
+            name: name.into_bytes(),
+            fingerprint: text.as_ref().map_or(0, |text| xxh3_64(text.as_bytes())),
+        });
+        let Some(function_type) = text else {
             return php_type;
         };
         let text = self.type_text(line, &function_type);

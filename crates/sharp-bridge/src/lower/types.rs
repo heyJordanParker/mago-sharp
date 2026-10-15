@@ -321,7 +321,7 @@ impl<'analysis> Types<'analysis> {
 
     /// The whole type of the lambda written at `lambda`, which `is` tests a closure of it by: [`Self::function_type`] of
     /// the parameter and result types the analysis gave it, written or inferred.
-    pub(crate) fn lambda_type(&self, lambda: Span) -> Option<String> {
+    pub(crate) fn lambda_type(&self, lambda: Span) -> FunctionType {
         let signature = self.artifacts.get_expression_type(&lambda).and_then(|r#type| match r#type.types.first() {
             Some(TAtomic::Callable(TCallable::Signature(signature))) => Some(signature),
             _ => None,
@@ -341,8 +341,11 @@ impl<'analysis> Types<'analysis> {
 
     /// The whole type of the method `class::method`, which `is` tests a closure of it by: [`Self::function_type`] of its
     /// declared parameter types and its result type.
-    pub(crate) fn method_type(&self, class: &[u8], method: &[u8]) -> Option<String> {
-        let metadata = self.codebase.get_method(class, method)?;
+    pub(crate) fn method_type(&self, class: &[u8], method: &[u8]) -> FunctionType {
+        let function = FunctionLikeIdentifier::Method(word(class), word(method));
+        let Some(metadata) = self.codebase.get_method(class, method) else {
+            unreachable!("the codebase holds every method a PHP# file declares, not {}", function.as_string());
+        };
         let parameters: Vec<Option<&TUnion>> = metadata
             .parameters
             .iter()
@@ -350,7 +353,17 @@ impl<'analysis> Types<'analysis> {
             .collect();
         let result = metadata.return_type_metadata.as_ref().map(|r#type| &r#type.type_union);
 
-        self.function_type(&FunctionLikeIdentifier::Method(word(class), word(method)), &parameters, result)
+        self.function_type(&function, &parameters, result)
+    }
+
+    /// The [`FunctionType`] of the PHP# function `function`, with `parameters` and `result`.
+    fn function_type(
+        &self,
+        function: &FunctionLikeIdentifier,
+        parameters: &[Option<&TUnion>],
+        result: Option<&TUnion>,
+    ) -> FunctionType {
+        FunctionType { name: function.as_string(), text: self.function_type_text(function, parameters, result) }
     }
 
     /// The type text `Function<R(P1, P2) uses E1, E2>` of the PHP# function `function`, with `parameters` and `result`,
@@ -358,7 +371,7 @@ impl<'analysis> Types<'analysis> {
     /// it leaves out is `Any?`. `None`, so a closure of it is of no function type, when no function type can say its
     /// type: when the effects solve finds an effect no `uses` lists, as for plain PHP no `extern` declares, or a type is
     /// one PHP# can't write, as the `never` of a lambda that always throws.
-    fn function_type(
+    fn function_type_text(
         &self,
         function: &FunctionLikeIdentifier,
         parameters: &[Option<&TUnion>],
@@ -367,12 +380,17 @@ impl<'analysis> Types<'analysis> {
         if !parameters.iter().copied().chain([result]).flatten().all(is_written_in_sharp) {
             return None;
         }
-        let mut effects: Vec<String> =
-            self.effects.function_effects(function)?.into_iter().map(|effect| class_text(effect, self.codebase)).collect();
+        let mut effects: Vec<String> = self
+            .effects
+            .function_effects(function)?
+            .into_iter()
+            .map(|effect| class_text(effect, self.codebase))
+            .collect();
         effects.sort_unstable();
         effects.dedup();
-        let written =
-            |r#type: Option<&TUnion>| r#type.map_or_else(|| "Any?".to_owned(), |r#type| text(r#type, self.codebase, Parameter::Index));
+        let written = |r#type: Option<&TUnion>| {
+            r#type.map_or_else(|| "Any?".to_owned(), |r#type| text(r#type, self.codebase, Parameter::Index))
+        };
         let parameters: Vec<String> = parameters.iter().map(|parameter| written(*parameter)).collect();
 
         Some(format!("Function<{}({}){}>", written(result), parameters.join(", "), uses_text(&effects)))
@@ -1064,6 +1082,15 @@ fn plain_parameters<'function>(
     (!sharp).then(|| function.parameters.iter().map(PlainParameter::Declared).collect())
 }
 
+/// The whole type of a PHP# method or lambda, which `is` tests a closure of it by.
+#[derive(Debug)]
+pub(crate) struct FunctionType {
+    /// The function, `Class::method` or the lambda's `{closure:…}` name.
+    pub(crate) name: String,
+    /// Its type text, `Function<R(P1, P2) uses E1, E2>`, or `None` when no function type can say its type.
+    pub(crate) text: Option<String>,
+}
+
 /// A parameter of plain PHP code a call runs, which a `Map` or a `Set` crosses into: a declared function's, method's or
 /// constructor's, or one of the signature of a plain PHP closure a local holds.
 #[derive(Clone, Copy, Debug)]
@@ -1246,7 +1273,12 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
             effects.sort_unstable();
             effects.dedup();
 
-            format!("Function<{}({}){}>", written(signature.get_return_type()), parameters.join(", "), uses_text(&effects))
+            format!(
+                "Function<{}({}){}>",
+                written(signature.get_return_type()),
+                parameters.join(", "),
+                uses_text(&effects)
+            )
         }
     }
 }

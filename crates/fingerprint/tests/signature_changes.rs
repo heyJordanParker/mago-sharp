@@ -580,7 +580,11 @@ fn an_edit_to_each_php_sharp_form_changes_the_fingerprint() {
             b"bool run(int v) => v is (> 1 or < 0) and < 9;",
             b"bool run(int v) => v is > 1 or (< 0 and < 9);",
         ),
-        ("a properties pattern", b"bool run(Any? v) => v is { status: 200 };", b"bool run(Any? v) => v is { code: 200 };"),
+        (
+            "a properties pattern",
+            b"bool run(Any? v) => v is { status: 200 };",
+            b"bool run(Any? v) => v is { code: 200 };",
+        ),
         (
             "a type pattern's properties",
             b"bool run(Any? v) => v is Order { total: 1 };",
@@ -628,7 +632,11 @@ fn an_edit_to_each_php_sharp_form_changes_the_fingerprint() {
             b"void run(List<int> lines) { for (const line of lines) { this.a(); } }",
             b"void run(List<int> lines) { for (const line of lines) { this.b(); } }",
         ),
-        ("a local declaration", b"int run() { let total = 1; return total; }", b"int run() { let total = 2; return total; }"),
+        (
+            "a local declaration",
+            b"int run() { let total = 1; return total; }",
+            b"int run() { let total = 2; return total; }",
+        ),
         ("a `new`'s type arguments", b"Any run() => new Box<Order>();", b"Any run() => new Box<Invoice>();"),
         ("a `new`'s initializer", b"Point run() => new Point { x: 1 };", b"Point run() => new Point { x: 2 };"),
         (
@@ -641,7 +649,11 @@ fn an_edit_to_each_php_sharp_form_changes_the_fingerprint() {
             b"Any run(Repo? r) => r?.find<Order>(1);",
             b"Any run(Repo? r) => r?.find<Invoice>(1);",
         ),
-        ("a `?? return`", b"int run(int? v) { int n = v ?? return 0; return n; }", b"int run(int? v) { int n = v ?? return 1; return n; }"),
+        (
+            "a `?? return`",
+            b"int run(int? v) { int n = v ?? return 0; return n; }",
+            b"int run(int? v) { int n = v ?? return 1; return n; }",
+        ),
     ];
 
     for (form, before, after) in rows {
