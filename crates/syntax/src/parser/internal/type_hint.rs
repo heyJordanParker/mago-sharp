@@ -264,7 +264,8 @@ where
     /// Whether a PHP# tuple type starts here, which PHP# writes in the brackets that also open an attribute list and a
     /// list: a `[` whose closing `]`, and an optional `?` written right after it, are followed by a name and then by
     /// `(`, `,`, `)`, `=`, `;` or `{`, as in `[Money, int] totals()` or `[Money, int] pair = …`. After an attribute list,
-    /// a type and a name follow, as in `[Searchable] string name`, and after a list an operator or `.`.
+    /// a type and a name follow, as in `[Searchable] string name`, or the class's own name and `(`, as in
+    /// `[Deprecated] Report(…)`, its constructor. After a list an operator or `.` follows.
     pub(crate) fn is_at_tuple_hint(&self) -> Result<bool, ParseError> {
         if !self.dialect.is_sharp() {
             return Ok(false);
@@ -302,11 +303,17 @@ where
         {
             name = tokens.next().transpose()?;
         }
-        if !name.is_some_and(|name| name.kind.is_identifier_maybe_reserved()) {
+        let Some(name) = name.filter(|name| name.kind.is_identifier_maybe_reserved()) else {
+            return Ok(false);
+        };
+        let Some(after) = tokens.next().transpose()? else {
+            return Ok(false);
+        };
+        if after.kind == T!["("] && self.state.members_name.as_deref() == Some(name.value) {
             return Ok(false);
         }
 
-        Ok(tokens.next().transpose()?.is_some_and(|after| matches!(after.kind, T!["(" | "," | ")" | "=" | ";" | "{"])))
+        Ok(matches!(after.kind, T!["(" | "," | ")" | "=" | ";" | "{"]))
     }
 
     /// Parses a PHP# tuple type, spec section 30: element types in brackets, each followed by its optional name, as in

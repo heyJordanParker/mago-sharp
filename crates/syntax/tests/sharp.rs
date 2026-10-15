@@ -1990,6 +1990,30 @@ fn a_tuple_type_writes_its_element_types_in_brackets_each_with_an_optional_name(
     assert_eq!(locals, [("[Money, int]", "pair"), ("[string key, Plan plan]?", "none")]);
 }
 
+/// An attribute list and a tuple type both open with `[`. Before the class's own name and `(`, the brackets are the
+/// attributes of its constructor, which a method never shares a name with, and before any other name and `(` they are
+/// a method's tuple return type.
+#[test]
+fn brackets_before_the_class_name_and_a_parenthesis_are_the_constructor_attributes() {
+    const CODE: &str = "class Report\n{\n    [Deprecated] Report(int count) { }\n    [Deprecated] private Report(string text) { }\n    [Money, int] Totals() { return [money, 1]; }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let forms: Vec<(&str, usize, Option<&str>)> = class_members(program)
+        .iter()
+        .map(|member| {
+            let ClassLikeMember::Method(method) = member else {
+                panic!("expected a method, got {member:#?}");
+            };
+            let returned = method.return_type_hint.as_ref().map(|returned| source(CODE, &returned.hint));
+
+            (source(CODE, &method.name), method.attribute_lists.len(), returned)
+        })
+        .collect();
+    assert_eq!(forms, [("Report", 1, None), ("Report", 1, None), ("Totals", 0, Some("[Money, int]"))]);
+}
+
 /// Spec section 30: `const [total, count] = summary;` unpacks a tuple into one local per element, with `let` or
 /// `const`, as TypeScript writes it.
 #[test]
