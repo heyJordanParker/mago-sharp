@@ -180,6 +180,91 @@ fn analyze_with_artifacts(
     (issues, artifacts)
 }
 
+/// The too-wide warnings of a project of `files`, as `mago analyze` gives them once it has analyzed every file: each
+/// as `path line:column message`, in the order the files and lines are written.
+fn too_wide(files: &[(&'static str, &'static str)]) -> Vec<String> {
+    let Prelude { mut database, mut metadata, mut symbol_references } = PRELUDE.clone();
+    let file_ids: Vec<_> = files
+        .iter()
+        .map(|(name, code)| {
+            let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
+            file.is_project = true;
+
+            database.add(file)
+        })
+        .collect();
+
+    let arena = LocalArena::new();
+    let mut programs = Vec::new();
+    for file_id in &file_ids {
+        let file = database.get_ref(file_id).expect("file was just added");
+        let program = parse_file(&arena, file);
+        assert!(!program.has_errors(), "{:?} did not parse: {:?}", file.name, program.errors);
+        let names = NameResolver::new(&arena).resolve(program);
+        metadata.extend(scan_program(&arena, file, program, &names, settings().version));
+        programs.push((file, program, names));
+    }
+    populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());
+
+    for (file, program, names) in &programs {
+        let mut result = AnalysisResult::new(mago_codex::reference::SymbolReferences::new());
+        Analyzer::new(&arena, file, names, &metadata, &PLUGIN_REGISTRY, settings())
+            .analyze(program, &mut result)
+            .expect("analysis succeeds");
+        symbol_references.extend(result.symbol_references);
+    }
+
+    let mut warnings: Vec<(usize, usize, String)> = mago_analyzer::too_wide_members(&metadata, &symbol_references)
+        .into_iter()
+        .map(|issue| {
+            let span = issue.primary_span().expect("a primary span");
+            let index =
+                files.iter().position(|(name, _)| FileId::new(name.as_bytes()) == span.file_id).expect("a file");
+            let (name, code) = files[index];
+            let offset = span.start.offset as usize;
+            let line = code[..offset].matches('\n').count() + 1;
+            let column = offset - code[..offset].rfind('\n').map_or(0, |newline| newline + 1) + 1;
+
+            (index, offset, format!("{name} {line}:{column} {}", issue.message))
+        })
+        .collect();
+    warnings.sort_unstable();
+
+    warnings.into_iter().map(|(_, _, warning)| warning).collect()
+}
+
+/// Spec section 5: a `public` member of a project's class that nothing outside its namespace and the namespaces below
+/// it uses is too wide. A use from the namespace or from the class itself is no outside use, and a use from code
+/// outside any class is, since its namespace is unknown. A member that implements an interface keeps the
+/// interface's access, an `internal` member or class reaches no further, a struct's `parse` is no member anyone
+/// wrote, and an interface's members have no narrower form. The constructor is named as C# names it, `Cart.Cart`.
+#[test]
+fn a_public_member_nothing_outside_its_namespace_uses_is_too_wide() {
+    let cart = "namespace App.Shop;\n\npublic class Cart : Priced\n{\n    public const int LIMIT = 3;\n    public const int FLOOR = 0;\n    public string name { get; set; } = \"\";\n    public string label { get; set; } = \"\";\n    internal string code { get; set; } = \"\";\n    private const int SEED = 1;\n\n    public Cart()\n    {\n    }\n\n    public int total() => this.count();\n    public int count() => 1;\n    public int price() => 2;\n    public int spare() => 3;\n    internal int hidden() => 4;\n}\n";
+    let priced = "namespace App.Shop;\n\npublic interface Priced\n{\n    int price();\n}\n";
+    let point = "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n";
+    let quiet = "namespace App.Shop;\n\ninternal class Quiet\n{\n    public int unused() => 1;\n}\n";
+    let page = "namespace App.Web;\n\nimport App.Shop.Cart;\nimport App.Shop.Point;\n\npublic class Page\n{\n    internal int show(Cart cart, Point point) => cart.total() + Cart.LIMIT + cart.name.length + point.x;\n}\n";
+    let boot = "<?php\n\n$cart = new \\App\\Shop\\Cart();\n$cart->spare();\n";
+
+    assert_eq!(
+        too_wide(&[
+            ("src/App/Shop/Cart.sharp", cart),
+            ("src/App/Shop/Priced.sharp", priced),
+            ("src/App/Shop/Point.sharp", point),
+            ("src/App/Shop/Quiet.sharp", quiet),
+            ("src/App/Web/Page.sharp", page),
+            ("src/boot.php", boot),
+        ]),
+        [
+            "src/App/Shop/Cart.sharp 6:22 `Cart.FLOOR` is public, and nothing outside `App.Shop` uses it.",
+            "src/App/Shop/Cart.sharp 8:19 `Cart.label` is public, and nothing outside `App.Shop` uses it.",
+            "src/App/Shop/Cart.sharp 17:16 `Cart.count` is public, and nothing outside `App.Shop` uses it.",
+            "src/App/Shop/Point.sharp 5:12 `Point.Point` is public, and nothing outside `App.Shop` uses it.",
+        ]
+    );
+}
+
 /// Asserts that no issue on a `.sharp` file of `names` names a word only PHP has, in its message, help, notes or
 /// annotations.
 fn assert_speaks_sharp<'name, 'issue>(
@@ -1584,7 +1669,7 @@ fn an_override_of_a_plain_php_property_keeps_its_set_and_its_level() {
 #[test]
 fn nameof_names_a_property_the_class_has_and_is_a_string() {
     let order = "namespace Demo;\n\npublic class Entity\n{\n    public int id { get; set; } = 0;\n}\n\npublic class Order : Entity\n{\n    public int total { get; set; } = 0;\n    public static int count { get; private set; } = 0;\n    private int secret = 0;\n    public int sum() => 1;\n\n    public string own() => nameof(Order.secret);\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string column() => nameof(Order.total);\n    public string parent() => nameof(Order.id);\n    public string shared() => nameof(Order.count);\n    public string misspelled() => nameof(Order.totl);\n    public string hidden() => nameof(Order.secret);\n    public string method() => nameof(Order.sum);\n    public string missing() => nameof(Ordr.total);\n    public int number() => nameof(Order.total);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string column() => nameof(Order.total);\n    public string parent() => nameof(Order.id);\n    public string shared() => nameof(Order.count);\n    public string misspelled() => nameof(Order.totl);\n    public string hidden() => nameof(Order.secret);\n    public string method() => nameof(Order.sum);\n    public string missing() => nameof(Missing.total);\n    public int number() => nameof(Order.total);\n}\n";
 
     assert_eq!(issues(("src/Demo/Order.sharp", order), &[]), Vec::<String>::new());
     assert_eq!(
@@ -1593,10 +1678,15 @@ fn nameof_names_a_property_the_class_has_and_is_a_string() {
             "Property `Order.totl` does not exist.",
             "`Order.secret` is `private`, so `nameof` can't name it here.",
             "Property `Order.sum` does not exist.",
-            "Class, Interface, or Trait `Ordr` does not exist.",
+            "Class, Interface, or Trait `Missing` does not exist.",
             "Invalid return type for method `Report.number`: expected `int`, but found `string`.",
         ]
     );
+
+    // A class whose parent is missing may inherit the name, so only the missing parent is reported.
+    let orphan =
+        "namespace Demo;\n\npublic class Orphan : Lost\n{\n    public string name() => nameof(Orphan.total);\n}\n";
+    assert_eq!(codes(&issues(("src/Demo/Orphan.sharp", orphan), &[])), ["non-existent-class-like"]);
 }
 
 /// The `App.Tenant.Store` classes the `internal` tests reach: `Hidden`, `internal` by default, and `Shop`, public
@@ -15879,6 +15969,10 @@ fn a_behavior_implements_behavior_for_the_property_s_type() {
             ),
         ]
     );
+
+    // An untyped property is the parser's error, so its behaviors have no type to be checked against.
+    let untyped = "namespace Demo;\n\npublic class Order\n{\n    public name { get; set; } via Trimmed = \"\";\n}\n";
+    assert_eq!(issues(("src/Demo/Order.sharp", untyped), &[behavior, behaviors]), ["5:12 parse"]);
 }
 
 /// Spec section 6.2: an observer sees `value`, the written value, and `didSet` sees `field`, the stored one, each of

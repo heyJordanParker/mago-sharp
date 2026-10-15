@@ -3190,13 +3190,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The class and the name of `target` when it is `Class.name` for a static property that runs accessors, whose
     /// reads and writes call its hidden methods, as [`Lowering::static_accessors`] writes them.
     fn static_accessor<'ast>(&self, target: &Expression<'ast>) -> Option<(&'ast ConstantAccess<'ast>, &'ast [u8])> {
-        let Expression::Access(Access::Property(access)) = target.unparenthesized() else {
+        let Expression::Access(Access::Property(
+            access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(name), .. },
+        )) = target.unparenthesized()
+        else {
             return None;
         };
         let class = self.names.static_property_class(access)?;
-        let ClassLikeMemberSelector::Identifier(name) = &access.property else {
-            return None;
-        };
         let classes =
             self.types.type_parameter_classes(&class.name).unwrap_or_else(|| vec![self.names.get(&class.name)]);
 

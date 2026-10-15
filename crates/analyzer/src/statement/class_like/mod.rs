@@ -3516,14 +3516,13 @@ fn widens_parameter(
     else {
         return false;
     };
-    let Some(parameter) = method.parameters.get(*parameter_index) else {
-        return false;
-    };
     if !class_like_metadata.flags.is_sharp() || method_class != class_like_metadata.name {
         return false;
     }
 
-    artifacts.widened_parameters.insert((parameter.name_span.start.offset, parameter.name_span.end.offset));
+    // The index comes from zipping the parent's parameters with `method`'s, so `method` has that parameter.
+    let span = method.parameters[*parameter_index].name_span;
+    artifacts.widened_parameters.insert((span.start.offset, span.end.offset));
 
     true
 }

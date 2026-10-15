@@ -2810,6 +2810,7 @@ fn report_static_without_initial_value(property: &Property, context: &mut Contex
     if property.modifiers().get_static().is_none()
         || property.initial_value().is_some()
         || matches!(property, Property::Computed(_))
+        || matches!(property, Property::Hooked(hooked) if !context.names.has_storage(&hooked.hook_list))
     {
         return;
     }

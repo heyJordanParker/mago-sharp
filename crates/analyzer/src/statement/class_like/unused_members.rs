@@ -662,10 +662,9 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
         }
     }
 
-    for name in &class.methods {
-        let Some(method) = codebase.function_likes.get(&(class_name, *name)) else {
-            continue;
-        };
+    let methods =
+        class.methods.iter().filter_map(|name| Some((name, codebase.function_likes.get(&(class_name, *name))?)));
+    for (name, method) in methods {
         let is_constructor = name.as_bytes() == b"__construct";
         // A method the codex gives the class, such as section 10's `parse`, spans the whole class, and nobody wrote it.
         if method.span != class.span

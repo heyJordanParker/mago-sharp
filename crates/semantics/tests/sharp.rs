@@ -1609,7 +1609,7 @@ fn an_interface_constant_or_another_interface_modifier_is_not_supported_yet() {
 /// not supported yet.
 #[test]
 fn an_interface_property_is_get_only_or_settable() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n    string tag { get; private set; }\n    string code { protected get; set; }\n}\n";
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n    string tag { get; private set; }\n    string code { protected get; set; }\n    string kind { get; set; init; }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -1617,11 +1617,12 @@ fn an_interface_property_is_get_only_or_settable() {
             "6:24 Interface virtual property `Named.label` must be abstract.",
             "6:5 This class member is not supported yet in PHP#.",
             "8:23 An interface member is always public, so it takes no access modifier.",
-            "9:19 An interface member is always public, so it takes no access modifier."
+            "9:19 An interface member is always public, so it takes no access modifier.",
+            "10:5 This class member is not supported yet in PHP#."
         ]
     );
     let helps: Vec<Option<String>> =
-        check("src/Report.sharp", code).into_iter().skip(2).map(|issue| issue.help).collect();
+        check("src/Report.sharp", code).into_iter().skip(2).take(2).map(|issue| issue.help).collect();
     assert_eq!(
         helps,
         [
@@ -3356,10 +3357,10 @@ fn a_field_or_a_property_may_be_static_with_a_constant_initial_value() {
 }
 
 /// Spec section 6: no constructor sets a static, so a static field or property that isn't `T?` has an initial value.
-/// A `T?` one starts as null. The error names both fixes.
+/// A `T?` one starts as null, and a property without storage holds nothing to set. The error names both fixes.
 #[test]
 fn a_static_that_is_not_nullable_needs_an_initial_value() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int hits = 0;\n    private static int misses;\n    public static string? region { get; set; }\n    public static string label { get; set; }\n    private static string? cached;\n    private static int|string key;\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int hits = 0;\n    private static int misses;\n    public static string? region { get; set; }\n    public static string label { get; set; }\n    private static string? cached;\n    private static int|string key;\n    public static int twice { get => 2; }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -3608,11 +3609,12 @@ fn via_goes_on_an_instance_auto_property_with_get_and_set() {
 
 /// Spec section 6.2: `willSet` and `didSet` each take a body and need `set`, as they run inside it on each write.
 /// `willSet` cannot change or stop the write, so it neither writes `value` nor returns, and a `set` body cannot return
-/// before `didSet`. What `field` holds in `willSet` before the first write is not decided, so it is not supported yet.
+/// before `didSet`, nor `didSet` return a value. What `field` holds in `willSet` before the first write is not decided,
+/// so it is not supported yet.
 /// A member declared on a constructor parameter takes no observer, as section 9 says.
 #[test]
 fn observers_take_a_body_beside_set_and_cannot_change_or_stop_the_write() {
-    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public string name { get; set; willSet => this.log(value); didSet { this.log(field); } } = \"\";\n    public int count { get; set { if (value < 0) { return; } field = value; } didSet => this.log(\"count\"); } = 0;\n    public int total { get; willSet => this.log(\"total\"); } = 0;\n    public int size { get; init; didSet => this.log(\"size\"); }\n    public int rank { get; set; willSet { value = 2; value++; return; } } = 0;\n    public int level { get; set; willSet => this.log(field); didSet; } = 0;\n\n    public Report(public string title { get; set; didSet => this.log(value); }) { }\n\n    private void log(Any? text) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public string name { get; set; willSet => this.log(value); didSet { this.log(field); } } = \"\";\n    public int count { get; set { if (value < 0) { return; } field = value; } didSet => this.log(\"count\"); } = 0;\n    public int total { get; willSet => this.log(\"total\"); } = 0;\n    public int size { get; init; didSet => this.log(\"size\"); }\n    public int rank { get; set; willSet { value = 2; value++; return; } } = 0;\n    public int level { get; set; willSet => this.log(field); didSet; } = 0;\n    public int depth { get; set; didSet { return 1; } } = 0;\n\n    public Report(public string title { get; set; didSet => this.log(value); }) { }\n\n    private void log(Any? text) { }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -3625,7 +3627,8 @@ fn observers_take_a_body_beside_set_and_cannot_change_or_stop_the_write() {
             "9:54 `willSet` cannot change `value`: the write after it stores `value` as written.",
             "10:62 This accessor is not supported yet in PHP#.",
             "10:54 `field` in `willSet` is not supported yet in PHP#.",
-            "12:58 Declare `title` in the class body to give it `didSet`: a member declared on a constructor parameter takes access levels and attributes only.",
+            "11:50 `didSet` must not return a value.",
+            "13:58 Declare `title` in the class body to give it `didSet`: a member declared on a constructor parameter takes access levels and attributes only.",
         ]
     );
 }

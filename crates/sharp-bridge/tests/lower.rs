@@ -1817,6 +1817,339 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 /// static only they write, under `private(set)`. Every read calls `name#get`, and every write `name#set`, with the
 /// value written held in a hidden variable, so the write's value is the value written, and a postfix `++` the value
 /// read.
+/// ```php
+/// public static function {'twice#get'}(): int { return 2; }
+/// private(set) static int $hits;
+/// public static function {'hits#set'}(int $value) { Meter::log("hit"); self::$hits = $value; }
+/// protected static function {'label#set'}(string $value) { self::$label = $value; Meter::log(self::$label); }
+///
+/// Meter::{'hits#set'}($value#1 = Meter::{'hits#get'}() + 1) ?? $value#1;
+/// Meter::{'hits#set'}(($old#1 = Meter::{'hits#get'}()) - 1) ?? $old#1;
+/// Meter::{'note#get'}() ?? (Meter::{'note#set'}($value#1 = "n") ?? $value#1);
+/// Meter::{'label#set'}($value#1 = Meter::{'label#get'}() . "l") ?? $value#1;
+///
+/// \Closure::bind(static function () { self::{'hits#set'}(0); self::{'label#set'}(strval(1)); … }, null, Meter::class)();
+/// ```
+///
+/// Decision 3, for each form a static property's accessors take: a `get` body of either form, `set;` and a narrower
+/// `protected set`, and `willSet` before and `didSet` after the write. Prefix `++` and `--` give the value written and
+/// postfix `--` the value read, `??=` writes only when the read is null, and `+=` on a string appends. An observed
+/// static's initial value, constant or not, is a write through `name#set` once its class is declared, so its observers
+/// run on it, spec section 6.2.
+#[test]
+fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_methods() {
+    let lowered = Lowered::new(
+        "class Meter\n{\n    public static int twice { get => 2; }\n    public static int thrice { get { return 3; } }\n    public static int hits { get; set; willSet => Meter.log(\"hit\"); } = 0;\n    public static string label { get; protected set; didSet => Meter.log(field); } = global.strval(1);\n    public static string? note { get; set; didSet => Meter.log(field); } = null;\n\n    public static void log(string? text)\n    {\n    }\n\n    public static void run()\n    {\n        ++Meter.hits;\n        --Meter.hits;\n        Meter.hits--;\n        Meter.note ??= \"n\";\n        Meter.label += \"l\";\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              CLASS "Meter" @1-21
+                null
+                null
+                STMT_LIST
+                  METHOD [17] "twice#get" @3-3
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ZVAL 2
+                    ZVAL [1] "int"
+                    null
+                  METHOD [17] "thrice#get" @4-4
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ZVAL 3
+                    ZVAL [1] "int"
+                    null
+                  PROP_GROUP [4113]
+                    ZVAL [1] "int"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "hits"
+                        null
+                        null
+                        null
+                    null
+                  METHOD [17] "hits#get" @5-5
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "hits"
+                    ZVAL [1] "int"
+                    null
+                  METHOD [17] "hits#set" @5-5
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "int"
+                        ZVAL "value"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      STMT_LIST
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "log"
+                          ARG_LIST
+                            ZVAL "hit"
+                      STMT_LIST
+                        ASSIGN
+                          STATIC_PROP
+                            ZVAL [1] "self"
+                            ZVAL "hits"
+                          VAR
+                            ZVAL "value"
+                    null
+                    null
+                  PROP_GROUP [4113]
+                    ZVAL [1] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "label"
+                        null
+                        null
+                        null
+                    null
+                  METHOD [17] "label#get" @6-6
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "label"
+                    ZVAL [1] "string"
+                    null
+                  METHOD [18] "label#set" @6-6
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "string"
+                        ZVAL "value"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      STMT_LIST
+                        ASSIGN
+                          STATIC_PROP
+                            ZVAL [1] "self"
+                            ZVAL "label"
+                          VAR
+                            ZVAL "value"
+                      STMT_LIST
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "log"
+                          ARG_LIST
+                            STATIC_PROP
+                              ZVAL [1] "self"
+                              ZVAL "label"
+                    null
+                    null
+                  PROP_GROUP [4113]
+                    ZVAL [257] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "note"
+                        null
+                        null
+                        null
+                    null
+                  METHOD [17] "note#get" @7-7
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "note"
+                    ZVAL [257] "string"
+                    null
+                  METHOD [17] "note#set" @7-7
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [257] "string"
+                        ZVAL "value"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      STMT_LIST
+                        ASSIGN
+                          STATIC_PROP
+                            ZVAL [1] "self"
+                            ZVAL "note"
+                          VAR
+                            ZVAL "value"
+                      STMT_LIST
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "log"
+                          ARG_LIST
+                            STATIC_PROP
+                              ZVAL [1] "self"
+                              ZVAL "note"
+                    null
+                    null
+                  METHOD [17] "log" @9-11
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [257] "string"
+                        ZVAL "text"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    ZVAL [1] "void"
+                    null
+                  METHOD [17] "run" @13-20
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      COALESCE
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "hits#set"
+                          ARG_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "value#1"
+                              BINARY_OP [1]
+                                STATIC_CALL
+                                  ZVAL "Meter"
+                                  ZVAL "hits#get"
+                                  ARG_LIST
+                                ZVAL 1
+                        VAR
+                          ZVAL "value#1"
+                      COALESCE
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "hits#set"
+                          ARG_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "value#1"
+                              BINARY_OP [2]
+                                STATIC_CALL
+                                  ZVAL "Meter"
+                                  ZVAL "hits#get"
+                                  ARG_LIST
+                                ZVAL 1
+                        VAR
+                          ZVAL "value#1"
+                      COALESCE
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "hits#set"
+                          ARG_LIST
+                            BINARY_OP [2]
+                              ASSIGN
+                                VAR
+                                  ZVAL "old#1"
+                                STATIC_CALL
+                                  ZVAL "Meter"
+                                  ZVAL "hits#get"
+                                  ARG_LIST
+                              ZVAL 1
+                        VAR
+                          ZVAL "old#1"
+                      COALESCE
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "note#get"
+                          ARG_LIST
+                        COALESCE
+                          STATIC_CALL
+                            ZVAL "Meter"
+                            ZVAL "note#set"
+                            ARG_LIST
+                              ASSIGN
+                                VAR
+                                  ZVAL "value#1"
+                                ZVAL "n"
+                          VAR
+                            ZVAL "value#1"
+                      COALESCE
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "label#set"
+                          ARG_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "value#1"
+                              BINARY_OP [8]
+                                STATIC_CALL
+                                  ZVAL "Meter"
+                                  ZVAL "label#get"
+                                  ARG_LIST
+                                ZVAL "l"
+                        VAR
+                          ZVAL "value#1"
+                    ZVAL [1] "void"
+                    null
+                null
+                null
+              CALL
+                STATIC_CALL
+                  ZVAL "Closure"
+                  ZVAL "bind"
+                  ARG_LIST
+                    CLOSURE [16] "" @5-5
+                      PARAM_LIST
+                      null
+                      STMT_LIST
+                        STATIC_CALL
+                          ZVAL [1] "self"
+                          ZVAL "hits#set"
+                          ARG_LIST
+                            ZVAL 0
+                        STATIC_CALL
+                          ZVAL [1] "self"
+                          ZVAL "label#set"
+                          ARG_LIST
+                            CALL
+                              ZVAL "strval"
+                              ARG_LIST
+                                ZVAL 1
+                        STATIC_CALL
+                          ZVAL [1] "self"
+                          ZVAL "note#set"
+                          ARG_LIST
+                            ZVAL null
+                      null
+                      null
+                    ZVAL null
+                    CLASS_NAME
+                      ZVAL "Meter"
+                ARG_LIST
+        "#}
+    );
+}
+
 #[test]
 fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
     let lowered = Lowered::new(
