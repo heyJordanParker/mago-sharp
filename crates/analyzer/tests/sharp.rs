@@ -9701,6 +9701,119 @@ fn a_list_where_a_set_is_expected_names_to_set() {
     );
 }
 
+/// Spec section 12: "`Iterable<T>` is anything a loop can read", and "`List<T>` and `Set<T>` are `Iterable<T>`". A
+/// plain PHP `iterable<Order>`, as a cursor gives, is one too, and a loop over an `Iterable<Order>` reads `Order`s. A
+/// value tested `is Iterable<Order>` is one, which the engine decides from the element type the value carries.
+#[test]
+fn an_iterable_is_anything_a_loop_reads() {
+    let query = "<?php\n\nnamespace Demo;\n\nfinal class Query\n{\n    /** @return iterable<Order> */\n    public static function cursor(): iterable\n    {\n        yield new Order(true);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int tally(Iterable<Order> orders)\n    {\n        let n = 0;\n        for (const order of orders) { n += order.paid ? 1 : 0; }\n        return n;\n    }\n\n    public int run(List<Order> list, Set<Order> set, List<Invoice> invoices)\n    {\n        return this.tally(list) + this.tally(set) + this.tally(Query.cursor()) + this.tally(invoices);\n    }\n\n    public int tested(Any? value) => value is Iterable<Order> ? this.tally(value) : 0;\n}\n\nstruct Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n\nclass Invoice\n{\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Query.php", query)]),
+        ["14:93 possibly-invalid-argument"]
+    );
+}
+
+/// Spec section 12: "an `Iterable` has no index". Reading one by index would read the source up to it, so the error
+/// names the two ways that read it.
+#[test]
+fn an_iterable_has_no_index() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int first(Iterable<int> rows)\n    {\n        return rows[0];\n    }\n}\n";
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
+
+    assert_eq!(
+        issues.iter().map(|issue| format!("{} {}", located(sharp, issue), issue.message)).collect::<Vec<_>>(),
+        ["7:16 invalid-array-access An `Iterable` has no index: loop over `rows`, or read `rows.toList()`."]
+    );
+}
+
+/// An `Iterable<T>` has the lazy operations of spec section 12, checked against `Sharp\IterableMethods<T>`: `filter`
+/// and `take` keep the element type, `map` takes the lambda's return type, and `toList` reads them into a `List<T>`.
+#[test]
+fn lazy_operations_on_an_iterable_type_their_results_by_the_elements() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Iterable<Order> orders, Iterable<Order>? maybe)\n    {\n        Iterable<Order> paid = orders.filter(o => o.paid);\n        Iterable<string> numbers = paid.map(o => o.number);\n        Iterable<string> first = numbers.take(100);\n        List<string> list = first.toList();\n        Iterable<int> wrongMap = paid.map(o => o.number);\n        List<int> wrongList = first.toList();\n        Iterable<Order>? kept = maybe?.filter(o => o.paid);\n        List<string> chain = orders.filter(o => o.paid).map(o => o.number).take(100).toList();\n        return global.count(list) + global.count(wrongList) + global.count(chain) + (kept == null ? 0 : 1) + Report.size(wrongMap);\n    }\n\n    private static int size(Iterable<int> values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; }, public string number { get; })\n    {\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[]),
+        ["11:34 invalid-local-assignment-value", "12:31 invalid-local-assignment-value"]
+    );
+}
+
+/// A method an `Iterable<T>` does not have is the error a `List` or `Map` gives, naming the type the code wrote and
+/// never the class the analyzer checks it against.
+#[test]
+fn a_method_an_iterable_does_not_have_is_an_error_naming_the_iterable() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool run(Iterable<Order> orders)\n    {\n        orders.toArray();\n        orders.first();\n        return true;\n    }\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
+
+    assert_eq!(
+        issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>(),
+        [
+            "Method `toArray` does not exist on `Iterable<Order>`.",
+            "Method `first` does not exist on `Iterable<Order>`."
+        ]
+    );
+    assert_eq!(
+        issues[0].help.as_deref(),
+        Some("An `Iterable<Order>` has the methods `filter`, `map`, `take`, `toList`.")
+    );
+    for issue in &issues {
+        let text = format!("{issue:?}");
+        assert!(!text.contains("IterableMethods"), "{text}");
+    }
+}
+
+/// A `List` held as a `List` keeps its own eager methods, so its `filter` gives a `List` and it has no `take`. Held as
+/// an `Iterable<T>`, the same value has the lazy operations, whatever the analyzer saw assigned to the place last.
+#[test]
+fn a_list_keeps_its_methods_until_it_is_held_as_an_iterable() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<Order> items, List<Order> others)\n    {\n        List<Order> kept = items.filter(o => o.paid);\n        Iterable<Order> held = items;\n        Iterable<Order> lazy = held.filter(o => o.paid);\n        List<Order> wrong = held.filter(o => o.paid);\n        held = others;\n        List<Order> firstTwo = held.take(2).toList();\n        items.take(1);\n        return global.count(kept) + global.count(wrong) + global.count(firstTwo) + Report.size(lazy);\n    }\n\n    private static int size(Iterable<Order> values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[]),
+        ["10:29 invalid-local-assignment-value", "13:15 non-existent-method"]
+    );
+    assert_eq!(messages(("src/Demo/Report.sharp", sharp), &[])[1], "Method `take` does not exist on `List<Order>`.");
+}
+
+/// A lambda passed to a lazy operation is checked against the element type, as any argument is.
+#[test]
+fn a_lazy_operation_refuses_a_lambda_of_another_element_type() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Iterable<Order> orders)\n    {\n        Iterable<Order> kept = orders.filter((string s) => s == \"\");\n        Iterable<int> sizes = orders.map((int n) => n);\n        return Report.size(kept) + Report.size(sizes);\n    }\n\n    private static int size(Iterable<Any> values) => 0;\n}\n\nclass Order\n{\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:46 invalid-argument", "8:42 invalid-argument"]);
+    let messages = messages(("src/Demo/Report.sharp", sharp), &[]);
+    assert!(
+        messages[0].starts_with("Invalid argument type for argument #1 of `Iterable<Order>.filter`"),
+        "{messages:?}"
+    );
+    assert!(messages[1].starts_with("Invalid argument type for argument #1 of `Iterable<Order>.map`"), "{messages:?}");
+}
+
+/// Spec section 12: "A value typed as a plain PHP class keeps that class's own methods until it is held as an
+/// `Iterable<T>`." Held as one, it has only the lazy operations.
+#[test]
+fn a_plain_php_iterable_class_keeps_its_methods_until_it_is_held_as_an_iterable() {
+    let cursor = "<?php\n\nnamespace Lib;\n\nuse Demo\\Order;\n\n/** @implements \\IteratorAggregate<int, Order> */\nfinal class Cursor implements \\IteratorAggregate\n{\n    public static function open(): self\n    {\n        return new self();\n    }\n\n    /** @param \\Closure(Order): bool $keep */\n    public function filter(\\Closure $keep): self\n    {\n        return $this;\n    }\n\n    public function only(): self\n    {\n        return $this;\n    }\n\n    /** @return \\Generator<int, Order, mixed, void> */\n    public function getIterator(): \\Generator\n    {\n        yield new Order(true);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Cursor;\n\nclass Report\n{\n    public int run()\n    {\n        Cursor cursor = Cursor.open().filter(o => o.paid).only();\n        Iterable<Order> rows = Cursor.open();\n        List<Order> some = rows.filter(o => o.paid).take(2).toList();\n        rows.only();\n        return global.count(some) + Report.size(cursor);\n    }\n\n    private static int size(Cursor values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
+    let others = [("src/Lib/Cursor.php", cursor)];
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &others), ["12:14 non-existent-method"]);
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &others),
+        ["Method `only` does not exist on `Iterable<Order>`."]
+    );
+}
+
+/// A plain PHP `iterable` has no methods, so a `.php` file's method call on one stays PHP's error.
+#[test]
+fn a_method_call_on_a_php_iterable_stays_an_error_in_php() {
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @param iterable<Order> $orders */\n    public function run(iterable $orders): void\n    {\n        $orders->filter(fn (Order $o): bool => true);\n    }\n}\n\nclass Order\n{\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["10:18 invalid-method-access"]);
+}
+
 /// `Sharp\Set` is the engine's class that makes each `Set` parameter a `Set`, which only the lowering calls, as
 /// `Sharp\Collection` is the class each collection method runs on. Neither is a class PHP# code imports and calls, so
 /// `Set.from` is an unknown method, as `\Sharp\Set::from` is in PHP.

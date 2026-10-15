@@ -6605,6 +6605,222 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
     );
 }
 
+/// `App\Tenant\Order`, a plain PHP class whose rows a lazy chain reads.
+const ORDER: (&str, &str) = (
+    "src/App/Tenant/Order.php",
+    "<?php\n\nnamespace App\\Tenant;\n\nfinal class Order\n{\n    public function __construct(public bool $paid, public string $number)\n    {\n    }\n}\n",
+);
+
+/// ```php
+/// return \Sharp\Sequence::from($orders)->filter(fn ($o) => $o->paid)->map(fn ($o) => $o->number)->take(100)->toList();
+/// ```
+///
+/// A call of a lazy operation of `Iterable<T>`, spec section 12, runs the method `Sharp\IterableMethods` declares on
+/// the engine's `Sharp\Sequence`. A chain reads its receiver through one `\Sharp\Sequence::from`, and each later
+/// operation calls the `Sequence` the one before it gave.
+#[test]
+fn a_lazy_chain_is_one_sequence_from_its_receiver_and_each_operation_on_it() {
+    assert_eq!(
+        body_in(
+            "List<string> run(Iterable<Order> orders)",
+            "        return orders.filter(o => o.paid).map(o => o.number).take(100).toList();\n",
+            &[ORDER]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                METHOD_CALL
+                  METHOD_CALL
+                    METHOD_CALL
+                      METHOD_CALL
+                        STATIC_CALL
+                          ZVAL "Sharp\\Sequence"
+                          ZVAL "from"
+                          ARG_LIST
+                            VAR
+                              ZVAL "orders"
+                        ZVAL "filter"
+                        ARG_LIST
+                          ARROW_FUNC "" @9-9
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "o"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            PROP
+                              VAR
+                                ZVAL "o"
+                              ZVAL "paid"
+                            SHARP_TYPE_ARGS
+                              null
+                              ZVAL "Function<bool(App.Tenant.Order)>"
+                            null
+                      ZVAL "map"
+                      ARG_LIST
+                        ARROW_FUNC "" @9-9
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "o"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          PROP
+                            VAR
+                              ZVAL "o"
+                            ZVAL "number"
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<string(App.Tenant.Order)>"
+                          null
+                    ZVAL "take"
+                    ARG_LIST
+                      ZVAL 100
+                  ZVAL "toList"
+                  ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
+/// $held = $sizes;
+/// $held = $sizes;
+/// $small = \Sharp\Sequence::from($held)->filter(fn ($n) => $n < 10);
+/// return \Sharp\Sequence::from($small)->take(2)->toList();
+/// ```
+///
+/// A `List` held as an `Iterable<T>` has the lazy operations, whatever was assigned to its place last, so its call
+/// reads it through `from` too. A local that holds a chain's `Sequence` is read through `from` again, which gives that
+/// `Sequence` back.
+#[test]
+fn a_list_held_as_an_iterable_and_a_local_holding_a_chain_are_read_through_from() {
+    assert_eq!(
+        body_in(
+            "List<int> run(List<int> sizes)",
+            "        Iterable<int> held = sizes;\n        held = sizes;\n        Iterable<int> small = held.filter(n => n < 10);\n        return small.take(2).toList();\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "held"
+                VAR
+                  ZVAL "sizes"
+              ASSIGN
+                VAR
+                  ZVAL "held"
+                VAR
+                  ZVAL "sizes"
+              ASSIGN
+                VAR
+                  ZVAL "small"
+                METHOD_CALL
+                  STATIC_CALL
+                    ZVAL "Sharp\\Sequence"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "held"
+                  ZVAL "filter"
+                  ARG_LIST
+                    ARROW_FUNC "" @11-11
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "n"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      BINARY_OP [20]
+                        VAR
+                          ZVAL "n"
+                        ZVAL 10
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<bool(int)>"
+                      null
+              RETURN
+                METHOD_CALL
+                  METHOD_CALL
+                    STATIC_CALL
+                      ZVAL "Sharp\\Sequence"
+                      ZVAL "from"
+                      ARG_LIST
+                        VAR
+                          ZVAL "small"
+                    ZVAL "take"
+                    ARG_LIST
+                      ZVAL 2
+                  ZVAL "toList"
+                  ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
+/// return ($maybe === null ? null : \Sharp\Sequence::from($maybe)->filter(fn ($o) => $o->paid));
+/// ```
+///
+/// PHP's `?->` cannot read a receiver through `from`, so a null-safe lazy operation is the conditional a null-safe
+/// property call is, over the `Sequence` call. php-src writes each `null` as a `CONST`, which compiles to the same
+/// value as the `ZVAL` the bridge writes.
+#[test]
+fn a_null_safe_lazy_operation_is_a_conditional_over_the_sequence_call() {
+    assert_eq!(
+        body_in(
+            "Iterable<Order>? run(Iterable<Order>? maybe)",
+            "        return maybe?.filter(o => o.paid);\n",
+            &[ORDER]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "maybe"
+                    ZVAL null
+                  ZVAL null
+                  METHOD_CALL
+                    STATIC_CALL
+                      ZVAL "Sharp\\Sequence"
+                      ZVAL "from"
+                      ARG_LIST
+                        VAR
+                          ZVAL "maybe"
+                    ZVAL "filter"
+                    ARG_LIST
+                      ARROW_FUNC "" @9-9
+                        PARAM_LIST
+                          PARAM
+                            null
+                            ZVAL "o"
+                            null
+                            null
+                            null
+                            null
+                        null
+                        PROP
+                          VAR
+                            ZVAL "o"
+                          ZVAL "paid"
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "Function<bool(App.Tenant.Order)>"
+                        null
+        "#}
+    );
+}
+
 /// ```php
 /// public function many(\Sharp\Set|array ...$groups): int
 /// {

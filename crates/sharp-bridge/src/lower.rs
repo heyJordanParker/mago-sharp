@@ -2996,7 +2996,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The type PHP writes for a type that is not a union, with generics erased. A built-in type is its name, `Object`
     /// included, which only a type parameter's bound writes, and `Any` is `mixed`. A class is its full name. `Self` is `static`. A `List` is a PHP array, so its type is `array`, and a
-    /// `Map` or a `Set` is the engine's `\Sharp\Map` or `\Sharp\Set`. A generic class type is its class, and `Class<T>` is `string`, because plain PHP receives a class
+    /// `Map` or a `Set` is the engine's `\Sharp\Map` or `\Sharp\Set`, and an `Iterable` is PHP's `iterable`. A generic class type is its class, and `Class<T>` is `string`, because plain PHP receives a class
     /// value as its class-name string (spec section 25). A function type runs as PHP's `\Closure`. A type parameter is
     /// its bound, or `mixed` without one, as the PHP twin written with `@template` declares it, and the classes a bound
     /// joins with `&` are one intersection.
@@ -3038,6 +3038,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Hint::Generic(generic) if generic.name.value == b"Class" => PhpType::Named(b"string"),
             Hint::Generic(generic) if generic.name.value == b"Map" => PhpType::Classes(vec![b"Sharp\\Map"]),
             Hint::Generic(generic) if generic.name.value == b"Set" => PhpType::Classes(vec![b"Sharp\\Set"]),
+            Hint::Generic(generic) if generic.name.value == b"Iterable" => PhpType::Named(b"iterable"),
             Hint::Generic(_) => PhpType::Keyword(IS_ARRAY),
             Hint::Function(_) => PhpType::Classes(vec![b"Closure"]),
             _ => unreachable!("check_slice refuses the type `{hint}`"),
@@ -3634,7 +3635,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 },
             },
             // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static call
-            // through a class value, the extension's member, the property call, or the plain method call.
+            // through a class value, the extension's member, the lazy operation, the property call, or the plain method call.
             Expression::Call(Call::NullSafeMethod(call)) => {
                 if let Some(lowered) = self.collection_call(expression, call.object, &call.argument_list, true) {
                     return lowered;
@@ -3643,6 +3644,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let tested = self.tested_links.contains(&expression.span());
                 if tested && let Some(extension) = self.types.extension(expression) {
                     return self.extension_access(expression, &extension, call.object, Some(&call.argument_list));
+                }
+                if tested && self.types.is_lazy_operation(expression) {
+                    return self.lazy_operation(line, call.object, &call.method, &call.argument_list);
                 }
                 if tested && let Some((class, _)) = self.class_value(call.object) {
                     let method = self.member(&call.method);
@@ -3859,6 +3863,32 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn is_property_call(&self, call: &Expression, object: &Expression) -> bool {
         receiver_classes(self.types.expression_type(object)).is_some()
             && matches!(self.types.call_target(call).kind, DeclarationKind::Property { .. })
+    }
+
+    /// A lazy operation of an `Iterable<T>`, spec section 12, on the engine's `Sharp\Sequence`, as
+    /// `\Sharp\Sequence::from($object)->method(arguments)`. An `object` that is itself a lazy operation, null-safe or
+    /// not, is already a `Sequence`, so a chain reads its first receiver through one `from`.
+    fn lazy_operation(
+        &mut self,
+        line: u32,
+        object: &Expression,
+        method: &ClassLikeMemberSelector,
+        arguments: &ArgumentList,
+    ) -> u32 {
+        let is_sequence =
+            matches!(object.unparenthesized(), Expression::Call(Call::Method(_) | Call::NullSafeMethod(_)))
+                && self.types.is_lazy_operation(object.unparenthesized());
+        let mut sequence = self.expression(object);
+        if !is_sequence {
+            let class = self.string(ZEND_NAME_FQ, line, b"Sharp\\Sequence");
+            let from = self.string(0, line, b"from");
+            let source = self.node(SHARP_AST_ARG_LIST, 0, line, &[sequence]);
+            sequence = self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, from, source]);
+        }
+        let method = self.member(method);
+        let arguments = self.arguments(arguments);
+
+        self.node(SHARP_AST_METHOD_CALL, 0, line, &[sequence, method, arguments])
     }
 
     /// Whether both operands of an operator are strings or both ints, the two cases where spec section 24's operators
@@ -4443,7 +4473,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, an
-    /// extension's member, a call of a function that may be null, `f?.(x)`, or any link below a collection method call that runs as PHP on the array or below an
+    /// extension's member, a lazy operation of an `Iterable`, a call of a function that may be null, `f?.(x)`, or any link below a collection method call that runs as PHP on the array or below an
     /// extension's member, which runs as a static call, with its receiver, when `chain` is a member
     /// read, a call or an index whose chain holds one no conditional tests yet. A null there would reach the PHP
     /// function, where `?->` skips only the rest of its own chain. The walk stops at a receiver a hidden variable
@@ -4490,6 +4520,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     if !self.tested_links.contains(&link.span())
                         && (below_php_call
                             || self.types.extension(link).is_some()
+                            || self.types.is_lazy_operation(link)
                             || self.is_class_value(call.object)
                             || self.is_property_call(link, call.object))
                     {
@@ -5560,6 +5591,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             && is_current_position(self.names.get(&class.name), call)
         {
             return self.current_position(class, call);
+        }
+        if self.types.is_lazy_operation(expression) {
+            return self.lazy_operation(self.line(call), call.object, &call.method, &call.argument_list);
         }
         if let Some(lowered) = self.collection_call(expression, call.object, &call.argument_list, false) {
             return lowered;

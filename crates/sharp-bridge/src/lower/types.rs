@@ -842,6 +842,16 @@ impl<'analysis> Types<'analysis> {
         Some((collection, method.as_bytes().to_ascii_lowercase()))
     }
 
+    /// Whether the method call `call`, null-safe or not, runs a lazy operation of a PHP# `Iterable<T>`, spec section 12,
+    /// which `Sharp\IterableMethods` declares and the engine's `Sharp\Sequence` runs.
+    pub(crate) fn is_lazy_operation(&self, call: &Expression) -> bool {
+        matches!(
+            self.artifacts.get_callees(call).next(),
+            Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, _), .. })
+                if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\IterableMethods")
+        )
+    }
+
     /// The plain PHP function the method call `call` runs, as `Pdf.render(html)` and `global.now()` call one, spec
     /// section 23, with the name its declaration writes. None for a call of a method.
     pub(crate) fn namespace_function(&self, call: &Expression) -> Option<Word> {

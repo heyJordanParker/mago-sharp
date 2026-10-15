@@ -363,8 +363,8 @@ where
 }
 
 /// Returns the PHP# collection type, as in `Map<string, int>`, that `object` stands for when it is `Sharp\ListMethods`,
-/// `Sharp\MapMethods` or `Sharp\SetMethods`. The analyzer checks a method call on a `List`, `Map` or `Set` against
-/// those classes, and a message names the type the code wrote instead.
+/// `Sharp\MapMethods`, `Sharp\SetMethods` or `Sharp\IterableMethods`. The analyzer checks a method call on a `List`,
+/// `Map`, `Set` or `Iterable` against those classes, and a message names the type the code wrote instead.
 #[must_use]
 pub(crate) fn display_sharp_collection<A>(context: &Context<'_, '_, A>, object: &TObject) -> Option<String>
 where
@@ -773,7 +773,8 @@ pub(crate) fn sharp_code_class_name(
     sharp_import_alias(codebase, imported_names, scope, name).unwrap_or_else(|| short_name(name))
 }
 
-/// Returns `List`, `Map` or `Set` when `object` is `Sharp\ListMethods`, `Sharp\MapMethods` or `Sharp\SetMethods`.
+/// Returns `List`, `Map`, `Set` or `Iterable` when `object` is `Sharp\ListMethods`, `Sharp\MapMethods`,
+/// `Sharp\SetMethods` or `Sharp\IterableMethods`.
 #[must_use]
 pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
     let name = object.get_name()?;
@@ -784,6 +785,8 @@ pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
         Some("Map")
     } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\SetMethods") {
         Some("Set")
+    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\IterableMethods") {
+        Some("Iterable")
     } else {
         None
     }

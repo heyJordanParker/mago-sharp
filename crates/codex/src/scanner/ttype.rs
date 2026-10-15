@@ -24,6 +24,7 @@ use crate::ttype::atomic::array::TArray;
 use crate::ttype::atomic::callable::TCallable;
 use crate::ttype::atomic::callable::TCallableSignature;
 use crate::ttype::atomic::callable::parameter::TCallableParameter;
+use crate::ttype::atomic::iterable::TIterable;
 use crate::ttype::atomic::mixed::TMixed;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
@@ -290,6 +291,10 @@ fn union_from_hint(
                         get_keyed_array(arguments.swap_remove(0), value)
                     }
                     b"Set" => wrap_atomic(TAtomic::Array(TArray::Set(Arc::new(arguments.swap_remove(0))))),
+                    // Spec section 12: anything a loop can read, PHP's `iterable` of its elements.
+                    b"Iterable" => {
+                        wrap_atomic(TAtomic::Iterable(TIterable::of_value(Arc::new(arguments.swap_remove(0)))))
+                    }
                     // A class value of one class, or of a type parameter, names it. Of any other type it holds that
                     // whole type, as `Class<int|string>` holds `int|string`, spec section 25.
                     b"Class" => {

@@ -925,9 +925,10 @@ impl CodebaseMetadata {
     /// The classes that declare a real member a PHP# extension member called `name` would hide on a value of type
     /// `receiver`, spec section 26, sorted: the member of that name that a class the value can be declares or
     /// inherits, a method or property, or one a docblock declares with `@method` or `@property`. `__call` and `__get`
-    /// declare none. A `List`, `Map` or `Set` has the methods of `Sharp\ListMethods`, `Sharp\MapMethods` or
-    /// `Sharp\SetMethods`. A type parameter shows its bound, so it has the members its bound's classes have. A class
-    /// below the type competes with no extension, which is chosen from the type the code shows.
+    /// declare none. A `List`, `Map`, `Set` or `Iterable` has the methods of `Sharp\ListMethods`, `Sharp\MapMethods`,
+    /// `Sharp\SetMethods` or `Sharp\IterableMethods`. A type parameter shows its bound, so it has the members its
+    /// bound's classes have. A class below the type competes with no extension, which is chosen from the type the code
+    /// shows.
     #[must_use]
     pub fn get_classes_hidden_by_extension(&self, receiver: &TUnion, name: &[u8]) -> Vec<Word> {
         /// The types a value of type `atomic` shows: a type parameter's bound's, at any depth, or `atomic` itself.
@@ -950,6 +951,7 @@ impl CodebaseMetadata {
                 TAtomic::Array(TArray::List(_)) => Some(word("Sharp\\ListMethods")),
                 TAtomic::Array(TArray::Keyed(_)) => Some(word("Sharp\\MapMethods")),
                 TAtomic::Array(TArray::Set(_)) => Some(word("Sharp\\SetMethods")),
+                TAtomic::Iterable(_) => Some(word("Sharp\\IterableMethods")),
                 _ => None,
             })
             .filter_map(|name| self.get_class_like(name.as_bytes()))
