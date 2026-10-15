@@ -693,7 +693,7 @@ impl<'analysis> Types<'analysis> {
             r#type
         };
         // An `Any` refuses null, which PHP's `mixed` takes, spec section 24, so only an `Any?` constrains nothing.
-        let constrains = |r#type: &TUnion| !(r#type.is_mixed() && r#type.can_be_null()) && !is_method_parameter(r#type);
+        let constrains = |r#type: &TUnion| !(is_method_parameter(r#type) || r#type.is_mixed() && r#type.can_be_null());
         let is_sharp_generic = |object: &TNamedObject| {
             object
                 .get_type_parameters()
@@ -1392,7 +1392,7 @@ fn holds_float(r#type: &TUnion) -> bool {
     r#type.types.iter().any(|atomic| match get_sharp_type(atomic) {
         Some(SharpType::List(element) | SharpType::Set(element) | SharpType::Iterable(element)) => holds_float(element),
         Some(SharpType::Map(key, value)) => holds_float(key) || holds_float(value),
-        _ => matches!(atomic, TAtomic::Scalar(scalar) if scalar.is_float()),
+        _ => atomic.is_float(),
     })
 }
 
