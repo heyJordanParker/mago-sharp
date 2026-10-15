@@ -77,11 +77,14 @@ pub enum SignatureCompatibilityIssue {
         child_name: Word,
         parent_name: Word,
     },
+    /// `substitutes` holds when the parent's parameter names a type parameter of its class, so the child's narrower
+    /// type is the type argument it substitutes, which a PHP# class's own method takes through a widened parameter.
     ErasedParameterNarrowed {
         parameter_index: usize,
         child_type: TUnion,
         parent_type: TUnion,
         bound: Option<Word>,
+        substitutes: bool,
     },
     ChangedTemplateBound {
         template: Word,
@@ -542,7 +545,7 @@ pub fn validate_erased_signature_compatibility(
         erased
     };
 
-    issues.extend(parent_method.parameters.iter().zip(&child_method.parameters).enumerate().find_map(
+    issues.extend(parent_method.parameters.iter().zip(&child_method.parameters).enumerate().filter_map(
         |(parameter_index, (parent_parameter, child_parameter))| {
             let parent_type = erased(parent_parameter, parent_class);
             let child_type = erased(child_parameter, child_class);
@@ -561,6 +564,17 @@ pub fn validate_erased_signature_compatibility(
             Some(SignatureCompatibilityIssue::ErasedParameterNarrowed {
                 parameter_index,
                 bound: bound_example(codebase, parent_parameter.type_declaration_metadata.as_ref(), &child_type),
+                substitutes: parent_parameter.type_metadata.as_ref().is_some_and(|parent| {
+                    parent.type_union.types.iter().any(|atomic| {
+                        matches!(
+                            atomic,
+                            TAtomic::GenericParameter(TGenericParameter {
+                                defining_entity: GenericParent::ClassLike(_),
+                                ..
+                            })
+                        )
+                    })
+                }),
                 child_type,
                 parent_type,
             })

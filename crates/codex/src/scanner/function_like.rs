@@ -208,6 +208,11 @@ where
         }
     }
 
+    // Spec section 5: a PHP# `internal` method runs as PHP's `public` one and reaches its class's namespace.
+    if context.program.dialect.is_sharp() && method.modifiers.contains_internal() {
+        metadata.flags |= MetadataFlags::INTERNAL_REACH;
+    }
+
     // A PHP# method is closed unless it is `virtual`, abstract or an `override`, spec section 22, so the analyzer
     // reads it as final. The engine still runs it as an open PHP method. An interface method is open, and its default
     // body is a body each class may replace.

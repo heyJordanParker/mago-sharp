@@ -390,13 +390,15 @@ impl Lowering<'_, '_> {
     }
 
     /// Whether reading `expression` runs nothing: a literal, a name, a plain PHP constant read through its namespace, a
-    /// lambda or `typeof(X)`.
+    /// lambda, `typeof(X)` or `nameof(X.y)`.
     pub(super) fn is_pure(&self, expression: &Expression) -> bool {
         match expression {
             Expression::Parenthesized(parenthesized) => self.is_pure(parenthesized.expression),
-            Expression::Literal(_) | Expression::ArrowFunction(_) | Expression::Closure(_) | Expression::TypeOf(_) => {
-                true
-            }
+            Expression::Literal(_)
+            | Expression::ArrowFunction(_)
+            | Expression::Closure(_)
+            | Expression::TypeOf(_)
+            | Expression::NameOf(_) => true,
             Expression::ConstantAccess(name) => {
                 matches!(self.names.binding(&name.name), Some(Binding::Local(_) | Binding::This | Binding::Constant))
             }

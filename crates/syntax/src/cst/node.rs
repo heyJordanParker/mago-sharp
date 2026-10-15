@@ -174,6 +174,7 @@ use crate::cst::cst::Modifier;
 use crate::cst::cst::Module;
 use crate::cst::cst::ModuleMember;
 use crate::cst::cst::ModuleParent;
+use crate::cst::cst::NameOf;
 use crate::cst::cst::NamedArgument;
 use crate::cst::cst::NamedConstructor;
 use crate::cst::cst::NamedPlaceholderArgument;
@@ -469,6 +470,7 @@ pub enum NodeKind {
     Literal,
     Pipe,
     TypeOf,
+    NameOf,
     With,
     ObjectInitializer,
     NamedValue,
@@ -888,6 +890,7 @@ pub enum Node<'ast, 'arena> {
     Variable(&'ast Variable<'arena>),
     Pipe(&'ast Pipe<'arena>),
     TypeOf(&'ast TypeOf<'arena>),
+    NameOf(&'ast NameOf<'arena>),
     With(&'ast With<'arena>),
     ObjectInitializer(&'ast ObjectInitializer<'arena>),
     NamedValue(&'ast NamedValue<'arena>),
@@ -1279,6 +1282,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Variable(_) => NodeKind::Variable,
             Self::Pipe(_) => NodeKind::Pipe,
             Self::TypeOf(_) => NodeKind::TypeOf,
+            Self::NameOf(_) => NodeKind::NameOf,
             Self::With(_) => NodeKind::With,
             Self::ObjectInitializer(_) => NodeKind::ObjectInitializer,
             Self::NamedValue(_) => NodeKind::NamedValue,
@@ -1697,6 +1701,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 }
                 f(Node::PropertyItem(&node.item));
                 f(Node::PropertyHookList(&node.hook_list));
+                for behavior in node.behaviors.iter().flat_map(|behaviors| behaviors.behaviors.iter()) {
+                    f(Node::Hint(behavior));
+                }
                 for item in node.initial_value.iter() {
                     f(Node::Expression(item.value));
                 }
@@ -2364,6 +2371,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     Expression::As(node) => Node::As(node),
                     Expression::PatternMatch(node) => Node::PatternMatch(node),
                     Expression::TypeOf(node) => Node::TypeOf(node),
+                    Expression::NameOf(node) => Node::NameOf(node),
                     Expression::With(node) => Node::With(node),
                     Expression::GenericClass(node) => Node::GenericClass(node),
                     Expression::SuperOf(node) => Node::SuperOf(node),
@@ -3160,6 +3168,11 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Expression(generic_class.class));
                 f(Node::TypeArgumentList(&generic_class.type_arguments));
             }
+            Node::NameOf(name_of) => {
+                f(Node::Keyword(&name_of.nameof));
+                f(Node::Identifier(&name_of.class));
+                f(Node::LocalIdentifier(&name_of.property));
+            }
             Node::With(with) => {
                 f(Node::Expression(with.object));
                 f(Node::Keyword(&with.with));
@@ -3479,6 +3492,7 @@ impl HasSpan for Node<'_, '_> {
             Self::Variable(node) => node.span(),
             Self::Pipe(node) => node.span(),
             Self::TypeOf(node) => node.span(),
+            Self::NameOf(node) => node.span(),
             Self::With(node) => node.span(),
             Self::ObjectInitializer(node) => node.span(),
             Self::NamedValue(node) => node.span(),

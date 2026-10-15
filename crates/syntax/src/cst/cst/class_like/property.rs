@@ -11,6 +11,7 @@ use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::modifier::Modifier;
+use crate::cst::cst::modifier::ModifierSequenceExt;
 use crate::cst::cst::terminator::Terminator;
 use crate::cst::cst::type_hint::Hint;
 use crate::cst::cst::variable::DirectVariable;
@@ -85,7 +86,20 @@ pub struct HookedProperty<'arena> {
     pub hint: Option<Hint<'arena>>,
     pub item: PropertyItem<'arena>,
     pub hook_list: PropertyHookList<'arena>,
+    pub behaviors: Option<PropertyBehaviorList<'arena>>,
     pub initial_value: Option<PropertyInitialValue<'arena>>,
+}
+
+/// The behaviors a PHP# auto-property runs its `get` and `set` through, spec section 6.4.
+///
+/// They follow its accessors: `via Trimmed, Tracked;`, and `via Trimmed = "";` before an initial value, which ends with
+/// its own `;`. Each names a type, so a generic behavior takes its type arguments, as in `via Logged<string>`.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct PropertyBehaviorList<'arena> {
+    pub via: Span,
+    pub behaviors: TokenSeparatedSequence<'arena, Hint<'arena>>,
+    pub semicolon: Option<Span>,
 }
 
 /// A PHP# computed property, which runs its expression on every read, as PHP's `get => expr;` hook does:
@@ -310,15 +324,34 @@ impl<'arena> Property<'arena> {
         }
     }
 
-    /// Returns `true` when a PHP# property's initial value runs at the start of the constructor instead of being
-    /// PHP's default: a value that is not a constant expression, or any value of a property that runs as `readonly`,
-    /// which takes no default.
+    /// Returns `true` when a PHP# instance property's initial value runs at the start of the constructor instead of
+    /// being PHP's default: a value that is not a constant expression, any value of a property that runs as
+    /// `readonly`, which takes no default, or any value of a property with behaviors, whose `set` processes it (spec
+    /// section 6.4). A static member's runs once, when a request first uses its class's statics.
     #[must_use]
     pub fn initial_value_runs_in_constructor(&self) -> bool {
-        self.initial_value().is_some_and(|value| {
-            matches!(self, Property::Hooked(hooked) if hooked.hook_list.is_readonly())
-                || !value.is_constant(&PHPVersion::PHP85, false)
-        })
+        !self.modifiers().contains_static()
+            && self.initial_value().is_some_and(|value| {
+                matches!(self, Property::Hooked(hooked) if hooked.hook_list.is_readonly() || hooked.behaviors.is_some())
+                    || !value.is_constant(&PHPVersion::PHP85, false)
+            })
+    }
+
+    /// Returns `true` when a PHP# instance property runs code at the start of the constructor: an initial value
+    /// [that runs there](Self::initial_value_runs_in_constructor), or behaviors, which the constructor creates before
+    /// any initial value (spec section 6.4).
+    #[must_use]
+    pub fn runs_in_constructor(&self) -> bool {
+        self.initial_value_runs_in_constructor()
+            || matches!(self, Property::Hooked(hooked) if hooked.behaviors.is_some())
+    }
+
+    /// Returns `true` when a PHP# static member's initial value runs once, when a request first uses its class's
+    /// statics, instead of being PHP's default: a value that is not a constant expression.
+    #[must_use]
+    pub fn initial_value_runs_after_class(&self) -> bool {
+        self.modifiers().contains_static()
+            && self.initial_value().is_some_and(|value| !value.is_constant(&PHPVersion::PHP85, false))
     }
 }
 
@@ -351,6 +384,13 @@ impl PropertyHook<'_> {
     #[must_use]
     pub fn is_setter(&self) -> bool {
         self.name.value == b"set" || self.name.value == b"init"
+    }
+
+    /// Returns `true` for a PHP# change observer, `willSet` or `didSet`, which runs before or after each write of its
+    /// property, inside the `set` hook (spec section 6.2), and takes `value` as `set` does.
+    #[must_use]
+    pub fn is_observer(&self) -> bool {
+        self.name.value == b"willSet" || self.name.value == b"didSet"
     }
 }
 
@@ -418,9 +458,21 @@ impl HasSpan for PlainProperty<'_> {
     }
 }
 
+impl HasSpan for PropertyBehaviorList<'_> {
+    fn span(&self) -> Span {
+        let end = self.semicolon.or_else(|| self.behaviors.nodes.last().map(HasSpan::span)).unwrap_or(self.via);
+
+        Span::between(self.via, end)
+    }
+}
+
 impl HasSpan for HookedProperty<'_> {
     fn span(&self) -> Span {
-        let end = self.initial_value.as_ref().map_or_else(|| self.hook_list.span(), HasSpan::span);
+        let end = match (&self.initial_value, &self.behaviors) {
+            (Some(initial_value), _) => initial_value.span(),
+            (None, Some(behaviors)) => behaviors.span(),
+            (None, None) => self.hook_list.span(),
+        };
 
         if let Some(attribute_list) = self.attribute_lists.first() {
             return Span::between(attribute_list.span(), end);

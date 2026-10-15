@@ -2,13 +2,18 @@ use mago_allocator::Arena;
 use std::rc::Rc;
 
 use mago_codex::context::ScopeContext;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_specialized_template_type;
+use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
@@ -17,6 +22,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::PlainProperty;
 use mago_syntax::cst::Property;
@@ -26,6 +32,7 @@ use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::PropertyHookConcreteExpressionBody;
 use mago_syntax::cst::PropertyItem;
+use mago_syntax::cst::built_in_generic_arity;
 use mago_word::Word;
 use mago_word::word;
 
@@ -49,13 +56,20 @@ use crate::statement::function_like::get_this_type;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_missing_return;
 use crate::statement::function_like::report_undefined_type_references;
+use crate::statement::get_type_from_hint;
 use crate::statement::r#return::handle_return_value;
 use crate::utils::int_refused_for_float;
+use crate::utils::names::article;
+use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
+use crate::utils::names::display_property_name;
 use crate::utils::names::display_sharp_accessor;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::report_int_for_float;
+use crate::visibility::is_visible_from_scope;
+use crate::visibility::reaches_internal;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Property<'arena> {
     fn analyze<'ctx, A>(
@@ -274,9 +288,203 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for HookedProperty<'arena> {
         for hook in &self.hook_list.hooks {
             analyze_property_hook(hook, property_name, context, block_context, artifacts)?;
         }
+        if let Some(behaviors) = &self.behaviors {
+            let mut classes = Vec::new();
+            for behavior in behaviors.behaviors.iter() {
+                classes.extend(check_behavior(behavior, property_name, context, block_context, artifacts));
+            }
+            effects::summary::record_behaviors(context, block_context, artifacts, property_name, &classes);
+        }
 
         Ok(())
     }
+}
+
+/// Spec section 6.4: a behavior runs a property's `get` and `set`, so it is a class that implements
+/// `Sharp\Behavior<T>` for the property's type `T`, which PHP# creates with `new` and no arguments. A generic one takes
+/// its type arguments as any written type does, which the analysis records for the bridge's `new`, as it records a
+/// generic `new`'s. The behavior's class and where it is named, unless it names no class.
+fn check_behavior<A>(
+    behavior: &Hint<'_>,
+    property_name: Word,
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Option<(Word, Span)>
+where
+    A: Arena,
+{
+    let name = match behavior {
+        Hint::Identifier(identifier) => word(context.resolved_names.get(identifier)),
+        Hint::Generic(generic) if built_in_generic_arity(generic.name.value).is_none() => {
+            word(context.resolved_names.get(&generic.name))
+        }
+        // Semantics refuses a behavior that names no class.
+        _ => return None,
+    };
+    let Some(class) = context.codebase.get_class_like(name.as_bytes()) else {
+        // PHP# creates a behavior with `new`, so an unknown one is named as `new` names it.
+        let missing = display_class_like_name(context, name);
+        context.collector.report_with_code(
+            IssueCode::NonExistentClass,
+            Issue::error(format!("Class `{missing}` not found."))
+                .with_annotation(
+                    Annotation::primary(behavior.span())
+                        .with_message(format!("`{missing}` is not defined or cannot be autoloaded")),
+                )
+                .with_help(
+                    "Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.",
+                ),
+        );
+        return None;
+    };
+    let behavior_type = get_type_from_hint(context, block_context, artifacts, behavior);
+    if !class.template_types.is_empty() {
+        let TAtomic::Object(TObject::Named(named)) = behavior_type.get_single() else {
+            unreachable!("a generic class written as a type is a named object");
+        };
+        let type_arguments = named.type_parameters.clone().unwrap_or_default();
+        artifacts.record_type_arguments(
+            behavior.span(),
+            (0..class.template_types.len()).map(|index| type_arguments.get(index).cloned()),
+            context.codebase,
+        );
+    }
+    let checked = Some((class.name, behavior.span()));
+    let Some(property_type) = block_context
+        .scope
+        .get_class_like()
+        .and_then(|class_like| class_like.properties.get(&property_name))
+        .and_then(|property| property.type_metadata.as_ref())
+        .map(|metadata| metadata.type_union.clone())
+    else {
+        return checked;
+    };
+
+    // The behavior as written, with its type arguments only when it writes them.
+    let behavior_name = match behavior {
+        Hint::Generic(_) => display_sharp_type(context, &behavior_type),
+        _ => display_class_like_name(context, class.original_name).to_string(),
+    };
+    let required = context
+        .codebase
+        .get_method(class.name.as_bytes(), b"__construct")
+        .and_then(|constructor| {
+            constructor
+                .parameters
+                .iter()
+                .find(|parameter| !parameter.flags.has_default() && !parameter.flags.is_variadic())
+        })
+        .map(|parameter| word(mago_bytes::trim_start_byte(parameter.name.0.as_bytes(), b'$')));
+    let (message, help) = if !class.kind.is_class() || class.flags.is_abstract() {
+        (
+            format!("`{behavior_name}` can't be created: PHP# creates each behavior with `new` for each object."),
+            format!(
+                "Name a class that implements `Behavior` for the property's type, such as one that extends `{behavior_name}`."
+            ),
+        )
+    } else if let Some(parameter) = required {
+        (
+            format!(
+                "`{behavior_name}` needs `{parameter}` to be created: PHP# creates each behavior as `new {behavior_name}()`."
+            ),
+            format!("Give `{parameter}` a default value, or keep what it holds in the behavior's own fields."),
+        )
+    } else if let Some(access) = closed_constructor(context, block_context, class) {
+        let owner = block_context
+            .scope
+            .get_class_like()
+            .map_or_else(String::new, |owner| display_class_like_name(context, owner.original_name).to_string());
+        (
+            format!(
+                "`{owner}` can't create `{behavior_name}`: its constructor is `{access}`, and PHP# creates each behavior as `new {behavior_name}()` in `{owner}`."
+            ),
+            format!("Make the constructor of `{behavior_name}` reachable from `{owner}`, as `public` is."),
+        )
+    } else {
+        let expected = TUnion::from_atomic(TAtomic::Object(TObject::Named(
+            TNamedObject::new(word(b"Sharp\\Behavior")).with_type_parameters(Some(vec![property_type.clone()])),
+        )));
+        if union_comparator::is_contained_by(
+            context.codebase,
+            &behavior_type,
+            &expected,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::new(),
+        ) {
+            return checked;
+        }
+
+        let property = display_property_name(context, property_name);
+        let property_type = display_sharp_type(context, &property_type);
+        let expected = display_sharp_type(context, &expected);
+        let TAtomic::Object(TObject::Named(named)) = behavior_type.get_single() else {
+            unreachable!("a class written as a type is a named object");
+        };
+        let implemented = get_specialized_template_type(
+            context.codebase,
+            word(b"T"),
+            word(b"Sharp\\Behavior"),
+            class,
+            named.type_parameters.as_deref(),
+        )
+        .filter(|_| context.codebase.class_implements(class.name.as_bytes(), b"Sharp\\Behavior"));
+        let message = match implemented {
+            Some(implemented) => {
+                let implemented = display_sharp_type(context, &implemented);
+                format!(
+                    "`{behavior_name}` is a `Behavior<{implemented}>`, and `{property}` is {} `{property_type}`.",
+                    article(&property_type)
+                )
+            }
+            None => format!("`{behavior_name}` is no `Behavior`, so it can't run the `get` and `set` of `{property}`."),
+        };
+
+        (
+            message,
+            format!(
+                "Name a behavior that implements `{expected}`, as `{property}` is {} `{property_type}`.",
+                article(&property_type)
+            ),
+        )
+    };
+
+    context.collector.report_with_code(
+        IssueCode::InvalidPropertyBehavior,
+        Issue::error(message)
+            .with_annotation(Annotation::primary(behavior.span()).with_message("Named here."))
+            .with_note("A behavior runs the property's `get` and `set`: it is a class that implements `Behavior` for the property's type, and PHP# creates one for each object with no arguments.")
+            .with_help(help),
+    );
+
+    checked
+}
+
+/// The access level of the constructor of the behavior `class` when the class being analyzed, which creates each of
+/// its behaviors with `new`, can't call it: `private` or `protected` outside the class that declares it, or `internal`
+/// outside its namespace, spec section 5.
+fn closed_constructor<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    class: &ClassLikeMetadata,
+) -> Option<String>
+where
+    A: Arena,
+{
+    let declaring = class.declaring_method_ids.get(&word(b"__construct"))?.get_class_name();
+    let constructor = context.codebase.get_method(declaring.as_bytes(), b"__construct")?;
+    let visibility = constructor.method_metadata.as_ref()?.visibility;
+    let is_internal = constructor.flags.is_internal_reach();
+    let reached = is_visible_from_scope(
+        context.codebase,
+        visibility,
+        declaring.as_bytes(),
+        block_context.scope.get_class_like_name(),
+    ) && reaches_internal(context, class, is_internal);
+
+    (!reached).then(|| if is_internal { "internal".to_owned() } else { visibility.to_string() })
 }
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for PropertyHook<'arena> {
@@ -315,8 +523,10 @@ where
         return Ok(());
     };
 
-    // A PHP# `init` body runs as the `set` hook it lowers to, under which the codex records it.
-    let hook_name = if context.dialect.is_sharp() && hook.is_setter() { b"set".as_slice() } else { hook.name.value };
+    // A PHP# `init` body runs as the `set` hook it lowers to, under which the codex records it, and so does an observer,
+    // spec section 6.2.
+    let is_set = context.dialect.is_sharp() && (hook.is_setter() || hook.is_observer());
+    let hook_name = if is_set { b"set".as_slice() } else { hook.name.value };
     let parameter_name = hook.parameter_list.as_ref().and_then(|p| p.parameters.first()).map(|p| word(p.variable.name));
     let mut hook_block_context =
         hook_block_context(hook_name, parameter_name, property_name, context, parent_block_context)?;
@@ -366,7 +576,9 @@ where
         }
         PropertyHookConcreteBody::Expression(expr_body) => FunctionLikeBody::Expression(expr_body.expression),
     };
-    record_accessor_summary(hook_name, property_name, parameters, code, context, parent_block_context, artifacts);
+    // An observer keeps a summary of its own, which each write runs beside the `set` body's.
+    let accessor = if hook.is_observer() { hook.name.value } else { hook_name };
+    record_accessor_summary(accessor, property_name, parameters, code, context, parent_block_context, artifacts);
 
     Ok(())
 }
@@ -445,7 +657,13 @@ where
 {
     let mut scope = ScopeContext::new(parent_block_context.scope.get_reference_origin());
     scope.set_class_like(parent_block_context.scope.get_class_like());
-    scope.set_static(false);
+    // A static property's accessors run as its class's static methods, with no `this`.
+    let is_static = parent_block_context
+        .scope
+        .get_class_like()
+        .and_then(|class_like| class_like.properties.get(&property_name))
+        .is_some_and(|property| property.flags.is_static());
+    scope.set_static(is_static);
 
     if let Some(class_like) = parent_block_context.scope.get_class_like()
         && let Some(property) = class_like.properties.get(&property_name)
@@ -469,7 +687,9 @@ where
 
     let mut hook_block_context = BlockContext::new(scope, context.settings.register_super_globals);
 
-    if let Some(class_like_metadata) = parent_block_context.scope.get_class_like() {
+    if let Some(class_like_metadata) = parent_block_context.scope.get_class_like()
+        && !is_static
+    {
         hook_block_context.locals.insert(
             Word::from("$this"),
             Rc::new(wrap_atomic(TAtomic::Object(get_this_type(context, class_like_metadata, None)))),

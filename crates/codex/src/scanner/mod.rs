@@ -1134,14 +1134,16 @@ where
 
     #[inline]
     fn walk_out_class(&mut self, class: &'arena Class<'arena>, context: &mut Context<'ctx, 'arena, A>) {
-        // The bridge gives a PHP# class without a constructor one for its initial values that are not constant, so a
-        // subclass's `: super()` reaches it from any file.
+        // The bridge gives a PHP# class without a constructor one for the initial values that run there and its
+        // behaviors, so a subclass's `: super()` reaches it from any file.
         if !self.has_constructor
             && context.program.dialect.is_sharp()
-            && class.members.iter().any(|member| {
-                matches!(member, ClassLikeMember::Property(property) if property.initial_value_runs_in_constructor())
-            })
-            && let Some(class_like_metadata) = self.stack.last().and_then(|class| self.codebase.class_likes.get_mut(class))
+            && class
+                .members
+                .iter()
+                .any(|member| matches!(member, ClassLikeMember::Property(property) if property.runs_in_constructor()))
+            && let Some(class_like_metadata) =
+                self.stack.last().and_then(|class| self.codebase.class_likes.get_mut(class))
         {
             let constructor = scan_initial_values_constructor(class, context);
             let method_identifier = MethodIdentifier::new(class_like_metadata.name, constructor.name);

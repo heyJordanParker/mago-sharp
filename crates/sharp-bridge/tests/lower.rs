@@ -1217,13 +1217,15 @@ fn a_method_is_a_public_function_with_its_return_type_after_its_parameters() {
 /// ```php
 /// private int $count = 0;
 /// protected \Lib\Calc $calc;
+/// public function __construct(\Lib\Calc $calc) { $this->calc = $calc; }
 /// ```
 ///
-/// `[4]` and `[2]` are `ZEND_ACC_PRIVATE` and `ZEND_ACC_PROTECTED`.
+/// `[32772]` and `[32770]` are `ZEND_ACC_PRIVATE` and `ZEND_ACC_PROTECTED` with `ZEND_ACC_FIELD`, `1 << 15`, which
+/// `ReflectionProperty::isField()` reads.
 #[test]
 fn a_field_is_a_property_group_of_one_property() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int count = 0;\n    protected Calc calc;\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int count = 0;\n    protected Calc calc;\n\n    public Report(Calc calc)\n    {\n        this.calc = calc;\n    }\n}\n",
         &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")],
     );
     let class = lowered.child(lowered.root(), 2);
@@ -1232,7 +1234,7 @@ fn a_field_is_a_property_group_of_one_property() {
         lowered.render(lowered.child(class, 2)),
         indoc! {r#"
             STMT_LIST
-              PROP_GROUP [4]
+              PROP_GROUP [32772]
                 ZVAL [1] "int"
                 PROP_DECL
                   PROP_ELEM
@@ -1241,7 +1243,7 @@ fn a_field_is_a_property_group_of_one_property() {
                     null
                     null
                 null
-              PROP_GROUP [2]
+              PROP_GROUP [32770]
                 ZVAL "Lib\\Calc"
                 PROP_DECL
                   PROP_ELEM
@@ -1249,6 +1251,26 @@ fn a_field_is_a_property_group_of_one_property() {
                     null
                     null
                     null
+                null
+              METHOD [1] "__construct" @10-13
+                PARAM_LIST
+                  PARAM
+                    ZVAL "Lib\\Calc"
+                    ZVAL "calc"
+                    null
+                    null
+                    null
+                    null
+                null
+                STMT_LIST
+                  ASSIGN
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "calc"
+                    VAR
+                      ZVAL "calc"
+                null
                 null
         "#}
     );
@@ -1259,14 +1281,15 @@ fn a_field_is_a_property_group_of_one_property() {
 /// private \Sharp\Map $cache = new \Sharp\Map();
 /// private \Closure $priceOf;
 /// private \Closure $charge;
+/// public function __construct(\Closure $priceOf, \Closure $charge) { … }
 /// ```
 ///
-/// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, `[4]`,
-/// while PHP makes a member with no modifier `public`.
+/// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, `[32772]`
+/// with `ZEND_ACC_FIELD`, while PHP makes a member with no modifier `public`.
 #[test]
 fn a_field_without_an_access_modifier_is_a_private_property() {
     let lowered = Lowered::with(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Money(Offer)> priceOf, Function<Charge(Cart) uses Http> charge)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n    }\n}\n",
         &[
             SHOP,
             (
@@ -1281,7 +1304,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
         lowered.render(lowered.child(class, 2)),
         indoc! {r#"
             STMT_LIST
-              PROP_GROUP [4]
+              PROP_GROUP [32772]
                 SHARP_TYPE_ARGS
                   ZVAL "Sharp\\Map"
                   ZVAL "Map<string, App.Shop.Plan>"
@@ -1308,7 +1331,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                           ARRAY_ELEM
                             ZVAL null
                             null
-              PROP_GROUP [4]
+              PROP_GROUP [32772]
                 ZVAL "Closure"
                 PROP_DECL
                   PROP_ELEM
@@ -1317,7 +1340,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                     null
                     null
                 null
-              PROP_GROUP [4]
+              PROP_GROUP [32772]
                 ZVAL "Closure"
                 PROP_DECL
                   PROP_ELEM
@@ -1325,6 +1348,40 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                     null
                     null
                     null
+                null
+              METHOD [1] "__construct" @9-13
+                PARAM_LIST
+                  PARAM
+                    ZVAL "Closure"
+                    ZVAL "priceOf"
+                    null
+                    null
+                    null
+                    null
+                  PARAM
+                    ZVAL "Closure"
+                    ZVAL "charge"
+                    null
+                    null
+                    null
+                    null
+                null
+                STMT_LIST
+                  ASSIGN
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "priceOf"
+                    VAR
+                      ZVAL "priceOf"
+                  ASSIGN
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "charge"
+                    VAR
+                      ZVAL "charge"
+                null
                 null
         "#}
     );
@@ -1348,7 +1405,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
 #[test]
 fn an_auto_property_is_a_property_with_its_set_visibility() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    public int total { get; protected set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n\n    public Report()\n    {\n        this.id = 1;\n        this.hidden = 2;\n    }\n}\n",
+        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    public int total { get; protected set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n\n    public Report()\n    {\n        this.name = \"\";\n        this.id = 1;\n        this.total = 0;\n        this.hidden = 2;\n    }\n}\n",
     );
     let groups: Vec<(u32, String)> = lowered
         .nodes()
@@ -1547,7 +1604,7 @@ fn property_groups(lowered: &Lowered) -> Vec<String> {
 #[test]
 fn accessor_bodies_are_property_hooks() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n    public int slug { get; init => field = value * 2; }\n\n    public Report()\n    {\n        this.guarded = 1;\n    }\n\n    public void resize(int to)\n    {\n    }\n}\n",
+        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n    public int slug { get; init => field = value * 2; }\n\n    public Report()\n    {\n        this.name = \"\";\n        this.count = 0;\n        this.size = 0;\n        this.guarded = 1;\n    }\n\n    public void resize(int to)\n    {\n    }\n}\n",
     );
 
     assert_eq!(
@@ -1804,6 +1861,1061 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 }
 
 /// ```php
+/// class Tally
+/// {
+///     public static function {'doubled#get'}(): int { return Tally::{'total#get'}() * 2; }
+///     private static int $total = 0;
+///     public static function {'total#get'}(): int { return self::$total; }
+///     private static function {'total#set'}(int $value) { self::$total = $value + 1; }
+///
+///     public static function run(): int
+///     {
+///         Tally::{'total#set'}($value#1 = 4) ?? $value#1;
+///         Tally::{'total#set'}($value#1 = Tally::{'total#get'}() + 2) ?? $value#1;
+///         return (Tally::{'total#set'}(($old#1 = Tally::{'total#get'}()) + 1) ?? $old#1) + Tally::{'doubled#get'}();
+///     }
+/// }
+/// ```
+///
+/// Decision 3: PHP has no hooks on a static, so a static computed property or one with an accessor body runs its
+/// accessors as its class's hidden static methods, `name#get` at the property's level and `name#set` at its `set`'s,
+/// `[17]` being `ZEND_ACC_PUBLIC | ZEND_ACC_STATIC` and `[20]` `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`. Its storage is a
+/// private static only they reach, `[20]`. Every read calls `name#get`, and every write `name#set`, with the
+/// value written held in a hidden variable, so the write's value is the value written, and a postfix `++` the value
+/// read.
+/// ```php
+/// public static function {'twice#get'}(): int { return 2; }
+/// private static int $hits = 0;
+/// public static function {'hits#set'}(int $value) { Meter::log("hit"); self::$hits = $value; }
+/// protected static function {'label#set'}(string $value) { self::$label = $value; Meter::log(self::$label); }
+///
+/// Meter::{'hits#set'}($value#1 = Meter::{'hits#get'}() + 1) ?? $value#1;
+/// Meter::{'hits#set'}(($old#1 = Meter::{'hits#get'}()) - 1) ?? $old#1;
+/// Meter::{'note#get'}() ?? (Meter::{'note#set'}($value#1 = "n") ?? $value#1);
+/// Meter::{'label#set'}($value#1 = Meter::{'label#get'}() . "l") ?? $value#1;
+///
+/// private static function #statics(): void { self::$label = strval(1); }
+/// ```
+///
+/// Decision 3, for each form a static property's accessors take: a `get` body of either form, `set;` and a narrower
+/// `protected set`, and `willSet` before and `didSet` after the write. Prefix `++` and `--` give the value written and
+/// postfix `--` the value read, `??=` writes only when the read is null, and `+=` on a string appends. A static's
+/// initial value fills its storage, spec section 6.2: a constant one is its default, and any other a write of the
+/// storage in `#statics`, which runs when a request first builds the class's statics, so it runs no observer.
+#[test]
+fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_methods() {
+    let lowered = Lowered::new(
+        "class Meter\n{\n    public static int twice { get => 2; }\n    public static int thrice { get { return 3; } }\n    public static int hits { get; set; willSet => Meter.log(\"hit\"); } = 0;\n    public static string label { get; protected set; didSet => Meter.log(field); } = global.strval(1);\n    public static string? note { get; set; didSet => Meter.log(field); } = null;\n\n    public static void log(string? text)\n    {\n    }\n\n    public static void run()\n    {\n        ++Meter.hits;\n        --Meter.hits;\n        Meter.hits--;\n        Meter.note ??= \"n\";\n        Meter.label += \"l\";\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r##"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              CLASS "Meter" @1-21
+                null
+                null
+                STMT_LIST
+                  METHOD [17] "twice#get" @3-3
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ZVAL 2
+                    ZVAL [1] "int"
+                    null
+                  METHOD [17] "thrice#get" @4-4
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ZVAL 3
+                    ZVAL [1] "int"
+                    null
+                  PROP_GROUP [20]
+                    ZVAL [1] "int"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "hits"
+                        ZVAL 0
+                        null
+                        null
+                    null
+                  METHOD [17] "hits#get" @5-5
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "hits"
+                    ZVAL [1] "int"
+                    null
+                  METHOD [17] "hits#set" @5-5
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "int"
+                        ZVAL "value"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      STMT_LIST
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "log"
+                          ARG_LIST
+                            ZVAL "hit"
+                      STMT_LIST
+                        ASSIGN
+                          STATIC_PROP
+                            ZVAL [1] "self"
+                            ZVAL "hits"
+                          VAR
+                            ZVAL "value"
+                    null
+                    null
+                  PROP_GROUP [20]
+                    ZVAL [1] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "label"
+                        null
+                        null
+                        null
+                    null
+                  METHOD [17] "label#get" @6-6
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "label"
+                    ZVAL [1] "string"
+                    null
+                  METHOD [18] "label#set" @6-6
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "string"
+                        ZVAL "value"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      STMT_LIST
+                        ASSIGN
+                          STATIC_PROP
+                            ZVAL [1] "self"
+                            ZVAL "label"
+                          VAR
+                            ZVAL "value"
+                      STMT_LIST
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "log"
+                          ARG_LIST
+                            STATIC_PROP
+                              ZVAL [1] "self"
+                              ZVAL "label"
+                    null
+                    null
+                  PROP_GROUP [20]
+                    ZVAL [257] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "note"
+                        ZVAL null
+                        null
+                        null
+                    null
+                  METHOD [17] "note#get" @7-7
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "note"
+                    ZVAL [257] "string"
+                    null
+                  METHOD [17] "note#set" @7-7
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [257] "string"
+                        ZVAL "value"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      STMT_LIST
+                        ASSIGN
+                          STATIC_PROP
+                            ZVAL [1] "self"
+                            ZVAL "note"
+                          VAR
+                            ZVAL "value"
+                      STMT_LIST
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "log"
+                          ARG_LIST
+                            STATIC_PROP
+                              ZVAL [1] "self"
+                              ZVAL "note"
+                    null
+                    null
+                  METHOD [17] "log" @9-11
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [257] "string"
+                        ZVAL "text"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "void"
+                      ZVAL "Function<void(string?)>"
+                    null
+                  METHOD [17] "run" @13-20
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      COALESCE
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "hits#set"
+                          ARG_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "value#1"
+                              BINARY_OP [1]
+                                STATIC_CALL
+                                  ZVAL "Meter"
+                                  ZVAL "hits#get"
+                                  ARG_LIST
+                                ZVAL 1
+                        VAR
+                          ZVAL "value#1"
+                      COALESCE
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "hits#set"
+                          ARG_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "value#1"
+                              BINARY_OP [2]
+                                STATIC_CALL
+                                  ZVAL "Meter"
+                                  ZVAL "hits#get"
+                                  ARG_LIST
+                                ZVAL 1
+                        VAR
+                          ZVAL "value#1"
+                      COALESCE
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "hits#set"
+                          ARG_LIST
+                            BINARY_OP [2]
+                              ASSIGN
+                                VAR
+                                  ZVAL "old#1"
+                                STATIC_CALL
+                                  ZVAL "Meter"
+                                  ZVAL "hits#get"
+                                  ARG_LIST
+                              ZVAL 1
+                        VAR
+                          ZVAL "old#1"
+                      COALESCE
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "note#get"
+                          ARG_LIST
+                        COALESCE
+                          STATIC_CALL
+                            ZVAL "Meter"
+                            ZVAL "note#set"
+                            ARG_LIST
+                              ASSIGN
+                                VAR
+                                  ZVAL "value#1"
+                                ZVAL "n"
+                          VAR
+                            ZVAL "value#1"
+                      COALESCE
+                        STATIC_CALL
+                          ZVAL "Meter"
+                          ZVAL "label#set"
+                          ARG_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "value#1"
+                              BINARY_OP [8]
+                                STATIC_CALL
+                                  ZVAL "Meter"
+                                  ZVAL "label#get"
+                                  ARG_LIST
+                                ZVAL "l"
+                        VAR
+                          ZVAL "value#1"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "void"
+                      ZVAL "Function<void()>"
+                    null
+                  METHOD [20] "#statics" @6-6
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      ASSIGN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "label"
+                        CALL
+                          ZVAL "strval"
+                          ARG_LIST
+                            ZVAL 1
+                    ZVAL [1] "void"
+                    null
+                null
+                null
+        "##}
+    );
+}
+
+#[test]
+fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
+    let lowered = Lowered::new(
+        "class Tally\n{\n    public static int doubled => Tally.total * 2;\n    public static int total { get; private set => field = value + 1; } = 0;\n\n    public static int run()\n    {\n        Tally.total = 4;\n        Tally.total += 2;\n        return Tally.total++ + Tally.doubled;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.root(), 1)),
+        indoc! {r#"
+            CLASS "Tally" @1-12
+              null
+              null
+              STMT_LIST
+                METHOD [17] "doubled#get" @3-3
+                  PARAM_LIST
+                  null
+                  STMT_LIST
+                    RETURN
+                      BINARY_OP [3]
+                        STATIC_CALL
+                          ZVAL "Tally"
+                          ZVAL "total#get"
+                          ARG_LIST
+                        ZVAL 2
+                  ZVAL [1] "int"
+                  null
+                PROP_GROUP [20]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "total"
+                      ZVAL 0
+                      null
+                      null
+                  null
+                METHOD [17] "total#get" @4-4
+                  PARAM_LIST
+                  null
+                  STMT_LIST
+                    RETURN
+                      STATIC_PROP
+                        ZVAL [1] "self"
+                        ZVAL "total"
+                  ZVAL [1] "int"
+                  null
+                METHOD [20] "total#set" @4-4
+                  PARAM_LIST
+                    PARAM
+                      ZVAL [1] "int"
+                      ZVAL "value"
+                      null
+                      null
+                      null
+                      null
+                  null
+                  STMT_LIST
+                    ASSIGN
+                      STATIC_PROP
+                        ZVAL [1] "self"
+                        ZVAL "total"
+                      BINARY_OP [1]
+                        VAR
+                          ZVAL "value"
+                        ZVAL 1
+                  null
+                  null
+                METHOD [17] "run" @6-11
+                  PARAM_LIST
+                  null
+                  STMT_LIST
+                    COALESCE
+                      STATIC_CALL
+                        ZVAL "Tally"
+                        ZVAL "total#set"
+                        ARG_LIST
+                          ASSIGN
+                            VAR
+                              ZVAL "value#1"
+                            ZVAL 4
+                      VAR
+                        ZVAL "value#1"
+                    COALESCE
+                      STATIC_CALL
+                        ZVAL "Tally"
+                        ZVAL "total#set"
+                        ARG_LIST
+                          ASSIGN
+                            VAR
+                              ZVAL "value#1"
+                            BINARY_OP [1]
+                              STATIC_CALL
+                                ZVAL "Tally"
+                                ZVAL "total#get"
+                                ARG_LIST
+                              ZVAL 2
+                      VAR
+                        ZVAL "value#1"
+                    RETURN
+                      BINARY_OP [1]
+                        COALESCE
+                          STATIC_CALL
+                            ZVAL "Tally"
+                            ZVAL "total#set"
+                            ARG_LIST
+                              BINARY_OP [1]
+                                ASSIGN
+                                  VAR
+                                    ZVAL "old#1"
+                                  STATIC_CALL
+                                    ZVAL "Tally"
+                                    ZVAL "total#get"
+                                    ARG_LIST
+                                ZVAL 1
+                          VAR
+                            ZVAL "old#1"
+                        STATIC_CALL
+                          ZVAL "Tally"
+                          ZVAL "doubled#get"
+                          ARG_LIST
+                  SHARP_TYPE_ARGS
+                    ZVAL [1] "int"
+                    ZVAL "Function<int()>"
+                  null
+              null
+              null
+        "#}
+    );
+}
+
+/// ```php
+/// public static function {'plan#get'}(): int
+/// {
+///     return \Sharp\Internal\keep('App\Tenant\Report::plan', static fn () => \trim(' a '));
+/// }
+/// ```
+///
+/// Spec section 6.5: a `static lazy` property's `name#get` runs its body on the first read and keeps the value for a
+/// singleton's lifetime, under the key of its class and name.
+#[test]
+fn a_static_lazy_property_keeps_its_value_for_a_singleton_s_lifetime() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public static lazy string plan => global.trim(\" a \");\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("plan#get"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  ZVAL "Sharp\\Internal\\keep"
+                  ARG_LIST
+                    ZVAL "App\\Tenant\\Report::plan"
+                    ARROW_FUNC [16] "" @5-5
+                      PARAM_LIST
+                      null
+                      CALL
+                        ZVAL "trim"
+                        ARG_LIST
+                          ZVAL " a "
+                      null
+                      null
+        "#}
+    );
+}
+
+/// ```php
+/// class Report
+/// {
+///     public private(set) static int $size = 3;
+///     public private(set) static \Lib\Calc $calc;
+///     private static string $name;
+///
+///     private static function #statics(): void { self::$calc = new \Lib\Calc(1); self::$name = trim(' a '); }
+/// }
+/// ```
+///
+/// Spec section 6: PHP has no `readonly` static, so a get-only static is `private(set)`, `[4113]` being
+/// `ZEND_ACC_PRIVATE_SET | ZEND_ACC_STATIC | ZEND_ACC_PUBLIC`, and the analyzer refuses every write of it. PHP gives a
+/// static only a constant default, so an initial value that isn't constant runs in the class's hidden method
+/// `#statics`, `[20]` being `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`, which the engine runs once each request, when the
+/// request first builds the class's statics.
+#[test]
+fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_statics_are_built() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int size { get; } = 3;\n    public static Calc calc { get; } = new Calc(1);\n    private static string name = global.trim(\" a \");\n}\n",
+        &[CALC_CLASS],
+    );
+
+    assert_eq!(
+        lowered.render(lowered.root()),
+        indoc! {r##"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App\\Tenant"
+                null
+              CLASS "Report" @5-10
+                null
+                null
+                STMT_LIST
+                  PROP_GROUP [4113]
+                    ZVAL [1] "int"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "size"
+                        ZVAL 3
+                        null
+                        null
+                    null
+                  PROP_GROUP [4113]
+                    ZVAL "Lib\\Calc"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "calc"
+                        null
+                        null
+                        null
+                    null
+                  PROP_GROUP [32788]
+                    ZVAL [1] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "name"
+                        null
+                        null
+                        null
+                    null
+                  METHOD [20] "#statics" @8-8
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      ASSIGN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "calc"
+                        NEW
+                          ZVAL "Lib\\Calc"
+                          ARG_LIST
+                            ZVAL 1
+                      ASSIGN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "name"
+                        CALL
+                          ZVAL "trim"
+                          ARG_LIST
+                            ZVAL " a "
+                    ZVAL [1] "void"
+                    null
+                null
+                null
+        "##}
+    );
+}
+
+/// ```php
+/// public string $name { set { $this->log($value); $this->name = $value; $this->log($this->name); } }
+/// public int $count { set { $this->count = $value * 2; $this->log('count'); } }
+///
+/// public function __construct()
+/// {
+///     $this->name = '';
+///     $this->count = 0;
+/// }
+/// ```
+///
+/// ```php
+/// private \App\Trimmed $name#via0;
+/// private \App\Upper $name#via1;
+/// public string $name {
+///     get => $this->{'name#via0'}->get($this->{'name#via1'}->get($this->name));
+///     set { $this->name = $this->{'name#via1'}->set($this->{'name#via0'}->set($value)); }
+/// }
+/// public function __construct() {
+///     $this->{'name#via0'} = new \App\Trimmed();
+///     $this->{'name#via1'} = new \App\Upper();
+///     $this->name = "";
+/// }
+/// ```
+///
+/// Spec section 6.4: each behavior is a hidden private property the constructor fills with `new` before the initial
+/// value, which it writes through the hooks. `set` runs the behaviors in the order they are written and `get` the other
+/// way. A behavior's `set(string value)` takes its type argument where `Behavior.set` erases its parameter to any value,
+/// so it keeps its PHP type `string` and carries `ZEND_PARAM_WIDENED`, `[64]`, which skips PHP's variance check.
+#[test]
+fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
+    let behavior = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+    );
+    let upper = (
+        "src/Upper.sharp",
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Upper : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.strtoupper(value);\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n\npublic class Report\n{\n    public string name { get; set; } via Trimmed, Upper = \"\";\n}\n",
+        &[behavior, upper],
+    );
+
+    assert_eq!(
+        property_groups(&lowered),
+        [
+            indoc! {r#"
+                PROP_GROUP [4]
+                  ZVAL "App\\Trimmed"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "name#via0"
+                      null
+                      null
+                      null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [4]
+                  ZVAL "App\\Upper"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "name#via1"
+                      null
+                      null
+                      null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "string"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "name"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @14-14
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            METHOD_CALL
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "name#via0"
+                              ZVAL "get"
+                              ARG_LIST
+                                METHOD_CALL
+                                  PROP
+                                    VAR
+                                      ZVAL "this"
+                                    ZVAL "name#via1"
+                                  ZVAL "get"
+                                  ARG_LIST
+                                    PROP
+                                      VAR
+                                        ZVAL "this"
+                                      ZVAL "name"
+                          null
+                          null
+                        PROPERTY_HOOK "set" @14-14
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "name"
+                              METHOD_CALL
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "name#via1"
+                                ZVAL "set"
+                                ARG_LIST
+                                  METHOD_CALL
+                                    PROP
+                                      VAR
+                                        ZVAL "this"
+                                      ZVAL "name#via0"
+                                    ZVAL "set"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "value"
+                          null
+                          null
+                  null
+            "#},
+        ]
+    );
+    assert_eq!(
+        lowered.body_of("__construct"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "name#via0"
+                NEW
+                  ZVAL "App\\Trimmed"
+                  ARG_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "name#via1"
+                NEW
+                  ZVAL "App\\Upper"
+                  ARG_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "name"
+                ZVAL ""
+        "#}
+    );
+    assert_eq!(
+        lowered.parameters_of("set"),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM [64]
+                ZVAL [1] "string"
+                ZVAL "value"
+                null
+                null
+                null
+                null
+        "#}
+    );
+}
+
+/// ```php
+/// public function __clone(): void
+/// {
+///     if (\method_exists(parent::class, '__clone')) { parent::__clone(); }
+///     $this->{'name#via0'} = new \App\Trimmed();
+/// }
+/// ```
+///
+/// Spec sections 6.4 and 16: a copy made with `with` or with plain PHP's `clone` gets a new instance of each behavior,
+/// so the two never share a behavior's state. A parent's own `__clone` runs first, when it has one.
+#[test]
+fn a_copy_gets_new_behaviors_after_its_parent_s_copy_runs() {
+    let behavior = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+    );
+    let named = ("src/Named.sharp", "namespace App;\n\npublic abstract class Named\n{\n}\n");
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n\npublic class Report : Named\n{\n    public string name { get; set; } via Trimmed = \"\";\n}\n",
+        &[behavior, named],
+    );
+
+    assert_eq!(
+        lowered.declared("__clone"),
+        indoc! {r#"
+            METHOD [1] "__clone" @12-15
+              PARAM_LIST
+              null
+              STMT_LIST
+                IF
+                  IF_ELEM
+                    CALL
+                      ZVAL "method_exists"
+                      ARG_LIST
+                        CLASS_NAME
+                          ZVAL [1] "parent"
+                        ZVAL "__clone"
+                    STMT_LIST
+                      STATIC_CALL
+                        ZVAL [1] "parent"
+                        ZVAL "__clone"
+                        ARG_LIST
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "name#via0"
+                  NEW
+                    ZVAL "App\\Trimmed"
+                    ARG_LIST
+              ZVAL [1] "void"
+              null
+        "#}
+    );
+}
+
+/// Spec sections 6.4 and 11: a generic behavior's `new` carries its type arguments under a `SHARP_TYPE_ARGS`, as a
+/// generic `new` does: `$this->{'level#via0'} = new \App\Kept<int>();`.
+#[test]
+fn a_generic_behavior_is_created_with_its_type_arguments() {
+    let behavior = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Kept<T> : Behavior<T>\n{\n    public T get(T value) => value;\n\n    public T set(T value) => value;\n}\n\npublic class Report\n{\n    public int level { get; set; } via Kept<int> = 1;\n}\n",
+        &[behavior],
+    );
+
+    assert_eq!(
+        lowered.declared("__construct"),
+        indoc! {r#"
+            METHOD [1] "__construct" @12-15
+              PARAM_LIST
+              null
+              STMT_LIST
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "level#via0"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "App\\Kept"
+                      ARG_LIST
+                    ZVAL "int"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "level"
+                  ZVAL 1
+              null
+              null
+        "#}
+    );
+}
+
+/// Spec section 6.2: the observers are no hooks of their own. The `set` hook runs `willSet`, then the `set` body or the
+/// storage write an auto `set` is, then `didSet`, and both run only once the object is built, so each waits on
+/// `\Sharp\Internal\building($this)`, asked once per write. An initial value fills the storage, spec section 6: a
+/// constant one is PHP's default, and any other, on a property with a `set` hook, is PHP's `setRawValue` at the start
+/// of the constructor, which runs no hook.
+#[test]
+fn observers_run_inside_the_set_hook_once_the_object_is_built() {
+    let lowered = Lowered::new(
+        "class Report\n{\n    public string name { get; set; willSet => this.log(field); didSet => this.log(field); } = \"\";\n    public int count { get; set { field = value * 2; } didSet { this.log(\"count\"); } } = 0;\n    public string title { get; set => field = global.trim(value); } = global.strval(1);\n\n    public void log(Any? text)\n    {\n    }\n}\n",
+    );
+
+    assert_eq!(
+        property_groups(&lowered),
+        [
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "string"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "name"
+                      ZVAL ""
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "set" @3-3
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "built#1"
+                              UNARY_OP [14]
+                                CALL
+                                  ZVAL "Sharp\\Internal\\building"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "this"
+                            IF
+                              IF_ELEM
+                                VAR
+                                  ZVAL "built#1"
+                                STMT_LIST
+                                  STMT_LIST
+                                    METHOD_CALL
+                                      VAR
+                                        ZVAL "this"
+                                      ZVAL "log"
+                                      ARG_LIST
+                                        PROP
+                                          VAR
+                                            ZVAL "this"
+                                          ZVAL "name"
+                            STMT_LIST
+                              ASSIGN
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "name"
+                                VAR
+                                  ZVAL "value"
+                            IF
+                              IF_ELEM
+                                VAR
+                                  ZVAL "built#1"
+                                STMT_LIST
+                                  STMT_LIST
+                                    METHOD_CALL
+                                      VAR
+                                        ZVAL "this"
+                                      ZVAL "log"
+                                      ARG_LIST
+                                        PROP
+                                          VAR
+                                            ZVAL "this"
+                                          ZVAL "name"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "count"
+                      ZVAL 0
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "set" @4-4
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "built#1"
+                              UNARY_OP [14]
+                                CALL
+                                  ZVAL "Sharp\\Internal\\building"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "this"
+                            STMT_LIST
+                              ASSIGN
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "count"
+                                BINARY_OP [3]
+                                  VAR
+                                    ZVAL "value"
+                                  ZVAL 2
+                            IF
+                              IF_ELEM
+                                VAR
+                                  ZVAL "built#1"
+                                STMT_LIST
+                                  STMT_LIST
+                                    METHOD_CALL
+                                      VAR
+                                        ZVAL "this"
+                                      ZVAL "log"
+                                      ARG_LIST
+                                        ZVAL "count"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "string"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "title"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "set" @5-5
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "title"
+                              CALL
+                                ZVAL "trim"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "value"
+                          null
+                          null
+                  null
+            "#},
+        ]
+    );
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("__construct"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                NEW
+                  ZVAL "ReflectionProperty"
+                  ARG_LIST
+                    CLASS_NAME
+                      ZVAL [1] "self"
+                    ZVAL "title"
+                ZVAL "setRawValue"
+                ARG_LIST
+                  VAR
+                    ZVAL "this"
+                  CALL
+                    ZVAL "strval"
+                    ARG_LIST
+                      ZVAL 1
+        "#}
+    );
+}
+
+/// ```php
 /// public int $size { get => $this->size; set { $this->size = $value; } }
 /// ```
 ///
@@ -1812,7 +2924,7 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 #[test]
 fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public int size { get => this.read(); set; }\n\n    public int read()\n    {\n        return 1;\n    }\n}\n",
+        "class Report\n{\n    public int size { get => this.read(); set; }\n\n    public Report()\n    {\n        this.size = 1;\n    }\n\n    public int read()\n    {\n        return 1;\n    }\n}\n",
     );
 
     assert_eq!(
@@ -1852,87 +2964,6 @@ fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
                       null
               null
         "#}]
-    );
-}
-
-/// ```php
-/// public function __construct(
-///     public string $title { get => $this->title; set { $this->title = \trim($value); } },
-///     public protected(set) int $id { get => $this->id; },
-/// ) {}
-/// ```
-///
-/// A property declared on a constructor parameter carries its hooks as the parameter's last child.
-#[test]
-fn a_promoted_property_with_accessor_bodies_is_a_promoted_parameter_with_hooks() {
-    let lowered = Lowered::new(
-        "class Report\n{\n    public Report(public string title { get => field; set => field = global.trim(value); }, public int id { get => field; })\n    {\n    }\n}\n",
-    );
-    let parameters: Vec<String> = lowered
-        .written()
-        .into_iter()
-        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_PARAM)
-        .map(|(index, _)| lowered.render(index as u32))
-        .collect();
-
-    assert_eq!(
-        parameters,
-        [
-            indoc! {r#"
-                PARAM [1]
-                  ZVAL [1] "string"
-                  ZVAL "title"
-                  null
-                  null
-                  null
-                  STMT_LIST
-                    PROPERTY_HOOK "get" @3-3
-                      null
-                      null
-                      PROPERTY_HOOK_SHORT_BODY
-                        PROP
-                          VAR
-                            ZVAL "this"
-                          ZVAL "title"
-                      null
-                      null
-                    PROPERTY_HOOK "set" @3-3
-                      null
-                      null
-                      STMT_LIST
-                        ASSIGN
-                          PROP
-                            VAR
-                              ZVAL "this"
-                            ZVAL "title"
-                          CALL
-                            ZVAL "trim"
-                            ARG_LIST
-                              VAR
-                                ZVAL "value"
-                      null
-                      null
-            "#},
-            indoc! {r#"
-                PARAM [2049]
-                  ZVAL [1] "int"
-                  ZVAL "id"
-                  null
-                  null
-                  null
-                  STMT_LIST
-                    PROPERTY_HOOK "get" @3-3
-                      null
-                      null
-                      PROPERTY_HOOK_SHORT_BODY
-                        PROP
-                          VAR
-                            ZVAL "this"
-                          ZVAL "id"
-                      null
-                      null
-            "#},
-        ]
     );
 }
 
@@ -2039,13 +3070,13 @@ fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() 
 /// ```
 ///
 /// A nullable property with accessor bodies takes the nullable type any `T?` lowers to. One whose body uses `field`
-/// starts as null, so it takes the default `null`, as a settable auto-property does. One without storage is virtual,
+/// has storage, and its `= null` is its default, as any constant initial value is. One without storage is virtual,
 /// and PHP refuses a default on a virtual property, so it takes none, get-only or not. `[256]` is `ZEND_TYPE_NULLABLE`
 /// on a class name, and `[257]` is `ZEND_NAME_NOT_FQ | ZEND_TYPE_NULLABLE`.
 #[test]
 fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
     let lowered = Lowered::with(
-        "import Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; }\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n",
+        "import Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n",
         &[common::MODEL],
     );
 
@@ -2152,8 +3183,9 @@ fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
 /// public function __construct(private int $count, public readonly int $id, protected string $name, int $extra) {}
 /// ```
 ///
-/// A parameter that declares a member carries the member's flags: `[4]` is `ZEND_ACC_PRIVATE`, `[129]` is
-/// `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, and `[2]` is `ZEND_ACC_PROTECTED`.
+/// A parameter that declares a member carries the member's flags: `(1 << 15) | 4` is `ZEND_ACC_FIELD |
+/// ZEND_ACC_PRIVATE`, because a parameter without accessors is a field, `129` is `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`,
+/// and `2` is `ZEND_ACC_PROTECTED`.
 #[test]
 fn a_constructor_parameter_with_an_access_modifier_is_a_promoted_parameter() {
     let lowered = Lowered::new(
@@ -2172,7 +3204,7 @@ fn a_constructor_parameter_with_an_access_modifier_is_a_promoted_parameter() {
 
     assert_eq!(
         parameters,
-        [("count".to_owned(), 4), ("id".to_owned(), 129), ("name".to_owned(), 2), ("extra".to_owned(), 0)]
+        [("count".to_owned(), (1 << 15) | 4), ("id".to_owned(), 129), ("name".to_owned(), 2), ("extra".to_owned(), 0)]
     );
 }
 
@@ -2199,7 +3231,7 @@ fn a_non_constant_initial_value_runs_at_the_start_of_the_constructor() {
         lowered.render(lowered.child(class, 2)),
         indoc! {r#"
             STMT_LIST
-              PROP_GROUP [4]
+              PROP_GROUP [32772]
                 ZVAL "Lib\\Calc"
                 PROP_DECL
                   PROP_ELEM
@@ -2273,7 +3305,7 @@ fn a_class_with_a_non_constant_initial_value_and_no_constructor_gets_one() {
         lowered.render(lowered.child(class, 2)),
         indoc! {r#"
             STMT_LIST
-              PROP_GROUP [4]
+              PROP_GROUP [32772]
                 ZVAL "Lib\\Calc"
                 PROP_DECL
                   PROP_ELEM
@@ -2428,7 +3460,7 @@ fn the_base_class_constructor_can_be_inherited() {
 fn super_calls_the_constructor_a_base_class_gets_for_its_initial_values() {
     let base = (
         "src/Lib/Stamped.sharp",
-        "namespace Lib;\n\nclass Stamped\n{\n    public string stamp { get; set; } = global.strtoupper(\"p\");\n}\n",
+        "namespace Lib;\n\npublic class Stamped\n{\n    public string stamp { get; set; } = global.strtoupper(\"p\");\n}\n",
     );
     let parent_construct = "  STATIC_CALL\n    ZVAL [1] \"parent\"\n    ZVAL \"__construct\"\n    ARG_LIST\n";
     for (code, body) in [
@@ -2477,12 +3509,12 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 /// public static function sized(int $size, string ...$notes): \App\Report
 /// {
 ///     ${'this#1'} = new \App\Report($size);
-///     (function ($size, ...$notes) {
+///     \Sharp\Internal\build(${'this#1'}, function ($size, ...$notes) {
 ///         if ($size === 0) { return; }
 ///         $this->label = parent::describe();
 ///         $read = function () { return $this->label; };
 ///         $skip = function () { return; };
-///     })->call(${'this#1'}, $size, ...$notes);
+///     }, $size, ...$notes);
 ///     return ${'this#1'};
 /// }
 /// ```
@@ -2491,6 +3523,8 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 /// main constructor, and the body is a closure bound to it, so it runs as a method body on a real `$this`: `super.m()`
 /// is `parent::m()`, `return;` and a lambda's `return;` return nothing, and a lambda reads `$this` as in a method. The
 /// closure takes each parameter, a variadic one spread back out. The method returns the object after its body.
+/// `\Sharp\Internal\build` binds the closure as `Closure::call` does while the object is still being built, so the
+/// body's writes run no observer, spec section 6.2.
 #[test]
 fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
     let lowered = Lowered::new(
@@ -2526,76 +3560,76 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                     ARG_LIST
                       VAR
                         ZVAL "size"
-                METHOD_CALL
-                  CLOSURE "" @16-24
-                    PARAM_LIST
-                      PARAM
-                        null
-                        ZVAL "size"
-                        null
-                        null
-                        null
-                        null
-                      PARAM [16]
-                        null
-                        ZVAL "notes"
-                        null
-                        null
-                        null
-                        null
-                    null
-                    STMT_LIST
-                      IF
-                        IF_ELEM
-                          BINARY_OP [16]
-                            VAR
-                              ZVAL "size"
-                            ZVAL 0
-                          STMT_LIST
-                            RETURN
-                              null
-                      ASSIGN
-                        PROP
-                          VAR
-                            ZVAL "this"
-                          ZVAL "label"
-                        STATIC_CALL
-                          ZVAL [1] "parent"
-                          ZVAL "describe"
-                          ARG_LIST
-                      ASSIGN
-                        VAR
-                          ZVAL "read"
-                        CLOSURE "" @22-22
-                          PARAM_LIST
-                          null
-                          STMT_LIST
-                            RETURN
-                              PROP
-                                VAR
-                                  ZVAL "this"
-                                ZVAL "label"
-                          SHARP_TYPE_ARGS
-                            null
-                            ZVAL "Function<string()>"
-                          null
-                      ASSIGN
-                        VAR
-                          ZVAL "skip"
-                        CLOSURE "" @23-23
-                          PARAM_LIST
-                          null
-                          STMT_LIST
-                            RETURN
-                              null
-                          null
-                          null
-                    null
-                    null
-                  ZVAL "call"
+                CALL
+                  ZVAL "Sharp\\Internal\\build"
                   ARG_LIST
                     VAR
                       ZVAL "this#1"
+                    CLOSURE "" @16-24
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "size"
+                          null
+                          null
+                          null
+                          null
+                        PARAM [16]
+                          null
+                          ZVAL "notes"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      STMT_LIST
+                        IF
+                          IF_ELEM
+                            BINARY_OP [16]
+                              VAR
+                                ZVAL "size"
+                              ZVAL 0
+                            STMT_LIST
+                              RETURN
+                                null
+                        ASSIGN
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "label"
+                          STATIC_CALL
+                            ZVAL [1] "parent"
+                            ZVAL "describe"
+                            ARG_LIST
+                        ASSIGN
+                          VAR
+                            ZVAL "read"
+                          CLOSURE "" @22-22
+                            PARAM_LIST
+                            null
+                            STMT_LIST
+                              RETURN
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "label"
+                            SHARP_TYPE_ARGS
+                              null
+                              ZVAL "Function<string()>"
+                            null
+                        ASSIGN
+                          VAR
+                            ZVAL "skip"
+                          CLOSURE "" @23-23
+                            PARAM_LIST
+                            null
+                            STMT_LIST
+                              RETURN
+                                null
+                            null
+                            null
+                      null
+                      null
                     VAR
                       ZVAL "size"
                     UNPACK
@@ -2683,31 +3717,31 @@ fn a_named_constructor_of_a_generic_class_takes_the_class_type_arguments_as_its_
                       VAR
                         ZVAL "item"
                   ZVAL "#0"
-              METHOD_CALL
-                CLOSURE "" @8-10
-                  PARAM_LIST
-                    PARAM
-                      null
-                      ZVAL "item"
-                      null
-                      null
-                      null
-                      null
-                  null
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "held"
-                      SHARP_IS_TYPE
-                        VAR
-                          ZVAL "item"
-                        ZVAL "$0"
-                  null
-                  null
-                ZVAL "call"
+              CALL
+                ZVAL "Sharp\\Internal\\build"
                 ARG_LIST
                   VAR
                     ZVAL "this#1"
+                  CLOSURE "" @8-10
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "item"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "held"
+                        SHARP_IS_TYPE
+                          VAR
+                            ZVAL "item"
+                          ZVAL "$0"
+                    null
+                    null
                   VAR
                     ZVAL "item"
               RETURN
@@ -2880,12 +3914,12 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
 /// ```
 ///
 /// Spec section 11: a generic class keeps each type argument's static fields in one hidden static, whose entry under ""
-/// holds each field's initial value, or null for a nullable field written without one. `\Sharp\Internal\statics` copies
-/// that entry the first time a type argument uses its statics. A field that is neither stays out of it, as today.
+/// holds each field's initial value. `\Sharp\Internal\statics` copies
+/// that entry the first time a type argument uses its statics.
 #[test]
 fn a_generic_class_keeps_the_initial_values_of_its_static_fields_in_one_hidden_static() {
     let lowered = Lowered::new(
-        "namespace App;\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static TItem? last { get; set; }\n\n    public static int total { get; set; }\n}\n",
+        "namespace App;\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static TItem? last { get; set; } = null;\n}\n",
     );
     let store = (0..lowered.nodes().len() as u32)
         .map(|node| lowered.render(node))
@@ -3083,14 +4117,14 @@ fn a_get_only_property_gets_its_initial_value_in_the_constructor() {
 /// }
 /// ```
 ///
-/// A field or a settable auto-property of a nullable type without an initial value starts as null, so it takes the
-/// default `null` on the line of its name. A get-only property is `readonly`, which takes no default, so its initial
-/// value runs in the constructor. `[257]` is `ZEND_NAME_NOT_FQ | ZEND_TYPE_NULLABLE`, and `[256]` is
+/// A nullable member has no implicit starting value, spec section 6, so it writes `= null`, which a field or a settable
+/// auto-property takes as its default, as any constant initial value. A get-only property is `readonly`, which takes
+/// no default, so its initial value runs in the constructor. `[257]` is `ZEND_NAME_NOT_FQ | ZEND_TYPE_NULLABLE`, and `[256]` is
 /// `ZEND_TYPE_NULLABLE` on a class name.
 #[test]
-fn a_nullable_field_or_settable_auto_property_without_an_initial_value_defaults_to_null() {
+fn a_nullable_member_s_initial_null_is_its_default() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int? total;\n    public Calc? owner { get; set; }\n    private (int|string)? key;\n    private int? start = 1;\n    public int? limit { get; } = null;\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int? total = null;\n    public Calc? owner { get; set; } = null;\n    private (int|string)? key = null;\n    private int? start = 1;\n    public int? limit { get; } = null;\n}\n",
         &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")],
     );
     let class = lowered.child(lowered.root(), 2);
@@ -3099,7 +4133,7 @@ fn a_nullable_field_or_settable_auto_property_without_an_initial_value_defaults_
         lowered.render(lowered.child(class, 2)),
         indoc! {r#"
             STMT_LIST
-              PROP_GROUP [4]
+              PROP_GROUP [32772]
                 ZVAL [257] "int"
                 PROP_DECL
                   PROP_ELEM
@@ -3117,7 +4151,7 @@ fn a_nullable_field_or_settable_auto_property_without_an_initial_value_defaults_
                     null
                     null
                 null
-              PROP_GROUP [4]
+              PROP_GROUP [32772]
                 TYPE_UNION
                   ZVAL [1] "int"
                   ZVAL [1] "string"
@@ -3129,7 +4163,7 @@ fn a_nullable_field_or_settable_auto_property_without_an_initial_value_defaults_
                     null
                     null
                 null
-              PROP_GROUP [4]
+              PROP_GROUP [32772]
                 ZVAL [257] "int"
                 PROP_DECL
                   PROP_ELEM
@@ -4023,7 +5057,7 @@ fn a_list_literal_initial_value_of_a_set_property_is_a_set() {
     assert_eq!(
         property_groups(&Lowered::new("class Report\n{\n    private Set<string> tags = [\"a\"];\n}\n")),
         [indoc! {r#"
-            PROP_GROUP [4]
+            PROP_GROUP [32772]
               SHARP_TYPE_ARGS
                 ZVAL "Sharp\\Set"
                 ZVAL "Set<string>"
@@ -6060,7 +7094,7 @@ fn a_write_into_a_map_a_hooked_property_holds_puts_it_through_the_property() {
 #[test]
 fn a_collection_method_after_a_null_safe_link_tests_the_link_around_the_function() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Holder? holder, Holder other)\n    {\n        const lines = holder?.lines.count();\n        const next = other.next?.lines.count();\n        const made = holder?.make().count();\n        const parenthesized = (holder?.lines).count();\n    }\n}\n\nclass Holder\n{\n    public List<int> lines { get; private set; } = [];\n    public Holder? next { get; private set; }\n\n    public List<int> make() => this.lines;\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Holder? holder, Holder other)\n    {\n        const lines = holder?.lines.count();\n        const next = other.next?.lines.count();\n        const made = holder?.make().count();\n        const parenthesized = (holder?.lines).count();\n    }\n}\n\nclass Holder\n{\n    public List<int> lines { get; private set; } = [];\n    public Holder? next { get; private set; } = null;\n\n    public List<int> make() => this.lines;\n}\n",
     );
 
     assert_eq!(
@@ -6847,7 +7881,7 @@ fn a_function_type_with_effects_is_the_closure_class() {
 #[test]
 fn a_nullable_function_type_with_effects_is_the_nullable_closure_class() {
     let (hint, declaration) = lowered_field(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback = null;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n}\n",
     );
 
     assert_eq!(hint, "ZVAL [256] \"Closure\"\n");
@@ -6945,7 +7979,7 @@ fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
               null
               null
               STMT_LIST
-                PROP_GROUP [4]
+                PROP_GROUP [32772]
                   SHARP_TYPE_ARGS
                     TYPE [7]
                     ZVAL "List<$0>"
@@ -8464,21 +9498,21 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
 
         public class Shelf<TItem>
         {
-            public Box<Order>? auto { get; set; }
+            public Box<Order>? auto { get; set; } = null;
 
-            public Box<TItem>? own { get; set; }
+            public Box<TItem>? own { get; set; } = null;
 
             public Box<Order>? logged
             {
                 get => field;
                 set { field = value; }
-            }
+            } = null;
 
-            protected Box<Order>? inherited;
+            protected Box<Order>? inherited = null;
 
-            private Box<Order>? hidden;
+            private Box<Order>? hidden = null;
 
-            public Box<Order>? fixed { get; private set; }
+            public Box<Order>? fixed { get; private set; } = null;
 
             public Box<Order>? created
             {
@@ -8486,7 +9520,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
                 init { field = value; }
             }
 
-            public int count { get; set; }
+            public int count { get; set; } = 0;
 
             private Function<Box<Order>()> maker = () => new Box<Order>();
 
@@ -8519,7 +9553,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
 
         public class Order
         {
-            private static Box<Order>? latest;
+            private static Box<Order>? latest = null;
 
             public static Box<Order> make() => new Box<Order>();
         }
@@ -10386,13 +11420,13 @@ fn final_override_lowers_to_a_final_method_with_the_override_attribute() {
 /// #[\Override] public bool $timestamps = false;
 /// ```
 ///
-/// An override is a field with `#[\Override]`, so PHP checks at link time that the parent has the property. PHP
-/// refuses a type on a property whose parent's has none, so an override of a property with no type has none either,
-/// as decision 028 writes. An override of a typed property keeps its written type.
+/// An override is a property with `#[\Override]`, and an auto-property lowers as a field does, so PHP checks at link
+/// time that the parent has the property. PHP refuses a type on a property whose parent's has none, so an override of
+/// a property with no type has none either, as decision 028 writes. An override of a typed property keeps its type.
 #[test]
 fn an_override_of_a_property_with_no_type_has_no_type() {
     let lowered = Lowered::with(
-        "class Order : Model\n{\n    protected override string table = \"orders\";\n    public override bool timestamps = false;\n}\n",
+        "class Order : Model\n{\n    protected override string table { get; set; } = \"orders\";\n    public override bool timestamps { get; set; } = false;\n}\n",
         &[("src/Model.php", "<?php class Model { protected $table = ''; public bool $timestamps = true; }")],
     );
     let class = lowered.child(lowered.root(), 1);
@@ -10431,16 +11465,306 @@ fn an_override_of_a_property_with_no_type_has_no_type() {
     );
 }
 
+/// ```php
+/// #[\Override] protected $table = 'orders' { set { $this->table = \trim($value); } }
+/// abstract public string $kind { get; }
+/// ```
+///
+/// An override with accessor bodies runs as PHP's hooks over the parent's property, untyped when the parent's is, and
+/// an abstract property runs as PHP's, with a hook that has no body and no `readonly`.
+#[test]
+fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks() {
+    let lowered = Lowered::with(
+        "abstract class Order : Model\n{\n    protected override string table { get; set => field = global.trim(value); } = \"orders\";\n    public abstract string kind { get; }\n}\n",
+        &[("src/Model.php", "<?php class Model { protected $table = ''; }")],
+    );
+    let class = lowered.child(lowered.root(), 1);
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 2)),
+        indoc! {r#"
+            STMT_LIST
+              PROP_GROUP [2]
+                null
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "table"
+                    ZVAL "orders"
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "set" @3-3
+                        null
+                        null
+                        STMT_LIST
+                          ASSIGN
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "table"
+                            CALL
+                              ZVAL "trim"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "value"
+                        null
+                        null
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Override"
+                      null
+              PROP_GROUP [65]
+                ZVAL [1] "string"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "kind"
+                    null
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "get" @4-4
+                        null
+                        null
+                        null
+                        null
+                        null
+                null
+        "#}
+    );
+}
+
+/// ```php
+/// class Shop
+/// {
+///     public const int MAX = 3;
+///     public int $views = 0;
+///     public int $stock = 0;
+///     public protected(set) int $id = 0;
+///     public function secret(): int { return 1; }
+/// }
+/// ```
+///
+/// PHP has no namespace reach, so spec section 5's `internal` runs as public, and the analyzer checks who reaches it.
+/// An `internal` class takes no flag, `internal set` takes no set visibility, and `internal init` takes the
+/// `protected(set)` of every `init`, which only constructors run.
+#[test]
+fn internal_runs_as_public() {
+    let lowered = Lowered::with(
+        "internal class Shop\n{\n    internal const int MAX = 3;\n    public int views { get; internal set; } = 0;\n    internal int stock { get; set; } = 0;\n    public int id { get; internal init; } = 0;\n\n    internal int secret() => 1;\n}\n",
+        &[],
+    );
+    let class = lowered.child(lowered.root(), 1);
+
+    assert_eq!(
+        lowered.render(class),
+        indoc! {r#"
+            CLASS "Shop" @1-9
+              null
+              null
+              STMT_LIST
+                CLASS_CONST_GROUP [1]
+                  CLASS_CONST_DECL
+                    CONST_ELEM
+                      ZVAL "MAX"
+                      ZVAL 3
+                      null
+                  null
+                  ZVAL [1] "int"
+                PROP_GROUP [1]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "views"
+                      ZVAL 0
+                      null
+                      null
+                  null
+                PROP_GROUP [1]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "stock"
+                      ZVAL 0
+                      null
+                      null
+                  null
+                PROP_GROUP [2049]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "id"
+                      ZVAL 0
+                      null
+                      null
+                  null
+                METHOD [1] "secret" @8-8
+                  PARAM_LIST
+                  null
+                  STMT_LIST
+                    RETURN
+                      ZVAL 1
+                  SHARP_TYPE_ARGS
+                    ZVAL [1] "int"
+                    ZVAL "Function<int()>"
+                  null
+              null
+              null
+        "#}
+    );
+}
+
+/// ```php
+/// private bool ${'doubled#lazy'} = false;
+/// public private(set) int $doubled { get { if (!$this->{'doubled#lazy'}) { $this->doubled = 2; $this->{'doubled#lazy'} = true; } return $this->doubled; } }
+/// private bool ${'found#lazy'} = false;
+/// public private(set) ?int $found { get { … } }
+/// public function __clone(): void { $this->{'doubled#lazy'} = false; $this->{'found#lazy'} = false; }
+/// ```
+///
+/// A `lazy` property keeps its first value in its own storage, which only its `get` hook writes, and a hidden flag
+/// beside it says whether the body ran, since a kept null can't say so. A copy is a new value, so its `__clone`
+/// clears each flag, and its first read computes the value again, spec section 6.5.
+#[test]
+fn a_lazy_property_keeps_its_first_value_in_its_storage() {
+    let lowered = Lowered::with(
+        "class Plan\n{\n    public lazy int doubled => 2;\n    public lazy int? found => null;\n}\n",
+        &[],
+    );
+    let class = lowered.child(lowered.root(), 1);
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 2)),
+        indoc! {r#"
+            STMT_LIST
+              PROP_GROUP [4]
+                ZVAL [1] "bool"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "doubled#lazy"
+                    ZVAL false
+                    null
+                    null
+                null
+              PROP_GROUP [4097]
+                ZVAL [1] "int"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "doubled"
+                    null
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "get" @3-3
+                        null
+                        null
+                        STMT_LIST
+                          IF
+                            IF_ELEM
+                              UNARY_OP [14]
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "doubled#lazy"
+                              STMT_LIST
+                                ASSIGN
+                                  PROP
+                                    VAR
+                                      ZVAL "this"
+                                    ZVAL "doubled"
+                                  ZVAL 2
+                                ASSIGN
+                                  PROP
+                                    VAR
+                                      ZVAL "this"
+                                    ZVAL "doubled#lazy"
+                                  ZVAL true
+                          RETURN
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "doubled"
+                        null
+                        null
+                null
+              PROP_GROUP [4]
+                ZVAL [1] "bool"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "found#lazy"
+                    ZVAL false
+                    null
+                    null
+                null
+              PROP_GROUP [4097]
+                ZVAL [257] "int"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "found"
+                    null
+                    null
+                    STMT_LIST
+                      PROPERTY_HOOK "get" @4-4
+                        null
+                        null
+                        STMT_LIST
+                          IF
+                            IF_ELEM
+                              UNARY_OP [14]
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "found#lazy"
+                              STMT_LIST
+                                ASSIGN
+                                  PROP
+                                    VAR
+                                      ZVAL "this"
+                                    ZVAL "found"
+                                  ZVAL null
+                                ASSIGN
+                                  PROP
+                                    VAR
+                                      ZVAL "this"
+                                    ZVAL "found#lazy"
+                                  ZVAL true
+                          RETURN
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "found"
+                        null
+                        null
+                null
+              METHOD [1] "__clone" @1-5
+                PARAM_LIST
+                null
+                STMT_LIST
+                  ASSIGN
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "doubled#lazy"
+                    ZVAL false
+                  ASSIGN
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "found#lazy"
+                    ZVAL false
+                ZVAL [1] "void"
+                null
+        "#}
+    );
+}
+
 /// The members of `RushOrder : Order : Model`, where the PHP# class `Order` overrides `table` with `string?` and
 /// `model` is the plain PHP class `Model`.
 fn rush_order_members(model: &str) -> String {
     let lowered = Lowered::with(
-        "class RushOrder : Order\n{\n    protected override string? table = \"rush_orders\";\n}\n",
+        "class RushOrder : Order\n{\n    protected override string? table { get; set; } = \"rush_orders\";\n}\n",
         &[
             ("src/Model.php", model),
             (
                 "src/Order.sharp",
-                "public class Order : Model\n{\n    protected override string? table = \"orders\";\n}\n",
+                "public class Order : Model\n{\n    protected override string? table { get; set; } = \"orders\";\n}\n",
             ),
         ],
     );
@@ -10883,6 +12207,28 @@ fn typeof_is_the_class_name_of_the_imported_class() {
 }
 
 /// ```php
+/// return 'total';
+/// ```
+///
+/// `nameof(X.y)` is the string `'y'`: the checker proved `X` has the property, so the running program needs its name
+/// alone.
+#[test]
+fn nameof_is_the_name_of_the_property() {
+    assert_eq!(
+        body_in(
+            "string run(int extra)",
+            "        return nameof(Calc.total);\n",
+            &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc { public int $total = 0; }")]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                ZVAL "total"
+        "#}
+    );
+}
+
+/// ```php
 /// #[\Lib\Access(\Lib\Calc::class, role: \App\Tenant\Report::class)]
 /// class Report
 /// ```
@@ -11007,8 +12353,8 @@ fn a_union_typed_class_constant_has_its_type_union() {
 /// public private(set) static string $last = "none";
 /// ```
 ///
-/// A static member's initial value is constant, so it is the default. `[20]` is `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`,
-/// and `[4113]` is `ZEND_ACC_PUBLIC | ZEND_ACC_STATIC | ZEND_ACC_PRIVATE_SET`.
+/// A static member's initial value is constant, so it is the default. `[32788]` is `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC
+/// | ZEND_ACC_FIELD`, and `[4113]` is `ZEND_ACC_PUBLIC | ZEND_ACC_STATIC | ZEND_ACC_PRIVATE_SET`.
 #[test]
 fn a_static_field_or_property_is_a_static_property_group() {
     let lowered = Lowered::new(
@@ -11025,7 +12371,7 @@ fn a_static_field_or_property_is_a_static_property_group() {
     assert_eq!(
         groups,
         [
-            (20, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"made\"\n    ZVAL 0\n    null\n    null\n".to_owned()),
+            (32788, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"made\"\n    ZVAL 0\n    null\n    null\n".to_owned()),
             (4113, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"last\"\n    ZVAL \"none\"\n    null\n    null\n".to_owned()),
         ]
     );
@@ -11043,7 +12389,7 @@ fn a_static_field_or_property_is_a_static_property_group() {
 #[test]
 fn a_static_property_with_type_arguments_has_its_type_text_around_its_type() {
     let lowered = Lowered::new(
-        "namespace App;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Registry\n{\n    public static Box<int>? latest { get; set; }\n\n    protected static Box<string>? inherited;\n\n    private static Box<int>? hidden;\n\n    public static Box<int>? last() => Registry.hidden;\n}\n",
+        "namespace App;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Registry\n{\n    public static Box<int>? latest { get; set; } = null;\n\n    protected static Box<string>? inherited = null;\n\n    private static Box<int>? hidden = null;\n\n    public static Box<int>? last() => Registry.hidden;\n}\n",
     );
     let groups: Vec<String> = lowered
         .nodes()
@@ -11070,7 +12416,7 @@ fn a_static_property_with_type_arguments_has_its_type_text_around_its_type() {
                   null
             "#},
             indoc! {r#"
-                PROP_GROUP [18]
+                PROP_GROUP [32786]
                   SHARP_TYPE_ARGS
                     ZVAL [256] "App\\Box"
                     ZVAL "App.Box<string>?"
@@ -11083,7 +12429,7 @@ fn a_static_property_with_type_arguments_has_its_type_text_around_its_type() {
                   null
             "#},
             indoc! {r#"
-                PROP_GROUP [20]
+                PROP_GROUP [32788]
                   SHARP_TYPE_ARGS
                     ZVAL [256] "App\\Box"
                     ZVAL "App.Box<int>?"
@@ -13031,29 +14377,10 @@ fn position_current_in_a_get_body_names_its_property() {
 #[test]
 fn position_current_in_a_set_body_names_its_property() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public string folder => Position.current().directory;\n    public string title { get; set { field = Position.current().function; } }\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public string folder => Position.current().directory;\n    public string title { get; set { field = Position.current().function; } }\n\n    public Report()\n    {\n        this.title = \"\";\n    }\n}\n",
     );
 
     assert_eq!(positions(&lowered), ["5:29 App.Tenant.Report.folder", "6:46 App.Tenant.Report.title"]);
-}
-
-/// ```php
-/// public function __construct(
-///     public string $code { get { return (new \Sharp\Position(__FILE__, 5, 53, 'App.Tenant.Report.code'))->function; } set { $this->code = $value; } },
-/// ) {
-///     $here = new \Sharp\Position(__FILE__, 7, 22, 'App.Tenant.Report.Report');
-/// }
-/// ```
-///
-/// A property declared on a constructor parameter names itself in its bodies, and the constructor's body after it
-/// names the constructor again.
-#[test]
-fn position_current_in_a_constructor_parameters_get_body_names_its_property_and_the_body_after_names_the_constructor() {
-    let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public Report(public string code { get { return Position.current().function; } set => field = value; })\n    {\n        const here = Position.current();\n    }\n}\n",
-    );
-
-    assert_eq!(positions(&lowered), ["5:53 App.Tenant.Report.code", "7:22 App.Tenant.Report.Report"]);
 }
 
 /// ```php
@@ -15454,7 +16781,7 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
               null
               null
               STMT_LIST
-                PROP_GROUP [4]
+                PROP_GROUP [32772]
                   ZVAL [1] "int"
                   PROP_DECL
                     PROP_ELEM
@@ -15554,7 +16881,7 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
 #[test]
 fn a_map_or_set_property_carries_the_plan_a_php_array_crosses_by() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Ledger\n{\n    public Map<string, int> stock { get; set; } = [:];\n    public Map<int, string> names { get; set; } = [:];\n    public Map<Status, int> counts { get; set; } = [:];\n    public Map<string, int>? spare { get; set; }\n    public static Set<string> tags { get; set; } = [];\n    public Map<string, List<Set<int>>> shelves { get; set; } = [:];\n    public int count { get; set; } = 0;\n}\n",
+        "namespace App.Tenant;\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Ledger\n{\n    public Map<string, int> stock { get; set; } = [:];\n    public Map<int, string> names { get; set; } = [:];\n    public Map<Status, int> counts { get; set; } = [:];\n    public Map<string, int>? spare { get; set; } = null;\n    public static Set<string> tags { get; set; } = [];\n    public Map<string, List<Set<int>>> shelves { get; set; } = [:];\n    public int count { get; set; } = 0;\n}\n",
     );
     // The attribute list of `#[\Sharp\Crossing(plan)]`, with the plan's rendering indented under its `ARG_LIST`.
     let crossing = |plan: &str| {
@@ -21832,16 +23159,18 @@ const SIZE: &str = "namespace App;\n\npublic struct Size\n{\n    public int widt
 /// ```php
 /// public function copies(\App\Size $size, int $depth): \App\Size
 /// {
-///     $made = (function ($value#1, $value#2) { $this->width = $value#1; $this->depth = $value#2; return $this; })
-///         ->call(new \App\Size(), 2, 1);
+///     $made = \Sharp\Internal\build(new \App\Size(),
+///         function ($value#1, $value#2) { $this->width = $value#1; $this->depth = $value#2; return $this; }, 2, 1);
 ///     return (function ($value#1) { return clone($this, ['depth' => $value#1]); })->call($size, $depth);
 /// }
 /// ```
 ///
 /// Spec section 16: an object initializer and `with` run in a closure bound to the object, as a named constructor
 /// runs, so they write an `init` property at its accessor's access wherever the code is. The initializer writes each
-/// value after `new`, and `with` is PHP 8.5's `clone` with the values, which runs each `init` hook on the copy. Each
-/// value is evaluated in the caller, as an argument, and the shorthand `depth` is the local `depth`.
+/// value after `new`, through `\Sharp\Internal\build`, which binds the closure as `Closure::call` does while the
+/// object is still being built, so its writes run no observer (spec section 6.2). `with` is PHP 8.5's `clone` with
+/// the values, which runs each `init` hook on the copy. Each value is evaluated in the caller, as an argument, and the
+/// shorthand `depth` is the local `depth`.
 #[test]
 fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
     assert_eq!(
@@ -21877,49 +23206,49 @@ fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
                 ASSIGN
                   VAR
                     ZVAL "made"
-                  METHOD_CALL
-                    CLOSURE "" @9-9
-                      PARAM_LIST
-                        PARAM
-                          null
-                          ZVAL "value#1"
-                          null
-                          null
-                          null
-                          null
-                        PARAM
-                          null
-                          ZVAL "value#2"
-                          null
-                          null
-                          null
-                          null
-                      null
-                      STMT_LIST
-                        ASSIGN
-                          PROP
-                            VAR
-                              ZVAL "this"
-                            ZVAL "width"
-                          VAR
-                            ZVAL "value#1"
-                        ASSIGN
-                          PROP
-                            VAR
-                              ZVAL "this"
-                            ZVAL "depth"
-                          VAR
-                            ZVAL "value#2"
-                        RETURN
-                          VAR
-                            ZVAL "this"
-                      null
-                      null
-                    ZVAL "call"
+                  CALL
+                    ZVAL "Sharp\\Internal\\build"
                     ARG_LIST
                       NEW
                         ZVAL "App\\Size"
                         ARG_LIST
+                      CLOSURE "" @9-9
+                        PARAM_LIST
+                          PARAM
+                            null
+                            ZVAL "value#1"
+                            null
+                            null
+                            null
+                            null
+                          PARAM
+                            null
+                            ZVAL "value#2"
+                            null
+                            null
+                            null
+                            null
+                        null
+                        STMT_LIST
+                          ASSIGN
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "width"
+                            VAR
+                              ZVAL "value#1"
+                          ASSIGN
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "depth"
+                            VAR
+                              ZVAL "value#2"
+                          RETURN
+                            VAR
+                              ZVAL "this"
+                        null
+                        null
                       ZVAL 2
                       ZVAL 1
                 RETURN
@@ -22196,7 +23525,7 @@ const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(
 /// `op_Equality` the bridge writes: two instances of the struct are equal when each property equals its pair by the
 /// property's own `==`, and any other pair, `null` included, is equal only when identical. The parameters take `mixed`,
 /// so an `Any?` compares with a struct. A static field and a computed property hold no part of the value, so `==`
-/// compares neither. A struct that declares `operator ==` gets no `op_Equality` of the bridge's: `==` calls its own,
+/// compares neither. The static field `made` is `[32788]`, `ZEND_ACC_FIELD | ZEND_ACC_STATIC | ZEND_ACC_PRIVATE`. A struct that declares `operator ==` gets no `op_Equality` of the bridge's: `==` calls its own,
 /// whatever it holds.
 #[test]
 fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
@@ -22257,7 +23586,7 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
                     STMT_LIST
                     null
                     null
-                  PROP_GROUP [20]
+                  PROP_GROUP [32788]
                     ZVAL [1] "int"
                     PROP_DECL
                       PROP_ELEM

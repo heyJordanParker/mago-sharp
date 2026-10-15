@@ -60,6 +60,11 @@ pub enum ParseError {
     UntypedParameterInSharp(Span),
     /// A PHP# field written without its type, such as `protected override table = "orders";`, at its name.
     UntypedFieldInSharp(Span),
+    /// A PHP# property written without its type, such as `protected override table { get; set; }`, at its name.
+    UntypedPropertyInSharp(Span),
+    /// A namespace written after PHP#'s `internal`, as in `internal(App.Tenant)`, at the parentheses. Spec section 5
+    /// has no named reach.
+    NamedReachInSharp(Span),
     /// A PHP# statement, expression or type nested more than [`MAX_RECURSION_DEPTH`] levels deep, at the innermost one.
     NestingTooDeepInSharp(Span),
     /// TypeScript's `in` written in a PHP# `for … of` loop, at the `in`.
@@ -91,6 +96,9 @@ pub enum ParseError {
     /// A PHP# parameter written as a computed property, as in `public string slug => "x"`, at its `=>`. A computed
     /// property has no incoming value to receive.
     ComputedParameterInSharp(Span),
+    /// A `via` clause on the PHP# constructor parameter named by the text, at `via`. Spec section 9: a member declared on
+    /// a parameter takes access levels and attributes only.
+    BehaviorParameterInSharp(Box<str>, Span),
     /// Anything but `super(…)` or `this(…)` after a PHP# constructor's `:`, as in `: parent(row)`, `: super { }` or
     /// `: ?Type`, from the `:` up to the body.
     ConstructorInitializerInSharp(Span),
@@ -137,6 +145,8 @@ impl HasFileId for ParseError {
             | ParseError::QualifiedNameInSharp(_, span)
             | ParseError::UntypedParameterInSharp(span)
             | ParseError::UntypedFieldInSharp(span)
+            | ParseError::UntypedPropertyInSharp(span)
+            | ParseError::NamedReachInSharp(span)
             | ParseError::NestingTooDeepInSharp(span)
             | ParseError::ForInInSharp(span)
             | ParseError::NotSupportedYetInSharp(_, span)
@@ -149,6 +159,7 @@ impl HasFileId for ParseError {
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
+            | ParseError::BehaviorParameterInSharp(_, span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
@@ -185,6 +196,8 @@ impl HasSpan for ParseError {
             | ParseError::QualifiedNameInSharp(_, span)
             | ParseError::UntypedParameterInSharp(span)
             | ParseError::UntypedFieldInSharp(span)
+            | ParseError::UntypedPropertyInSharp(span)
+            | ParseError::NamedReachInSharp(span)
             | ParseError::NestingTooDeepInSharp(span)
             | ParseError::ForInInSharp(span)
             | ParseError::NotSupportedYetInSharp(_, span)
@@ -197,6 +210,7 @@ impl HasSpan for ParseError {
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
+            | ParseError::BehaviorParameterInSharp(_, span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
@@ -296,6 +310,12 @@ impl std::fmt::Display for ParseError {
             ParseError::UntypedFieldInSharp(_) => {
                 "A PHP# field needs a type, as in `private int count = 0;`.".to_string()
             }
+            ParseError::UntypedPropertyInSharp(_) => {
+                "A PHP# property needs a type, as in `public int views { get; set; }`.".to_string()
+            }
+            ParseError::NamedReachInSharp(_) => {
+                "`internal` takes no namespace: move the shared helper to the parent namespace.".to_string()
+            }
             ParseError::NestingTooDeepInSharp(_) => {
                 format!("PHP# nests statements, expressions and types at most {MAX_RECURSION_DEPTH} levels deep.")
             }
@@ -330,6 +350,9 @@ impl std::fmt::Display for ParseError {
             ParseError::OtherMemberInSharpModule(_) => {
                 "A module holds only service bindings and laws: give each binding one expression.".to_string()
             }
+            ParseError::BehaviorParameterInSharp(name, _) => format!(
+                "Declare `{name}` in the class body to give it `via`: a member declared on a constructor parameter takes access levels and attributes only."
+            ),
             ParseError::ComputedParameterInSharp(_) => {
                 "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()
             }
@@ -395,6 +418,8 @@ impl From<&ParseError> for Issue {
             | ParseError::QualifiedNameInSharp(..)
             | ParseError::UntypedParameterInSharp(..)
             | ParseError::UntypedFieldInSharp(..)
+            | ParseError::UntypedPropertyInSharp(..)
+            | ParseError::NamedReachInSharp(..)
             | ParseError::ForInInSharp(..)
             | ParseError::InvalidTemplateEscapeInSharp(..)
             | ParseError::PhpLambdaInSharp(..)
@@ -405,6 +430,7 @@ impl From<&ParseError> for Issue {
             | ParseError::ReadonlyNotLastInSharp(..)
             | ParseError::OtherMemberInSharpModule(..)
             | ParseError::ComputedParameterInSharp(..)
+            | ParseError::BehaviorParameterInSharp(..)
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)
             | ParseError::NestedTypeInSharp(..)

@@ -48,6 +48,7 @@ use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::CompositeString;
+use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Construct;
@@ -98,6 +99,7 @@ use mago_syntax::cst::PartialArgumentList;
 use mago_syntax::cst::PositionalArgument;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::PropertyBehaviorList;
 use mago_syntax::cst::PropertyHook;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
@@ -262,6 +264,7 @@ const ZEND_ACC_TRAIT: u32 = 1 << 1;
 const ZEND_ACC_READONLY: u32 = 1 << 7;
 const ZEND_ACC_PROTECTED_SET: u32 = 1 << 11;
 const ZEND_ACC_PRIVATE_SET: u32 = 1 << 12;
+const ZEND_ACC_FIELD: u32 = 1 << 15;
 const ZEND_ACC_ENUM: u32 = 1 << 28;
 const ZEND_ACC_SHARP_HIDDEN: u32 = 1 << 13;
 const ZEND_SHARP_TYPE_OF_LIST: u32 = 1;
@@ -269,6 +272,7 @@ const ZEND_SHARP_NEW_CLASS_VALUE: u32 = 1;
 const ZEND_TYPE_NULLABLE: u32 = 1 << 8;
 const IS_STATIC: u32 = 15;
 const ZEND_PARAM_VARIADIC: u32 = 1 << 4;
+const ZEND_PARAM_WIDENED: u32 = 1 << 6;
 const ZEND_PARENTHESIZED_CONDITIONAL: u32 = 1;
 const ZEND_DIM_IS: u32 = 1;
 const ZEND_BIND_REF: u32 = 1;
@@ -1517,13 +1521,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         left_brace: Span,
         right_brace: Span,
     ) -> Vec<u32> {
+        // Each behavior is created before any initial value, which its property's `set` may run through.
         let mut initial_values = Vec::new();
+        for member in class_members {
+            if let ClassLikeMember::Property(Property::Hooked(property)) = member
+                && let Some(behaviors) = &property.behaviors
+            {
+                initial_values.extend(self.behavior_creations(property.item.variable(), behaviors));
+            }
+        }
         for member in class_members {
             if let ClassLikeMember::Property(property) = member
                 && property.initial_value_runs_in_constructor()
                 && let Some(value) = property.initial_value()
             {
-                initial_values.push(self.initial_value(property.first_variable(), value));
+                initial_values.push(self.initial_value(property, value));
             }
         }
 
@@ -1569,7 +1581,23 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 ClassLikeMember::NamedConstructor(
                     constructor @ NamedConstructor { initializer: Some(initializer), .. },
                 ) => self.named_constructor(constructor, initializer),
-                ClassLikeMember::Property(property) => self.property(property, parent_name),
+                ClassLikeMember::Property(property) if runs_static_accessors(property) => {
+                    members.extend(self.static_accessors(property, parent_name));
+
+                    continue;
+                }
+                ClassLikeMember::Property(property) => {
+                    if let Property::Computed(computed) = property
+                        && is_lazy(&computed.modifiers)
+                    {
+                        members.push(self.lazy_flag(computed));
+                    }
+                    if let Property::Hooked(HookedProperty { item, behaviors: Some(behaviors), .. }) = property {
+                        members.extend(self.behavior_slots(item.variable(), behaviors));
+                    }
+
+                    self.property(property, parent_name)
+                }
                 ClassLikeMember::Constant(constant) => self.constant(constant),
                 ClassLikeMember::Extension(extension) => {
                     for member in &extension.members {
@@ -1601,13 +1629,79 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 &[parameters, NULL, body, NULL, NULL],
             ));
         }
+        members.extend(self.copy_resets(class_members, parent_name.is_some(), keyword, right_brace));
+        members.extend(self.static_initial_values(class_members));
 
         members
     }
 
+    /// The hidden `public function __clone(): void` of a class whose copy must not share what its original holds, spec
+    /// sections 6.4, 6.5 and 16. A copy, made with `with` or with plain PHP's `clone`, gets a new instance of each
+    /// behavior, and computes each `lazy` property again on its first read, as Kotlin's `copy()` does. It runs the
+    /// parent's `__clone` first when the parent has one. None for a class with neither.
+    fn copy_resets(
+        &mut self,
+        class_members: &Sequence<ClassLikeMember>,
+        has_parent: bool,
+        keyword: Span,
+        right_brace: Span,
+    ) -> Option<u32> {
+        let line = self.line(right_brace);
+        let mut statements = Vec::new();
+        for member in class_members {
+            match member {
+                ClassLikeMember::Property(Property::Hooked(property)) => {
+                    if let Some(behaviors) = &property.behaviors {
+                        statements.extend(self.behavior_creations(property.item.variable(), behaviors));
+                    }
+                }
+                ClassLikeMember::Property(Property::Computed(computed))
+                    if is_lazy(&computed.modifiers) && !computed.modifiers.contains_static() =>
+                {
+                    let flag = self.lazy_flag_fetch(line, computed.variable.name);
+                    let r#false = self.zval(line, sharp_value::SHARP_FALSE, |_| {});
+                    statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[flag, r#false]));
+                }
+                _ => {}
+            }
+        }
+        if statements.is_empty() {
+            return None;
+        }
+
+        // `if (\method_exists(parent::class, '__clone')) { parent::__clone(); }`: a parent's own copy runs first.
+        if has_parent {
+            let parent = self.string(ZEND_NAME_NOT_FQ, line, b"parent");
+            let class = self.node(SHARP_AST_CLASS_NAME, 0, line, &[parent]);
+            let name = self.string(0, line, b"__clone");
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[class, name]);
+            let function = self.string(ZEND_NAME_FQ, line, b"method_exists");
+            let exists = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+            let parent = self.string(ZEND_NAME_NOT_FQ, line, b"parent");
+            let method = self.string(0, line, b"__clone");
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+            let call = self.node(SHARP_AST_STATIC_CALL, 0, line, &[parent, method, arguments]);
+            let call = self.node(SHARP_AST_STMT_LIST, 0, line, &[call]);
+            let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[exists, call]);
+            statements.insert(0, self.node(SHARP_AST_IF, 0, line, &[branch]));
+        }
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+        let void = self.string(ZEND_NAME_NOT_FQ, line, b"void");
+
+        Some(self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            keyword,
+            right_brace,
+            b"__clone",
+            &[parameters, NULL, body, void, NULL],
+        ))
+    }
+
     /// The hidden static a generic PHP# class keeps each type argument's own static fields in, spec section 11, as
     /// `public static $"\0<sharp>\0statics" = ["" => ["count" => 0, "items" => []]];` with `ZEND_ACC_SHARP_HIDDEN`:
-    /// under the key "" the defaults, each field's initial value, or null for a nullable field without one, which
+    /// under the key "" the defaults, each field's initial value, which
     /// `\Sharp\Internal\statics()` copies for each type argument text on its first use. None for a class without static
     /// fields.
     fn statics_store(&mut self, class: &Class) -> Option<u32> {
@@ -1625,9 +1719,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let field_line = self.line(variable);
             let value = match property.initial_value() {
                 Some(value) => self.expression(value),
-                None if is_null_by_default(property, self.names) => {
-                    self.zval(field_line, sharp_value::SHARP_NULL, |_| {})
-                }
                 None => continue,
             };
             let name = self.string(0, field_line, variable.name);
@@ -1808,12 +1899,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(variable);
         let hint = property.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
         let name = self.string(0, line, variable.name);
-        let mut hooks = Vec::new();
-        for accessor in &property.hook_list.hooks {
-            hooks.push(self.hook(accessor.name.value, accessor.name, accessor, NULL, NULL));
-        }
-
-        let hooks = self.node(SHARP_AST_STMT_LIST, 0, self.line(&property.hook_list), &hooks);
+        let hooks = self.abstract_hooks(&property.hook_list);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
 
@@ -2320,10 +2406,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A named constructor is the static method it runs as, spec section 9.1, as php-src's grammar builds
     /// `public static function fromJson(string $json): \Demo\Artifact { ${'this#1'} = new \Demo\Artifact(…);
-    /// (function ($json) { … })->call(${'this#1'}, $json); return ${'this#1'}; }`: its `: this(…)` creates the object
-    /// with the main constructor, and its body is a closure bound to that object, so it runs as a method body on a real
-    /// `$this`, where `super.m()` and `return;` run as they do in a method. A generic class's static method takes the
-    /// class's type arguments as its own, ends its parameter list with their bounds, and gives them to the object.
+    /// \Sharp\Internal\build(${'this#1'}, function ($json) { … }, $json); return ${'this#1'}; }`: its `: this(…)`
+    /// creates the object with the main constructor, and its body is a closure that `\Sharp\Internal\build` binds to
+    /// that object, as `Closure::call` does, so it runs as a method body on a real `$this`, where `super.m()` and
+    /// `return;` run as they do in a method. The object is still being built while the body runs, so its writes run no
+    /// observer, spec section 6.2. A generic class's static method takes the class's type arguments as its own, ends
+    /// its parameter list with their bounds, and gives them to the object.
     fn named_constructor(&mut self, constructor: &NamedConstructor, initializer: &ConstructorInitializer) -> u32 {
         self.enter(constructor.name.value);
         self.static_type_parameters = self.types.static_type_parameters(self.class);
@@ -2382,9 +2470,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             b"",
             &[closure_parameters, NULL, body, NULL, NULL],
         );
-        let call = self.string(0, line, b"call");
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
-        statements.push(self.node(SHARP_AST_METHOD_CALL, 0, line, &[closure, call, arguments]));
+        arguments.insert(1, closure);
+        statements.push(self.global_call(line, b"Sharp\\Internal\\build", &arguments));
 
         let end = self.lines.line(constructor.body.span().end.offset);
         let object = self.variable(constructor.body.span(), b"this#1");
@@ -2492,8 +2579,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return created;
         };
 
-        // `(function ($value#1) { $this->x = $value#1; return $this; })->call(new \App\Point(), 1)`
-        self.bound_to(instantiation.span(), created, initializer, |lowering, span, values| {
+        // `\Sharp\Internal\build(new \App\Point(), function ($value#1) { $this->x = $value#1; return $this; }, 1)`: the
+        // object is built once the initializer ends, so its writes run no observer, spec section 6.2.
+        self.bound_to(instantiation.span(), created, initializer, true, |lowering, span, values| {
             let line = lowering.line(span);
             let mut statements = Vec::new();
             for (name, value) in values {
@@ -2521,11 +2609,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// `point with { y: 9 }` copies the object, spec section 16, as PHP 8.5's `clone` with values does:
     /// `(function ($value#1) { return \clone($this, ['y' => $value#1]); })->call($point, 9)`. `clone` writes each
-    /// value through the property's accessor, after the copy's `__clone`.
+    /// value through the property's accessor, after the copy's `__clone`, while the engine marks the copy as still
+    /// being built, so the writes run no observer, spec section 6.2.
     fn with(&mut self, with: &With) -> u32 {
         let object = self.expression(with.object);
 
-        self.bound_to(with.span(), object, &with.initializer, |lowering, span, values| {
+        self.bound_to(with.span(), object, &with.initializer, false, |lowering, span, values| {
             let line = lowering.line(span);
             let mut entries = Vec::new();
             for (name, value) in values {
@@ -2543,15 +2632,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Runs the statements `body` writes, as a closure bound to `object`, the object `new` or `with` at `span` creates,
-    /// spec section 16: `(function ($value#1, …) { … })->call($object, …)`. The closure runs with the object's class's
-    /// own access, so a write runs an `init` or `set` accessor wherever the code is, as a named constructor's body runs
-    /// (`Lowering::named_constructor`). Each value of `initializer` runs in the caller, in order after `object`, as an
-    /// argument, and `body` reads it through the hidden parameter it gets beside the property's name.
+    /// spec section 16: `(function ($value#1, …) { … })->call($object, …)`, or, when the closure `builds` the object,
+    /// `\Sharp\Internal\build($object, function ($value#1, …) { … }, …)`, which binds it the same way while the object
+    /// is still being built, so its writes run no observer, spec section 6.2. The closure runs with the object's
+    /// class's own access, so a write runs an `init` or `set` accessor wherever the code is, as a named constructor's
+    /// body runs (`Lowering::named_constructor`). Each value of `initializer` runs in the caller, in order after
+    /// `object`, as an argument, and `body` reads it through the hidden parameter it gets beside the property's name.
     fn bound_to(
         &mut self,
         span: Span,
         object: u32,
         initializer: &ObjectInitializer,
+        builds: bool,
         body: impl FnOnce(&mut Self, Span, Vec<(&[u8], u32)>) -> Vec<u32>,
     ) -> u32 {
         let line = self.line(span);
@@ -2575,6 +2667,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let statements = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let closure =
             self.declaration(SHARP_AST_CLOSURE, 0, span, span, b"", &[parameters, NULL, statements, NULL, NULL]);
+        if builds {
+            arguments.insert(1, closure);
+            return self.global_call(line, b"Sharp\\Internal\\build", &arguments);
+        }
         let call = self.string(0, line, b"call");
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
 
@@ -2650,16 +2746,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
     }
 
-    /// A variadic parameter carries `ZEND_PARAM_VARIADIC`, as php-src's grammar builds `int ...$values`. A parameter
-    /// the container fills, whose type is `service`, carries the service's id when its PHP type drops it.
+    /// A variadic parameter carries `ZEND_PARAM_VARIADIC`, as php-src's grammar builds `int ...$values`, and a widened
+    /// one `ZEND_PARAM_WIDENED` (`Types::is_widened`). A parameter the container fills, whose type is `service`,
+    /// carries the service's id when its PHP type drops it.
     fn parameter(&mut self, parameter: &FunctionLikeParameter, service: Option<&FunctionLikeParameterMetadata>) -> u32 {
         let Some(hint) = &parameter.hint else {
             unreachable!("semantics refuses a method parameter without a type");
         };
         let hint_index = self.hint(hint);
         let service = service.and_then(|service| dropped_service(hint, service));
+        let node = self.parameter_of_type(parameter, hint_index, service);
+        if self.types.is_widened(parameter.variable.span) {
+            self.nodes[node as usize].attr |= ZEND_PARAM_WIDENED;
+        }
 
-        self.parameter_of_type(parameter, hint_index, service)
+        node
     }
 
     /// A parameter with its lowered type, or with a null type, as a lambda's parameter can be, and with the id of the
@@ -2675,12 +2776,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(parameter.variable.span);
         let name = self.string(0, line, parameter.variable.name);
         let default = parameter.default_value.as_ref().map_or(NULL, |default| self.expression(default.value));
-        let (member_flags, hooks, hint) = if parameter.is_promoted_property() && !self.promoted_beside {
-            let (flags, hooks) = self.member_flags_and_hooks(parameter);
-
-            (flags, hooks, self.property_hint(hint, parameter.variable.name, line))
+        let (member_flags, hint) = if parameter.is_promoted_property() && !self.promoted_beside {
+            (self.member_flags(parameter), self.property_hint(hint, parameter.variable.name, line))
         } else {
-            (0, NULL, hint)
+            (0, hint)
         };
         let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
         let service = service.map(|service| self.service_attribute(line, service));
@@ -2690,7 +2789,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             SHARP_AST_PARAM,
             member_flags | variadic_flag,
             self.line(parameter),
-            &[hint, name, default, attributes, NULL, hooks],
+            &[hint, name, default, attributes, NULL, NULL],
         )
     }
 
@@ -2707,13 +2806,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_TYPE_UNION, 0, line, &types)
     }
 
-    /// The flags and the hooks of the property a constructor parameter promotes.
-    fn member_flags_and_hooks(&mut self, parameter: &FunctionLikeParameter) -> (u32, u32) {
-        let accessor_flags =
-            parameter.hooks.as_ref().map_or(0, |accessors| accessor_flags(&parameter.modifiers, accessors, self.names));
-        let hooks = self.hooks(&parameter.variable, parameter.hooks.as_ref(), parameter.hint.as_ref());
+    /// The flags of the property a constructor parameter promotes. Spec section 9 gives such a property access levels
+    /// and no accessor bodies, so it has no hooks. One without accessors is a field, which reflection tells from a
+    /// property by its flag.
+    fn member_flags(&self, parameter: &FunctionLikeParameter) -> u32 {
+        let accessor_flags = match &parameter.hooks {
+            Some(accessors) => accessor_flags(&parameter.modifiers, accessors, self.names),
+            None => ZEND_ACC_FIELD,
+        };
 
-        (modifier_flags(&parameter.modifiers) | accessor_flags, hooks)
+        modifier_flags(&parameter.modifiers) | accessor_flags
     }
 
     /// `hint`, the lowered type of the property `property`, wrapped around the type text [`Types::property_check`]
@@ -2742,8 +2844,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let hint = self.hint(hint);
         let hint = self.property_hint(hint, parameter.variable.name, line);
         let name = self.string(0, line, parameter.variable.name);
-        let (flags, hooks) = self.member_flags_and_hooks(parameter);
-        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
+        let flags = self.member_flags(parameter);
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, NULL]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
         let crossing = self.crossing_attribute(parameter.hint.as_ref());
         let attributes = self.attributes(&parameter.attribute_lists, None, crossing);
@@ -2755,27 +2857,45 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// grammar builds `private int $count = 0;`, `public private(set) int $views = 0;`, `public readonly int $id;`,
     /// `public string $name { get => $this->name; }` and `public string $slug { get => expr; }`. A field with no access
     /// modifier is `private`, while PHP makes it `public`. A constant initial value is its default, unless the property
-    /// is `readonly`. A member that starts as null without an initial value
-    /// takes the default `null` on the line of its name, as php-src builds `private ?int $total = null;`. An override is
-    /// a field with `#[\Override]`. PHP refuses a type on a property whose parent's property has none, so an override of
+    /// is `readonly`, and a member without one has none, as a nullable one has no implicit `null`. An override is a
+    /// property with `#[\Override]`, and an auto-property override lowers as a field does. PHP refuses a type on a property whose parent's property has none, so an override of
     /// a property of `parent` whose root declaration has no type has none either, down the whole chain (decision 028).
     fn property(&mut self, property: &Property, parent: Option<&[u8]>) -> u32 {
         let (accessor_flags, attribute_lists, hooks) = match property {
-            Property::Plain(field) => (0, &field.attribute_lists, NULL),
+            // Reflection tells a field from a property by its flag, spec section 6.1.
+            Property::Plain(field) => (ZEND_ACC_FIELD, &field.attribute_lists, NULL),
+            // An abstract property runs as PHP's, with abstract hooks and no `readonly`, as an interface property does.
+            Property::Hooked(hooked) if hooked.modifiers.contains_abstract() => {
+                let flags = accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names) & !ZEND_ACC_READONLY;
+
+                (flags, &hooked.attribute_lists, self.abstract_hooks(&hooked.hook_list))
+            }
+            // A static property's accessors are its class's hidden static methods, which alone reach its storage, so
+            // the storage is private whatever the property's access level, and plain PHP reaches it only through a
+            // method.
+            Property::Hooked(hooked) if runs_static_accessors(property) => (0, &hooked.attribute_lists, NULL),
+            Property::Hooked(hooked @ HookedProperty { behaviors: Some(behaviors), .. }) => (
+                accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
+                &hooked.attribute_lists,
+                self.behavior_hooks(hooked.item.variable(), &hooked.hook_list, behaviors),
+            ),
             Property::Hooked(hooked) => (
                 accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
                 &hooked.attribute_lists,
                 self.hooks(hooked.item.variable(), Some(&hooked.hook_list), property.hint()),
             ),
             Property::Computed(computed) => {
+                let lazy = is_lazy(&computed.modifiers);
                 let hook = self.accessor_bodies(computed.variable.name, |lowering| {
-                    let body = lowering.short_body(b"get", &computed.body);
+                    let body =
+                        if lazy { lowering.lazy_body(computed) } else { lowering.short_body(b"get", &computed.body) };
 
                     lowering.hook(b"get", computed.body.arrow, &computed.body, NULL, body)
                 });
 
                 (
-                    0,
+                    // A lazy property keeps its value in its own storage, which only its `get` hook writes.
+                    if lazy { ZEND_ACC_PRIVATE_SET } else { 0 },
                     &computed.attribute_lists,
                     self.node(SHARP_AST_STMT_LIST, 0, self.line(computed.body.arrow), &[hook]),
                 )
@@ -2799,14 +2919,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let hint = self.property_hint(hint, variable.name, line);
         let name = self.string(0, line, variable.name);
         let default = match property.initial_value() {
-            Some(value) if !property.initial_value_runs_in_constructor() => self.expression(value),
-            None if is_null_by_default(property, self.names) => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
+            Some(value)
+                if !property.initial_value_runs_in_constructor() && !property.initial_value_runs_after_class() =>
+            {
+                self.expression(value)
+            }
             _ => NULL,
         };
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, default, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
-        let access = if property.modifiers().contains_visibility() { 0 } else { ZEND_ACC_PRIVATE };
-        let flags = modifier_flags(property.modifiers()) | access | accessor_flags;
+        let access_flags = ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE;
+        let flags = modifier_flags(property.modifiers()) | accessor_flags;
+        let flags = if runs_static_accessors(property) { flags & !access_flags } else { flags };
+        // A member with no access modifier is private, spec section 5.
+        let access = if flags & access_flags == 0 { ZEND_ACC_PRIVATE } else { 0 };
+        let flags = flags | access;
         let crossing = self.crossing_attribute(property.hint());
         let attributes = self.attributes(attribute_lists, r#override, crossing);
 
@@ -2815,9 +2942,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A property's hook list, or null when it needs none: an auto-property is plain storage. Each body is a hook. An
     /// auto accessor beside a body that uses `field` is PHP's backing store, so it is no hook, and beside bodies that
-    /// never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does. The `set` hook
-    /// of a `Map` or a `Set`, whose type `holds` names, also takes the PHP array plain PHP writes, and the body first
-    /// crosses it, as a parameter's is.
+    /// never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does. The observers
+    /// are no hooks of their own: they run inside the `set` hook, which an auto `set` beside one always has. The `set`
+    /// hook of a `Map` or a `Set`, whose type `holds` names, also takes the PHP array plain PHP writes, and the body
+    /// first crosses it, as a parameter's is.
     fn hooks(&mut self, variable: &DirectVariable, accessors: Option<&PropertyHookList>, holds: Option<&Hint>) -> u32 {
         let Some(accessors) = accessors.filter(|accessors| {
             accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
@@ -2826,17 +2954,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
 
         let uses_field = self.names.uses_field(accessors);
+        let named = |name: &[u8]| accessors.hooks.iter().find(|accessor| accessor.name.value == name);
+        let (will_set, did_set) = (named(b"willSet"), named(b"didSet"));
         self.accessor_bodies(variable.name, |lowering| {
             let mut hooks = Vec::new();
-            for accessor in &accessors.hooks {
+            for accessor in accessors.hooks.iter().filter(|accessor| !accessor.is_observer()) {
+                let observed = accessor.is_setter() && (will_set.is_some() || did_set.is_some());
                 let mut body = match &accessor.body {
-                    PropertyHookBody::Concrete(PropertyHookConcreteBody::Block(block)) => lowering.block(block),
-                    PropertyHookBody::Concrete(PropertyHookConcreteBody::Expression(body)) => {
-                        lowering.short_body(accessor.name.value, body)
-                    }
-                    PropertyHookBody::Abstract(_) if uses_field => continue,
+                    PropertyHookBody::Concrete(body) => lowering.accessor_body(accessor.name.value, body),
+                    PropertyHookBody::Abstract(_) if uses_field && !observed => continue,
                     PropertyHookBody::Abstract(_) => lowering.storage_body(accessor),
                 };
+                if observed {
+                    body = lowering.observed(accessor, will_set, body, did_set, true);
+                }
                 let mut parameters = NULL;
                 if accessor.is_setter()
                     && let Some(hint) = holds
@@ -2862,6 +2993,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &hooks)
         })
+    }
+
+    /// The hooks of an interface property or an abstract one: each accessor is a hook with no body, as php-src's
+    /// grammar builds `{ get; set; }`. An `init` is the `set` hook, as it is on a property with a body.
+    fn abstract_hooks(&mut self, accessors: &PropertyHookList) -> u32 {
+        let mut hooks = Vec::new();
+        for accessor in &accessors.hooks {
+            let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
+            hooks.push(self.hook(name, accessor.name, accessor, NULL, NULL));
+        }
+
+        self.node(SHARP_AST_STMT_LIST, 0, self.line(accessors), &hooks)
     }
 
     /// `lowered`, the lowered value, checked against the type text `text` once it enters PHP# from plain PHP, with
@@ -2894,12 +3037,210 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The body of `get => expr;`, the short body php-src's grammar builds, on the arrow's line. A `set` with an
     /// expression body is the statement list `set { expr; }`, because PHP stores the result of `set => expr;`.
+    /// The body an accessor named `accessor` writes: a block, or `=> expr;`.
+    fn accessor_body(&mut self, accessor: &[u8], body: &PropertyHookConcreteBody) -> u32 {
+        match body {
+            PropertyHookConcreteBody::Block(block) => self.block(block),
+            PropertyHookConcreteBody::Expression(body) => self.short_body(accessor, body),
+        }
+    }
+
+    /// The `set` hook of a property with observers, spec section 6.2: `willSet`, then `write`, the `set` body or the
+    /// storage write, then `didSet`. An instance property's observers run only once its object is built, so they wait
+    /// on what `\Sharp\Internal\building` says: `$built#1 = !\Sharp\Internal\building($this);
+    /// if ($built#1) { willSet } write; if ($built#1) { didSet }`. A static's run on every write, as its initial value
+    /// never writes through it.
+    fn observed(
+        &mut self,
+        setter: &PropertyHook,
+        will_set: Option<&PropertyHook>,
+        write: u32,
+        did_set: Option<&PropertyHook>,
+        instance: bool,
+    ) -> u32 {
+        let line = self.line(setter);
+        let span = setter.name.span;
+        let mut statements = Vec::new();
+        if instance {
+            let this = self.variable(span, b"this");
+            let building = self.global_call(line, b"Sharp\\Internal\\building", &[this]);
+            let built = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[building]);
+            let place = self.variable(span, b"built#1");
+            statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[place, built]));
+        }
+        let observer = |lowering: &mut Self, observer: &PropertyHook| {
+            let PropertyHookBody::Concrete(body) = &observer.body else {
+                unreachable!("semantics refuses an observer without a body");
+            };
+            let body = lowering.accessor_body(observer.name.value, body);
+            if !instance {
+                return body;
+            }
+            let built = lowering.variable(span, b"built#1");
+
+            lowering.if_chain(span, &[(built, body)])
+        };
+        statements.extend(will_set.map(|will_set| observer(self, will_set)));
+        statements.push(write);
+        statements.extend(did_set.map(|did_set| observer(self, did_set)));
+
+        self.node(SHARP_AST_STMT_LIST, 0, line, &statements)
+    }
+
     fn short_body(&mut self, accessor: &[u8], body: &PropertyHookConcreteExpressionBody) -> u32 {
         let line = self.line(body.arrow);
         let expression = self.expression(body.expression);
         let kind = if accessor == b"get" { SHARP_AST_PROPERTY_HOOK_SHORT_BODY } else { SHARP_AST_STMT_LIST };
 
         self.node(kind, 0, line, &[expression])
+    }
+
+    /// The `get` body of `lazy T name => expr;`, spec section 6.5: it runs `expr` on the first read and keeps the value
+    /// in the property's storage, and whether it ran in the hidden flag [`Lowering::lazy_flag`] declares, which a
+    /// copy's `__clone` clears and a null value can't stand in for:
+    /// `get { if (!$this->{'name#lazy'}) { $this->name = expr; $this->{'name#lazy'} = true; } return $this->name; }`.
+    /// A throw in `expr` keeps nothing, so the next read runs it again.
+    fn lazy_body(&mut self, computed: &ComputedProperty) -> u32 {
+        let line = self.line(computed.body.arrow);
+        let storage = self.storage(line);
+        let value = self.expression(computed.body.expression);
+        let keep = self.node(SHARP_AST_ASSIGN, 0, line, &[storage, value]);
+        let flag = self.lazy_flag_fetch(line, computed.variable.name);
+        let r#true = self.zval(line, sharp_value::SHARP_TRUE, |_| {});
+        let ran = self.node(SHARP_AST_ASSIGN, 0, line, &[flag, r#true]);
+        let first_read = self.node(SHARP_AST_STMT_LIST, 0, line, &[keep, ran]);
+        let flag = self.lazy_flag_fetch(line, computed.variable.name);
+        let not_ran = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[flag]);
+        let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[not_ran, first_read]);
+        let r#if = self.node(SHARP_AST_IF, 0, line, &[branch]);
+        let storage = self.storage(line);
+        let r#return = self.node(SHARP_AST_RETURN, 0, line, &[storage]);
+
+        self.node(SHARP_AST_STMT_LIST, 0, line, &[r#if, r#return])
+    }
+
+    /// The hidden flag of an instance `lazy` property, `private bool ${'name#lazy'} = false;`, which its `get` hook sets
+    /// once the value is kept. No PHP# name has a `#`, so it names no member a program declares.
+    fn lazy_flag(&mut self, computed: &ComputedProperty) -> u32 {
+        let line = self.line(&computed.variable);
+        let hint = self.string(ZEND_NAME_NOT_FQ, line, b"bool");
+        let name = self.string(0, line, &lazy_flag_name(computed.variable.name));
+        let r#false = self.zval(line, sharp_value::SHARP_FALSE, |_| {});
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, r#false, NULL, NULL]);
+        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+
+        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PRIVATE, line, &[hint, declaration, NULL])
+    }
+
+    /// The hidden private properties that hold the behaviors of the property `variable`, spec section 6.4, one per
+    /// behavior, `private \App\Trimmed $name#via0;`, named as PHP source can't spell, as the hidden local `this#1` is.
+    fn behavior_slots(&mut self, variable: &DirectVariable, behaviors: &PropertyBehaviorList) -> Vec<u32> {
+        let line = self.line(variable);
+        let mut slots = Vec::new();
+        for (index, behavior) in behaviors.behaviors.iter().enumerate() {
+            let hint = self.string(ZEND_NAME_FQ, line, self.behavior_class(behavior));
+            let name = self.string(0, line, &behavior_slot_name(variable.name, index));
+            let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, NULL]);
+            let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+            slots.push(self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PRIVATE, line, &[hint, declaration, NULL]));
+        }
+
+        slots
+    }
+
+    /// `$this->{'name#via0'} = new \App\Trimmed();` for each behavior of the property `variable`, which the constructor
+    /// runs before any initial value, spec section 6.4: one instance per object, with no arguments. A generic behavior's
+    /// `new` carries its type arguments, as a generic `new` does.
+    fn behavior_creations(&mut self, variable: &DirectVariable, behaviors: &PropertyBehaviorList) -> Vec<u32> {
+        let line = self.line(variable);
+        let mut creations = Vec::new();
+        for (index, behavior) in behaviors.behaviors.iter().enumerate() {
+            let slot = self.behavior_slot(line, variable.name, index);
+            let name = self.behavior_class(behavior);
+            let class = self.string(ZEND_NAME_FQ, line, name);
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+            let created = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+            let type_arguments = self.types.type_arguments(name, behavior.span());
+            let created = self.with_type_arguments(line, created, type_arguments);
+            creations.push(self.node(SHARP_AST_ASSIGN, 0, line, &[slot, created]));
+        }
+
+        creations
+    }
+
+    /// The full name of the class the behavior `behavior` names, with or without type arguments.
+    fn behavior_class(&self, behavior: &Hint) -> &'lowering [u8] {
+        match behavior {
+            Hint::Identifier(identifier) => self.names.get(identifier),
+            Hint::Generic(generic) => self.names.get(&generic.name),
+            _ => unreachable!("semantics refuses a behavior that names no class"),
+        }
+    }
+
+    /// `$this->{'name#viaN'}`, the slot of the behavior at `index` of the property `property`.
+    fn behavior_slot(&mut self, line: u32, property: &[u8], index: usize) -> u32 {
+        let this = self.string(0, line, b"this");
+        let this = self.node(SHARP_AST_VAR, 0, line, &[this]);
+        let name = self.string(0, line, &behavior_slot_name(property, index));
+
+        self.node(SHARP_AST_PROP, 0, line, &[this, name])
+    }
+
+    /// The hooks of the property `variable` with `behaviors`, spec section 6.4. `set` runs the written value through
+    /// each behavior's `set` in the order they are written, and stores the result. `get` runs the storage through each
+    /// behavior's `get` the other way, so the first behavior wraps the rest:
+    /// `get => $this->{'name#via0'}->get($this->{'name#via1'}->get($this->name));` and
+    /// `set { $this->name = $this->{'name#via1'}->set($this->{'name#via0'}->set($value)); }`.
+    fn behavior_hooks(
+        &mut self,
+        variable: &DirectVariable,
+        accessors: &PropertyHookList,
+        behaviors: &PropertyBehaviorList,
+    ) -> u32 {
+        let (Some(getter), Some(setter)) =
+            (accessors.hooks.iter().find(|accessor| accessor.name.value == b"get"), accessors.setter())
+        else {
+            unreachable!("semantics gives `via` only to a property with `get; set;`");
+        };
+        let count = behaviors.behaviors.len();
+
+        self.accessor_bodies(variable.name, |lowering| {
+            let line = lowering.line(variable);
+            let call = |lowering: &mut Self, index: usize, accessor: &[u8], value: u32| {
+                let slot = lowering.behavior_slot(line, variable.name, index);
+                let method = lowering.string(0, line, accessor);
+                let arguments = lowering.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+
+                lowering.node(SHARP_AST_METHOD_CALL, 0, line, &[slot, method, arguments])
+            };
+
+            let mut read = lowering.storage(line);
+            for index in (0..count).rev() {
+                read = call(lowering, index, b"get", read);
+            }
+            let read = lowering.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[read]);
+            let get = lowering.hook(b"get", getter.name, getter, NULL, read);
+
+            let mut written = lowering.variable(setter.name.span, b"value");
+            for index in 0..count {
+                written = call(lowering, index, b"set", written);
+            }
+            let storage = lowering.storage(line);
+            let store = lowering.node(SHARP_AST_ASSIGN, 0, line, &[storage, written]);
+            let store = lowering.node(SHARP_AST_STMT_LIST, 0, line, &[store]);
+            let set = lowering.hook(b"set", setter.name, setter, NULL, store);
+
+            lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &[get, set])
+        })
+    }
+
+    /// `$this->{'name#lazy'}`, the hidden flag of the instance `lazy` property `name`.
+    fn lazy_flag_fetch(&mut self, line: u32, property: &[u8]) -> u32 {
+        let this = self.string(0, line, b"this");
+        let this = self.node(SHARP_AST_VAR, 0, line, &[this]);
+        let name = self.string(0, line, &lazy_flag_name(property));
+
+        self.node(SHARP_AST_PROP, 0, line, &[this, name])
     }
 
     /// An auto accessor's body over the storage: `get => $this->name;` or [`Self::storage_set`].
@@ -2926,6 +3267,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `field`: `$this->name` of the property whose accessor body is being lowered, which PHP reads and writes as the
     /// storage inside the property's own hook.
     fn storage(&mut self, line: u32) -> u32 {
+        // A static property's storage is its class's own static, `self::$name`.
+        if self.types.is_static_accessor(self.class, &self.property) {
+            let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+            let name = store_text(&mut self.texts, &self.property);
+            let name = self.zval(line, sharp_value::SHARP_STRING, |node| node.text = name);
+
+            return self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, name]);
+        }
+
         let this = self.string(0, line, b"this");
         let this = self.node(SHARP_AST_VAR, 0, line, &[this]);
         let name = store_text(&mut self.texts, &self.property);
@@ -3024,15 +3374,284 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// `$this->name = value;` on the line of the member's name.
-    fn initial_value(&mut self, variable: &DirectVariable, value: &Expression) -> u32 {
-        let line = self.line(variable);
-        let this = self.variable(variable.span, b"this");
-        let name = self.string(0, line, variable.name);
-        let property = self.node(SHARP_AST_PROP, 0, line, &[this, name]);
-        let value = self.expression(value);
+    /// The hidden method that sets each static whose initial value isn't constant, as PHP gives a static only a constant
+    /// default: `private static function #statics(): void { self::$a = …; }`. The engine runs it once each request,
+    /// when it first builds the class's statics, after their constant defaults (`zend_class_init_sharp_statics`), so a
+    /// preloaded class gets the values too. Each value fills the storage, so it runs neither a `set` body nor an
+    /// observer, spec section 6.2. None when each static's initial value is its default.
+    fn static_initial_values(&mut self, members: &Sequence<ClassLikeMember>) -> Option<u32> {
+        let properties: Vec<&Property> = members
+            .iter()
+            .filter_map(|member| match member {
+                ClassLikeMember::Property(property) if property.initial_value_runs_after_class() => Some(property),
+                _ => None,
+            })
+            .collect();
+        let first = properties.first()?;
+        let line = self.line(first.first_variable());
+        let mut statements = Vec::new();
+        for property in &properties {
+            let variable = property.first_variable();
+            let Some(value) = property.initial_value() else {
+                unreachable!("a static whose initial value runs after its class has one");
+            };
+            let line = self.line(variable);
+            let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+            let value = self.expression(value);
+            let member = self.string(0, line, variable.name);
+            let target = self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, member]);
+            statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[target, value]));
+        }
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let void = self.string(ZEND_NAME_NOT_FQ, line, b"void");
+        let span = first.span();
 
-        self.node(SHARP_AST_ASSIGN, 0, line, &[property, value])
+        Some(self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PRIVATE | ZEND_ACC_STATIC,
+            span,
+            span,
+            b"#statics",
+            &[parameters, NULL, body, void, NULL],
+        ))
+    }
+
+    /// The members a static property with accessors runs as, decision 3: PHP has no hooks on a static, so its storage,
+    /// when it has one, is a plain static only its class writes, and its accessors are the hidden static methods
+    /// `name#get` and `name#set`, which every PHP# read and write calls, as [`Lowering::accessor_call`] writes them.
+    /// `name#get` returns the `get` body's value, or the storage for `get;`. `name#set` runs the observers around the
+    /// `set` body, or around the storage write for `set;`, as an instance property's `set` hook does.
+    fn static_accessors(&mut self, property: &Property, parent: Option<&[u8]>) -> Vec<u32> {
+        let mut members = Vec::new();
+        let accessors = match property {
+            Property::Hooked(hooked) => {
+                if self.names.has_storage(&hooked.hook_list) {
+                    members.push(self.property(property, parent));
+                }
+                Some(&hooked.hook_list)
+            }
+            _ => None,
+        };
+        let variable = property.first_variable();
+        let Some(hint) = property.hint() else {
+            unreachable!("the PHP# parser gives every field and property its type");
+        };
+        let read_visibility = modifier_flags(property.modifiers()) & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED);
+        let read_visibility = if read_visibility == 0 { ZEND_ACC_PRIVATE } else { read_visibility };
+
+        let get = self.accessor_bodies(variable.name, |lowering| {
+            let line = lowering.line(variable);
+            let returned = |lowering: &mut Self, value: u32| {
+                let r#return = lowering.node(SHARP_AST_RETURN, 0, line, &[value]);
+                lowering.node(SHARP_AST_STMT_LIST, 0, line, &[r#return])
+            };
+            let getter =
+                accessors.and_then(|accessors| accessors.hooks.iter().find(|accessor| accessor.name.value == b"get"));
+            let body = match (property, getter.map(|getter| &getter.body)) {
+                (Property::Computed(computed), _) if is_lazy(&computed.modifiers) => {
+                    let value = lowering.static_lazy_value(computed);
+                    returned(lowering, value)
+                }
+                (Property::Computed(computed), _) => {
+                    let value = lowering.expression(computed.body.expression);
+                    returned(lowering, value)
+                }
+                (_, Some(PropertyHookBody::Concrete(PropertyHookConcreteBody::Block(block)))) => lowering.block(block),
+                (_, Some(PropertyHookBody::Concrete(PropertyHookConcreteBody::Expression(body)))) => {
+                    let value = lowering.expression(body.expression);
+                    returned(lowering, value)
+                }
+                _ => {
+                    let storage = lowering.storage(line);
+                    returned(lowering, storage)
+                }
+            };
+            let return_type = lowering.hint(hint);
+
+            lowering.accessor_method(variable, b"get", read_visibility, NULL, body, return_type)
+        });
+        members.push(get);
+
+        let Some(accessors) = accessors else {
+            return members;
+        };
+        let Some(setter) = accessors.setter() else {
+            return members;
+        };
+        let named = |name: &[u8]| accessors.hooks.iter().find(|accessor| accessor.name.value == name);
+        let (will_set, did_set) = (named(b"willSet"), named(b"didSet"));
+        let write_visibility = match setter.modifiers.first() {
+            Some(Modifier::Private(_)) => ZEND_ACC_PRIVATE,
+            Some(Modifier::Protected(_)) => ZEND_ACC_PROTECTED,
+            // PHP has no namespace reach, so the analyzer checks `internal set`, as on an instance property.
+            _ => read_visibility,
+        };
+        let set = self.accessor_bodies(variable.name, |lowering| {
+            let line = lowering.line(setter);
+            let write = match &setter.body {
+                PropertyHookBody::Concrete(body) => lowering.accessor_body(setter.name.value, body),
+                PropertyHookBody::Abstract(_) => lowering.storage_set(setter.name.span),
+            };
+            let body = if will_set.is_some() || did_set.is_some() {
+                lowering.observed(setter, will_set, write, did_set, false)
+            } else {
+                write
+            };
+            let accepted = lowering.hint(hint);
+            let value = lowering.string(0, line, b"value");
+            let parameter = lowering.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, NULL, NULL, NULL]);
+            let parameters = lowering.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
+
+            lowering.accessor_method(variable, b"set", write_visibility, parameters, body, NULL)
+        });
+        members.push(set);
+
+        members
+    }
+
+    /// The value a `static lazy` property's `name#get` returns, spec section 6.5:
+    /// `\Sharp\Internal\keep('App\Report::name', static fn () => body)`, which runs the body on the first read and keeps
+    /// its value for a singleton's lifetime.
+    fn static_lazy_value(&mut self, computed: &ComputedProperty) -> u32 {
+        let line = self.line(computed.body.arrow);
+        let key = self.string(0, line, &[self.class, b"::", computed.variable.name].concat());
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let value = self.expression(computed.body.expression);
+        let compute = self.declaration(
+            SHARP_AST_ARROW_FUNC,
+            ZEND_ACC_STATIC,
+            computed.body.arrow,
+            computed.body.expression,
+            b"",
+            &[parameters, NULL, value, NULL, NULL],
+        );
+        let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\keep");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[key, compute]);
+
+        self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+    }
+
+    /// The class and the name of `target` when it is `Class.name` for a static property that runs accessors, whose
+    /// reads and writes call its hidden methods, as [`Lowering::static_accessors`] writes them.
+    fn static_accessor<'ast>(&self, target: &Expression<'ast>) -> Option<(&'ast ConstantAccess<'ast>, &'ast [u8])> {
+        let Expression::Access(Access::Property(
+            access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(name), .. },
+        )) = target.unparenthesized()
+        else {
+            return None;
+        };
+        let class = self.names.static_property_class(access)?;
+        let classes =
+            self.types.type_parameter_classes(&class.name).unwrap_or_else(|| vec![self.names.get(&class.name)]);
+
+        classes.iter().any(|class| self.types.is_static_accessor(class, name.value)).then_some((class, name.value))
+    }
+
+    /// `Class::{'name#get'}()` or `Class::{'name#set'}(value)`: the call of the hidden method `accessor` of the static
+    /// property `name` of `class`, with `arguments`.
+    fn accessor_call(&mut self, class: &ConstantAccess, name: &[u8], accessor: &[u8], arguments: &[u32]) -> u32 {
+        let line = self.line(class);
+        let (class, _) = self.static_class(class);
+        let method = self.string(0, line, &[name, b"#", accessor].concat());
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, arguments);
+
+        self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
+    }
+
+    /// A write of `value` to the static property `name` of `class`, which runs accessors, at `span`:
+    /// `Class::{'name#set'}($value#N = value) ?? $value#N`. The hidden setter returns nothing, so the write's value is
+    /// the value written, as an assignment's is.
+    fn accessor_write(&mut self, class: &ConstantAccess, name: &[u8], value: u32, span: Span) -> u32 {
+        let line = self.line(span);
+        let hidden = self.hidden("value");
+        let variable = self.variable(span, &hidden);
+        let held = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, value]);
+        let call = self.accessor_call(class, name, b"set", &[held]);
+        let written = self.variable(span, &hidden);
+        self.temporaries -= 1;
+
+        self.node(SHARP_AST_COALESCE, 0, line, &[call, written])
+    }
+
+    /// `++` or `--`, by `operation`, `ZEND_ADD` or `ZEND_SUB`, of the static property `name` of `class`, which runs
+    /// accessors, at `span`. A prefix one is the value written. A postfix one is the value read:
+    /// `Class::{'name#set'}(($old#N = Class::{'name#get'}()) + 1) ?? $old#N`.
+    fn accessor_step(&mut self, class: &ConstantAccess, name: &[u8], operation: u32, postfix: bool, span: Span) -> u32 {
+        let line = self.line(span);
+        let one = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = 1);
+        let read = self.accessor_call(class, name, b"get", &[]);
+        if !postfix {
+            let value = self.node(SHARP_AST_BINARY_OP, operation, line, &[read, one]);
+
+            return self.accessor_write(class, name, value, span);
+        }
+
+        let hidden = self.hidden("old");
+        let old = self.variable(span, &hidden);
+        let held = self.node(SHARP_AST_ASSIGN, 0, line, &[old, read]);
+        let value = self.node(SHARP_AST_BINARY_OP, operation, line, &[held, one]);
+        let call = self.accessor_call(class, name, b"set", &[value]);
+        let old = self.variable(span, &hidden);
+        self.temporaries -= 1;
+
+        self.node(SHARP_AST_COALESCE, 0, line, &[call, old])
+    }
+
+    /// The hidden static method `name#get` or `name#set` of the static property `variable`, with the visibility
+    /// `visibility`, spanning the property's name.
+    fn accessor_method(
+        &mut self,
+        variable: &DirectVariable,
+        accessor: &[u8],
+        visibility: u32,
+        parameters: u32,
+        body: u32,
+        return_type: u32,
+    ) -> u32 {
+        let parameters =
+            if parameters == NULL { self.node(SHARP_AST_PARAM_LIST, 0, self.line(variable), &[]) } else { parameters };
+        let name = [variable.name, b"#", accessor].concat();
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            visibility | ZEND_ACC_STATIC,
+            variable.span,
+            variable.span,
+            &name,
+            &[parameters, NULL, body, return_type, NULL],
+        )
+    }
+
+    /// The write of `property`'s initial value `value` at the start of the constructor, on the line of its name. It
+    /// fills the storage, so it runs neither a `set` body nor an observer, spec section 6: PHP's
+    /// `(new \ReflectionProperty(self::class, 'name'))->setRawValue($this, value);` when the property has a `set` hook,
+    /// and `$this->name = value;`, which runs the behaviors' `set`, otherwise.
+    fn initial_value(&mut self, property: &Property, value: &Expression) -> u32 {
+        let variable = property.first_variable();
+        let line = self.line(variable);
+        let name = self.string(0, line, variable.name);
+        let value = self.expression(value);
+        let this = self.variable(variable.span, b"this");
+        let runs_set_hook = matches!(property, Property::Hooked(hooked) if hooked.behaviors.is_none()
+        && hooked.hook_list.hooks.iter().any(|accessor| {
+            accessor.is_observer() || (accessor.is_setter() && matches!(accessor.body, PropertyHookBody::Concrete(_)))
+        }));
+        if !runs_set_hook {
+            let property = self.node(SHARP_AST_PROP, 0, line, &[this, name]);
+
+            return self.node(SHARP_AST_ASSIGN, 0, line, &[property, value]);
+        }
+
+        let own = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+        let class = self.node(SHARP_AST_CLASS_NAME, 0, line, &[own]);
+        let reflection = self.string(ZEND_NAME_FQ, line, b"ReflectionProperty");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[class, name]);
+        let reflection = self.node(SHARP_AST_NEW, 0, line, &[reflection, arguments]);
+        let method = self.string(0, line, b"setRawValue");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[this, value]);
+
+        self.node(SHARP_AST_METHOD_CALL, 0, line, &[reflection, method, arguments])
     }
 
     /// A type is the type PHP writes for it once generics are erased, as [`Lowering::erase`] gives it.
@@ -3573,6 +4192,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     return self.operator_call(line, class, name, &[operand]);
                 }
 
+                if let UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_) = unary.operator
+                    && let Some((class, name)) = self.static_accessor(unary.operand)
+                {
+                    let operation = if matches!(unary.operator, UnaryPrefixOperator::PreIncrement(_)) {
+                        ZEND_ADD
+                    } else {
+                        ZEND_SUB
+                    };
+
+                    return self.accessor_step(class, name, operation, false, unary.operand.span());
+                }
+
                 let (kind, attr) = prefix_kind(&unary.operator);
                 let operand = if unary.operator.is_increment_or_decrement() {
                     self.target(unary.operand)
@@ -3583,6 +4214,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(kind, attr, line, &[operand])
             }
             Expression::UnaryPostfix(unary) => {
+                if let Some((class, name)) = self.static_accessor(unary.operand) {
+                    let operation = if matches!(unary.operator, UnaryPostfixOperator::PostIncrement(_)) {
+                        ZEND_ADD
+                    } else {
+                        ZEND_SUB
+                    };
+
+                    return self.accessor_step(class, name, operation, true, unary.operand.span());
+                }
+
                 let kind = match unary.operator {
                     UnaryPostfixOperator::PostIncrement(_) => SHARP_AST_POST_INC,
                     UnaryPostfixOperator::PostDecrement(_) => SHARP_AST_POST_DEC,
@@ -3592,8 +4233,31 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(kind, 0, line, &[operand])
             }
             Expression::Assignment(assignment) => {
+                // A static that runs accessors is written through its hidden `name#set`.
+                if let Some((class, name)) = self.static_accessor(assignment.lhs) {
+                    let span = assignment.lhs.span();
+                    match assignment.operator {
+                        AssignmentOperator::Assign(_) => {
+                            let declared = self.types.property_type(assignment.lhs).cloned();
+                            let value = self.crossed_value(assignment.rhs, declared.as_ref());
+
+                            return self.accessor_write(class, name, value, span);
+                        }
+                        AssignmentOperator::Coalesce(_) => {
+                            let read = self.accessor_call(class, name, b"get", &[]);
+                            let value = self.expression(assignment.rhs);
+                            let write = self.accessor_write(class, name, value, span);
+
+                            return self.node(SHARP_AST_COALESCE, 0, line, &[read, write]);
+                        }
+                        // A compound assignment reads and writes it in `compound_assignment`.
+                        _ => {}
+                    }
+                }
+
                 if let Expression::ArrayAccess(access) = assignment.lhs
                     && match access.array.unparenthesized() {
+                        array if self.static_accessor(array).is_some() => true,
                         Expression::ArrayAccess(element) => self.is_list(element.array),
                         // `Class.name` is a static property, which PHP gives no hooks.
                         Expression::Access(Access::Property(
@@ -3625,6 +4289,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
 
                 match (&assignment.operator, self.operand_types_of(assignment)) {
+                    (AssignmentOperator::Addition(_), Operands::Strings)
+                        if self.static_accessor(assignment.lhs).is_some() =>
+                    {
+                        self.compound_assignment(line, assignment, |this, read, value| {
+                            this.node(SHARP_AST_BINARY_OP, ZEND_CONCAT, line, &[read, value])
+                        })
+                    }
                     (AssignmentOperator::Addition(_), Operands::Strings) => {
                         let lhs = self.target(assignment.lhs);
                         let rhs = self.expression(assignment.rhs);
@@ -3634,6 +4305,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     (AssignmentOperator::Division(_), Operands::Ints) => {
                         self.compound_assignment(line, assignment, |this, target, value| {
                             this.intdiv(line, target, value)
+                        })
+                    }
+                    (operator, _) if self.static_accessor(assignment.lhs).is_some() => {
+                        let (_, attr) = assignment_kind(operator);
+
+                        self.compound_assignment(line, assignment, |this, read, value| {
+                            this.node(SHARP_AST_BINARY_OP, attr, line, &[read, value])
                         })
                     }
                     (operator, _) => {
@@ -3802,6 +4480,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CLASS_NAME, 0, line, &[class])
             }
+            // The checker proved the class has the property, so the running program needs only its name.
+            Expression::NameOf(name_of) => self.string(0, line, name_of.property.value),
             Expression::Throw(throw) => {
                 let exception = self.expression(throw.exception);
 
@@ -3876,6 +4556,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         member: u32,
         line: u32,
     ) -> u32 {
+        // A static that runs accessors is read through its hidden `name#get`, `Class::{'name#get'}()`.
+        if classes.iter().any(|class| self.types.is_static_accessor(class, name)) {
+            let method = self.string(0, line, &[name, b"#get"].concat());
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+
+            return self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
+        }
         let Some(type_arguments) = self.types.statics_type_arguments(access) else {
             return self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, member]);
         };
@@ -4286,6 +4973,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         assignment: &Assignment,
         operation: impl FnOnce(&mut Self, u32, u32) -> u32,
     ) -> u32 {
+        // A static that runs accessors reads through `name#get` and writes through `name#set`.
+        if let Some((class, name)) = self.static_accessor(assignment.lhs) {
+            let read = self.accessor_call(class, name, b"get", &[]);
+            let value = self.expression(assignment.rhs);
+            let result = operation(self, read, value);
+
+            return self.accessor_write(class, name, result, assignment.lhs.span());
+        }
+
         let receiver = match assignment.lhs {
             Expression::Access(Access::Property(access))
                 if self.names.static_property_class(access).is_none() && !self.is_local_or_this(access.object) =>
@@ -6249,12 +6945,41 @@ fn super_alias(interface: Word, method: Word) -> Vec<u8> {
     [method.as_bytes(), b"@", interface.as_bytes()].concat()
 }
 
+/// Whether a static property runs accessors, decision 3: a computed one, or one with an accessor body or an observer.
+/// [`Lowering::static_accessors`] lowers it.
+fn runs_static_accessors(property: &Property) -> bool {
+    property.modifiers().contains_static()
+        && match property {
+            Property::Computed(_) => true,
+            Property::Hooked(hooked) => {
+                hooked.hook_list.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
+            }
+            Property::Plain(_) => false,
+        }
+}
+
+/// Whether a property is `lazy`, spec section 6.5.
+fn is_lazy(modifiers: &Sequence<Modifier>) -> bool {
+    modifiers.iter().any(|modifier| matches!(modifier, Modifier::Lazy(_)))
+}
+
+/// `name#lazy`, the hidden flag of the instance `lazy` property `name`.
+fn lazy_flag_name(property: &[u8]) -> Vec<u8> {
+    [property, b"#lazy"].concat()
+}
+
+/// `name#viaN`, the hidden slot of the behavior at `index` of the property `name`, spec section 6.4.
+fn behavior_slot_name(property: &[u8], index: usize) -> Vec<u8> {
+    [property, format!("#via{index}").as_bytes()].concat()
+}
+
 /// The flags of a member's modifiers. Every modifier is named, so a new one does not compile until it is decided.
 fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
     let mut flags = 0;
     for modifier in modifiers {
         flags |= match modifier {
-            Modifier::Public(_) => ZEND_ACC_PUBLIC,
+            // PHP has no namespace reach, so the analyzer checks spec section 5's `internal`, and it runs as public.
+            Modifier::Public(_) | Modifier::Internal(_) => ZEND_ACC_PUBLIC,
             Modifier::Protected(_) => ZEND_ACC_PROTECTED,
             Modifier::Private(_) => ZEND_ACC_PRIVATE,
             Modifier::Static(_) => ZEND_ACC_STATIC,
@@ -6263,14 +6988,17 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             Modifier::Final(_) => ZEND_ACC_FINAL,
             // PHP methods are open to overriding, and `method` lowers `override` to `#[\Override]`. PHP has no
             // `required` constructor, and the checker proves every subclass keeps one `new Self(…)` can call. `method`
-            // gives an `extern` method the body that calls its native function.
-            Modifier::Virtual(_) | Modifier::Override(_) | Modifier::Required(_) | Modifier::Extern(_) => 0,
+            // gives an `extern` method the body that calls its native function. `property` gives a `lazy` property
+            // the `get` hook that keeps its value.
+            Modifier::Virtual(_)
+            | Modifier::Override(_)
+            | Modifier::Required(_)
+            | Modifier::Extern(_)
+            | Modifier::Lazy(_) => 0,
             Modifier::Readonly(_)
             | Modifier::PublicSet(_)
             | Modifier::ProtectedSet(_)
             | Modifier::PrivateSet(_)
-            | Modifier::Lazy(_)
-            | Modifier::Internal(_)
             | Modifier::Foreign(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
         };
     }
@@ -6300,13 +7028,14 @@ fn static_type_text(text: &str, count: usize) -> String {
     written
 }
 
-/// The flags of a class's modifiers. `public` adds none, because every PHP class is public, and `foreign` adds none,
-/// because only the checker reads it. A static class, whose members are all static, runs as a final PHP class.
+/// The flags of a class's modifiers. `public` and `internal` add none, because every PHP class is public and the
+/// analyzer checks spec section 5's namespace reach, and `foreign` adds none, because only the checker reads it. A
+/// static class, whose members are all static, runs as a final PHP class.
 fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
     let mut flags = 0;
     for modifier in modifiers {
         flags |= match modifier {
-            Modifier::Public(_) | Modifier::Foreign(_) => 0,
+            Modifier::Public(_) | Modifier::Internal(_) | Modifier::Foreign(_) => 0,
             Modifier::Abstract(_) => ZEND_ACC_EXPLICIT_ABSTRACT_CLASS,
             Modifier::Final(_) | Modifier::Static(_) => ZEND_ACC_FINAL,
             Modifier::Protected(_)
@@ -6319,8 +7048,7 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::Override(_)
             | Modifier::Required(_)
             | Modifier::Extern(_)
-            | Modifier::Lazy(_)
-            | Modifier::Internal(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
+            | Modifier::Lazy(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
         };
     }
 
@@ -6373,19 +7101,6 @@ fn without_readonly<'hint, 'arena>(hint: &'hint Hint<'arena>) -> &'hint Hint<'ar
     }
 }
 
-/// Whether a member without an initial value starts as null, as in C# and Swift: a field, or a property with storage
-/// and `set`, of a nullable type. A get-only property with storage is set only where `readonly` allows, and
-/// `readonly` takes no default, so the checker refuses one of a nullable type without an initial value. A property
-/// without storage is virtual, and PHP refuses a default on a virtual property.
-fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
-    matches!(property.hint(), Some(Hint::Nullable(_)))
-        && match property {
-            Property::Plain(_) => true,
-            Property::Hooked(hooked) => !hooked.hook_list.is_get_only() && names.has_storage(&hooked.hook_list),
-            Property::Computed(_) => false,
-        }
-}
-
 /// The flags a property's accessors add: `readonly` for a get-only auto-property, which spec section 6.1 sets in the
 /// constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` or `init`
 /// accessor's access modifier, and `protected(set)` for an `init` without one. A get-only property whose body uses
@@ -6394,6 +7109,11 @@ fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
 /// so a private property, or a protected one with `protected(set)`, takes none, and the flags carry only what the
 /// engine keeps.
 fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, names: &ResolvedNames) -> u32 {
+    // PHP has no `readonly` static, so a get-only static auto-property is `private(set)`, which its class's initializer
+    // writes once, and the analyzer refuses every other write.
+    if accessors.is_readonly() && modifiers.contains_static() {
+        return if modifiers.contains_private() { 0 } else { ZEND_ACC_PRIVATE_SET };
+    }
     if accessors.is_readonly() {
         return ZEND_ACC_READONLY;
     }
@@ -6404,8 +7124,10 @@ fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, 
         Some(setter) => match setter.modifiers.first() {
             // `init` sets the property while the object is created, in the constructors of its class and its
             // subclasses, so it runs as `protected(set)`, and the analyzer refuses every write after that.
-            None if setter.name.value == b"init" => ZEND_ACC_PROTECTED_SET,
-            None => 0,
+            None | Some(Modifier::Internal(_)) if setter.name.value == b"init" => ZEND_ACC_PROTECTED_SET,
+            // PHP has no namespace reach, so the analyzer checks spec section 5's `internal set`, and other classes
+            // of the namespace write the property as PHP's public set.
+            None | Some(Modifier::Internal(_)) => 0,
             Some(Modifier::Protected(_)) => ZEND_ACC_PROTECTED_SET,
             Some(Modifier::Private(_)) => ZEND_ACC_PRIVATE_SET,
             Some(modifier) => unreachable!("check_slice refuses the accessor modifier `{modifier}`"),

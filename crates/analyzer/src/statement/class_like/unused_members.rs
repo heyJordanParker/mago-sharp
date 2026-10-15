@@ -10,6 +10,11 @@
 //! Members with names starting with underscore (`_`) are considered intentionally unused
 //! and are not reported. This also covers magic methods (`__construct`, `__call`, etc.)
 //! since they all start with double underscore.
+//!
+//! [`too_wide_members`] warns, once the whole project is analyzed, on a PHP# `public`
+//! member that nothing outside its namespace uses, which spec section 5 calls too wide.
+
+use std::cell::OnceCell;
 
 use foldhash::HashMap;
 use foldhash::HashSet;
@@ -21,17 +26,24 @@ use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferenceKind;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::symbol::SymbolIdentifier;
+use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
+use mago_reporting::IssueCollection;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_text_edit::Safety;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
+use mago_word::WordMap;
+use mago_word::word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::utils::names::display_property_name;
+use crate::utils::names::sharp_class_like_name;
+use crate::visibility::is_within_namespace;
+use crate::visibility::namespace_of;
 
 /// Represents a checkable member (property or method) with its metadata.
 #[derive(Clone)]
@@ -562,4 +574,116 @@ where
     context.collector.propose(issue, |edits| {
         edits.push(TextEdit::insert(method_span.start_offset(), "_").with_safety(Safety::PotentiallyUnsafe));
     });
+}
+
+/// Warns on each `public` member that nothing outside its namespace and the namespaces below it uses.
+///
+/// Spec section 5 calls such a member too wide. The pass reads `references` of every file, so it runs once the whole
+/// project is analyzed, beside [`Effects::solve`](crate::effects::Effects::solve). A use from the namespace, the
+/// member's own class included, is no outside use, so a member nothing uses warns too. A use from code outside any
+/// class or function counts as outside, because its namespace is not known here.
+///
+/// Only a public PHP# class of a project has such members, a file whose nearest `composer.json` says `"type":
+/// "project"`, of the files analyzed: a library's uses are in the projects that install it, which the analysis never
+/// sees. An `internal` class's members reach no further than it does (a member is never more visible than its class),
+/// interface members are exempt because they have no narrower form, and plain PHP has no `internal`. A member that
+/// overrides or implements another keeps that one's access, PHP calls a magic method itself, and `new` calls the
+/// constructor, which takes its class's reach, so none of them warns.
+#[must_use]
+pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferences) -> IssueCollection {
+    // Each use of a member name: the class the code names it on, and the class or function the code is in, `None`
+    // for code outside both.
+    let mut member_uses = HashMap::<Word, Vec<(Word, Option<Word>)>>::default();
+    references.for_each_reference(|origin, (class, member), _| {
+        let code_in = match origin {
+            ReferenceOrigin::Symbol((symbol, _)) => Some(symbol),
+            ReferenceOrigin::File(_) => None,
+        };
+        member_uses.entry(member).or_default().push((class, code_in));
+    });
+
+    let short_name_counts = OnceCell::new();
+    let mut issues = IssueCollection::default();
+    for (class_name, class) in &codebase.class_likes {
+        if !class.flags.is_user_defined()
+            || !class.flags.is_project()
+            || class.flags.is_internal_reach()
+            || class.kind.is_interface()
+        {
+            continue;
+        }
+
+        let namespace = namespace_of(class.original_name.as_bytes());
+        let is_used_outside = |member: Word| {
+            member_uses.get(&member).is_some_and(|uses| {
+                uses.iter().any(|(on, code_in)| {
+                    (on == class_name || codebase.is_instance_of(on.as_bytes(), class_name.as_bytes()))
+                        && code_in.is_none_or(|symbol| !is_within_namespace(namespace_of(symbol.as_bytes()), namespace))
+                })
+            })
+        };
+
+        for (member, label, span) in public_members(codebase, *class_name, class) {
+            if is_used_outside(member) {
+                continue;
+            }
+
+            let class_label = sharp_class_like_name(codebase, &WordMap::default(), &short_name_counts, *class_name);
+            let namespace = String::from_utf8_lossy(namespace).replace('\\', ".");
+            issues.push(
+                Issue::warning(format!(
+                    "`{}` is public, and nothing outside `{namespace}` uses it.",
+                    display_sharp_member(class_label, label)
+                ))
+                .with_code(IssueCode::TooWideMember)
+                .with_annotation(Annotation::primary(span).with_message("Declared `public` here."))
+                .with_note("A member is as wide as its uses, so one that only its namespace uses is `internal`.")
+                .with_help("Declare it `internal`."),
+            );
+        }
+    }
+
+    issues
+}
+
+/// The `public` members `class` declares that [`too_wide_members`] checks, each as its key in `references`, its name
+/// as PHP# writes it, and the span the warning points at.
+fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLikeMetadata) -> Vec<(Word, Word, Span)> {
+    let mut members = Vec::new();
+
+    for (name, property) in &class.properties {
+        if class.declaring_property_ids.get(name) == Some(&class_name)
+            && property.read_visibility.is_public()
+            && !property.flags.is_internal_reach()
+            && !class.overridden_property_ids.contains_key(name)
+            && let Some(span) = property.name_span.or(property.span)
+        {
+            members.push((*name, word(mago_bytes::trim_start_byte(name.as_bytes(), b'$')), span));
+        }
+    }
+
+    let methods =
+        class.methods.iter().filter_map(|name| Some((name, codebase.function_likes.get(&(class_name, *name))?)));
+    for (name, method) in methods {
+        // A method the codex gives the class, such as section 10's `parse`, spans the whole class, and nobody wrote it.
+        // PHP calls a magic method itself, and `new` calls the constructor, which takes the reach of its class.
+        if method.span != class.span
+            && class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
+            && method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_public())
+            && !method.flags.is_internal_reach()
+            && !name.as_bytes().starts_with(b"__")
+            && !class.overridden_method_ids.contains_key(name)
+        {
+            members.push((*name, method.original_name, method.name_span.unwrap_or(method.span)));
+        }
+    }
+
+    for (name, constant) in &class.constants {
+        if class.span.contains(&constant.span) && constant.visibility.is_public() && !constant.flags.is_internal_reach()
+        {
+            members.push((*name, *name, constant.span));
+        }
+    }
+
+    members
 }

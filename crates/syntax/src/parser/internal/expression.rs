@@ -340,6 +340,10 @@ where
             return Ok(self.arena.alloc(Expression::TypeOf(self.parse_type_of()?)));
         }
 
+        if self.is_at_name_of()? {
+            return Ok(self.arena.alloc(Expression::NameOf(self.parse_name_of()?)));
+        }
+
         // `super.label()` calls the parent's method, spec section 22, as PHP's `parent::label()`, and
         // `super<HasLabel>.label()` calls the interface `HasLabel`'s default body.
         if self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"super" {

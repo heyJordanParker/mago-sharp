@@ -88,6 +88,17 @@ impl MetadataFlags {
     /// A PHP# sealed interface, spec section 20.1: its permitted inheritors are the classes of its namespace that
     /// implement it, which the populator gathers.
     pub const SEALED: MetadataFlags = MetadataFlags(1 << 56);
+    /// A PHP# property whose `set` or `init` is `internal`, spec section 5: code outside its class's namespace and the
+    /// namespaces below it can't write it.
+    pub const INTERNAL_SET: MetadataFlags = MetadataFlags(1 << 57);
+    /// A PHP# class-like of a project: a file whose nearest `composer.json` says `"type": "project"`, so no other
+    /// package uses it, and spec section 5's too-wide warning runs on it.
+    pub const PROJECT: MetadataFlags = MetadataFlags(1 << 58);
+    /// A PHP# declaration or member written `internal`, spec section 5: it reaches its namespace and every namespace
+    /// below it. `INTERNAL` stays PHPDoc's `@internal`.
+    pub const INTERNAL_REACH: MetadataFlags = MetadataFlags(1 << 59);
+    /// A PHP# field, spec section 6: storage that is never a property, as `ReflectionProperty::isField()` tells.
+    pub const FIELD: MetadataFlags = MetadataFlags(1 << 60);
 }
 
 impl MetadataFlags {
@@ -272,6 +283,30 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_internal(self) -> bool {
         self.contains(Self::INTERNAL)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_internal_set(self) -> bool {
+        self.contains(Self::INTERNAL_SET)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_project(self) -> bool {
+        self.contains(Self::PROJECT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_internal_reach(self) -> bool {
+        self.contains(Self::INTERNAL_REACH)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_field(self) -> bool {
+        self.contains(Self::FIELD)
     }
 
     #[inline]
@@ -571,6 +606,10 @@ mod tests {
             ("OPERATOR", MetadataFlags::OPERATOR),
             ("ENUM_CASE_CLASS", MetadataFlags::ENUM_CASE_CLASS),
             ("SEALED", MetadataFlags::SEALED),
+            ("INTERNAL_SET", MetadataFlags::INTERNAL_SET),
+            ("PROJECT", MetadataFlags::PROJECT),
+            ("INTERNAL_REACH", MetadataFlags::INTERNAL_REACH),
+            ("FIELD", MetadataFlags::FIELD),
         ];
 
         let mut seen = MetadataFlags::empty();

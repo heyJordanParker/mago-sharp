@@ -143,6 +143,83 @@ fn issues_in(stdout: &str, file: &str) -> Vec<String> {
         .collect()
 }
 
+/// Spec section 5: too wide is a warning, on a `public` member of a PHP# class that nothing outside its namespace and
+/// the namespaces below it uses, across every file of the project: one its own class, a class of its namespace or of
+/// one below it uses, and one nothing uses. A member used from another namespace, an interface member and its
+/// implementation, the members of an `internal` class, and plain PHP get none. The warning runs only in a project, a
+/// package whose `composer.json` says `"type": "project"`, because a library's uses are in the projects that install
+/// it, so Composer's default type, a library's, gets none.
+#[test]
+fn analyze_warns_on_a_public_member_nothing_outside_its_namespace_uses() {
+    let directory = workspace(&valid_report());
+    write(directory.path(), "composer.json", "{\n    \"name\": \"acme/shop\",\n    \"type\": \"project\"\n}\n");
+    let cart = "namespace App.Shop;\n\npublic class Cart : Priced\n{\n    public const int LIMIT = 3;\n\n    public const int FLOOR = 0;\n\n    public int items => 0;\n\n    public int total() => this.count();\n\n    public int count() => 1;\n\n    public int size() => 2;\n\n    public int spare() => 3;\n\n    public int price() => this.size();\n\n    public int tax() => 4;\n}\n";
+    write(directory.path(), "src/App/Shop/Cart.sharp", cart);
+    write(
+        directory.path(),
+        "src/App/Shop/Priced.sharp",
+        "namespace App.Shop;\n\npublic interface Priced\n{\n    int price();\n}\n",
+    );
+    write(
+        directory.path(),
+        "src/App/Shop/Till.sharp",
+        "namespace App.Shop;\n\nclass Till\n{\n    public int charge(Cart cart) => cart.tax();\n}\n",
+    );
+    write(
+        directory.path(),
+        "src/App/Shop/Orders/Line.sharp",
+        "namespace App.Shop.Orders;\n\nimport App.Shop.Cart;\n\nclass Line\n{\n    public int price(Cart cart) => cart.size() + cart.price();\n}\n",
+    );
+    write(
+        directory.path(),
+        "src/App/Web/Page.sharp",
+        "namespace App.Web;\n\nimport App.Shop.Cart;\n\nclass Page\n{\n    public int show(Cart cart) => cart.total() + Cart.LIMIT;\n}\n",
+    );
+    write(
+        directory.path(),
+        "src/App/Shop/Basket.php",
+        "<?php\n\nnamespace App\\Shop;\n\nfinal class Basket\n{\n    public function total(): int\n    {\n        return $this->count();\n    }\n\n    public function count(): int\n    {\n        return 1;\n    }\n}\n",
+    );
+
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let too_wide = |file: &str| -> Vec<String> {
+        let mut issues: Vec<String> =
+            issues_in(&stdout, file).into_iter().filter(|issue| issue.ends_with(" too-wide-member")).collect();
+        issues.sort();
+        issues
+    };
+
+    assert_eq!(
+        too_wide("src/App/Shop/Cart.sharp"),
+        [
+            "13:16 too-wide-member",
+            "15:16 too-wide-member",
+            "17:16 too-wide-member",
+            "21:16 too-wide-member",
+            "7:22 too-wide-member",
+            "9:16 too-wide-member",
+        ],
+        "{stdout}"
+    );
+    assert!(stdout.contains("`Cart.count` is public, and nothing outside `App.Shop` uses it."), "{stdout}");
+    for file in [
+        "src/App/Shop/Priced.sharp",
+        "src/App/Shop/Till.sharp",
+        "src/App/Shop/Orders/Line.sharp",
+        "src/App/Web/Page.sharp",
+        "src/App/Shop/Basket.php",
+        "src/Demo/Report.sharp",
+    ] {
+        assert_eq!(too_wide(file), Vec::<String>::new(), "{file}: {stdout}");
+    }
+
+    write(directory.path(), "composer.json", "{\n    \"name\": \"acme/shop\"\n}\n");
+    let library = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let library = String::from_utf8_lossy(&library.stdout);
+    assert!(!library.contains("too-wide-member"), "{library}");
+}
+
 /// A semantic error stops a PHP# file from running, so the analyzer issues its refused code causes add nothing:
 /// each refused line shows its refusal alone, and a PHP file keeps every issue.
 #[test]
@@ -1369,23 +1446,22 @@ fn analyze_reports_only_the_second_extern_of_a_class() {
     );
 }
 
+/// Spec section 6: a getter never writes `this`, and `compile` refuses the file that breaks the rule, while it still
+/// compiles the others.
 #[test]
-fn compile_refuses_a_file_whose_getter_calls_plain_php_without_an_extern() {
+fn compile_refuses_a_file_whose_getter_writes_this() {
     let directory = extern_workspace(&stripe_stub(""));
     write(
         directory.path(),
         "app/Shop/Label.sharp",
-        "namespace App.Shop;\n\npublic class Label\n{\n    public Label(private string name) { }\n\n    public string text => global.trim(this.name);\n}\n",
+        "namespace App.Shop;\n\npublic class Label\n{\n    private int reads = 0;\n\n    public int read { get { this.reads = this.reads + 1; return this.reads; } }\n}\n",
     );
 
     let output = run(directory.path(), "compile", &[]);
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(
-        printed.contains("Getter `text` calls `global.trim`, which has no `extern` declaration. Getters must be pure."),
-        "{printed}"
-    );
+    assert!(printed.contains("Getter `read` changes `this.reads`. A getter never writes `this`."), "{printed}");
     assert!(!directory.path().join(".sharp/app/Shop/Label.sharpc").exists());
     assert!(directory.path().join(".sharp/app/Stubs/Stripe.sharpc").exists(), "{printed}");
 }

@@ -1206,7 +1206,7 @@ where
         check_sharp_reached_twice(context, class_like_metadata, inheritance_ast, &mut checked_signatures);
     }
     check_class_like_extends(context, class_like_metadata, &extended_types);
-    check_class_like_implements(context, class_like_metadata, &implemented_types, &mut checked_signatures);
+    check_class_like_implements(context, artifacts, class_like_metadata, &implemented_types, &mut checked_signatures);
 
     for (_, used_types) in &trait_uses {
         check_class_like_use(context, class_like_metadata, used_types);
@@ -1393,7 +1393,7 @@ where
 
     if !class_like_metadata.kind.is_trait() {
         check_inherited_operators(context, class_like_metadata, members, &mut checked_signatures);
-        check_abstract_method_signatures(context, class_like_metadata, &mut checked_signatures);
+        check_abstract_method_signatures(context, artifacts, class_like_metadata, &mut checked_signatures);
         check_trait_method_conflicts(context, class_like_metadata, &trait_uses);
     }
 
@@ -1440,7 +1440,7 @@ where
     if has_complete_hierarchy {
         check_unused_template_parameters(context, class_like_metadata);
     }
-    check_class_like_properties(context, class_like_metadata, members);
+    check_class_like_properties(context, class_like_metadata);
     check_docblock_declared_members(context, class_like_metadata, declaration_span);
 
     let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, mago_word::empty_word())));
@@ -1557,7 +1557,7 @@ where
 
     if has_complete_hierarchy {
         crate::readonly::finalize_class_writes(context, artifacts, class_like_metadata);
-        initialization::check_get_only_initialization(context, class_like_metadata);
+        initialization::check_storage_initialization(context, class_like_metadata);
         initialization::check_property_initialization(
             context,
             artifacts,
@@ -1909,6 +1909,7 @@ fn report_outside_implementer<A>(
 #[allow(clippy::unwrap_used)]
 fn check_class_like_implements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
+    artifacts: &mut AnalysisArtifacts,
     class_like_metadata: &'ctx ClassLikeMetadata,
     implemented_types: &[Identifier<'arena>],
     checked_signatures: &mut HashSet<(Word, Word)>,
@@ -2045,7 +2046,13 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                 InheritanceKind::Implements(implemented_type.span()),
             );
 
-            check_interface_method_signatures(context, class_like_metadata, implemented_metadata, checked_signatures);
+            check_interface_method_signatures(
+                context,
+                artifacts,
+                class_like_metadata,
+                implemented_metadata,
+                checked_signatures,
+            );
         } else {
             let implemented_name = BytesDisplay(implemented_type.value());
             let (note, help) = if is_struct {
@@ -2945,6 +2952,7 @@ fn check_inherited_operators<'ctx, 'arena, A>(
 
 fn check_abstract_method_signatures<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
     class_like_metadata: &'ctx ClassLikeMetadata,
     checked_signatures: &mut HashSet<(Word, Word)>,
 ) where
@@ -3068,6 +3076,9 @@ fn check_abstract_method_signatures<'ctx, A>(
             );
 
             for incompatibility in issues {
+                if widens_parameter(artifacts, class_like_metadata, method_fqcn, appearing_method, &incompatibility) {
+                    continue;
+                }
                 report_signature_compatibility_issue(
                     context,
                     class_like_metadata,
@@ -3589,8 +3600,40 @@ fn apply_template_substitution_to_method(
     substituted_method
 }
 
+/// Records the parameter `incompatibility` names in `artifacts` when the bridge widens it, and returns whether it did:
+/// a parameter of a PHP# method that `class_like_metadata` declares itself, at `method_class`, which erases to a
+/// narrower type than the parameter it overrides or implements because it takes the type argument of a type parameter
+/// that parameter names, as `string value` of a `Behavior<string>`'s `set`. The bridge declares it with no PHP type, and
+/// the engine checks a call from plain PHP against its written type, as Java's bridge method does for its erased
+/// generics. A plain PHP class, a method the class inherits, and a narrower type no type parameter explains, as a
+/// closure over PHP's `callable`, keep the refusal: the bridge lowers neither of the first two here, and the last would
+/// refuse calls its parent accepts.
+fn widens_parameter(
+    artifacts: &mut AnalysisArtifacts,
+    class_like_metadata: &ClassLikeMetadata,
+    method_class: Word,
+    method: &FunctionLikeMetadata,
+    incompatibility: &SignatureCompatibilityIssue,
+) -> bool {
+    let SignatureCompatibilityIssue::ErasedParameterNarrowed { parameter_index, substitutes: true, .. } =
+        incompatibility
+    else {
+        return false;
+    };
+    if !class_like_metadata.flags.is_sharp() || method_class != class_like_metadata.name {
+        return false;
+    }
+
+    // The index comes from zipping the parent's parameters with `method`'s, so `method` has that parameter.
+    let span = method.parameters[*parameter_index].name_span;
+    artifacts.widened_parameters.insert((span.start.offset, span.end.offset));
+
+    true
+}
+
 fn check_interface_method_signatures<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
     class_like_metadata: &'ctx ClassLikeMetadata,
     interface_metadata: &'ctx ClassLikeMetadata,
     checked_signatures: &mut HashSet<(Word, Word)>,
@@ -3673,6 +3716,15 @@ fn check_interface_method_signatures<'ctx, A>(
         );
 
         for incompatibility in issues {
+            if widens_parameter(
+                artifacts,
+                class_like_metadata,
+                class_method_id.get_class_name(),
+                class_method,
+                &incompatibility,
+            ) {
+                continue;
+            }
             report_signature_compatibility_issue(
                 context,
                 class_like_metadata,
@@ -3892,6 +3944,10 @@ fn report_signature_compatibility_issue<'ctx, A>(
     use method_signature::SignatureCompatibilityIssue;
 
     match incompatibility {
+        // PHP# checks only `.sharp` code, and the engine runs a closed PHP# method as an open one, so a plain PHP
+        // subclass, a test double included, overrides it.
+        SignatureCompatibilityIssue::FinalMethodOverride
+            if !context.dialect.is_sharp() && parent_class.flags.is_sharp() => {}
         // A PHP# method is closed unless it is `virtual`, spec section 22, and only an override is written `final`.
         SignatureCompatibilityIssue::FinalMethodOverride if parent_class.flags.is_sharp() => {
             let reason = if parent_class.overridden_method_ids.contains_key(&method_name) {
@@ -4066,7 +4122,13 @@ fn report_signature_compatibility_issue<'ctx, A>(
                 .with_help("Change the parameter type to be compatible with the parent method."),
             );
         }
-        SignatureCompatibilityIssue::ErasedParameterNarrowed { parameter_index, child_type, parent_type, bound } => {
+        SignatureCompatibilityIssue::ErasedParameterNarrowed {
+            parameter_index,
+            child_type,
+            parent_type,
+            bound,
+            ..
+        } => {
             let parameter = parent_method.parameters.get(parameter_index);
             let param_name = parameter
                 .map_or_else(|| word("unknown"), |p| word(mago_bytes::trim_start_byte(p.name.0.as_bytes(), b'$')));
@@ -4339,30 +4401,58 @@ fn check_docblock_declared_members<A>(
     }
 }
 
-/// Whether the PHP# member named `property`, with its `$`, declares accessors, which make it a property, as a
-/// constructor parameter's can. A member without them is a field.
-fn has_accessors(members: &[ClassLikeMember<'_>], property: Word) -> bool {
-    members.iter().any(|member| match member {
-        ClassLikeMember::Property(Property::Hooked(hooked)) => {
-            php_variable_name(hooked.item.variable().name) == property
-        }
-        ClassLikeMember::Property(Property::Computed(computed)) => {
-            php_variable_name(computed.variable.name) == property
-        }
-        ClassLikeMember::Method(method) => method
-            .parameter_list
-            .parameters
-            .iter()
-            .any(|parameter| parameter.hooks.is_some() && php_variable_name(parameter.variable.name) == property),
-        _ => false,
-    })
+/// Reports a PHP# override of a plain PHP property that has no `set`, an `init`, or a `set` at another level than the
+/// parent's, spec section 6.1. The parent's own code writes the property at any time, which a get-only or an `init`
+/// property promises no code does, and line 287 makes the override's access level the parent's.
+fn report_plain_php_override_set<A>(
+    context: &mut Context<'_, '_, A>,
+    property: &PropertyMetadata,
+    parent: &PropertyMetadata,
+    (child_display, parent_display, parent_class): (&str, &str, Word),
+    (span, parent_span): (Span, Span),
+) where
+    A: Arena,
+{
+    let settable = |property: &PropertyMetadata| {
+        !property.flags.is_readonly()
+            && !property.flags.is_init()
+            && (!property.flags.is_virtual_property() || property.hooks.contains_key(&word("set")))
+    };
+
+    let issue = if settable(parent) && !settable(property) {
+        let accessor = if property.flags.is_init() { "`set`, not `init`" } else { "`set`" };
+
+        Issue::error(format!(
+            "`{parent_display}` is settable, and `{parent_class}`'s own code writes it, so its override `{child_display}` has {accessor}."
+        ))
+        .with_help("Give the override `set`, as in `{ get; set; }`.")
+    } else if settable(property)
+        // A read level that differs is its own error, which also fixes the set level.
+        && property.read_visibility == parent.read_visibility
+        && property.write_visibility != parent.write_visibility
+    {
+        let level = parent.write_visibility;
+
+        Issue::error(format!(
+            "`{parent_display}` is set at `{level}`, so its override `{child_display}` is set at `{level}` too."
+        ))
+        .with_help("Write `set` with no access modifier: an override keeps its parent's access level.")
+    } else {
+        return;
+    };
+
+    context.collector.report_with_code(
+        IssueCode::IncompatiblePropertyAccess,
+        issue
+            .with_annotation(Annotation::primary(span).with_message("Overridden here."))
+            .with_annotation(Annotation::secondary(parent_span).with_message("The parent's property.")),
+    );
 }
 
 #[allow(clippy::similar_names)]
 fn check_class_like_properties<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    members: &[ClassLikeMember<'_>],
 ) where
     A: Arena,
 {
@@ -4478,9 +4568,30 @@ fn check_class_like_properties<'ctx, A>(
             let parent_display = display_member(context, parent_class_name, property_name);
             let property = display_property_name(context, *property_name);
 
-            // PHP makes a property whose `set` is private final, so the engine refuses a PHP# override of one.
-            if parent_property.flags.is_final()
-                || (context.dialect.is_sharp() && parent_property.write_visibility.is_private())
+            // A PHP# property is closed unless it is `virtual` or `abstract`, spec sections 6.1 and 22, so the codex reads
+            // it as final. PHP# writes no `final` on a property, so a final PHP# property is a closed one.
+            let sharp_parent = context.dialect.is_sharp() && parent_metadata.flags.is_sharp();
+            // PHP# checks only `.sharp` code, so a plain PHP subclass, a test double included, overrides a closed PHP#
+            // property. PHP itself makes one whose `set` is private final, and refuses that override.
+            let open_to_php = !context.dialect.is_sharp()
+                && parent_metadata.flags.is_sharp()
+                && !parent_property.write_visibility.is_private();
+            if sharp_parent && parent_property.flags.is_final() && !parent_property.write_visibility.is_private() {
+                let parent_class = display_class_like_name(context, parent_class_name);
+
+                context.collector.report_with_code(
+                    IssueCode::OverrideFinalProperty,
+                    Issue::error(format!(
+                        "Cannot override `{parent_display}`: a PHP# property is closed unless it is `virtual` or `abstract`."
+                    ))
+                    .with_annotation(Annotation::primary(property_span).with_message("Overridden here."))
+                    .with_annotation(Annotation::secondary(parent_property_span).with_message("Declared closed here."))
+                    .with_help(format!("Declare `{property}` `virtual` in `{parent_class}` to let a subclass override it.")),
+                );
+            } else if !open_to_php
+                && (parent_property.flags.is_final()
+                // PHP makes a property whose `set` is private final, so the engine refuses a PHP# override of one.
+                || (context.dialect.is_sharp() && parent_property.write_visibility.is_private()))
             {
                 context.collector.report_with_code(
                     IssueCode::OverrideFinalProperty,
@@ -4590,8 +4701,22 @@ fn check_class_like_properties<'ctx, A>(
                 );
             }
 
-            if (property_metadata.write_visibility != property_metadata.read_visibility
-                || parent_property.write_visibility != parent_property.read_visibility)
+            // Spec section 6.1: a plain PHP parent's own code writes its property, so its override has `set`, at the
+            // parent's level (line 287). PHP refuses a `readonly` or a set level the parent lacks as the class links.
+            let plain_php_parent = context.dialect.is_sharp() && !parent_metadata.flags.is_sharp();
+            if plain_php_parent {
+                report_plain_php_override_set(
+                    context,
+                    property_metadata,
+                    parent_property,
+                    (&child_display, &parent_display, display_class_like_name(context, parent_class_name)),
+                    (property_span, parent_property_span),
+                );
+            }
+
+            if !plain_php_parent
+                && (property_metadata.write_visibility != property_metadata.read_visibility
+                    || parent_property.write_visibility != parent_property.read_visibility)
                 && property_metadata.write_visibility > parent_property.write_visibility
             {
                 context.collector.report_with_code(
@@ -4639,7 +4764,7 @@ fn check_class_like_properties<'ctx, A>(
             }
 
             // Check readonly modifier consistency
-            if property_metadata.flags.is_readonly() != parent_property.flags.is_readonly() {
+            if !plain_php_parent && property_metadata.flags.is_readonly() != parent_property.flags.is_readonly() {
                 let (child_modifier, parent_modifier) = if property_metadata.flags.is_readonly() {
                     ("readonly", "non-readonly")
                 } else {
@@ -4675,30 +4800,6 @@ fn check_class_like_properties<'ctx, A>(
             let parent_has_set_hook = parent_property.hooks.contains_key(&word("set"));
             let parent_only_get = parent_is_virtual && parent_has_get_hook && !parent_has_set_hook;
             let parent_only_set = parent_is_virtual && parent_has_set_hook && !parent_has_get_hook;
-
-            // A property keeps its written type, which PHP refuses over a property that runs untyped, so it cannot replace
-            // a property that a declaration up to the root leaves untyped yet.
-            if let Some(declaring_type) = property_metadata.type_declaration_metadata.as_ref()
-                && let Some((untyped_parent, _)) =
-                    overridden.iter().find(|(_, overridden)| overridden.type_declaration_metadata.is_none())
-                && has_accessors(members, property_metadata.name.0)
-            {
-                let untyped_parent = display_member(context, untyped_parent.original_name, property_name);
-
-                context.collector.report_with_code(
-                    IssueCode::NotSupportedYet,
-                    Issue::error(format!(
-                        "A property that replaces the untyped PHP property `{untyped_parent}` is not supported yet."
-                    ))
-                    .with_annotation(
-                        Annotation::primary(declaring_type.span)
-                            .with_message("PHP refuses a type the parent property does not have."),
-                    )
-                    .with_help("Rename the property, or give the PHP property a type."),
-                );
-
-                continue;
-            }
 
             let mut has_type_incompatibility = false;
             match (

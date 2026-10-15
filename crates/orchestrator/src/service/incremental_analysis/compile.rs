@@ -2015,14 +2015,14 @@ mod tests {
             ("app/Shop/Report.sharp", "namespace App.Shop;\n\npublic class Report\n{\n    public int pages(Invoice invoice)\n    {\n        return invoice.pages();\n    }\n\n    public int settle(Invoice invoice)\n    {\n        return this.pay(invoice);\n    }\n\n    public int tax(Taxable taxable)\n    {\n        return taxable.amount();\n    }\n\n    public int due()\n    {\n        return this.pay(Status.Open);\n    }\n\n    private int pay(Payable payable)\n    {\n        return payable.amount();\n    }\n}\n".to_string()),
             ("app/Lib/Mailer.php", "<?php\n\nnamespace Mail;\n\nfinal class Mailer\n{\n    public static function subject(string $text): string\n    {\n        return $text;\n    }\n}\n".to_string()),
             ("app/Stubs/Mail.sharp", "namespace App.Stubs;\n\nimport Mail.Mailer;\n\nextern Mailer;\n".to_string()),
-            ("app/Shop/Notice.sharp", "namespace App.Shop;\n\nimport Mail.Mailer;\n\npublic class Notice\n{\n    public Notice(private string name) { }\n\n    public string text => Mailer.subject(this.name);\n}\n".to_string()),
+            ("app/Shop/Notice.sharp", "namespace App.Shop;\n\nimport Mail.Mailer;\n\npublic class Notice\n{\n    public Notice(private string name) { }\n\n    public string text => Mailer.subject(this.name);\n\n    law titled(Notice notice) => notice.text != \"\";\n}\n".to_string()),
             ("app/Shop/Rates.sharp", "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id);\n}\n".to_string()),
-            ("app/Shop/Quote.sharp", "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rates rates) { }\n\n    public int price => this.rates.rate(1);\n}\n".to_string()),
+            ("app/Shop/Quote.sharp", "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rates rates) { }\n\n    public int price => this.rates.rate(1);\n\n    law priced(Quote quote) => quote.price > 0;\n}\n".to_string()),
             ("app/Shop/Payments.sharp", "namespace App.Shop;\n\npublic class Payments\n{\n    public int charge(int cents) => cents;\n}\n".to_string()),
-            ("app/Shop/Checkout.sharp", "namespace App.Shop;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.charge(100);\n}\n".to_string()),
+            ("app/Shop/Checkout.sharp", "namespace App.Shop;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.charge(100);\n\n    law totaled(Checkout checkout) => checkout.total > 0;\n}\n".to_string()),
             ("app/Shop/Base.sharp", "namespace App.Shop;\n\npublic abstract class Base\n{\n    public int size() => 1;\n}\n".to_string()),
             ("app/Shop/Kept.sharp", "namespace App.Shop;\n\npublic class Kept : Base\n{\n}\n".to_string()),
-            ("app/Shop/Shelf.sharp", "namespace App.Shop;\n\npublic class Shelf\n{\n    public Shelf(private Kept kept) { }\n\n    public int count => this.kept.size();\n}\n".to_string()),
+            ("app/Shop/Shelf.sharp", "namespace App.Shop;\n\npublic class Shelf\n{\n    public Shelf(private Kept kept) { }\n\n    public int count => this.kept.size();\n\n    law counted(Shelf shelf) => shelf.count > 0;\n}\n".to_string()),
         ]
     }
 

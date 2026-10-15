@@ -74,6 +74,15 @@ pub struct File {
     /// forms into the other files.
     pub is_standard_library: bool,
 
+    /// What the PSR-4 folders of a `.sharp` file's nearest `composer.json` say about its namespace, spec section 5, or
+    /// `None` when no PSR-4 folder holds it. The loader sets it, with `is_standard_library`.
+    pub folder_namespace: Option<FolderNamespace>,
+
+    /// Whether a `.sharp` file's nearest `composer.json` says `"type": "project"`: an application, whose code no other
+    /// package uses, so spec section 5's too-wide warning runs on it. Composer's default type is a library's. The
+    /// loader sets it, with `is_standard_library`.
+    pub is_project: bool,
+
     /// The contents of the file, if available.
     pub contents: Cow<'static, [u8]>,
 
@@ -84,6 +93,18 @@ pub struct File {
     /// The first line always starts at offset 0. This is useful for quickly
     /// navigating to a specific line number without scanning the whole file.
     pub lines: Vec<u32>,
+}
+
+/// The namespace a PHP# file's folder gives it, from the PSR-4 folders of its nearest `composer.json`.
+///
+/// Spec section 5: a namespace's inside is its folder, and a test folder may declare the namespace it tests.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum FolderNamespace {
+    /// An `autoload` folder holds the file and maps its folder to this namespace, dot-separated, as `App.Tenant.Store`.
+    Namespace(Box<str>),
+    /// An `autoload-dev` folder holds the file, which may declare any namespace.
+    Test,
 }
 
 pub trait HasFileId {
@@ -107,7 +128,18 @@ impl File {
         let size = contents.len() as u32;
         let lines = line_starts(contents.as_ref());
 
-        Self { id, name, path, file_type, is_standard_library: false, contents, size, lines }
+        Self {
+            id,
+            name,
+            path,
+            file_type,
+            is_standard_library: false,
+            folder_namespace: None,
+            is_project: false,
+            contents,
+            size,
+            lines,
+        }
     }
 
     /// Creates a new `File` instance by reading its contents from the filesystem.

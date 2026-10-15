@@ -181,6 +181,91 @@ fn analyze_with_artifacts(
     (issues, artifacts)
 }
 
+/// The too-wide warnings of a project of `files`, as `mago analyze` gives them once it has analyzed every file: each
+/// as `path line:column message`, in the order the files and lines are written.
+fn too_wide(files: &[(&'static str, &'static str)]) -> Vec<String> {
+    let Prelude { mut database, mut metadata, mut symbol_references } = PRELUDE.clone();
+    let file_ids: Vec<_> = files
+        .iter()
+        .map(|(name, code)| {
+            let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
+            file.is_project = true;
+
+            database.add(file)
+        })
+        .collect();
+
+    let arena = LocalArena::new();
+    let mut programs = Vec::new();
+    for file_id in &file_ids {
+        let file = database.get_ref(file_id).expect("file was just added");
+        let program = parse_file(&arena, file);
+        assert!(!program.has_errors(), "{:?} did not parse: {:?}", file.name, program.errors);
+        let names = NameResolver::new(&arena).resolve(program);
+        metadata.extend(scan_program(&arena, file, program, &names, settings().version));
+        programs.push((file, program, names));
+    }
+    populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());
+
+    for (file, program, names) in &programs {
+        let mut result = AnalysisResult::new(mago_codex::reference::SymbolReferences::new());
+        Analyzer::new(&arena, file, names, &metadata, &PLUGIN_REGISTRY, settings())
+            .analyze(program, &mut result)
+            .expect("analysis succeeds");
+        symbol_references.extend(result.symbol_references);
+    }
+
+    let mut warnings: Vec<(usize, usize, String)> = mago_analyzer::too_wide_members(&metadata, &symbol_references)
+        .into_iter()
+        .map(|issue| {
+            let span = issue.primary_span().expect("a primary span");
+            let index =
+                files.iter().position(|(name, _)| FileId::new(name.as_bytes()) == span.file_id).expect("a file");
+            let (name, code) = files[index];
+            let offset = span.start.offset as usize;
+            let line = code[..offset].matches('\n').count() + 1;
+            let column = offset - code[..offset].rfind('\n').map_or(0, |newline| newline + 1) + 1;
+
+            (index, offset, format!("{name} {line}:{column} {}", issue.message))
+        })
+        .collect();
+    warnings.sort_unstable();
+
+    warnings.into_iter().map(|(_, _, warning)| warning).collect()
+}
+
+/// Spec section 5: a `public` member of a project's class that nothing outside its namespace and the namespaces below
+/// it uses is too wide. A use from the namespace or from the class itself is no outside use, and a use from code
+/// outside any class is, since its namespace is unknown. A member that implements an interface keeps the
+/// interface's access, an `internal` member or class reaches no further, a struct's `parse` is no member anyone
+/// wrote, an interface's members have no narrower form, and `new` calls a constructor, as `Point`'s, at its class's
+/// reach.
+#[test]
+fn a_public_member_nothing_outside_its_namespace_uses_is_too_wide() {
+    let cart = "namespace App.Shop;\n\npublic class Cart : Priced\n{\n    public const int LIMIT = 3;\n    public const int FLOOR = 0;\n    public string name { get; set; } = \"\";\n    public string label { get; set; } = \"\";\n    internal string code { get; set; } = \"\";\n    private const int SEED = 1;\n\n    public Cart()\n    {\n    }\n\n    public int total() => this.count();\n    public int count() => 1;\n    public int price() => 2;\n    public int spare() => 3;\n    internal int hidden() => 4;\n}\n";
+    let priced = "namespace App.Shop;\n\npublic interface Priced\n{\n    int price();\n}\n";
+    let point = "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n";
+    let quiet = "namespace App.Shop;\n\ninternal class Quiet\n{\n    public int unused() => 1;\n}\n";
+    let page = "namespace App.Web;\n\nimport App.Shop.Cart;\nimport App.Shop.Point;\n\npublic class Page\n{\n    internal int show(Cart cart, Point point) => cart.total() + Cart.LIMIT + cart.name.length + point.x;\n}\n";
+    let boot = "<?php\n\n$cart = new \\App\\Shop\\Cart();\n$cart->spare();\n";
+
+    assert_eq!(
+        too_wide(&[
+            ("src/App/Shop/Cart.sharp", cart),
+            ("src/App/Shop/Priced.sharp", priced),
+            ("src/App/Shop/Point.sharp", point),
+            ("src/App/Shop/Quiet.sharp", quiet),
+            ("src/App/Web/Page.sharp", page),
+            ("src/boot.php", boot),
+        ]),
+        [
+            "src/App/Shop/Cart.sharp 6:22 `Cart.FLOOR` is public, and nothing outside `App.Shop` uses it.",
+            "src/App/Shop/Cart.sharp 8:19 `Cart.label` is public, and nothing outside `App.Shop` uses it.",
+            "src/App/Shop/Cart.sharp 17:16 `Cart.count` is public, and nothing outside `App.Shop` uses it.",
+        ]
+    );
+}
+
 /// Asserts that no issue on a `.sharp` file of `names` names a word only PHP has, in its message, help, notes or
 /// annotations.
 fn assert_speaks_sharp<'name, 'issue>(
@@ -1038,7 +1123,9 @@ fn field_value_and_a_get_body_have_the_property_type_as_in_php() {
 }
 
 /// A property whose accessors all have bodies that never use `field` has no storage, so nothing initializes it, as
-/// PHP's virtual property. Every other property is backed, and is initialized as a field is.
+/// PHP's virtual property. Every other property is backed, and is initialized as a field is. Spec section 6 holds a
+/// backed property to a value from the start, so PHP#'s own error names `count` and `total` where PHP reports a missing
+/// constructor, and PHP's own check stays off PHP# code.
 #[test]
 fn only_a_property_with_storage_needs_initializing_as_in_php() {
     let sharp = "namespace Demo;\n\nclass Store\n{\n    public int open { get => 1; }\n    public int named { get => this.open; set => this.save(value); }\n    public int count { get => field; set => field = value; }\n    public int total { get; set => field = value; }\n\n    public void save(int value)\n    {\n    }\n}\n";
@@ -1048,8 +1135,8 @@ fn only_a_property_with_storage_needs_initializing_as_in_php() {
     let sharp_issues = issues_with(settings(), ("src/Demo/Store.sharp", sharp), &[]);
     let php_issues = issues_with(settings(), ("src/Demo/Store.php", php), &[]);
 
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
-    assert!(!sharp_issues.is_empty(), "the backed properties need initializing: {php_issues:?}");
+    assert_eq!(php_issues, ["5:7 missing-constructor"]);
+    assert_eq!(sharp_issues, ["7:16 uninitialized-property", "8:16 uninitialized-property"]);
 }
 
 /// A get-only property whose `get` body uses `field` is set where a get-only auto-property is: once, in the
@@ -1091,30 +1178,20 @@ fn a_get_block_with_a_path_that_ends_without_returning_is_reported() {
     );
 }
 
-/// A property with accessors that redeclares a plain PHP parent's untyped property is refused as a field that does
-/// is, because PHP refuses a type the parent property does not have. The refusal names it a property.
+/// A property, with accessor bodies or without, overrides a plain PHP parent's untyped property: it writes its type,
+/// and the engine drops it as decision 028 does, so PHP runs the hooks untyped. Without `override` it names the fix.
+/// A PHP twin that keeps the type is what PHP refuses.
 #[test]
-fn a_property_with_accessors_over_a_php_parents_untyped_property_is_not_supported_yet() {
+fn a_property_with_accessors_overrides_a_php_parents_untyped_property() {
     let parent = "<?php\n\nnamespace Lib;\n\nclass Record\n{\n    public $label;\n    public $code;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Record;\n\nclass Order : Record\n{\n    public string label { get => field; set => field = value; } = \"\";\n    public string code { get; set; } = \"\";\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Record;\n\nclass Order : Record\n{\n    public override string label { get => field; set => field = value; } = \"\";\n    public override string code { get; set; } = \"\";\n}\n";
+    let missing = "namespace Demo;\n\nimport Lib.Record;\n\nclass Order : Record\n{\n    public string label { get => field; set => field = value; } = \"\";\n    public string code { get; set; } = \"\";\n}\n";
     let others = [("src/Lib/Record.php", parent)];
 
-    assert_eq!(issues(("src/Demo/Order.sharp", sharp), &others), ["7:12 not-supported-yet", "8:12 not-supported-yet"]);
+    assert_eq!(issues(("src/Demo/Order.sharp", sharp), &others), Vec::<String>::new());
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Order.sharp", sharp), &others)
-            .into_iter()
-            .map(|issue| (issue.message, issue.help.unwrap_or_default()))
-            .collect::<Vec<_>>(),
-        [
-            (
-                "A property that replaces the untyped PHP property `Record.label` is not supported yet.".to_owned(),
-                "Rename the property, or give the PHP property a type.".to_owned()
-            ),
-            (
-                "A property that replaces the untyped PHP property `Record.code` is not supported yet.".to_owned(),
-                "Rename the property, or give the PHP property a type.".to_owned()
-            ),
-        ]
+        issues(("src/Demo/Order.sharp", missing), &others),
+        ["7:19 missing-override-attribute", "8:19 missing-override-attribute"]
     );
 
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Record;\n\nclass Order extends Record\n{\n    public string $label = '' {\n        get => $this->label;\n        set => $value;\n    }\n    public string $code = '';\n}\n";
@@ -1140,10 +1217,10 @@ fn a_property_over_a_php_parents_attributes_reports_its_mixed_get_as_in_php() {
 
 /// A nullable property with accessor bodies has the issues of its PHP twin. Over a plain PHP parent's attributes it
 /// has no storage, so its `get` reports `mixed` unless it converts the value with `as`. One whose body uses
-/// `field` starts as null, so it needs no constructor, and a get-only one without storage needs no initial value.
+/// `field` has storage, so it writes `= null` as its twin does, and a get-only one without storage needs no initial value.
 #[test]
 fn nullable_properties_with_accessor_bodies_have_the_issues_of_their_php_twins() {
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; }\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    public ?Address $shipping {\n        get => $this->getAttribute('shipping');\n        set {\n            $this->setAttribute('shipping', $value);\n        }\n    }\n    public ?string $note = null {\n        get => $this->note;\n        set {\n            $this->note = $value;\n        }\n    }\n    public ?string $summary {\n        get => $this->note;\n    }\n}\n\nclass Address\n{\n}\n";
 
     let sharp_issues = issues(("src/Demo/Order.sharp", sharp), &[("src/Lib/Model.php", MODEL)]);
@@ -1363,7 +1440,7 @@ fn a_generic_interface_gives_each_class_its_default_bodies_with_its_type_argumen
 
     // A class that implements the interface holds its own type arguments, so a default body can't read the
     // interface's while the code runs.
-    let reads = "namespace Demo;\n\npublic class Box<TValue>\n{\n    public TValue? value;\n}\n\npublic interface Held<TItem>\n{\n    bool holds(Any value) => value is TItem;\n\n    Box<TItem> boxed() => new Box<TItem>();\n}\n";
+    let reads = "namespace Demo;\n\npublic class Box<TValue>\n{\n    public TValue? value = null;\n}\n\npublic interface Held<TItem>\n{\n    bool holds(Any value) => value is TItem;\n\n    Box<TItem> boxed() => new Box<TItem>();\n}\n";
     assert_eq!(
         messages(("src/Demo/Held.sharp", reads), &[]),
         [
@@ -1537,18 +1614,18 @@ const MODEL: &str = "<?php\n\nnamespace Lib;\n\ntrait HasTimestamps\n{\n    /** 
 /// An override of a plain PHP parent's property writes a type that fits the parent's `@var`, or any type when the
 /// parent has none, and the type of a typed parent, with the parent's access level, spec section 6.1.
 #[test]
-fn a_field_overrides_a_plain_php_property_with_a_type_that_fits_the_parent() {
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table = \"orders\";\n    protected override List<string> fillable = [\"number\", \"total\"];\n    protected override List<string> with = [\"customer\"];\n    public override bool timestamps = false;\n    protected override int perPage = 20;\n}\n";
+fn a_property_overrides_a_plain_php_property_with_a_type_that_fits_the_parent() {
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table { get; set; } = \"orders\";\n    protected override List<string> fillable { get; set; } = [\"number\", \"total\"];\n    protected override List<string> with { get => field; set => field = value; } = [\"customer\"];\n    public override bool timestamps { get; set; } = false;\n    protected override int perPage { get; set => field = value > 0 ? value : 15; } = 20;\n}\n";
     let others = [("src/Lib/Model.php", MODEL)];
 
     assert_eq!(issues(("src/Demo/Order.sharp", sharp), &others), Vec::<String>::new());
 }
 
-/// An override whose type does not fit the parent's, whose access level differs, that overrides nothing, or a field
-/// that replaces a parent's property without `override`, is an error, spec section 6.1.
+/// An override whose type does not fit the parent's, whose access level differs, that overrides nothing, or a property
+/// or field that replaces a parent's property without `override`, is an error, spec section 6.1.
 #[test]
 fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override List<string> fillable = [\"number\"];\n    protected override string? table = 5;\n    public override int timestamps = 0;\n    protected override List<string> appends = [];\n    protected string with = \"customer\";\n    protected override string missing = \"none\";\n    protected override string secret = \"order\";\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override List<string> fillable { get; set; } = [\"number\"];\n    protected override string? table { get; set; } = 5;\n    public override int timestamps { get; set; } = 0;\n    protected override List<string> appends { get; set; } = [];\n    protected string with { get; set; } = \"customer\";\n    protected override string missing { get; set; } = \"none\";\n    protected override string secret { get; set; } = \"order\";\n    protected int perPage = 20;\n}\n";
 
     let issues =
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Order.sharp", sharp), &[("src/Lib/Model.php", MODEL)]);
@@ -1569,13 +1646,17 @@ fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
             "The override `Order.timestamps` has type `int`, which does not fit `bool`, the type of `Model.timestamps`.",
         ),
         ("incompatible-property-type", "Property `Order.appends` has an incompatible type declaration."),
-        ("missing-override-attribute", "Missing `override` modifier on overriding field `Order.with`."),
+        ("missing-override-attribute", "Missing `override` modifier on overriding property `Order.with`."),
         ("invalid-override-attribute", "Invalid `override` modifier on `Order.missing`."),
         ("invalid-override-attribute", "Invalid `override` modifier on `Order.secret`."),
+        (
+            "missing-override-attribute",
+            "The field `Order.perPage` replaces `Model.perPage`: an override is a property marked `override`.",
+        ),
     ] {
         assert!(reported.contains(&expected), "{expected:?} is missing from {reported:#?}");
     }
-    assert_eq!(reported.len(), 7, "{reported:#?}");
+    assert_eq!(reported.len(), 8, "{reported:#?}");
 
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    #[\\Override]\n    public $fillable = ['number'];\n    #[\\Override]\n    protected $table = 5;\n    #[\\Override]\n    public $timestamps = 0;\n    #[\\Override]\n    protected array $appends = [];\n    protected $with = 'customer';\n    #[\\Override]\n    protected $missing = 'none';\n    #[\\Override]\n    protected $secret = 'order';\n}\n";
     assert_eq!(
@@ -1592,7 +1673,7 @@ fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
 /// them. The PHP twin keeps Mago's text.
 #[test]
 fn an_override_whose_type_does_not_fit_the_parent_is_reported_once() {
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override int table = 5;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override int table { get; set; } = 5;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    #[\\Override]\n    protected int $table = 5;\n}\n";
     let others = [("src/Lib/Model.php", MODEL)];
 
@@ -1622,17 +1703,17 @@ fn an_override_whose_type_does_not_fit_the_parent_is_reported_once() {
 }
 
 /// A PHP# class that overrides a plain PHP parent's property, for a subclass to override it again.
-const ORDER: &str = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table = \"orders\";\n}\n";
+const ORDER: &str = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table { get; set; } = \"orders\";\n}\n";
 
 /// A plain PHP base class that types the property `ORDER` overrides.
 const TYPED_MODEL: &str =
     "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    protected ?string $table = null;\n}\n";
 
-/// A field overrides a PHP# parent's field as it overrides a plain PHP parent's property, spec section 6.1, whether the
-/// plain PHP root of the chain leaves the property untyped or types it.
+/// A property overrides a PHP# parent's override as it overrides a plain PHP parent's property, spec section 6.1,
+/// whether the plain PHP root of the chain leaves the property untyped or types it. An override stays open.
 #[test]
-fn a_field_overrides_a_sharp_field_with_its_type_and_access_level() {
-    let sharp = "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override string? table = \"rush_orders\";\n}\n";
+fn a_property_overrides_a_sharp_override_with_its_type_and_access_level() {
+    let sharp = "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override string? table { get; set; } = \"rush_orders\";\n}\n";
 
     for model in [MODEL, TYPED_MODEL] {
         let others = [("src/Demo/Order.sharp", ORDER), ("src/Lib/Model.php", model)];
@@ -1641,11 +1722,10 @@ fn a_field_overrides_a_sharp_field_with_its_type_and_access_level() {
     }
 }
 
-/// An override of a PHP# parent's field writes `override`, the parent's written type and its access level, spec section
-/// 6.1, measured against that field alone, so each break is one error. A property with accessors keeps its type, so it
-/// cannot replace the field while the plain PHP root of the chain leaves the property untyped.
+/// An override of a PHP# parent's override writes `override`, the parent's written type and its access level, spec
+/// section 6.1, measured against that override alone, so each break is one error. A field can't replace it.
 #[test]
-fn an_override_that_does_not_match_the_sharp_field_is_an_error() {
+fn an_override_that_does_not_match_the_sharp_override_is_an_error() {
     let reported = |sharp: &'static str| {
         analyze(
             &PLUGIN_REGISTRY,
@@ -1661,17 +1741,19 @@ fn an_override_that_does_not_match_the_sharp_field_is_an_error() {
 
     assert_eq!(
         reported(
-            "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override string table = \"rush_orders\";\n}\n"
+            "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override string table { get; set; } = \"rush_orders\";\n}\n"
         ),
         error("incompatible-property-type", "Property `RushOrder.table` has an incompatible type declaration.")
     );
     assert_eq!(
-        reported("namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override int table = 5;\n}\n"),
+        reported(
+            "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override int table { get; set; } = 5;\n}\n"
+        ),
         error("incompatible-property-type", "Property `RushOrder.table` has an incompatible type declaration.")
     );
     assert_eq!(
         reported(
-            "namespace Demo;\n\npublic class RushOrder : Order\n{\n    public override string? table = \"rush_orders\";\n}\n"
+            "namespace Demo;\n\npublic class RushOrder : Order\n{\n    public override string? table { get; set; } = \"rush_orders\";\n}\n"
         ),
         error(
             "incompatible-property-access",
@@ -1682,25 +1764,26 @@ fn an_override_that_does_not_match_the_sharp_field_is_an_error() {
         reported(
             "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected string? table = \"rush_orders\";\n}\n"
         ),
-        error("missing-override-attribute", "Missing `override` modifier on overriding field `RushOrder.table`.")
+        error(
+            "missing-override-attribute",
+            "The field `RushOrder.table` replaces `Order.table`: an override is a property marked `override`."
+        )
     );
     assert_eq!(
         reported(
             "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected string? table { get; set; } = \"rush_orders\";\n}\n"
         ),
-        error(
-            "not-supported-yet",
-            "A property that replaces the untyped PHP property `Model.table` is not supported yet."
-        )
+        error("missing-override-attribute", "Missing `override` modifier on overriding property `RushOrder.table`.")
     );
 }
 
-/// PHP makes a property whose `set` is private final, so a field cannot override one, whether a PHP# parent writes it
-/// `{ get; private set; }` or a plain PHP parent writes `private(set)`, as the engine refuses the class when it links.
+/// PHP makes a property whose `set` is private final, so nothing overrides one, whether a PHP# parent writes it
+/// `{ get; private set; }`, `virtual` or not, or a plain PHP parent writes `private(set)`, as the engine refuses the
+/// class when it links.
 #[test]
-fn a_field_cannot_override_a_property_whose_set_is_private() {
+fn an_override_of_a_property_whose_set_is_private_is_an_error() {
     let php = "<?php\n\nnamespace Lib;\n\nclass Tally\n{\n    public private(set) int $views = 0;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Tally;\n\npublic class Counter\n{\n    public int views { get; private set; } = 0;\n    public int likes { get; set; } = 0;\n}\n\npublic class PageCounter : Counter\n{\n    public override int views = 1;\n    public override int likes = 1;\n}\n\npublic class PageTally : Tally\n{\n    public override int views = 1;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Tally;\n\npublic class Counter\n{\n    public virtual int views { get; private set; } = 0;\n    public virtual int likes { get; set; } = 0;\n}\n\npublic class PageCounter : Counter\n{\n    public override int views { get; private set; } = 1;\n    public override int likes { get; set; } = 1;\n}\n\npublic class PageTally : Tally\n{\n    public override int views { get; private set; } = 1;\n}\n";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counter.sharp", sharp), &[("src/Lib/Tally.php", php)])
@@ -1714,19 +1797,165 @@ fn a_field_cannot_override_a_property_whose_set_is_private() {
     );
 }
 
-/// A field cannot override a PHP# parent's property with accessor bodies yet: spec section 6.1 overrides it as a
-/// property, and PHP would keep the parent's accessors on the field.
+/// Spec sections 6.1 and 22: a PHP# property is closed unless it is `virtual` or `abstract`, and an override of one
+/// is a property with accessor bodies or a computed one too. A `protected` field is open (line 289).
 #[test]
-fn overriding_a_sharp_property_with_accessor_bodies_is_not_supported_yet() {
-    let sharp = "namespace Demo;\n\npublic class Base\n{\n    public string slug => \"base\";\n    protected string label = \"base\";\n}\n\npublic class Child : Base\n{\n    public override string slug = \"child\";\n    protected override string label = \"child\";\n}\n";
+fn a_property_overrides_a_sharp_property_only_when_it_is_open() {
+    let sharp = "namespace Demo;\n\npublic abstract class Base\n{\n    public virtual string slug => \"base\";\n    protected string label = \"base\";\n    public abstract int count { get; }\n    public string closed => \"base\";\n    public int total { get; set; } = 0;\n}\n\npublic class Child : Base\n{\n    public override string slug => \"child\";\n    protected override string label { get => field; set => field = value; } = \"child\";\n    public override int count => 1;\n    public override string closed => \"child\";\n    public override int total { get; set; } = 1;\n}\n";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Base.sharp", sharp), &[])
             .into_iter()
             .map(|issue| (issue.code.unwrap_or_default(), issue.message))
             .collect::<Vec<_>>(),
-        [("not-supported-yet".to_owned(), "Overriding the PHP# property `Base.slug` is not supported yet.".to_owned())]
+        [
+            (
+                "override-final-property".to_owned(),
+                "Cannot override `Base.total`: a PHP# property is closed unless it is `virtual` or `abstract`."
+                    .to_owned()
+            ),
+            (
+                "override-final-property".to_owned(),
+                "Cannot override `Base.closed`: a PHP# property is closed unless it is `virtual` or `abstract`."
+                    .to_owned()
+            ),
+        ]
     );
+}
+
+/// Spec section 6.1: a plain PHP parent's own code writes its property at any time, so an override of it has `set`,
+/// never `init`, and its access level matches the parent's, `set` included (line 287).
+#[test]
+fn an_override_of_a_plain_php_property_keeps_its_set_and_its_level() {
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table { get; } = \"orders\";\n    public override bool timestamps { get; protected set; } = false;\n    protected override List<string> fillable => [];\n    protected override int perPage { get; private set; } = 20;\n    protected override List<string> with { get; init; } = [];\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Order.sharp", sharp), &[("src/Lib/Model.php", MODEL)])
+            .into_iter()
+            .map(|issue| (issue.code.unwrap_or_default(), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "incompatible-property-access".to_owned(),
+                "`Model.timestamps` is set at `public`, so its override `Order.timestamps` is set at `public` too."
+                    .to_owned()
+            ),
+            (
+                "incompatible-property-access".to_owned(),
+                "`Model.perPage` is set at `protected`, so its override `Order.perPage` is set at `protected` too."
+                    .to_owned()
+            ),
+            (
+                "incompatible-property-access".to_owned(),
+                "`Model.with` is settable, and `Model`'s own code writes it, so its override `Order.with` has `set`, not `init`."
+                    .to_owned()
+            ),
+            (
+                "incompatible-property-access".to_owned(),
+                "`Model.table` is settable, and `Model`'s own code writes it, so its override `Order.table` has `set`."
+                    .to_owned()
+            ),
+            (
+                "incompatible-property-access".to_owned(),
+                "`Model.fillable` is settable, and `Model`'s own code writes it, so its override `Order.fillable` has `set`."
+                    .to_owned()
+            ),
+        ]
+    );
+}
+
+/// `nameof(X.y)` is the string `'y'`, spec section 6.3, and the checker proves `X` declares or inherits `y`, a
+/// property or a field, instance or static, readable where `nameof` is written, as C#'s `nameof` does. A method is not
+/// a property, and a misspelled name is an error wherever it is written.
+#[test]
+fn nameof_names_a_property_the_class_has_and_is_a_string() {
+    let order = "namespace Demo;\n\npublic class Entity\n{\n    public int id { get; set; } = 0;\n}\n\npublic class Order : Entity\n{\n    public int total { get; set; } = 0;\n    public static int count { get; private set; } = 0;\n    private int secret = 0;\n    public int sum() => 1;\n\n    public string own() => nameof(Order.secret);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string column() => nameof(Order.total);\n    public string parent() => nameof(Order.id);\n    public string shared() => nameof(Order.count);\n    public string misspelled() => nameof(Order.totl);\n    public string hidden() => nameof(Order.secret);\n    public string method() => nameof(Order.sum);\n    public string missing() => nameof(Missing.total);\n    public int number() => nameof(Order.total);\n}\n";
+
+    assert_eq!(issues(("src/Demo/Order.sharp", order), &[]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Order.sharp", order)]),
+        [
+            "Property `Order.totl` does not exist.",
+            "`Order.secret` is `private`, so `nameof` can't name it here.",
+            "Property `Order.sum` does not exist.",
+            "Class, Interface, or Trait `Missing` does not exist.",
+            "Invalid return type for method `Report.number`: expected `int`, but found `string`.",
+        ]
+    );
+
+    // A class whose parent is missing may inherit the name, so only the missing parent is reported.
+    let orphan =
+        "namespace Demo;\n\npublic class Orphan : Lost\n{\n    public string name() => nameof(Orphan.total);\n}\n";
+    assert_eq!(codes(&issues(("src/Demo/Orphan.sharp", orphan), &[])), ["non-existent-class-like"]);
+}
+
+/// The `App.Tenant.Store` classes the `internal` tests reach: `Hidden`, `internal` by default, and `Shop`, public
+/// with `internal` members.
+const TENANT_STORE: [(&str, &str); 2] = [
+    (
+        "src/App/Tenant/Store/Hidden.sharp",
+        "namespace App.Tenant.Store;\n\nclass Hidden\n{\n    public int total() => 1;\n}\n",
+    ),
+    (
+        "src/App/Tenant/Store/Shop.sharp",
+        "namespace App.Tenant.Store;\n\npublic class Shop\n{\n    internal const int MAX = 3;\n    public int views { get; internal set; } = 0;\n    internal int stock { get; set; } = 0;\n\n    internal int secret() => 1;\n\n    public Hidden make() => new Hidden();\n}\n",
+    ),
+];
+
+/// Spec section 5: `internal` reaches its namespace and every namespace below it, and is the default for classes. A
+/// member is never more visible than its class, so a public member of an `internal` class is `internal` too. Code
+/// outside the reach, a sibling or the parent namespace, gets the error where it reaches: the import of a class, or
+/// the member. A member it can't reach reads as no value, as a private one does, so only `internal-access` is kept.
+#[test]
+fn internal_reaches_its_namespace_and_every_namespace_below_it() {
+    let reach = |analyzed: (&'static str, &'static str)| -> Vec<String> {
+        analyze(&PLUGIN_REGISTRY, settings(), analyzed, &TENANT_STORE)
+            .into_iter()
+            .filter(|issue| issue.code.as_deref() == Some("internal-access"))
+            .map(|issue| issue.message)
+            .collect()
+    };
+    let body = "{\n    public int run(Shop shop)\n    {\n        const stock = shop.stock;\n        shop.secret();\n        shop.make().total();\n        shop.views = 2;\n        shop.stock = 1;\n        return Shop.MAX + shop.views + stock;\n    }\n}\n";
+    let code = |namespace: &str| -> &'static str {
+        leak(format!(
+            "namespace {namespace};\n\nimport App.Tenant.Store.Hidden;\nimport App.Tenant.Store.Shop;\n\npublic class Use\n{body}"
+        ))
+    };
+
+    assert_eq!(
+        messages(("src/App/Tenant/Store/Inner/Use.sharp", code("App.Tenant.Store.Inner")), &TENANT_STORE),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        messages(("src/App/Tenant/Store/Use.sharp", code("App.Tenant.Store")), &TENANT_STORE),
+        Vec::<String>::new()
+    );
+
+    for (path, namespace) in
+        [("src/App/Tenant/Other/Use.sharp", "App.Tenant.Other"), ("src/App/Tenant/Use.sharp", "App.Tenant")]
+    {
+        let outside =
+            |reached: &str| format!("`{reached}` is internal to `App.Tenant.Store`, and `{namespace}` is outside it.");
+
+        assert_eq!(
+            reach((path, code(namespace))),
+            [
+                outside("Hidden"),
+                outside("Shop.stock"),
+                outside("Shop.secret"),
+                outside("Hidden.total"),
+                outside("Shop.views.set"),
+                outside("Shop.stock"),
+                outside("Shop.MAX"),
+            ],
+            "{namespace}"
+        );
+    }
+
+    // Plain PHP has no namespace visibility, so a `.php` file reaches every PHP# class and member.
+    let php = "<?php\n\nnamespace App\\Tenant\\Other;\n\nuse App\\Tenant\\Store\\Hidden;\nuse App\\Tenant\\Store\\Shop;\n\nfinal class Plain\n{\n    public function run(Shop $shop, Hidden $hidden): int\n    {\n        $shop->views = 2;\n        return $shop->secret() + $hidden->total() + Shop::MAX;\n    }\n}\n";
+    assert_eq!(reach(("src/App/Tenant/Other/Plain.php", php)), Vec::<String>::new());
 }
 
 /// A PHP class that implements a class reports it, and keeps the metadata upstream Mago builds: only a PHP# header
@@ -5256,7 +5485,7 @@ fn equality_with_null_checks_an_any_nullable_and_is_redundant_on_an_any() {
 /// An accessor of an `Any?` property takes and gives null, and one of an `Any` property gives any value but null.
 #[test]
 fn an_accessor_of_any_gives_no_null_and_of_any_nullable_does() {
-    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public Any? note { get => field; set => field = value; }\n\n    public Any label { get => this.note ?? \"none\"; }\n\n    public Any blank { get => null; }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public Any? note { get => field; set => field = value; } = null;\n\n    public Any label { get => this.note ?? \"none\"; }\n\n    public Any blank { get => null; }\n}\n";
 
     assert_eq!(issues(("src/Demo/Inbox.sharp", sharp), &[]), ["9:31 invalid-return-statement"]);
 }
@@ -5266,7 +5495,7 @@ fn an_accessor_of_any_gives_no_null_and_of_any_nullable_does() {
 #[test]
 fn an_override_of_a_plain_php_mixed_property_writes_any() {
     let library = "<?php\n\nnamespace Lib;\n\nabstract class Message\n{\n    /** @var mixed */\n    protected $payload;\n\n    protected mixed $data = null;\n\n    protected $raw;\n\n    protected mixed $body = 1;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Message;\n\npublic class Mail : Message\n{\n    protected override Any? payload = null;\n    protected override Any? data = null;\n    protected override Any raw = 1;\n    protected override Any body = \"text\";\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Message;\n\npublic class Mail : Message\n{\n    protected override Any? payload { get; set; } = null;\n    protected override Any? data { get; set; } = null;\n    protected override Any raw { get; set; } = 1;\n    protected override Any body { get; set; } = \"text\";\n}\n";
 
     assert_eq!(issues(("src/Demo/Mail.sharp", sharp), &[("src/Lib/Message.php", library)]), Vec::<String>::new());
 }
@@ -5674,9 +5903,11 @@ fn a_nullable_union_holds_its_types_and_null_as_its_php_twin_does() {
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
+/// Spec section 6: a nullable member has no implicit starting value, so it writes `= null`, as its PHP twin does. A
+/// PHP twin without one is refused, as the PHP# member is.
 #[test]
-fn a_nullable_field_without_an_initial_value_starts_as_null_as_its_php_twin_does() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int? total;\n    private (int|string)? key;\n    public Report? next { get; set; }\n\n    public int? current()\n    {\n        return this.total;\n    }\n\n    public int sum()\n    {\n        return (this.total ?? 0) + (this.next?.sum() ?? 0);\n    }\n\n    public (int|string)? find() => this.key;\n}\n";
+fn a_nullable_member_that_starts_as_null_writes_it_as_its_php_twin_does() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int? total = null;\n    private (int|string)? key = null;\n    public Report? next { get; set; } = null;\n\n    public int? current()\n    {\n        return this.total;\n    }\n\n    public int sum()\n    {\n        return (this.total ?? 0) + (this.next?.sum() ?? 0);\n    }\n\n    public (int|string)? find() => this.key;\n}\n";
     let php = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nclass Report\n{\n    private ?int $total = null;\n    private int|string|null $key = null;\n    public ?Report $next = null;\n\n    public function current(): ?int\n    {\n        return $this->total;\n    }\n\n    public function sum(): int\n    {\n        return ($this->total ?? 0) + ($this->next?->sum() ?? 0);\n    }\n\n    public function find(): int|string|null\n    {\n        return $this->key;\n    }\n}\n";
     let php_without_default = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    private ?int $total;\n\n    public function current(): ?int\n    {\n        return $this->total;\n    }\n}\n";
     let settings = || Settings { check_property_initialization: true, ..settings() };
@@ -5691,7 +5922,7 @@ fn a_nullable_field_without_an_initial_value_starts_as_null_as_its_php_twin_does
 
 #[test]
 fn a_nullable_field_returned_as_a_value_is_reported_as_its_php_twin_is() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int? total;\n\n    public int current()\n    {\n        return this.total;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int? total = null;\n\n    public int current()\n    {\n        return this.total;\n    }\n}\n";
     let php = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nclass Report\n{\n    private ?int $total = null;\n\n    public function current(): int\n    {\n        return $this->total;\n    }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
@@ -6536,9 +6767,9 @@ fn every_required_property_is_set_where_its_object_is_created() {
             .map(|issue| format!("{} {} | {}", located(sharp, issue), issue.message, issue.notes.join(" ")))
             .collect::<Vec<_>>(),
         [
-            "62:17 uninitialized-property `secret` is never set: set it in the main constructor, or give it an initial value. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
-            "63:16 uninitialized-property `serial` is never set: set it in the main constructor, or give it an initial value. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
-            "71:16 uninitialized-property `value` is get-only and never set: set it in the main constructor, or give it an initial value. | A get-only property is set only while its object is created, and no constructor sets it on every path.".to_owned(),
+            "62:17 uninitialized-property `secret` is never set: give `secret` an initial value, or set it on every path through the constructor. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
+            "63:16 uninitialized-property `serial` is never set: give `serial` an initial value, or set it on every path through the constructor. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
+            "71:16 uninitialized-property `value` is get-only and never set: give `value` an initial value, or set it on every path through the constructor. | A get-only property is set only while its object is created, and no constructor sets it on every path.".to_owned(),
             format!("76:28 missing-required-property `new Label` must set `text`, `tone` and `size`. | {note}"),
             format!("78:28 missing-required-property `new Label` must set `tone` and `size`. | {note}"),
             format!("84:31 missing-required-property `new Ticket` must set `price` and `note`. | {note}"),
@@ -6559,8 +6790,97 @@ fn a_get_only_property_no_constructor_sets_is_an_error() {
     assert_eq!(
         refusals(("src/Demo/Total.sharp", sharp), &[]),
         [
-            "6:16 uninitialized-property `count` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
-            "31:16 uninitialized-property `y` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
+            "6:16 uninitialized-property `count` is get-only and never set: give `count` an initial value, or set it on every path through the constructor. | ",
+            "31:16 uninitialized-property `y` is get-only and never set: give `y` an initial value, or set it on every path through the constructor. | ",
+        ]
+    );
+}
+
+/// Spec section 6.1: a settable property holds a value from the start, so one with storage and no initial value that
+/// no constructor sets on every path is an error, as a get-only one is, `T?` included. A computed one has no storage,
+/// and a `required` or `init` one is set where its object is created. A get-only `T?` property needs no initial value
+/// when every path through the constructor sets it.
+#[test]
+fn a_settable_property_that_is_not_nullable_needs_a_value_as_a_get_only_one_does() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public int views { get; private set; }\n    public int likes { get; set; } = 0;\n    public int shares { get; set; }\n    public int clicks { get; set; }\n    public string? note { get; set; }\n    public int doubled { get => this.likes * 2; set => this.likes = value / 2; }\n    public required int stock { get; set; }\n    public int code { get; init; }\n    public string? label { get; }\n    public string? tag { get; }\n\n    public Order(bool big, string? label)\n    {\n        this.shares = 1;\n        this.label = label;\n        if (big) {\n            this.clicks = 1;\n            this.tag = \"big\";\n        }\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Order.sharp", sharp), &[]),
+        [
+            "8:16 uninitialized-property `clicks` is never set: give `clicks` an initial value, or set it on every path through the constructor. | ",
+            "9:20 uninitialized-property `note` is never set: give `note` an initial value, or set it on every path through the constructor. | ",
+            "14:20 uninitialized-property `tag` is get-only and never set: give `tag` an initial value, or set it on every path through the constructor. | ",
+            "5:16 uninitialized-property `views` is never set: give `views` an initial value, or set it on every path through the constructor. | ",
+        ]
+    );
+}
+
+/// Spec section 6: a nullable member has no implicit starting value. A `T?` field or settable property with storage
+/// writes `= null` as any other starting value, or every path through the constructor sets it, or it is the error a
+/// non-nullable member gets, naming both fixes. A field is held to it as a property is.
+#[test]
+fn a_nullable_member_has_no_implicit_starting_value() {
+    let sharp = "namespace Demo;\n\nclass Profile\n{\n    public int? total;\n    public int? kept = null;\n    public int count;\n    public string? nickname { get; set; }\n    public string? alias { get; set; } = null;\n    public string? title { get; set; }\n\n    public Profile()\n    {\n        this.title = null;\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Profile.sharp", sharp), &[]),
+        [
+            "7:16 uninitialized-property `count` is never set: give `count` an initial value, or set it on every path through the constructor. | ",
+            "8:20 uninitialized-property `nickname` is never set: give `nickname` an initial value, or set it on every path through the constructor. | ",
+            "5:17 uninitialized-property `total` is never set: give `total` an initial value, or set it on every path through the constructor. | ",
+        ]
+    );
+}
+
+/// Spec section 6: a property a class inherits from an abstract PHP# parent needs a value as one it declares does, so
+/// a concrete class that sets it on no path through its constructor, its parent's run through `: super(…)` included,
+/// is an error on that class, naming the parent that declares it.
+#[test]
+fn an_inherited_property_no_constructor_sets_is_an_error_on_the_class() {
+    let base = "namespace Demo;\n\npublic abstract class Base\n{\n    public int count { get; set; }\n    public int size { get; }\n    public int? note { get; set; } = null;\n}\n";
+    let child = "namespace Demo;\n\npublic class Child : Base\n{\n}\n";
+    let kept = "namespace Demo;\n\npublic abstract class Counted\n{\n    public int count { get; set; }\n\n    public Counted()\n    {\n        this.count = 1;\n    }\n}\n\npublic class Kept : Counted\n{\n    public Kept() : super()\n    {\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Child.sharp", child), &[("src/Demo/Base.sharp", base)]),
+        [
+            "3:14 uninitialized-property `Child` never sets `count`, which it inherits from `Base`: give `count` an initial value, or set it on every path through the constructor. | ",
+            "3:14 uninitialized-property `Child` never sets `size`, which it inherits from `Base`: give `size` an initial value, or set it on every path through the constructor. | ",
+        ]
+    );
+    assert_eq!(refusals(("src/Demo/Kept.sharp", kept), &[]), Vec::<String>::new());
+}
+
+/// Spec section 6: a get-only static is set once, by its initial value, so a write of it is an error inside its class
+/// as outside it. An initial value that isn't constant is checked against the static's type as any other.
+#[test]
+fn a_get_only_static_is_set_only_by_its_initial_value() {
+    let sharp = "namespace Demo;\n\nclass Registry\n{\n    public static int size { get; } = 3;\n    public static string label { get; } = global.trim(\" a \");\n    public static int wrong { get; } = global.trim(\"b\");\n\n    public static void reset()\n    {\n        Registry.size = 4;\n    }\n}\n\nclass Caller\n{\n    public static void run()\n    {\n        Registry.size = 5;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Registry.sharp", sharp), &[]),
+        ["7:40 invalid-property-default-value", "11:18 invalid-property-write", "19:18 invalid-property-write"]
+    );
+}
+
+/// Decision 3: a static property takes a computed body, accessor bodies and observers, as an instance property does.
+/// Its `field` is its static storage, and its accessors have no `this`, as a static method has none. A static computed
+/// property is get-only.
+#[test]
+fn a_static_property_runs_its_accessors_as_an_instance_property_does() {
+    let sharp = "namespace Demo;\n\nclass Counter\n{\n    private static int hits = 0;\n    public static int doubled => Counter.hits * 2;\n    public static int total { get => field; set { field = value; Counter.hits = Counter.hits + 1; } } = 0;\n    public static string label { get; set; didSet => Counter.hits = global.strlen(field); } = \"\";\n    public static int wrong => this.doubled;\n    public static int typed => \"x\";\n\n    public static int alsoWrong()\n    {\n        return this.doubled;\n    }\n\n    public static void bump()\n    {\n        Counter.total = Counter.total + 1;\n        Counter.total += 2;\n        Counter.total++;\n        Counter.label = \"a\";\n        Counter.doubled = 3;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Counter.sharp", sharp), &[]),
+        [
+            "9:32 undefined-variable",
+            "9:37 mixed-property-access",
+            "9:32 mixed-return-statement",
+            "10:32 invalid-return-statement",
+            "14:16 undefined-variable",
+            "14:21 mixed-property-access",
+            "14:16 mixed-return-statement",
+            "23:17 invalid-property-write",
         ]
     );
 }
@@ -8010,7 +8330,7 @@ fn a_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
 
 #[test]
 fn a_nullable_field_of_a_function_type_with_an_effect_is_accepted() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n\n    public void replace(Function<Charge(Cart) uses Http> next)\n    {\n        this.fallback = next;\n    }\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback = null;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n\n    public void replace(Function<Charge(Cart) uses Http> next)\n    {\n        this.fallback = next;\n    }\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
 }
@@ -8038,8 +8358,8 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
         "src/App/Shop/Offers.php",
         "<?php\n\nnamespace App\\Shop;\n\nfinal class Plan\n{\n}\n\nfinal class Money\n{\n}\n\nfinal class Offer\n{\n}\n",
     );
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n    Function<int(Function<int(int) uses Http>)> apply;\n}\n";
-    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, Plan> */\n    private array $cache = [];\n    /** @var \\Closure(Offer): Money */\n    private \\Closure $priceOf;\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers;\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback = null;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers = [:];\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<Money(Offer)> priceOf, Function<Charge(Cart) uses Http> charge, Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n        this.apply = apply;\n    }\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, Plan> */\n    private array $cache = [];\n    /** @var \\Closure(Offer): Money */\n    private \\Closure $priceOf;\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers = [];\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n\n    /**\n     * @param \\Closure(Offer): Money $priceOf\n     * @param \\Closure(Cart): Charge $charge\n     * @param \\Closure(\\Closure(int): int): int $apply\n     */\n    public function __construct(\\Closure $priceOf, \\Closure $charge, \\Closure $apply)\n    {\n        $this->priceOf = $priceOf;\n        $this->charge = $charge;\n        $this->apply = $apply;\n    }\n}\n";
     let sharp_reader = "namespace App.Shop;\n\npublic class Receipt\n{\n    public static int size(Checkout checkout) => global.count(checkout.cache);\n}\n";
     let php_reader = "<?php\n\nnamespace App\\Shop;\n\nfinal class Receipt\n{\n    public static function size(Checkout $checkout): int { return count($checkout->cache); }\n}\n";
 
@@ -8050,10 +8370,10 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
         [
             "8:39 unused-property",
             "9:57 unused-property",
-            "10:49 unused-property",
             "5:23 unused-property",
-            "6:28 unused-property",
-            "7:38 unused-property",
+            "10:49 write-only-property",
+            "6:28 write-only-property",
+            "7:38 write-only-property",
         ]
     );
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
@@ -10352,17 +10672,15 @@ fn a_pattern_or_as_of_a_type_parameter_is_checked_with_the_other_arms() {
 }
 
 /// Generics are erased when PHP# compiles, so `Validator<in TItem>` takes `mixed`, and PHP refuses a parameter
-/// narrower than the one it overrides when it links the class. The parameter is refused where it is written, with the
-/// type it must take and the bound that lets it keep its type.
+/// narrower than the one it overrides when it links the class. A PHP# method that takes the type argument, `Order`,
+/// compiles: the bridge widens its parameter, as Java's bridge method takes the erased type.
 #[test]
-fn a_parameter_narrower_than_the_erased_parent_parameter_is_an_error() {
+fn a_parameter_that_takes_the_type_argument_is_widened() {
     let sharp = "namespace Demo;\n\npublic class StrictValidator : Validator<Order>\n{\n    public bool validate(Order item) => true;\n}\n";
 
     assert_eq!(
-        explained(("src/Demo/StrictValidator.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        [
-            "5:32 incompatible-parameter-type Parameter `item` of `StrictValidator.validate` must take at least `Any?`, the type `Validator.validate` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Validator<in TItem : Order>`, so both sides erase to the bound."
-        ]
+        widened(("src/Demo/StrictValidator.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        (Vec::new(), vec!["5:32 item".to_owned()])
     );
 }
 
@@ -10411,28 +10729,33 @@ fn a_field_whose_type_erases_to_another_type_than_the_parent_field_is_an_error()
 }
 
 /// The help of an erased parameter names a bound only where one bound makes both sides erase alike: an enum is a bound,
-/// as `Box<TItem : Status>`, and a union is not. `Class<TItem>` erases to `string` on both sides, so
-/// `kind(Class<Order> type)` links.
+/// as `Box<TItem : Status>`, and a union is not. A plain PHP class narrowing the parameter is refused, since PHP links
+/// it as written, and its PHP# twin widens both parameters. `Class<TItem>` erases to `string` on both sides, so
+/// `kind(Class<Order> type)` links as written. A widened parameter keeps the variance error of `Feed<out TItem>`.
 #[test]
 fn an_erased_parameter_help_names_a_bound_only_where_one_fits() {
-    let sharp_box = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic enum Status\n{\n    case Open;\n}\n\npublic class Box<TItem>\n{\n    public virtual void put(TItem item)\n    {\n    }\n\n    public virtual void kind(Class<TItem> type)\n    {\n    }\n}\n\npublic class StatusBox : Box<Status>\n{\n    public override void put(Status item)\n    {\n    }\n}\n\npublic class PairBox : Box<Order>\n{\n    public override void put(Order|Line item)\n    {\n    }\n\n    public override void kind(Class<Order> type)\n    {\n    }\n}\n";
+    let sharp_box = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic enum Status\n{\n    case Open;\n}\n\npublic class Box<TItem>\n{\n    public virtual void put(TItem item)\n    {\n    }\n\n    public virtual void kind(Class<TItem> type)\n    {\n    }\n}\n";
+    let php_boxes = "<?php\n\nnamespace Demo;\n\n/** @extends Box<Status> */\nclass StatusBox extends Box\n{\n    public function put(Status $item): void\n    {\n    }\n}\n\n/** @extends Box<Order> */\nclass PairBox extends Box\n{\n    public function put(Order|Line $item): void\n    {\n    }\n}\n";
+    let sharp_boxes = "namespace Demo;\n\npublic class StatusBox : Box<Status>\n{\n    public override void put(Status item)\n    {\n    }\n}\n\npublic class PairBox : Box<Order>\n{\n    public override void put(Order|Line item)\n    {\n    }\n\n    public override void kind(Class<Order> type)\n    {\n    }\n}\n";
+    let boxes = [("src/Demo/Box.sharp", sharp_box)];
 
     assert_eq!(
-        explained(("src/Demo/Box.sharp", sharp_box), &[]),
+        explained(("src/Demo/Boxes.php", php_boxes), &boxes),
         [
-            "29:37 incompatible-parameter-type Parameter `item` of `StatusBox.put` must take at least `Any?`, the type `Box.put` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Box<TItem : Status>`, so both sides erase to the bound.",
-            "36:41 incompatible-parameter-type Parameter `item` of `PairBox.put` must take at least `Any?`, the type `Box.put` erases it to. Write `item` with a type that erases to `Any?`.",
+            "8:32 incompatible-parameter-type Parameter `item` of `Demo\\StatusBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `item` with a type that erases to `mixed`, or bound the type parameter, as in `Box<TItem : Status>`, so both sides erase to the bound.",
+            "16:36 incompatible-parameter-type Parameter `item` of `Demo\\PairBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `item` with a type that erases to `mixed`.",
         ]
+    );
+    assert_eq!(
+        widened(("src/Demo/Boxes.sharp", sharp_boxes), &boxes),
+        (Vec::new(), vec!["5:37 item".to_owned(), "12:41 item".to_owned()])
     );
 
     let sharp_feed = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic interface Feed<out TItem>\n{\n    void take(TItem item);\n}\n\npublic class OrderFeed : Feed<Order>\n{\n    public void take(Order item)\n    {\n    }\n}\n";
 
     assert_eq!(
-        explained(("src/Demo/Feed.sharp", sharp_feed), &[]),
-        [
-            "9:10 invalid-template-parameter `TItem` is declared `out`, so `take` cannot take it in.",
-            "14:28 incompatible-parameter-type Parameter `item` of `OrderFeed.take` must take at least `Any?`, the type `Feed.take` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Feed<out TItem : Order>`, so both sides erase to the bound.",
-        ]
+        widened(("src/Demo/Feed.sharp", sharp_feed), &[]),
+        (vec!["9:10 invalid-template-parameter".to_owned()], vec!["14:28 item".to_owned()])
     );
 }
 
@@ -10447,27 +10770,52 @@ fn a_signature_that_links_once_erased_has_no_issue() {
 }
 
 /// A renamed parameter does not hide an erased one: `put(Order order)` over the `virtual` `put(TItem item)` of a
-/// concrete `Box<TItem>`, and over an interface's `put(TItem item)`, reports the rename and the erasure in one run.
+/// concrete `Box<TItem>`, and over an interface's `put(TItem item)`, reports the rename and widens the parameter in
+/// one run.
 #[test]
-fn a_renamed_parameter_reports_its_erased_type_too() {
+fn a_renamed_parameter_is_widened_too() {
     let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<TItem>\n{\n    public virtual void put(TItem item)\n    {\n    }\n}\n\npublic class OrderBox : Box<Order>\n{\n    public override void put(Order order)\n    {\n    }\n}\n\npublic interface Sink<TItem>\n{\n    void put(TItem item);\n}\n\npublic class OrderSink : Sink<Order>\n{\n    public void put(Order order)\n    {\n    }\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Boxes.sharp", sharp), &[]),
-        [
-            "16:26 incompatible-parameter-name",
-            "16:36 incompatible-parameter-type",
-            "28:17 incompatible-parameter-name",
-            "28:27 incompatible-parameter-type",
-        ]
+        widened(("src/Demo/Boxes.sharp", sharp), &[]),
+        (
+            vec!["16:26 incompatible-parameter-name".to_owned(), "28:17 incompatible-parameter-name".to_owned()],
+            vec!["16:36 order".to_owned(), "28:27 order".to_owned()]
+        )
+    );
+}
+
+/// A PHP# member is closed to a PHP# subclass unless it is `virtual` or `abstract`, but PHP# checks only `.sharp` code,
+/// so a plain PHP subclass, a test double included, overrides a closed property and a closed method with no report.
+/// A PHP# subclass that does the same keeps both reports.
+#[test]
+fn a_plain_php_subclass_overrides_a_closed_member_with_no_report() {
+    let shape = "namespace App;\n\npublic class Shape\n{\n    protected string title { get; set; } = \"shape\";\n\n    public string name() => this.title;\n}\n";
+    let legacy_title =
+        "<?php\n\nnamespace App;\n\nclass LegacyShape extends Shape\n{\n    protected string $title = 'legacy';\n}\n";
+    let legacy_name = "<?php\n\nnamespace App;\n\nclass LegacyShape extends Shape\n{\n    public function name(): string\n    {\n        return 'old';\n    }\n}\n";
+    let sharp = "namespace App;\n\npublic class Square : Shape\n{\n    protected override string title { get; set; } = \"square\";\n\n    public override string name() => \"square\";\n}\n";
+
+    assert_eq!(
+        codes(&issues(("src/App/LegacyShape.php", legacy_title), &[("src/App/Shape.sharp", shape)])),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        codes(&issues(("src/App/LegacyShape.php", legacy_name), &[("src/App/Shape.sharp", shape)])),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        codes(&issues(("src/App/Square.sharp", sharp), &[("src/App/Shape.sharp", shape)])),
+        ["override-final-method", "override-final-property"]
     );
 }
 
 /// The engine erases a PHP# class's type parameters whoever extends it, so a PHP class whose `@extends Box<Order>`
-/// narrows `put` to `Order` is refused as PHP refuses it when the class links, and so is a PHP# class narrowing the
-/// `mixed` parameter of a PHP `@template` class. A PHP class extending a PHP `@template` class keeps its issues.
+/// narrows `put` to `Order` is refused as PHP refuses it when the class links: the bridge lowers only PHP#. A PHP#
+/// class narrowing the `mixed` parameter of a PHP `@template` class to its type argument is widened. A PHP class
+/// extending a PHP `@template` class keeps its issues.
 #[test]
-fn a_php_class_overriding_an_erased_sharp_method_is_refused() {
+fn a_php_class_overriding_an_erased_sharp_method_is_refused_and_a_sharp_class_is_widened() {
     let order_box = "<?php\n\nnamespace Demo;\n\n/** @extends Box<Order> */\nclass OrderBox extends Box\n{\n    public function put(Order $item): void\n    {\n    }\n}\n";
     let sharp_box = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<TItem>\n{\n    public virtual void put(TItem item)\n    {\n    }\n}\n";
     let php_box = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\n/** @template TItem */\nclass Box\n{\n    /** @param TItem $item */\n    public function put(mixed $item): void\n    {\n    }\n}\n";
@@ -10481,10 +10829,8 @@ fn a_php_class_overriding_an_erased_sharp_method_is_refused() {
         ]
     );
     assert_eq!(
-        explained(("src/Demo/OrderBox.sharp", sharp_order_box), &[("src/Demo/Box.php", php_box)]),
-        [
-            "5:36 incompatible-parameter-type Parameter `item` of `OrderBox.put` must take at least `Any?`, the type `Box.put` erases it to. Write `item` with a type that erases to `Any?`."
-        ]
+        widened(("src/Demo/OrderBox.sharp", sharp_order_box), &[("src/Demo/Box.php", php_box)]),
+        (Vec::new(), vec!["5:36 item".to_owned()])
     );
 }
 
@@ -10529,6 +10875,30 @@ fn generic_declarations_infer_what_their_php_template_twins_infer() {
     );
 }
 
+/// The issues of `analyzed` as `line:column code`, then the parameters the analysis widened, as `line:column name`, in
+/// the order they are written.
+fn widened(
+    analyzed: (&'static str, &'static str),
+    others: &[(&'static str, &'static str)],
+) -> (Vec<String>, Vec<String>) {
+    let (issues, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, others);
+    let code = analyzed.1;
+    let mut spans: Vec<_> = artifacts.widened_parameters.into_iter().collect();
+    spans.sort_unstable();
+    let parameters = spans
+        .into_iter()
+        .map(|(start, end)| {
+            let (start, end) = (start as usize, end as usize);
+            let line = code[..start].matches('\n').count() + 1;
+            let column = start - code[..start].rfind('\n').map_or(0, |newline| newline + 1) + 1;
+
+            format!("{line}:{column} {}", &code[start..end])
+        })
+        .collect();
+
+    (issues.iter().map(|issue| located(code, issue)).collect(), parameters)
+}
+
 /// The issues of `analyzed` as `line:column code message`, each followed by its help when it has one.
 fn explained(analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]) -> Vec<String> {
     analyze(&PLUGIN_REGISTRY, settings(), analyzed, others)
@@ -10545,7 +10915,7 @@ fn explained(analyzed: (&'static str, &'static str), others: &[(&'static str, &'
 /// and a type argument outside its bound or beyond the type parameters is reported where it is written.
 #[test]
 fn the_type_arguments_of_new_fix_the_type_parameters_of_the_class() {
-    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? item { get; set; }\n}\n\npublic class Report\n{\n    public static PaginatedList<Order> keepPage(PaginatedList<Order> page) => page;\n\n    public static Box<Order> keepBox(Box<Order> box) => box;\n\n    public static Box<Line> keepLineBox(Box<Line> box) => box;\n\n    public static Any lined(List<Line> lines) => new PaginatedList<Order>(lines);\n\n    public static PaginatedList<Order> ordered(List<Order> orders) => Report.keepPage(new PaginatedList<Order>(orders));\n\n    public static Any numbered(List<int> numbers) => new PaginatedList<int>(numbers);\n\n    public static Any paired(List<Order> orders) => new PaginatedList<Order, Order>(orders);\n\n    public static Box<Order> boxed() => Report.keepBox(new Box<Order>());\n\n    public static Box<Line> misboxed() => Report.keepLineBox(new Box<Order>());\n\n    public static PaginatedList<TItem> wrapped<TItem : DatabaseEntity>(List<TItem> items) => new PaginatedList<TItem>(items);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? item { get; set; } = null;\n}\n\npublic class Report\n{\n    public static PaginatedList<Order> keepPage(PaginatedList<Order> page) => page;\n\n    public static Box<Order> keepBox(Box<Order> box) => box;\n\n    public static Box<Line> keepLineBox(Box<Line> box) => box;\n\n    public static Any lined(List<Line> lines) => new PaginatedList<Order>(lines);\n\n    public static PaginatedList<Order> ordered(List<Order> orders) => Report.keepPage(new PaginatedList<Order>(orders));\n\n    public static Any numbered(List<int> numbers) => new PaginatedList<int>(numbers);\n\n    public static Any paired(List<Order> orders) => new PaginatedList<Order, Order>(orders);\n\n    public static Box<Order> boxed() => Report.keepBox(new Box<Order>());\n\n    public static Box<Line> misboxed() => Report.keepLineBox(new Box<Order>());\n\n    public static PaginatedList<TItem> wrapped<TItem : DatabaseEntity>(List<TItem> items) => new PaginatedList<TItem>(items);\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
@@ -11130,7 +11500,7 @@ fn an_override_that_changes_a_bound_names_the_bound() {
 /// passed to `this(…)`. The plain PHP twins keep Mago's issues.
 #[test]
 fn a_type_new_a_type_test_and_a_static_member_name_the_type_arguments_of_a_generic_class() {
-    let types = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public Self same(TFirst first, TSecond second) => this;\n}\n\npublic class Report\n{\n    public PaginatedList? shelf { get; set; }\n\n    public static void f(PaginatedList page)\n    {\n    }\n\n    public static Pair paired(Order order) => new Pair<Order, Order>();\n\n    public static Any local(PaginatedList<Order> given)\n    {\n        PaginatedList page = given;\n        return page;\n    }\n\n    public static Any listed(List<Order> orders) => new PaginatedList(orders);\n\n    public static Any pair() => new Pair();\n}\n";
+    let types = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public Self same(TFirst first, TSecond second) => this;\n}\n\npublic class Report\n{\n    public PaginatedList? shelf { get; set; } = null;\n\n    public static void f(PaginatedList page)\n    {\n    }\n\n    public static Pair paired(Order order) => new Pair<Order, Order>();\n\n    public static Any local(PaginatedList<Order> given)\n    {\n        PaginatedList page = given;\n        return page;\n    }\n\n    public static Any listed(List<Order> orders) => new PaginatedList(orders);\n\n    public static Any pair() => new Pair();\n}\n";
     let php_types = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass PaginatedList\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    public ?PaginatedList $shelf = null;\n\n    public static function f(PaginatedList $page): void\n    {\n    }\n}\n";
     let classes = "namespace Demo;\n\nimport RuntimeException;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n\npublic class Plain\n{\n}\n\npublic class Failure<TItem> : RuntimeException\n{\n    public TItem? first() => null;\n}\n";
     let tests = "namespace Demo;\n\npublic class Report\n{\n    public static bool held(Any? value) => value is Box;\n\n    public static Any? kept(Any? value) => value as Box;\n\n    public static int matched(Any? value) => match (value) { Box => 1, default => 0 };\n\n    public static bool plain(Any? value) => value is Plain;\n\n    public static int run()\n    {\n        try {\n            return 1;\n        } catch (Failure failure) {\n            return 0;\n        }\n    }\n\n    public Report(public Box<int> box { get; }) { }\n\n    public Report.empty() : this(new Box()) { }\n\n    public static Box<int>? narrowed(Any? value) => value as Box;\n\n    public static Box<int> made() => new Box();\n}\n";
@@ -11218,7 +11588,7 @@ const CHECKS: &str = "namespace Checks;\n\npublic interface Validator<TItem>\n{\
 /// 11.1's note.
 #[test]
 fn a_substitution_a_missing_marker_blocks_names_the_marker() {
-    let sharp = "namespace App;\n\nimport Checks.Slot;\nimport Checks.Validator;\nimport Demo.DatabaseEntity;\nimport Demo.Order;\nimport Demo.PaginatedList;\n\npublic class Report\n{\n    public PaginatedList<DatabaseEntity>? shelf { get; set; }\n\n    public static Any wide(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any narrow(Validator<Order> validator) => validator;\n\n    public static Any slot(Slot<DatabaseEntity> slot) => slot;\n\n    public static Any passed(PaginatedList<Order> page) => Report.wide(page);\n\n    public static Any checked(Validator<DatabaseEntity> validator) => Report.narrow(validator);\n\n    public static Any slotted(Slot<Order> slot) => Report.slot(slot);\n\n    public static PaginatedList<DatabaseEntity> returned(PaginatedList<Order> page) => page;\n\n    public static PaginatedList<DatabaseEntity> assigned(PaginatedList<Order> page)\n    {\n        PaginatedList<DatabaseEntity> wide = page;\n        return wide;\n    }\n\n    public void kept(PaginatedList<Order> page)\n    {\n        this.shelf = page;\n    }\n}\n";
+    let sharp = "namespace App;\n\nimport Checks.Slot;\nimport Checks.Validator;\nimport Demo.DatabaseEntity;\nimport Demo.Order;\nimport Demo.PaginatedList;\n\npublic class Report\n{\n    public PaginatedList<DatabaseEntity>? shelf { get; set; } = null;\n\n    public static Any wide(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any narrow(Validator<Order> validator) => validator;\n\n    public static Any slot(Slot<DatabaseEntity> slot) => slot;\n\n    public static Any passed(PaginatedList<Order> page) => Report.wide(page);\n\n    public static Any checked(Validator<DatabaseEntity> validator) => Report.narrow(validator);\n\n    public static Any slotted(Slot<Order> slot) => Report.slot(slot);\n\n    public static PaginatedList<DatabaseEntity> returned(PaginatedList<Order> page) => page;\n\n    public static PaginatedList<DatabaseEntity> assigned(PaginatedList<Order> page)\n    {\n        PaginatedList<DatabaseEntity> wide = page;\n        return wide;\n    }\n\n    public void kept(PaginatedList<Order> page)\n    {\n        this.shelf = page;\n    }\n}\n";
     let others = [("src/Demo/Paging.sharp", PAGING), ("src/Checks/Checks.sharp", CHECKS)];
     let wide = "PaginatedList<Order> cannot be used as PaginatedList<DatabaseEntity>.";
 
@@ -11611,10 +11981,10 @@ fn a_type_argument_outside_its_bound_is_named_as_sharp_writes_it() {
     );
 }
 
-/// An override that does not fit the member it overrides names both types as PHP# writes them, and a type that erases
-/// to another type than the parent's names each class and member as PHP# writes it, `ListBase.put`, and each erased
-/// type as PHP# writes it, as `Any?`, or as PHP's where PHP# has no name for it, as in PHP's `array`. The PHP twin keeps
-/// Mago's text.
+/// An override that does not fit the member it overrides names both types as PHP# writes them, and a field that erases
+/// to another type than the parent's names each class and member as PHP# writes it, `ListBase.item`, and each erased
+/// type as PHP# writes it, as `Any?`, or as PHP's where PHP# has no name for it, as in PHP's `array|null`. The
+/// parameter of `ListBase.put` takes the type argument, so it is widened. The PHP twin keeps Mago's text.
 #[test]
 fn an_override_names_its_types_as_sharp_writes_them_and_the_erased_types_as_php_does() {
     let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic class Base<TItem>\n{\n    public TItem? item = null;\n\n    public virtual void put(TItem item)\n    {\n    }\n\n    public virtual TItem get(TItem item) => item;\n}\n\npublic class OrderBase : Base<Order>\n{\n    public override Line? item = null;\n\n    public override void put(Line item)\n    {\n    }\n\n    public override Line get(Order item) => new Line();\n}\n\npublic class ListBase : Base<List<int>>\n{\n    public override List<int>? item = null;\n\n    public override void put(List<int> item)\n    {\n    }\n}\n";
@@ -11634,7 +12004,6 @@ fn an_override_names_its_types_as_sharp_writes_them_and_the_erased_types_as_php_
             "26:26 incompatible-parameter-type Parameter `item` of `OrderBase.put` expects type `Line` but parent `Base.put` expects type `Order` | Parameter `item` expects type `Line` but parent expects `Order` | Parent method `Base.put` parameter defined here | In class `OrderBase` | Parameter types must be contravariant: child must accept equal or wider types than parent. | Change the parameter type to be compatible with the parent method.",
             "30:26 incompatible-return-type Return type `Line` of `OrderBase.get` is incompatible with parent return type `Order` of `Base.get` | Returns type `Line` but parent expects `Order` | Parent method `Base.get` return type defined here | In class `OrderBase` | Return types must be covariant: child must return equal or narrower types than parent. | Change the return type to be compatible with the parent method.",
             "24:21 incompatible-property-type Property `OrderBase.item` has an incompatible type declaration. | This type `Line?` is incompatible with the parent's type. | The parent property is defined with type `Order?` here. | PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class. | Change the type of `item` to `Order?` to match the parent property.",
-            "37:40 incompatible-parameter-type Parameter `item` of `ListBase.put` must take at least `Any?`, the type `Base.put` erases it to. | Erases to PHP's `array`. | `Base.put` takes `Any?` once its type parameters are erased. | PHP# erases type parameters when it compiles, and PHP refuses a parameter narrower than the one it overrides when it links the class. | Write `item` with a type that erases to `Any?`.",
             "35:21 incompatible-property-type Property `ListBase.item` must have `Any?`, the type `Base.item` erases to. | Erases to PHP's `array|null`. | Erases to `Any?`. | PHP# erases type parameters when it compiles, and PHP requires a property to keep the type of the property it overrides. | Write `item` with a type that erases to `Any?`.",
         ]
     );
@@ -11735,7 +12104,7 @@ fn an_override_returns_the_type_parameter_the_member_it_overrides_returns() {
 /// The PHP twin keeps Mago's issues.
 #[test]
 fn a_property_of_a_generic_receiver_has_the_receivers_type_arguments() {
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n    public void save()\n    {\n    }\n}\n\npublic class Shelf<TItem>\n{\n    public List<TItem> items { get; set; } = [];\n\n    public Function<void(TItem)>? visit { get; set; }\n\n    public void leak(Shelf<Order> other, TItem item)\n    {\n        other.items.add(item);\n    }\n\n    public void keep(TItem item)\n    {\n        this.items.add(item);\n    }\n}\n\npublic class Stocker\n{\n    public static void fill(Shelf<Order> shelf)\n    {\n        shelf.items.add(new Order());\n    }\n}\n\npublic class OrderShelf : Shelf<Order>\n{\n    public void stock()\n    {\n        this.items.add(new Order());\n    }\n\n    public void watch()\n    {\n        this.visit = (item) => item.save();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n    public void save()\n    {\n    }\n}\n\npublic class Shelf<TItem>\n{\n    public List<TItem> items { get; set; } = [];\n\n    public Function<void(TItem)>? visit { get; set; } = null;\n\n    public void leak(Shelf<Order> other, TItem item)\n    {\n        other.items.add(item);\n    }\n\n    public void keep(TItem item)\n    {\n        this.items.add(item);\n    }\n}\n\npublic class Stocker\n{\n    public static void fill(Shelf<Order> shelf)\n    {\n        shelf.items.add(new Order());\n    }\n}\n\npublic class OrderShelf : Shelf<Order>\n{\n    public void stock()\n    {\n        this.items.add(new Order());\n    }\n\n    public void watch()\n    {\n        this.visit = (item) => item.save();\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n    public function save(): void\n    {\n    }\n}\n\n/** @template TItem */\nclass Shelf\n{\n    /** @var list<TItem> */\n    public array $items = [];\n\n    /** @var (\\Closure(TItem): void)|null */\n    public ?\\Closure $visit = null;\n\n    /**\n     * @param Shelf<Order> $other\n     * @param TItem $item\n     */\n    public function leak(Shelf $other, mixed $item): void\n    {\n        $other->items[] = $item;\n    }\n\n    /** @param TItem $item */\n    public function keep(mixed $item): void\n    {\n        $this->items[] = $item;\n    }\n}\n\nclass Stocker\n{\n    /** @param Shelf<Order> $shelf */\n    public static function fill(Shelf $shelf): void\n    {\n        $shelf->items[] = new Order();\n    }\n}\n\n/** @extends Shelf<Order> */\nclass OrderShelf extends Shelf\n{\n    public function stock(): void\n    {\n        $this->items[] = new Order();\n    }\n\n    public function watch(): void\n    {\n        $this->visit = fn($item) => $item->save();\n    }\n}\n";
 
     assert_eq!(
@@ -12489,37 +12858,23 @@ fn a_php_intersection_key_with_a_backed_enum_keeps_upstreams_key_type() {
     );
 }
 
-/// An erased type is named as PHP# writes it, `Entity`, `Order?`, `Any?` or `Iterable<Any?>`, and as PHP's only where
-/// PHP# has no word for a part of it, `array` and `Closure`, so `array|null` is PHP's whole. The PHP twin keeps Mago's
-/// issues.
+/// A parameter that takes its type argument is widened whatever it erases to: a class narrower than its bound,
+/// `Entity`, a nullable one, a `List` that erases to PHP's `array`, a function type that erases to PHP's `Closure`,
+/// and a plain PHP template's `iterable`. The PHP twin keeps Mago's issues.
 #[test]
-fn an_erased_parameter_type_is_named_as_sharp_writes_it() {
+fn a_parameter_is_widened_whatever_it_erases_to() {
     let sharp = "namespace Demo;\n\nimport Lib.Feed;\n\npublic abstract class Entity\n{\n}\n\npublic class Order : Entity\n{\n}\n\npublic class Box<TItem : Entity>\n{\n    public virtual void put(TItem item)\n    {\n    }\n\n    public virtual void fill(TItem? item)\n    {\n    }\n}\n\npublic class OrderBox : Box<Order>\n{\n    public override void put(Order item)\n    {\n    }\n\n    public override void fill(Order? item)\n    {\n    }\n}\n\npublic class Slot<TValue>\n{\n    public virtual void keep(TValue value)\n    {\n    }\n}\n\npublic class ListSlot : Slot<List<int>?>\n{\n    public override void keep(List<int>? value)\n    {\n    }\n}\n\npublic class FunctionSlot : Slot<Function<int(int)>>\n{\n    public override void keep(Function<int(int)> value)\n    {\n    }\n}\n\npublic class Numbers : Feed<List<int>>\n{\n    public override void keep(List<int> values)\n    {\n    }\n}\n";
     let feed = "<?php\n\nnamespace Lib;\n\n/** @template T of iterable */\nabstract class Feed\n{\n    /** @param T $values */\n    abstract public function keep(iterable $values): void;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Feed;\n\nabstract class Entity\n{\n}\n\nclass Order extends Entity\n{\n}\n\n/** @template TItem of Entity */\nclass Box\n{\n    /** @param TItem $item */\n    public function put(Entity $item): void\n    {\n    }\n}\n\n/** @extends Box<Order> */\nclass OrderBox extends Box\n{\n    public function put(Entity $item): void\n    {\n    }\n}\n\n/** @extends Feed<list<int>> */\nclass Numbers extends Feed\n{\n    /** @param list<int> $values */\n    public function keep(iterable $values): void\n    {\n    }\n}\n";
     let others = [("src/Lib/Feed.php", feed)];
-    let note = "PHP# erases type parameters when it compiles, and PHP refuses a parameter narrower than the one it overrides when it links the class.";
 
     assert_eq!(worded(("src/Demo/Box.php", php), &others), Vec::<String>::new());
     assert_eq!(
-        worded(("src/Demo/Box.sharp", sharp), &others),
-        [
-            format!(
-                "26:36 incompatible-parameter-type Parameter `item` of `OrderBox.put` must take at least `Entity`, the type `Box.put` erases it to. | Erases to `Order`. | `Box.put` takes `Entity` once its type parameters are erased. | {note} | Write `item` with a type that erases to `Entity`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound."
-            ),
-            format!(
-                "30:38 incompatible-parameter-type Parameter `item` of `OrderBox.fill` must take at least `Entity?`, the type `Box.fill` erases it to. | Erases to `Order?`. | `Box.fill` takes `Entity?` once its type parameters are erased. | {note} | Write `item` with a type that erases to `Entity?`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound."
-            ),
-            format!(
-                "44:42 incompatible-parameter-type Parameter `value` of `ListSlot.keep` must take at least `Any?`, the type `Slot.keep` erases it to. | Erases to PHP's `array|null`. | `Slot.keep` takes `Any?` once its type parameters are erased. | {note} | Write `value` with a type that erases to `Any?`."
-            ),
-            format!(
-                "51:50 incompatible-parameter-type Parameter `value` of `FunctionSlot.keep` must take at least `Any?`, the type `Slot.keep` erases it to. | Erases to PHP's `Closure`. | `Slot.keep` takes `Any?` once its type parameters are erased. | {note} | Write `value` with a type that erases to `Any?`."
-            ),
-            format!(
-                "58:41 incompatible-parameter-type Parameter `values` of `Numbers.keep` must take at least `Iterable<Any?>`, the type `Feed.keep` erases it to. | Erases to PHP's `array`. | `Feed.keep` takes `Iterable<Any?>` once its type parameters are erased. | {note} | Write `values` with a type that erases to `Iterable<Any?>`."
-            ),
-        ]
+        widened(("src/Demo/Box.sharp", sharp), &others),
+        (
+            Vec::new(),
+            ["26:36 item", "30:38 item", "44:42 value", "51:50 value", "58:41 values"].map(str::to_owned).to_vec()
+        )
     );
 }
 
@@ -13163,7 +13518,7 @@ fn a_generic_call_takes_the_type_argument_an_argument_fixes() {
 /// Swift's `??` takes a `T?`, and through either branch of `?:`, a local's and an argument's alike.
 #[test]
 fn the_declared_type_a_call_goes_into_fixes_its_type_arguments() {
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic interface Cache\n{\n    T get<T>(string key);\n}\n\npublic class Report\n{\n    public Box<Order>? box { get; set; }\n\n    public Box<T> make<T>() => new Box<T>();\n\n    public static Box<T> made<T>() => new Box<T>();\n\n    public Box<T> fresh<T>() => new Box<T>();\n\n    public void show(Box<Order> box)\n    {\n    }\n\n    public List<Order> local(Cache cache)\n    {\n        List<Order> orders = cache.get(\"orders\");\n        return orders;\n    }\n\n    public void property()\n    {\n        this.box = this.make();\n    }\n\n    public Box<Order> returned()\n    {\n        return Report.made();\n    }\n\n    public Box<Order> body() => Self.made();\n\n    public void argument()\n    {\n        this.show(this.fresh());\n    }\n\n    public List<Order> coalesced(Cache cache)\n    {\n        List<Order> orders = cache.get(\"cached\") ?? [];\n        return orders;\n    }\n\n    public List<Order> picked(Cache cache, bool fresh)\n    {\n        List<Order> orders = fresh ? cache.get(\"fresh\") : cache.get(\"stale\");\n        return orders;\n    }\n\n    public void list(List<Order> orders)\n    {\n    }\n\n    public void passed(Cache cache, bool fresh)\n    {\n        this.list(cache.get(\"first\") ?? []);\n        this.list(fresh ? cache.get(\"left\") : cache.get(\"right\"));\n    }\n}\n\npublic class Shelf<TItem>\n{\n    public Box<T> shelved<T>() => new Box<T>();\n\n    public void stock(Box<TItem> box)\n    {\n    }\n\n    public void run()\n    {\n        this.stock(this.shelved());\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic interface Cache\n{\n    T get<T>(string key);\n}\n\npublic class Report\n{\n    public Box<Order>? box { get; set; } = null;\n\n    public Box<T> make<T>() => new Box<T>();\n\n    public static Box<T> made<T>() => new Box<T>();\n\n    public Box<T> fresh<T>() => new Box<T>();\n\n    public void show(Box<Order> box)\n    {\n    }\n\n    public List<Order> local(Cache cache)\n    {\n        List<Order> orders = cache.get(\"orders\");\n        return orders;\n    }\n\n    public void property()\n    {\n        this.box = this.make();\n    }\n\n    public Box<Order> returned()\n    {\n        return Report.made();\n    }\n\n    public Box<Order> body() => Self.made();\n\n    public void argument()\n    {\n        this.show(this.fresh());\n    }\n\n    public List<Order> coalesced(Cache cache)\n    {\n        List<Order> orders = cache.get(\"cached\") ?? [];\n        return orders;\n    }\n\n    public List<Order> picked(Cache cache, bool fresh)\n    {\n        List<Order> orders = fresh ? cache.get(\"fresh\") : cache.get(\"stale\");\n        return orders;\n    }\n\n    public void list(List<Order> orders)\n    {\n    }\n\n    public void passed(Cache cache, bool fresh)\n    {\n        this.list(cache.get(\"first\") ?? []);\n        this.list(fresh ? cache.get(\"left\") : cache.get(\"right\"));\n    }\n}\n\npublic class Shelf<TItem>\n{\n    public Box<T> shelved<T>() => new Box<T>();\n\n    public void stock(Box<TItem> box)\n    {\n    }\n\n    public void run()\n    {\n        this.stock(this.shelved());\n    }\n}\n";
     let analyzed = ("src/Demo/Report.sharp", sharp);
 
     for (call, recorded) in [
@@ -13581,7 +13936,7 @@ fn a_refused_value_names_its_types_as_sharp_writes_them() {
 /// PHP twin keeps Mago's text.
 #[test]
 fn an_override_names_its_members_and_types_as_sharp_writes_them() {
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic class Base\n{\n    public Order? item = null;\n\n    public virtual void put(Order item)\n    {\n    }\n\n    public virtual Order get(Order item) => item;\n}\n\npublic class OrderBase : Base\n{\n    public override Line? item = null;\n\n    public override void put(Line item)\n    {\n    }\n\n    public override Line get(Order item) => new Line();\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic class Base\n{\n    public virtual Order? item { get; set; } = null;\n\n    public virtual void put(Order item)\n    {\n    }\n\n    public virtual Order get(Order item) => item;\n}\n\npublic class OrderBase : Base\n{\n    public override Line? item { get; set; } = null;\n\n    public override void put(Line item)\n    {\n    }\n\n    public override Line get(Order item) => new Line();\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\nclass Line\n{\n}\n\nclass Base\n{\n    public ?Order $item = null;\n\n    public function put(Order $item): void\n    {\n    }\n\n    public function get(Order $item): Order\n    {\n        return $item;\n    }\n}\n\nclass OrderBase extends Base\n{\n    public ?Line $item = null;\n\n    public function put(Line $item): void\n    {\n    }\n\n    public function get(Order $item): Line\n    {\n        return new Line();\n    }\n}\n";
 
     assert_eq!(
@@ -13636,7 +13991,7 @@ fn a_message_names_an_accessor_as_sharp_writes_it() {
 #[test]
 fn a_message_names_an_inherited_accessor_as_sharp_writes_it() {
     let library = "<?php\n\nnamespace Lib;\n\ninterface Priced\n{\n    public int $total { get; }\n}\n\nclass Counter\n{\n    public int $count = 0 {\n        final get => $this->count;\n    }\n}\n\ninterface Shared\n{\n    public array $items { &get; }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Counter;\nimport Lib.Priced;\nimport Lib.Shared;\n\npublic class Order : Priced\n{\n}\n\npublic class Tally : Counter\n{\n    public override int count { get => 1; }\n}\n\npublic class Bag : Shared\n{\n    public List<int> items { get => []; }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Counter;\nimport Lib.Priced;\nimport Lib.Shared;\n\npublic class Order : Priced\n{\n}\n\npublic class Tally : Counter\n{\n    public override int count { get => 1; set; } = 0;\n}\n\npublic class Bag : Shared\n{\n    public List<int> items { get => []; }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Counter;\nuse Lib\\Priced;\nuse Lib\\Shared;\n\nclass Order implements Priced\n{\n}\n\nclass Tally extends Counter\n{\n    public int $count {\n        get => 1;\n    }\n}\n\nclass Bag implements Shared\n{\n    public array $items {\n        get => [];\n    }\n}\n";
     let others = [("src/Lib/Library.php", library)];
 
@@ -13982,8 +14337,9 @@ fn a_member_access_refusal_names_the_member_as_sharp_writes_it() {
     );
 }
 
-/// A property no constructor initializes is named as PHP# writes it, `total`, in its class `Order`. The PHP twin keeps
-/// upstream's wording.
+/// A field no constructor initializes is PHP#'s own error, which names it as PHP# writes it, `total`, and names both
+/// fixes. Upstream's check, which offers a nullable type as a third fix, runs only on the PHP twin, in its own wording,
+/// even with `check_property_initialization` on.
 #[test]
 fn an_uninitialized_property_and_its_class_are_named_as_sharp_writes_them() {
     let sharp = "namespace Demo;\n\nclass Ledger\n{\n    private int count;\n}\n\nclass Order\n{\n    private int total;\n\n    public Order()\n    {\n    }\n}\n";
@@ -14006,8 +14362,8 @@ fn an_uninitialized_property_and_its_class_are_named_as_sharp_writes_them() {
     assert_eq!(
         uninitialized(("src/Demo/Order.sharp", sharp)),
         [
-            "3:7 missing-constructor Class `Ledger` has typed properties without default values but no constructor to initialize them. | This class needs a constructor | This property needs initialization | Properties requiring initialization: count | Add a constructor that initializes all typed properties, or provide default values.",
-            "10:17 uninitialized-property Property `total` is not initialized in the constructor of class `Order`. | This property is not initialized | In class `Order` | Typed properties without default values must be initialized in the constructor. | Initialize `total` in the constructor, provide a default value, or make the type nullable.",
+            "5:17 uninitialized-property `count` is never set: give `count` an initial value, or set it on every path through the constructor. | Declared here. | A field or a property with storage starts with the value it is given, `null` included, and no constructor sets it on every path.",
+            "10:17 uninitialized-property `total` is never set: give `total` an initial value, or set it on every path through the constructor. | Declared here. | A field or a property with storage starts with the value it is given, `null` included, and no constructor sets it on every path.",
         ]
     );
 }
@@ -15001,7 +15357,7 @@ fn a_call_is_checked_by_the_class_that_declares_the_member_not_the_class_it_goes
     let through_coin = "<?php\n\nnamespace App;\n\nfinal class Check\n{\n    public function run(Coin $coin): bool\n    {\n        return Coin::op_Equality($coin, null);\n    }\n}\n";
     let shelf = (
         "src/App/Shelf.sharp",
-        "namespace App;\n\nimport Demo.Rows;\nimport Lib.Store;\n\npublic class Shelf\n{\n    public Store store => new Store();\n\n    public Rows rows => new Rows();\n\n    public Money money => new Money(5);\n\n    public Coin coin => new Coin(5);\n}\n",
+        "namespace App;\n\nimport Demo.Rows;\nimport Lib.Store;\n\npublic class Shelf\n{\n    public Store store => new Store();\n\n    public Rows rows => new Rows();\n\n    public Money money => new Money(5);\n\n    public Coin coin => new Coin(5);\n\n    law stored(Shelf shelf) => shelf.store is Store;\n\n    law rowed(Shelf shelf) => shelf.rows is Rows;\n\n    law paid(Shelf shelf) => shelf.money is Money && shelf.coin is Coin;\n}\n",
     );
 
     assert_eq!(
@@ -15027,8 +15383,8 @@ fn a_call_is_checked_by_the_class_that_declares_the_member_not_the_class_it_goes
     assert_eq!(
         effect_issues(&[shelf, store, rows, MONEY_OPERATORS, coin]),
         [
-            "src/App/Shelf.sharp:8:27 impure-getter: Getter `store` calls `Store`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
-            "src/App/Shelf.sharp:10:25 impure-getter: Getter `rows` calls `Store`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
+            "src/App/Shelf.sharp:16:32 impure-law: Law `stored` reaches `Shelf.store`, which calls `Store` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
+            "src/App/Shelf.sharp:18:31 impure-law: Law `rowed` reaches `Shelf.rows`, which calls `Store` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
         ]
     );
 }
@@ -15314,7 +15670,7 @@ fn an_extern_event_gives_its_class_the_effects_it_lists() {
     );
     let failure = (
         "app/Shop/Failure.sharp",
-        "namespace App.Shop;\n\nimport Illuminate.Queue.Events.JobFailed;\n\npublic class Failure\n{\n    public JobFailed last => new JobFailed(1);\n}\n",
+        "namespace App.Shop;\n\nimport Illuminate.Queue.Events.JobFailed;\n\npublic class Failure\n{\n    public JobFailed last => new JobFailed(1);\n\n    law failed(Failure failure) => failure.last is JobFailed;\n}\n",
     );
     let pure = (
         "app/Stubs/Queue.sharp",
@@ -15330,7 +15686,7 @@ fn an_extern_event_gives_its_class_the_effects_it_lists() {
     assert_eq!(
         effect_issues(&[failure, events, database]),
         [
-            "app/Shop/Failure.sharp:7:30 impure-getter: Getter `last` calls `JobFailed`, which has the effect `Database`. Getters must be pure."
+            "app/Shop/Failure.sharp:9:36 impure-law: Law `failed` reaches `Failure.last`, which calls `JobFailed` with the effect `Database`. Laws hold only over pure code."
         ]
     );
 }
@@ -15561,7 +15917,7 @@ fn a_listener_class_takes_services_its_namespace_modules_bind() {
 
 const LABEL: (&str, &str) = (
     "app/Shop/Label.sharp",
-    "namespace App.Shop;\n\npublic class Label\n{\n    public Label(private string name) { }\n\n    public string text => global.trim(this.name);\n}\n",
+    "namespace App.Shop;\n\npublic class Label\n{\n    public Label(private string name) { }\n\n    public string text => global.trim(this.name);\n\n    law named(Label label) => label.text != \"\";\n}\n",
 );
 
 #[test]
@@ -15571,12 +15927,14 @@ fn a_getter_calling_a_function_an_extern_declares_pure_passes() {
     assert_eq!(effect_issues(&[LABEL, stub]), Vec::<String>::new());
 }
 
+/// A getter may call anything, spec section 6, and a read of it carries what it calls, so a law reading it is held to
+/// the getter's call.
 #[test]
-fn a_getter_calling_a_function_with_no_extern_is_refused_and_names_the_missing_declaration() {
+fn a_law_reading_a_getter_that_calls_a_function_with_no_extern_is_refused_and_names_the_missing_declaration() {
     assert_eq!(
         effect_issues(&[LABEL]),
         [
-            "app/Shop/Label.sharp:7:27 impure-getter: Getter `text` calls `global.trim`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern global.trim;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Label.sharp:9:31 impure-law: Law `named` reaches `Label.text`, which calls `global.trim` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern global.trim;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
@@ -15592,7 +15950,7 @@ fn an_extern_declares_a_plain_php_function_through_its_namespace() {
     );
     let page = (
         "app/Shop/Page.sharp",
-        "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Page\n{\n    public Page(private string html) { }\n\n    public string printed => Pdf.render(this.html);\n}\n",
+        "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Page\n{\n    public Page(private string html) { }\n\n    public string printed => Pdf.render(this.html);\n\n    law printable(Page page) => page.printed != \"\";\n}\n",
     );
     let stub = ("app/Stubs/Pdf.sharp", "namespace App.Stubs;\n\nimport Vendor.Pdf;\n\nextern Pdf.render uses Files;\n");
     let bare = ("app/Stubs/Text.sharp", "namespace App.Stubs;\n\nextern trim;\n");
@@ -15600,13 +15958,13 @@ fn an_extern_declares_a_plain_php_function_through_its_namespace() {
     assert_eq!(
         effect_issues(&[page, pdf, stub]),
         [
-            "app/Shop/Page.sharp:9:30 impure-getter: Getter `printed` calls `Pdf.render`, which has the effect `Files`. Getters must be pure."
+            "app/Shop/Page.sharp:11:33 impure-law: Law `printable` reaches `Page.printed`, which calls `Pdf.render` with the effect `Files`. Laws hold only over pure code."
         ]
     );
     assert_eq!(
         effect_issues(&[page, pdf]),
         [
-            "app/Shop/Page.sharp:9:30 impure-getter: Getter `printed` calls `Pdf.render`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Pdf.render;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Page.sharp:11:33 impure-law: Law `printable` reaches `Page.printed`, which calls `Pdf.render` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Pdf.render;` when it has no effect, or name its effects after `uses`."
         ]
     );
     assert_eq!(
@@ -15624,13 +15982,14 @@ const MAGIC: (&str, &str) = (
 
 const SHELF: (&str, &str) = (
     "app/Shop/Shelf.sharp",
-    "namespace App.Shop;\n\nimport Lib.Bag;\nimport Lib.Codes;\n\npublic class Shelf\n{\n    public Shelf(private Bag bag) { }\n\n    public int count => this.bag.size();\n\n    public int code => Codes.next();\n}\n",
+    "namespace App.Shop;\n\nimport Lib.Bag;\nimport Lib.Codes;\n\npublic class Shelf\n{\n    public Shelf(private Bag bag) { }\n\n    public int count => this.bag.size();\n\n    public int code => Codes.next();\n\n    law counted(Shelf shelf) => shelf.count > 0;\n\n    law coded(Shelf shelf) => shelf.code > 0;\n}\n",
 );
 
 /// A method no class declares runs the class's `__call` or `__callStatic`, so its call has the effects the `extern` on
-/// that magic method declares, and an unknown effect without one, as any call of a plain PHP method does.
+/// that magic method declares, and an unknown effect without one, as any call of a plain PHP method does. A law
+/// reading a getter that makes the call has them too.
 #[test]
-fn a_getter_calling_a_method_a_magic_method_serves_has_the_effects_of_the_magic_method() {
+fn a_call_of_a_method_a_magic_method_serves_has_the_effects_of_the_magic_method() {
     let pure = (
         "app/Stubs/Magic.sharp",
         "namespace App.Stubs;\n\nimport Lib.Bag;\nimport Lib.Codes;\n\nextern Bag.__call;\nextern Codes.__callStatic;\n",
@@ -15643,8 +16002,8 @@ fn a_getter_calling_a_method_a_magic_method_serves_has_the_effects_of_the_magic_
     assert_eq!(
         effect_issues(&[SHELF, MAGIC]),
         [
-            "app/Shop/Shelf.sharp:10:25 impure-getter: Getter `count` calls `Bag.__call`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Bag.__call;` when it has no effect, or name its effects after `uses`.",
-            "app/Shop/Shelf.sharp:12:24 impure-getter: Getter `code` calls `Codes.__callStatic`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Codes.__callStatic;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Shelf.sharp:14:33 impure-law: Law `counted` reaches `Shelf.count`, which calls `Bag.__call` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Bag.__call;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Shelf.sharp:16:31 impure-law: Law `coded` reaches `Shelf.code`, which calls `Codes.__callStatic` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Codes.__callStatic;` when it has no effect, or name its effects after `uses`.",
         ]
     );
     assert_eq!(issues(pure, &[MAGIC]), Vec::<String>::new());
@@ -15652,7 +16011,7 @@ fn a_getter_calling_a_method_a_magic_method_serves_has_the_effects_of_the_magic_
     assert_eq!(
         effect_issues(&[SHELF, MAGIC, timed]),
         [
-            "app/Shop/Shelf.sharp:10:25 impure-getter: Getter `count` calls `Bag.__call`, which has the effect `Clock`. Getters must be pure."
+            "app/Shop/Shelf.sharp:14:33 impure-law: Law `counted` reaches `Shelf.count`, which calls `Bag.__call` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
 }
@@ -15745,7 +16104,7 @@ fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write(
 }
 
 /// A call of a method without a body has the effects its `uses` lists, which every implementation is held to, so a
-/// getter calling it through an interface is refused naming them.
+/// law reading a getter that calls it through an interface is refused naming them.
 #[test]
 fn a_call_of_a_method_without_a_body_has_the_effects_its_uses_lists() {
     let rates = |uses: &'static str| {
@@ -15759,46 +16118,47 @@ fn a_call_of_a_method_without_a_body_has_the_effects_its_uses_lists() {
     };
     let quote = (
         "app/Shop/Quote.sharp",
-        "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rates rates) { }\n\n    public int price => this.rates.rate(1);\n}\n",
+        "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rates rates) { }\n\n    public int price => this.rates.rate(1);\n\n    law priced(Quote quote) => quote.price > 0;\n}\n",
     );
 
     assert_eq!(effect_issues(&[quote, rates("")]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[quote, rates(" uses Http")]),
         [
-            "app/Shop/Quote.sharp:7:25 impure-getter: Getter `price` calls `Rates.rate`, which has the effect `Http`. Getters must be pure."
+            "app/Shop/Quote.sharp:9:32 impure-law: Law `priced` reaches `Quote.price`, which calls `Rates.rate` with the effect `Http`. Laws hold only over pure code."
         ]
     );
 }
 
 /// Spec section 29: a call through a function value has the effects its function type lists, whether the value is a
-/// field, a parameter or a local, so a getter calling one that uses `Database` is refused and names `Database`.
+/// field, a parameter or a local. A getter may call one that uses `Database`, spec section 6, and a law reading the
+/// getter is refused naming `Database`.
 #[test]
-fn a_getter_calling_a_function_value_with_an_effect_is_refused_naming_the_effect() {
+fn a_law_reading_a_getter_that_calls_a_function_value_with_an_effect_is_refused_naming_the_effect() {
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Function<int(int) uses Database> rate) { }\n\n    public int price => this.rate(2);\n\n    public int total => this.apply(this.rate);\n\n    public int stored\n    {\n        get\n        {\n            Function<int(int) uses Database> lookup = this.rate;\n            return lookup(3);\n        }\n    }\n\n    public int apply(Function<int(int) uses Database> step) => step(1);\n}\n",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Function<int(int) uses Database> rate) { }\n\n    public int price => this.rate(2);\n\n    public int total => this.apply(this.rate);\n\n    public int stored\n    {\n        get\n        {\n            Function<int(int) uses Database> lookup = this.rate;\n            return lookup(3);\n        }\n    }\n\n    public int apply(Function<int(int) uses Database> step) => step(1);\n\n    law priced(Pricing pricing) => pricing.price > 0;\n\n    law totaled(Pricing pricing) => pricing.total > 0;\n\n    law kept(Pricing pricing) => pricing.stored > 0;\n}\n",
     );
 
     assert_eq!(issues(pricing, &[]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing]),
         [
-            "app/Shop/Pricing.sharp:7:25 impure-getter: Getter `price` calls `Pricing.rate`, which has the effect `Database`. Getters must be pure.",
-            "app/Shop/Pricing.sharp:9:25 impure-getter: Getter `total` reaches `Pricing.apply`, which calls `step` with the effect `Database`. Getters must be pure.",
-            "app/Shop/Pricing.sharp:16:20 impure-getter: Getter `stored` calls `lookup`, which has the effect `Database`. Getters must be pure.",
+            "app/Shop/Pricing.sharp:22:36 impure-law: Law `priced` reaches `Pricing.price`, which calls `Pricing.rate` with the effect `Database`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:24:37 impure-law: Law `totaled` reaches `Pricing.apply`, which calls `step` with the effect `Database`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:26:34 impure-law: Law `kept` reaches `Pricing.stored`, which calls `lookup` with the effect `Database`. Laws hold only over pure code.",
         ]
     );
 }
 
 /// A call that runs a function value has that value's effects, whether a local holding a lambda runs it, or a plain
 /// PHP function or method runs a lambda, a method value or a function value it is given, even when its `extern`
-/// declares it pure.
+/// declares it pure. A getter that runs one has them, and so a law reading it is refused.
 #[test]
-fn a_getter_running_a_function_value_through_plain_php_or_a_local_has_the_value_s_effects() {
+fn running_a_function_value_through_plain_php_or_a_local_has_the_value_s_effects() {
     let effects = (
         "app/Shop/Effects.sharp",
-        "namespace App.Shop;\n\nimport Lib.Runner;\n\npublic class Effects\n{\n    public Effects(private Function<int() uses Clock> tick) { }\n\n    public int viaLocalLambda\n    {\n        get\n        {\n            const f = () => global.time();\n            return f();\n        }\n    }\n\n    public int viaArrayMap => global.count(global.array_map(x => global.time() + x, [1, 2]));\n\n    public int viaCallUserFunc => global.call_user_func(() => global.time());\n\n    public int viaUsort\n    {\n        get\n        {\n            List<int> xs = [2, 1];\n            global.usort(xs, (a, b) => global.time() + a - b);\n            return xs[0];\n        }\n    }\n\n    public int viaPlainMethod => Runner.run(() => global.time());\n\n    public int viaMethodValue => global.count(global.array_map(this.stamp, [1]));\n\n    public int viaFunctionValue => global.call_user_func(this.tick);\n\n    public int stamp(int x) => global.time() + x;\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Runner;\n\npublic class Effects\n{\n    public Effects(private Function<int() uses Clock> tick) { }\n\n    public int viaLocalLambda\n    {\n        get\n        {\n            const f = () => global.time();\n            return f();\n        }\n    }\n\n    public int viaArrayMap => global.count(global.array_map(x => global.time() + x, [1, 2]));\n\n    public int viaCallUserFunc => global.call_user_func(() => global.time());\n\n    public int viaUsort\n    {\n        get\n        {\n            List<int> xs = [2, 1];\n            global.usort(xs, (a, b) => global.time() + a - b);\n            return xs[0];\n        }\n    }\n\n    public int viaPlainMethod => Runner.run(() => global.time());\n\n    public int viaMethodValue => global.count(global.array_map(this.stamp, [1]));\n\n    public int viaFunctionValue => global.call_user_func(this.tick);\n\n    public int stamp(int x) => global.time() + x;\n\n    law local(Effects effects) => effects.viaLocalLambda > 0;\n\n    law mapped(Effects effects) => effects.viaArrayMap > 0;\n\n    law called(Effects effects) => effects.viaCallUserFunc > 0;\n\n    law sorted(Effects effects) => effects.viaUsort > 0;\n\n    law run(Effects effects) => effects.viaPlainMethod > 0;\n\n    law valued(Effects effects) => effects.viaMethodValue > 0;\n\n    law ticked(Effects effects) => effects.viaFunctionValue > 0;\n}\n",
     );
     let runner = (
         "app/Lib/Runner.php",
@@ -15812,13 +16172,13 @@ fn a_getter_running_a_function_value_through_plain_php_or_a_local_has_the_value_
     assert_eq!(
         effect_issues(&[effects, runner, stub]),
         [
-            "app/Shop/Effects.sharp:13:29 impure-getter: Getter `viaLocalLambda` calls `global.time`, which has the effect `Clock`. Getters must be pure.",
-            "app/Shop/Effects.sharp:18:66 impure-getter: Getter `viaArrayMap` calls `global.time`, which has the effect `Clock`. Getters must be pure.",
-            "app/Shop/Effects.sharp:20:63 impure-getter: Getter `viaCallUserFunc` calls `global.time`, which has the effect `Clock`. Getters must be pure.",
-            "app/Shop/Effects.sharp:27:40 impure-getter: Getter `viaUsort` calls `global.time`, which has the effect `Clock`. Getters must be pure.",
-            "app/Shop/Effects.sharp:32:51 impure-getter: Getter `viaPlainMethod` calls `global.time`, which has the effect `Clock`. Getters must be pure.",
-            "app/Shop/Effects.sharp:34:64 impure-getter: Getter `viaMethodValue` reaches `Effects.stamp`, which calls `global.time` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Effects.sharp:36:58 impure-getter: Getter `viaFunctionValue` calls `this.tick`, which has the effect `Clock`. Getters must be pure.",
+            "app/Shop/Effects.sharp:40:35 impure-law: Law `local` reaches `Effects.viaLocalLambda`, which calls `global.time` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Effects.sharp:42:36 impure-law: Law `mapped` reaches `Effects.viaArrayMap`, which calls `global.time` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Effects.sharp:44:36 impure-law: Law `called` reaches `Effects.viaCallUserFunc`, which calls `global.time` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Effects.sharp:46:36 impure-law: Law `sorted` reaches `Effects.viaUsort`, which calls `global.time` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Effects.sharp:48:33 impure-law: Law `run` reaches `Effects.viaPlainMethod`, which calls `global.time` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Effects.sharp:50:36 impure-law: Law `valued` reaches `Effects.stamp`, which calls `global.time` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Effects.sharp:52:36 impure-law: Law `ticked` reaches `Effects.viaFunctionValue`, which calls `this.tick` with the effect `Clock`. Laws hold only over pure code.",
         ]
     );
 }
@@ -16005,9 +16365,6 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect(
             effect_issues(&files),
             [
                 format!(
-                    "app/Shop/Checkout.sharp:18:24 impure-getter: Getter `size` calls `Client.get`, which has the effect `{name}`. Getters must be pure."
-                ),
-                format!(
                     "app/Shop/Checkout.sharp:24:36 impure-law: Law `positive` calls `Client.get`, which has the effect `{name}`. Laws hold only over pure code."
                 ),
                 format!(
@@ -16070,7 +16427,7 @@ fn a_plain_php_method_value_read_through_a_subclass_is_held_to_the_subclass_exte
     );
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed, private QuietChild quiet) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get) + Pricing.apply((this.feed.get));\n\n    public int viaLocal()\n    {\n        let step = this.feed.get;\n        return Pricing.apply(step);\n    }\n\n    public int price => this.feed.get(1);\n\n    public int stepped\n    {\n        get\n        {\n            let step = this.feed.get;\n            return step(1);\n        }\n    }\n\n    public int calm() => Pricing.apply(this.quiet.get) + Pricing.apply((this.quiet.get));\n\n    public int calmViaLocal()\n    {\n        let step = this.quiet.get;\n        return Pricing.apply(step);\n    }\n\n    public int quietly\n    {\n        get\n        {\n            let step = this.quiet.get;\n            return step(1);\n        }\n    }\n}\n",
+        "namespace App.Shop;\n\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed, private QuietChild quiet) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get) + Pricing.apply((this.feed.get));\n\n    public int viaLocal()\n    {\n        let step = this.feed.get;\n        return Pricing.apply(step);\n    }\n\n    public int price => this.feed.get(1);\n\n    public int stepped\n    {\n        get\n        {\n            let step = this.feed.get;\n            return step(1);\n        }\n    }\n\n    public int calm() => Pricing.apply(this.quiet.get) + Pricing.apply((this.quiet.get));\n\n    public int calmViaLocal()\n    {\n        let step = this.quiet.get;\n        return Pricing.apply(step);\n    }\n\n    public int quietly\n    {\n        get\n        {\n            let step = this.quiet.get;\n            return step(1);\n        }\n    }\n\n    law priced(Pricing pricing) => pricing.price > 0;\n\n    law stepping(Pricing pricing) => pricing.stepped > 0;\n\n    law quiets(Pricing pricing) => pricing.quietly > 0;\n}\n",
     );
 
     assert_eq!(issues(pricing, &[feeds, stub]), Vec::<String>::new());
@@ -16078,8 +16435,8 @@ fn a_plain_php_method_value_read_through_a_subclass_is_held_to_the_subclass_exte
     assert_eq!(
         effect_issues(&[pricing, feeds, stub]),
         [
-            "app/Shop/Pricing.sharp:20:25 impure-getter: Getter `price` calls `RemoteFeed.get`, which has the effect `Http`. Getters must be pure.".to_owned(),
-            "app/Shop/Pricing.sharp:27:20 impure-getter: Getter `stepped` calls `RemoteFeed.get`, which has the effect `Http`. Getters must be pure.".to_owned(),
+            "app/Shop/Pricing.sharp:48:36 impure-law: Law `priced` reaches `Pricing.price`, which calls `RemoteFeed.get` with the effect `Http`. Laws hold only over pure code.".to_owned(),
+            "app/Shop/Pricing.sharp:50:38 impure-law: Law `stepping` reaches `Pricing.stepped`, which calls `RemoteFeed.get` with the effect `Http`. Laws hold only over pure code.".to_owned(),
             format!("app/Shop/Pricing.sharp:12:39 {message}"),
             format!("app/Shop/Pricing.sharp:12:70 {message}"),
             format!("app/Shop/Pricing.sharp:17:30 {message}"),
@@ -16168,19 +16525,19 @@ const HOLDER: (&str, &str) = (
 
 /// A plain PHP property holding a closure or a callable declares no effect, and an `extern` on its class declares the
 /// class's own members, not the code the property holds, so calling it always has an unknown effect. An object with
-/// `__invoke` has the effects of its `__invoke`.
+/// `__invoke` has the effects of its `__invoke`. A law reading a getter that makes such a call has them too.
 #[test]
-fn a_getter_calling_a_plain_php_property_holding_a_function_has_an_unknown_effect() {
+fn a_call_of_a_plain_php_property_holding_a_function_has_an_unknown_effect() {
     let holder = HOLDER;
     let till = (
         "app/Shop/Till.sharp",
-        "namespace App.Shop;\n\nimport Lib.Holder;\n\npublic class Till\n{\n    public Till(private Holder holder) { }\n\n    public int closed => this.holder.closure(2);\n\n    public int called => this.holder.callback(2);\n\n    public int formatted => this.holder.format(2);\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Holder;\n\npublic class Till\n{\n    public Till(private Holder holder) { }\n\n    public int closed => this.holder.closure(2);\n\n    public int called => this.holder.callback(2);\n\n    public int formatted => this.holder.format(2);\n\n    law closes(Till till) => till.closed > 0;\n\n    law calls(Till till) => till.called > 0;\n\n    law formats(Till till) => till.formatted > 0;\n}\n",
     );
     let class_extern = ("app/Stubs/Holder.sharp", "namespace App.Stubs;\n\nimport Lib.Holder;\n\nextern Holder;\n");
     let refused = [
-        "app/Shop/Till.sharp:9:26 impure-getter: Getter `closed` calls `Holder.closure`, which has no `extern` declaration. Getters must be pure. Help: Property `Holder.closure` holds plain PHP code, which no `extern` can declare. Call it outside the getter, or through a method of `Holder` that an `extern` declares.",
-        "app/Shop/Till.sharp:11:26 impure-getter: Getter `called` calls `Holder.callback`, which has no `extern` declaration. Getters must be pure. Help: Property `Holder.callback` holds plain PHP code, which no `extern` can declare. Call it outside the getter, or through a method of `Holder` that an `extern` declares.",
-        "app/Shop/Till.sharp:13:29 impure-getter: Getter `formatted` calls `Formatter.__invoke`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Formatter.__invoke;` when it has no effect, or name its effects after `uses`. Add `import Lib.Formatter;` to the file.",
+        "app/Shop/Till.sharp:15:30 impure-law: Law `closes` reaches `Till.closed`, which calls `Holder.closure` with no `extern` declaration. Laws hold only over pure code. Help: Property `Holder.closure` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Holder` that an `extern` declares.",
+        "app/Shop/Till.sharp:17:29 impure-law: Law `calls` reaches `Till.called`, which calls `Holder.callback` with no `extern` declaration. Laws hold only over pure code. Help: Property `Holder.callback` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Holder` that an `extern` declares.",
+        "app/Shop/Till.sharp:19:31 impure-law: Law `formats` reaches `Till.formatted`, which calls `Formatter.__invoke` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Formatter.__invoke;` when it has no effect, or name its effects after `uses`. Add `import Lib.Formatter;` to the file.",
     ];
 
     assert_eq!(effect_issues(&[till, holder]), refused);
@@ -16203,8 +16560,11 @@ fn a_law_calling_a_plain_php_property_holding_a_closure_has_an_unknown_effect() 
     );
 }
 
+/// Spec section 6: a getter may run anything, as a method does, so one reaching a method in another file that calls an
+/// `extern` with the effect `Clock` compiles. A read of it carries `Clock`, so a law reading it, which must be pure, is
+/// refused naming the call.
 #[test]
-fn a_getter_reaching_a_method_that_calls_an_extern_with_an_effect_in_another_file_is_refused() {
+fn a_getter_with_an_effect_compiles_and_a_law_reading_it_is_refused() {
     let order = (
         "app/Shop/Order.sharp",
         "namespace App.Shop;\n\npublic class Order\n{\n    public int price() => global.now();\n}\n",
@@ -16213,25 +16573,263 @@ fn a_getter_reaching_a_method_that_calls_an_extern_with_an_effect_in_another_fil
         "app/Shop/Cart.sharp",
         "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n}\n",
     );
+    let checked = (
+        "app/Shop/Cart.sharp",
+        "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n\n    law totaled(Cart cart) => cart.total > 0;\n}\n",
+    );
 
+    assert_eq!(effect_issues(&[cart, order, CLOCK_STUB, NOW]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[cart, order, CLOCK_STUB, NOW]),
+        effect_issues(&[checked, order, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Cart.sharp:7:25 impure-getter: Getter `total` reaches `Order.price`, which calls `global.now` with the effect `Clock`. Getters must be pure."
+            "app/Shop/Cart.sharp:9:31 impure-law: Law `totaled` reaches `Order.price`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
 }
 
+/// Spec section 6.2: an observer runs inside the `set` hook on each write once the object is built, so a write after
+/// the constructor returns carries its effects, and a law that writes the property is refused naming the observer's
+/// call. A constructor's write and a named constructor's run no observer, so a law that only builds the object is pure.
 #[test]
-fn a_getter_writing_a_field_of_this_is_refused() {
+fn a_write_of_a_property_carries_its_observers_effects_once_the_object_is_built() {
+    let quiet = (
+        "app/Shop/Tag.sharp",
+        "namespace App.Shop;\n\npublic class Tag\n{\n    public string name { get; set; didSet => this.name.length; } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n\n    public static Tag renamed()\n    {\n        const tag = new Tag();\n        tag.name = \"old\";\n        return tag;\n    }\n}\n",
+    );
+    let timed = (
+        "app/Shop/Tag.sharp",
+        "namespace App.Shop;\n\npublic class Tag\n{\n    public string name { get; set; didSet => global.now(); } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n\n    public Tag.titled(string title) : this()\n    {\n        this.name = title;\n    }\n\n    public static Tag renamed()\n    {\n        const tag = new Tag();\n        tag.name = \"old\";\n        return tag;\n    }\n}\n",
+    );
+    let quiet_laws = (
+        "app/Shop/Labels.sharp",
+        "namespace App.Shop;\n\npublic class Labels\n{\n    law built(int size) => new Tag().name.length > size;\n\n    law renamed(int size) => Tag.renamed().name.length > size;\n}\n",
+    );
+    let timed_laws = (
+        "app/Shop/Labels.sharp",
+        "namespace App.Shop;\n\npublic class Labels\n{\n    law built(int size) => new Tag().name.length > size;\n\n    law titled(int size) => Tag.titled(\"a\").name.length > size;\n\n    law renamed(int size) => Tag.renamed().name.length > size;\n}\n",
+    );
+
+    assert_eq!(effect_issues(&[quiet, quiet_laws, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[timed, timed_laws, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Labels.sharp:9:30 impure-law: Law `renamed` reaches `Tag.name`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
+        ]
+    );
+}
+
+/// Decision 3: a static property's accessors run on its reads and writes as an instance property's do, so a law
+/// reading a static computed property reaches its body's effect. A write of a static changes shared state first.
+#[test]
+fn a_static_property_s_reads_and_writes_carry_its_accessors_effects() {
+    let stamp = (
+        "app/Shop/Stamp.sharp",
+        "namespace App.Shop;\n\npublic class Stamp\n{\n    public static int now => global.now();\n    public static int last { get; set { field = value + global.now(); } } = 0;\n\n    law read(int size) => Stamp.now > size;\n\n    law written(int size) => Stamp.mark(size) > 0;\n\n    public static int mark(int size)\n    {\n        Stamp.last = size;\n        return size;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[stamp, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Stamp.sharp:8:27 impure-law: Law `read` reaches `Stamp.now`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Stamp.sharp:10:30 impure-law: Law `written` reaches `Stamp.mark`, which changes `Stamp.last`. Laws hold only over pure code.",
+        ]
+    );
+}
+
+const BEHAVIOR_LIBRARY: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+    "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+);
+
+/// Spec section 6.4: a behavior's `get` and `set` are the property's accessors. Each may have any effect, and `set`
+/// writes the behavior's own fields, so `Stamped` compiles. A read of the property carries what `get` does, so a method
+/// that must be pure and reads it is refused naming the effect, and a `get` that writes the behavior's own fields is
+/// refused as any getter writing `this` is.
+#[test]
+fn a_behavior_s_accessors_may_have_any_effect_and_the_property_s_reads_carry_it() {
+    let stamped = (
+        "app/Shop/Stamped.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Behavior;\n\npublic class Stamped : Behavior<int>\n{\n    private int writes = 0;\n\n    public int get(int value) => value + global.now();\n\n    public int set(int value)\n    {\n        this.writes = this.writes + 1;\n        return value;\n    }\n}\n",
+    );
+    let tag = (
+        "app/Shop/Tag.sharp",
+        "namespace App.Shop;\n\npublic class Tag\n{\n    public int stamp { get; set; } via Stamped = 0;\n}\n",
+    );
+    let sizes = (
+        "app/Shop/Sizes.sharp",
+        "namespace App.Shop;\n\npublic interface Sizes\n{\n    int size(Tag tag);\n}\n\npublic class TagSizes : Sizes\n{\n    public int size(Tag tag) => tag.stamp;\n}\n",
+    );
+    let counted = (
+        "app/Shop/Counted.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Behavior;\n\npublic class Counted : Behavior<int>\n{\n    private int reads = 0;\n\n    public int get(int value)\n    {\n        this.reads = this.reads + 1;\n        return value;\n    }\n\n    public int set(int value) => value;\n}\n",
+    );
+    let note = (
+        "app/Shop/Note.sharp",
+        "namespace App.Shop;\n\npublic class Note\n{\n    public int views { get; set; } via Counted = 0;\n}\n",
+    );
+
+    assert_eq!(issues(tag, &[BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[tag, BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[sizes, tag, BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Sizes.sharp:10:33 incompatible-effects: `TagSizes.size` reaches `Stamped.get`, which calls `global.now` with the effect `Clock`, so the pure `Sizes.size` cannot accept it."
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[note, BEHAVIOR_LIBRARY, counted]),
+        [
+            "app/Shop/Note.sharp:5:40 getter-writes-this: Getter `views` reaches `Counted.get`, which changes `this.reads`. A getter never writes `this`. Help: Write the change in a method, and call it before the read."
+        ]
+    );
+}
+
+/// Spec sections 6.4 and 11: `via` names a type, so a generic behavior takes its type arguments as any written type
+/// does. `Logged<string>` is a `Behavior<string>`, and `Logged<int>` on a `string` property names both types.
+#[test]
+fn a_generic_behavior_takes_its_type_arguments() {
+    let logged = (
+        "src/Demo/Logged.sharp",
+        "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Logged<T> : Behavior<T>\n{\n    public T get(T value) => value;\n\n    public T set(T value) => value;\n}\n",
+    );
+    let order = "namespace Demo;\n\npublic class Order\n{\n    public string name { get; set; } via Logged<string> = \"\";\n    public string code { get; set; } via Logged<int> = \"\";\n}\n";
+    let note = "A behavior runs the property's `get` and `set`: it is a class that implements `Behavior` for the property's type, and PHP# creates one for each object with no arguments.";
+
+    assert_eq!(
+        worded(("src/Demo/Order.sharp", order), &[BEHAVIOR_LIBRARY, logged]),
+        [format!(
+            "6:42 invalid-property-behavior `Logged<int>` is a `Behavior<int>`, and `code` is a `string`. | Named here. | {note} | Name a behavior that implements `Behavior<string>`, as `code` is a `string`."
+        )]
+    );
+}
+
+/// Spec section 6.4: a behavior is a class that implements `Sharp.Behavior<T>` for the property's type, which PHP#
+/// creates for each object with `new` and no arguments. One for another type names both types, a class that is no
+/// behavior says so, an interface, an abstract class and a constructor that needs an argument can't be created, and a
+/// name that is no class is the error any unknown class is.
+#[test]
+fn a_behavior_implements_behavior_for_the_property_s_type() {
+    let behavior = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+    );
+    let behaviors = (
+        "src/Demo/Behaviors.sharp",
+        "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n\npublic abstract class Base : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public abstract string set(string value);\n}\n\npublic class Logged : Behavior<string>\n{\n    public Logged(private string prefix)\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => this.prefix + value;\n}\n\npublic class Plain\n{\n}\n\npublic class Hidden : Behavior<string>\n{\n    private Hidden()\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => value;\n}\n",
+    );
+    let order = "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Order\n{\n    public string name { get; set; } via Trimmed = \"\";\n    public int count { get; set; } via Trimmed = 0;\n    public string code { get; set; } via Missing = \"\";\n    public string kind { get; set; } via Behavior = \"\";\n    public string base { get; set; } via Base = \"\";\n    public string log { get; set; } via Logged = \"\";\n    public string note { get; set; } via Plain = \"\";\n    public string word { get; set; } via Hidden = \"\";\n}\n";
+    let note = "A behavior runs the property's `get` and `set`: it is a class that implements `Behavior` for the property's type, and PHP# creates one for each object with no arguments.";
+
+    assert_eq!(
+        worded(("src/Demo/Order.sharp", order), &[behavior, behaviors]),
+        [
+            format!(
+                "8:40 invalid-property-behavior `Trimmed` is a `Behavior<string>`, and `count` is an `int`. | Named here. | {note} | Name a behavior that implements `Behavior<int>`, as `count` is an `int`."
+            ),
+            "9:42 non-existent-class Class `Missing` not found. | `Missing` is not defined or cannot be autoloaded | Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.".to_owned(),
+            format!(
+                "10:42 invalid-property-behavior `Behavior` can't be created: PHP# creates each behavior with `new` for each object. | Named here. | {note} | Name a class that implements `Behavior` for the property's type, such as one that extends `Behavior`."
+            ),
+            format!(
+                "11:42 invalid-property-behavior `Base` can't be created: PHP# creates each behavior with `new` for each object. | Named here. | {note} | Name a class that implements `Behavior` for the property's type, such as one that extends `Base`."
+            ),
+            format!(
+                "12:41 invalid-property-behavior `Logged` needs `prefix` to be created: PHP# creates each behavior as `new Logged()`. | Named here. | {note} | Give `prefix` a default value, or keep what it holds in the behavior's own fields."
+            ),
+            format!(
+                "13:42 invalid-property-behavior `Plain` is no `Behavior`, so it can't run the `get` and `set` of `note`. | Named here. | {note} | Name a behavior that implements `Behavior<string>`, as `note` is a `string`."
+            ),
+            format!(
+                "14:42 invalid-property-behavior `Order` can't create `Hidden`: its constructor is `private`, and PHP# creates each behavior as `new Hidden()` in `Order`. | Named here. | {note} | Make the constructor of `Hidden` reachable from `Order`, as `public` is."
+            ),
+        ]
+    );
+
+    // An untyped property is the parser's error, so its behaviors have no type to be checked against.
+    let untyped = "namespace Demo;\n\npublic class Order\n{\n    public name { get; set; } via Trimmed = \"\";\n}\n";
+    assert_eq!(issues(("src/Demo/Order.sharp", untyped), &[behavior, behaviors]), ["5:12 parse"]);
+
+    // A behavior that names no class is semantics' error, so the analyzer checks nothing more of it.
+    let no_class =
+        "namespace Demo;\n\npublic class Order\n{\n    public string name { get; set; } via string = \"\";\n}\n";
+    assert_eq!(issues(("src/Demo/Order.sharp", no_class), &[behavior, behaviors]), Vec::<String>::new());
+}
+
+/// Spec section 6.2: an observer sees `value`, the written value, and `field`, the stored one, each of
+/// the property's type, so passing either where an `int` goes is the error a `set` body's is. `field` in `willSet` is
+/// the value the write replaces.
+#[test]
+fn an_observer_sees_value_and_field_of_the_property_type() {
+    let sharp = "namespace Demo;\n\nclass Tag\n{\n    public string name { get; set; willSet => this.size(value); didSet => this.size(field); } = \"\";\n    public string title { get; set; willSet => this.size(field); } = \"\";\n\n    private void size(int count)\n    {\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Tag.sharp", sharp), &[]),
+        ["5:57 invalid-argument", "5:85 invalid-argument", "6:58 invalid-argument"]
+    );
+}
+
+/// Spec section 6.5: a `lazy` body may have any effect, so one calling a method with the effect `Database` compiles. A
+/// read of it carries `Database`, so a law reading it is refused. The value the property keeps is the language's write,
+/// so it is no write of `this`, but a `lazy` body that writes `this` itself is refused as any getter is.
+#[test]
+fn a_lazy_body_with_an_effect_compiles_and_a_read_of_it_has_the_effect() {
+    let rows = (
+        "src/Lib/Rows.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Rows\n{\n    public function find(int $id): int\n    {\n        return $id;\n    }\n}\n",
+    );
+    let stub = ("app/Stubs/Rows.sharp", "namespace App.Stubs;\n\nimport Lib.Rows;\n\nextern Rows uses Database;\n");
+    let plan = (
+        "app/Shop/Plan.sharp",
+        "namespace App.Shop;\n\nimport Lib.Rows;\n\npublic class Plan\n{\n    public Plan(private Rows rows) { }\n\n    public lazy int tier => this.rows.find(1);\n}\n",
+    );
+    let checked = (
+        "app/Shop/Plan.sharp",
+        "namespace App.Shop;\n\nimport Lib.Rows;\n\npublic class Plan\n{\n    public Plan(private Rows rows) { }\n\n    public lazy int tier => this.rows.find(1);\n\n    law tiered(Plan plan) => plan.tier > 0;\n}\n",
+    );
+    let counting = (
+        "app/Shop/Plan.sharp",
+        "namespace App.Shop;\n\npublic class Plan\n{\n    private int reads = 0;\n\n    public lazy int tier => this.count();\n\n    public int count()\n    {\n        this.reads = this.reads + 1;\n        return this.reads;\n    }\n}\n",
+    );
+
+    assert_eq!(issues(plan, &[rows, stub]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[plan, rows, stub]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[checked, rows, stub]),
+        [
+            "app/Shop/Plan.sharp:11:30 impure-law: Law `tiered` reaches `Plan.tier`, which calls `Rows.find` with the effect `Database`. Laws hold only over pure code."
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[counting]),
+        [
+            "app/Shop/Plan.sharp:7:29 getter-writes-this: Getter `tier` reaches `Plan.count`, which changes `this.reads`. A getter never writes `this`. Help: Write the change in a method, and call it before the read."
+        ]
+    );
+}
+
+/// Spec section 6.1: a `get` body may have any effect but never writes `this`, so a getter that writes a field of
+/// `this`, or calls a method of `this` that writes one, is refused naming the write. Unlike a method marked
+/// `readonly`, a getter calls a plain PHP method through `this`, as the spec's accessor over Eloquent's
+/// `getAttribute` does, because PHP# sees no write in it.
+#[test]
+fn a_getter_writing_this_or_calling_a_method_that_writes_it_is_refused() {
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\") as Address; set => this.setAttribute(\"shipping\", value); }\n}\n\nclass Address\n{\n}\n",
+    );
+    assert_eq!(effect_issues(&[order, ("src/Lib/Model.php", MODEL)]), Vec::<String>::new());
+
     let counter = (
         "app/Shop/Counter.sharp",
-        "namespace App.Shop;\n\npublic class Counter\n{\n    private int count = 0;\n\n    public int next { get { this.count = this.count + 1; return this.count; } }\n}\n",
+        "namespace App.Shop;\n\npublic class Counter\n{\n    private int count = 0;\n\n    public int next { get { this.count = this.count + 1; return this.count; } }\n\n    public int bumped => this.bump();\n\n    public int bump()\n    {\n        this.count = this.count + 1;\n        return this.count;\n    }\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[counter]),
-        ["app/Shop/Counter.sharp:7:29 impure-getter: Getter `next` changes `this.count`. Getters must be pure."]
+        [
+            "app/Shop/Counter.sharp:7:29 getter-writes-this: Getter `next` changes `this.count`. A getter never writes `this`. Help: Write the change in a method, and call it before the read.",
+            "app/Shop/Counter.sharp:9:26 getter-writes-this: Getter `bumped` reaches `Counter.bump`, which changes `this.count`. A getter never writes `this`. Help: Write the change in a method, and call it before the read.",
+        ]
     );
 }
 
@@ -16272,7 +16870,7 @@ fn a_getter_changing_what_a_function_value_returns_for_its_field_is_refused() {
     assert_eq!(
         effect_issues(&[page, builder]),
         [
-            "app/Shop/Page.sharp:13:13 impure-getter: Getter `title` reaches `Builder.add`, which changes `this.text`. Getters must be pure."
+            "app/Shop/Page.sharp:13:13 getter-writes-this: Getter `title` reaches `Builder.add`, which changes `this.text`. A getter never writes `this`. Help: Write the change in a method, and call it before the read."
         ]
     );
 }
@@ -16280,40 +16878,41 @@ fn a_getter_changing_what_a_function_value_returns_for_its_field_is_refused() {
 /// `: super(…)` runs in the constructor, so `new` reaches the effects of its arguments and of the base class's
 /// constructor, as it reaches the constructor body's.
 #[test]
-fn a_getter_creating_an_object_whose_super_call_has_an_effect_is_refused() {
+fn creating_an_object_whose_super_call_has_an_effect_has_that_effect() {
     let stamps = (
         "app/Shop/Stamp.sharp",
-        "namespace App.Shop;\n\npublic class Stamp\n{\n    public Stamp(public int at { get; }) { }\n}\n\npublic class Late : Stamp\n{\n    public Late() : super(global.now()) { }\n}\n\npublic class Timed\n{\n    public Timed() { global.now(); }\n}\n\npublic class Child : Timed\n{\n    public Child() : super() { }\n}\n\npublic class Card\n{\n    public int late => new Late().at;\n\n    public bool child => new Child() != null;\n}\n",
+        "namespace App.Shop;\n\npublic class Stamp\n{\n    public Stamp(public int at { get; }) { }\n}\n\npublic class Late : Stamp\n{\n    public Late() : super(global.now()) { }\n}\n\npublic class Timed\n{\n    public Timed() { global.now(); }\n}\n\npublic class Child : Timed\n{\n    public Child() : super() { }\n}\n\npublic class Card\n{\n    public int late => new Late().at;\n\n    public bool child => new Child() != null;\n\n    law dated(Card card) => card.late > 0;\n\n    law born(Card card) => card.child;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[stamps, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Stamp.sharp:25:24 impure-getter: Getter `late` reaches `Late.Late`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Stamp.sharp:27:26 impure-getter: Getter `child` reaches `Timed.Timed`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Stamp.sharp:29:29 impure-law: Law `dated` reaches `Late.Late`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Stamp.sharp:31:28 impure-law: Law `born` reaches `Timed.Timed`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
         ]
     );
 }
 
 /// `new Stamp.now()` runs the named constructor's body, so a getter reaches its effects, and those of its `: this(…)`.
 #[test]
-fn a_getter_creating_an_object_whose_named_constructor_has_an_effect_is_refused() {
+fn creating_an_object_whose_named_constructor_has_an_effect_has_that_effect() {
     let stamps = (
         "app/Shop/Stamp.sharp",
-        "namespace App.Shop;\n\npublic class Stamp\n{\n    public Stamp(public int at { get; }) { }\n\n    public Stamp.zero() : this(0) { }\n    public Stamp.current() : this(global.now()) { }\n    public Stamp.logged() : this(0) { global.now(); }\n}\n\npublic class Card\n{\n    public int zero => new Stamp.zero().at;\n\n    public int current => new Stamp.current().at;\n\n    public int logged => new Stamp.logged().at;\n}\n",
+        "namespace App.Shop;\n\npublic class Stamp\n{\n    public Stamp(public int at { get; }) { }\n\n    public Stamp.zero() : this(0) { }\n    public Stamp.current() : this(global.now()) { }\n    public Stamp.logged() : this(0) { global.now(); }\n}\n\npublic class Card\n{\n    public int zero => new Stamp.zero().at;\n\n    public int current => new Stamp.current().at;\n\n    public int logged => new Stamp.logged().at;\n\n    law zeroed(Card card) => card.zero == 0;\n\n    law dated(Card card) => card.current > 0;\n\n    law noted(Card card) => card.logged == 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[stamps, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Stamp.sharp:16:27 impure-getter: Getter `current` reaches `Stamp.current`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Stamp.sharp:18:26 impure-getter: Getter `logged` reaches `Stamp.logged`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Stamp.sharp:22:29 impure-law: Law `dated` reaches `Stamp.current`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Stamp.sharp:24:29 impure-law: Law `noted` reaches `Stamp.logged`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
         ]
     );
 }
 
 /// A write runs the property's `set` or `init` body with the written value as `value`, so a body that changes `value`
-/// changes the object the caller wrote.
+/// changes the object the caller wrote. Here that object is a field of the getter's `this`, which a getter never
+/// writes.
 #[test]
 fn a_getter_whose_new_object_changes_the_value_its_init_accessor_is_given_is_refused() {
     let builder = (
@@ -16328,58 +16927,58 @@ fn a_getter_whose_new_object_changes_the_value_its_init_accessor_is_given_is_ref
     assert_eq!(
         effect_issues(&[page, builder]),
         [
-            "app/Shop/Page.sharp:17:26 impure-getter: Getter `boxed` reaches `Builder.add`, which changes `this.text`. Getters must be pure."
+            "app/Shop/Page.sharp:17:26 getter-writes-this: Getter `boxed` reaches `Builder.add`, which changes `this.text`. A getter never writes `this`. Help: Write the change in a method, and call it before the read."
         ]
     );
 }
 
 #[test]
-fn a_getter_calling_a_virtual_method_whose_override_has_an_effect_is_refused() {
+fn a_call_of_a_virtual_method_has_the_effects_of_its_overrides() {
     let rates = (
         "app/Shop/Rate.sharp",
         "namespace App.Shop;\n\npublic class Rate\n{\n    public virtual int value() => 1;\n}\n\npublic class LiveRate : Rate\n{\n    public override int value() => global.now();\n}\n",
     );
     let quote = (
         "app/Shop/Quote.sharp",
-        "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rate rate) { }\n\n    public int amount => this.rate.value();\n}\n",
+        "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rate rate) { }\n\n    public int amount => this.rate.value();\n\n    law priced(Quote quote) => quote.amount > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[quote, rates, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Quote.sharp:7:26 impure-getter: Getter `amount` reaches `LiveRate.value`, which calls `global.now` with the effect `Clock`. Getters must be pure."
+            "app/Shop/Quote.sharp:9:32 impure-law: Law `priced` reaches `LiveRate.value`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
 }
 
 /// A collection method has the effects of the lambda passed to it, as `uses f` will declare, and the lambda is part of
-/// the getter, so the error points into it.
+/// the law, so the error points into it.
 #[test]
-fn a_getter_whose_list_map_lambda_calls_an_undeclared_function_is_refused() {
+fn a_law_whose_list_map_lambda_calls_an_undeclared_function_is_refused() {
     let names = (
         "app/Shop/Names.sharp",
-        "namespace App.Shop;\n\npublic class Names\n{\n    public Names(private List<string> all) { }\n\n    public List<string> loud => this.all.map(name => global.strtoupper(name));\n}\n",
+        "namespace App.Shop;\n\npublic class Names\n{\n    law loud(List<string> all) => all.map(name => global.strtoupper(name)).count() == all.count();\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[names]),
         [
-            "app/Shop/Names.sharp:7:54 impure-getter: Getter `loud` calls `global.strtoupper`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern global.strtoupper;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Names.sharp:5:51 impure-law: Law `loud` calls `global.strtoupper`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern global.strtoupper;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
 
 #[test]
-fn a_getter_reading_the_environment_is_refused_with_the_effect_environment() {
+fn reading_the_environment_has_the_effect_environment() {
     let deploy = (
         "app/Ops/Deploy.sharp",
-        "namespace App.Ops;\n\npublic class Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string region => this.environment.variable(\"AWS_REGION\") ?? \"us-east-1\";\n}\n",
+        "namespace App.Ops;\n\npublic class Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string region => this.environment.variable(\"AWS_REGION\") ?? \"us-east-1\";\n\n    law regional(Deploy deploy) => deploy.region != \"\";\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[deploy, ENVIRONMENT]),
         [
-            "app/Ops/Deploy.sharp:7:29 impure-getter: Getter `region` calls `Environment.variable`, which has the effect `Environment`. Getters must be pure."
+            "app/Ops/Deploy.sharp:9:36 impure-law: Law `regional` reaches `Deploy.region`, which calls `Environment.variable` with the effect `Environment`. Laws hold only over pure code."
         ]
     );
 }
@@ -16397,7 +16996,8 @@ fn environment_require_is_called_on_an_environment_object() {
 }
 
 /// Spec section 29: code has a `foreign` class's effect by holding one of its objects, so a getter that calls or reads
-/// through a field or a constructor parameter of a project's `foreign` class is refused, naming the class.
+/// through a field or a constructor parameter of a project's `foreign` class has it, and a law reading the getter is
+/// refused, naming the class.
 #[test]
 fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
     let payments = (
@@ -16406,37 +17006,37 @@ fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
     );
     let field = (
         "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    private Payments payments;\n\n    public Checkout(Payments payments)\n    {\n        this.payments = payments;\n    }\n\n    public int total => this.payments.charge(100);\n}\n",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    private Payments payments;\n\n    public Checkout(Payments payments)\n    {\n        this.payments = payments;\n    }\n\n    public int total => this.payments.charge(100);\n\n    law totaled(Checkout checkout) => checkout.total > 0;\n}\n",
     );
     let parameter = (
         "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.charge(100);\n}\n",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.charge(100);\n\n    law totaled(Checkout checkout) => checkout.total > 0;\n}\n",
     );
     let read = (
         "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.fee;\n}\n",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.fee;\n\n    law totaled(Checkout checkout) => checkout.total > 0;\n}\n",
     );
     let named_at_run_time = (
         "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.{\"fee\"};\n}\n",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.{\"fee\"};\n\n    law totaled(Checkout checkout) => checkout.total > 0;\n}\n",
     );
 
     for (form, refused) in [
         (
             field,
-            "app/Shop/Checkout.sharp:14:25 impure-getter: Getter `total` calls `Payments.charge`, which has the effect `Payments`. Getters must be pure.",
+            "app/Shop/Checkout.sharp:16:39 impure-law: Law `totaled` reaches `Checkout.total`, which calls `Payments.charge` with the effect `Payments`. Laws hold only over pure code.",
         ),
         (
             parameter,
-            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Payments.charge`, which has the effect `Payments`. Getters must be pure.",
+            "app/Shop/Checkout.sharp:11:39 impure-law: Law `totaled` reaches `Checkout.total`, which calls `Payments.charge` with the effect `Payments`. Laws hold only over pure code.",
         ),
         (
             read,
-            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Payments.fee`, which has the effect `Payments`. Getters must be pure.",
+            "app/Shop/Checkout.sharp:11:39 impure-law: Law `totaled` reaches `Checkout.total`, which calls `Payments.fee` with the effect `Payments`. Laws hold only over pure code.",
         ),
         (
             named_at_run_time,
-            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Payments`, which has the effect `Payments`. Getters must be pure.",
+            "app/Shop/Checkout.sharp:11:39 impure-law: Law `totaled` reaches `Checkout.total`, which calls `Payments` with the effect `Payments`. Laws hold only over pure code.",
         ),
     ] {
         assert_eq!(effect_issues(&[form, payments]), [refused], "{}", form.1);
@@ -16453,12 +17053,12 @@ fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
     );
     let subclass = (
         "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\nimport App.Billing.Stripe;\n\npublic class Checkout\n{\n    public Checkout(private Stripe stripe) { }\n\n    public int total => this.stripe.fee();\n}\n",
+        "namespace App.Shop;\n\nimport App.Billing.Stripe;\n\npublic class Checkout\n{\n    public Checkout(private Stripe stripe) { }\n\n    public int total => this.stripe.fee();\n\n    law totaled(Checkout checkout) => checkout.total > 0;\n}\n",
     );
     assert_eq!(
         effect_issues(&[subclass, gateway, stripe]),
         [
-            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Stripe.fee`, which has the effect `Gateway`. Getters must be pure."
+            "app/Shop/Checkout.sharp:11:39 impure-law: Law `totaled` reaches `Checkout.total`, which calls `Stripe.fee` with the effect `Gateway`. Laws hold only over pure code."
         ]
     );
 }
@@ -16483,7 +17083,7 @@ fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
     );
     let quiet_reader = (
         "app/Cache/QuietReader.sharp",
-        "namespace App.Cache;\n\npublic class QuietReader\n{\n    public QuietReader(private Store store) { }\n\n    public int count => this.store.size();\n\n    public Function<int()> counter() => () => this.store.size();\n}\n",
+        "namespace App.Cache;\n\npublic class QuietReader\n{\n    public QuietReader(private Store store) { }\n\n    public int count => this.store.size();\n\n    public Function<int()> counter() => () => this.store.size();\n\n    law counted(QuietReader reader) => reader.count > 0;\n}\n",
     );
     let plain = (
         "app/Cache/Plain.sharp",
@@ -16495,7 +17095,7 @@ fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
     );
     let plain_reader = (
         "app/Cache/PlainReader.sharp",
-        "namespace App.Cache;\n\npublic class PlainReader\n{\n    public PlainReader(private Plain plain) { }\n\n    public int count => this.plain.size();\n\n    public Function<int()> counter() => () => this.plain.size();\n}\n",
+        "namespace App.Cache;\n\npublic class PlainReader\n{\n    public PlainReader(private Plain plain) { }\n\n    public int count => this.plain.size();\n\n    public Function<int()> counter() => () => this.plain.size();\n\n    law counted(PlainReader reader) => reader.count > 0;\n}\n",
     );
 
     assert_eq!(
@@ -16507,14 +17107,14 @@ fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
     assert_eq!(
         effect_issues(&[quiet, store(" uses QuietStore"), quiet_reader]),
         [
-            "app/Cache/QuietReader.sharp:7:25 impure-getter: Getter `count` calls `Store.size`, which has the effect `QuietStore`. Getters must be pure.",
+            "app/Cache/QuietReader.sharp:11:40 impure-law: Law `counted` reaches `QuietReader.count`, which calls `Store.size` with the effect `QuietStore`. Laws hold only over pure code.",
             "app/Cache/QuietReader.sharp:9:41 invalid-return-statement: This lambda calls `Store.size`, which has the effect `QuietStore`, so a `Function<int()>` cannot hold it.",
         ]
     );
     assert_eq!(
         effect_issues(&[sneaky, plain, plain_reader]),
         [
-            "app/Cache/PlainReader.sharp:7:25 impure-getter: Getter `count` reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`. Getters must be pure.",
+            "app/Cache/PlainReader.sharp:11:40 impure-law: Law `counted` reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`. Laws hold only over pure code.",
             "app/Cache/PlainReader.sharp:9:41 invalid-return-statement: This lambda reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`, so a `Function<int()>` cannot hold it.",
         ]
     );
@@ -16631,14 +17231,14 @@ fn a_foreign_object_behind_a_type_parameter_or_a_type_argument_is_refused_in_a_s
 fn a_recursive_pair_of_methods_solves_without_looping() {
     let tree = (
         "app/Shop/Tree.sharp",
-        "namespace App.Shop;\n\npublic class Tree\n{\n    public int even(int n) => n == 0 ? 0 : this.odd(n - 1);\n\n    public int odd(int n) => n == 0 ? global.now() : this.even(n - 1);\n\n    public int depth => this.even(4);\n}\n",
+        "namespace App.Shop;\n\npublic class Tree\n{\n    public int even(int n) => n == 0 ? 0 : this.odd(n - 1);\n\n    public int odd(int n) => n == 0 ? global.now() : this.even(n - 1);\n\n    public int depth => this.even(4);\n\n    law deep(Tree tree) => tree.depth >= 0;\n}\n",
     );
     let files = [tree, CLOCK_STUB, NOW];
 
     assert_eq!(
         effect_issues(&files),
         [
-            "app/Shop/Tree.sharp:9:25 impure-getter: Getter `depth` reaches `Tree.odd`, which calls `global.now` with the effect `Clock`. Getters must be pure."
+            "app/Shop/Tree.sharp:11:28 impure-law: Law `deep` reaches `Tree.odd`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
     let (codebase, summaries) = summarized(&files);
@@ -16691,24 +17291,24 @@ fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
 /// An operator on an instance runs the operator its class declares (spec section 19), so a getter that applies one
 /// reaches that operator's body, as a getter that calls a method reaches the method's.
 #[test]
-fn a_getter_applying_an_operator_whose_body_has_an_effect_is_refused() {
+fn applying_an_operator_has_the_effects_of_its_body() {
     let money = (
         "app/Shop/Money.sharp",
         "namespace App.Shop;\n\npublic class Money\n{\n    public Money(public int cents) { }\n\n    public int hash() => this.cents;\n\n    public static Money operator +(Money a, Money b) => new Money(a.cents + b.cents + global.now());\n\n    public static Money operator -(Money a) => new Money(global.now() - a.cents);\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents + global.now();\n\n    public static int operator <=>(Money a, Money b) => a.cents - b.cents + global.now();\n}\n",
     );
     let cart = (
         "app/Shop/Cart.sharp",
-        "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Money price, private Money tax) { }\n\n    public Money total => this.price + this.tax;\n\n    public Money refund => -this.price;\n\n    public bool even => this.price == this.tax;\n\n    public bool cheaper => this.price < this.tax;\n\n    public Money doubled\n    {\n        get\n        {\n            let sum = this.price;\n            sum += this.price;\n            return sum;\n        }\n    }\n}\n",
+        "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Money price, private Money tax) { }\n\n    public Money total => this.price + this.tax;\n\n    public Money refund => -this.price;\n\n    public bool even => this.price == this.tax;\n\n    public bool cheaper => this.price < this.tax;\n\n    public Money doubled\n    {\n        get\n        {\n            let sum = this.price;\n            sum += this.price;\n            return sum;\n        }\n    }\n\n    law totals(Cart cart) => cart.total.cents > 0;\n\n    law refunds(Cart cart) => cart.refund.cents > 0;\n\n    law evens(Cart cart) => cart.even;\n\n    law cheapens(Cart cart) => cart.cheaper;\n\n    law doubles(Cart cart) => cart.doubled.cents > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[cart, money, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Cart.sharp:7:27 impure-getter: Getter `total` reaches `Money.operator +`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:9:28 impure-getter: Getter `refund` reaches `Money.operator -`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:11:25 impure-getter: Getter `even` reaches `Money.operator ==`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:13:28 impure-getter: Getter `cheaper` reaches `Money.operator <=>`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:20:13 impure-getter: Getter `doubled` reaches `Money.operator +`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Cart.sharp:25:30 impure-law: Law `totals` reaches `Money.operator +`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Cart.sharp:27:31 impure-law: Law `refunds` reaches `Money.operator -`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Cart.sharp:29:29 impure-law: Law `evens` reaches `Money.operator ==`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Cart.sharp:31:32 impure-law: Law `cheapens` reaches `Money.operator <=>`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Cart.sharp:33:31 impure-law: Law `doubles` reaches `Money.operator +`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
         ]
     );
 }
@@ -16827,7 +17427,7 @@ const VENDOR_CLOCK: (&str, &str) = (
     "<?php\n\nnamespace Vendor;\n\nfinal class Clock\n{\n    /** @var \\Closure(int): int */\n    public \\Closure $tick;\n\n    public function now(): int\n    {\n        return time();\n    }\n}\n",
 );
 
-/// A PHP# class that hands out a `Vendor\Clock`, so a getter in its namespace reaches the clock with no import.
+/// A PHP# class that hands out a `Vendor\Clock`, so code in its namespace reaches the clock with no import.
 const CLOCK_SOURCE: (&str, &str) = (
     "app/Shop/Source.sharp",
     "namespace App.Shop;\n\nimport Vendor.Clock;\n\npublic class Source\n{\n    public Source(private Clock time) { }\n\n    public Clock clock() => this.time;\n}\n",
@@ -16836,55 +17436,55 @@ const CLOCK_SOURCE: (&str, &str) = (
 /// An effects message names a class as every other message does: by its full name when another class shares its short
 /// name.
 #[test]
-fn a_getter_calling_a_method_of_a_class_that_shares_its_short_name_names_the_class_in_full() {
+fn a_call_of_a_method_of_a_class_that_shares_its_short_name_names_the_class_in_full() {
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\npublic class Timer\n{\n    public Timer(private Source source) { }\n\n    public int started => this.source.clock().now();\n}\n",
+        "namespace App.Shop;\n\npublic class Timer\n{\n    public Timer(private Source source) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:7:27 impure-getter: Getter `started` calls `Vendor.Clock.now`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Clock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
+            "app/Shop/Timer.sharp:9:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
 
 /// The help for a plain PHP property names its class by the same rule as the message.
 #[test]
-fn a_getter_calling_a_plain_php_property_of_a_class_that_shares_its_short_name_names_the_class_in_full() {
+fn a_call_of_a_plain_php_property_of_a_class_that_shares_its_short_name_names_the_class_in_full() {
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\npublic class Timer\n{\n    public Timer(private Source source) { }\n\n    public int ticked => this.source.clock().tick(2);\n}\n",
+        "namespace App.Shop;\n\npublic class Timer\n{\n    public Timer(private Source source) { }\n\n    public int ticked => this.source.clock().tick(2);\n\n    law begins(Timer timer) => timer.ticked > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:7:26 impure-getter: Getter `ticked` calls `Vendor.Clock.tick`, which has no `extern` declaration. Getters must be pure. Help: Property `Vendor.Clock.tick` holds plain PHP code, which no `extern` can declare. Call it outside the getter, or through a method of `Vendor.Clock` that an `extern` declares."
+            "app/Shop/Timer.sharp:9:32 impure-law: Law `begins` reaches `Timer.ticked`, which calls `Vendor.Clock.tick` with no `extern` declaration. Laws hold only over pure code. Help: Property `Vendor.Clock.tick` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Vendor.Clock` that an `extern` declares."
         ]
     );
 }
 
 /// An effects message names a class the file imports by the name its import gives it.
 #[test]
-fn a_getter_calling_a_method_of_a_class_imported_under_another_name_names_the_class_by_that_name() {
+fn a_call_of_a_method_of_a_class_imported_under_another_name_names_the_class_by_that_name() {
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\nimport Vendor.Clock as VendorClock;\n\npublic class Timer\n{\n    public Timer(private VendorClock clock) { }\n\n    public int started => this.clock.now();\n}\n",
+        "namespace App.Shop;\n\nimport Vendor.Clock as VendorClock;\n\npublic class Timer\n{\n    public Timer(private VendorClock clock) { }\n\n    public int started => this.clock.now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:27 impure-getter: Getter `started` calls `VendorClock.now`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `VendorClock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
 
-/// The PHP# method a getter reaches is named by the same rule as a plain PHP class.
+/// The PHP# method a law reaches is named by the same rule as a plain PHP class.
 #[test]
-fn a_getter_reaching_a_method_of_a_php_sharp_class_that_shares_its_short_name_names_the_class_in_full() {
+fn reaching_a_method_of_a_php_sharp_class_that_shares_its_short_name_names_the_class_in_full() {
     let shop_order = ("app/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order\n{\n}\n");
     let billing_order = (
         "app/Billing/Order.sharp",
@@ -16892,34 +17492,34 @@ fn a_getter_reaching_a_method_of_a_php_sharp_class_that_shares_its_short_name_na
     );
     let cart = (
         "app/Billing/Cart.sharp",
-        "namespace App.Billing;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n}\n",
+        "namespace App.Billing;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n\n    law totals(Cart cart) => cart.total > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[cart, billing_order, shop_order, CLOCK_STUB, NOW]),
         [
-            "app/Billing/Cart.sharp:7:25 impure-getter: Getter `total` reaches `App.Billing.Order.price`, which calls `global.now` with the effect `Clock`. Getters must be pure."
+            "app/Billing/Cart.sharp:9:30 impure-law: Law `totals` reaches `App.Billing.Order.price`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
 }
 
-/// The message is the getter's, so it names a class as the getter's file does, whatever the file of the method that
+/// The message is the law's, so it names a class as the law's file does, whatever the file of the method that
 /// makes the call imports.
 #[test]
-fn a_getter_reaching_a_call_in_another_file_names_the_class_as_the_getter_file_does() {
+fn a_law_reaching_a_call_in_another_file_names_the_class_as_the_law_file_does() {
     let order = (
         "app/Shop/Order.sharp",
         "namespace App.Shop;\n\nimport Vendor.Clock as VendorClock;\n\npublic class Order\n{\n    public Order(private VendorClock clock) { }\n\n    public int stamp() => this.clock.now();\n}\n",
     );
     let cart = (
         "app/Shop/Cart.sharp",
-        "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int stamped => this.order.stamp();\n}\n",
+        "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int stamped => this.order.stamp();\n\n    law stamps(Cart cart) => cart.stamped > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[cart, order, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Cart.sharp:7:27 impure-getter: Getter `stamped` reaches `Order.stamp`, which calls `Vendor.Clock.now` with no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Clock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
+            "app/Shop/Cart.sharp:9:30 impure-law: Law `stamps` reaches `Order.stamp`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
@@ -16932,40 +17532,40 @@ const METER: (&str, &str) = (
 /// The `extern` the help writes compiles only where its class is bound, so the help names the import a class from
 /// another namespace needs, even when no other class shares its short name.
 #[test]
-fn a_getter_calling_a_class_its_file_does_not_import_names_the_import_the_extern_needs() {
+fn a_call_of_a_class_its_file_does_not_import_names_the_import_the_extern_needs() {
     let gauge = (
         "app/Shop/Gauge.sharp",
         "namespace App.Shop;\n\nimport Lib.Meter;\n\npublic class Gauge\n{\n    public Gauge(private Meter source) { }\n\n    public Meter meter() => this.source;\n}\n",
     );
     let panel = (
         "app/Shop/Panel.sharp",
-        "namespace App.Shop;\n\npublic class Panel\n{\n    public Panel(private Gauge gauge) { }\n\n    public int level => this.gauge.meter().read();\n}\n",
+        "namespace App.Shop;\n\npublic class Panel\n{\n    public Panel(private Gauge gauge) { }\n\n    public int level => this.gauge.meter().read();\n\n    law levels(Panel panel) => panel.level > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[panel, gauge, METER]),
         [
-            "app/Shop/Panel.sharp:7:25 impure-getter: Getter `level` calls `Meter.read`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Meter.read;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
+            "app/Shop/Panel.sharp:9:32 impure-law: Law `levels` reaches `Panel.level`, which calls `Meter.read` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Meter.read;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
         ]
     );
 }
 
 /// A class of the file's own namespace is bound without an import, so the help names none.
 #[test]
-fn a_getter_calling_a_class_of_its_own_namespace_names_no_import() {
+fn a_call_of_a_class_of_its_own_namespace_names_no_import() {
     let printer = (
         "src/App/Shop/Printer.php",
         "<?php\n\nnamespace App\\Shop;\n\nfinal class Printer\n{\n    public function print(): int\n    {\n        return 0;\n    }\n}\n",
     );
     let kiosk = (
         "app/Shop/Kiosk.sharp",
-        "namespace App.Shop;\n\npublic class Kiosk\n{\n    public Kiosk(private Printer printer) { }\n\n    public int printed => this.printer.print();\n}\n",
+        "namespace App.Shop;\n\npublic class Kiosk\n{\n    public Kiosk(private Printer printer) { }\n\n    public int printed => this.printer.print();\n\n    law prints(Kiosk kiosk) => kiosk.printed > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[kiosk, printer]),
         [
-            "app/Shop/Kiosk.sharp:7:27 impure-getter: Getter `printed` calls `Printer.print`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Printer.print;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Kiosk.sharp:9:32 impure-law: Law `prints` reaches `Kiosk.printed`, which calls `Printer.print` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Printer.print;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
@@ -16974,20 +17574,20 @@ fn a_getter_calling_a_class_of_its_own_namespace_names_no_import() {
 /// `extern` would name that other class. So the help imports the class under the alias its full name gives, and the
 /// `extern` uses the alias. Following the help clears the error.
 #[test]
-fn a_getter_calling_a_class_whose_short_name_its_file_imports_names_an_aliased_import() {
+fn a_call_of_a_class_whose_short_name_its_file_imports_names_an_aliased_import() {
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\nimport App.Clock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n}\n",
+        "namespace App.Shop;\n\nimport App.Clock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
     let declared = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\nimport App.Clock;\nimport Vendor.Clock as VendorClock;\n\nextern VendorClock.now;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n}\n",
+        "namespace App.Shop;\n\nimport App.Clock;\nimport Vendor.Clock as VendorClock;\n\nextern VendorClock.now;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:27 impure-getter: Getter `started` calls `Vendor.Clock.now`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock;` to the file."
         ]
     );
     assert_eq!(effect_issues(&[declared, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]), Vec::<String>::new());
@@ -17007,13 +17607,13 @@ fn an_aliased_import_capitalizes_each_part_of_a_lowercase_namespace() {
     );
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\nimport App.Clock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n}\n",
+        "namespace App.Shop;\n\nimport App.Clock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, source, clock, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:27 impure-getter: Getter `started` calls `vendor.Clock.now`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`. Add `import vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`. Add `import vendor.Clock as VendorClock;` to the file."
         ]
     );
 }
@@ -17024,13 +17624,13 @@ fn an_aliased_import_capitalizes_each_part_of_a_lowercase_namespace() {
 fn an_aliased_import_whose_alias_the_file_binds_takes_the_first_free_number() {
     let timer = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\nimport App.Clock;\nimport Lib.VendorClock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n}\n",
+        "namespace App.Shop;\n\nimport App.Clock;\nimport Lib.VendorClock;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:10:27 impure-getter: Getter `started` calls `Vendor.Clock.now`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern VendorClock1.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock1;` to the file."
+            "app/Shop/Timer.sharp:12:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock1.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock1;` to the file."
         ]
     );
 }
@@ -17517,6 +18117,33 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     );
 }
 
+/// Spec section 6.1: a PHP# interface states a property `{ get; set; }`, and a class gives it `{ get; set; }`. A class
+/// that gives it get-only is refused, naming the `set` the interface states.
+#[test]
+fn a_class_gives_an_interface_property_stated_with_set_a_set() {
+    let settable = (
+        "app/Shop/Settable.sharp",
+        "namespace App.Shop;\n\npublic interface Settable\n{\n    int total { get; set; }\n}\n",
+    );
+    let tally = (
+        "app/Shop/Tally.sharp",
+        "namespace App.Shop;\n\npublic class Tally : Settable\n{\n    public int total { get; set; } = 0;\n\n    public static int bump(Settable settable)\n    {\n        settable.total = settable.total + 1;\n        return settable.total;\n    }\n}\n",
+    );
+    let fixed = (
+        "app/Shop/Fixed.sharp",
+        "namespace App.Shop;\n\npublic class Fixed : Settable\n{\n    public int total { get; }\n\n    public Fixed(int total)\n    {\n        this.total = total;\n    }\n}\n",
+    );
+
+    assert_eq!(worded(settable, &[]), Vec::<String>::new());
+    assert_eq!(worded(tally, &[settable]), Vec::<String>::new());
+    assert_eq!(
+        worded(fixed, &[settable]),
+        [
+            "5:16 incompatible-property-access `Fixed` gives `total` get-only, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+}
+
 /// An interface member is public, written bare: a class gives a bare property and a bare method as public ones, an
 /// event gives the property, and other code reads and calls them through the interface.
 #[test]
@@ -17603,15 +18230,15 @@ fn emit_takes_an_event() {
     );
 }
 
-/// Spec section 15: `emit` has the effect `Events`, whatever its listeners do, so a getter or a law that emits, or
-/// reaches a method that does, is refused naming the event, and a lambda that emits fits only a function type that
-/// lists `Events`.
+/// Spec section 15: `emit` has the effect `Events`, whatever its listeners do. A getter may emit, spec section 6, and a
+/// law that reaches a getter or a method that emits is refused naming the event. A lambda that emits fits only a
+/// function type that lists `Events`.
 #[test]
 fn emit_has_the_effect_events() {
     let [order_event, order_paid] = ORDER_EVENTS;
     let checkout = (
         "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<void() uses Events> announce = () => { emit new OrderPaid(1); };\n\n    private Function<void()> silent = () => { emit new OrderPaid(2); };\n\n    public int paid\n    {\n        get\n        {\n            emit new OrderPaid(3);\n            return 3;\n        }\n    }\n\n    public int total => this.complete();\n\n    law completes(Checkout checkout) => checkout.complete() > 0;\n\n    public int complete()\n    {\n        emit new OrderPaid(4);\n        return 4;\n    }\n\n    public void run()\n    {\n        this.announce();\n        this.silent();\n    }\n\n    public void broadcast()\n    {\n        emit new OrderPaid(5);\n        this.announce();\n    }\n}\n",
+        "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<void() uses Events> announce = () => { emit new OrderPaid(1); };\n\n    private Function<void()> silent = () => { emit new OrderPaid(2); };\n\n    public int paid\n    {\n        get\n        {\n            emit new OrderPaid(3);\n            return 3;\n        }\n    }\n\n    public int total => this.complete();\n\n    law completes(Checkout checkout) => checkout.complete() > 0;\n\n    law announces(Checkout checkout) => checkout.paid > 0;\n\n    public int complete()\n    {\n        emit new OrderPaid(4);\n        return 4;\n    }\n\n    public void run()\n    {\n        this.announce();\n        this.silent();\n    }\n\n    public void broadcast()\n    {\n        emit new OrderPaid(5);\n        this.announce();\n    }\n}\n",
     );
 
     assert_eq!(issues(checkout, &ORDER_EVENTS), Vec::<String>::new());
@@ -17625,9 +18252,8 @@ fn emit_has_the_effect_events() {
     assert_eq!(
         effect_issues(&[checkout, order_event, order_paid]),
         [
-            "app/Shop/Checkout.sharp:13:13 impure-getter: Getter `paid` emits `OrderPaid`, which has the effect `Events`. Getters must be pure.",
-            "app/Shop/Checkout.sharp:18:25 impure-getter: Getter `total` reaches `Checkout.complete`, which emits `OrderPaid` with the effect `Events`. Getters must be pure.",
             "app/Shop/Checkout.sharp:20:41 impure-law: Law `completes` reaches `Checkout.complete`, which emits `OrderPaid` with the effect `Events`. Laws hold only over pure code.",
+            "app/Shop/Checkout.sharp:22:41 impure-law: Law `announces` reaches `Checkout.paid`, which emits `OrderPaid` with the effect `Events`. Laws hold only over pure code.",
             "app/Shop/Checkout.sharp:7:39 invalid-property-default-value: This lambda emits `OrderPaid`, which has the effect `Events`, so a `Function<void()>` cannot hold it.",
         ]
     );
@@ -17728,7 +18354,7 @@ fn a_dispatcher_may_reach_any_effect_and_a_call_of_dispatch_has_the_effect_event
     );
     let monitor = (
         "app/Shop/Monitor.sharp",
-        "namespace App.Shop;\n\nimport Sharp.Dispatcher;\n\npublic class Monitor\n{\n    public Monitor(private Dispatcher dispatcher) { }\n\n    public int checked\n    {\n        get\n        {\n            this.dispatcher.dispatch(1, []);\n            return 1;\n        }\n    }\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Dispatcher;\n\npublic class Monitor\n{\n    public Monitor(private Dispatcher dispatcher) { }\n\n    public int checked\n    {\n        get\n        {\n            this.dispatcher.dispatch(1, []);\n            return 1;\n        }\n    }\n\n    law watched(Monitor monitor) => monitor.checked > 0;\n}\n",
     );
 
     assert_eq!(issues(retrying, &[DISPATCHER, FETCH, FETCH_STUB]), Vec::<String>::new());
@@ -17742,7 +18368,7 @@ fn a_dispatcher_may_reach_any_effect_and_a_call_of_dispatch_has_the_effect_event
     assert_eq!(
         effect_issues(&[monitor, DISPATCHER]),
         [
-            "app/Shop/Monitor.sharp:13:13 impure-getter: Getter `checked` calls `Dispatcher.dispatch`, which has the effect `Events`. Getters must be pure."
+            "app/Shop/Monitor.sharp:18:37 impure-law: Law `watched` reaches `Monitor.checked`, which calls `Dispatcher.dispatch` with the effect `Events`. Laws hold only over pure code."
         ]
     );
 }
@@ -17892,13 +18518,13 @@ fn events_on_has_the_effect_events() {
     let [order_event, order_paid] = ORDER_EVENTS;
     let getter = (
         "app/Shop/Gauge.sharp",
-        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Gauge\n{\n    public Listening watching\n    {\n        get => Events.on<OrderPaid>(e => { });\n    }\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Gauge\n{\n    public Listening watching\n    {\n        get => Events.on<OrderPaid>(e => { });\n    }\n\n    law watched(Gauge gauge) => gauge.watching != null;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[getter, EVENTS, order_event, order_paid]),
         [
-            "app/Shop/Gauge.sharp:9:16 impure-getter: Getter `watching` reaches `Events.on`, which calls `Internal.listen` with the effect `Events`. Getters must be pure."
+            "app/Shop/Gauge.sharp:12:33 impure-law: Law `watched` reaches `Events.on`, which calls `Internal.listen` with the effect `Events`. Laws hold only over pure code."
         ]
     );
 }

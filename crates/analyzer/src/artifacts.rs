@@ -112,6 +112,11 @@ pub struct AnalysisArtifacts {
     pub(crate) tested_types: HashMap<(u32, u32), TUnion>,
     /// The full name of the plain PHP constant each PHP# read through a namespace reaches, keyed by the read's span.
     pub(crate) namespace_constants: HashMap<(u32, u32), Word>,
+    /// The parameters of a PHP# method that erase to a narrower type than a parameter of a method it overrides or
+    /// implements erases to, as `string value` of `Trimmed.set` against `T value` of `Behavior.set`, keyed by the
+    /// span of the parameter's name. The bridge declares each with no PHP type, as Java's bridge method takes the
+    /// erased type, and the engine checks a call from plain PHP against its written type (spec section 11).
+    pub widened_parameters: HashSet<(u32, u32)>,
     /// The function values the analysis gave places whose function types list effects, until the body that gives them
     /// records its summary.
     pub(crate) function_values: Vec<FunctionValue>,
@@ -159,6 +164,7 @@ impl AnalysisArtifacts {
             call_targets: HashMap::default(),
             tested_types: HashMap::default(),
             namespace_constants: HashMap::default(),
+            widened_parameters: HashSet::default(),
             function_values: Vec::new(),
             readonly_calls: Vec::new(),
             variable_definedness: HashMap::default(),

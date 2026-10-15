@@ -17,8 +17,10 @@ use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Identifier;
+use mago_syntax::cst::Keyword;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::StaticPropertyAccess;
 use mago_syntax::cst::Variable;
 use mago_word::Word;
 use mago_word::word;
@@ -262,8 +264,25 @@ where
     A: Arena,
 {
     let (property, _) = block_context.scope.get_property_hook()?;
-    let name = context.arena.alloc_slice_copy(property.as_bytes().strip_prefix(b"$")?);
     let span = field.span();
+    // A static property's storage is the class's own static, `self::$name`.
+    if block_context
+        .scope
+        .get_class_like()
+        .and_then(|class| class.properties.get(&property))
+        .is_some_and(|metadata| metadata.flags.is_static())
+    {
+        let name = context.arena.alloc_slice_copy(property.as_bytes());
+        let class = context.arena.alloc(Expression::Self_(Keyword { span, value: b"self" }));
+
+        return Some(context.arena.alloc(Expression::Access(Access::StaticProperty(StaticPropertyAccess {
+            class,
+            double_colon: span,
+            property: Variable::Direct(DirectVariable { span, name }),
+        }))));
+    }
+
+    let name = context.arena.alloc_slice_copy(property.as_bytes().strip_prefix(b"$")?);
     let this = context.arena.alloc(Expression::Variable(Variable::Direct(DirectVariable { span, name: b"$this" })));
 
     Some(context.arena.alloc(Expression::Access(Access::Property(PropertyAccess {

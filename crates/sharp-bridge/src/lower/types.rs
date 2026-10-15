@@ -356,6 +356,14 @@ impl<'analysis> Types<'analysis> {
             .map_or((None, None), |metadata| self.function_metadata(metadata, None))
     }
 
+    /// Whether the analysis widened the parameter whose name spans `name`: it erases to a narrower type than a parameter
+    /// its method overrides or implements, as `string value` of a `Behavior<string>`'s `set`, so PHP would refuse the
+    /// class when it links. Its declaration keeps its PHP type, which reflection reports and every call checks under
+    /// the caller's `strict_types`, and carries `ZEND_PARAM_WIDENED`, so inheritance skips its variance check.
+    pub(crate) fn is_widened(&self, name: Span) -> bool {
+        self.artifacts.widened_parameters.contains(&(name.start.offset, name.end.offset))
+    }
+
     /// The whole type of the lambda written at `lambda`, which `is` tests a closure of it by: [`Self::function_type`] of
     /// the parameter and result types the analysis gave it, written or inferred.
     pub(crate) fn lambda_type(&self, lambda: Span) -> FunctionType {
@@ -449,9 +457,7 @@ impl<'analysis> Types<'analysis> {
         let parameters: Vec<Option<String>> = metadata
             .parameters
             .iter()
-            .map(|parameter| {
-                parameter.type_metadata.as_ref().and_then(|r#type| self.checked_text(&r#type.type_union, true))
-            })
+            .map(|parameter| self.checked_text(&parameter.type_metadata.as_ref()?.type_union, true))
             .collect();
 
         (
@@ -970,6 +976,17 @@ impl<'analysis> Types<'analysis> {
         receiver_classes(r#type).into_iter().flatten().any(|class| {
             self.codebase.get_declaring_property(class, &variable).is_some_and(|metadata| !metadata.hooks.is_empty())
         })
+    }
+
+    /// Whether the static property `property` of `class` runs accessors: a computed one, or one with an accessor body or
+    /// an observer. PHP has no hooks on a static, so its class holds them as the hidden static methods `name#get` and
+    /// `name#set`, which every read and write of it calls.
+    pub(crate) fn is_static_accessor(&self, class: &[u8], property: &[u8]) -> bool {
+        let variable = [b"$", property].concat();
+
+        self.codebase
+            .get_declaring_property(class, &variable)
+            .is_some_and(|metadata| metadata.flags.is_static() && !metadata.hooks.is_empty())
     }
 
     /// The property `class` declares or inherits by the name `property`, if any.
