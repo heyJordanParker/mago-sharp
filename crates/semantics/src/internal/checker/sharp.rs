@@ -159,9 +159,9 @@ const OBJECT: &[u8] = b"Object";
 ///   `public`, no header and no constructor, and only constants and static members. The bridge lowers it to a final
 ///   PHP class.
 /// - An interface: an optional `public`, a name, optional type parameters, an optional `: Interface` header, methods
-///   and get-only properties, with no attributes, other modifiers or `extends`. An interface method has optional type
+///   and properties, with no attributes, other modifiers or `extends`. An interface method has optional type
 ///   parameters, parameters, a return type and no body, as spec section 29 writes `Money quote(Cart cart);`, and a
-///   property is written `int orderId { get; }`. Every interface member is public, written bare, so an access modifier
+///   property is written `int orderId { get; }` or `List<string> claims { get; set; }`. Every interface member is public, written bare, so an access modifier
 ///   on one is an error, and so is any other modifier on a method.
 /// - Type parameters, as spec section 11 declares them: on a class, an interface and a method, as in
 ///   `<out TItem : DatabaseEntity & Shareable, TKey>`. A name is `T`, or `T` and an uppercase ASCII letter, as in
@@ -211,12 +211,19 @@ const OBJECT: &[u8] = b"Object";
 ///   block returns a value and a `set` block returns none, as php-src types its hooks. `field` in a lambda is an
 ///   error, because PHP runs a lambda as a function of its own, where `$this->name` calls the accessor again.
 ///   `this.name` or `this?.name` inside `name`'s own accessor is an error that names `field`, because PHP reads the
-///   storage there, while C# calls the accessor again. A static property with a body is not supported yet, because
-///   PHP has no hooks on a static property, and neither is a non-constant initial value on a property whose `set` has
-///   a body, which would run the body in the constructor.
-/// - A computed property: `public`, `protected` or `private`, a type, one name and an expression body, as in
-///   `public string slug => Str.slug(name);`. Its expression is a method body's expression and runs on each read. A
-///   `static` computed property is not supported yet, because PHP has no hooks on a static property.
+///   storage there, while C# calls the accessor again. PHP has no hooks on a static property, so a static property's
+///   accessor bodies run as hidden static methods of its class, and a generic class's static with a body is not
+///   supported yet. A non-constant initial value on a property whose `set` has a body is not supported yet, because
+///   it would run the body in the constructor.
+/// - Observers, spec section 6.2: `willSet` and `didSet` with a body, beside a `set` accessor, run on every write,
+///   the initial value's included. `willSet` sees `value`, and `didSet` sees `field`. `willSet` neither returns nor
+///   writes `value`, `didSet` returns no value, and `field` in `willSet` is not supported yet.
+/// - Behaviors, spec section 6.4: `via` and class names after the accessors of an instance auto-property with
+///   `get; set;`, and the analyzer checks each is a `Behavior` for the property's type.
+/// - A computed property: `public`, `protected` or `private`, an optional `static` or `lazy`, a type, one name and an
+///   expression body, as in `public string slug => Str.slug(name);`. Its expression is a method body's expression and
+///   runs on each read, or once when `lazy`. A `static` one runs as a hidden static method of its class, because PHP
+///   has no hooks on a static property.
 /// - A method: `public`, `protected` or `private`, an optional `static`, `virtual` or `override`, optional type
 ///   parameters, parameters, a return type and a body, or `abstract` and no body. The analyzer decides `virtual` and `override`, as spec section 22
 ///   writes them. Its name does not start with `__`, which PHP reserves for magic methods, and is not its class's name,
@@ -273,8 +280,9 @@ const OBJECT: &[u8] = b"Object";
 ///   `Calc?`. `(int)?` is a parse error, as PHP lexes `(int)` as a cast. A field, or a property with storage and `set`,
 ///   of a nullable type or a nullable union starts as null without an initial value, as in C# and Swift, so
 ///   `private int? total;` holds null until it is written, and the engine gives it the default `null`. A get-only
-///   property with storage of one without an initial value is not supported yet, because it is set only where
-///   `readonly` allows, and `readonly` takes no default. A property without storage holds nothing to start with.
+///   property of one without an initial value is set once by the constructor, because `readonly` takes no default,
+///   and the analyzer reports a path through the constructor that leaves it unset. A property without storage holds
+///   nothing to start with.
 /// - `Self`, written exactly so, is the class a static method is called on, spec section 25, and PHP's `static`. It is
 ///   a method's return type only, as in Swift, nullable as in `Self?`, in a union as in `Self|int`, or a type argument
 ///   there as in `List<Self>`, and any other type position, a function type's included, is an error. The lexer reads
