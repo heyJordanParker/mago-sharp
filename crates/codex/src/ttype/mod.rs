@@ -1456,8 +1456,8 @@ pub fn get_backing_key_type<'key>(
 /// Whether every value of `key_type` keys a PHP# `Map` and joins a `Set`.
 ///
 /// Spec section 12 keys a `Map` by anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`
-/// and an enum case, which section 19 gives `==` with no code, a struct, and a class that declares or inherits
-/// `operator ==`, which the checker requires `hash()` beside. An intersection keys one when any of its members does,
+/// and an enum case, which section 19 gives `==` with no code, a struct, a `List`, `Set` or `Map` of them, and a class
+/// that declares or inherits `operator ==`, which the checker requires `hash()` beside. An intersection keys one when any of its members does,
 /// since each of its values is a value of every member. A class value keys none: it compares by its whole type, type
 /// arguments included, and runs as its plain class name, which `Class<Box<Order>>` and `Class<Box<Invoice>>` share.
 #[must_use]
@@ -1490,6 +1490,14 @@ pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
             std::iter::once(atomic).chain(atomic.get_intersection_types().unwrap_or_default()).any(is_key_object)
         }
         TAtomic::GenericParameter(parameter) => is_key_type(&parameter.constraint, codebase),
+        // Section 19 compares two collections by their elements, and the engine hashes a collection by them, so a
+        // collection of key types keys a `Map` too.
+        TAtomic::Array(TArray::Set(element_type)) => is_key_type(element_type, codebase),
+        TAtomic::Array(collection) => {
+            let (key_type, value_type) = get_array_parameters(collection, codebase);
+
+            is_key_type(&key_type, codebase) && is_key_type(&value_type, codebase)
+        }
         _ => false,
     })
 }

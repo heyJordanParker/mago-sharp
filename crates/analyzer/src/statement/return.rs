@@ -61,6 +61,7 @@ use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
+use crate::utils::with_to_set_help;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
     fn analyze<'ctx, A>(
@@ -631,6 +632,8 @@ pub fn handle_return_value<'ctx, A>(
         if let Some(type_diff) = get_type_diff(context, &expected_return_type, &inferred_return_type) {
             issue = issue.with_note(type_diff);
         }
+        let issue =
+            with_to_set_help(context, Some(return_value), (&expected_return_type, &inferred_return_type), issue);
 
         let (code, issue) = explain_blocked_substitution(
             context,

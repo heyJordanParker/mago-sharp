@@ -51,6 +51,7 @@ use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
+use crate::utils::with_to_set_help;
 
 /// The part of `union` that may share a value with another type. A PHP# type parameter and its class type, as `TItem`
 /// and `Class<TItem>`, are opaque, so with `is_sharp` they share a value with no other type, and a union of them alone
@@ -371,12 +372,14 @@ where
         }
     }
 
-    // Spec section 12 converts a list passed where a `Set` is expected: a PHP# method or lambda makes a `Set` of each
-    // parameter it declares `Set` before its body runs, so that parameter takes a `List` of its elements too. A call
-    // through a `Function` value, of plain PHP, or of a parameter whose `Set` comes from a template runs no such body.
+    // Spec section 12: "Only a literal takes its collection type from where it lands." A PHP# method or lambda makes a
+    // `Set` of each parameter it declares `Set` before its body runs, so that parameter takes a list literal of its
+    // elements from PHP# code, where a `List` variable is refused, and any list from plain PHP. A call through a
+    // `Function` value, of plain PHP, or of a parameter whose `Set` comes from a template runs no such body.
     let list_accepting_parameter_type = invocation_target
         .get_function_like_metadata()
         .filter(|function| function.flags.is_sharp())
+        .filter(|_| !context.dialect.is_sharp() || matches!(input_expression.unparenthesized(), Expression::Array(_)))
         .and_then(|_| invocation_target.get_parameter(adjust_offset_for_variadic(invocation_target, argument_offset)))
         .and_then(|parameter| parameter.get_type())
         .filter(|declared_type| is_declared_set(declared_type))
@@ -546,6 +549,7 @@ where
     if let Some(type_diff) = get_type_diff(context, parameter_type, input_type) {
         issue = issue.with_note(type_diff);
     }
+    let issue = with_to_set_help(context, Some(input_expression), (parameter_type, input_type), issue);
 
     let (kind, issue) =
         explain_blocked_substitution(context, input_type, parameter_type, IssueCode::InvalidArgument, (kind, issue));

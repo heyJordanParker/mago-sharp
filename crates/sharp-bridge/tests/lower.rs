@@ -6469,18 +6469,18 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
 /// $prefix = "v";
 /// $check = function (\Sharp\Set|array $tags) use ($prefix) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->contains($prefix); };
 /// $size = function (\Sharp\Set|array $tags) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->count(); };
-/// return $check($extra) ? $size($extra) : 0;
+/// return $check(['a']) ? $size(['b']) : 0;
 /// ```
 ///
-/// A call of a lambda that declares a parameter `Set` passes it a list too, so a lambda makes each `Set` parameter a
+/// A call of a lambda that declares a parameter `Set` passes it a list literal too, so a lambda makes each `Set` parameter a
 /// `Set` object first, as a method does. PHP's `fn` has no statements before its expression, so a lambda with an
 /// expression body and a `Set` parameter is a `CLOSURE` whose `use` list captures what the binder says it captures.
 #[test]
 fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
     assert_eq!(
         body_in(
-            "int run(List<string> extra)",
-            "        const prefix = \"v\";\n        const check = (Set<string> tags) => tags.contains(prefix);\n        const size = (Set<string> tags) => {\n            return tags.count();\n        };\n        return check(extra) ? size(extra) : 0;\n",
+            "int run()",
+            "        const prefix = \"v\";\n        const check = (Set<string> tags) => tags.contains(prefix);\n        const size = (Set<string> tags) => {\n            return tags.count();\n        };\n        return check([\"a\"]) ? size([\"b\"]) : 0;\n",
             &[],
         ),
         indoc! {r#"
@@ -6588,14 +6588,18 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
                     VAR
                       ZVAL "check"
                     ARG_LIST
-                      VAR
-                        ZVAL "extra"
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "a"
+                          null
                   CALL
                     VAR
                       ZVAL "size"
                     ARG_LIST
-                      VAR
-                        ZVAL "extra"
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "b"
+                          null
                   ZVAL 0
         "#}
     );

@@ -3639,12 +3639,17 @@ fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
 }
 
 /// Whether `hint` keys a `Map` and is a `Set`'s element by its kind alone, spec section 12: a type with `==` and
-/// `hash()` with no code, or a named type, which the analyzer accepts when it is an enum, a struct, a class that
-/// declares `operator ==`, or a type parameter bounded by one.
+/// `hash()` with no code, a collection of such types, or a named type, which the analyzer accepts when it is an enum, a
+/// struct, a class that declares `operator ==`, or a type parameter bounded by one.
 fn is_key_hint(hint: &Hint) -> bool {
     match hint {
         Hint::Integer(_) | Hint::Float(_) | Hint::Bool(_) | Hint::String(_) | Hint::Identifier(_) => true,
         Hint::Nullable(nullable) => is_key_hint(nullable.hint),
+        // Spec section 19 compares two collections by their elements, which `sharp_hash` hashes, so a collection whose
+        // every type argument has `==` and `hash()` has them too.
+        Hint::Generic(collection) if matches!(collection.name.value, b"List" | b"Set" | b"Map") => {
+            collection.type_arguments.arguments.iter().all(is_key_hint)
+        }
         _ => false,
     }
 }
@@ -3854,7 +3859,7 @@ fn check_generic(generic: &GenericHint, place: Place, context: &mut Context<'_, 
         {
             report_refusal(
                 Issue::error(format!(
-                    "{rule} is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
+                    "{rule} is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`."
                 ))
                 .with_annotation(Annotation::primary(key.span()).with_message("Key type written here.")),
                 generic.span(),

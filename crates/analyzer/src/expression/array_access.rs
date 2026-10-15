@@ -244,9 +244,11 @@ where
 
     context.collector.report_with_code(
         IssueCode::InvalidArrayAccess,
-        Issue::error("A `List` index never reads null: it throws past either end, so `??` never reads a missing index.")
-            .with_annotation(Annotation::primary(access.span()).with_message("This index throws when it is missing."))
-            .with_help("Read it with `list.getOrNull(i)`, which gives null past either end."),
+        Issue::error(
+            "A `List` index never reads null: it throws past either end, so `??` never reads a missing index.",
+        )
+        .with_annotation(Annotation::primary(access.span()).with_message("This index throws when it is missing."))
+        .with_help("Read it with `list.getOrNull(i)`, which gives null past either end."),
     );
 
     true

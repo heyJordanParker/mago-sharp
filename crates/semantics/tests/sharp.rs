@@ -2324,7 +2324,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             format!("23:35 PHP# has no `__LINE__`: {line}"),
             "23:45 A by-reference parameter is not supported yet in PHP#.".to_owned(),
             format!("23:54 PHP# has no `__LINE__`: {line}"),
-            "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.".to_owned(),
+            "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.".to_owned(),
             "29:18 This type is not supported yet in PHP#.".to_owned(),
             "30:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
         ]
@@ -2410,7 +2410,7 @@ fn a_map_key_is_refused_once() {
     let code = leak(method(
         "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        return 1;\n",
     ));
-    let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.";
+    let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.";
 
     assert_eq!(
         issues(code),
@@ -3985,7 +3985,7 @@ fn an_interface_method_takes_and_returns_list_and_map_types() {
     assert_eq!(
         issues(code),
         [
-            "5:9 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
+            "5:9 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`."
         ]
     );
 }
@@ -4044,30 +4044,34 @@ fn a_list_map_set_or_class_with_the_wrong_count_of_type_arguments_names_the_coun
     );
 }
 
-/// A `Set`'s element takes exactly what a `Map`'s key takes. A named type may be an enum, a struct or a class that
-/// declares `operator ==`, which only the analyzer knows, so it passes here.
+/// A `Set`'s element takes exactly what a `Map`'s key takes, a collection of such elements too (spec section 12). A
+/// named type may be an enum, a struct or a class that declares `operator ==`, which only the analyzer knows, so it
+/// passes here.
 #[test]
 fn a_set_element_takes_what_a_map_key_takes() {
-    let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e)\n    {\n        return [];\n    }\n}\n";
+    let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e, Set<Any> f, Set<List<Any>> g)\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:86 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
+            "3:104 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "3:116 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
         ]
     );
 }
 
-/// A key of a built-in type with `==` and `hash()`, nullable or not, keys a `Map`. A named key type may be an enum, a
-/// struct or a class that declares `operator ==`, which only the analyzer knows, so it passes here.
+/// A key of a built-in type with `==` and `hash()`, nullable or not, keys a `Map`, and so does a `List`, a `Set` or a
+/// `Map` whose every type argument does (spec section 12). A named key type may be an enum, a struct or a class that
+/// declares `operator ==`, which only the analyzer knows, so it passes here.
 #[test]
 fn a_map_key_without_equality_by_its_kind_is_an_error() {
-    let code = "class Report\n{\n    public Map<float, int> run(Map<Line, int> a, Map<int?, int> b, Map<string, Map<bool, int>> c, Map<List<int>, int> d)\n    {\n        return [:];\n    }\n}\n";
+    let code = "class Report\n{\n    public Map<float, int> run(Map<Line, int> a, Map<int?, int> b, Map<string, Map<bool, int>> c, Map<List<int>, int> d, Map<Set<string>, int> e, Map<Map<string, List<int>>, int> f, Map<List<Any>, int> g, Map<Any, int> h)\n    {\n        return [:];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:103 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
+            "3:187 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "3:210 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
         ]
     );
 }
@@ -4632,12 +4636,12 @@ fn a_type_argument_of_a_bound_is_never_void() {
 /// and bounds, and refuses a class value as a `Map` key as it refuses one in a `Map` literal.
 #[test]
 fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_takes() {
-    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<List<int>, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<Any, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "6:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
+            "6:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
             "9:27 A type argument cannot be `void`: `void` is only a return type.",
             "18:43 A type argument cannot be `void`: `void` is only a return type.",
             "19:28 A type parameter takes no type arguments: write `TItem`.",
@@ -4755,15 +4759,15 @@ fn a_static_member_of_a_generic_class_returns_self() {
 /// follows the same type written alone.
 #[test]
 fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union() {
-    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<List<int>, int> c = [:];\n    private Map<List<int>, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<List<void>> g;\n    private Class<List<void>>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<Any, int> c = [:];\n    private Map<Any, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<List<void>> g;\n    private Class<List<void>>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "5:13 A type parameter takes no type arguments: write `TItem`.",
             "6:13 A type parameter takes no type arguments: write `TItem`.",
-            "7:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
-            "8:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
+            "7:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "8:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
             "9:23 A type argument cannot be `void`: `void` is only a return type.",
             "10:23 A type argument cannot be `void`: `void` is only a return type.",
             "11:24 A type argument cannot be `void`: `void` is only a return type.",

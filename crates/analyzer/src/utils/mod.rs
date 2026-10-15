@@ -3,6 +3,7 @@ use mago_allocator::Arena;
 
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::DroppedReadonly;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -115,6 +116,28 @@ pub fn report_int_for_float<A>(
         Issue::error(format!("`int` is not `float`: {fix}"))
             .with_annotation(Annotation::primary(value.span()).with_message(format!("Declared `{declared}`."))),
     );
+}
+
+/// Spec section 12: "A `List` variable passed there is a compile error, and where a `Set` is expected the error names
+/// `toSet()`." Gives `issue`, the refusal of `value` of the type `given` where `declared` goes, with the help that
+/// writes the conversion, as "write `picked.toSet()`", and as it is for any other value.
+pub fn with_to_set_help<A>(
+    context: &Context<'_, '_, A>,
+    value: Option<&Expression<'_>>,
+    (declared, given): (&TUnion, &TUnion),
+    issue: Issue,
+) -> Issue
+where
+    A: Arena,
+{
+    let is_list = !given.types.is_empty()
+        && given.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)) | TAtomic::Null));
+    let expects_set = declared.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))));
+    match value {
+        Some(value) if context.dialect.is_sharp() && is_list && expects_set => issue
+            .with_help(format!("A `List` is not a `Set`: write `{}.toSet()`.", quoted_source(context, value.span()))),
+        _ => issue,
+    }
 }
 
 /// Reports `value`, a PHP# value of the type `given` that would lose a readonly where the type `declared` goes, spec

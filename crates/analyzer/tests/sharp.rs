@@ -2790,7 +2790,7 @@ fn a_literal_keyed_by_a_value_that_cannot_key_a_map_names_the_map_key_rule() {
     assert_eq!(
         keys(("src/Demo/Report.sharp", sharp)),
         [
-            "7:44 invalid-array-element-key A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Object` is none of them. | `Object` keys this `Map`. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "7:44 invalid-array-element-key A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Object` is none of them. | `Object` keys this `Map`. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`.",
         ]
     );
 }
@@ -5466,7 +5466,7 @@ fn a_lambda_with_union_and_variadic_parameters_is_checked_as_its_php_twin() {
 #[test]
 fn an_enum_returning_self_with_a_union_constant_is_checked_as_its_php_twin() {
     let sharp = "namespace Demo;\n\nenum Status : string\n{\n    public const int|string Key = 1;\n\n    case Active = \"a\";\n\n    public static Self first() => Status.Active;\n\n    public static List<Self> all() => Self.cases();\n\n    public static Self? find(string ...codes) => Status.tryFrom(codes.getOrNull(0) ?? \"a\");\n\n    public static Self wrong() => \"a\";\n\n    public static int|string key() => Status.Key;\n}\n";
-    let php ="<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nenum Status: string\n{\n    public const int|string Key = 1;\n\n    case Active = \"a\";\n\n    public static function first(): static { return Status::Active; }\n\n    /** @return list<static> */\n    public static function all(): array { return static::cases(); }\n\n    public static function find(string ...$codes): ?static { return Status::tryFrom($codes[0] ?? \"a\"); }\n\n    public static function wrong(): static { return \"a\"; }\n\n    public static function key(): int|string { return Status::Key; }\n}\n";
+    let php = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nenum Status: string\n{\n    public const int|string Key = 1;\n\n    case Active = \"a\";\n\n    public static function first(): static { return Status::Active; }\n\n    /** @return list<static> */\n    public static function all(): array { return static::cases(); }\n\n    public static function find(string ...$codes): ?static { return Status::tryFrom($codes[0] ?? \"a\"); }\n\n    public static function wrong(): static { return \"a\"; }\n\n    public static function key(): int|string { return Status::Key; }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Status.sharp", sharp), &[]);
     let php_issues = issues_with(Settings { check_throws: false, ..settings() }, ("src/Demo/Status.php", php), &[]);
@@ -7862,7 +7862,8 @@ fn a_method_without_an_access_modifier_is_private_as_its_php_twin() {
     let sharp_reader = "namespace App.Shop;\n\npublic class Order\n{\n    public int held(Stock stock) => stock.reserve(\"a\") + Stock.make();\n}\n";
     let php_reader = "<?php\n\nnamespace App\\Shop;\n\nfinal class Order\n{\n    public function held(Stock $stock): int { return $stock->reserve(\"a\") + Stock::make(); }\n}\n";
     let named = "namespace App.Shop;\n\npublic interface Named\n{\n    string name();\n}\n";
-    let named_user = "namespace App.Shop;\n\npublic class Label\n{\n    public string of(Named named) => named.name();\n}\n";
+    let named_user =
+        "namespace App.Shop;\n\npublic class Label\n{\n    public string of(Named named) => named.name();\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Stock.sharp", sharp), &[]), Vec::<String>::new());
 
@@ -7880,7 +7881,10 @@ fn a_method_without_an_access_modifier_is_private_as_its_php_twin() {
     );
     assert_eq!(codes(&sharp_issues), codes(&php_issues), "{php_issues:?}");
 
-    assert_eq!(issues(("src/App/Shop/Label.sharp", named_user), &[("src/App/Shop/Named.sharp", named)]), Vec::<String>::new());
+    assert_eq!(
+        issues(("src/App/Shop/Label.sharp", named_user), &[("src/App/Shop/Named.sharp", named)]),
+        Vec::<String>::new()
+    );
 }
 
 /// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, so an
@@ -9146,7 +9150,7 @@ fn a_class_that_declares_equality_and_hash_keys_a_map() {
     assert_eq!(
         refusals(("src/App/Desk.sharp", desk), &others),
         [
-            "5:22 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Seat` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`."
+            "5:22 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Seat` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`."
         ]
     );
 }
@@ -9162,11 +9166,11 @@ fn a_map_key_type_that_is_no_value_is_an_error() {
     assert_eq!(
         refusals(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
         [
-            "9:12 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
-            "11:33 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "9:12 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "11:33 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`.",
             "11:56 non-existent-class-like Cannot find type `Username`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
             "14:9 non-existent-class-like Cannot find type `Username`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
-            "20:36 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "20:36 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`.",
         ]
     );
 }
@@ -9175,7 +9179,7 @@ fn a_map_key_type_that_is_no_value_is_an_error() {
 /// call whose argument is refused, as `groupBy(5)` or `groupBy(selector: …)`, gives that one issue, as on master.
 #[test]
 fn a_group_key_is_checked_only_where_a_function_fills_the_key_parameter() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int group(List<int> items)\n    {\n        const byFive = items.groupBy(5);\n        const bySelector = items.groupBy(selector: n => n);\n        const byHalf = items.associateBy(key: n => [n]);\n        return global.count(byFive) + global.count(bySelector) + global.count(byHalf);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int group(List<int> items)\n    {\n        const byFive = items.groupBy(5);\n        const bySelector = items.groupBy(selector: n => n);\n        const byHalf = items.associateBy(key: n => new Tally());\n        return global.count(byFive) + global.count(bySelector) + global.count(byHalf);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[]),
@@ -9406,7 +9410,7 @@ fn a_map_keyed_by_a_type_parameter_without_a_backed_enum_in_its_bound_is_an_erro
 
     let refusal = |key: &str| {
         format!(
-            "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `{key}` is none of them."
+            "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `{key}` is none of them."
         )
     };
     assert_eq!(messages(("src/Demo/Tally.sharp", unbounded), &others), [refusal("TKey")]);
@@ -9437,8 +9441,8 @@ fn a_set_element_takes_what_a_map_key_takes() {
     assert_eq!(
         refusals(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
         [
-            "9:12 template-constraint-violation A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Fill the `Set` with an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
-            "11:50 template-constraint-violation A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Fill the `Set` with an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "9:12 template-constraint-violation A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Line` is none of them. | Fill the `Set` with an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "11:50 template-constraint-violation A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Line` is none of them. | Fill the `Set` with an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`.",
         ]
     );
 }
@@ -9629,18 +9633,18 @@ fn equality_of_a_set_is_not_supported_yet() {
     );
 }
 
-/// Spec section 12 converts a list passed where a `Set` is expected, so a `List` or a list literal is accepted as an
-/// argument, and the receiving method makes it a `Set`. A `Map` is never a `Set`, and a `Set` is never a `Map` or a
-/// `List`. A `List` is converted only where it is passed, so a typed local takes no `List`. A plain PHP caller passes a
-/// list too.
+/// Spec section 12: "Only a literal takes its collection type from where it lands." A list literal passed where a
+/// `Set` is expected becomes one, which the receiving method makes, and a `List` variable is refused. A `Map` is never
+/// a `Set`, and a `Set` is never a `Map` or a `List`. A plain PHP caller passes a list.
 #[test]
-fn a_list_is_passed_where_a_set_is_expected_and_a_map_is_not() {
+fn a_list_literal_is_passed_where_a_set_is_expected_and_a_list_or_a_map_is_not() {
     let sharp = "namespace Demo;\n\nclass Tags\n{\n    public void take(Set<string> tags)\n    {\n    }\n\n    public void keep(Map<string, string> named, List<string> listed)\n    {\n    }\n\n    public void run(List<string> names, Map<string, string> named, Set<string> tags)\n    {\n        this.take(names);\n        this.take([\"vip\", \"new\"]);\n        this.take(tags);\n        this.take(named);\n        this.keep(tags, names);\n        this.keep(named, tags);\n        Set<string> fromList = names;\n        Set<string> fromMap = named;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function run(Tags $tags): void\n    {\n        $tags->take(['vip', 'new']);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tags.sharp", sharp), &[]),
         [
+            "15:19 invalid-argument",
             "18:19 invalid-argument",
             "19:19 invalid-argument",
             "20:26 invalid-argument",
@@ -9651,8 +9655,9 @@ fn a_list_is_passed_where_a_set_is_expected_and_a_map_is_not() {
     assert_eq!(issues(("src/Demo/Caller.php", php), &[("src/Demo/Tags.sharp", sharp)]), Vec::<String>::new());
 }
 
-/// A list becomes a `Set` only in the body of the PHP# method or lambda that declares the parameter `Set`, so only a
-/// call of one takes a list there, each element of a variadic one too, and a lambda a local holds is one. Neither
+/// A list literal becomes a `Set` only in the body of the PHP# method or lambda that declares the parameter `Set`, so
+/// only a call of one takes a list literal there, each element of a variadic one too, and a lambda a local holds is
+/// one, while a `List` variable is refused everywhere. Neither
 /// `Sharp\ListMethods.add` of a `List<Set<string>>`, whose `Set` comes from its template, nor a call through a
 /// `Function` value runs such a body, so each takes only a `Set`. A plain PHP caller still passes a list to a PHP#
 /// method.
@@ -9663,9 +9668,37 @@ fn a_list_is_passed_as_a_set_only_to_a_body_that_makes_it_one() {
 
     assert_eq!(
         issues(("src/Demo/Tags.sharp", sharp), &[]),
-        ["17:17 invalid-argument", "18:17 invalid-argument", "19:15 invalid-argument", "23:18 invalid-argument",]
+        [
+            "15:19 invalid-argument",
+            "16:19 invalid-argument",
+            "17:17 invalid-argument",
+            "18:17 invalid-argument",
+            "19:15 invalid-argument",
+            "23:18 invalid-argument",
+        ]
     );
     assert_eq!(issues(("src/Demo/Caller.php", php), &[("src/Demo/Tags.sharp", sharp)]), Vec::<String>::new());
+}
+
+/// Spec section 12: "A `List` variable passed there is a compile error, and where a `Set` is expected the error names
+/// `toSet()`", as an argument, a local, a return and a property.
+#[test]
+fn a_list_where_a_set_is_expected_names_to_set() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public Set<string> held { get; set; } = [];\n\n    public void take(Set<string> tags)\n    {\n    }\n\n    public Set<string> run(List<string> picked)\n    {\n        this.take(picked);\n        Set<string> local = picked;\n        this.held = picked;\n        return picked;\n    }\n}\n";
+    let helps: Vec<_> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tags.sharp", sharp), &[])
+        .iter()
+        .map(|issue| format!("{} | {}", located(sharp, issue), issue.help.as_deref().unwrap_or_default()))
+        .collect();
+
+    assert_eq!(
+        helps,
+        [
+            "13:19 invalid-argument | A `List` is not a `Set`: write `picked.toSet()`.",
+            "14:29 invalid-local-assignment-value | A `List` is not a `Set`: write `picked.toSet()`.",
+            "15:21 invalid-property-assignment-value | A `List` is not a `Set`: write `picked.toSet()`.",
+            "16:16 invalid-return-statement | A `List` is not a `Set`: write `picked.toSet()`.",
+        ]
+    );
 }
 
 /// `Sharp\Set` is the engine's class that makes each `Set` parameter a `Set`, which only the lowering calls, as
@@ -12157,8 +12190,8 @@ fn a_class_value_with_type_arguments_carries_them_to_its_static_members() {
 fn a_class_value_keys_no_map_written_as_a_type_a_literal_or_inferred() {
     let classes = "namespace Demo;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n\n    public Class<Order> kind() => typeof(Order);\n}\n\npublic class Box<TItem>\n{\n}\n";
     let sharp = "namespace Demo;\n\npublic class Keys\n{\n    public Map<Class<Order>, int> typed() => [:];\n\n    public Map<Class<Box<Order>>, int> typedGeneric() => [:];\n\n    public Any literal() => [typeof(Order): 1];\n\n    public Any literalGeneric() => [typeof(Box<Order>): 1];\n\n    public Any grouped(List<Order> orders) => orders.groupBy((Order order) => order.kind());\n\n    public Any associated(List<Order> orders) => orders.associateBy((Order order) => order.kind());\n\n    public Any made() => new Box<Map<Class<Order>, int>>();\n\n    public Map<string, Class<Order>> values() => [\"order\": typeof(Order)];\n\n    public Map<int, List<Order>> byId(List<Order> orders) => orders.groupBy((Order order) => order.id);\n}\n";
-    let rule = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`";
-    let help = "Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.";
+    let rule = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`";
+    let help = "Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`.";
 
     assert_eq!(
         worded(("src/Demo/Keys.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
