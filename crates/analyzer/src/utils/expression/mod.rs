@@ -21,7 +21,6 @@ use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::MethodCall;
@@ -42,6 +41,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::plugin::hook::NamedCall;
 use crate::resolver::static_property::StaticProperty;
 use crate::utils::misc::unwrap_expression;
 
@@ -559,22 +559,23 @@ pub fn get_index_id<'ast, 'arena>(
 pub fn get_function_like_id_from_call<'ast, 'arena>(
     call: &'ast Call<'arena>,
     resolved_names: &'ast ResolvedNames<'arena>,
+    codebase: &CodebaseMetadata,
     expression_types: &HashMap<(u32, u32), Rc<TUnion>>,
 ) -> Option<FunctionLikeIdentifier> {
-    get_static_functionlike_id_from_call(call, resolved_names)
+    get_static_functionlike_id_from_call(call, resolved_names, codebase)
         .or_else(|| get_method_id_from_call(call, expression_types))
 }
 
 pub fn get_static_functionlike_id_from_call<'ast, 'arena>(
     call: &'ast Call<'arena>,
     resolved_names: &'ast ResolvedNames<'arena>,
+    codebase: &CodebaseMetadata,
 ) -> Option<FunctionLikeIdentifier> {
-    match call {
-        Call::Function(FunctionCall { function: Expression::Identifier(identifier), .. }) => {
-            let function_name = resolved_names.get(&identifier);
+    if let Some(named_call) = NamedCall::from_call(resolved_names, codebase, call) {
+        return Some(FunctionLikeIdentifier::Function(named_call.name));
+    }
 
-            Some(FunctionLikeIdentifier::Function(word(function_name)))
-        }
+    match call {
         Call::StaticMethod(StaticMethodCall {
             class: Expression::Identifier(class_identifier),
             method: ClassLikeMemberSelector::Identifier(method),

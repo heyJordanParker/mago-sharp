@@ -45,6 +45,7 @@ use crate::invocation::analyzer::analyze_invocation;
 use crate::invocation::post_process::post_invocation_process;
 use crate::invocation::return_type_fetcher::fetch_invocation_return_type;
 use crate::invocation::template_result::seed_extension_type_arguments;
+use crate::plugin::hook::NamedCall;
 use crate::plugin::hook::StaticCall;
 use crate::reconciler::assertion_reconciler;
 use crate::utils::names::display_function_like_identifier;
@@ -118,7 +119,16 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
         A: Arena,
     {
         match self {
-            Call::Function(call) => call.analyze(context, block_context, artifacts),
+            Call::Function(call) => match NamedCall::from_call(context.resolved_names, context.codebase, self) {
+                Some(named_call) => function_call::analyze_with_function_call_hooks(
+                    context,
+                    block_context,
+                    artifacts,
+                    &named_call,
+                    |context, block_context, artifacts| call.analyze(context, block_context, artifacts),
+                ),
+                None => call.analyze(context, block_context, artifacts),
+            },
             // As a call with an invalid target, it gets no type, and only its arguments are analyzed.
             Call::Method(call) if report_full_name(context, call.object, None) => {
                 call.argument_list.analyze(context, block_context, artifacts)
@@ -126,9 +136,23 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
             // PHP# calls a plain PHP function through its namespace, `Pdf.render(html)` or `global.now()`.
             Call::Method(call)
                 if context.dialect.is_sharp()
-                    && let Some(function) = function_call::namespace_function_name(context, call) =>
+                    && let Some(named_call) = NamedCall::from_call(context.resolved_names, context.codebase, self) =>
             {
-                function_call::analyze_namespace_function_call(context, block_context, artifacts, call, function)
+                function_call::analyze_with_function_call_hooks(
+                    context,
+                    block_context,
+                    artifacts,
+                    &named_call,
+                    |context, block_context, artifacts| {
+                        function_call::analyze_namespace_function_call(
+                            context,
+                            block_context,
+                            artifacts,
+                            call,
+                            named_call.name,
+                        )
+                    },
+                )
             }
             // PHP# writes the static call `Class::m()` as `Class.m()`, with a bare name the binder bound to a class.
             Call::Method(call)

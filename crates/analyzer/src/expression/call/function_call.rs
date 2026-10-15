@@ -43,6 +43,7 @@ use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
+use crate::plugin::hook::NamedCall;
 use crate::resolver::extension::is_imported_by_default;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::utils::expression::get_bare_name_variable_id;
@@ -50,8 +51,6 @@ use crate::utils::names::display_atomic;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
-use crate::utils::names::member_namespace;
-use crate::utils::names::namespace_member;
 use crate::utils::names::sharp_code_class_name;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
@@ -64,25 +63,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
     where
         A: Arena,
     {
-        if context.plugin_registry.has_function_call_hooks() {
-            let mut hook_context = HookContext::new(context, block_context, artifacts);
-            let result = context.plugin_registry.before_function_call(self, &mut hook_context)?;
-            for reported in hook_context.take_issues() {
-                context.collector.report_with_code(reported.code, reported.issue);
-            }
-
-            match result {
-                ExpressionHookResult::Continue => {}
-                ExpressionHookResult::Skip => {
-                    return Ok(());
-                }
-                ExpressionHookResult::SkipWithType(ty) => {
-                    artifacts.set_expression_type(&self.span(), ty);
-                    return Ok(());
-                }
-            }
-        }
-
         let mut template_result = TemplateResult::default();
         let (invocation_targets, encountered_invalid_targets) = resolve_targets(
             context,
@@ -112,14 +92,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
             && is_refused_type(&callee_type)
         {
             artifacts.set_rc_expression_type(self, callee_type);
-        }
-
-        if context.plugin_registry.has_function_call_hooks() {
-            let mut hook_context = HookContext::new(context, block_context, artifacts);
-            context.plugin_registry.after_function_call(self, &mut hook_context)?;
-            for reported in hook_context.take_issues() {
-                context.collector.report_with_code(reported.code, reported.issue);
-            }
         }
 
         Ok(())
@@ -180,24 +152,56 @@ where
     )
 }
 
-/// The plain PHP function a PHP# `Name.member(…)` calls, spec section 23: `global.now()` calls the function `now` of
-/// PHP's root namespace, and `Pdf.render(html)` after `import Vendor.Pdf;` the function `render` of that namespace,
-/// where no class is named `Vendor\Pdf`. An imported namespace names its function whether or not the function exists,
-/// so the call of a missing one is refused as a missing function.
-pub(super) fn namespace_function_name<A>(context: &Context<'_, '_, A>, call: &MethodCall<'_>) -> Option<Word>
+/// Analyzes `call` with `analyze`, between the function call hooks. A hook before it may skip the analysis and give
+/// the call its type, and the hooks after it see the analyzed call.
+pub(super) fn analyze_with_function_call_hooks<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    call: &NamedCall<'_, 'arena>,
+    analyze: impl FnOnce(
+        &mut Context<'ctx, 'arena, A>,
+        &mut BlockContext<'ctx>,
+        &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>,
+) -> Result<(), AnalysisError>
 where
     A: Arena,
 {
-    let name = context.resolved_names.static_call_class(call)?;
-    let ClassLikeMemberSelector::Identifier(member) = &call.method else {
-        return None;
-    };
-    let namespace = member_namespace(context, &name.name, member.value)?;
+    if !context.plugin_registry.has_function_call_hooks() {
+        return analyze(context, block_context, artifacts);
+    }
 
-    Some(namespace_member(namespace, member.value))
+    let mut hook_context = HookContext::new(context, block_context, artifacts);
+    let result = context.plugin_registry.before_function_call(call, &mut hook_context)?;
+    for reported in hook_context.take_issues() {
+        context.collector.report_with_code(reported.code, reported.issue);
+    }
+
+    match result {
+        ExpressionHookResult::Continue => {}
+        ExpressionHookResult::Skip => {
+            return Ok(());
+        }
+        ExpressionHookResult::SkipWithType(ty) => {
+            artifacts.set_expression_type(&call.span, ty);
+            return Ok(());
+        }
+    }
+
+    analyze(context, block_context, artifacts)?;
+
+    let mut hook_context = HookContext::new(context, block_context, artifacts);
+    context.plugin_registry.after_function_call(call, &mut hook_context)?;
+    for reported in hook_context.take_issues() {
+        context.collector.report_with_code(reported.code, reported.issue);
+    }
+
+    Ok(())
 }
 
-/// Analyzes `Name.member(…)` as a call of the plain PHP function `function`, which [`namespace_function_name`] found.
+/// Analyzes `Name.member(…)` as a call of the plain PHP function `function`, which
+/// [`crate::utils::names::namespace_function_name`] found.
 pub(super) fn analyze_namespace_function_call<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -214,8 +218,12 @@ where
         None,
         call.method.span(),
         None,
-        false,
+        block_context.known_functions.contains(&ascii_lowercase_word(function.as_bytes())),
     );
+    if let Some(metadata) = target.as_ref().and_then(InvocationTarget::get_function_like_metadata) {
+        check_function_use(context, block_context, metadata, function, call.method.span());
+    }
+
     let analyze = |context: &mut Context<'ctx, 'arena, A>| {
         analyze_invocation_targets(
             context,
@@ -366,13 +374,7 @@ where
                 report_bare_function_call(context, block_context, artifacts, metadata, arguments, span);
             }
 
-            crate::utils::casing::check_function_casing_with_metadata(context, metadata, name, span);
-            crate::utils::experimental::check_experimental_function_with_metadata(
-                context,
-                block_context,
-                metadata,
-                span,
-            );
+            check_function_use(context, block_context, metadata, name, span);
         }
 
         return Ok(if let Some(t) = target { (vec![t], false) } else { (vec![], false) });
@@ -388,6 +390,21 @@ where
     };
 
     Ok(resolve_callable_targets(context, &expression_type.clone(), expression.span(), template_result))
+}
+
+/// Reports a call of `function` by `used_name` in a casing other than its declared one, and a call of a function marked
+/// `@experimental`: the checks PHP's `name(…)` and PHP#'s `global.name(…)` both get at `span`.
+fn check_function_use<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    function: &FunctionLikeMetadata,
+    used_name: Word,
+    span: Span,
+) where
+    A: Arena,
+{
+    crate::utils::casing::check_function_casing_with_metadata(context, function, used_name, span);
+    crate::utils::experimental::check_experimental_function_with_metadata(context, block_context, function, span);
 }
 
 /// The targets a call of a value of `expression_type` runs: the function a closure or a callable names, or the

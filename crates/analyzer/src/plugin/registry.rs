@@ -17,7 +17,6 @@ use mago_syntax::cst::Class;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Function;
-use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
@@ -66,6 +65,7 @@ use crate::plugin::hook::InterfaceDeclarationHook;
 use crate::plugin::hook::IssueFilterDecision;
 use crate::plugin::hook::IssueFilterHook;
 use crate::plugin::hook::MethodCallHook;
+use crate::plugin::hook::NamedCall;
 use crate::plugin::hook::NullSafeMethodCallHook;
 use crate::plugin::hook::ProgramHook;
 use crate::plugin::hook::StatementHook;
@@ -914,7 +914,7 @@ impl PluginRegistry {
     /// Returns [`PluginError`] if any registered hook propagates one.
     pub fn before_function_call(
         &self,
-        call: &FunctionCall<'_>,
+        call: &NamedCall<'_, '_>,
         context: &mut HookContext<'_, '_>,
     ) -> PluginResult<ExpressionHookResult> {
         for hook in &self.function_call_hooks {
@@ -931,7 +931,7 @@ impl PluginRegistry {
     /// # Errors
     ///
     /// Returns [`PluginError`] if any registered hook propagates one.
-    pub fn after_function_call(&self, call: &FunctionCall<'_>, context: &mut HookContext<'_, '_>) -> PluginResult<()> {
+    pub fn after_function_call(&self, call: &NamedCall<'_, '_>, context: &mut HookContext<'_, '_>) -> PluginResult<()> {
         for hook in &self.function_call_hooks {
             hook.after_function_call(call, context)?;
         }

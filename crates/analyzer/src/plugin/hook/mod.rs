@@ -19,7 +19,9 @@
 //! All hooks receive real CST references and a [`HookContext`](crate::plugin::context::HookContext)
 //! that provides mutable access to the analysis state. [`StaticMethodCallHook`] receives the
 //! [`StaticCall`] parts of the call instead, because PHP# writes a static call without a
-//! [`StaticMethodCall`](mago_syntax::cst::StaticMethodCall) node.
+//! [`StaticMethodCall`](mago_syntax::cst::StaticMethodCall) node, and [`FunctionCallHook`] receives the
+//! [`NamedCall`] view, because PHP# writes a call of a plain PHP function, `global.intdiv(…)`, without a
+//! [`FunctionCall`](mago_syntax::cst::FunctionCall) node.
 
 mod action;
 mod call;

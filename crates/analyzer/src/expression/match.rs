@@ -605,7 +605,14 @@ where
         }
 
         for condition in &expression_arm.conditions {
-            extract_function_constant_existence(condition, self.artifacts, &mut arm_body_context, false);
+            extract_function_constant_existence(
+                self.context.resolved_names,
+                self.context.codebase,
+                condition,
+                self.artifacts,
+                &mut arm_body_context,
+                false,
+            );
         }
 
         expression_arm.expression.analyze(self.context, &mut arm_body_context, self.artifacts)?;

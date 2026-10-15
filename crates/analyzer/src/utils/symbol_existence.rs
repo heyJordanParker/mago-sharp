@@ -1,9 +1,9 @@
+use mago_codex::metadata::CodebaseMetadata;
+use mago_names::ResolvedNames;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
-use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Parenthesized;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
@@ -14,50 +14,54 @@ use mago_word::ascii_lowercase_word;
 
 use crate::artifacts::AnalysisArtifacts;
 use crate::context::block::BlockContext;
+use crate::plugin::hook::NamedCall;
 
 /// Extracts `function_exists` and `defined` calls from a condition expression.
 pub fn extract_function_constant_existence(
+    resolved_names: &ResolvedNames<'_>,
+    codebase: &CodebaseMetadata,
     expression: &Expression<'_>,
     artifacts: &AnalysisArtifacts,
     block_context: &mut BlockContext<'_>,
     negated: bool,
 ) {
+    let extract = |expression, block_context: &mut BlockContext<'_>, negated| {
+        extract_function_constant_existence(resolved_names, codebase, expression, artifacts, block_context, negated);
+    };
+
     ensure_sufficient_stack(|| match expression {
         Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Not(_), operand }) => {
-            extract_function_constant_existence(operand, artifacts, block_context, !negated);
+            extract(operand, block_context, !negated);
         }
         Expression::Binary(Binary { lhs, operator: BinaryOperator::And(_) | BinaryOperator::LowAnd(_), rhs })
             if !negated =>
         {
-            extract_function_constant_existence(lhs, artifacts, block_context, negated);
-            extract_function_constant_existence(rhs, artifacts, block_context, negated);
+            extract(lhs, block_context, negated);
+            extract(rhs, block_context, negated);
         }
         Expression::Binary(Binary { lhs, operator: BinaryOperator::Or(_) | BinaryOperator::LowOr(_), rhs })
             if negated =>
         {
-            extract_function_constant_existence(lhs, artifacts, block_context, negated);
-            extract_function_constant_existence(rhs, artifacts, block_context, negated);
+            extract(lhs, block_context, negated);
+            extract(rhs, block_context, negated);
         }
-        Expression::Call(Call::Function(FunctionCall { function: Expression::Identifier(ident), argument_list }))
-            if !negated =>
-        {
-            let func_name = ident.value().to_ascii_lowercase();
-            match func_name.as_slice() {
-                b"function_exists" => {
-                    if let Some(name) = get_first_literal_string_arg(argument_list, artifacts, false) {
-                        block_context.known_functions.insert(name);
-                    }
+        Expression::Call(call) if !negated => {
+            let Some(call) = NamedCall::from_call(resolved_names, codebase, call) else {
+                return;
+            };
+
+            if call.calls(&[b"function_exists"]) {
+                if let Some(name) = get_first_literal_string_arg(call.argument_list, artifacts, false) {
+                    block_context.known_functions.insert(name);
                 }
-                b"defined" => {
-                    if let Some(name) = get_first_literal_string_arg(argument_list, artifacts, true) {
-                        block_context.known_constants.insert(name);
-                    }
-                }
-                _ => {}
+            } else if call.calls(&[b"defined"])
+                && let Some(name) = get_first_literal_string_arg(call.argument_list, artifacts, true)
+            {
+                block_context.known_constants.insert(name);
             }
         }
         Expression::Parenthesized(Parenthesized { expression, .. }) => {
-            extract_function_constant_existence(expression, artifacts, block_context, negated);
+            extract(expression, block_context, negated);
         }
         _ => {}
     });

@@ -18,13 +18,16 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
+use mago_names::ResolvedNames;
 use mago_names::binding::sharp_operator_symbol;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_names::short_name;
 use mago_span::HasPosition;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Identifier;
+use mago_syntax::cst::MethodCall;
 use mago_syntax_core::utils::is_part_of_identifier;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -820,12 +823,16 @@ pub(crate) fn namespace_function(
 /// `import Vendor.Pdf;` when no class is named `Vendor\Pdf`. Its member is then one of the namespace's functions,
 /// spec section 23, whether or not that function exists.
 #[must_use]
-pub(crate) fn is_imported_namespace<A, T>(context: &Context<'_, '_, A>, name: &T, full_name: Word) -> bool
+pub(crate) fn is_imported_namespace<T>(
+    resolved_names: &ResolvedNames<'_>,
+    codebase: &CodebaseMetadata,
+    name: &T,
+    full_name: Word,
+) -> bool
 where
-    A: Arena,
     T: HasPosition,
 {
-    context.resolved_names.is_imported(name) && !context.codebase.class_like_exists(full_name.as_bytes())
+    resolved_names.is_imported(name) && !codebase.class_like_exists(full_name.as_bytes())
 }
 
 /// The namespace whose plain PHP function or constant the PHP# `name.member` names, spec section 23: PHP's root
@@ -833,22 +840,43 @@ where
 /// that namespace has a function or a constant `member`, as long as no class has the namespace's name. None when
 /// `name` is a class.
 #[must_use]
-pub(crate) fn member_namespace<A>(context: &Context<'_, '_, A>, name: &Identifier<'_>, member: &[u8]) -> Option<Word>
-where
-    A: Arena,
-{
+pub(crate) fn member_namespace(
+    resolved_names: &ResolvedNames<'_>,
+    codebase: &CodebaseMetadata,
+    name: &Identifier<'_>,
+    member: &[u8],
+) -> Option<Word> {
     if name.value() == b"global" {
         return Some(word(""));
     }
 
-    let namespace = word(context.resolved_names.get(name));
+    let namespace = word(resolved_names.get(name));
     let full_name = namespace_member(namespace, member);
-    let names_member = context.codebase.function_exists(full_name.as_bytes())
-        || context.codebase.constant_exists(full_name.as_bytes());
+    let names_member = codebase.function_exists(full_name.as_bytes()) || codebase.constant_exists(full_name.as_bytes());
 
-    ((is_imported_namespace(context, name, namespace) || names_member)
-        && !context.codebase.class_like_exists(namespace.as_bytes()))
+    ((is_imported_namespace(resolved_names, codebase, name, namespace) || names_member)
+        && !codebase.class_like_exists(namespace.as_bytes()))
     .then_some(namespace)
+}
+
+/// The plain PHP function a PHP# `Name.member(…)` calls, spec section 23: `global.now()` calls the function `now` of
+/// PHP's root namespace, and `Pdf.render(html)` after `import Vendor.Pdf;` the function `render` of that namespace,
+/// where no class is named `Vendor\Pdf`. An imported namespace names its function whether or not the function exists,
+/// so the call of a missing one is refused as a missing function. None for any other call, and for every call in a
+/// PHP file.
+#[must_use]
+pub(crate) fn namespace_function_name(
+    resolved_names: &ResolvedNames<'_>,
+    codebase: &CodebaseMetadata,
+    call: &MethodCall<'_>,
+) -> Option<Word> {
+    let name = resolved_names.static_call_class(call)?;
+    let ClassLikeMemberSelector::Identifier(member) = &call.method else {
+        return None;
+    };
+    let namespace = member_namespace(resolved_names, codebase, &name.name, member.value)?;
+
+    Some(namespace_member(namespace, member.value))
 }
 
 /// The full name of the function or constant `member` of `namespace`, which [`member_namespace`] found: the bare
