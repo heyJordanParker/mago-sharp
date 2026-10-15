@@ -3800,11 +3800,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         'arena: 'hint,
     {
         match hint {
-            Hint::Integer(name)
-            | Hint::Float(name)
-            | Hint::Bool(name)
-            | Hint::String(name)
-            | Hint::Void(name) => PhpType::Named(name.value),
+            Hint::Integer(name) | Hint::Float(name) | Hint::Bool(name) | Hint::String(name) | Hint::Void(name) => {
+                PhpType::Named(name.value)
+            }
             Hint::Object(_) => PhpType::Named(b"object"),
             Hint::Mixed(_) => PhpType::Mixed,
             Hint::Identifier(name) => match self.names.binding(name) {
@@ -7053,7 +7051,11 @@ fn behavior_slot_name(property: &[u8], index: usize) -> Vec<u8> {
 fn member_flags(modifiers: &Sequence<Modifier>) -> u32 {
     let flags = modifier_flags(modifiers);
 
-    if flags & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE) == 0 { flags | ZEND_ACC_PRIVATE } else { flags }
+    if flags & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE) == 0 {
+        flags | ZEND_ACC_PRIVATE
+    } else {
+        flags
+    }
 }
 
 /// The flags of a member's modifiers. Every modifier is named, so a new one does not compile until it is decided.

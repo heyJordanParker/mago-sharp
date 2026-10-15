@@ -8499,7 +8499,8 @@ fn literals_are_short_arrays_and_an_index_is_a_dim() {
 /// ```
 ///
 /// `Any` and `Any?` are both PHP's `mixed`, which already holds null and refuses `?`, so neither carries
-/// `ZEND_TYPE_NULLABLE`. `[1]` is `ZEND_NAME_NOT_FQ`.
+/// `ZEND_TYPE_NULLABLE`. `[1]` is `ZEND_NAME_NOT_FQ`. An `Any` refuses null, spec section 24, so the parameter list
+/// ends with the type texts a call from plain PHP is checked against, as for a generic class.
 #[test]
 fn any_and_nullable_any_are_mixed() {
     let lowered = Lowered::new(
@@ -8525,6 +8526,9 @@ fn any_and_nullable_any_are_mixed() {
                 null
                 null
                 null
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "Any, Any?"
         "#}
     );
     assert_eq!(
@@ -10560,7 +10564,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
                   null
                 SHARP_TYPE_ARGS
                   null
-                  ZVAL "Lib.HasLabel, List<Lib.HasLabel>, Any?"
+                  ZVAL "Lib.HasLabel, List<Lib.HasLabel>, Any"
               null
               STMT_LIST
                 RETURN
@@ -15217,6 +15221,62 @@ fn equality_of_an_unchecked_any_compares_by_value() {
                   VAR
                     ZVAL "raw"
                   ZVAL null
+        "#}
+    );
+}
+
+/// ```php
+/// return [$f(2), $holder->onTotal(2), $count(2)];
+/// ```
+///
+/// Spec section 24: a function value may hold a plain PHP closure, which returns an `int` where the function type says
+/// `float`. So a call of a function value whose result holds a `float` checks its result, as a call into plain PHP
+/// does, and the check converts the `int`, whether the value is a local or a property. A result with no `float` needs
+/// no check.
+#[test]
+fn a_call_of_a_function_value_checks_a_float_result() {
+    assert_eq!(
+        Lowered::with(
+            &method_with(
+                "List<Any> run(Function<float(int)> f, Holder holder, Function<int(int)> count)",
+                "        return [f(2), holder.onTotal(2), count(2)];\n",
+            ),
+            &[("src/App/Tenant/Holder.sharp", "namespace App.Tenant;\n\npublic class Holder\n{\n    public Function<List<float>(int)> onTotal { get; } = (int n) => [1.5];\n}\n")],
+        )
+        .body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                ARRAY [3]
+                  ARRAY_ELEM
+                    VERIFY_TYPE_ARGS
+                      CALL
+                        VAR
+                          ZVAL "f"
+                        ARG_LIST
+                          ZVAL 2
+                      ZVAL "float"
+                      ZVAL "f()"
+                    null
+                  ARRAY_ELEM
+                    VERIFY_TYPE_ARGS
+                      CALL
+                        PROP
+                          VAR
+                            ZVAL "holder"
+                          ZVAL "onTotal"
+                        ARG_LIST
+                          ZVAL 2
+                      ZVAL "List<float>"
+                      ZVAL "onTotal()"
+                    null
+                  ARRAY_ELEM
+                    CALL
+                      VAR
+                        ZVAL "count"
+                      ARG_LIST
+                        ZVAL 2
+                    null
         "#}
     );
 }

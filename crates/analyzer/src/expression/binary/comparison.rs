@@ -1456,7 +1456,9 @@ where
         Some(Refusal::CollectionElement) => "whose elements `==` cannot compare",
         Some(Refusal::StructProperty) => "which can't compare by value",
         Some(_) => "which `==` cannot compare with another of its type",
-        None => "which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection",
+        None => {
+            "which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection"
+        }
     };
 
     Issue::error(format!(

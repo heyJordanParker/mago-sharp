@@ -7922,7 +7922,10 @@ fn a_value_that_is_not_an_object_passed_to_an_object_is_an_invalid_argument() {
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function run(): void\n    {\n        Report::keep(5);\n    }\n\n    public static function keep(object $source): void\n    {\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:21 invalid-argument"]);
-    assert_eq!(codes(&issues(("src/Demo/Report.sharp", sharp), &[])), codes(&issues(("src/Demo/Report.php", php), &[])));
+    assert_eq!(
+        codes(&issues(("src/Demo/Report.sharp", sharp), &[])),
+        codes(&issues(("src/Demo/Report.php", php), &[]))
+    );
 }
 
 /// `for (const [k, v] of x)` reads the keys of a `Map`. A `List`'s indexes come from `entries()`, as spec section 12
@@ -18628,9 +18631,18 @@ const JSON: (&str, &str) = (
 /// an `int` and a `string` key a JSON object. A plain PHP twin's `json_encode` call names `Json.encode`.
 #[test]
 fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
-    let shapes = ("app/Shop/Shapes.sharp", "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n\npublic struct Tag\n{\n    public Tag(public string name { get; }) { }\n\n    public string toString() => this.name;\n}\n");
-    let report = ("app/Shop/Report.sharp", "namespace App.Shop;\n\nimport Sharp.Json.Json;\n\npublic class Report\n{\n    public static void run(Map<Point, int> points, Map<Tag, int> tags, List<Map<Point, int>> nested, Map<string, Point> values, Map<int, string> numbered, Any? raw)\n    {\n        Report.keep(Json.encode(tags));\n        Report.keep(Json.encode(values));\n        Report.keep(Json.encode(numbered));\n        Report.keep(Json.encode(raw));\n        Report.keep(Json.encode(points));\n        Report.keep(Json.encode(nested));\n    }\n\n    public static void keep(string json)\n    {\n    }\n}\n");
-    let bare = ("app/Shop/Bare.sharp", "namespace App.Shop;\n\npublic class Bare\n{\n    public static string run(Any? value) => json_encode(value);\n}\n");
+    let shapes = (
+        "app/Shop/Shapes.sharp",
+        "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n\npublic struct Tag\n{\n    public Tag(public string name { get; }) { }\n\n    public string toString() => this.name;\n}\n",
+    );
+    let report = (
+        "app/Shop/Report.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Json.Json;\n\npublic class Report\n{\n    public static void run(Map<Point, int> points, Map<Tag, int> tags, List<Map<Point, int>> nested, Map<string, Point> values, Map<int, string> numbered, Any? raw)\n    {\n        Report.keep(Json.encode(tags));\n        Report.keep(Json.encode(values));\n        Report.keep(Json.encode(numbered));\n        Report.keep(Json.encode(raw));\n        Report.keep(Json.encode(points));\n        Report.keep(Json.encode(nested));\n    }\n\n    public static void keep(string json)\n    {\n    }\n}\n",
+    );
+    let bare = (
+        "app/Shop/Bare.sharp",
+        "namespace App.Shop;\n\npublic class Bare\n{\n    public static string run(Any? value) => json_encode(value);\n}\n",
+    );
 
     assert_eq!(worded(JSON, &[]), Vec::<String>::new());
     assert_eq!(
