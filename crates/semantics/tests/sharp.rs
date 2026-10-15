@@ -3565,7 +3565,7 @@ fn properties_outside_the_slice_are_not_supported_yet() {
             "8:12 Property `Report.d` cannot be declared abstract",
             "5:9 A property without `public`, `protected` or `private` is not supported yet in PHP#.",
             "6:23 A get-only static property is not supported yet in PHP#.",
-            "7:20 This accessor is not supported yet in PHP#.",
+            "7:20 Only `set` and `init` take an access level: `get` reads `c` at the property's own level.",
             "10:16 An initial value before the accessors is not supported yet in PHP#.",
             "11:25 This accessor is not supported yet in PHP#.",
         ]
@@ -3573,6 +3573,30 @@ fn properties_outside_the_slice_are_not_supported_yet() {
 
     let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    abstract public int $d { get; }\n}\n";
     assert_eq!(issues_in("src/Report.php", php), ["7:5 Property `Report::$d` cannot be declared abstract"]);
+}
+
+/// Spec section 6.1: only `set` and `init` carry their own access level, so `get` reads at the property's level, and an
+/// access level on it is an error that says how to read the property only inside the class.
+#[test]
+fn an_access_level_on_get_is_an_error_naming_a_method_that_reads_it() {
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public int views { protected get; set; } = 0;\n    public int count { public get; private set; } = 0;\n    private int total { get; set; } = 0;\n}\n";
+    let help = |property: &str| {
+        Some(format!(
+            "Write `get;`, and to read `{property}` only inside the class, write a method that reads it there, such as a `private` method that returns `this.{property}`."
+        ))
+    };
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:24 Only `set` and `init` take an access level: `get` reads `views` at the property's own level.",
+            "6:24 Only `set` and `init` take an access level: `get` reads `count` at the property's own level.",
+        ]
+    );
+    assert_eq!(
+        check("src/Report.sharp", code).into_iter().map(|issue| issue.help).collect::<Vec<_>>(),
+        [help("views"), help("count")]
+    );
 }
 
 /// Spec section 6.1: `get` and `set` take a body, written `=> expr;` or as a block, which uses `field` for the

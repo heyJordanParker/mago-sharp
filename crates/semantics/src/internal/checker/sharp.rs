@@ -1012,7 +1012,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             let variable = property.item.variable();
             // `is_interface_property` took an interface property's accessors.
             if !is_in_interface(context.program, property.span()) {
-                check_accessors(&property.modifiers, &property.hook_list, variable.span, context);
+                check_accessors(&property.modifiers, &property.hook_list, variable, context);
             }
             check_accessor_bodies(&property.hook_list, variable.name, context);
             if let Some(initial_value) = &property.initial_value
@@ -1271,7 +1271,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             if let Some(accessors) = &parameter.hooks
                 && parameter.modifiers.contains_visibility()
             {
-                check_accessors(&parameter.modifiers, accessors, parameter.variable.span, context);
+                check_accessors(&parameter.modifiers, accessors, &parameter.variable, context);
                 report_parameter_accessor_bodies(parameter, accessors, context);
             }
 
@@ -2891,11 +2891,12 @@ fn is_slice_constant(constant: &ClassLikeConstant) -> Result<(), Box<Issue>> {
 /// Checks the accessors of a property, declared in the class body or on a constructor parameter: `get` once, and an
 /// optional `set` or `init` once, which may take an access modifier narrower than the property's, as in C#. `init`
 /// sets the property only while its object is created, spec section 6.1. Each is `;`, an expression body `=> expr;`
-/// or a block. An access modifier on `get` and a parameter list on `set` are not supported yet.
+/// or a block. Only `set` and `init` carry an access level, so one on `get` is an error. A parameter list on `set` is
+/// not supported yet.
 fn check_accessors(
     modifiers: &Sequence<Modifier>,
     accessors: &PropertyHookList,
-    name: Span,
+    variable: &DirectVariable,
     context: &mut Context<'_, '_, '_>,
 ) {
     let access = modifiers.iter().find(|modifier| {
@@ -2905,7 +2906,21 @@ fn check_accessors(
 
     for accessor in &accessors.hooks {
         let name = accessor.name.value;
-        if !is_slice_accessor(accessor) {
+        if let [level @ (Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))] =
+            accessor.modifiers.as_slice()
+            && name == b"get"
+        {
+            let property = BytesDisplay(variable.name);
+            context.report(
+                Issue::error(format!(
+                    "Only `set` and `init` take an access level: `get` reads `{property}` at the property's own level."
+                ))
+                .with_annotation(Annotation::primary(level.span()).with_message("Written here."))
+                .with_help(format!(
+                    "Write `get;`, and to read `{property}` only inside the class, write a method that reads it there, such as a `private` method that returns `this.{property}`."
+                )),
+            );
+        } else if !is_slice_accessor(accessor) {
             report_not_supported(
                 accessor.span(),
                 "accessor",
@@ -2943,7 +2958,7 @@ fn check_accessors(
     if !declared.contains(&b"get".as_slice()) {
         context.report(
             Issue::error("A PHP# property needs a `get` accessor.")
-                .with_annotation(Annotation::primary(name).with_message("Declared here."))
+                .with_annotation(Annotation::primary(variable.span).with_message("Declared here."))
                 .with_help("Add `get;`, as in `public int views { get; set; }`."),
         );
     }
