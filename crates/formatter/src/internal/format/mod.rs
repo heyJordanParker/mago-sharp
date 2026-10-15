@@ -286,6 +286,9 @@ where
                 Statement::HaltCompiler(h) => h.format(f),
                 Statement::Unset(u) => u.format(f),
                 Statement::Noop(_) => Document::String(b";"),
+                Statement::PatternMatch(_) => {
+                    unreachable!("`mago format` skips PHP# files, the only ones with a `match` over patterns")
+                }
                 #[allow(clippy::unreachable)]
                 _ => unreachable!("A statement variant was not handled in formatter: {self:?}"),
             }
@@ -1329,6 +1332,10 @@ where
     A: Arena,
 {
     fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        if self.sealed.is_some() || !self.modifiers.is_empty() {
+            unreachable!("`mago format` skips PHP# files, the only ones with an interface's modifiers or `sealed`");
+        }
+
         wrap!(f, self, Interface, {
             let mut attributes = vec_in![f.arena];
             for attribute_list in &self.attribute_lists {

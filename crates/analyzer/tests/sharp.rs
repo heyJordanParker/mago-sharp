@@ -4516,6 +4516,19 @@ fn a_data_case_compares_by_value() {
     );
 }
 
+/// Spec section 21: a `match` statement runs one arm, so one with a `default` whose every arm returns, continues or
+/// breaks leaves the code around it: an `if` around it narrows what follows, and a method needs no return after it. A
+/// `break` in an arm leaves the loop, so a method whose loop it ends still needs its return.
+#[test]
+fn a_match_statement_whose_every_arm_leaves_leaves_the_code_around_it() {
+    let code = "namespace App;\n\nclass Shows\n{\n    public int size(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => {\n                    return 0;\n                },\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    public int sum(List<string?> values, int k)\n    {\n        let total = 0;\n        for (const value of values) {\n            if (value == null) {\n                match (k) {\n                    0 => {\n                        continue;\n                    },\n                    default => {\n                        break;\n                    },\n                }\n            }\n            total += this.take(value);\n        }\n\n        return total;\n    }\n\n    public int pick(Any? value)\n    {\n        match (value) {\n            int n => {\n                return n;\n            },\n            default => {\n                return 0;\n            },\n        }\n    }\n\n    public int never(int x)\n    {\n        while (true) {\n            match (x) {\n                0 => {\n                    break;\n                },\n                default => { },\n            }\n        }\n    }\n\n    private int take(string s) => 1;\n}\n";
+
+    assert_eq!(
+        written(code, &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shows.sharp", code), &[])),
+        ["53:16 missing-return-statement Missing return statement in method `Shows.never`"]
+    );
+}
+
 /// Spec sections 13 and 20: a `readonly` before a type whose value never changes is an error, and an enum is one, so
 /// an enum whose cases carry data, one of its cases, and a collection of them take none, as a struct takes none.
 #[test]

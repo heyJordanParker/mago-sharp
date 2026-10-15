@@ -4,6 +4,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::Literal;
+use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::WhileBody;
 
@@ -433,6 +434,41 @@ impl ControlAction {
 
                     control_actions.extend(try_statement_actions);
                     control_actions.retain(|c| !c.is_none());
+                }
+                // A PHP# `match` statement runs one arm, as an `if` chain does, so a `break` or `continue` in an arm
+                // leaves the loop around it. Spec section 21 refuses one that may run no arm, so it leaves when every
+                // arm does: a block that leaves, or an expression that never returns.
+                Statement::PatternMatch(pattern_match) => {
+                    let mut all_leave = true;
+                    for arm in &pattern_match.arms {
+                        let arm_actions = match arm.body() {
+                            PatternMatchArmBody::Block(block) => ControlAction::from_statements(
+                                block.statements.iter().collect(),
+                                break_type.clone(),
+                                artifacts,
+                                return_is_exit,
+                            ),
+                            PatternMatchArmBody::Expression(expression) => ControlActionSet::from_single(
+                                if artifacts
+                                    .and_then(|artifacts| artifacts.get_expression_type(*expression))
+                                    .is_some_and(|expression_type| expression_type.is_never())
+                                {
+                                    ControlAction::End
+                                } else {
+                                    ControlAction::None
+                                },
+                            ),
+                        };
+
+                        all_leave = all_leave && !arm_actions.contains(ControlAction::None);
+                        control_actions.extend(arm_actions);
+                    }
+
+                    if all_leave {
+                        return control_actions;
+                    }
+
+                    control_actions.retain(|action| action != ControlAction::None);
                 }
                 _ => {}
             }
