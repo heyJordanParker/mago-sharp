@@ -3846,12 +3846,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &elements)
             }
         };
-        // A local declared without a type takes the type of its value, so a PHP array plain PHP gives becomes the `Map`
-        // or `Set` PHP# reads it as here, as for a typed local, and a method that changes it changes the local.
+        // A local declared without a type that holds a `Map` or a `Set` takes the type of its value, as a typed local
+        // does: a PHP array plain PHP gives becomes the object here, so a method that changes it changes the local, and
+        // a read of the local needs no crossing.
         let declared = match local.hint {
             Some(hint) => Some(self.hint_type(hint)),
             None => Some(self.types.expression_type(local.value).clone())
-                .filter(|inferred| self.may_be_php_array(local.value) && self.crossing_array(inferred).is_some()),
+                .filter(|inferred| self.crossing_array(inferred).is_some()),
         };
         let value = self.crossed_value(local.value, declared.as_ref());
         if let Some(declared) = declared {
