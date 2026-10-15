@@ -281,12 +281,10 @@ const OBJECT: &[u8] = b"Object";
 ///   which the engine compiles as `int|string|null`.
 ///   `check_union` reports `null` written in a union, as in `int|null`, as not supported yet. PHP's own check reports
 ///   a nullable union inside another union, and a single type in parentheses, as in `(Calc)?`, which PHP# writes
-///   `Calc?`. `(int)?` is a parse error, as PHP lexes `(int)` as a cast. A field, or a property with storage and `set`,
-///   of a nullable type or a nullable union starts as null without an initial value, as in C# and Swift, so
-///   `private int? total;` holds null until it is written, and the engine gives it the default `null`. A get-only
-///   property of one without an initial value is set once by the constructor, because `readonly` takes no default,
-///   and the analyzer reports a path through the constructor that leaves it unset. A property without storage holds
-///   nothing to start with.
+///   `Calc?`. `(int)?` is a parse error, as PHP lexes `(int)` as a cast. A member of a nullable type has no implicit
+///   starting value: a field or a property with storage writes `= null` as any other initial value, or the
+///   constructor sets it, and the analyzer reports a path through the constructor that leaves it unset. A property
+///   without storage holds nothing to start with.
 /// - `Self`, written exactly so, is the class a static method is called on, spec section 25, and PHP's `static`. It is
 ///   a method's return type only, as in Swift, nullable as in `Self?`, in a union as in `Self|int`, or a type argument
 ///   there as in `List<Self>`, and any other type position, a function type's included, is an error. The lexer reads
@@ -2938,26 +2936,22 @@ fn report_generic_static(property: &Property, context: &mut Context<'_, '_, '_>)
     );
 }
 
-/// Reports a static field or a static property with storage that has no initial value and isn't `T?`, spec section 6.
-/// No constructor sets a static, so it would be read before anything set it. A `T?` one starts as null.
+/// Reports a static field or a static property with storage that has no initial value, spec section 6. No constructor
+/// sets a static, so it would be read before anything set it, and a `T?` one has no implicit `null` either.
 fn report_static_without_initial_value(property: &Property, context: &mut Context<'_, '_, '_>) {
+    // An untyped member is the parser's error.
     if property.modifiers().get_static().is_none()
         || property.initial_value().is_some()
+        || property.hint().is_none()
         || matches!(property, Property::Computed(_))
         || matches!(property, Property::Hooked(hooked) if !context.names.has_storage(&hooked.hook_list))
     {
         return;
     }
-    let Some(hint) = property.hint().filter(|hint| !matches!(hint, Hint::Nullable(_))) else {
-        return;
-    };
 
     let variable = property.first_variable();
-    let name = BytesDisplay(variable.name);
-    let written = BytesDisplay(context.get_code_snippet(hint));
-    let nullable = if matches!(hint, Hint::Union(_)) { format!("({written})?") } else { format!("{written}?") };
     context.report(
-        Issue::error(format!("Give `{name}` an initial value, or make it `{nullable}`: no constructor sets a static."))
+        Issue::error(format!("Give `{}` an initial value: no constructor sets a static.", BytesDisplay(variable.name)))
             .with_annotation(Annotation::primary(variable.span).with_message("Declared without a value here.")),
     );
 }

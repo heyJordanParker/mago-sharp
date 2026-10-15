@@ -33,7 +33,6 @@ use crate::scanner::ttype::merge_type_preserving_nullability;
 use crate::scanner::typing_error_issue;
 use crate::scanner::version_claim::TypeOverride;
 use crate::scanner::version_claim::evaluate_version_attributes;
-use crate::ttype::get_null;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::visibility::Visibility;
 
@@ -208,13 +207,9 @@ where
                 .items
                 .iter()
                 .map(|item| {
-                    let (name, name_span, mut has_default, mut default_type) =
+                    let (name, name_span, has_default, default_type) =
                         scan_property_item(item, classname, context, scope);
                     let is_required = is_sharp && is_required(&plain_property.modifiers);
-                    if is_sharp && !has_default && !is_required {
-                        default_type = sharp_null_default(plain_property.hint.as_ref(), name_span);
-                        has_default = default_type.is_some();
-                    }
 
                     let mut item_flags = flags;
                     // Spec section 6: a PHP# property without accessors is a field.
@@ -316,9 +311,6 @@ where
             let is_abstract = hooked_property.modifiers.contains_abstract();
             if is_sharp && is_required(&hooked_property.modifiers) {
                 flags |= MetadataFlags::REQUIRED;
-            } else if is_sharp && !has_default && !is_abstract && !hooked_property.hook_list.is_get_only() {
-                default_type = sharp_null_default(hooked_property.hint.as_ref(), name_span);
-                has_default = default_type.is_some();
             }
 
             let read_visibility = match hooked_property.modifiers.get_first_read_visibility() {
@@ -580,16 +572,6 @@ where
 /// no `null` default.
 fn is_required(modifiers: &Sequence<Modifier>) -> bool {
     modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_)))
-}
-
-/// The default of a PHP# field or auto-property with `set` of a nullable type written without an initial value: it
-/// starts as null, as in C# and Swift, and the engine gives it the default `null`.
-fn sharp_null_default(hint: Option<&Hint>, name_span: Span) -> Option<TypeMetadata> {
-    matches!(hint, Some(Hint::Nullable(_))).then(|| {
-        let mut type_metadata = TypeMetadata::new(get_null(), name_span);
-        type_metadata.inferred = true;
-        type_metadata
-    })
 }
 
 fn scan_property_hook<'arena, A>(

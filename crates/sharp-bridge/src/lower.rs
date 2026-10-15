@@ -1683,7 +1683,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The hidden static a generic PHP# class keeps each type argument's own static fields in, spec section 11, as
     /// `public static $"\0<sharp>\0statics" = ["" => ["count" => 0, "items" => []]];` with `ZEND_ACC_SHARP_HIDDEN`:
-    /// under the key "" the defaults, each field's initial value, or null for a nullable field without one, which
+    /// under the key "" the defaults, each field's initial value, which
     /// `\Sharp\Internal\statics()` copies for each type argument text on its first use. None for a class without static
     /// fields.
     fn statics_store(&mut self, class: &Class) -> Option<u32> {
@@ -1701,9 +1701,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let field_line = self.line(variable);
             let value = match property.initial_value() {
                 Some(value) => self.expression(value),
-                None if is_null_by_default(property, self.names) => {
-                    self.zval(field_line, sharp_value::SHARP_NULL, |_| {})
-                }
                 None => continue,
             };
             let name = self.string(0, field_line, variable.name);
@@ -2743,9 +2740,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// grammar builds `private int $count = 0;`, `public private(set) int $views = 0;`, `public readonly int $id;`,
     /// `public string $name { get => $this->name; }` and `public string $slug { get => expr; }`. A field with no access
     /// modifier is `private`, while PHP makes it `public`. A constant initial value is its default, unless the property
-    /// is `readonly`. A member that starts as null without an initial value
-    /// takes the default `null` on the line of its name, as php-src builds `private ?int $total = null;`. An override is
-    /// a property with `#[\Override]`, and an auto-property override lowers as a field does. PHP refuses a type on a property whose parent's property has none, so an override of
+    /// is `readonly`, and a member without one has none, as a nullable one has no implicit `null`. An override is a
+    /// property with `#[\Override]`, and an auto-property override lowers as a field does. PHP refuses a type on a property whose parent's property has none, so an override of
     /// a property of `parent` whose root declaration has no type has none either, down the whole chain (decision 028).
     fn property(&mut self, property: &Property, parent: Option<&[u8]>) -> u32 {
         let (accessor_flags, attribute_lists, hooks) = match property {
@@ -2811,7 +2807,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             {
                 self.expression(value)
             }
-            None if is_null_by_default(property, self.names) => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
             _ => NULL,
         };
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, default, NULL, hooks]);
@@ -6918,23 +6913,6 @@ fn without_readonly<'hint, 'arena>(hint: &'hint Hint<'arena>) -> &'hint Hint<'ar
         Hint::Readonly(readonly) => readonly.hint,
         hint => hint,
     }
-}
-
-/// Whether a member without an initial value starts as null, as in C# and Swift: a field, or a property with storage
-/// and `set`, of a nullable type. A get-only property with storage is set only where `readonly` allows, and
-/// `readonly` takes no default, so the checker holds one without an initial value to a constructor that sets it on
-/// every path. A property without storage is virtual, and PHP refuses a default on a virtual property.
-fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
-    matches!(property.hint(), Some(Hint::Nullable(_)))
-        && match property {
-            Property::Plain(_) => true,
-            Property::Hooked(hooked) => {
-                !hooked.modifiers.contains_abstract()
-                    && !hooked.hook_list.is_get_only()
-                    && names.has_storage(&hooked.hook_list)
-            }
-            Property::Computed(_) => false,
-        }
 }
 
 /// The flags a property's accessors add: `readonly` for a get-only auto-property, which spec section 6.1 sets in the

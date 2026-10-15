@@ -3374,18 +3374,21 @@ fn a_field_or_a_property_may_be_static_with_a_constant_initial_value() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// Spec section 6: no constructor sets a static, so a static field or property that isn't `T?` has an initial value.
-/// A `T?` one starts as null, and a property without storage holds nothing to set. The error names both fixes.
+/// Spec section 6: no constructor sets a static, and a nullable member has no implicit starting value, so a static field
+/// or property with storage has an initial value whatever its type, `= null` included. A property without storage
+/// holds nothing to set.
 #[test]
-fn a_static_that_is_not_nullable_needs_an_initial_value() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int hits = 0;\n    private static int misses;\n    public static string? region { get; set; }\n    public static string label { get; set; }\n    private static string? cached;\n    private static int|string key;\n    public static int twice { get => 2; }\n}\n";
+fn a_static_needs_an_initial_value_whatever_its_type() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int hits = 0;\n    private static int misses;\n    public static string? region { get; set; }\n    public static string label { get; set; }\n    private static string? cached;\n    private static int|string key;\n    public static int twice { get => 2; }\n    private static string? none = null;\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "6:24 Give `misses` an initial value, or make it `int?`: no constructor sets a static.",
-            "8:26 Give `label` an initial value, or make it `string?`: no constructor sets a static.",
-            "10:31 Give `key` an initial value, or make it `(int|string)?`: no constructor sets a static.",
+            "6:24 Give `misses` an initial value: no constructor sets a static.",
+            "7:27 Give `region` an initial value: no constructor sets a static.",
+            "8:26 Give `label` an initial value: no constructor sets a static.",
+            "9:28 Give `cached` an initial value: no constructor sets a static.",
+            "10:31 Give `key` an initial value: no constructor sets a static.",
         ]
     );
 }
@@ -3426,8 +3429,8 @@ fn a_get_only_nullable_property_without_an_initial_value_is_in_the_slice() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// Spec section 6: a get-only static is set once, by its initial value, which runs once after its class is declared
-/// when it isn't constant, as any static's does. A generic class's statics start as a copy of constant initial values
+/// Spec section 6: a get-only static is set once, by its initial value, which runs once when a request first uses its
+/// class's statics when it isn't constant, as any static's does. A generic class's statics start as a copy of constant initial values
 /// for each type argument, so one that runs as code is not supported yet there.
 #[test]
 fn a_static_member_takes_any_initial_value_and_is_get_only_or_settable() {
@@ -3436,7 +3439,7 @@ fn a_static_member_takes_any_initial_value_and_is_get_only_or_settable() {
     assert_eq!(
         issues(code),
         [
-            "7:23 Give `id` an initial value, or make it `int?`: no constructor sets a static.",
+            "7:23 Give `id` an initial value: no constructor sets a static.",
             "15:32 A static member of a generic class with an initial value that runs as code is not supported yet in PHP#.",
         ]
     );
@@ -3572,7 +3575,7 @@ fn properties_outside_the_slice_are_not_supported_yet() {
         [
             "8:12 Property `Report.d` cannot be declared abstract",
             "5:9 A property without `public`, `protected` or `private` is not supported yet in PHP#.",
-            "6:23 Give `b` an initial value, or make it `int?`: no constructor sets a static.",
+            "6:23 Give `b` an initial value: no constructor sets a static.",
             "7:20 Only `set` and `init` take an access level: `get` reads `c` at the property's own level.",
             "10:16 An initial value before the accessors is not supported yet in PHP#.",
             "11:25 This accessor is not supported yet in PHP#.",
@@ -3672,10 +3675,10 @@ fn accessor_bodies_are_in_the_slice() {
 
 /// Spec section 24 puts `?` on a property as on a parameter, so a property with accessor bodies takes a nullable type.
 /// A property without storage is computed by its accessors, so it starts as nothing and needs no initial value even
-/// when get-only, and one whose body uses `field` starts as null as an auto-property with `set` does.
+/// when get-only, and one whose body uses `field` has storage, which starts with the value written, `null` included.
 #[test]
 fn nullable_properties_with_accessor_bodies_are_in_the_slice() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; }\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }

@@ -1123,9 +1123,9 @@ fn field_value_and_a_get_body_have_the_property_type_as_in_php() {
 }
 
 /// A property whose accessors all have bodies that never use `field` has no storage, so nothing initializes it, as
-/// PHP's virtual property. Every other property is backed, and is initialized as a field is. Spec section 6.1 holds a
-/// settable backed property that isn't `T?` to a value from the start, so PHP#'s own error names `count` and `total`
-/// beside PHP's missing constructor.
+/// PHP's virtual property. Every other property is backed, and is initialized as a field is. Spec section 6 holds a
+/// backed property to a value from the start, so PHP#'s own error names `count` and `total` where PHP reports a missing
+/// constructor, and PHP's own check stays off PHP# code.
 #[test]
 fn only_a_property_with_storage_needs_initializing_as_in_php() {
     let sharp = "namespace Demo;\n\nclass Store\n{\n    public int open { get => 1; }\n    public int named { get => this.open; set => this.save(value); }\n    public int count { get => field; set => field = value; }\n    public int total { get; set => field = value; }\n\n    public void save(int value)\n    {\n    }\n}\n";
@@ -1136,7 +1136,7 @@ fn only_a_property_with_storage_needs_initializing_as_in_php() {
     let php_issues = issues_with(settings(), ("src/Demo/Store.php", php), &[]);
 
     assert_eq!(php_issues, ["5:7 missing-constructor"]);
-    assert_eq!(sharp_issues, ["7:16 uninitialized-property", "8:16 uninitialized-property", "3:7 missing-constructor"]);
+    assert_eq!(sharp_issues, ["7:16 uninitialized-property", "8:16 uninitialized-property"]);
 }
 
 /// A get-only property whose `get` body uses `field` is set where a get-only auto-property is: once, in the
@@ -1217,10 +1217,10 @@ fn a_property_over_a_php_parents_attributes_reports_its_mixed_get_as_in_php() {
 
 /// A nullable property with accessor bodies has the issues of its PHP twin. Over a plain PHP parent's attributes it
 /// has no storage, so its `get` reports `mixed` unless it converts the value with `as`. One whose body uses
-/// `field` starts as null, so it needs no constructor, and a get-only one without storage needs no initial value.
+/// `field` has storage, so it writes `= null` as its twin does, and a get-only one without storage needs no initial value.
 #[test]
 fn nullable_properties_with_accessor_bodies_have_the_issues_of_their_php_twins() {
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; }\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    public ?Address $shipping {\n        get => $this->getAttribute('shipping');\n        set {\n            $this->setAttribute('shipping', $value);\n        }\n    }\n    public ?string $note = null {\n        get => $this->note;\n        set {\n            $this->note = $value;\n        }\n    }\n    public ?string $summary {\n        get => $this->note;\n    }\n}\n\nclass Address\n{\n}\n";
 
     let sharp_issues = issues(("src/Demo/Order.sharp", sharp), &[("src/Lib/Model.php", MODEL)]);
@@ -5298,7 +5298,7 @@ fn equality_with_null_checks_an_any_nullable_and_is_redundant_on_an_any() {
 /// An accessor of an `Any?` property takes and gives null, and one of an `Any` property gives any value but null.
 #[test]
 fn an_accessor_of_any_gives_no_null_and_of_any_nullable_does() {
-    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public Any? note { get => field; set => field = value; }\n\n    public Any label { get => this.note ?? \"none\"; }\n\n    public Any blank { get => null; }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public Any? note { get => field; set => field = value; } = null;\n\n    public Any label { get => this.note ?? \"none\"; }\n\n    public Any blank { get => null; }\n}\n";
 
     assert_eq!(issues(("src/Demo/Inbox.sharp", sharp), &[]), ["9:31 invalid-return-statement"]);
 }
@@ -5716,9 +5716,11 @@ fn a_nullable_union_holds_its_types_and_null_as_its_php_twin_does() {
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
+/// Spec section 6: a nullable member has no implicit starting value, so it writes `= null`, as its PHP twin does. A
+/// PHP twin without one is refused, as the PHP# member is.
 #[test]
-fn a_nullable_field_without_an_initial_value_starts_as_null_as_its_php_twin_does() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int? total;\n    private (int|string)? key;\n    public Report? next { get; set; }\n\n    public int? current()\n    {\n        return this.total;\n    }\n\n    public int sum()\n    {\n        return (this.total ?? 0) + (this.next?.sum() ?? 0);\n    }\n\n    public (int|string)? find() => this.key;\n}\n";
+fn a_nullable_member_that_starts_as_null_writes_it_as_its_php_twin_does() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int? total = null;\n    private (int|string)? key = null;\n    public Report? next { get; set; } = null;\n\n    public int? current()\n    {\n        return this.total;\n    }\n\n    public int sum()\n    {\n        return (this.total ?? 0) + (this.next?.sum() ?? 0);\n    }\n\n    public (int|string)? find() => this.key;\n}\n";
     let php = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nclass Report\n{\n    private ?int $total = null;\n    private int|string|null $key = null;\n    public ?Report $next = null;\n\n    public function current(): ?int\n    {\n        return $this->total;\n    }\n\n    public function sum(): int\n    {\n        return ($this->total ?? 0) + ($this->next?->sum() ?? 0);\n    }\n\n    public function find(): int|string|null\n    {\n        return $this->key;\n    }\n}\n";
     let php_without_default = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    private ?int $total;\n\n    public function current(): ?int\n    {\n        return $this->total;\n    }\n}\n";
     let settings = || Settings { check_property_initialization: true, ..settings() };
@@ -5733,7 +5735,7 @@ fn a_nullable_field_without_an_initial_value_starts_as_null_as_its_php_twin_does
 
 #[test]
 fn a_nullable_field_returned_as_a_value_is_reported_as_its_php_twin_is() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int? total;\n\n    public int current()\n    {\n        return this.total;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int? total = null;\n\n    public int current()\n    {\n        return this.total;\n    }\n}\n";
     let php = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nclass Report\n{\n    private ?int $total = null;\n\n    public function current(): int\n    {\n        return $this->total;\n    }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
@@ -6607,10 +6609,10 @@ fn a_get_only_property_no_constructor_sets_is_an_error() {
     );
 }
 
-/// Spec section 6.1: a settable property that isn't `T?` holds a value from the start, so one with storage and no
-/// initial value that no constructor sets on every path is an error, as a get-only one is. A `T?` one starts as null,
-/// a computed one has no storage, and a `required` or `init` one is set where its object is created. A get-only `T?`
-/// property is held to the same check, and needs no initial value when every path through the constructor sets it.
+/// Spec section 6.1: a settable property holds a value from the start, so one with storage and no initial value that
+/// no constructor sets on every path is an error, as a get-only one is, `T?` included. A computed one has no storage,
+/// and a `required` or `init` one is set where its object is created. A get-only `T?` property needs no initial value
+/// when every path through the constructor sets it.
 #[test]
 fn a_settable_property_that_is_not_nullable_needs_a_value_as_a_get_only_one_does() {
     let sharp = "namespace Demo;\n\nclass Order\n{\n    public int views { get; private set; }\n    public int likes { get; set; } = 0;\n    public int shares { get; set; }\n    public int clicks { get; set; }\n    public string? note { get; set; }\n    public int doubled { get => this.likes * 2; set => this.likes = value / 2; }\n    public required int stock { get; set; }\n    public int code { get; init; }\n    public string? label { get; }\n    public string? tag { get; }\n\n    public Order(bool big, string? label)\n    {\n        this.shares = 1;\n        this.label = label;\n        if (big) {\n            this.clicks = 1;\n            this.tag = \"big\";\n        }\n    }\n}\n";
@@ -6619,8 +6621,26 @@ fn a_settable_property_that_is_not_nullable_needs_a_value_as_a_get_only_one_does
         refusals(("src/Demo/Order.sharp", sharp), &[]),
         [
             "8:16 uninitialized-property `clicks` is never set: give `clicks` an initial value, or set it on every path through the constructor. | ",
+            "9:20 uninitialized-property `note` is never set: give `note` an initial value, or set it on every path through the constructor. | ",
             "14:20 uninitialized-property `tag` is get-only and never set: give `tag` an initial value, or set it on every path through the constructor. | ",
             "5:16 uninitialized-property `views` is never set: give `views` an initial value, or set it on every path through the constructor. | ",
+        ]
+    );
+}
+
+/// Spec section 6: a nullable member has no implicit starting value. A `T?` field or settable property with storage
+/// writes `= null` as any other starting value, or every path through the constructor sets it, or it is the error a
+/// non-nullable member gets, naming both fixes. A field is held to it as a property is.
+#[test]
+fn a_nullable_member_has_no_implicit_starting_value() {
+    let sharp = "namespace Demo;\n\nclass Profile\n{\n    public int? total;\n    public int? kept = null;\n    public int count;\n    public string? nickname { get; set; }\n    public string? alias { get; set; } = null;\n    public string? title { get; set; }\n\n    public Profile()\n    {\n        this.title = null;\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Profile.sharp", sharp), &[]),
+        [
+            "7:16 uninitialized-property `count` is never set: give `count` an initial value, or set it on every path through the constructor. | ",
+            "8:20 uninitialized-property `nickname` is never set: give `nickname` an initial value, or set it on every path through the constructor. | ",
+            "5:17 uninitialized-property `total` is never set: give `total` an initial value, or set it on every path through the constructor. | ",
         ]
     );
 }
@@ -6630,7 +6650,7 @@ fn a_settable_property_that_is_not_nullable_needs_a_value_as_a_get_only_one_does
 /// is an error on that class, naming the parent that declares it.
 #[test]
 fn an_inherited_property_no_constructor_sets_is_an_error_on_the_class() {
-    let base = "namespace Demo;\n\npublic abstract class Base\n{\n    public int count { get; set; }\n    public int size { get; }\n    public int? note { get; set; }\n}\n";
+    let base = "namespace Demo;\n\npublic abstract class Base\n{\n    public int count { get; set; }\n    public int size { get; }\n    public int? note { get; set; } = null;\n}\n";
     let child = "namespace Demo;\n\npublic class Child : Base\n{\n}\n";
     let kept = "namespace Demo;\n\npublic abstract class Counted\n{\n    public int count { get; set; }\n\n    public Counted()\n    {\n        this.count = 1;\n    }\n}\n\npublic class Kept : Counted\n{\n    public Kept() : super()\n    {\n    }\n}\n";
 
@@ -8123,7 +8143,7 @@ fn a_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
 
 #[test]
 fn a_nullable_field_of_a_function_type_with_an_effect_is_accepted() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n\n    public void replace(Function<Charge(Cart) uses Http> next)\n    {\n        this.fallback = next;\n    }\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback = null;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n\n    public void replace(Function<Charge(Cart) uses Http> next)\n    {\n        this.fallback = next;\n    }\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
 }
@@ -8151,8 +8171,8 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
         "src/App/Shop/Offers.php",
         "<?php\n\nnamespace App\\Shop;\n\nfinal class Plan\n{\n}\n\nfinal class Money\n{\n}\n\nfinal class Offer\n{\n}\n",
     );
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n    Function<int(Function<int(int) uses Http>)> apply;\n}\n";
-    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, Plan> */\n    private array $cache = [];\n    /** @var \\Closure(Offer): Money */\n    private \\Closure $priceOf;\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers;\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback = null;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers = [:];\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<Money(Offer)> priceOf, Function<Charge(Cart) uses Http> charge, Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n        this.apply = apply;\n    }\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, Plan> */\n    private array $cache = [];\n    /** @var \\Closure(Offer): Money */\n    private \\Closure $priceOf;\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers = [];\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n\n    /**\n     * @param \\Closure(Offer): Money $priceOf\n     * @param \\Closure(Cart): Charge $charge\n     * @param \\Closure(\\Closure(int): int): int $apply\n     */\n    public function __construct(\\Closure $priceOf, \\Closure $charge, \\Closure $apply)\n    {\n        $this->priceOf = $priceOf;\n        $this->charge = $charge;\n        $this->apply = $apply;\n    }\n}\n";
     let sharp_reader = "namespace App.Shop;\n\npublic class Receipt\n{\n    public static int size(Checkout checkout) => global.count(checkout.cache);\n}\n";
     let php_reader = "<?php\n\nnamespace App\\Shop;\n\nfinal class Receipt\n{\n    public static function size(Checkout $checkout): int { return count($checkout->cache); }\n}\n";
 
@@ -8163,10 +8183,10 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
         [
             "8:39 unused-property",
             "9:57 unused-property",
-            "10:49 unused-property",
             "5:23 unused-property",
-            "6:28 unused-property",
-            "7:38 unused-property",
+            "10:49 write-only-property",
+            "6:28 write-only-property",
+            "7:38 write-only-property",
         ]
     );
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
@@ -10708,7 +10728,7 @@ fn explained(analyzed: (&'static str, &'static str), others: &[(&'static str, &'
 /// and a type argument outside its bound or beyond the type parameters is reported where it is written.
 #[test]
 fn the_type_arguments_of_new_fix_the_type_parameters_of_the_class() {
-    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? item { get; set; }\n}\n\npublic class Report\n{\n    public static PaginatedList<Order> keepPage(PaginatedList<Order> page) => page;\n\n    public static Box<Order> keepBox(Box<Order> box) => box;\n\n    public static Box<Line> keepLineBox(Box<Line> box) => box;\n\n    public static Any lined(List<Line> lines) => new PaginatedList<Order>(lines);\n\n    public static PaginatedList<Order> ordered(List<Order> orders) => Report.keepPage(new PaginatedList<Order>(orders));\n\n    public static Any numbered(List<int> numbers) => new PaginatedList<int>(numbers);\n\n    public static Any paired(List<Order> orders) => new PaginatedList<Order, Order>(orders);\n\n    public static Box<Order> boxed() => Report.keepBox(new Box<Order>());\n\n    public static Box<Line> misboxed() => Report.keepLineBox(new Box<Order>());\n\n    public static PaginatedList<TItem> wrapped<TItem : DatabaseEntity>(List<TItem> items) => new PaginatedList<TItem>(items);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? item { get; set; } = null;\n}\n\npublic class Report\n{\n    public static PaginatedList<Order> keepPage(PaginatedList<Order> page) => page;\n\n    public static Box<Order> keepBox(Box<Order> box) => box;\n\n    public static Box<Line> keepLineBox(Box<Line> box) => box;\n\n    public static Any lined(List<Line> lines) => new PaginatedList<Order>(lines);\n\n    public static PaginatedList<Order> ordered(List<Order> orders) => Report.keepPage(new PaginatedList<Order>(orders));\n\n    public static Any numbered(List<int> numbers) => new PaginatedList<int>(numbers);\n\n    public static Any paired(List<Order> orders) => new PaginatedList<Order, Order>(orders);\n\n    public static Box<Order> boxed() => Report.keepBox(new Box<Order>());\n\n    public static Box<Line> misboxed() => Report.keepLineBox(new Box<Order>());\n\n    public static PaginatedList<TItem> wrapped<TItem : DatabaseEntity>(List<TItem> items) => new PaginatedList<TItem>(items);\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
@@ -11293,7 +11313,7 @@ fn an_override_that_changes_a_bound_names_the_bound() {
 /// passed to `this(…)`. The plain PHP twins keep Mago's issues.
 #[test]
 fn a_type_new_a_type_test_and_a_static_member_name_the_type_arguments_of_a_generic_class() {
-    let types = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public Self same(TFirst first, TSecond second) => this;\n}\n\npublic class Report\n{\n    public PaginatedList? shelf { get; set; }\n\n    public static void f(PaginatedList page)\n    {\n    }\n\n    public static Pair paired(Order order) => new Pair<Order, Order>();\n\n    public static Any local(PaginatedList<Order> given)\n    {\n        PaginatedList page = given;\n        return page;\n    }\n\n    public static Any listed(List<Order> orders) => new PaginatedList(orders);\n\n    public static Any pair() => new Pair();\n}\n";
+    let types = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public Self same(TFirst first, TSecond second) => this;\n}\n\npublic class Report\n{\n    public PaginatedList? shelf { get; set; } = null;\n\n    public static void f(PaginatedList page)\n    {\n    }\n\n    public static Pair paired(Order order) => new Pair<Order, Order>();\n\n    public static Any local(PaginatedList<Order> given)\n    {\n        PaginatedList page = given;\n        return page;\n    }\n\n    public static Any listed(List<Order> orders) => new PaginatedList(orders);\n\n    public static Any pair() => new Pair();\n}\n";
     let php_types = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass PaginatedList\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    public ?PaginatedList $shelf = null;\n\n    public static function f(PaginatedList $page): void\n    {\n    }\n}\n";
     let classes = "namespace Demo;\n\nimport RuntimeException;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n\npublic class Plain\n{\n}\n\npublic class Failure<TItem> : RuntimeException\n{\n    public TItem? first() => null;\n}\n";
     let tests = "namespace Demo;\n\npublic class Report\n{\n    public static bool held(Any? value) => value is Box;\n\n    public static Any? kept(Any? value) => value as Box;\n\n    public static int matched(Any? value) => match (value) { Box => 1, default => 0 };\n\n    public static bool plain(Any? value) => value is Plain;\n\n    public static int run()\n    {\n        try {\n            return 1;\n        } catch (Failure failure) {\n            return 0;\n        }\n    }\n\n    public Report(public Box<int> box { get; }) { }\n\n    public Report.empty() : this(new Box()) { }\n\n    public static Box<int>? narrowed(Any? value) => value as Box;\n\n    public static Box<int> made() => new Box();\n}\n";
@@ -11381,7 +11401,7 @@ const CHECKS: &str = "namespace Checks;\n\npublic interface Validator<TItem>\n{\
 /// 11.1's note.
 #[test]
 fn a_substitution_a_missing_marker_blocks_names_the_marker() {
-    let sharp = "namespace App;\n\nimport Checks.Slot;\nimport Checks.Validator;\nimport Demo.DatabaseEntity;\nimport Demo.Order;\nimport Demo.PaginatedList;\n\npublic class Report\n{\n    public PaginatedList<DatabaseEntity>? shelf { get; set; }\n\n    public static Any wide(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any narrow(Validator<Order> validator) => validator;\n\n    public static Any slot(Slot<DatabaseEntity> slot) => slot;\n\n    public static Any passed(PaginatedList<Order> page) => Report.wide(page);\n\n    public static Any checked(Validator<DatabaseEntity> validator) => Report.narrow(validator);\n\n    public static Any slotted(Slot<Order> slot) => Report.slot(slot);\n\n    public static PaginatedList<DatabaseEntity> returned(PaginatedList<Order> page) => page;\n\n    public static PaginatedList<DatabaseEntity> assigned(PaginatedList<Order> page)\n    {\n        PaginatedList<DatabaseEntity> wide = page;\n        return wide;\n    }\n\n    public void kept(PaginatedList<Order> page)\n    {\n        this.shelf = page;\n    }\n}\n";
+    let sharp = "namespace App;\n\nimport Checks.Slot;\nimport Checks.Validator;\nimport Demo.DatabaseEntity;\nimport Demo.Order;\nimport Demo.PaginatedList;\n\npublic class Report\n{\n    public PaginatedList<DatabaseEntity>? shelf { get; set; } = null;\n\n    public static Any wide(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any narrow(Validator<Order> validator) => validator;\n\n    public static Any slot(Slot<DatabaseEntity> slot) => slot;\n\n    public static Any passed(PaginatedList<Order> page) => Report.wide(page);\n\n    public static Any checked(Validator<DatabaseEntity> validator) => Report.narrow(validator);\n\n    public static Any slotted(Slot<Order> slot) => Report.slot(slot);\n\n    public static PaginatedList<DatabaseEntity> returned(PaginatedList<Order> page) => page;\n\n    public static PaginatedList<DatabaseEntity> assigned(PaginatedList<Order> page)\n    {\n        PaginatedList<DatabaseEntity> wide = page;\n        return wide;\n    }\n\n    public void kept(PaginatedList<Order> page)\n    {\n        this.shelf = page;\n    }\n}\n";
     let others = [("src/Demo/Paging.sharp", PAGING), ("src/Checks/Checks.sharp", CHECKS)];
     let wide = "PaginatedList<Order> cannot be used as PaginatedList<DatabaseEntity>.";
 
@@ -11897,7 +11917,7 @@ fn an_override_returns_the_type_parameter_the_member_it_overrides_returns() {
 /// The PHP twin keeps Mago's issues.
 #[test]
 fn a_property_of_a_generic_receiver_has_the_receivers_type_arguments() {
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n    public void save()\n    {\n    }\n}\n\npublic class Shelf<TItem>\n{\n    public List<TItem> items { get; set; } = [];\n\n    public Function<void(TItem)>? visit { get; set; }\n\n    public void leak(Shelf<Order> other, TItem item)\n    {\n        other.items.add(item);\n    }\n\n    public void keep(TItem item)\n    {\n        this.items.add(item);\n    }\n}\n\npublic class Stocker\n{\n    public static void fill(Shelf<Order> shelf)\n    {\n        shelf.items.add(new Order());\n    }\n}\n\npublic class OrderShelf : Shelf<Order>\n{\n    public void stock()\n    {\n        this.items.add(new Order());\n    }\n\n    public void watch()\n    {\n        this.visit = (item) => item.save();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n    public void save()\n    {\n    }\n}\n\npublic class Shelf<TItem>\n{\n    public List<TItem> items { get; set; } = [];\n\n    public Function<void(TItem)>? visit { get; set; } = null;\n\n    public void leak(Shelf<Order> other, TItem item)\n    {\n        other.items.add(item);\n    }\n\n    public void keep(TItem item)\n    {\n        this.items.add(item);\n    }\n}\n\npublic class Stocker\n{\n    public static void fill(Shelf<Order> shelf)\n    {\n        shelf.items.add(new Order());\n    }\n}\n\npublic class OrderShelf : Shelf<Order>\n{\n    public void stock()\n    {\n        this.items.add(new Order());\n    }\n\n    public void watch()\n    {\n        this.visit = (item) => item.save();\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n    public function save(): void\n    {\n    }\n}\n\n/** @template TItem */\nclass Shelf\n{\n    /** @var list<TItem> */\n    public array $items = [];\n\n    /** @var (\\Closure(TItem): void)|null */\n    public ?\\Closure $visit = null;\n\n    /**\n     * @param Shelf<Order> $other\n     * @param TItem $item\n     */\n    public function leak(Shelf $other, mixed $item): void\n    {\n        $other->items[] = $item;\n    }\n\n    /** @param TItem $item */\n    public function keep(mixed $item): void\n    {\n        $this->items[] = $item;\n    }\n}\n\nclass Stocker\n{\n    /** @param Shelf<Order> $shelf */\n    public static function fill(Shelf $shelf): void\n    {\n        $shelf->items[] = new Order();\n    }\n}\n\n/** @extends Shelf<Order> */\nclass OrderShelf extends Shelf\n{\n    public function stock(): void\n    {\n        $this->items[] = new Order();\n    }\n\n    public function watch(): void\n    {\n        $this->visit = fn($item) => $item->save();\n    }\n}\n";
 
     assert_eq!(
@@ -13311,7 +13331,7 @@ fn a_generic_call_takes_the_type_argument_an_argument_fixes() {
 /// Swift's `??` takes a `T?`, and through either branch of `?:`, a local's and an argument's alike.
 #[test]
 fn the_declared_type_a_call_goes_into_fixes_its_type_arguments() {
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic interface Cache\n{\n    T get<T>(string key);\n}\n\npublic class Report\n{\n    public Box<Order>? box { get; set; }\n\n    public Box<T> make<T>() => new Box<T>();\n\n    public static Box<T> made<T>() => new Box<T>();\n\n    public Box<T> fresh<T>() => new Box<T>();\n\n    public void show(Box<Order> box)\n    {\n    }\n\n    public List<Order> local(Cache cache)\n    {\n        List<Order> orders = cache.get(\"orders\");\n        return orders;\n    }\n\n    public void property()\n    {\n        this.box = this.make();\n    }\n\n    public Box<Order> returned()\n    {\n        return Report.made();\n    }\n\n    public Box<Order> body() => Self.made();\n\n    public void argument()\n    {\n        this.show(this.fresh());\n    }\n\n    public List<Order> coalesced(Cache cache)\n    {\n        List<Order> orders = cache.get(\"cached\") ?? [];\n        return orders;\n    }\n\n    public List<Order> picked(Cache cache, bool fresh)\n    {\n        List<Order> orders = fresh ? cache.get(\"fresh\") : cache.get(\"stale\");\n        return orders;\n    }\n\n    public void list(List<Order> orders)\n    {\n    }\n\n    public void passed(Cache cache, bool fresh)\n    {\n        this.list(cache.get(\"first\") ?? []);\n        this.list(fresh ? cache.get(\"left\") : cache.get(\"right\"));\n    }\n}\n\npublic class Shelf<TItem>\n{\n    public Box<T> shelved<T>() => new Box<T>();\n\n    public void stock(Box<TItem> box)\n    {\n    }\n\n    public void run()\n    {\n        this.stock(this.shelved());\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic interface Cache\n{\n    T get<T>(string key);\n}\n\npublic class Report\n{\n    public Box<Order>? box { get; set; } = null;\n\n    public Box<T> make<T>() => new Box<T>();\n\n    public static Box<T> made<T>() => new Box<T>();\n\n    public Box<T> fresh<T>() => new Box<T>();\n\n    public void show(Box<Order> box)\n    {\n    }\n\n    public List<Order> local(Cache cache)\n    {\n        List<Order> orders = cache.get(\"orders\");\n        return orders;\n    }\n\n    public void property()\n    {\n        this.box = this.make();\n    }\n\n    public Box<Order> returned()\n    {\n        return Report.made();\n    }\n\n    public Box<Order> body() => Self.made();\n\n    public void argument()\n    {\n        this.show(this.fresh());\n    }\n\n    public List<Order> coalesced(Cache cache)\n    {\n        List<Order> orders = cache.get(\"cached\") ?? [];\n        return orders;\n    }\n\n    public List<Order> picked(Cache cache, bool fresh)\n    {\n        List<Order> orders = fresh ? cache.get(\"fresh\") : cache.get(\"stale\");\n        return orders;\n    }\n\n    public void list(List<Order> orders)\n    {\n    }\n\n    public void passed(Cache cache, bool fresh)\n    {\n        this.list(cache.get(\"first\") ?? []);\n        this.list(fresh ? cache.get(\"left\") : cache.get(\"right\"));\n    }\n}\n\npublic class Shelf<TItem>\n{\n    public Box<T> shelved<T>() => new Box<T>();\n\n    public void stock(Box<TItem> box)\n    {\n    }\n\n    public void run()\n    {\n        this.stock(this.shelved());\n    }\n}\n";
     let analyzed = ("src/Demo/Report.sharp", sharp);
 
     for (call, recorded) in [
@@ -13729,7 +13749,7 @@ fn a_refused_value_names_its_types_as_sharp_writes_them() {
 /// PHP twin keeps Mago's text.
 #[test]
 fn an_override_names_its_members_and_types_as_sharp_writes_them() {
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic class Base\n{\n    public virtual Order? item { get; set; }\n\n    public virtual void put(Order item)\n    {\n    }\n\n    public virtual Order get(Order item) => item;\n}\n\npublic class OrderBase : Base\n{\n    public override Line? item { get; set; } = null;\n\n    public override void put(Line item)\n    {\n    }\n\n    public override Line get(Order item) => new Line();\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic class Base\n{\n    public virtual Order? item { get; set; } = null;\n\n    public virtual void put(Order item)\n    {\n    }\n\n    public virtual Order get(Order item) => item;\n}\n\npublic class OrderBase : Base\n{\n    public override Line? item { get; set; } = null;\n\n    public override void put(Line item)\n    {\n    }\n\n    public override Line get(Order item) => new Line();\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\nclass Line\n{\n}\n\nclass Base\n{\n    public ?Order $item = null;\n\n    public function put(Order $item): void\n    {\n    }\n\n    public function get(Order $item): Order\n    {\n        return $item;\n    }\n}\n\nclass OrderBase extends Base\n{\n    public ?Line $item = null;\n\n    public function put(Line $item): void\n    {\n    }\n\n    public function get(Order $item): Line\n    {\n        return new Line();\n    }\n}\n";
 
     assert_eq!(
@@ -14130,8 +14150,9 @@ fn a_member_access_refusal_names_the_member_as_sharp_writes_it() {
     );
 }
 
-/// A property no constructor initializes is named as PHP# writes it, `total`, in its class `Order`. The PHP twin keeps
-/// upstream's wording.
+/// A field no constructor initializes is PHP#'s own error, which names it as PHP# writes it, `total`, and names both
+/// fixes. Upstream's check, which offers a nullable type as a third fix, runs only on the PHP twin, in its own wording,
+/// even with `check_property_initialization` on.
 #[test]
 fn an_uninitialized_property_and_its_class_are_named_as_sharp_writes_them() {
     let sharp = "namespace Demo;\n\nclass Ledger\n{\n    private int count;\n}\n\nclass Order\n{\n    private int total;\n\n    public Order()\n    {\n    }\n}\n";
@@ -14154,8 +14175,8 @@ fn an_uninitialized_property_and_its_class_are_named_as_sharp_writes_them() {
     assert_eq!(
         uninitialized(("src/Demo/Order.sharp", sharp)),
         [
-            "3:7 missing-constructor Class `Ledger` has typed properties without default values but no constructor to initialize them. | This class needs a constructor | This property needs initialization | Properties requiring initialization: count | Add a constructor that initializes all typed properties, or provide default values.",
-            "10:17 uninitialized-property Property `total` is not initialized in the constructor of class `Order`. | This property is not initialized | In class `Order` | Typed properties without default values must be initialized in the constructor. | Initialize `total` in the constructor, provide a default value, or make the type nullable.",
+            "5:17 uninitialized-property `count` is never set: give `count` an initial value, or set it on every path through the constructor. | Declared here. | A field or a property with storage starts with the value it is given, `null` included, and no constructor sets it on every path.",
+            "10:17 uninitialized-property `total` is never set: give `total` an initial value, or set it on every path through the constructor. | Declared here. | A field or a property with storage starts with the value it is given, `null` included, and no constructor sets it on every path.",
         ]
     );
 }

@@ -22,10 +22,10 @@ use crate::utils::names::display_property_name;
 /// Reports a PHP# get-only property that nothing sets, spec section 6.1: no initial value, and no constructor, main or
 /// named, that assigns it on every path. A get-only property can be set nowhere else, and neither can a struct's
 /// property no object initializer sets, spec section 10: any but a public `init` one, which is required where the
-/// struct is created. A class's `init` property is set where its object is created. A settable property that isn't
-/// `T?` holds a value from the start, so it needs one the same way, while a `T?` one starts as null, and a field is
-/// no property. A property the class inherits from a PHP# parent is checked on the class, since an abstract parent
-/// leaves it to its subclasses, and a main constructor runs each parent's through `: super(…)`.
+/// struct is created. A class's `init` property is set where its object is created. A field or a settable property
+/// with storage holds a value from the start, so it needs one the same way, and a `T?` one has no implicit `null`. A
+/// property the class inherits from a PHP# parent is checked on the class, since an abstract parent leaves it to its
+/// subclasses, and a main constructor runs each parent's through `: super(…)`.
 pub fn check_get_only_initialization<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
 where
     A: Arena,
@@ -59,10 +59,7 @@ where
             continue;
         };
         let get_only = property.flags.is_readonly() && !property.flags.is_init();
-        let set_later = !property.flags.is_readonly()
-            && !property.flags.is_field()
-            && !property.flags.is_init()
-            && !property.flags.is_required();
+        let set_later = !property.flags.is_readonly() && !property.flags.is_init() && !property.flags.is_required();
         let struct_only = class_like_metadata.flags.is_struct() && !property.flags.is_required();
         let never_set = (get_only || set_later || struct_only)
             && !property.flags.is_promoted_property()
@@ -77,10 +74,10 @@ where
         let property_name = String::from_utf8_lossy(name.as_bytes().strip_prefix(b"$").unwrap_or(name.as_bytes()));
         let note = if get_only {
             "A get-only property is set only while its object is created, and no constructor sets it on every path."
-        } else if set_later {
-            "A property that isn't `T?` holds a value from the start, and no constructor sets it on every path."
-        } else {
+        } else if struct_only {
             "Only the struct sets this property, and no constructor sets it on every path."
+        } else {
+            "A field or a property with storage starts with the value it is given, `null` included, and no constructor sets it on every path."
         };
         let fix = format!("give `{property_name}` an initial value, or set it on every path through the constructor.");
 
@@ -120,7 +117,9 @@ pub fn check_property_initialization<'ctx, A>(
 where
     A: Arena,
 {
-    if !context.settings.check_property_initialization {
+    // PHP# holds every field and property with storage to a value, `check_get_only_initialization`, whatever this
+    // setting says, and a `T?` one to an explicit `null`, so this check, which offers a nullable type, runs on PHP only.
+    if !context.settings.check_property_initialization || context.dialect.is_sharp() {
         return Ok(());
     }
 
@@ -811,11 +810,8 @@ fn report_uninitialized_property<A>(
     issue = issue.with_note("Typed properties without default values must be initialized in the constructor.");
 
     let help = if is_inherited {
-        // PHP# calls the base class's constructor as `: super(…)`, spec section 9.
-        let parent_call = if context.dialect.is_sharp() { "`super(…)`" } else { "`parent::__construct()`" };
-
         format!(
-            "Initialize `{prop_name}` in the constructor, call {parent_call} if parent handles initialization, or provide a default value."
+            "Initialize `{prop_name}` in the constructor, call `parent::__construct()` if parent handles initialization, or provide a default value."
         )
     } else {
         format!("Initialize `{prop_name}` in the constructor, provide a default value, or make the type nullable.")

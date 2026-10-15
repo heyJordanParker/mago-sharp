@@ -1217,6 +1217,7 @@ fn a_method_is_a_public_function_with_its_return_type_after_its_parameters() {
 /// ```php
 /// private int $count = 0;
 /// protected \Lib\Calc $calc;
+/// public function __construct(\Lib\Calc $calc) { $this->calc = $calc; }
 /// ```
 ///
 /// `[32772]` and `[32770]` are `ZEND_ACC_PRIVATE` and `ZEND_ACC_PROTECTED` with `ZEND_ACC_FIELD`, `1 << 15`, which
@@ -1224,7 +1225,7 @@ fn a_method_is_a_public_function_with_its_return_type_after_its_parameters() {
 #[test]
 fn a_field_is_a_property_group_of_one_property() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int count = 0;\n    protected Calc calc;\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int count = 0;\n    protected Calc calc;\n\n    public Report(Calc calc)\n    {\n        this.calc = calc;\n    }\n}\n",
         &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")],
     );
     let class = lowered.child(lowered.root(), 2);
@@ -1251,6 +1252,26 @@ fn a_field_is_a_property_group_of_one_property() {
                     null
                     null
                 null
+              METHOD [1] "__construct" @10-13
+                PARAM_LIST
+                  PARAM
+                    ZVAL "Lib\\Calc"
+                    ZVAL "calc"
+                    null
+                    null
+                    null
+                    null
+                null
+                STMT_LIST
+                  ASSIGN
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "calc"
+                    VAR
+                      ZVAL "calc"
+                null
+                null
         "#}
     );
 }
@@ -1260,6 +1281,7 @@ fn a_field_is_a_property_group_of_one_property() {
 /// private \Sharp\Map $cache = new \Sharp\Map();
 /// private \Closure $priceOf;
 /// private \Closure $charge;
+/// public function __construct(\Closure $priceOf, \Closure $charge) { … }
 /// ```
 ///
 /// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, `[32772]`
@@ -1267,7 +1289,7 @@ fn a_field_is_a_property_group_of_one_property() {
 #[test]
 fn a_field_without_an_access_modifier_is_a_private_property() {
     let lowered = Lowered::with(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Money(Offer)> priceOf, Function<Charge(Cart) uses Http> charge)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n    }\n}\n",
         &[
             SHOP,
             (
@@ -1326,6 +1348,40 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                     null
                     null
                     null
+                null
+              METHOD [1] "__construct" @9-13
+                PARAM_LIST
+                  PARAM
+                    ZVAL "Closure"
+                    ZVAL "priceOf"
+                    null
+                    null
+                    null
+                    null
+                  PARAM
+                    ZVAL "Closure"
+                    ZVAL "charge"
+                    null
+                    null
+                    null
+                    null
+                null
+                STMT_LIST
+                  ASSIGN
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "priceOf"
+                    VAR
+                      ZVAL "priceOf"
+                  ASSIGN
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "charge"
+                    VAR
+                      ZVAL "charge"
+                null
                 null
         "#}
     );
@@ -2957,13 +3013,13 @@ fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() 
 /// ```
 ///
 /// A nullable property with accessor bodies takes the nullable type any `T?` lowers to. One whose body uses `field`
-/// starts as null, so it takes the default `null`, as a settable auto-property does. One without storage is virtual,
+/// has storage, and its `= null` is its default, as any constant initial value is. One without storage is virtual,
 /// and PHP refuses a default on a virtual property, so it takes none, get-only or not. `[256]` is `ZEND_TYPE_NULLABLE`
 /// on a class name, and `[257]` is `ZEND_NAME_NOT_FQ | ZEND_TYPE_NULLABLE`.
 #[test]
 fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
     let lowered = Lowered::with(
-        "import Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; }\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n",
+        "import Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n",
         &[common::MODEL],
     );
 
@@ -3799,12 +3855,12 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
 /// ```
 ///
 /// Spec section 11: a generic class keeps each type argument's static fields in one hidden static, whose entry under ""
-/// holds each field's initial value, or null for a nullable field written without one. `\Sharp\Internal\statics` copies
+/// holds each field's initial value. `\Sharp\Internal\statics` copies
 /// that entry the first time a type argument uses its statics.
 #[test]
 fn a_generic_class_keeps_the_initial_values_of_its_static_fields_in_one_hidden_static() {
     let lowered = Lowered::new(
-        "namespace App;\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static TItem? last { get; set; }\n}\n",
+        "namespace App;\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static TItem? last { get; set; } = null;\n}\n",
     );
     let store = (0..lowered.nodes().len() as u32)
         .map(|node| lowered.render(node))
@@ -4002,14 +4058,14 @@ fn a_get_only_property_gets_its_initial_value_in_the_constructor() {
 /// }
 /// ```
 ///
-/// A field or a settable auto-property of a nullable type without an initial value starts as null, so it takes the
-/// default `null` on the line of its name. A get-only property is `readonly`, which takes no default, so its initial
-/// value runs in the constructor. `[257]` is `ZEND_NAME_NOT_FQ | ZEND_TYPE_NULLABLE`, and `[256]` is
+/// A nullable member has no implicit starting value, spec section 6, so it writes `= null`, which a field or a settable
+/// auto-property takes as its default, as any constant initial value. A get-only property is `readonly`, which takes
+/// no default, so its initial value runs in the constructor. `[257]` is `ZEND_NAME_NOT_FQ | ZEND_TYPE_NULLABLE`, and `[256]` is
 /// `ZEND_TYPE_NULLABLE` on a class name.
 #[test]
-fn a_nullable_field_or_settable_auto_property_without_an_initial_value_defaults_to_null() {
+fn a_nullable_member_s_initial_null_is_its_default() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int? total;\n    public Calc? owner { get; set; }\n    private (int|string)? key;\n    private int? start = 1;\n    public int? limit { get; } = null;\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int? total = null;\n    public Calc? owner { get; set; } = null;\n    private (int|string)? key = null;\n    private int? start = 1;\n    public int? limit { get; } = null;\n}\n",
         &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")],
     );
     let class = lowered.child(lowered.root(), 2);
@@ -6979,7 +7035,7 @@ fn a_write_into_a_map_a_hooked_property_holds_puts_it_through_the_property() {
 #[test]
 fn a_collection_method_after_a_null_safe_link_tests_the_link_around_the_function() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Holder? holder, Holder other)\n    {\n        const lines = holder?.lines.count();\n        const next = other.next?.lines.count();\n        const made = holder?.make().count();\n        const parenthesized = (holder?.lines).count();\n    }\n}\n\nclass Holder\n{\n    public List<int> lines { get; private set; } = [];\n    public Holder? next { get; private set; }\n\n    public List<int> make() => this.lines;\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Holder? holder, Holder other)\n    {\n        const lines = holder?.lines.count();\n        const next = other.next?.lines.count();\n        const made = holder?.make().count();\n        const parenthesized = (holder?.lines).count();\n    }\n}\n\nclass Holder\n{\n    public List<int> lines { get; private set; } = [];\n    public Holder? next { get; private set; } = null;\n\n    public List<int> make() => this.lines;\n}\n",
     );
 
     assert_eq!(
@@ -7766,7 +7822,7 @@ fn a_function_type_with_effects_is_the_closure_class() {
 #[test]
 fn a_nullable_function_type_with_effects_is_the_nullable_closure_class() {
     let (hint, declaration) = lowered_field(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback = null;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n}\n",
     );
 
     assert_eq!(hint, "ZVAL [256] \"Closure\"\n");
@@ -9383,21 +9439,21 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
 
         public class Shelf<TItem>
         {
-            public Box<Order>? auto { get; set; }
+            public Box<Order>? auto { get; set; } = null;
 
-            public Box<TItem>? own { get; set; }
+            public Box<TItem>? own { get; set; } = null;
 
             public Box<Order>? logged
             {
                 get => field;
                 set { field = value; }
-            }
+            } = null;
 
-            protected Box<Order>? inherited;
+            protected Box<Order>? inherited = null;
 
-            private Box<Order>? hidden;
+            private Box<Order>? hidden = null;
 
-            public Box<Order>? fixed { get; private set; }
+            public Box<Order>? fixed { get; private set; } = null;
 
             public Box<Order>? created
             {
@@ -9438,7 +9494,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
 
         public class Order
         {
-            private static Box<Order>? latest;
+            private static Box<Order>? latest = null;
 
             public static Box<Order> make() => new Box<Order>();
         }
@@ -11871,7 +11927,7 @@ fn a_static_field_or_property_is_a_static_property_group() {
 #[test]
 fn a_static_property_with_type_arguments_has_its_type_text_around_its_type() {
     let lowered = Lowered::new(
-        "namespace App;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Registry\n{\n    public static Box<int>? latest { get; set; }\n\n    protected static Box<string>? inherited;\n\n    private static Box<int>? hidden;\n\n    public static Box<int>? last() => Registry.hidden;\n}\n",
+        "namespace App;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Registry\n{\n    public static Box<int>? latest { get; set; } = null;\n\n    protected static Box<string>? inherited = null;\n\n    private static Box<int>? hidden = null;\n\n    public static Box<int>? last() => Registry.hidden;\n}\n",
     );
     let groups: Vec<String> = lowered
         .nodes()
@@ -16363,7 +16419,7 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
 #[test]
 fn a_map_or_set_property_carries_the_plan_a_php_array_crosses_by() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Ledger\n{\n    public Map<string, int> stock { get; set; } = [:];\n    public Map<int, string> names { get; set; } = [:];\n    public Map<Status, int> counts { get; set; } = [:];\n    public Map<string, int>? spare { get; set; }\n    public static Set<string> tags { get; set; } = [];\n    public Map<string, List<Set<int>>> shelves { get; set; } = [:];\n    public int count { get; set; } = 0;\n}\n",
+        "namespace App.Tenant;\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Ledger\n{\n    public Map<string, int> stock { get; set; } = [:];\n    public Map<int, string> names { get; set; } = [:];\n    public Map<Status, int> counts { get; set; } = [:];\n    public Map<string, int>? spare { get; set; } = null;\n    public static Set<string> tags { get; set; } = [];\n    public Map<string, List<Set<int>>> shelves { get; set; } = [:];\n    public int count { get; set; } = 0;\n}\n",
     );
     // The attribute list of `#[\Sharp\Crossing(plan)]`, with the plan's rendering indented under its `ARG_LIST`.
     let crossing = |plan: &str| {
