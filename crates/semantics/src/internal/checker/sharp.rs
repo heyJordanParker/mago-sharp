@@ -47,7 +47,6 @@ use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForOf;
 use mago_syntax::cst::Function;
 use mago_syntax::cst::FunctionCall;
-use mago_syntax::cst::FunctionHint;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::GenericHint;
@@ -1508,11 +1507,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
                 None
             }
-            hint if let Some(function) = tested_function_type(hint) => {
-                report_function_type_test(function, context);
-
-                None
-            }
             // A type outside the slice, and `Self`, are refused by the walk, as anywhere in a body.
             hint if !has_type_test(hint) && (is_slice_type(hint) || matches!(hint, Hint::Union(_))) => {
                 report_not_supported(
@@ -1571,12 +1565,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        (Node::Hint(hint), Place::Pattern) if let Some(function) = tested_function_type(hint) => {
-            report_function_type_test(function, context);
-
-            None
-        }
-        // A generic class's type arguments are types, as in a body.
+        // A generic class's type arguments and a function type's parameter and result types are types, as in a body.
         (Node::Hint(hint), Place::Pattern) if is_slice_type(hint) && has_type_test(hint) => Some(Body),
         // A union's members are types, which `check_union` checks as in a body.
         (Node::Hint(hint @ Hint::Union(union)), Place::Pattern) if has_type_test(hint) => {
@@ -3626,28 +3615,6 @@ fn is_slice_type(hint: &Hint) -> bool {
         Hint::Function(function) => !function.parameters.iter().any(|parameter| matches!(parameter, Hint::Void(_))),
         _ => false,
     }
-}
-
-/// The function type `hint` tests, alone or as a member of a union, or `None` when it tests none.
-fn tested_function_type<'hint, 'arena>(hint: &'hint Hint<'arena>) -> Option<&'hint FunctionHint<'arena>> {
-    match hint {
-        Hint::Function(function) => Some(function),
-        Hint::Union(union) => tested_function_type(union.left).or_else(|| tested_function_type(union.right)),
-        _ => None,
-    }
-}
-
-/// Refuses a test of `function`: a function value keeps only the types PHP declares on it, so no test while the code
-/// runs tells one function type from another.
-fn report_function_type_test(function: &FunctionHint, context: &mut Context<'_, '_, '_>) {
-    context.report(
-        Issue::error("A function type can't be tested: a function value doesn't keep its type while the code runs.")
-            .with_annotation(Annotation::primary(function.span()).with_message("Tested here."))
-            .with_note(
-                "A function keeps neither its result type nor a parameter type the checker inferred, so no test can tell `Function<int(int)>` from `Function<string(int)>`.",
-            )
-            .with_help("Give the value its function type where it is made, as in `Function<int(int)> double = x => x * 2;`."),
-    );
 }
 
 /// Refuses the expression at `span` in a constant value: it reads a type argument, which only the running code has.

@@ -10400,7 +10400,7 @@ fn a_refused_type_test_still_declares_its_name() {
 /// refusal.
 #[test]
 fn new_of_a_refused_value_reports_nothing_more() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any make(Any value)\n    {\n        const type = value as Function<int()>;\n        return new (type)();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any make(Any value)\n    {\n        const type = value as Class<Report>;\n        return new (type)();\n    }\n}\n";
 
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -11886,6 +11886,28 @@ fn a_type_test_of_a_php_class_with_docblock_templates_passes() {
 
     assert_eq!(explained(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// Spec section 21: every type answers `is`, `as` and `match` the same way, function types included, so a lambda and a
+/// method value are tested in each. A `Closure` a plain PHP method returns declares no PHP# type, so testing it against
+/// a function type is `unknown-function-type`, in each form.
+#[test]
+fn function_types_are_tested_like_any_type() {
+    let legacy = (
+        "src/Lib/Legacy.php",
+        "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    public static function doubler(): \\Closure\n    {\n        return fn($x) => $x * 2;\n    }\n}\n",
+    );
+    let code = "namespace App;\n\nimport Lib.Legacy;\n\npublic class Shows\n{\n    public int twice(int x) => x * 2;\n\n    public void run()\n    {\n        Any? doubled = (int x) => x * 2;\n        Any? method = this.twice;\n        const a = doubled is Function<int(int)>;\n        const b = doubled as Function<string(string)>;\n        const c = match (method) { Function<int(int)> f => f(1), default => 2 };\n        const d = Legacy.doubler() is Function<int(int)>;\n        const e = Legacy.doubler() as Function<int(int)>;\n        const f = match (Legacy.doubler()) { Function<int(int)> f => f(1), default => 2 };\n    }\n}\n";
+    let unknown = |line: u32, column: u32| {
+        format!(
+            "{line}:{column} unknown-function-type The type of `Legacy.doubler()`'s function is unknown: its source declares no parameter or result types."
+        )
+    };
+
+    assert_eq!(
+        written(code, &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shows.sharp", code), &[legacy])),
+        [unknown(16, 19), unknown(17, 19), unknown(18, 26)]
+    );
 }
 
 /// Spec section 11: a plain PHP class's objects carry no type arguments while the code runs, so a type test that gives

@@ -9,6 +9,8 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use mago_allocator::LocalArena;
 use mago_analyzer::analysis_result::AnalysisResult;
+use mago_analyzer::effects::EffectSummary;
+use mago_analyzer::effects::Effects;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::Listing;
 use mago_codex::metadata::module::BindingMetadata;
@@ -226,14 +228,16 @@ impl IncrementalAnalysisService {
         let session = self.plugin_registry.create_external_analysis_session(self.database.files());
         let (library, rest): (Vec<_>, Vec<_>) = files.iter().partition(|file| file.is_standard_library);
         let reach = Reach::new(&self.codebase, &self.native_symbol_references);
+        let effects = self.effects();
 
-        let lowered_library = self.lower_all(&library, &InlineForms::default(), &errors, &reach, session.as_ref())?;
+        let lowered_library =
+            self.lower_all(&library, &InlineForms::default(), &errors, &reach, &effects, session.as_ref())?;
         let forms: InlineForms = lowered_library
             .iter()
             .filter_map(|lowered| lowered.as_ref().ok())
             .flat_map(|(_, forms, _)| forms.iter().cloned())
             .collect();
-        let lowered_rest = self.lower_all(&rest, &forms, &errors, &reach, session.as_ref())?;
+        let lowered_rest = self.lower_all(&rest, &forms, &errors, &reach, &effects, session.as_ref())?;
         let mut translations = Vec::new();
         let mut lowered: HashMap<FileId, Result<LoweredUnit, IssueCollection>> = library
             .iter()
@@ -561,6 +565,18 @@ impl IncrementalAnalysisService {
         classes.chain(class_like.all_parent_interfaces.iter().copied()).chain(traits).collect()
     }
 
+    /// The effects solve over every file's bodies, as the analysis ran it, which a PHP# function's type lists, spec
+    /// section 29.
+    fn effects(&self) -> Effects {
+        let mut summaries: Vec<(&FileId, &[EffectSummary])> =
+            self.file_states.iter().map(|(file_id, state)| (file_id, state.effect_summaries.as_slice())).collect();
+        summaries.sort_unstable_by_key(|(file_id, _)| **file_id);
+        let summaries: Vec<EffectSummary> =
+            summaries.into_iter().flat_map(|(_, summaries)| summaries.iter().cloned()).collect();
+
+        Effects::solve(&self.codebase, &summaries)
+    }
+
     /// Lowers each of `files` with `forms` to inline, and translates it to Lean as far as `reach` asks, the files the
     /// analysis reported `errors` in refused.
     fn lower_all(
@@ -569,6 +585,7 @@ impl IncrementalAnalysisService {
         forms: &InlineForms,
         errors: &HashMap<FileId, IssueCollection>,
         reach: &Reach,
+        effects: &Effects,
         session: Option<&ExternalAnalysisSession>,
     ) -> Result<Vec<Lowered>, OrchestratorError> {
         files
@@ -593,7 +610,7 @@ impl IncrementalAnalysisService {
                         });
                 });
 
-                Ok(match check(file, program, names, &artifacts, &self.codebase, forms, &issues) {
+                Ok(match check(file, program, names, &artifacts, &self.codebase, effects, forms, &issues) {
                     Ok(checked) => Ok((
                         LoweredUnit { unit: lower(&checked), namespace_classes, reaches_extension },
                         inline_forms(&checked),

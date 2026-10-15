@@ -394,6 +394,36 @@ impl Effects {
         })
     }
 
+    /// The effects of the PHP# method or lambda `function`, by full class name, each once, as a function type's `uses`
+    /// lists them: each effect of the plain PHP and the `foreign` classes it reaches, and `Sharp\Events` when it emits.
+    /// A change of state is no effect. `None` when it calls plain PHP no `extern` declares, which no function type lists,
+    /// and for a function no summary records, such as a plain PHP one or a method without a body.
+    #[must_use]
+    pub fn function_effects(&self, function: &FunctionLikeIdentifier) -> Option<Vec<Word>> {
+        let body = match function {
+            FunctionLikeIdentifier::Method(class, method) => {
+                Body::Method(ascii_lowercase_word(class.as_bytes()), ascii_lowercase_word(method.as_bytes()))
+            }
+            FunctionLikeIdentifier::Closure(name) => Body::Lambda(*name),
+            _ => return None,
+        };
+
+        let mut effects = Vec::new();
+        for (item, _) in &self.solved[*self.index.get(&body)?] {
+            let effect = match item {
+                Item::Effect(Effect::Foreign(effect)) => *effect,
+                Item::Effect(Effect::Emit) => events(),
+                Item::Effect(Effect::Unknown(_)) => return None,
+                Item::Changed(_) => continue,
+            };
+            if !effects.contains(&effect) {
+                effects.push(effect);
+            }
+        }
+
+        Some(effects)
+    }
+
     /// The issues of every effect rule. The getter rule reads only the solve, and the law rule reads which bodies are
     /// laws from `codebase`. Each message names classes as the file of the getter or law it refuses does.
     #[must_use]

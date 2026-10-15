@@ -196,11 +196,11 @@ fn type_test_of<'arena>(hint: &Hint<'arena>) -> Option<TypeTest<'arena>> {
 }
 
 /// Whether the engine's test of the type the analyzer records tests `hint`: `Any`, a generic class or a collection
-/// with its type arguments, and a union whose every member has a test. A class value is a string with no test, and a
+/// with its type arguments, a function type, and a union whose every member has a test. A class value is a string with no test, and a
 /// union with `null` is nullable, which no type pattern is.
 fn is_engine_tested(hint: &Hint<'_>) -> bool {
     match hint {
-        Hint::Mixed(_) => true,
+        Hint::Mixed(_) | Hint::Function(_) => true,
         Hint::Generic(generic) => generic.name.value != b"Class",
         Hint::Union(union) => is_tested_member(union.left) && is_tested_member(union.right),
         _ => false,

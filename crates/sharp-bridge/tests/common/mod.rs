@@ -12,6 +12,7 @@ use foldhash::HashSet;
 use mago_allocator::LocalArena;
 use mago_analyzer::Analyzer;
 use mago_analyzer::analysis_result::AnalysisResult;
+use mago_analyzer::effects::Effects;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
 use mago_codex::populator::populate_codebase;
@@ -174,7 +175,9 @@ pub fn checked_file<R>(
         .collect();
     assert!(leaks.is_empty(), "A `.sharp` message speaks PHP#.\n{}", leaks.join("\n"));
 
-    match check(file, program, names, &artifacts, &metadata, forms, &issues) {
+    // The library is scanned, not analyzed, so only the file's own bodies have effects.
+    let effects = Effects::solve(&metadata, &artifacts.effect_summaries);
+    match check(file, program, names, &artifacts, &metadata, &effects, forms, &issues) {
         Ok(checked) => Ok(then(&checked)),
         Err(Refusal::Parse(errors)) => {
             Err(errors.iter().map(|error| diagnostic(&code, Some(error.span()), "parse", &error.to_string())).collect())

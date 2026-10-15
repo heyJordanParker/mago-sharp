@@ -141,7 +141,10 @@ fn every_text_of_a_lowered_unit_is_an_offset_into_its_texts() {
         .map(|node| &texts[node.text.offset as usize..(node.text.offset + node.text.len) as usize])
         .collect();
 
-    assert_eq!(resolved, [&b"strict_types"[..], b"App\\Tenant", b"weekly", b"string", b"title", b"Report"]);
+    assert_eq!(
+        resolved,
+        [&b"strict_types"[..], b"App\\Tenant", b"weekly", b"string", b"Function<string()>", b"title", b"Report"]
+    );
     assert!(lowered.nodes().iter().any(|node| node.kind == sharp_kind::SHARP_AST_ZVAL
         && node.value == sharp_value::SHARP_STRING
         && node.text.len == 6));
@@ -207,7 +210,10 @@ fn a_compiled_file_reads_back_through_the_c_layout() {
 
     let texts: Vec<&[u8]> =
         decoded.nodes.iter().filter(|node| node.text.len != 0).map(|node| decoded.text(node.text)).collect();
-    assert_eq!(texts, [&b"strict_types"[..], b"App\\Tenant", b"weekly", b"string", b"title", b"Report"]);
+    assert_eq!(
+        texts,
+        [&b"strict_types"[..], b"App\\Tenant", b"weekly", b"string", b"Function<string()>", b"title", b"Report"]
+    );
     assert_eq!(decoded.children, lowered.children());
     assert_eq!(decoded.facts, FACTS);
 }

@@ -1994,6 +1994,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
             None => (method.name.span, NULL),
         };
+        // Spec section 14.3: a method named without parentheses is a function value, a closure of the method.
+        let return_type = if php_method_name(method) == b"__construct" {
+            return_type
+        } else {
+            let function_type = self.types.method_type(self.class, php_method_name(method));
+
+            self.function_type(return_type, function_type, self.line(start))
+        };
         self.static_type_parameters = None;
         let r#override = method.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
         let attributes = self.attributes(&method.attribute_lists, r#override, None);
@@ -4427,10 +4435,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn arrow_function(&mut self, arrow_function: &ArrowFunction) -> u32 {
         let lambda = arrow_function.span();
         let parameters = self.lambda_parameters(lambda, &arrow_function.parameter_list);
-        let ((mut statements, value), captures_type_arguments) = self.lambda_body(|lowering| {
+        let ((mut statements, value, return_type), captures_type_arguments) = self.lambda_body(|lowering| {
             (
                 lowering.collection_parameters(&arrow_function.parameter_list.parameters),
                 lowering.expression(arrow_function.expression),
+                lowering.lambda_type(lambda),
             )
         });
         if statements.is_empty()
@@ -4443,7 +4452,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 lambda,
                 arrow_function.expression,
                 b"",
-                &[parameters, NULL, value, NULL, NULL],
+                &[parameters, NULL, value, return_type, NULL],
             );
         }
 
@@ -4452,7 +4461,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements.push(self.node(SHARP_AST_RETURN, 0, line, &[value]));
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
 
-        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, NULL, NULL])
+        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, NULL])
     }
 
     /// A lambda with a block body is a `CLOSURE`, as php-src's grammar builds `function () use (…) { … }`, which makes
@@ -4460,17 +4469,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn closure(&mut self, closure: &Closure) -> u32 {
         let lambda = closure.span();
         let parameters = self.lambda_parameters(lambda, &closure.parameter_list);
-        let (body, captures_type_arguments) = self.lambda_body(|lowering| {
+        let ((body, return_type), captures_type_arguments) = self.lambda_body(|lowering| {
             let mut statements = lowering.collection_parameters(&closure.parameter_list.parameters);
             for statement in &closure.body.statements {
                 statements.push(lowering.statement(statement));
             }
 
-            lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(&closure.body), &statements)
+            (lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(&closure.body), &statements), lowering.lambda_type(lambda))
         });
         let uses = self.closure_uses(lambda, captures_type_arguments);
 
-        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, NULL, NULL])
+        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, NULL])
+    }
+
+    /// The result type of the lambda at `lambda`, which has no PHP type, with its whole type, as
+    /// [`Self::function_type`] gives it. A type that names the method's own type parameter as `#i` makes the lambda
+    /// capture the method's type arguments, as its body's would.
+    fn lambda_type(&mut self, lambda: Span) -> u32 {
+        let function_type = self.types.lambda_type(lambda);
+
+        self.function_type(NULL, function_type, self.line(lambda))
+    }
+
+    /// The result type of a PHP# method or lambda declaration: a `SHARP_TYPE_ARGS` of `php_type` and `function_type`,
+    /// the function's whole type, which `is` tests a closure of it by, or `php_type` alone when no function type takes
+    /// a closure of it.
+    fn function_type(&mut self, php_type: u32, function_type: Option<String>, line: u32) -> u32 {
+        let Some(function_type) = function_type else {
+            return php_type;
+        };
+        let text = self.type_text(line, &function_type);
+
+        self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[php_type, text])
     }
 
     /// The parameters of the lambda at `lambda`, each with its type or a null type, as PHP writes a parameter without
@@ -6372,6 +6402,7 @@ mod tests {
     use std::borrow::Cow;
 
     use mago_analyzer::artifacts::AnalysisArtifacts;
+    use mago_analyzer::effects::Effects;
     use mago_codex::metadata::CodebaseMetadata;
     use mago_database::file::File;
     use mago_names::resolver::NameResolver;
@@ -6390,12 +6421,14 @@ mod tests {
         let arena = LocalArena::new();
         let program = parse_file_with_dialect(&arena, &file, Dialect::Sharp, ParserSettings::default());
         let (artifacts, codebase, forms) = (AnalysisArtifacts::new(), CodebaseMetadata::new(), InlineForms::default());
+        let effects = Effects::solve(&codebase, &[]);
         let checked = CheckedProgram::unchecked(
             &file,
             program,
             NameResolver::new(&arena).resolve(program),
             &artifacts,
             &codebase,
+            &effects,
             &forms,
         );
 

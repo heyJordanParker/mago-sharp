@@ -5027,22 +5027,15 @@ fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
     );
 }
 
-/// A function value keeps no type while the code runs, so `is`, `as` and a `match` arm of a function type are errors,
-/// alone or in a union, while `Any` and a union of types with a test are patterns.
+/// Spec section 21: every type answers `is`, `as` and `match` the same way, function types included, alone or in a
+/// union, as `Any` and a union of types with a test do.
 #[test]
-fn a_type_test_of_a_function_type_is_an_error() {
+fn a_function_type_is_tested_like_any_type() {
     let code = leak(method(
-        "        const a = extra is Function<int(int)>;\n        const b = extra as Function<int(int)>;\n        const c = match (extra) { int|Function<int()> f => 1, default => 2 };\n        const d = extra is Any;\n        const e = extra is int|string n;\n        const f = extra as int|string;\n        return extra;\n",
+        "        const a = extra is Function<int(int)>;\n        const b = extra as Function<int(int)>;\n        const c = match (extra) { int|Function<int()> f => 1, default => 2 };\n        const d = extra is Any;\n        const e = extra is int|string n;\n        const f = extra as int|string;\n        const g = extra is Function<void(int) uses Http>;\n        return extra;\n",
     ));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:28 A function type can't be tested: a function value doesn't keep its type while the code runs.",
-            "8:28 A function type can't be tested: a function value doesn't keep its type while the code runs.",
-            "9:39 A function type can't be tested: a function value doesn't keep its type while the code runs.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// A class value is a string with no test, so `as` refuses its type and names every type it converts to.

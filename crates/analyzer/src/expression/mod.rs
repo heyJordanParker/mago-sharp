@@ -11,6 +11,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::r#enum::TEnum;
 use mago_codex::ttype::get_literal_string;
@@ -402,17 +403,18 @@ pub(crate) fn analyze_php_shape<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    let tests_function_type = hints.iter().any(|hint| names_function_type(hint));
     let mut is_refused = false;
     for hint in hints {
         is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint);
         is_refused |= report_erased_type_test(context, hint);
 
-        // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any` or of a
-        // union is `instanceof` a name spanning the whole type, and narrows to the type written, which the analysis
-        // records as the type the test reads.
+        // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any`, of a
+        // function type or of a union is `instanceof` a name spanning the whole type, and narrows to the type written,
+        // which the analysis records as the type the test reads.
         let reads_type_arguments = match hint {
             Hint::Identifier(name) => context.resolved_names.is_type_parameter(name),
-            Hint::Generic(_) | Hint::Mixed(_) | Hint::Union(_) => has_type_test(hint),
+            Hint::Generic(_) | Hint::Mixed(_) | Hint::Function(_) | Hint::Union(_) => has_type_test(hint),
             _ => false,
         };
         if reads_type_arguments {
@@ -577,6 +579,23 @@ where
             ))
             .with_annotation(Annotation::primary(test).with_message("Tests nothing."))
             .with_help(help),
+        );
+    }
+
+    // Spec section 21: a function value from plain PHP keeps no PHP# type while the code runs, so a function-type test
+    // of a value whose source declares none, such as the `Closure` a plain PHP method returns, is an error.
+    if tests_function_type
+        && let Some(value) = tested_value(node)
+        && artifacts.get_expression_type(value).is_some_and(|value_type| has_undeclared_function(value_type, context))
+    {
+        let value_text = quoted_source(context, value.span());
+        context.collector.report_with_code(
+            IssueCode::UnknownFunctionType,
+            Issue::error(format!(
+                "The type of `{value_text}`'s function is unknown: its source declares no parameter or result types."
+            ))
+            .with_annotation(Annotation::primary(value.span()).with_message("Tested here."))
+            .with_help("Call it from a PHP# lambda that declares its types, and test the lambda."),
         );
     }
 
@@ -1151,6 +1170,42 @@ pub(crate) fn is_refused_type(union: &TUnion) -> bool {
 /// on yet.
 pub(crate) fn is_refused_match(pattern_match: &PatternMatch<'_>) -> bool {
     match_arm_hints(pattern_match).into_iter().any(|hint| !has_type_test(hint))
+}
+
+/// Whether `hint` is a function type, or a union with one.
+fn names_function_type(hint: &Hint<'_>) -> bool {
+    match hint {
+        Hint::Function(_) => true,
+        Hint::Union(union) => names_function_type(union.left) || names_function_type(union.right),
+        _ => false,
+    }
+}
+
+/// The value a PHP# `is`, `as` or `match` tests.
+fn tested_value<'ast, 'arena>(node: Node<'ast, 'arena>) -> Option<&'ast Expression<'arena>> {
+    match node {
+        Node::Expression(Expression::Is(is)) => Some(is.value),
+        Node::Expression(Expression::As(r#as)) => Some(r#as.value),
+        Node::Expression(Expression::PatternMatch(pattern_match))
+        | Node::Statement(Statement::PatternMatch(pattern_match)) => Some(pattern_match.expression),
+        _ => None,
+    }
+}
+
+/// Whether `value_type` has a function whose source declares no PHP# type: a `Closure` or a function signature plain
+/// PHP wrote, or a plain PHP function or method named as a value. The engine finds no type on such a function.
+fn has_undeclared_function<A>(value_type: &TUnion, context: &Context<'_, '_, A>) -> bool
+where
+    A: Arena,
+{
+    value_type.types.iter().any(|atomic| match atomic {
+        TAtomic::Callable(TCallable::Signature(signature)) => signature.effects.is_none(),
+        TAtomic::Callable(TCallable::Alias(identifier)) => {
+            context.codebase.get_function_like(identifier).is_none_or(|function| !function.flags.is_sharp())
+        }
+        TAtomic::Object(TObject::Named(object)) => object.name.as_bytes().eq_ignore_ascii_case(b"Closure"),
+        _ => false,
+    })
 }
 
 /// The type of each type pattern in `pattern`, itself or a pattern inside it. A list pattern's rest is no type pattern:

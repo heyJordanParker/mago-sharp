@@ -1,6 +1,7 @@
 use mago_analyzer::CodebasePatternNames;
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::artifacts::CallTarget;
+use mago_analyzer::effects::Effects;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -51,6 +52,8 @@ pub struct Types<'analysis> {
     names: ResolvedNames<'analysis>,
     artifacts: &'analysis AnalysisArtifacts,
     codebase: &'analysis CodebaseMetadata,
+    /// The effects of every PHP# body, which a function's type lists.
+    effects: &'analysis Effects,
     inline_forms: &'analysis InlineForms,
 }
 
@@ -99,9 +102,10 @@ impl<'analysis> Types<'analysis> {
         names: ResolvedNames<'analysis>,
         artifacts: &'analysis AnalysisArtifacts,
         codebase: &'analysis CodebaseMetadata,
+        effects: &'analysis Effects,
         inline_forms: &'analysis InlineForms,
     ) -> Self {
-        Self { file, names, artifacts, codebase, inline_forms }
+        Self { file, names, artifacts, codebase, effects, inline_forms }
     }
 
     pub(crate) fn names(&self) -> &ResolvedNames<'analysis> {
@@ -313,6 +317,65 @@ impl<'analysis> Types<'analysis> {
         self.codebase
             .get_closure_at(self.file, span)
             .map_or((None, None), |metadata| self.function_metadata(metadata, None))
+    }
+
+    /// The whole type of the lambda written at `lambda`, which `is` tests a closure of it by: [`Self::function_type`] of
+    /// the parameter and result types the analysis gave it, written or inferred.
+    pub(crate) fn lambda_type(&self, lambda: Span) -> Option<String> {
+        let signature = self.artifacts.get_expression_type(&lambda).and_then(|r#type| match r#type.types.first() {
+            Some(TAtomic::Callable(TCallable::Signature(signature))) => Some(signature),
+            _ => None,
+        });
+        let Some(signature) = signature else {
+            unreachable!("the analysis types a lambda as its signature, not the lambda at {lambda:?}");
+        };
+        let parameters: Vec<Option<&TUnion>> =
+            signature.get_parameters().iter().map(TCallableParameter::get_type_signature).collect();
+
+        self.function_type(
+            &FunctionLikeIdentifier::for_closure(self.file, lambda),
+            &parameters,
+            signature.get_return_type(),
+        )
+    }
+
+    /// The whole type of the method `class::method`, which `is` tests a closure of it by: [`Self::function_type`] of its
+    /// declared parameter types and its result type.
+    pub(crate) fn method_type(&self, class: &[u8], method: &[u8]) -> Option<String> {
+        let metadata = self.codebase.get_method(class, method)?;
+        let parameters: Vec<Option<&TUnion>> = metadata
+            .parameters
+            .iter()
+            .map(|parameter| parameter.type_metadata.as_ref().map(|r#type| &r#type.type_union))
+            .collect();
+        let result = metadata.return_type_metadata.as_ref().map(|r#type| &r#type.type_union);
+
+        self.function_type(&FunctionLikeIdentifier::Method(word(class), word(method)), &parameters, result)
+    }
+
+    /// The type text `Function<R(P1, P2) uses E1, E2>` of the PHP# function `function`, with `parameters` and `result`,
+    /// each class's type parameter as `$i` and the function's own as `#i`, and the effects it reaches, sorted. A type
+    /// it leaves out is `Any?`. `None`, so a closure of it is of no function type, when no function type can say its
+    /// type: when the effects solve finds an effect no `uses` lists, as for plain PHP no `extern` declares, or a type is
+    /// one PHP# can't write, as the `never` of a lambda that always throws.
+    fn function_type(
+        &self,
+        function: &FunctionLikeIdentifier,
+        parameters: &[Option<&TUnion>],
+        result: Option<&TUnion>,
+    ) -> Option<String> {
+        if !parameters.iter().copied().chain([result]).flatten().all(is_written_in_sharp) {
+            return None;
+        }
+        let mut effects: Vec<String> =
+            self.effects.function_effects(function)?.into_iter().map(|effect| class_text(effect, self.codebase)).collect();
+        effects.sort_unstable();
+        effects.dedup();
+        let written =
+            |r#type: Option<&TUnion>| r#type.map_or_else(|| "Any?".to_owned(), |r#type| text(r#type, self.codebase, Parameter::Index));
+        let parameters: Vec<String> = parameters.iter().map(|parameter| written(*parameter)).collect();
+
+        Some(format!("Function<{}({}){}>", written(result), parameters.join(", "), uses_text(&effects)))
     }
 
     /// The metadata of a function the engine reads on a call, whose own bounds follow `class_bounds`.
@@ -1178,10 +1241,19 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
             let written = |r#type: Option<&TUnion>| r#type.map_or_else(|| "Any?".to_owned(), type_text);
             let parameters: Vec<String> =
                 signature.get_parameters().iter().map(|parameter| written(parameter.get_type_signature())).collect();
+            let mut effects: Vec<String> =
+                signature.effects.iter().flatten().map(|effect| class_text(*effect, codebase)).collect();
+            effects.sort_unstable();
+            effects.dedup();
 
-            format!("Function<{}({})>", written(signature.get_return_type()), parameters.join(", "))
+            format!("Function<{}({}){}>", written(signature.get_return_type()), parameters.join(", "), uses_text(&effects))
         }
     }
+}
+
+/// The `uses` of a function type text, ` uses E1, E2`, for `effects`, which are sorted, or nothing for none.
+fn uses_text(effects: &[String]) -> String {
+    if effects.is_empty() { String::new() } else { format!(" uses {}", effects.join(", ")) }
 }
 
 /// The full dotted name of the class `name`, as it is declared.
