@@ -64,6 +64,8 @@ use crate::invocation::template_result::seed_type_arguments;
 use crate::resolver::class_name::ResolutionOrigin;
 use crate::resolver::class_name::ResolvedClassname;
 use crate::resolver::class_name::class_value_class;
+use crate::resolver::class_name::holds_no_class;
+use crate::resolver::class_name::report_class_value_of_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::statement::function_like::get_this_type;
@@ -85,7 +87,34 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     where
         A: Arena,
     {
-        let classnames = resolve_classnames_from_expression(context, block_context, artifacts, self.class, false)?;
+        // PHP#'s `new (type)(…)` creates an object from a class value, spec section 25, and only a class's `Class`
+        // creates one: a `Class<int>` or a `Class<int|string>` holds a type that is no class.
+        let is_class_value = context.dialect.is_sharp() && matches!(self.class, Expression::Parenthesized(_));
+        if is_class_value {
+            let was_inside_call = block_context.flags.inside_call();
+            block_context.flags.set_inside_call(true);
+            self.class.analyze(context, block_context, artifacts)?;
+            block_context.flags.set_inside_call(was_inside_call);
+
+            if let Some(value_type) = artifacts.get_expression_type(self.class.unparenthesized()).cloned()
+                && holds_no_class(&value_type)
+            {
+                report_class_value_of_no_class(
+                    context,
+                    self.class.unparenthesized(),
+                    &value_type,
+                    "creates objects",
+                    "Create an object from the class value of a class, as in `new (typeof(Order))()`.",
+                );
+                self.argument_list.analyze(context, block_context, artifacts)?;
+                artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+                return Ok(());
+            }
+        }
+
+        let classnames =
+            resolve_classnames_from_expression(context, block_context, artifacts, self.class, is_class_value)?;
         if classnames.is_empty() {
             return Ok(());
         }
@@ -819,16 +848,16 @@ where
 
     // PHP#'s `new TItem(…)` creates the type argument, and `new (type)(…)` the class a class value holds, any subclass
     // of the class, so the class keeps a constructor every subclass must keep, as `new Self(…)` needs, spec section 25.
-    // A plain PHP class's own constructor checks the call.
-    let holds_any_subclass =
-        context.dialect.is_sharp() && classname.is_from_class_string() && !classname.is_from_literal_class_string();
-    if has_inconsistent_constructor && holds_any_subclass && metadata.flags.is_sharp() {
+    // That holds for every class value, `typeof(Loose)` included, as the spec writes the rule. A plain PHP class's own
+    // constructor checks the call.
+    let through_class_value = context.dialect.is_sharp() && classname.is_from_class_string();
+    if has_inconsistent_constructor && through_class_value && metadata.flags.is_sharp() {
         let written = String::from_utf8_lossy(&context.source_file.contents[class_expression_span.to_range_usize()]);
         let holder = match &classname.origin {
             ResolutionOrigin::SpecificClassLikeString(TClassLikeString::Generic { parameter_name, .. }) => {
                 format!("`{parameter_name}` can be")
             }
-            _ => "the class value can hold".to_owned(),
+            _ => "a class value can hold".to_owned(),
         };
         context.collector.report_with_code(
             IssueCode::UnsafeInstantiation,
@@ -842,7 +871,7 @@ where
         );
     } else if has_inconsistent_constructor
         && !skip_constructor_warning
-        && !holds_any_subclass
+        && !through_class_value
         && (classname.is_static() || classname.is_from_class_string() || classname.is_object_instance())
     {
         let mut issue = if classname.is_static() {

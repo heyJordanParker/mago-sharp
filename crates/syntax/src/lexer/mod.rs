@@ -577,6 +577,8 @@ impl<'input> Lexer<'input> {
                         read_literal_string(&self.input, *quote, 0)
                     }
                     [b'"', ..] => (TokenKind::DoubleQuote, 1),
+                    // `typeof` takes a type, so `typeof(int)` in a `.sharp` file holds the type `int`, not a cast.
+                    [b'(', ..] if self.sharp && self.follows_type_of() => (TokenKind::LeftParenthesis, 1),
                     [b'(', ..] => 'parenthesis: {
                         let mut peek_offset = 1;
                         while let Some(&b) = self.input.read(peek_offset + 1).get(peek_offset) {
@@ -1224,6 +1226,16 @@ impl<'input> Lexer<'input> {
         let kind = if slashes > 0 { TokenKind::QualifiedIdentifier } else { TokenKind::Identifier };
 
         (kind, length)
+    }
+
+    /// Whether the code before the current offset ends in the word `typeof`, with only whitespace after it.
+    fn follows_type_of(&self) -> bool {
+        let before = self.input.slice_in_range(0, self.input.current_position().offset);
+        let before = before.trim_ascii_end();
+
+        before.strip_suffix(b"typeof").is_some_and(|rest| {
+            rest.last().is_none_or(|&byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'$' | b'\\'))
+        })
     }
 
     #[inline]

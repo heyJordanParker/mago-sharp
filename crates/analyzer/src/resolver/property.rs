@@ -64,6 +64,8 @@ use crate::expression::with::is_set_by_with;
 use crate::external::PropertyAccessKind;
 use crate::invocation::infer_parameter_templates_from_argument;
 use crate::invocation::rename_trait_objects;
+use crate::resolver::class_name::class_value_classes;
+use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
@@ -128,6 +130,9 @@ pub struct PropertyResolutionResult {
     /// The static method of the extension's computed property a PHP# read runs, spec section 26, which leaves the
     /// other properties empty.
     pub extension: Option<MethodIdentifier>,
+    /// True when the object is a PHP# class value and the member is no member of `Class`, so the access reads or
+    /// writes a static member of the classes the value holds, spec section 25, which leaves the properties empty.
+    pub class_value: bool,
 }
 
 /// Resolves all possible instance properties from an object expression and a member selector.
@@ -182,6 +187,15 @@ where
         if object_type.is_nullable() && !is_null_safe && !object_type.has_nullsafe_null() {
             report_access_on_null(context, block_context, object_expression.span(), operator_span, false, false);
         }
+
+        return Ok(result);
+    }
+
+    if context.dialect.is_sharp()
+        && let ClassLikeMemberSelector::Identifier(_) = property_selector
+        && (class_value_classes(&object_type).is_some() || holds_no_class(&object_type))
+    {
+        result.class_value = true;
 
         return Ok(result);
     }

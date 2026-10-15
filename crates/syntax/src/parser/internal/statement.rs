@@ -77,7 +77,7 @@ where
                 .parse_struct_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())
                 .map(Statement::Struct),
             T![Identifier] if self.is_at_emit()? => self.parse_emit().map(Statement::Emit),
-            T!["const" | Identifier | "(" | "readonly"] if self.is_at_local_declaration()? => {
+            T!["const" | Identifier | "(" | "self" | "readonly"] if self.is_at_local_declaration()? => {
                 self.parse_local_declaration().map(Statement::LocalDeclaration)
             }
             T!["return"] => self.parse_return().map(Statement::Return),

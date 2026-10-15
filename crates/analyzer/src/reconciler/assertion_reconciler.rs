@@ -1229,17 +1229,15 @@ where
 
                         continue;
                     }
-                    TClassLikeString::Generic { constraint, .. } => constraint.as_ref(),
-                    TClassLikeString::OfType { constraint, .. } => constraint.as_ref(),
+                    TClassLikeString::Generic { constraint, .. } => std::slice::from_ref(constraint.as_ref()),
+                    TClassLikeString::OfType { constraint, .. } => constraint.types.as_ref(),
                 };
 
-                if is_contained_by(
-                    context.codebase,
-                    &TClassLikeString::literal(assertion_class_string_val).get_object_type(context.codebase),
-                    constraint,
-                    true,
-                    &mut ComparisonResult::new(),
-                ) {
+                let asserted_object =
+                    TClassLikeString::literal(assertion_class_string_val).get_object_type(context.codebase);
+                if constraint.iter().any(|constraint| {
+                    is_contained_by(context.codebase, &asserted_object, constraint, true, &mut ComparisonResult::new())
+                }) {
                     if existing_var_type.is_single()
                         && let Some(key) = &key
                         && let Some(span) = span

@@ -235,7 +235,7 @@ fn replace_atomic(
             return atomic_type;
         }
         TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
-            *Arc::make_mut(constraint) = replace_atomic(constraint, template_result, codebase, opts);
+            *Arc::make_mut(constraint) = self::replace(constraint, template_result, codebase, opts);
 
             return atomic_type;
         }
@@ -447,10 +447,10 @@ fn handle_template_param_class_substitution(
 
     for template_atomic_type in template_type.types.as_ref() {
         if let TAtomic::Object(_) = &template_atomic_type {
-            atomic_types.push(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType {
-                kind: *kind,
-                constraint: Arc::new(template_atomic_type.clone()),
-            })));
+            atomic_types.push(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::of_type(
+                *kind,
+                template_atomic_type.clone(),
+            ))));
         }
     }
 
@@ -463,10 +463,8 @@ fn handle_template_param_class_substitution(
                 constraint: Arc::new(atomic_type_as.clone()),
             })));
         } else {
-            atomic_types.push(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType {
-                kind: *kind,
-                constraint: Arc::new(atomic_type_as),
-            })));
+            atomic_types
+                .push(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::of_type(*kind, atomic_type_as))));
         }
     }
 

@@ -7068,6 +7068,41 @@ fn a_type_parameter_without_a_bound_is_mixed_alone_nullable_or_in_a_union() {
 }
 
 /// ```php
+/// /** @template T of object */
+/// public function keep(object $value): object { return $value; }
+/// ```
+///
+/// A type parameter bounded by `Object` is PHP's `object`, and a call from plain PHP gives it `Object`.
+#[test]
+fn a_type_parameter_bounded_by_object_is_php_object() {
+    let lowered = Lowered::new(indoc! {"
+        class Report
+        {
+            public T keep<T : Object>(T value) => value;
+        }
+    "});
+    let method = lowered.child(lowered.child(lowered.child(lowered.root(), 1), 2), 0);
+
+    assert_eq!(
+        format!("{}{}", lowered.render(lowered.child(method, 0)), lowered.render(lowered.child(method, 3))),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM
+                ZVAL [1] "Object"
+                ZVAL "value"
+                null
+                null
+                null
+                null
+              SHARP_TYPE_ARGS
+                ZVAL "Object"
+                null
+            ZVAL [1] "Object"
+        "#}
+    );
+}
+
+/// ```php
 /// /** @template TItem of \Lib\DatabaseEntity&\Lib\Shareable */
 /// public function share(\Lib\DatabaseEntity&\Lib\Shareable $item): (\Lib\DatabaseEntity&\Lib\Shareable)|null
 /// ```
@@ -8103,7 +8138,7 @@ fn a_bound_writes_a_type_parameter_of_its_own_class_as_any() {
 /// call. A lambda writes them the same way, and the engine reads them from the method's call the lambda captured them
 /// from: a lambda whose body, or a lambda in it, names a `#` is a `CLOSURE` whose `use` list ends with the method's
 /// hidden local, by value. A method whose call needs its type arguments, or whose parameter names a PHP# class with type
-/// arguments, a class value of one, or a type parameter, ends its parameter list with its metadata: a `SHARP_TYPE_ARGS` of the bounds of its
+/// arguments, a class value of one or of a type that is no class, or a type parameter, ends its parameter list with its metadata: a `SHARP_TYPE_ARGS` of the bounds of its
 /// own type parameters and a type text list with each parameter's type, `Any?` for one the engine never checks. Plain
 /// PHP's generics are erased, so a parameter of a plain PHP class with type arguments is never checked, and a call from
 /// plain PHP gives a method's own type parameters none, so a parameter of one is never checked either.
@@ -8146,6 +8181,8 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
             public List<Any?> unbound() => Repository.repeat(new Holder().get(), 4);
 
             public void kinds(Class<PaginatedList<Order>> pages, Class<PaginatedList> any, Class<Order> order, Class<Holder<Order>> holders) { }
+
+            public void types(Class<int|string> either, Class<int> number, Class<Any> anything) { }
         }
 
         public class PaginatedList<TItem : DatabaseEntity>
@@ -8341,6 +8378,13 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
             .ends_with(&metadata("null", r#"ZVAL "Class<App.PaginatedList<App.Order>>, Any?, Any?, Any?""#)),
         "{}",
         lowered.parameters_of("kinds")
+    );
+    // A class value of a type that is no class is only the text `typeof` gives that type, which PHP's `string` type
+    // doesn't check.
+    assert!(
+        lowered.parameters_of("types").ends_with(&metadata("null", r#"ZVAL "Class<int|string>, Class<int>, Any?""#)),
+        "{}",
+        lowered.parameters_of("types")
     );
     assert_eq!(lowered.parameters_of("pairWith"), format!("PARAM_LIST\n{}", metadata(r#"ZVAL "Any?""#, "null")));
     assert!(!lowered.parameters_of("run").contains("SHARP_TYPE_ARGS"));
@@ -8816,6 +8860,54 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs
         "STMT_LIST\n  RETURN\n    MATCH\n      ZVAL true\n      MATCH_ARM_LIST\n        MATCH_ARM\n          EXPR_LIST\n            SHARP_IS_TYPE\n              VAR\n                ZVAL \"value\"\n              ZVAL \"#0\"\n          ZVAL 1\n        MATCH_ARM\n          null\n          ZVAL 0\n"
     );
     assert_eq!(lowered.body_of("kind"), "STMT_LIST\n  RETURN\n    SHARP_TYPE_OF\n      ZVAL \"#0\"\n");
+}
+
+/// `typeof` of a type that is no class is a `SHARP_TYPE_OF` of its type text, as `typeof(T)` is when `T` runs as that
+/// type, so the engine gives its class value. A nullable or union type is one type, spelled whole. `typeof(Self)` is
+/// PHP's `static::class`, and a static call through it is PHP's `static::method()`.
+#[test]
+fn typeof_of_a_type_that_is_no_class_spells_its_type() {
+    let lowered = Lowered::new(indoc! {"
+        namespace App;
+
+        public class Order
+        {
+            public static string defaultTag() => \"div\";
+
+            public static Any whole() => typeof(int);
+
+            public static Any nullable() => typeof(int?);
+
+            public static Any either() => typeof(string|int);
+
+            public static Any held() => typeof((Order|int)?);
+
+            public static Any orders() => typeof(List<Order>);
+
+            public static Any counts() => typeof(Map<string, int>);
+
+            public static Any numbers() => typeof(Set<int>);
+
+            public static Any own() => typeof(Self);
+
+            public static string tag() => typeof(Self).defaultTag();
+        }
+    "});
+    let type_of = |text: &str| format!("STMT_LIST\n  RETURN\n    SHARP_TYPE_OF\n      ZVAL \"{text}\"\n");
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert_eq!(lowered.body_of("whole"), type_of("int"));
+    assert_eq!(lowered.body_of("nullable"), type_of("int?"));
+    assert_eq!(lowered.body_of("either"), type_of("int|string"));
+    assert_eq!(lowered.body_of("held"), type_of("(App.Order|int)?"));
+    assert_eq!(lowered.body_of("orders"), type_of("List<App.Order>"));
+    assert_eq!(lowered.body_of("counts"), type_of("Map<string, int>"));
+    assert_eq!(lowered.body_of("numbers"), type_of("Set<int>"));
+    assert_eq!(lowered.body_of("own"), "STMT_LIST\n  RETURN\n    CLASS_NAME\n      ZVAL [1] \"static\"\n");
+    assert_eq!(
+        lowered.body_of("tag"),
+        "STMT_LIST\n  RETURN\n    STATIC_CALL\n      ZVAL [1] \"static\"\n      ZVAL \"defaultTag\"\n      ARG_LIST\n"
+    );
 }
 
 /// `new TItem(…)` is a `NEW` that names no class under the `SHARP_TYPE_ARGS` of `TItem`'s text, so the engine creates
@@ -11432,6 +11524,47 @@ fn a_member_read_through_a_class_value_is_the_fetch_of_its_kind_on_that_class() 
 }
 
 /// ```php
+/// $type = \Sharp\Class::of($calc);
+/// return \strlen($type::label());
+/// ```
+///
+/// A class value of an enum, as `Class.of` gives for an enum case, calls the enum's static as a class's is called.
+#[test]
+fn a_static_call_through_a_class_value_of_an_enum_is_a_static_call_on_it() {
+    assert_eq!(
+        body_in(
+            "int run(Calc calc)",
+            "        const type = Class.of(calc);\n        return global.strlen(type.label());\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib; enum Calc { case One; public static function label(): string { return 'calc'; } }",
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "type"
+                STATIC_CALL
+                  ZVAL "Sharp\\Class"
+                  ZVAL "of"
+                  ARG_LIST
+                    VAR
+                      ZVAL "calc"
+              RETURN
+                CALL
+                  ZVAL "strlen"
+                  ARG_LIST
+                    STATIC_CALL
+                      VAR
+                        ZVAL "type"
+                      ZVAL "label"
+                      ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
 /// $type = $extra > 0 ? \Lib\Calc::class : null;
 /// $max = ($type === null ? null : $type::MAX);
 /// $count = ($type === null ? null : $type::$count);
@@ -12214,14 +12347,15 @@ fn a_file_lowers_to_the_same_bytes_from_any_workspace_root_and_names_no_path() {
 /// ```php
 /// $settings = new \Sharp\Environment();
 /// $lines = \Sharp\List::wrap($extra);
+/// $type = \Sharp\Class::of($this);
 /// return 1;
 /// ```
 #[test]
-fn environment_and_list_are_the_classes_of_the_sharp_namespace() {
+fn environment_list_and_class_are_the_classes_of_the_sharp_namespace() {
     assert_eq!(
         body_in(
             RUN,
-            "        const settings = new Environment();\n        const lines = List.wrap(extra);\n        return 1;\n",
+            "        const settings = new Environment();\n        const lines = List.wrap(extra);\n        const type = Class.of(this);\n        return 1;\n",
             &[common::ENVIRONMENT]
         ),
         indoc! {r#"
@@ -12241,6 +12375,15 @@ fn environment_and_list_are_the_classes_of_the_sharp_namespace() {
                   ARG_LIST
                     VAR
                       ZVAL "extra"
+              ASSIGN
+                VAR
+                  ZVAL "type"
+                STATIC_CALL
+                  ZVAL "Sharp\\Class"
+                  ZVAL "of"
+                  ARG_LIST
+                    VAR
+                      ZVAL "this"
               RETURN
                 ZVAL 1
         "#}
@@ -17811,6 +17954,91 @@ fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
             "#}
             .to_owned()
         )
+    );
+}
+
+/// Spec section 26: a member of `extension<T>(List<T> items)` runs as a generic static method whose type parameters
+/// are the block's and then its own, so its parameter list ends with their metadata, as any generic method's does. A
+/// call passes the type arguments the checker inferred from the receiver, and those the member names after them.
+#[test]
+fn a_generic_extension_member_takes_the_type_arguments_of_its_block_and_its_own() {
+    let lowered = Lowered::with(
+        indoc! {"
+        namespace App;
+
+        import App.Lists.ListExtensions;
+
+        public class Report
+        {
+            public List<string> twice(List<string> names) => names.twice();
+
+            public List<string> converted(List<Order> orders) => orders.converted<string>(order => \"order\");
+        }
+    "},
+        &[
+            ("src/App/Order.sharp", "namespace App;\n\npublic class Order\n{\n}\n"),
+            (
+                "src/App/Lists/ListExtensions.sharp",
+                "namespace App.Lists;\n\npublic static class ListExtensions\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> twice() => items;\n\n        public List<TOut> converted<TOut>(Function<TOut(T)> convert) => [];\n    }\n}\n",
+            ),
+        ],
+    );
+
+    assert_eq!(
+        lowered.body_of("twice"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL "App\\Lists\\ListExtensions"
+                  ZVAL "twice"
+                  ARG_LIST
+                    VAR
+                      ZVAL "names"
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "string"
+        "#}
+    );
+    let converted = lowered.body_of("converted");
+    assert!(
+        converted.ends_with("        SHARP_TYPE_ARGS\n          null\n          ZVAL \"App.Order, string\"\n"),
+        "{converted}"
+    );
+
+    let extensions = Lowered::with(
+        "namespace App.Lists;\n\nimport App.Order;\n\npublic static class ListExtensions\n{\n    extension<T : Order>(List<T> items)\n    {\n        public List<TOut> converted<TOut>(Function<TOut(T)> convert) => [];\n    }\n}\n",
+        &[("src/App/Order.sharp", "namespace App;\n\npublic class Order\n{\n}\n")],
+    );
+    assert_eq!(
+        extensions.declared("converted"),
+        indoc! {r#"
+            METHOD [17] "converted" @9-9
+              PARAM_LIST
+                PARAM
+                  TYPE [7]
+                  ZVAL "items"
+                  null
+                  null
+                  null
+                  null
+                PARAM
+                  ZVAL "Closure"
+                  ZVAL "convert"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  ZVAL "App.Order, Any?"
+                  null
+              null
+              STMT_LIST
+                RETURN
+                  ARRAY [3]
+              TYPE [7]
+              null
+        "#}
     );
 }
 

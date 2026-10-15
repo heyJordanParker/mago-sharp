@@ -51,6 +51,8 @@ use crate::effects::ReadonlyCall;
 use crate::error::AnalysisError;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
+use crate::resolver::class_name::class_value_classes;
+use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
@@ -188,6 +190,9 @@ pub struct MethodResolutionResult {
     pub called_properties: Vec<CalledProperty>,
     /// The static method of the extension a PHP# call runs, spec section 26, which leaves the other targets empty.
     pub extension: Option<MethodIdentifier>,
+    /// True when the receiver is a PHP# class value and the method is no member of `Class`, so the call is a static
+    /// call on the classes the value holds, spec section 25, which leaves the other targets empty.
+    pub class_value: bool,
     /// True if any selector was dynamic (e.g., from a generic string), making the method name unknown.
     pub has_dynamic_selector: bool,
     /// True if any resolution path involved an object with an ambiguous type (e.g., `mixed`, generic `object`).
@@ -244,6 +249,17 @@ where
         return Ok(result);
     }
 
+    if context.dialect.is_sharp()
+        && let ClassLikeMemberSelector::Identifier(_) = selector
+        && artifacts
+            .get_expression_type(object)
+            .is_some_and(|object_type| class_value_classes(object_type).is_some() || holds_no_class(object_type))
+    {
+        result.class_value = true;
+
+        return Ok(result);
+    }
+
     let mut method_names = Vec::new();
 
     for resolved_selector in resolved_selectors {
@@ -258,6 +274,7 @@ where
         }
     }
 
+    let mut missing: HashSet<(Word, Word)> = HashSet::default();
     if let Some(object_type) = artifacts.get_expression_type(object) {
         // A PHP# collection is called as every collection its place is declared as, whatever it holds, so a method
         // resolves on each of them, and a collection that lacks it is reported once.
@@ -404,13 +421,17 @@ where
 
                                     result.has_invalid_target = true;
                                 } else {
-                                    report_non_existent_method(
-                                        context,
-                                        object.span(),
-                                        selector.span(),
-                                        classname,
-                                        method_name,
-                                    );
+                                    // A PHP# union of one generic class, as `Pair<int, Order>|Pair<string, Order>`,
+                                    // misses the method once.
+                                    if !context.dialect.is_sharp() || missing.insert((classname, method_name)) {
+                                        report_non_existent_method(
+                                            context,
+                                            object.span(),
+                                            selector.span(),
+                                            classname,
+                                            method_name,
+                                        );
+                                    }
 
                                     result.has_invalid_target = true;
                                 }

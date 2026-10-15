@@ -16,13 +16,13 @@ where
             && self.stream.peek_kind(1)? == Some(T!["("]))
     }
 
-    /// Parses `typeof(Class)`, or `typeof(PaginatedList<Order>)`, the class value with type arguments of spec section 25.
+    /// Parses `typeof(X)` of any type `X`, as `typeof(Order)`, `typeof(PaginatedList<Order>)` or `typeof(int)`, spec
+    /// section 25.
     pub(crate) fn parse_type_of(&mut self) -> Result<TypeOf<'arena>, ParseError> {
         Ok(TypeOf {
             r#typeof: self.expect_any_keyword()?,
             left_parenthesis: self.stream.eat_span(T!["("])?,
-            class: self.parse_identifier()?,
-            type_arguments: self.parse_optional_type_argument_list()?,
+            r#type: self.parse_type_hint()?,
             right_parenthesis: self.stream.eat_span(T![")"])?,
         })
     }

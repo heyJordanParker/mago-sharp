@@ -13,6 +13,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleKind;
+use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
@@ -64,6 +65,7 @@ use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
+use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
@@ -82,6 +84,7 @@ use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_statics;
 use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
+use crate::resolver::extension::class_member;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
 use crate::statement::function_like::FunctionLikeBody;
@@ -1493,6 +1496,10 @@ where
         }
     }
 
+    if context.dialect.is_sharp() && class_like_metadata.flags.is_sharp() {
+        report_statics_named_like_class_members(context, members);
+    }
+
     // Check trait constant overrides AFTER constants have been analyzed
     // so we can compare their inferred values
     check_class_like_constants(context, class_like_metadata, members);
@@ -1510,6 +1517,50 @@ where
     }
 
     Ok(())
+}
+
+/// Reports each static of a PHP# class-like named like a member of `Class`, spec section 25, as TypeScript's error 2699
+/// refuses a static named like a member of `Function`: `type.y` through a class value reaches a static method, a
+/// static property, a constant and an enum case alike, and `Class`'s own member wins, so the static would never run. A
+/// member name is compared ignoring case, as PHP calls a method, and the message quotes each name as written.
+fn report_statics_named_like_class_members<A>(context: &mut Context<'_, '_, A>, members: &[ClassLikeMember<'_>])
+where
+    A: Arena,
+{
+    let mut statics: Vec<(&[u8], Span)> = Vec::new();
+    for member in members {
+        match member {
+            ClassLikeMember::Method(method) if method.is_static() => {
+                statics.push((method.name.value, method.name.span));
+            }
+            ClassLikeMember::Property(property) if property.modifiers().iter().any(Modifier::is_static) => {
+                for variable in property.variables() {
+                    statics.push((variable.name.strip_prefix(b"$").unwrap_or(variable.name), variable.span));
+                }
+            }
+            ClassLikeMember::Constant(constant) => {
+                statics.extend(constant.items.iter().map(|item| (item.name.value, item.name.span)));
+            }
+            ClassLikeMember::EnumCase(enum_case) => {
+                statics.push((enum_case.item.name().value, enum_case.item.name().span));
+            }
+            _ => {}
+        }
+    }
+
+    for (name, span) in statics {
+        let Some(member) = class_member(context.codebase, name) else {
+            continue;
+        };
+        let (name, member) = (BytesDisplay(name), member.original_name);
+        context.collector.report_with_code(
+            IssueCode::NameAlreadyInUse,
+            Issue::error(format!(
+                "`type.{name}` on a class value reaches `Class`'s member `{member}`, never this static. Rename it."
+            ))
+            .with_annotation(Annotation::primary(span).with_message("Declared here.")),
+        );
+    }
 }
 
 /// Reports a PHP# class or event, declared at `span`, that does not give the property `property_name` that `parent`
@@ -2834,6 +2885,9 @@ fn check_abstract_method_signatures<'ctx, A>(
                 continue;
             }
 
+            let declaring_class_name = required_constructor_class(context, class_like_metadata, *method_name_atom)
+                .unwrap_or(declaring_class_name);
+            let declaring_class_name_str = declaring_class_name.as_bytes();
             if !checked_signatures.insert((declaring_class_name, *method_name_atom)) {
                 continue;
             }
@@ -3570,6 +3624,122 @@ where
     true
 }
 
+/// The class whose own constructor is written `required` nearest above the PHP# class `class_like_metadata`, when
+/// `method_name` is the constructor, spec section 25: `new Self(…)` creates any class below it with the arguments that
+/// constructor takes, so each constructor below it is compared with that one, not with its parent's.
+fn required_constructor_class<A>(
+    context: &Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    method_name: Word,
+) -> Option<Word>
+where
+    A: Arena,
+{
+    if !class_like_metadata.flags.is_sharp() || method_name.as_bytes() != b"__construct" {
+        return None;
+    }
+
+    std::iter::successors(class_like_metadata.direct_parent_class, |class| {
+        context.codebase.get_class_like(class.as_bytes())?.direct_parent_class
+    })
+    .find(|class| {
+        context
+            .codebase
+            .get_method(class.as_bytes(), b"__construct")
+            .is_some_and(|constructor| constructor.flags.is_required())
+    })
+}
+
+/// Reports a PHP# constructor that `new Self(…)` cannot call, below a `required` one, by the rule of spec section 25 it
+/// breaks: it must start with the parameters of the `required` constructor, and leave no parameter without a default
+/// that constructor leaves out, whether it adds one or drops the default the `required` constructor gives. The message
+/// names the shortest `new Self(…)`, and the code stays the one the signature check found. A parameter without a type,
+/// which only a file the parser refused declares, reads as `Any?`.
+fn report_required_constructor_mismatch<A>(
+    context: &mut Context<'_, '_, A>,
+    child_name: &Word,
+    parent_name: &Word,
+    child_method: &FunctionLikeMetadata,
+    parent_method: &FunctionLikeMetadata,
+    incompatibility: method_signature::SignatureCompatibilityIssue,
+    primary_span: Span,
+) where
+    A: Arena,
+{
+    use method_signature::SignatureCompatibilityIssue;
+
+    let name = |parameter: &FunctionLikeParameterMetadata| {
+        String::from_utf8_lossy(mago_bytes::trim_start_byte(parameter.name.0.as_bytes(), b'$')).into_owned()
+    };
+    let arguments = parent_method
+        .parameters
+        .iter()
+        .filter(|parameter| !parameter.flags.has_default())
+        .map(name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let keeps_the_start = parent_method
+        .parameters
+        .iter()
+        .enumerate()
+        .all(|(index, parent)| child_method.parameters.get(index).is_some_and(|child| child.name == parent.name));
+    let without_default: Vec<Word> = child_method
+        .parameters
+        .iter()
+        .enumerate()
+        .filter(|(index, child)| {
+            !child.flags.has_default()
+                && parent_method.parameters.get(*index).is_none_or(|parent| parent.flags.has_default())
+        })
+        .map(|(_, child)| word(name(child)))
+        .collect();
+
+    let code = match incompatibility {
+        SignatureCompatibilityIssue::ParameterNameMismatch { .. } => IssueCode::IncompatibleParameterName,
+        SignatureCompatibilityIssue::IncompatibleParameterType { .. } => IssueCode::IncompatibleParameterType,
+        _ => IssueCode::IncompatibleParameterCount,
+    };
+    let leading_type_differs = matches!(incompatibility, SignatureCompatibilityIssue::IncompatibleParameterType { .. });
+    let issue = match without_default.as_slice() {
+        [first, ..] if keeps_the_start && !leading_type_differs => {
+            let fix = if without_default.len() == 1 {
+                format!("give `{first}` a default")
+            } else {
+                "give each a default".to_owned()
+            };
+
+            Issue::error(format!(
+                "`{child_name}`'s constructor gives {} no default, so `new Self({arguments})` cannot call it: {fix}.",
+                and_list(&without_default)
+            ))
+        }
+        _ => {
+            let start = parent_method
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    let r#type =
+                        parameter.type_metadata.as_ref().map_or_else(get_mixed, |r#type| r#type.type_union.clone());
+
+                    format!("{} {}", display_type(context, &r#type), name(parameter))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            Issue::error(format!(
+                "`{child_name}`'s constructor must start with `{start}`, as `{parent_name}`'s does, so `new Self({arguments})` can call it."
+            ))
+        }
+    };
+
+    context.collector.report_with_code(
+        code,
+        issue
+            .with_annotation(Annotation::primary(primary_span).with_message("Declared here."))
+            .with_note("A `required` constructor lets `new Self(…)` create any subclass, so every class below it keeps a constructor `new Self(…)` can call."),
+    );
+}
+
 fn report_signature_compatibility_issue<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     child_class: &'ctx ClassLikeMetadata,
@@ -3585,6 +3755,28 @@ fn report_signature_compatibility_issue<'ctx, A>(
     let parent_name = display_class_like_name(context, parent_class.original_name);
     let child_class_span = child_class.name_span.unwrap_or(child_class.span);
     let parent_class_span = parent_class.name_span.unwrap_or(parent_class.span);
+    if context.dialect.is_sharp()
+        && parent_class.flags.is_sharp()
+        && parent_class.flags.has_consistent_constructor()
+        && method_name.as_bytes().eq_ignore_ascii_case(b"__construct")
+        && let Some(child_constructor) =
+            context.codebase.get_declaring_method(child_class.name.as_bytes(), b"__construct")
+        && let Some(parent_constructor) =
+            context.codebase.get_declaring_method(parent_class.name.as_bytes(), b"__construct")
+    {
+        report_required_constructor_mismatch(
+            context,
+            &child_name,
+            &parent_name,
+            child_constructor,
+            parent_constructor,
+            incompatibility,
+            primary_span,
+        );
+
+        return;
+    }
+
     let (child_display, parent_display) = if context.dialect.is_sharp() {
         let method_name = parent_method.original_name;
 

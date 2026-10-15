@@ -1020,6 +1020,9 @@ generate_ast_walker! {
 
     'arena Extension as extension => {
         walker.walk_keyword(&extension.extension, context);
+        if let Some(type_parameters) = &extension.type_parameters {
+            walker.walk_type_parameter_list(type_parameters, context);
+        }
         walker.walk_function_like_parameter_list(&extension.parameter_list, context);
 
         for member in &extension.members {
@@ -2893,10 +2896,7 @@ generate_ast_walker! {
 
     'arena TypeOf as type_of => {
         walker.walk_keyword(&type_of.r#typeof, context);
-        walker.walk_identifier(&type_of.class, context);
-        if let Some(type_arguments) = &type_of.type_arguments {
-            walker.walk_type_argument_list(type_arguments, context);
-        }
+        walker.walk_hint(&type_of.r#type, context);
     }
 
     'arena GenericClass as generic_class => {

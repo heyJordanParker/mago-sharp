@@ -54,6 +54,12 @@ where
         ))
     }
 
+    /// Whether `written` names the scalar type `name`. PHP reads it ignoring case, and PHP# writes it in lowercase
+    /// only, spec section 24, so `Int`, `Float`, `Bool` and `String` in a `.sharp` file are classes, as `(Int)` is.
+    fn is_scalar_name(&self, written: &[u8], name: &[u8]) -> bool {
+        if self.dialect.is_sharp() { written == name } else { written.eq_ignore_ascii_case(name) }
+    }
+
     pub(crate) fn parse_optional_type_hint(&mut self) -> Result<Option<Hint<'arena>>, ParseError> {
         if self.is_at_type_hint()? { Ok(Some(self.parse_type_hint()?)) } else { Ok(None) }
     }
@@ -104,10 +110,10 @@ where
             T![Identifier] => match token.value {
                 val if val.eq_ignore_ascii_case(b"void") => Hint::Void(self.parse_local_identifier()?),
                 val if val.eq_ignore_ascii_case(b"never") => Hint::Never(self.parse_local_identifier()?),
-                val if val.eq_ignore_ascii_case(b"float") => Hint::Float(self.parse_local_identifier()?),
-                val if val.eq_ignore_ascii_case(b"bool") => Hint::Bool(self.parse_local_identifier()?),
-                val if val.eq_ignore_ascii_case(b"int") => Hint::Integer(self.parse_local_identifier()?),
-                val if val.eq_ignore_ascii_case(b"string") => Hint::String(self.parse_local_identifier()?),
+                val if self.is_scalar_name(val, b"float") => Hint::Float(self.parse_local_identifier()?),
+                val if self.is_scalar_name(val, b"bool") => Hint::Bool(self.parse_local_identifier()?),
+                val if self.is_scalar_name(val, b"int") => Hint::Integer(self.parse_local_identifier()?),
+                val if self.is_scalar_name(val, b"string") => Hint::String(self.parse_local_identifier()?),
                 val if val.eq_ignore_ascii_case(b"object") => Hint::Object(self.parse_local_identifier()?),
                 val if val.eq_ignore_ascii_case(b"mixed") => Hint::Mixed(self.parse_local_identifier()?),
                 // PHP# writes PHP's `mixed` as `Any`, as spec section 24 decides.

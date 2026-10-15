@@ -116,9 +116,9 @@ where
 
 /// Whether `input_object` is the very class the container is parameterizing, without carrying
 /// type parameters of its own — in which case it cannot specialize anything.
-fn names_the_same_unspecialized_class(container_constraint: &TAtomic, input_object: &TAtomic) -> bool {
-    let (TAtomic::Object(TObject::Named(container)), TAtomic::Object(TObject::Named(input))) =
-        (container_constraint, input_object)
+fn names_the_same_unspecialized_class(container_constraint: &TUnion, input_object: &TAtomic) -> bool {
+    let (Some(TAtomic::Object(TObject::Named(container))), TAtomic::Object(TObject::Named(input))) =
+        (container_constraint.is_single().then(|| container_constraint.get_single()), input_object)
     else {
         return false;
     };
@@ -126,7 +126,8 @@ fn names_the_same_unspecialized_class(container_constraint: &TAtomic, input_obje
     input.type_parameters.is_none() && container.name == input.name
 }
 
-/// Turns the class-string-ish members of `input_type` into the object types they name.
+/// Turns the class-string-ish members of `input_type` into the types they name. A PHP# class value of several types,
+/// as `Class<int|string>`, names each of them.
 fn collect_class_string_object_types<A>(context: &Context<'_, '_, A>, input_type: &TUnion) -> Vec<TAtomic>
 where
     A: Arena,
@@ -134,6 +135,9 @@ where
     let mut input_objects = vec![];
     for input_atomic in input_type.types.iter() {
         match input_atomic {
+            TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
+                input_objects.extend(constraint.types.iter().cloned());
+            }
             TAtomic::Scalar(TScalar::ClassLikeString(class_string)) => {
                 input_objects.push(class_string.get_object_type(context.codebase));
             }
@@ -859,7 +863,7 @@ fn infer_templates_from_input_and_container_types<A>(
             // class-string itself, so unwrap both sides to objects and let the regular object
             // inference specialize `T` through the argument's `@extends`.
             TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
-                let container_object_type = wrap_atomic(constraint.as_ref().clone());
+                let container_object_type = constraint.as_ref().clone();
                 if !container_object_type.has_template_types() {
                     continue;
                 }
@@ -1267,7 +1271,8 @@ where
 /// this function would be used on parameter `$b` to infer that `B` is `int`. In PHP#,
 /// `List<Order> orders = cache.get("orders")` against `T get<T>(string key)` infers that `T` is `List<Order>`.
 ///
-/// Returns the templates `input_type` falls outside the bound of. They get no bound from it.
+/// Returns each template `input_type` falls outside the bound of, with the type it gives and the bound. They get no
+/// bound from it.
 ///
 /// # Arguments
 ///
@@ -1280,7 +1285,7 @@ pub fn infer_unfixed_templates<A>(
     container_type: &TUnion,
     input_type: &TUnion,
     template_result: &mut TemplateResult,
-) -> WordSet
+) -> Vec<TemplateInferenceViolation>
 where
     A: Arena,
 {
@@ -1294,7 +1299,7 @@ where
         &mut violations,
     );
 
-    violations.into_iter().map(|violation| violation.template_name).collect()
+    violations
 }
 
 /// Replaces unbound `GenericParameter` types with their constraint types.

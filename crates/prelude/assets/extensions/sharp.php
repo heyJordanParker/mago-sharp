@@ -38,6 +38,21 @@ final class List
     public static function wrap(mixed $value): array {}
 }
 
+final class Class
+{
+    /**
+     * The class of the object `$value` holds, which may be a subclass of its type. PHP# writes this instead of PHP's
+     * `$value::class`, because `typeof` takes a type only. Plain PHP receives it as the class name.
+     *
+     * @template T of object
+     *
+     * @param T $value
+     *
+     * @return class-string<T>
+     */
+    public static function of(object $value): string {}
+}
+
 /**
  * A PHP# `Map<K, V>`, as plain PHP receives one: a value with each key kept as itself, an object included, and found by
  * its `==` and `hash()`, in insertion order. Plain PHP reads it, writes it and removes from it through its index, which

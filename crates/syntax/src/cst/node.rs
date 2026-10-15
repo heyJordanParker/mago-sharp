@@ -1604,6 +1604,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }
             Node::Extension(node) => {
                 f(Node::Keyword(&node.extension));
+                for item in node.type_parameters.iter() {
+                    f(Node::TypeParameterList(item));
+                }
                 f(Node::FunctionLikeParameterList(&node.parameter_list));
                 for item in node.members.iter() {
                     f(Node::ClassLikeMember(item));
@@ -3063,10 +3066,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }
             Node::TypeOf(type_of) => {
                 f(Node::Keyword(&type_of.r#typeof));
-                f(Node::Identifier(&type_of.class));
-                if let Some(type_arguments) = &type_of.type_arguments {
-                    f(Node::TypeArgumentList(type_arguments));
-                }
+                f(Node::Hint(&type_of.r#type));
             }
             Node::GenericClass(generic_class) => {
                 f(Node::Expression(generic_class.class));

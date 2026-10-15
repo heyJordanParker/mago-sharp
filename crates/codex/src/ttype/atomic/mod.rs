@@ -1022,9 +1022,10 @@ pub fn populate_atomic_type(
                 }
             }
         }
-        TAtomic::Scalar(TScalar::ClassLikeString(
-            TClassLikeString::OfType { constraint, .. } | TClassLikeString::Generic { constraint, .. },
-        )) => {
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
+            populate!(union Arc::make_mut(constraint));
+        }
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic { constraint, .. })) => {
             populate!(atomic Arc::make_mut(constraint));
         }
         TAtomic::Conditional(conditional) => {

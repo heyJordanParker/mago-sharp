@@ -1059,7 +1059,11 @@ where
         );
         let return_type = inferred_type_replacer::replace(&return_type, template_result, context.codebase);
 
-        violated_templates.extend(infer_unfixed_templates(context, &return_type, expected_type, template_result));
+        violated_templates.extend(
+            infer_unfixed_templates(context, &return_type, expected_type, template_result)
+                .into_iter()
+                .map(|violation| violation.template_name),
+        );
     }
 
     let mut unbound_templates = WordSet::default();
@@ -2399,8 +2403,8 @@ where
             TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Literal { value })) => {
                 return Some(*value);
             }
-            TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. }))
-                if let Some(name) = extract_class_name_from_atomic(constraint) =>
+            TAtomic::Scalar(TScalar::ClassLikeString(class_string @ TClassLikeString::OfType { .. }))
+                if let Some(name) = class_string.constraint().and_then(extract_class_name_from_atomic) =>
             {
                 return Some(name);
             }

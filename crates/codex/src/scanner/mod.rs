@@ -391,10 +391,14 @@ impl Scanner {
             class_like_metadata.inheritable_method_ids.insert(name, method_identifier);
         }
 
-        // PHP#'s `required` constructor is one every subclass keeps, so `new Self(…)` can call it, spec section 25.
+        // PHP#'s `required` constructor is one every subclass keeps, so `new Self(…)` can call it, spec section 25. The
+        // constructor itself is marked, so each class below compares its own with the nearest one written `required`.
         let is_required = method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_)));
         if (method_metadata.is_final || is_required) && is_constructor {
             class_like_metadata.flags |= MetadataFlags::CONSISTENT_CONSTRUCTOR;
+        }
+        if is_required && is_constructor {
+            function_like_metadata.flags |= MetadataFlags::REQUIRED;
         }
 
         self.template_constraints.push(

@@ -1,5 +1,8 @@
 //! The members PHP# extensions add to a receiver's type, spec section 26.
 
+use std::borrow::Cow;
+
+use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -9,6 +12,8 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_names::short_name;
 use mago_reporting::Annotation;
@@ -20,6 +25,9 @@ use mago_word::ascii_lowercase_word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::invocation::TemplateInferenceViolation;
+use crate::invocation::infer_unfixed_templates;
+use crate::resolver::class_name::class_value_classes;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
@@ -45,6 +53,9 @@ pub(crate) enum Extension {
 /// fits inside every other's runs. Two that fit with neither inside the other are an error naming where each comes
 /// from, and one that fits but the file does not import is an error naming the import to add. Either still reaches its
 /// member, so the access is checked as it would run.
+///
+/// A class value's members are `Class`'s own, spec section 25, so on one only the members that extend `Class` are
+/// candidates, and an extension of `string`, which a class value fits, never reaches it.
 pub(crate) fn resolve_extension<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     receiver: &TUnion,
@@ -68,10 +79,11 @@ where
         return None;
     }
 
+    let is_class_value = class_value_classes(receiver).is_some();
     let fitting: Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)> = extensions
         .iter()
         .filter_map(|(_, method)| Some((*method, codebase.get_method_by_id(method)?)))
-        .filter(|(_, metadata)| fits(codebase, receiver, metadata))
+        .filter(|(_, metadata)| (!is_class_value || is_class_member(metadata)) && fits(context, receiver, metadata))
         .collect();
     let (own, others): (Vec<_>, Vec<_>) =
         fitting.iter().partition(|(method, _)| is_imported_or_in_namespace(context, method.get_class_name()));
@@ -81,8 +93,9 @@ where
     let in_scope = if own.is_empty() { default } else { own };
     let (in_scope, other_kind): (Vec<_>, Vec<_>) =
         in_scope.into_iter().partition(|(_, metadata)| metadata.flags.contains(flag));
-    let in_scope = most_specific(codebase, in_scope);
+    let in_scope = most_specific(context, in_scope);
     let elsewhere = elsewhere.into_iter().find(|(_, metadata)| metadata.flags.contains(flag));
+    let receiver_type = receiver;
     let receiver = display_type(context, receiver);
     let (code, access) = if flag == MetadataFlags::EXTENSION_METHOD {
         (IssueCode::NonExistentMethod, "Called here.")
@@ -140,32 +153,99 @@ where
 
             Some(Extension::Member(method))
         }
-        ([], None, None) => None,
+        // A member in scope whose block's type parameter the receiver gives a type outside its bound, as
+        // `List<string>` gives `TEntity` of `extension<TEntity : DatabaseEntity>(List<TEntity> rows)`.
+        ([], None, None) => {
+            let violation = extensions
+                .iter()
+                .filter_map(|(_, method)| Some((*method, codebase.get_method_by_id(method)?)))
+                .filter(|(method, metadata)| {
+                    metadata.flags.contains(flag)
+                        && (!is_class_value || is_class_member(metadata))
+                        && (is_imported_or_in_namespace(context, method.get_class_name())
+                            || is_imported_by_default(context, method.get_class_name(), metadata))
+                })
+                .find_map(|(_, metadata)| fit(context, receiver_type, metadata).err().flatten())?;
+            context.collector.report_with_code(
+                code,
+                Issue::error(format!(
+                    "`{}` is outside `{}`'s bound `{}`, so `{receiver}` has no `{}`.",
+                    display_type(context, &violation.inferred_bound),
+                    violation.template_name,
+                    display_type(context, &violation.constraint),
+                    String::from_utf8_lossy(name.value),
+                ))
+                .with_annotation(Annotation::primary(name.span()).with_message(access)),
+            );
+
+            Some(Extension::Refused)
+        }
     }
 }
 
-/// Whether a value of type `receiver` fits the receiver of the extension member `metadata`, its first parameter.
-fn fits(codebase: &CodebaseMetadata, receiver: &TUnion, metadata: &FunctionLikeMetadata) -> bool {
-    metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()).is_some_and(|parameter| {
-        union_comparator::is_contained_by(
-            codebase,
-            receiver,
-            &parameter.type_union,
-            false,
-            false,
-            false,
-            &mut ComparisonResult::new(),
-        )
-    })
+/// Whether a value of type `receiver` fits the receiver of the extension member `metadata`, its first parameter, as
+/// [`fit`] decides it.
+fn fits<A>(context: &Context<'_, '_, A>, receiver: &TUnion, metadata: &FunctionLikeMetadata) -> bool
+where
+    A: Arena,
+{
+    fit(context, receiver, metadata).is_ok()
+}
+
+/// How a value of type `receiver` meets the receiver of the extension member `metadata`, its first parameter. The type
+/// parameters of an extension block, `T` in `extension<T>(List<T> items)`, are first inferred from `receiver`, as a call
+/// infers them from its argument, so a `List<Order>` fits as a `List<Order>`. A receiver outside a type parameter's
+/// bound fits none, and the error names that type parameter, the type the receiver gives it and the bound. Every other
+/// receiver that fits none gives no error, as does every receiver of a member whose own receiver has no type, which
+/// only a file the parser refused declares.
+fn fit<A>(
+    context: &Context<'_, '_, A>,
+    receiver: &TUnion,
+    metadata: &FunctionLikeMetadata,
+) -> Result<(), Option<TemplateInferenceViolation>>
+where
+    A: Arena,
+{
+    let parameter = metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()).ok_or(None)?;
+    let parameter = if metadata.template_types.is_empty() {
+        Cow::Borrowed(&parameter.type_union)
+    } else {
+        let mut template_result = TemplateResult::new(
+            metadata.template_types.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
+            HashMap::default(),
+        );
+        if let Some(violation) =
+            infer_unfixed_templates(context, &parameter.type_union, receiver, &mut template_result).into_iter().next()
+        {
+            return Err(Some(violation));
+        }
+
+        Cow::Owned(inferred_type_replacer::replace(&parameter.type_union, &template_result, context.codebase))
+    };
+
+    union_comparator::is_contained_by(
+        context.codebase,
+        receiver,
+        &parameter,
+        false,
+        false,
+        false,
+        &mut ComparisonResult::new(),
+    )
+    .then_some(())
+    .ok_or(None)
 }
 
 /// The members of `candidates` whose receiver fits inside every other candidate's, as C# overload resolution and
 /// Kotlin pick the most specific receiver, spec section 26: an extension on `AuditedWallet` over one on `Wallet`. All
 /// of `candidates` when none does, so they stay ambiguous.
-fn most_specific<'ctx>(
-    codebase: &CodebaseMetadata,
+fn most_specific<'ctx, A>(
+    context: &Context<'_, '_, A>,
     candidates: Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)>,
-) -> Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)> {
+) -> Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)>
+where
+    A: Arena,
+{
     let specific: Vec<_> = candidates
         .iter()
         .filter(|(_, metadata)| {
@@ -173,7 +253,7 @@ fn most_specific<'ctx>(
                 .parameters
                 .first()
                 .and_then(|parameter| parameter.get_type_metadata())
-                .is_some_and(|own| candidates.iter().all(|(_, other)| fits(codebase, &own.type_union, other)))
+                .is_some_and(|own| candidates.iter().all(|(_, other)| fits(context, &own.type_union, other)))
         })
         .copied()
         .collect();
@@ -302,4 +382,26 @@ where
                     )
                 })
             })
+}
+
+/// Whether the extension member `metadata` is a member of `Class`, spec section 25: its receiver is a class value, as
+/// `attributes` of the standard library's `Sharp.ClassMembers`, which semantics lets no other file declare. A call or
+/// read of it through a class value reaches it, not a static of the class the value holds.
+pub(crate) fn is_class_member(metadata: &FunctionLikeMetadata) -> bool {
+    metadata.parameters.first().and_then(|receiver| receiver.get_type_metadata()).is_some_and(|receiver| {
+        receiver.type_union.types.iter().all(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
+    })
+}
+
+/// The member of `Class` named `name`, compared ignoring case, as PHP compares method names, when there is one.
+pub(crate) fn class_member<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    name: &[u8],
+) -> Option<&'codebase FunctionLikeMetadata> {
+    codebase
+        .extensions
+        .get(&ascii_lowercase_word(name))?
+        .iter()
+        .filter_map(|(_, method)| codebase.get_method_by_id(method))
+        .find(|metadata| is_class_member(metadata))
 }

@@ -46,7 +46,8 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_static_write;
 use crate::error::AnalysisError;
-use crate::expression::access::written_static_property;
+use crate::expression::access::analyze_through_class_value;
+use crate::expression::access::refuse_statics_of_no_class;
 use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
@@ -57,6 +58,7 @@ use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
+use crate::expression::call::static_method_call::analyze_static_method_call;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
@@ -75,6 +77,7 @@ use crate::invocation::template_result::populate_template_result_from_invocation
 use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
+use crate::plugin::hook::StaticCall;
 use crate::resolver::method::UndocumentedMethod;
 use crate::resolver::method::UnresolvedMethod;
 use crate::resolver::method::get_declared_collection;
@@ -354,9 +357,31 @@ where
             artifacts,
             extension,
             object,
+            type_arguments,
             Some(argument_list),
             is_null_safe,
             span,
+        );
+    }
+
+    // PHP# calls a static method through a class value, `type.m()`, as PHP's `$type::m()`, spec section 25.
+    if method_resolution.class_value {
+        context.collector.extend(receiver_issues);
+        if refuse_statics_of_no_class(context, artifacts, object, span) {
+            return argument_list.analyze(context, block_context, artifacts);
+        }
+        let call = StaticCall { class: object, method: selector, argument_list, span };
+
+        return analyze_through_class_value(
+            context,
+            block_context,
+            artifacts,
+            object,
+            is_null_safe,
+            span,
+            |context, block_context, artifacts| {
+                analyze_static_method_call(context, block_context, artifacts, call, type_arguments, true)
+            },
         );
     }
 
@@ -700,7 +725,7 @@ where
             Ok(None)
         }
         Expression::Access(Access::Property(access)) => {
-            let written = match written_static_property(context, block_context, access) {
+            let written = match StaticProperty::from_property_access(access, context.resolved_names) {
                 // Reading `Counter.items` reported its missing type arguments, and the write back would again.
                 Some(static_property) if bare_generic_class(context, static_property.class).is_some() => Ok(()),
                 // The read of the collection analyzed its class.

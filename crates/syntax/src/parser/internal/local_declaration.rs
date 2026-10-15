@@ -101,7 +101,8 @@ where
                 && self.stream.peek_kind_after_type_arguments(1)? != Some(T!["."]));
         }
 
-        if hint.kind != T![Identifier] {
+        // `Self` reads as a local's type here, so the checker can say it is a return type only, spec section 25.
+        if hint.kind != T![Identifier] && hint.kind != T!["self"] {
             return Ok(false);
         }
 

@@ -290,16 +290,24 @@ fn union_from_hint(
                         get_keyed_array(arguments.swap_remove(0), value)
                     }
                     b"Set" => wrap_atomic(TAtomic::Array(TArray::Set(Arc::new(arguments.swap_remove(0))))),
-                    b"Class" => builder::get_class_strings_of(
-                        TClassLikeStringKind::Class,
-                        arguments.swap_remove(0),
-                        generic.span(),
-                    )
-                    .unwrap_or_else(|_| {
-                        wrap_atomic(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::any(
-                            TClassLikeStringKind::Class,
-                        ))))
-                    }),
+                    // A class value of one class, or of a type parameter, names it. Of any other type it holds that
+                    // whole type, as `Class<int|string>` holds `int|string`, spec section 25.
+                    b"Class" => {
+                        let held = arguments.swap_remove(0);
+                        let class = if held.is_single() {
+                            builder::get_class_strings_of(TClassLikeStringKind::Class, held.clone(), generic.span())
+                                .ok()
+                        } else {
+                            None
+                        };
+
+                        class.unwrap_or_else(|| {
+                            wrap_atomic(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType {
+                                kind: TClassLikeStringKind::Class,
+                                constraint: Arc::new(held),
+                            })))
+                        })
+                    }
                     _ => get_mixed_keyed_array(),
                 }
             }

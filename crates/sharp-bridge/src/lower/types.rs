@@ -234,6 +234,16 @@ impl<'analysis> Types<'analysis> {
         Some(self.argument_texts(arguments))
     }
 
+    /// The type arguments the access `access` of a generic extension member gives the static method it runs as, spec
+    /// section 26: those the checker inferred from the receiver for the extension block's type parameters, then the
+    /// member's own, written as [`Self::type_arguments`] writes those of a `new`. None for a member that isn't generic.
+    pub(crate) fn extension_type_arguments(&self, access: &Expression) -> Option<String> {
+        let span = access.span();
+        let arguments = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?;
+
+        Some(self.argument_texts(arguments))
+    }
+
     /// The type arguments the method value `value` of a PHP# generic method takes from the function type it goes
     /// into, as the checker found them, written as [`Self::type_arguments`] writes those of a `new`. None for the value
     /// of a method that isn't generic.
@@ -402,14 +412,21 @@ impl<'analysis> Types<'analysis> {
             })
             || r#type.types.iter().any(|atomic| match atomic {
                 TAtomic::Object(TObject::Named(object)) => is_sharp_generic(object),
-                // A `Class<PaginatedList>` names no type arguments, so PHP's `string` type is the whole of its check.
-                TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
-                    matches!(constraint.as_ref(), TAtomic::Object(TObject::Named(object))
-                    if is_sharp_generic(object)
-                        && !object.get_type_parameters().is_some_and(|arguments| {
-                            arguments.iter().any(TUnion::from_unspecified_template)
-                        }))
-                }
+                // A `Class<PaginatedList>` names no type arguments, so PHP's `string` type is the whole of its check. A
+                // `Class<int>` or a `Class<int|string>` takes only the text `typeof` gives its type, which PHP's `string`
+                // type doesn't check.
+                TAtomic::Scalar(TScalar::ClassLikeString(
+                    class_value @ TClassLikeString::OfType { constraint, .. },
+                )) => match class_value.constraint() {
+                    Some(TAtomic::Object(TObject::Named(object))) => {
+                        is_sharp_generic(object)
+                            && !object
+                                .get_type_parameters()
+                                .is_some_and(|arguments| arguments.iter().any(TUnion::from_unspecified_template))
+                    }
+                    Some(TAtomic::Object(_) | TAtomic::GenericParameter(_)) => false,
+                    _ => !constraint.is_mixed() && is_written_in_sharp(constraint),
+                },
                 TAtomic::GenericParameter(parameter) => {
                     matches!(parameter.defining_entity, GenericParent::ClassLike(_))
                 }
@@ -936,10 +953,10 @@ pub(crate) fn class_value_classes(r#type: &TUnion) -> Option<Vec<&[u8]>> {
         .map(|atomic| match atomic {
             TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Literal { value })) => Some(value.as_bytes()),
             TAtomic::Scalar(TScalar::ClassLikeString(
-                TClassLikeString::Generic { constraint, .. } | TClassLikeString::OfType { constraint, .. },
-            )) => match constraint.as_ref() {
-                TAtomic::Object(TObject::Named(object)) => Some(object.name.as_bytes()),
-                TAtomic::Object(TObject::Enum(object)) => Some(object.name.as_bytes()),
+                class_value @ (TClassLikeString::Generic { .. } | TClassLikeString::OfType { .. }),
+            )) => match class_value.constraint() {
+                Some(TAtomic::Object(TObject::Named(object))) => Some(object.name.as_bytes()),
+                Some(TAtomic::Object(TObject::Enum(object))) => Some(object.name.as_bytes()),
                 _ => None,
             },
             _ => None,
@@ -1126,7 +1143,7 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
         SharpType::ClassValue(class_value) => {
             let class = match class_value {
                 TClassLikeString::Literal { value } => class_text(*value, codebase),
-                TClassLikeString::OfType { constraint, .. } => atomic_text(constraint, codebase, parameter),
+                TClassLikeString::OfType { constraint, .. } => text(constraint, codebase, parameter),
                 TClassLikeString::Generic { parameter_name, defining_entity, constraint, .. } => {
                     parameter_text(*parameter_name, *defining_entity, &|| atomic_text(constraint, codebase, parameter))
                 }
@@ -1179,6 +1196,7 @@ mod tests {
     use mago_codex::ttype::get_list;
     use mago_codex::ttype::get_mixed;
     use mago_codex::ttype::get_null;
+    use mago_codex::ttype::get_nullable_int;
     use mago_codex::ttype::get_object;
     use mago_codex::ttype::get_string;
     use mago_codex::ttype::get_void;
@@ -1304,13 +1322,16 @@ mod tests {
         assert_eq!(text(&wrap_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_value)))), "Class<App.Order>");
     }
 
-    /// A class value bounded by a class names it, one of a type parameter writes the type parameter, and one of any
-    /// class names `Object`. A type that is only `null` is `null`.
+    /// A class value bounded by a class names it, one of a union or a nullable type writes that whole type, one of a
+    /// type parameter writes the type parameter, and one of any class names `Object`. A type that is only `null` is
+    /// `null`.
     #[test]
     fn a_class_value_names_its_bound_its_type_parameter_or_object() {
         let order = TAtomic::Object(TObject::Named(TNamedObject::new(word("App\\Order"))));
         let class_value = |class_value| text(&wrap_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_value))));
         let of_type = TClassLikeString::of_type(TClassLikeStringKind::Class, order.clone());
+        let held =
+            |held: TUnion| TClassLikeString::OfType { kind: TClassLikeStringKind::Class, constraint: Arc::new(held) };
         let generic = TClassLikeString::generic(
             TClassLikeStringKind::Class,
             word("TItem"),
@@ -1319,6 +1340,8 @@ mod tests {
         );
 
         assert_eq!(class_value(of_type), "Class<App.Order>");
+        assert_eq!(class_value(held(union(&[get_string(), get_int()]))), "Class<int|string>");
+        assert_eq!(class_value(held(get_nullable_int())), "Class<int?>");
         assert_eq!(class_value(generic), "Class<Any?>");
         assert_eq!(class_value(TClassLikeString::class_string()), "Class<Object>");
         assert_eq!(text(&get_null()), "null");

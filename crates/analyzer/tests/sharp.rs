@@ -3344,6 +3344,28 @@ fn list_wrap_of_a_list_is_refused_once() {
     );
 }
 
+/// `Class.of(value)` is the class of the object a value holds, spec section 25, so it is a class value of the value's
+/// type: it reaches the static of the class it holds, and goes where plain PHP takes a class name. It takes an object
+/// only, since a class is what it gives, and the refusal names that bound once.
+#[test]
+fn class_of_a_value_is_a_class_value_of_its_type() {
+    let factory = "<?php\n\nnamespace Lib;\n\nfinal class Factory\n{\n    /**\n     * @template T of object\n     * @param class-string<T> $class\n     * @return T\n     */\n    public static function make(string $class): object\n    {\n        return new $class();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Factory;\n\nclass Badge\n{\n    public static string tag() => \"badge\";\n\n    public string tagOf(Badge badge)\n    {\n        const type = Class.of(badge);\n        return type.tag();\n    }\n\n    public Badge remade(Badge badge) => Factory.make(Class.of(badge));\n\n    public string named(Badge badge) => Class.of(badge);\n\n    public int wrong(Badge badge) => Class.of(badge);\n\n    public void count() { Class.of(5); }\n}\n";
+    let others = [("src/Lib/Factory.php", factory)];
+
+    assert_eq!(
+        issues(("src/Demo/Badge.sharp", sharp), &others),
+        ["19:38 invalid-return-statement", "21:36 template-constraint-violation"]
+    );
+    assert_eq!(
+        messages(("src/Demo/Badge.sharp", sharp), &others),
+        [
+            "Invalid return type for method `Badge.wrong`: expected `int`, but found `Class<Badge>`.",
+            "`5` does not satisfy the bound `Object` of type parameter `T`."
+        ]
+    );
+}
+
 /// A value from plain PHP typed `mixed` arrives as `Any?`, which could hold a list.
 #[test]
 fn list_wrap_of_a_value_of_any_type_is_refused() {
@@ -5107,8 +5129,8 @@ fn self_and_a_required_constructor_are_checked_as_static_and_a_consistent_constr
     assert_eq!(codes(&sharp_issues), codes(&php_issues), "{php_issues:?}");
 }
 
-/// `Self` can be any descendant, so a grandchild's constructor is compared with its parent's as a child's is, spec
-/// section 25.
+/// `Self` can be any descendant, so a grandchild's constructor is compared with the `required` constructor above it as
+/// a child's is, spec section 25.
 #[test]
 fn every_descendant_of_a_required_constructor_keeps_a_matching_constructor() {
     let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Row;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n\n    public static Self fromSchema(Row row) => new Self(row);\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null) : super(row)\n    {\n    }\n}\n\npublic class Shipment : Order\n{\n    public Shipment() : super(new Row())\n    {\n    }\n}\n\npublic class LineItem : Order\n{\n    public LineItem(Row row, Clock clock) : super(row, clock)\n    {\n    }\n}\n";
@@ -5116,6 +5138,45 @@ fn every_descendant_of_a_required_constructor_keeps_a_matching_constructor() {
     assert_eq!(
         issues(("src/Demo/DatabaseEntity.sharp", sharp), &[("src/Lib/Row.php", ROW), ("src/Lib/Clock.php", CLOCK)]),
         ["24:12 incompatible-parameter-count", "31:12 incompatible-parameter-count"]
+    );
+}
+
+/// Below a `required` constructor, a constructor `new Self(…)` cannot call says which of spec section 25's two rules it
+/// breaks, in the words a PHP# class is written in: its leading parameters, or a parameter left without a default,
+/// whether it adds one or drops the default the `required` constructor gives. Each class is compared with the nearest
+/// class above it whose own constructor is `required`, which the message names, so `Narrowed`, which drops `Order`'s
+/// `clock`, compiles, and `Twisted` breaks `DatabaseEntity`'s rule. The message names the shortest `new Self(…)`, and
+/// the code stays the one PHP's check gives.
+#[test]
+fn a_constructor_below_a_required_one_names_the_rule_it_breaks() {
+    let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Row;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null) : super(row)\n    {\n    }\n}\n\npublic class Invoice : DatabaseEntity\n{\n    public Invoice(Row row, Clock clock) : super(row)\n    {\n    }\n}\n\npublic class Reordered : DatabaseEntity\n{\n    public Reordered(Clock clock, Row row) : super(row)\n    {\n    }\n}\n\npublic class Renamed : DatabaseEntity\n{\n    public Renamed(Row other) : super(other)\n    {\n    }\n}\n\npublic class Retyped : DatabaseEntity\n{\n    public Retyped(Clock row) : super(new Row())\n    {\n    }\n}\n\npublic class Dropped : DatabaseEntity\n{\n    public Dropped() : super(new Row())\n    {\n    }\n}\n\npublic class Shipment : Order\n{\n    public Shipment(Row row, Clock? clock, int count) : super(row, clock)\n    {\n    }\n}\n\npublic class Narrowed : Order\n{\n    public Narrowed(Row row) : super(row)\n    {\n    }\n}\n\npublic class Twisted : Order\n{\n    public Twisted(Clock clock) : super(new Row(), clock)\n    {\n    }\n}\n\npublic abstract class Ledger\n{\n    public required Ledger(Row row, Clock? clock = null)\n    {\n    }\n}\n\npublic class DroppedDefault : Ledger\n{\n    public DroppedDefault(Row row, Clock? clock) : super(row, clock)\n    {\n    }\n}\n\npublic class Kept : Ledger\n{\n    public Kept(Row row, Clock? clock = null, int count = 0) : super(row, clock)\n    {\n    }\n}\n";
+    let others = [("src/Lib/Row.php", ROW), ("src/Lib/Clock.php", CLOCK)];
+
+    assert_eq!(
+        issues(("src/Demo/DatabaseEntity.sharp", sharp), &others),
+        [
+            "22:12 incompatible-parameter-count",
+            "29:12 incompatible-parameter-count",
+            "36:12 incompatible-parameter-name",
+            "43:12 incompatible-parameter-type",
+            "50:12 incompatible-parameter-count",
+            "57:12 incompatible-parameter-count",
+            "71:12 incompatible-parameter-type",
+            "85:12 incompatible-parameter-count",
+        ]
+    );
+    assert_eq!(
+        messages(("src/Demo/DatabaseEntity.sharp", sharp), &others),
+        [
+            "`Invoice`'s constructor gives `clock` no default, so `new Self(row)` cannot call it: give `clock` a default.",
+            "`Reordered`'s constructor must start with `Row row`, as `DatabaseEntity`'s does, so `new Self(row)` can call it.",
+            "`Renamed`'s constructor must start with `Row row`, as `DatabaseEntity`'s does, so `new Self(row)` can call it.",
+            "`Retyped`'s constructor must start with `Row row`, as `DatabaseEntity`'s does, so `new Self(row)` can call it.",
+            "`Dropped`'s constructor must start with `Row row`, as `DatabaseEntity`'s does, so `new Self(row)` can call it.",
+            "`Shipment`'s constructor gives `clock` and `count` no default, so `new Self(row)` cannot call it: give each a default.",
+            "`Twisted`'s constructor must start with `Row row`, as `DatabaseEntity`'s does, so `new Self(row)` can call it.",
+            "`DroppedDefault`'s constructor gives `clock` no default, so `new Self(row)` cannot call it: give `clock` a default.",
+        ]
     );
 }
 
@@ -5693,6 +5754,46 @@ fn an_extension_member_reads_its_receiver_as_a_parameter_of_its_type() {
     assert_eq!(
         issues(("src/App/Shared/Text/TextExtensions.sharp", sharp), &[]),
         ["7:32 invalid-return-statement", "8:28 invalid-return-statement"]
+    );
+}
+
+/// Spec section 26: an extension block's type parameters are inferred from the receiver, as C# 14 infers them, one or
+/// several, and a member's own type parameters come after them, so `orders.blank<string>()` names only the member's,
+/// and a count that doesn't fit them is refused as on any method. A receiver outside a bound has no such member, and
+/// the error names the bound, as spec section 26's `names.saved` says. A union receiver that fits no block is reported
+/// once. Each wrong return shows the type the access gives.
+#[test]
+fn an_extension_block_infers_its_type_parameters_from_the_receiver() {
+    let orders = "namespace App;\n\npublic class Order\n{\n}\n";
+    let rush = "namespace App;\n\npublic class RushOrder : Order\n{\n}\n";
+    let pair = "namespace App;\n\npublic class Pair<TLeft, TRight>\n{\n}\n";
+    let lists = "namespace App.Lists;\n\nimport App.Order;\nimport App.Pair;\n\npublic static class ListExtensions\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> twice() => items;\n        public List<TOut> converted<TOut>(Function<TOut(T)> convert) => [];\n        public List<TOut> blank<TOut>() => [];\n        public bool isEmpty => items.count() == 0;\n    }\n\n    extension<TValue>(Map<string, List<TValue>> groups)\n    {\n        public TValue? firstOf(string key) => null;\n    }\n\n    extension<TLeft, TRight>(Pair<TLeft, TRight> pair)\n    {\n        public Pair<TRight, TLeft> swapped() => new Pair<TRight, TLeft>();\n    }\n\n    extension<T : Order>(List<T> orders)\n    {\n        public T? newest() => null;\n        public int saved => orders.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Lists.ListExtensions;\nimport App.Order;\nimport App.Pair;\nimport App.RushOrder;\n\npublic class Report\n{\n    public List<int> twice(List<string> names) => names.twice();\n    public List<int> converted(List<Order> orders) => orders.converted<string>(order => \"order\");\n    public bool empty(List<Order> orders) => orders.isEmpty;\n    public int firstOf(Map<string, List<Order>> groups) => groups.firstOf(\"a\");\n    public int swapped(Pair<int, Order> pair) => pair.swapped();\n    public int newest(List<RushOrder> orders) => orders.newest();\n    public Any? numbers(List<int> numbers) => numbers.newest();\n    public List<int> blank(List<Order> orders) => orders.blank<string>();\n    public Any? many(List<Order> orders) => orders.blank<string, int>();\n    public Any? saved(List<string> names) => names.saved;\n    public Any? either(Pair<int, Order>|Pair<string, Order> pair) => pair.swapped();\n}\n";
+    let others = [
+        ("src/App/Order.sharp", orders),
+        ("src/App/RushOrder.sharp", rush),
+        ("src/App/Pair.sharp", pair),
+        ("src/App/Lists/ListExtensions.sharp", lists),
+    ];
+
+    assert_eq!(issues(("src/App/Lists/ListExtensions.sharp", lists), &others[..3]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &others),
+        [
+            "Invalid return type for method `Report.twice`: expected `List<int>`, but found `List<string>`.",
+            "Invalid return type for method `Report.converted`: expected `List<int>`, but found `List<string>`.",
+            "Method `Report.firstOf` is declared to return `int` but possibly returns a nullable value (inferred as `Order?`).",
+            "Invalid return type for method `Report.firstOf`: expected `int`, but found `Order?`.",
+            "Invalid return type for method `Report.swapped`: expected `int`, but found `Pair<Order, int>`.",
+            "Method `Report.newest` is declared to return `int` but possibly returns a nullable value (inferred as `RushOrder?`).",
+            "Invalid return type for method `Report.newest`: expected `int`, but found `RushOrder?`.",
+            "`int` is outside `T`'s bound `Order`, so `List<int>` has no `newest`.",
+            "Invalid return type for method `Report.blank`: expected `List<int>`, but found `List<string>`.",
+            "Too many type arguments for `ListExtensions.blank`: expected 1, but found 2.",
+            "Nothing fixes the type argument `TOut` of the call to `ListExtensions.blank`.",
+            "`string` is outside `T`'s bound `Order`, so `List<string>` has no `saved`.",
+            "Method `Pair.swapped` does not exist.",
+        ]
     );
 }
 
@@ -9613,11 +9714,12 @@ fn a_type_parameter_before_a_dot_is_not_read_as_a_constant() {
 }
 
 /// `TItem.member` reads the member of the type argument's class, which its bound declares, so a missing member is
-/// reported on the bound. A type parameter that can stand for a type that is not a class has no members to read, so a
-/// property read on it reports that once and reads nothing.
+/// reported on the bound, and a static method read without a call is its function value. A type parameter that can
+/// stand for a type that is not a class has no members to read, so a property read on it reports that once and reads
+/// nothing.
 #[test]
 fn a_static_member_of_a_type_parameter_is_its_bounds() {
-    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n}\n\npublic abstract class Builder<TItem : Maker, TAny>\n{\n    public int build() => TItem.make();\n\n    public int missing() => TItem.unknown();\n\n    public int open() => TAny.make();\n\n    public int read() => TAny.size;\n\n    public abstract TItem made(TAny value);\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n}\n\npublic abstract class Builder<TItem : Maker, TAny>\n{\n    public int build() => TItem.make();\n\n    public int missing() => TItem.unknown();\n\n    public int open() => TAny.make();\n\n    public int read() => TAny.size;\n\n    public int maker() => TItem.make;\n\n    public abstract TItem made(TAny value);\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Builder.sharp", sharp), &[]),
@@ -9627,6 +9729,7 @@ fn a_static_member_of_a_type_parameter_is_its_bounds() {
             "`TAny` can stand for a type that is not a class.",
             "Could not infer a precise return type for method `Builder.open`. Saw type `Any?`.",
             "`TAny` can stand for a type that is not a class.",
+            "Invalid return type for method `Builder.maker`: expected `int`, but found `Function<int()>`.",
         ]
     );
 }
@@ -10354,6 +10457,51 @@ fn typeof_of_a_type_parameter_is_the_class_of_the_type_parameter() {
     assert_eq!(
         messages(("src/Demo/Kinds.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
         ["Invalid return type for method `Kinds.named`: expected `int`, but found `Class<TItem>`."]
+    );
+}
+
+/// `typeof` of any other type is a `Class` of that type, spec section 25, as `typeof(TItem)` is when `TItem` runs as
+/// one: a built-in type, a collection and `Self`, the class a static method is called on, whose statics it reaches.
+#[test]
+fn typeof_of_any_type_is_the_class_of_that_type() {
+    let order = "namespace Demo;\n\npublic class Order\n{\n    public static string defaultTag() => \"div\";\n\n    public static int whole() => typeof(int);\n    public static int orders() => typeof(List<Order>);\n    public static int counts() => typeof(Map<string, int>);\n    public static int numbers() => typeof(Set<int>);\n    public static int own() => typeof(Self);\n    public static string tag() => typeof(Self).defaultTag();\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Order.sharp", order), &[]),
+        [
+            "Invalid return type for method `Order.whole`: expected `int`, but found `Class<int>`.",
+            "Invalid return type for method `Order.orders`: expected `int`, but found `Class<List<Order>>`.",
+            "Invalid return type for method `Order.counts`: expected `int`, but found `Class<Map<string, int>>`.",
+            "Invalid return type for method `Order.numbers`: expected `int`, but found `Class<Set<int>>`.",
+            "Invalid return type for method `Order.own`: expected `int`, but found `Class<Order>`.",
+        ]
+    );
+}
+
+/// `typeof` of a nullable or union type is the `Class` of that whole type, spec section 25, as C#'s `typeof(int?)` is,
+/// and a written `Class` of any one type holds it in a field, a parameter and a local. `Class<X>` fits `Class<Y>` when
+/// `X` fits `Y`, so `Class<int>` fits `Class<int|string>` and not the reverse. Only a class's `Class` creates objects
+/// and has statics, so `new`, a static read, a static call and a static write through a `Class<int>` are each refused
+/// once.
+#[test]
+fn typeof_of_a_nullable_or_union_type_is_its_class_and_class_holds_any_type() {
+    let kinds = "namespace Demo;\n\npublic class Kinds\n{\n    private Class<int?> maybe = typeof(int?);\n\n    public Class<int?> kept() => this.maybe;\n\n    public static int nullable() => typeof(int?);\n    public static int either() => typeof(int|string);\n    public static Class<int|string> widened() => typeof(int);\n    public static Class<int> narrowed() => typeof(int|string);\n    public static Class<string> other() => typeof(int);\n\n    public static Class<int|string> local(Class<int|string> given)\n    {\n        Class<int> t = typeof(int);\n        Class<int|string> u = t;\n        return given;\n    }\n\n    public static Any made()\n    {\n        Class<int> t = typeof(int);\n        return new (t)();\n    }\n\n    public static Any built(Class<int|string> either) => new (either)();\n\n    public static List<T> none<T>(Class<T> type) => [];\n\n    public static int inferred() => Kinds.none(typeof(int|string));\n\n    public static Any read(Class<int> t) => t.MAX;\n\n    public static Any direct() => typeof(int).MAX;\n\n    public static Any called(Class<int|string> either) => either.make(1);\n\n    public static void written(Class<int?> maybe)\n    {\n        maybe.count = 1;\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Kinds.sharp", kinds), &[]),
+        [
+            "Invalid return type for method `Kinds.nullable`: expected `int`, but found `Class<int?>`.",
+            "Invalid return type for method `Kinds.either`: expected `int`, but found `Class<int|string>`.",
+            "Invalid return type for method `Kinds.narrowed`: expected `Class<int>`, but found `Class<int|string>`.",
+            "Invalid return type for method `Kinds.other`: expected `Class<string>`, but found `Class<int>`.",
+            "`t` is a `Class<int>`, and only a class's `Class` creates objects.",
+            "`either` is a `Class<int|string>`, and only a class's `Class` creates objects.",
+            "Invalid return type for method `Kinds.inferred`: expected `int`, but found `List<int|string>`.",
+            "`t` is a `Class<int>`, and only a class's `Class` has statics.",
+            "`typeof(int)` is a `Class<int>`, and only a class's `Class` has statics.",
+            "`either` is a `Class<int|string>`, and only a class's `Class` has statics.",
+            "`maybe` is a `Class<int?>`, and only a class's `Class` has statics.",
+        ]
     );
 }
 
@@ -11400,16 +11548,136 @@ fn an_override_of_a_method_returning_self_returns_self() {
     assert_eq!(explained(("src/Demo/Builder.sharp", sharp), &[]), Vec::<String>::new());
 }
 
+/// The standard library's `Sharp.ClassMembers`, which adds `Class`'s one member, `attributes`, to every class value.
+const CLASS_MEMBERS: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ClassMembers.sharp",
+    "namespace Sharp;\n\nimport ReflectionAttribute;\nimport ReflectionClass;\n\npublic static class ClassMembers\n{\n    extension<T>(Class<T> type)\n    {\n        public List<TAttribute> attributes<TAttribute : Object>()\n            => new ReflectionClass(type)\n                .getAttributes(typeof(TAttribute), ReflectionAttribute.IS_INSTANCEOF)\n                .map(attribute => attribute.newInstance());\n    }\n}\n",
+);
+
+/// `Class`'s own members win over a static of the class a class value holds, spec section 25: `attributes<Listen>()`
+/// through `typeof(Order)`, a `Class<Order>` and a local of an inferred class value is `Class`'s, a `List<Listen>`,
+/// while `type.defaultTag()` still calls `Order`'s static. A plain `string` has no `attributes`. Each wrong return
+/// shows the type the call gives.
+#[test]
+fn a_member_of_class_wins_over_a_static_of_the_held_class() {
+    let classes = "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Listen\n{\n    public Listen(public string topic { get; }) { }\n}\n\n[Listen(\"orders\")]\npublic class Order\n{\n    public static string defaultTag() => \"order\";\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public int written() => typeof(Order).attributes<Listen>();\n\n    public int typed(Class<Order> type) => type.attributes<Listen>();\n\n    public int inferred()\n    {\n        const type = typeof(Order);\n        return type.attributes<Listen>();\n    }\n\n    public int tag()\n    {\n        const type = typeof(Order);\n        return type.defaultTag();\n    }\n\n    public Any? text(string name) => name.attributes<Listen>();\n}\n";
+    let others = [("src/Demo/Classes.sharp", classes), CLASS_MEMBERS];
+
+    assert_eq!(issues(CLASS_MEMBERS, &[]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &others),
+        [
+            "Invalid return type for method `Report.written`: expected `int`, but found `List<Listen>`.",
+            "Invalid return type for method `Report.typed`: expected `int`, but found `List<Listen>`.",
+            "Invalid return type for method `Report.inferred`: expected `int`, but found `List<Listen>`.",
+            "Invalid return type for method `Report.tag`: expected `int`, but found `string`.",
+            "Attempting to access a method on a non-object type (`string`).",
+        ]
+    );
+}
+
+/// A class value is one by its type, whatever expression gives it, spec section 25: `Class.of(order)`, a field and a
+/// nullable field through `?.` reach the statics of the class they hold as `typeof(Order)` and a local do, a static
+/// field is read and written, and a constant read. `Class`'s own members are the members whose receiver is a class
+/// value, so an imported `string` extension named `attributes`, which a class value would fit, never reaches one, and
+/// `Class`'s `attributes` wins over a plain PHP class's static `attributes`. Each wrong return shows the type the access
+/// gives.
+#[test]
+fn a_class_value_reaches_class_members_and_the_statics_of_its_class_whatever_expression_gives_it() {
+    let legacy = (
+        "src/Demo/Legacy.php",
+        "<?php\n\nnamespace Demo;\n\nclass Legacy\n{\n    public static function attributes(): string\n    {\n        return 'legacy';\n    }\n}\n",
+    );
+    let classes = "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Listen\n{\n}\n\npublic class Order\n{\n    public const int LIMIT = 3;\n\n    public static int count = 0;\n\n    public static string defaultTag() => \"order\";\n}\n";
+    let text = (
+        "src/Demo/Lists/TextExtensions.sharp",
+        "namespace Demo.Lists;\n\npublic static class TextExtensions\n{\n    extension(string text)\n    {\n        public List<string> attributes<TAttribute>() => [text];\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Demo.Lists.TextExtensions;\n\npublic class Report\n{\n    private Class<Order> kept = typeof(Order);\n\n    private Class<Order>? maybe = null;\n\n    public static string direct(Order order) => Class.of(order).defaultTag();\n\n    public string viaField() => this.kept.defaultTag();\n\n    public string? viaNullableField() => this.maybe?.defaultTag();\n\n    public int counted()\n    {\n        this.kept.count = this.kept.count + 1;\n        return this.kept.count;\n    }\n\n    public static int limit(Order order) => Class.of(order).LIMIT;\n\n    public static bool shadowed(Class<Order> type) => type.attributes<Listen>();\n\n    public static bool legacy() => typeof(Legacy).attributes<Listen>();\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes), CLASS_MEMBERS, text, legacy]),
+        [
+            "Invalid return type for method `Report.shadowed`: expected `bool`, but found `List<Listen>`.",
+            "Invalid return type for method `Report.legacy`: expected `bool`, but found `List<Listen>`.",
+        ]
+    );
+}
+
+/// `Object` bounds a type parameter to any object, spec section 11, as C#'s `where T : class` and TypeScript's
+/// `T extends object` do: a PHP# class, an interface and a plain PHP class are type arguments of it, and `int` is not,
+/// whether a call infers it or names it. `attributes<TAttribute : Object>()` takes an attribute class, so
+/// `attributes<int>()` gets the same type argument error.
+#[test]
+fn an_object_bound_takes_any_object_and_nothing_else() {
+    let legacy = ("src/Demo/Legacy.php", "<?php\n\nnamespace Demo;\n\nclass Legacy\n{\n}\n");
+    let classes = "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Listen\n{\n}\n\npublic interface Shareable\n{\n}\n\npublic class Order : Shareable\n{\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static TValue keep<TValue : Object>(TValue value) => value;\n\n    public static void run(Order order, Shareable shared, Legacy legacy)\n    {\n        Report.keep(order);\n        Report.keep(shared);\n        Report.keep(legacy);\n        Report.keep(1);\n        Report.keep<int>(1);\n    }\n\n    public static Any listens() => typeof(Order).attributes<Listen>();\n\n    public static Any numbers() => typeof(Order).attributes<int>();\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes), CLASS_MEMBERS, legacy]),
+        [
+            "12:21 template-constraint-violation `1` does not satisfy the bound `Object` of type parameter `TValue`. | This argument has type `1`, which is not compatible with the required bound `Object`. | Type parameter `TValue` is bounded by `Object`. | Ensure the argument's type satisfies the bound.",
+            "13:20 template-constraint-violation Type argument `int` does not satisfy `Report.keep<TValue>`'s `TValue`. | `int` is supplied for `TValue` here... | ...but `TValue` is bounded by `Object`. | Supply a type contained by `Object`.",
+            "18:60 template-constraint-violation Type argument `int` does not satisfy `ClassMembers.attributes<TAttribute>`'s `TAttribute`. | `int` is supplied for `TAttribute` here... | ...but `TAttribute` is bounded by `Object`. | Supply a type contained by `Object`.",
+        ]
+    );
+}
+
+/// A PHP# class can't declare a static named like a member of `Class`, spec section 25, as TypeScript's error 2699
+/// refuses one named like a member of `Function`: `type.attributes` on a class value reaches `Class`'s, so a static
+/// method, a static property, a constant and an enum case of that name never run through it. A method name is
+/// compared ignoring case, as PHP calls one, and the message quotes the static's name and `Class`'s member each as
+/// written. An instance member and a static of another name are not reached through a class value, so they stay.
+#[test]
+fn a_static_named_like_a_member_of_class_is_an_error() {
+    let refusal =
+        "`type.attributes` on a class value reaches `Class`'s member `attributes`, never this static. Rename it.";
+    let capitalized = (
+        "src/Demo/Report.sharp",
+        "namespace Demo;\n\npublic class Report\n{\n    public static string Attributes() => \"\";\n}\n",
+    );
+
+    assert_eq!(issues(capitalized, &[CLASS_MEMBERS]), ["5:26 name-already-in-use"]);
+    assert_eq!(
+        messages(capitalized, &[CLASS_MEMBERS]),
+        ["`type.Attributes` on a class value reaches `Class`'s member `attributes`, never this static. Rename it."]
+    );
+    for (member, column) in [
+        ("public static string attributes() => \"\";", 26),
+        ("public static string attributes { get; set; } = \"\";", 26),
+        ("public const string attributes = \"\";", 25),
+    ] {
+        let report = (
+            "src/Demo/Report.sharp",
+            &*format!("namespace Demo;\n\npublic class Report\n{{\n    {member}\n}}\n").leak(),
+        );
+
+        assert_eq!(issues(report, &[CLASS_MEMBERS]), [format!("5:{column} name-already-in-use")], "`{member}`");
+        assert_eq!(messages(report, &[CLASS_MEMBERS]), [refusal], "`{member}`");
+    }
+    let size = ("src/Demo/Size.sharp", "namespace Demo;\n\npublic enum Size\n{\n    case attributes;\n}\n");
+    let allowed = (
+        "src/Demo/Report.sharp",
+        "namespace Demo;\n\npublic class Report\n{\n    public string attributes() => \"\";\n\n    public static string tags() => \"\";\n}\n",
+    );
+
+    assert_eq!(issues(size, &[CLASS_MEMBERS]), ["5:10 name-already-in-use"]);
+    assert_eq!(messages(size, &[CLASS_MEMBERS]), [refusal]);
+    assert_eq!(issues(allowed, &[CLASS_MEMBERS]), Vec::<String>::new());
+}
+
 /// `new (type)(…)` creates an object from a class value, spec section 25: with the type arguments `new` names, or else
 /// those the value carries, as a `Class<Box<Order>>` carries `Order`. A `Class<Box>` carries none, so its `new` names
 /// them. The value must be a class value of a class: a `string`, or the class value of a type parameter whose bound
-/// holds a type that is no class, is refused. The class keeps a `required` constructor, because the value can hold any
-/// subclass. Each row's wrong return shows the type the `new` gives. The PHP twin's `new $type()` on a `class-string`
-/// of the PHP# class keeps Mago's issues.
+/// holds a type that is no class, is refused. The class keeps a `required` constructor, because a class value can hold
+/// any subclass, also when this one holds exactly `typeof(Loose)`. Each row's wrong return shows the type the `new`
+/// gives. The PHP twin's `new $type()` on a `class-string` of the PHP# class keeps Mago's issues.
 #[test]
 fn new_through_a_class_value_gives_the_object_the_type_arguments_it_names_or_the_value_carries() {
     let classes = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public Self copy() => new Self();\n\n    public TItem? first() => null;\n}\n\npublic class Plain\n{\n    public required Plain()\n    {\n    }\n}\n\npublic class Loose\n{\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    private Class<Box> kind = typeof(Box);\n\n    private Class<Plain> plain = typeof(Plain);\n\n    private Class<Box<Order>> orders = typeof(Box<Order>);\n\n    public Any? make() => new (this.kind)();\n\n    public Box<int> typed() => new (this.kind)<string>();\n\n    public Plain made() => new (this.plain)();\n\n    public Box<int> carried() => new (this.orders)();\n\n    public Any? text(string kind) => new (kind)();\n\n    public Loose loose(Class<Loose> type) => new (type)();\n\n    public TItem blank<TItem>()\n    {\n        const type = typeof(TItem);\n        return new (type)();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    private Class<Box> kind = typeof(Box);\n\n    private Class<Plain> plain = typeof(Plain);\n\n    private Class<Box<Order>> orders = typeof(Box<Order>);\n\n    public Any? make() => new (this.kind)();\n\n    public Box<int> typed() => new (this.kind)<string>();\n\n    public Plain made() => new (this.plain)();\n\n    public Box<int> carried() => new (this.orders)();\n\n    public Any? text(string kind) => new (kind)();\n\n    public Loose loose(Class<Loose> type) => new (type)();\n\n    public TItem blank<TItem>()\n    {\n        const type = typeof(TItem);\n        return new (type)();\n    }\n\n    public Loose exact() => new (typeof(Loose))();\n\n    public Loose kept()\n    {\n        const type = typeof(Loose);\n        return new (type)();\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @param class-string<Box> $type */\n    public static function make(string $type): mixed\n    {\n        return new $type();\n    }\n\n    /** @param class-string<Plain> $type */\n    public static function plain(string $type): Plain\n    {\n        return new $type();\n    }\n}\n";
 
     assert_eq!(explained(("src/Demo/Report.php", php), &[("src/Demo/Classes.sharp", classes)]), Vec::<String>::new());
@@ -11421,8 +11689,10 @@ fn new_through_a_class_value_gives_the_object_the_type_arguments_it_names_or_the
             "13:32 invalid-return-statement Box<string> cannot be used as Box<int>. | This has type `Box<string>`. | A type parameter without `out` or `in` is invariant, so neither substitution is allowed.",
             "17:34 invalid-return-statement Box<Order> cannot be used as Box<int>. | This has type `Box<Order>`. | A type parameter without `out` or `in` is invariant, so neither substitution is allowed.",
             "19:43 invalid-class-string-expression `kind` is a `string`, not a `Class`: `new (…)` creates an object from a class value. | Used as a class value here. | Get a class value with `typeof`, as in `typeof(Order)`.",
-            "21:46 unsafe-instantiation `new (type)(…)` needs a `required` constructor: the class value can hold any subclass of `Loose`, so every subclass must keep a constructor that `new (type)(…)` can call. | Created here. | Declare the constructor of `Loose` `required`, as in `public required Loose(…)`.",
+            "21:46 unsafe-instantiation `new (type)(…)` needs a `required` constructor: a class value can hold any subclass of `Loose`, so every subclass must keep a constructor that `new (type)(…)` can call. | Created here. | Declare the constructor of `Loose` `required`, as in `public required Loose(…)`.",
             "26:21 invalid-class-string-expression `TItem` can stand for a type that is not a class. | Used as a class here. | Bound `TItem` by a class, as in `<TItem : Order>`.",
+            "29:29 unsafe-instantiation `new (typeof(Loose))(…)` needs a `required` constructor: a class value can hold any subclass of `Loose`, so every subclass must keep a constructor that `new (typeof(Loose))(…)` can call. | Created here. | Declare the constructor of `Loose` `required`, as in `public required Loose(…)`.",
+            "34:16 unsafe-instantiation `new (type)(…)` needs a `required` constructor: a class value can hold any subclass of `Loose`, so every subclass must keep a constructor that `new (type)(…)` can call. | Created here. | Declare the constructor of `Loose` `required`, as in `public required Loose(…)`.",
         ]
     );
 }

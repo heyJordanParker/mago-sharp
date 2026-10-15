@@ -38,8 +38,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodPartialApplication<'
     where
         A: Arena,
     {
-        let method_resolution =
-            resolve_static_method_targets(context, block_context, artifacts, self.class, &self.method, self.span())?;
+        let method_resolution = resolve_static_method_targets(
+            context,
+            block_context,
+            artifacts,
+            self.class,
+            &self.method,
+            self.span(),
+            false,
+        )?;
 
         let mut identifiers = vec![];
         for resolved_method in &method_resolution.resolved_methods {

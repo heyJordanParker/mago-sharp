@@ -177,6 +177,7 @@ impl Fingerprintable for Extension<'_> {
         H: std::hash::Hasher,
     {
         "extension".hash(hasher);
+        self.type_parameters.fingerprint_with_hasher(hasher, resolved_names, options);
         self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);

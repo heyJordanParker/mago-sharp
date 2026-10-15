@@ -630,6 +630,24 @@ fn using_a_local_after_its_block_closes_is_an_error() {
     assert_eq!(issues(code), ["10:16 `inner` is used after the block that declares it closes."]);
 }
 
+/// `typeof` takes a type, spec section 25, so a local in scope named in it is an error that names `Class.of`, as each
+/// kind of local declares it. A class of the same name doesn't matter: the local wins, as it does everywhere else.
+#[test]
+fn typeof_of_a_local_is_an_error_that_names_class_of() {
+    let code = leak(method(
+        "        const parameter = typeof(extra);\n        const report = 1;\n        const local = typeof(report);\n        if (extra is int count) {\n            const pattern = typeof(count);\n        }\n        const type = typeof(Report);\n        return 1;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:34 `typeof` takes a type, and `extra` is a local: write `Class.of(extra)`.",
+            "9:30 `typeof` takes a type, and `report` is a local: write `Class.of(report)`.",
+            "11:36 `typeof` takes a type, and `count` is a local: write `Class.of(count)`.",
+        ]
+    );
+}
+
 #[test]
 fn writing_a_const_local_after_its_block_closes_reports_only_the_scope_error() {
     let code =
@@ -1199,7 +1217,7 @@ fn self_is_a_return_type_creates_with_a_required_constructor_and_calls_static_me
 
 #[test]
 fn self_is_only_a_return_type() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Self owner;\n    public Self? next { get; set; }\n    public const Self SAME = 1;\n\n    public required Report(Self other, int|Self either)\n    {\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Self owner;\n    public Self? next { get; set; }\n    public const Self SAME = 1;\n\n    public required Report(Self other, int|Self either)\n    {\n        Self copy = new Self(other, either);\n        Self? none = null;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -1209,6 +1227,8 @@ fn self_is_only_a_return_type() {
             "7:18 `Self` is only a return type in PHP#.",
             "9:28 `Self` is only a return type in PHP#.",
             "9:44 `Self` is only a return type in PHP#.",
+            "11:9 `Self` is only a return type in PHP#.",
+            "12:9 `Self` is only a return type in PHP#.",
         ]
     );
 }
@@ -2813,6 +2833,81 @@ fn an_extension_receiver_is_one_plain_parameter() {
     }
 }
 
+/// An extension block declares type parameters as a method does, spec section 26, and a call infers them from its
+/// receiver, so each one appears in the receiver's type, as C#'s CS9295 requires. A member's own type parameters are
+/// written on the member.
+#[test]
+fn an_extension_block_type_parameter_appears_in_its_receiver() {
+    for (header, expected) in [
+        ("extension<T>(List<T> items)", vec![]),
+        ("extension<TLeft, TRight>(Map<string, Function<TRight(TLeft)>> items)", vec![]),
+        ("extension<T : Order>(List<T> items)", vec![]),
+        ("extension<TItem>(Function<TItem(Order)> make)", vec![]),
+        (
+            "extension<T>(List<T> items, int count)",
+            vec![
+                "5:17 An extension's receiver is one parameter, with no modifier, default or `...`, as in `extension(string value)`.",
+            ],
+        ),
+        (
+            "extension<T, TOther>(List<T> items)",
+            vec![
+                "5:18 The receiver `List<T>` doesn't use `TOther`: a call infers an extension block's type parameters from its receiver, so each one appears there.",
+            ],
+        ),
+        (
+            "extension<T>(string items)",
+            vec![
+                "5:15 The receiver `string` doesn't use `T`: a call infers an extension block's type parameters from its receiver, so each one appears there.",
+            ],
+        ),
+        (
+            "extension<out T>(List<T> items)",
+            vec![
+                "5:15 An extension block's type parameter takes no `out`: only a class or an interface declares variance, so remove it.",
+            ],
+        ),
+        (
+            "extension<K>(List<K> items)",
+            vec!["5:15 A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`."],
+        ),
+    ] {
+        let code = format!(
+            "namespace App.Shared;\n\npublic static class Lists\n{{\n    {header}\n    {{\n        public int size() => 0;\n    }}\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), expected, "`{header}`");
+    }
+
+    let shadowed = "namespace App.Shared;\n\npublic static class Lists\n{\n    extension<T>(List<T> items)\n    {\n        public T? first<T>() => null;\n        public List<TOut> converted<TOut>() => [];\n    }\n}\n";
+    assert_eq!(
+        issues(shadowed),
+        ["7:25 `T` is already a type parameter of the extension block: give the member's another name."]
+    );
+}
+
+/// A class value's members are `Class`'s own and the statics of the class it holds, spec section 25, so only the
+/// standard library, under `Sharp`, declares an extension of `Class`, nullable or not, and a class value of another
+/// type is any other receiver's member, as `List<Class<Order>>` is.
+#[test]
+fn only_the_standard_library_extends_class() {
+    let refusal = "An extension can't add members to `Class`: a class value's members are `Class`'s own and the statics of the class it holds.";
+    for (namespace, receiver, expected) in [
+        ("App.Shared", "extension<T>(Class<T> type)", vec![format!("5:18 {refusal}")]),
+        ("App.Shared", "extension(Class<Order> type)", vec![format!("5:15 {refusal}")]),
+        ("App.Shared", "extension<T>(Class<T>? type)", vec![format!("5:18 {refusal}")]),
+        ("App.Shared", "extension<T>(List<Class<T>> types)", vec![]),
+        ("Sharp", "extension<T>(Class<T> type)", vec![]),
+        ("Sharp.Data", "extension<T>(Class<T> type)", vec![]),
+    ] {
+        let code = format!(
+            "namespace {namespace};\n\npublic static class Classes\n{{\n    {receiver}\n    {{\n        public string describe() => \"\";\n    }}\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), expected, "`{namespace}`: `{receiver}`");
+    }
+}
+
 /// An extension adds methods and computed properties to its receiver's type. A value of that type has no storage of
 /// the extension's, and the static class holds its constants, operators, laws and constructors.
 #[test]
@@ -4049,11 +4144,32 @@ fn new_through_a_class_value_calls_the_constructor_with_its_arguments() {
     );
 }
 
+/// `typeof` takes any one type in a method body, spec section 25: a class, a built-in type, a collection, `Self`, the
+/// class a static method is called on, and a nullable or union type, as C#'s `typeof(int?)` takes one. PHP's `self`,
+/// and a union in parentheses without `?`, are refused as they are in every type.
 #[test]
-fn typeof_names_a_class_in_a_method_body() {
-    let code = leak(method("        Store.keep(typeof(Order));\n        return extra;\n"));
+fn typeof_takes_one_type_in_a_method_body() {
+    for (r#type, expected) in [
+        ("Order", vec![]),
+        ("int", vec![]),
+        ("List<Order>", vec![]),
+        ("Map<string, int>", vec![]),
+        ("Set<int>", vec![]),
+        ("Self", vec![]),
+        ("int?", vec![]),
+        ("int|string", vec![]),
+        ("Order|Line", vec![]),
+        ("(int|string)?", vec![]),
+        ("(Order|Line)", vec!["7:27 This type is not supported yet in PHP#.".to_owned()]),
+        (
+            "self",
+            vec!["7:27 PHP# has no `self`: write the class's own name, `Report`, for the declaring class.".to_owned()],
+        ),
+    ] {
+        let code = leak(method(&format!("        Store.keep(typeof({type}));\n        return extra;\n")));
 
-    assert_eq!(issues(code), Vec::<String>::new());
+        assert_eq!(issues(code), expected, "`typeof({type})`");
+    }
 }
 
 /// A member of `typeof(X)` or of a local holding a class value is a static member of the class it holds, as `X.y` is,
@@ -4464,23 +4580,29 @@ fn in_or_out_is_an_error_only_on_a_method_type_parameter() {
     );
 }
 
-/// A bound is a class or an interface, a generic class type, or several of them joined with `&`, spec section 11. A
-/// union of classes names `&`, which joins several bounds.
+/// A bound is `Object`, a class or an interface, a generic class type, or several classes and interfaces joined with
+/// `&`, spec section 11. `Object` holds any object, as C#'s `where T : class` and TypeScript's `T extends object` do,
+/// and joins no other bound, as mago's own check of an intersection says. A union of classes names `&`, which joins
+/// several bounds.
 #[test]
-fn a_bound_that_is_not_a_class_an_interface_or_a_generic_class_type_is_an_error() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n}\n";
+fn a_bound_that_is_not_object_a_class_an_interface_or_a_generic_class_type_is_an_error() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable, TM : Object>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n    public void j<TN : object>() { }\n    public void k<TO : Object & Shareable>() { }\n    public void l<TP : Object?>() { }\n    public void m<TQ : Object>(TQ value) { }\n}\n";
 
     assert_eq!(
         issues(code),
-        (5..=13)
+        (5..=16)
             .map(|line| match line {
                 8 => "8:24 A bound can't be a union: join several bounds with `&`.".to_owned(),
-                line => format!("{line}:24 A bound is a class or an interface, as in `<TItem : DatabaseEntity>`."),
+                15 => "15:24 Type `Object` cannot be part of an intersection.".to_owned(),
+                line => format!(
+                    "{line}:24 A bound is `Object`, a class or an interface, as in `<TItem : DatabaseEntity>`."
+                ),
             })
             .collect::<Vec<_>>()
     );
-    assert!(check("src/Report.sharp", code).iter().all(|issue| issue.notes
-        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+    assert!(check("src/Report.sharp", code).iter().filter(|issue| issue.message.starts_with("A bound")).all(|issue| issue
+        .notes
+        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
 }
 
 /// A bound's type arguments are a parameter's types, so a `void` among them is refused as one, alone or joined with
@@ -4499,11 +4621,10 @@ fn a_type_argument_of_a_bound_is_never_void() {
     );
 }
 
-/// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes a class, an
-/// interface or a type parameter, a class value may carry its type arguments, a type argument is never `void`, and a
-/// type parameter takes no type arguments, nor does a local before `.`: only a class takes them there. The analyzer
-/// checks a generic class's arity and bounds, and refuses a class value as a `Map` key as it refuses one in a `Map`
-/// literal.
+/// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes any one type, a
+/// class value may carry its type arguments, a type argument is never `void`, and a type parameter takes no type
+/// arguments, nor does a local before `.`: only a class takes them there. The analyzer checks a generic class's arity
+/// and bounds, and refuses a class value as a `Map` key as it refuses one in a `Map` literal.
 #[test]
 fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_takes() {
     let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<List<int>, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
@@ -4512,16 +4633,23 @@ fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_tak
         issues(code),
         [
             "6:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
-            "7:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
-            "8:31 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
             "9:27 A type argument cannot be `void`: `void` is only a return type.",
             "18:43 A type argument cannot be `void`: `void` is only a return type.",
-            "19:33 A type parameter takes no type arguments: write `typeof(TItem)`.",
+            "19:28 A type parameter takes no type arguments: write `TItem`.",
             "20:28 A type parameter takes no type arguments: write `TItem`.",
             "21:26 `type` is not a class, so it takes no type arguments.",
             "25:29 A type parameter takes no type arguments: write `TItem`.",
         ]
     );
+}
+
+/// `Class<T>` takes any one type in a field, a parameter and a local, spec section 25: a built-in type, a nullable type
+/// and a union, as `typeof` gives them.
+#[test]
+fn class_takes_any_one_type_in_a_field_a_parameter_and_a_local() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Class<int> kind;\n    private Class<int?> maybe;\n\n    public int run(Class<int|string> either, Class<(Order|Line)?> held)\n    {\n        Class<int> t = typeof(int);\n        Class<int|string> u = typeof(int|string);\n        return 0;\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// The type arguments of `new` and of a method call, `super.` and `Self.` calls included, are a method body's types,
@@ -4622,7 +4750,7 @@ fn a_static_member_of_a_generic_class_returns_self() {
 /// follows the same type written alone.
 #[test]
 fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union() {
-    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<List<int>, int> c = [:];\n    private Map<List<int>, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<int> g;\n    private Class<int>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<List<int>, int> c = [:];\n    private Map<List<int>, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<List<void>> g;\n    private Class<List<void>>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
 
     assert_eq!(
         issues(code),
@@ -4633,8 +4761,8 @@ fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union()
             "8:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
             "9:23 A type argument cannot be `void`: `void` is only a return type.",
             "10:23 A type argument cannot be `void`: `void` is only a return type.",
-            "11:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
-            "12:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
+            "11:24 A type argument cannot be `void`: `void` is only a return type.",
+            "12:24 A type argument cannot be `void`: `void` is only a return type.",
             "13:27 A type argument cannot be `void`: `void` is only a return type.",
             "14:27 A type argument cannot be `void`: `void` is only a return type.",
         ]

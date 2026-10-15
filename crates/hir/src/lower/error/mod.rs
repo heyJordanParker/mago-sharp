@@ -21,6 +21,7 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         // PHP# grammar does not expect there.
         ParseError::UnexpectedToken(..)
         | ParseError::PhpSyntaxInSharp(..)
+        | ParseError::ClassNameConstantInSharp(..)
         | ParseError::PhpLambdaInSharp(..)
         | ParseError::LambdaAfterOperatorInSharp(..)
         | ParseError::ConditionalInGuardInSharp(..)
