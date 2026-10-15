@@ -138,8 +138,8 @@ where
 /// The PHP functions a pattern node calls to test a value, as the identifiers its PHP calls.
 ///
 /// They are `is_int`, `is_float`, `is_string` or `is_bool` at a scalar type of a type pattern or `as`, `is_object` at
-/// the `{` of a properties pattern, `is_array` at the `[` and `count` at the `]` of a list pattern, and `is_array` at
-/// the `...` and `array_slice` at the type of a list pattern's named rest. The binder records each as the name resolved
+/// the `{` of a properties pattern, `is_array` at the `[` and `count` at the `]` of a list pattern, and `array_slice` at
+/// the `...` of a list pattern's named rest. The binder records each as the name resolved
 /// at that span, as it records a call's name.
 pub fn called_functions(node: Node<'_, '_>) -> impl Iterator<Item = LocalIdentifier<'static>> {
     let called = |span, value: &'static [u8]| Some(LocalIdentifier { span, value });
@@ -148,9 +148,8 @@ pub fn called_functions(node: Node<'_, '_>) -> impl Iterator<Item = LocalIdentif
         Node::As(r#as) => [scalar_test(r#as.hint), None],
         Node::PropertiesPattern(properties) => [called(properties.left_brace, b"is_object"), None],
         Node::ListPattern(list) => [called(list.left_bracket, b"is_array"), called(list.right_bracket, b"count")],
-        Node::RestPattern(RestPattern { ellipsis, hint: Some(hint), .. }) => {
-            [called(*ellipsis, b"is_array"), called(hint.span(), b"array_slice")]
-        }
+        // The rest's type is a type test of its own, whose name the binder records at its span.
+        Node::RestPattern(RestPattern { ellipsis, hint: Some(_), .. }) => [called(*ellipsis, b"array_slice"), None],
         _ => [None, None],
     };
 
@@ -611,8 +610,7 @@ where
         if let Some((place, rest)) = rest
             && let (Some(hint), Some(variable)) = (rest.hint, rest.variable)
         {
-            let mut functions = called_functions(Node::RestPattern(rest));
-            let (is_array, array_slice) = (functions.next()?, functions.next()?);
+            let array_slice = called_functions(Node::RestPattern(rest)).next()?;
             let array = self.read(subject, hint.span());
             let mut arguments = vec![array, self.integer(place, end_of(hint.span()))];
             if place + 1 < elements {
@@ -628,7 +626,8 @@ where
                 operator: AssignmentOperator::Assign(start_of(rest.ellipsis)),
                 rhs: slice,
             }));
-            let assigned = self.call(is_array, assignment);
+            // The slice is tested as a typed element is, so `...List<Circle> rest` holds only circles.
+            let assigned = self.type_test(hint, assignment)?;
 
             test = self.binary(test, BinaryOperator::And(start_of(rest.ellipsis)), assigned);
         }

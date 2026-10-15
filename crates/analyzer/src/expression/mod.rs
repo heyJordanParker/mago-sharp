@@ -460,8 +460,8 @@ where
     // The PHP of a pattern calls a type test that no source the user wrote calls. It is the PHP# syntax itself, so it is
     // never a bare call to refuse. Some calls are the shape of the pattern, which no source the user wrote can drop, so
     // C# reports nothing there when they always hold: a properties pattern's `is_object` and a list pattern's
-    // `is_array`, their null checks, a list pattern's `count` and its rest's `is_array`, and the type test of a list's
-    // element, which the list's own type can make always true, as `[int, ...List<int> rest]` writes "any element".
+    // `is_array`, their null checks, a list pattern's `count`, and the type test of a list's element or rest, which the
+    // list's own type can make always true, as `[int, ...List<int> rest]` writes "any element".
     let mut pattern_calls = PatternCalls::default();
     match node {
         Node::Expression(expression) => PatternCallWalker.walk_expression(expression, &mut pattern_calls),
@@ -1106,7 +1106,8 @@ impl<'ast, 'arena> Walker<'ast, 'arena, PatternCalls> for PatternCallWalker {
         calls.lists.push((list.span(), list.left_bracket));
         calls.element_tests.extend(list.elements.iter().filter_map(|element| match element {
             ListPatternElement::Pattern(Pattern::Type(TypePattern { hint, .. })) => Some(hint.span()),
-            _ => None,
+            ListPatternElement::Rest(rest) => rest.hint.map(HasSpan::span),
+            ListPatternElement::Pattern(_) => None,
         }));
     }
 
@@ -1208,8 +1209,8 @@ where
     })
 }
 
-/// The type of each type pattern in `pattern`, itself or a pattern inside it. A list pattern's rest is no type pattern:
-/// it holds the elements the others leave, which its type never tests.
+/// The type of each type pattern in `pattern`, itself or a pattern inside it, and of each list pattern's named rest,
+/// which tests the elements the others leave as a typed element is tested.
 fn type_pattern_hints<'ast>(pattern: &'ast Pattern<'ast>) -> Vec<&'ast Hint<'ast>> {
     let properties_hints = |properties: &'ast PropertiesPattern<'ast>| -> Vec<&'ast Hint<'ast>> {
         properties.properties.iter().flat_map(|property| type_pattern_hints(property.pattern)).collect()
@@ -1238,7 +1239,7 @@ fn type_pattern_hints<'ast>(pattern: &'ast Pattern<'ast>) -> Vec<&'ast Hint<'ast
             .iter()
             .flat_map(|element| match element {
                 ListPatternElement::Pattern(pattern) => type_pattern_hints(pattern),
-                ListPatternElement::Rest(_) => Vec::new(),
+                ListPatternElement::Rest(rest) => rest.hint.into_iter().collect(),
             })
             .collect(),
         Pattern::Value(_) | Pattern::Comparison(_) => Vec::new(),

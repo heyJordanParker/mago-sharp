@@ -16319,8 +16319,11 @@ fn a_leave_after_null_coalesce_is_its_statement_inside_the_expression() {
 /// ```php
 /// $a = \is_array($values) && \count($values) === 0;
 /// $b = \is_array($values) && \count($values) >= 1 && \is_int($first = $values[0])
-///     && \is_array($rest = \array_slice($values, 1));
+///     && ($rest = \array_slice($values, 1)) is List<int>;
 /// ```
+///
+/// The rest is tested as a typed element is, by the engine's test of its type, so `...List<Circle> rest` holds only
+/// circles.
 #[test]
 fn a_list_pattern_tests_the_count_then_each_element_then_takes_the_rest() {
     assert_eq!(
@@ -16375,18 +16378,17 @@ fn a_list_pattern_tests_the_count_then_each_element_then_takes_the_rest() {
                             VAR
                               ZVAL "values"
                             ZVAL 0
-                  CALL
-                    ZVAL "is_array"
-                    ARG_LIST
-                      ASSIGN
-                        VAR
-                          ZVAL "rest"
-                        CALL
-                          ZVAL "array_slice"
-                          ARG_LIST
-                            VAR
-                              ZVAL "values"
-                            ZVAL 1
+                  SHARP_IS_TYPE
+                    ASSIGN
+                      VAR
+                        ZVAL "rest"
+                      CALL
+                        ZVAL "array_slice"
+                        ARG_LIST
+                          VAR
+                            ZVAL "values"
+                          ZVAL 1
+                    ZVAL "List<int>"
               RETURN
                 ZVAL 0
             "#}

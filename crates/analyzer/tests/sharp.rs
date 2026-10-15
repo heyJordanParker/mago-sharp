@@ -4890,6 +4890,16 @@ fn list_patterns_test_the_count_and_each_element() {
         ]
     );
 
+    // A rest's type is tested as a typed element's is: one no element can have never matches, and `rest` has the type
+    // written.
+    let typed = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static bool texts(List<int> values) => values is [int first, ...List<string> rest];\n\n    public static float circles(List<Any> shapes) => match (shapes) {\n        [...List<Circle> rest] => rest[0].radius,\n        default => 0.0,\n    };\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", typed), &[("src/Lib/Shapes.php", SHAPES)]),
+        [
+            "7:61 impossible-type-comparison This pattern never matches the value it tests. | Remove the pattern, or test a value that can match it."
+        ]
+    );
+
     // Spec section 21 skips `default` only on an enum or a sealed interface, so a `match` on a list needs it.
     let defaultless = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int> values) => match (values) {\n        [] => 0,\n        [int, ...List<int> rest] => 1,\n    };\n}\n";
     assert_eq!(issues(("src/Demo/Report.sharp", defaultless), &[]), ["5:49 match-not-exhaustive"]);
