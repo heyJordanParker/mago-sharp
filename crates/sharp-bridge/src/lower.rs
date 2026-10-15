@@ -872,9 +872,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The `==` of a struct, spec section 10, or of an enum with a case that carries data, section 20, as
     /// `public static function op_Equality(mixed $a, mixed $b): bool`, spanning the name at `span`. `classes` holds the
-    /// struct, or the class of each case that carries data. Two instances of one of them are equal when each property
-    /// equals its pair by the property's own `==`, joined by `&&`. Any other pair, null and a plain case included, is
-    /// equal only when identical, so null equals only null and a value of another type or case is unequal:
+    /// struct, or the class of each case. Two instances of one of them are equal when each property equals its pair by
+    /// the property's own `==`, joined by `&&`, so two of a plain case are always equal. Any other pair is equal only
+    /// when identical, so null equals only null and a value of another type or case is unequal:
     /// `if ($a instanceof \App\Point && $b instanceof \App\Point) { return …; } return $a === $b;`.
     fn value_equality(&mut self, span: Span, classes: &[&[u8]]) -> u32 {
         let name = php_operator_name(&BinaryOperator::Equal(span), 2)
@@ -1788,12 +1788,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// Spec section 20: an enum with a case that carries data is an abstract class, with the enum's header as its
     /// interface list, the enum's constants and methods, and the `op_Equality` that compares two of the same case
     /// field by field, as `abstract class PaymentResult implements \App\HasLabel`. Each case is a final subclass named
-    /// in the enum's namespace, declared after it. A case that carries data promotes its fields in its constructor and
-    /// implements `\Sharp\Struct`, so a `Map` or a `Set` hashes it by its fields as it hashes a struct, as
+    /// in the enum's namespace, declared after it, that implements `\Sharp\Struct`, so a `Map` or a `Set` hashes it by
+    /// its fields as it hashes a struct. A case that carries data promotes its fields in its constructor, as
     /// `final class Paid extends \App\PaymentResult implements \Sharp\Struct { public function __construct(public readonly string $transactionId) {} }`
-    /// in the namespace `App\PaymentResult`. A plain case is one object, which its `instance()` makes once and gives:
-    /// `final class Open extends \App\CheckoutState { private static $instance; private function __construct() {}
-    /// public static function instance(): self { return self::$instance ??= new self(); } }`.
+    /// in the namespace `App\PaymentResult`. A plain case is a case with no fields, so a copy `unserialize` makes is
+    /// equal to it, and its `instance()` makes its one object once and gives it:
+    /// `final class Open extends \App\CheckoutState implements \Sharp\Struct { private static $instance;
+    /// private function __construct() {} public static function instance(): self { return self::$instance ??= new self(); } }`.
     fn data_enum(&mut self, r#enum: &Enum, statements: &mut Vec<u32>) {
         self.class = self.names.get(&r#enum.name);
         let enum_name = self.class;
@@ -1807,18 +1808,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 _ => unreachable!("check_slice refuses the enum member `{member}`"),
             });
         }
-        let data_cases: Vec<Vec<u8>> = r#enum
+        let cases: Vec<Vec<u8>> = r#enum
             .members
             .iter()
             .filter_map(|member| match member {
-                ClassLikeMember::EnumCase(EnumCase { item: EnumCaseItem::Data(item), .. }) => {
-                    Some([enum_name, b"\\", item.name.value].concat())
-                }
+                ClassLikeMember::EnumCase(case) => Some([enum_name, b"\\", case.item.name().value].concat()),
                 _ => None,
             })
             .collect();
-        let data_cases: Vec<&[u8]> = data_cases.iter().map(Vec::as_slice).collect();
-        members.push(self.value_equality(r#enum.name.span, &data_cases));
+        let cases: Vec<&[u8]> = cases.iter().map(Vec::as_slice).collect();
+        members.push(self.value_equality(r#enum.name.span, &cases));
 
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
         let attributes = self.attributes(&r#enum.attribute_lists, None, None);
@@ -1838,16 +1837,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             };
             let name = case.item.name();
             let line = self.line(name.span);
-            let (members, header) = match &case.item {
-                EnumCaseItem::Data(item) => {
-                    let constructor = self.promoted_constructor(name.span, &item.parameter_list);
-                    let marker = self.string(ZEND_NAME_FQ, line, b"Sharp\\Struct");
-
-                    (vec![constructor], self.node(SHARP_AST_NAME_LIST, 0, line, &[marker]))
-                }
-                EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => (self.case_object(name.span), NULL),
+            let members = match &case.item {
+                EnumCaseItem::Data(item) => vec![self.promoted_constructor(name.span, &item.parameter_list)],
+                EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => self.case_object(name.span),
             };
             let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
+            let marker = self.string(ZEND_NAME_FQ, line, b"Sharp\\Struct");
+            let header = self.node(SHARP_AST_NAME_LIST, 0, line, &[marker]);
             let parent = self.string(ZEND_NAME_FQ, line, enum_name);
             let attributes = self.attributes(&case.attribute_lists, None, None);
             let class_name = [r#enum.name.value, b"\\", name.value].concat();

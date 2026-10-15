@@ -9525,11 +9525,12 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
 ///     public function label(): string { return 'checkout'; }
 ///     public static function op_Equality(mixed $a, mixed $b): bool
 ///     {
+///         if ($a instanceof \App\CheckoutState\Open && $b instanceof \App\CheckoutState\Open) { return true; }
 ///         if ($a instanceof \App\CheckoutState\Paying && $b instanceof \App\CheckoutState\Paying) { return $a->gateway === $b->gateway; }
 ///         return $a === $b;
 ///     }
 /// }
-/// final class CheckoutState\Open extends \App\CheckoutState
+/// final class CheckoutState\Open extends \App\CheckoutState implements \Sharp\Struct
 /// {
 ///     private static $instance;
 ///     private function __construct() {}
@@ -9550,9 +9551,10 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
 /// Spec section 20: an enum with a case that carries data is an abstract class, `[64]`
 /// `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS`, and each case a final subclass named in the enum's namespace. A plain case is the
 /// one object its class's `instance()` gives, and `CheckoutState.Paying(…)` creates its case. An enum compares by value,
-/// sections 19 and 20, so `==` runs the enum's `op_Equality`, which compares two of the same case that carries data
-/// field by field and anything else as identical, as a struct's does. A case that carries data implements
-/// `\Sharp\Struct`, so a `Map` or a `Set` hashes it by its fields, as it hashes a struct.
+/// sections 19 and 20, so `==` runs the enum's `op_Equality`, which compares two of the same case field by field and
+/// anything else as identical, as a struct's does. A plain case is a case with no fields, so the copy `unserialize`
+/// makes of it is equal to it. Each case implements `\Sharp\Struct`, so a `Map` or a `Set` hashes it by its fields, as
+/// it hashes a struct.
 #[test]
 fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
     let lowered = Lowered::new(
@@ -9611,6 +9613,20 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                             INSTANCEOF
                               VAR
                                 ZVAL "a"
+                              ZVAL "App\\CheckoutState\\Open"
+                            INSTANCEOF
+                              VAR
+                                ZVAL "b"
+                              ZVAL "App\\CheckoutState\\Open"
+                          STMT_LIST
+                            RETURN
+                              ZVAL true
+                      IF
+                        IF_ELEM
+                          AND
+                            INSTANCEOF
+                              VAR
+                                ZVAL "a"
                               ZVAL "App\\CheckoutState\\Paying"
                             INSTANCEOF
                               VAR
@@ -9639,7 +9655,8 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                 null
               CLASS [32] "CheckoutState\\Open" @5-5
                 ZVAL "App\\CheckoutState"
-                null
+                NAME_LIST
+                  ZVAL "Sharp\\Struct"
                 STMT_LIST
                   PROP_GROUP [20]
                     null
