@@ -1217,6 +1217,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 }
 
                 check_method_uses(method, context);
+                check_abstract_access(method, context);
                 check_iterator_returns(method, context);
                 check_extern(method, context)
             }
@@ -2502,6 +2503,24 @@ fn check_method_uses(method: &Method, context: &mut Context<'_, '_, '_>) {
             .with_help("Remove it from `uses`, or declare the method without a body."),
         );
     }
+}
+
+/// Refuses an abstract method that is `private`, written or by spec section 5's default: a subclass implements it, so
+/// it is `public` or `protected`, as C# refuses a `private` one. PHP's own engine refuses it only when it runs.
+fn check_abstract_access(method: &Method, context: &mut Context<'_, '_, '_>) {
+    if !method.modifiers.contains_abstract()
+        || method
+            .modifiers
+            .iter()
+            .any(|modifier| matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Internal(_)))
+    {
+        return;
+    }
+
+    context.report(
+        Issue::error("A subclass implements an abstract method, so it is `public` or `protected`: write `protected abstract`.")
+            .with_annotation(Annotation::primary(method.name.span).with_message("Declared here.")),
+    );
 }
 
 /// The place of a method's parts, refusing an `extern` method that is not `static`, in a static or `foreign` class,

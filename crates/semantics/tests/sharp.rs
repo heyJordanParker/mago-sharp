@@ -2654,6 +2654,16 @@ fn a_method_without_an_access_modifier_compiles() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// A subclass implements an abstract method, so it is `public` or `protected`, as C# refuses a `private` one, where a
+/// method with no access modifier is `private`.
+#[test]
+fn an_abstract_method_states_public_or_protected() {
+    let code = "namespace App.Tenant;\n\npublic abstract class Report\n{\n    abstract int size();\n    private abstract int count();\n    protected abstract int total();\n    public abstract int sum();\n    internal abstract int mean();\n}\n";
+    let message = "A subclass implements an abstract method, so it is `public` or `protected`: write `protected abstract`.";
+
+    assert_eq!(issues(code), [format!("5:18 {message}"), format!("6:26 {message}")]);
+}
+
 #[test]
 fn a_method_named_after_its_class_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int report() { return 1; }\n}\n\nclass Calc\n{\n    public int CALC() { return 1; }\n}\n";
