@@ -80,6 +80,8 @@ pub struct Unit {
     texts: Vec<u8>,
     /// Each standard library method the file inlines, once, with its form's fingerprint.
     inlined: Vec<Read>,
+    /// Each function type the file spells for its own methods and lambdas, with its text's fingerprint.
+    function_types: Vec<Read>,
 }
 
 impl Unit {
@@ -114,6 +116,14 @@ impl Unit {
     #[must_use]
     pub fn inlined(&self) -> &[Read] {
         &self.inlined
+    }
+
+    /// The function type of each method and lambda the file declares, which `is` tests a closure of it by, named
+    /// `Class::method` or by the lambda's `{closure:…}` name, with the xxh3-64 of its type text. Its effects come from
+    /// the bodies of every function it calls, in any file, so the orchestrator stores them as `Reads::function_types`.
+    #[must_use]
+    pub fn function_types(&self) -> &[Read] {
+        &self.function_types
     }
 }
 

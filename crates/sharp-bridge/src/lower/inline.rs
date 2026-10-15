@@ -28,7 +28,6 @@ use super::Lines;
 use super::Lowering;
 use super::NULL;
 use super::is_current_position;
-use super::set_parameter;
 use super::types::Declaration;
 use super::types::DeclarationKind;
 use super::types::receiver_classes;
@@ -198,8 +197,9 @@ impl Lowering<'_, '_> {
         parameters: &[&FunctionLikeParameter],
         body: Body,
     ) -> Option<InlineForm> {
-        // A form runs without the method's statements before its body, which make each `Set` parameter a `Set`.
-        if parameters.iter().any(|parameter| parameter.is_variadic() || set_parameter(parameter).is_some()) {
+        // A form runs without the method's statements before its body, which make each `Map` and `Set` a parameter
+        // holds the object.
+        if parameters.iter().any(|parameter| parameter.is_variadic() || self.crossing_type(parameter).is_some()) {
             return None;
         }
 

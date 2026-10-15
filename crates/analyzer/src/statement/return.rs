@@ -57,6 +57,8 @@ use crate::utils::names::display_nullable_type;
 use crate::utils::names::display_sharp_accessor;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::quoted_source;
+use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
 
@@ -412,6 +414,29 @@ pub fn handle_return_value<'ctx, A>(
                 .with_help(format!(
                     "Add specific type hints to variables, parameters, or properties involved in calculating the return value. Consider adding a specific return type declaration to the {kind} signature to catch potential mismatches earlier."
                 )),
+            );
+
+            return;
+        }
+
+        // Spec section 13: a readonly value never leaves through a return type that would let its caller change it.
+        if context.dialect.is_sharp() && expected_return_type.drops_readonly_of(&inferred_return_type) {
+            let readonly_return = display_type(context, &expected_return_type.clone().to_readonly());
+            // An operator's operands are readonly by definition, so one it returns is readonly or a new value.
+            let fix = if block_context.scope.get_function_like().is_some_and(|function| function.flags.is_operator()) {
+                format!(". Declare the return type `{readonly_return}`, or return a new value.")
+            } else {
+                format!(". Declare the return type `{readonly_return}`.")
+            };
+            let action = format!("return {}", quoted_source(context, return_value.span()));
+            report_dropped_readonly(
+                context,
+                block_context,
+                IssueCode::InvalidReturnStatement,
+                return_value,
+                (&expected_return_type, &inferred_return_type),
+                &action,
+                &fix,
             );
 
             return;

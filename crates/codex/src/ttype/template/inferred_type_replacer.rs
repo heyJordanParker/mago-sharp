@@ -120,7 +120,10 @@ pub fn replace_with_polarity(
                 {
                     let template_type = get_most_specific_type_from_bounds(bounds, codebase);
 
+                    // A class string names each class of the type, and a PHP# class value of the rest holds that whole
+                    // type, as `Class<T>` of an `int|string` is a `Class<int|string>`, spec section 25.
                     let mut class_template_types = Vec::new();
+                    let mut held = Vec::new();
                     for template_type_part in template_type.types.as_ref() {
                         if template_type_part.is_mixed() || matches!(template_type_part, TAtomic::Object(TObject::Any))
                         {
@@ -128,10 +131,7 @@ pub fn replace_with_polarity(
                                 .push(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Any { kind: *kind })));
                         } else if let TAtomic::Object(TObject::Named(_)) = template_type_part {
                             class_template_types.push(TAtomic::Scalar(TScalar::ClassLikeString(
-                                TClassLikeString::OfType {
-                                    kind: *kind,
-                                    constraint: Arc::new(template_type_part.clone()),
-                                },
+                                TClassLikeString::of_type(*kind, template_type_part.clone()),
                             )));
                         } else if let TAtomic::GenericParameter(TGenericParameter {
                             constraint,
@@ -150,7 +150,14 @@ pub fn replace_with_polarity(
                                     defining_entity: *defining_entity,
                                 },
                             )));
+                        } else {
+                            held.push(template_type_part.clone());
                         }
+                    }
+                    if !held.is_empty() {
+                        class_template_types.push(TAtomic::Scalar(TScalar::ClassLikeString(
+                            TClassLikeString::OfType { kind: *kind, constraint: Arc::new(TUnion::from_vec(held)) },
+                        )));
                     }
 
                     if !class_template_types.is_empty() {
@@ -406,7 +413,7 @@ fn replace_atomic(
             }
         },
         TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
-            *Arc::make_mut(constraint) = replace_atomic((**constraint).clone(), template_result, codebase, polarity);
+            *Arc::make_mut(constraint) = replace_with_polarity(constraint, template_result, codebase, polarity);
         }
         _ => (),
     }

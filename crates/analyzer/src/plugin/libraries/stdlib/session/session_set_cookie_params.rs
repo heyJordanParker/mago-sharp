@@ -2,13 +2,12 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::Argument;
-use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 
 use crate::code::IssueCode;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::FunctionCallHook;
 use crate::plugin::hook::HookResult;
+use crate::plugin::hook::NamedCall;
 use crate::plugin::provider::Provider;
 use crate::plugin::provider::ProviderMeta;
 
@@ -36,12 +35,8 @@ impl Provider for SessionSetCookieParamsHook {
 }
 
 impl FunctionCallHook for SessionSetCookieParamsHook {
-    fn after_function_call(&self, call: &FunctionCall<'_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
-        let Expression::Identifier(identifier) = call.function else {
-            return Ok(());
-        };
-
-        if !identifier.value().eq_ignore_ascii_case(b"session_set_cookie_params") {
+    fn after_function_call(&self, call: &NamedCall<'_, '_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
+        if !call.calls(&[b"session_set_cookie_params"]) {
             return Ok(());
         }
 
@@ -82,7 +77,7 @@ impl FunctionCallHook for SessionSetCookieParamsHook {
             Issue::error("Too many arguments provided for function `session_set_cookie_params`.")
                 .with_annotation(Annotation::primary(span).with_message("Unexpected argument provided here"))
                 .with_annotation(
-                    Annotation::secondary(call.function.span()).with_message("For this function call"),
+                    Annotation::secondary(call.span).with_message("For this function call"),
                 )
                 .with_note(format!(
                     "When the first argument is an array, `session_set_cookie_params()` expects exactly 1 argument, but received {}.",

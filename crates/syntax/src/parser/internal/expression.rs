@@ -12,6 +12,7 @@ use crate::cst::cst::Assignment;
 use crate::cst::cst::AssignmentOperator;
 use crate::cst::cst::Binary;
 use crate::cst::cst::BinaryOperator;
+use crate::cst::cst::Break;
 use crate::cst::cst::Call;
 use crate::cst::cst::ClassConstantAccess;
 use crate::cst::cst::ClassLikeConstantSelector;
@@ -20,28 +21,34 @@ use crate::cst::cst::Clone;
 use crate::cst::cst::Conditional;
 use crate::cst::cst::ConstantAccess;
 use crate::cst::cst::ConstructorName;
+use crate::cst::cst::Continue;
 use crate::cst::cst::Expression;
 use crate::cst::cst::FunctionCall;
 use crate::cst::cst::FunctionPartialApplication;
 use crate::cst::cst::GenericClass;
 use crate::cst::cst::Identifier;
 use crate::cst::cst::Instantiation;
+use crate::cst::cst::Leave;
 use crate::cst::cst::MethodCall;
 use crate::cst::cst::MethodPartialApplication;
+use crate::cst::cst::NullSafeFunctionCall;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::Parenthesized;
 use crate::cst::cst::PartialApplication;
 use crate::cst::cst::Pipe;
 use crate::cst::cst::PropertyAccess;
+use crate::cst::cst::Return;
 use crate::cst::cst::StaticMethodCall;
 use crate::cst::cst::StaticMethodPartialApplication;
 use crate::cst::cst::StaticPropertyAccess;
 use crate::cst::cst::SuperOf;
+use crate::cst::cst::Terminator;
 use crate::cst::cst::UnaryPostfix;
 use crate::cst::cst::UnaryPostfixOperator;
 use crate::cst::cst::UnaryPrefix;
 use crate::cst::cst::UnaryPrefixOperator;
+use crate::cst::cst::With;
 use crate::dialect::Dialect;
 use crate::error::ParseError;
 use crate::parser::MAX_RECURSION_DEPTH;
@@ -197,6 +204,25 @@ where
                 continue;
             }
 
+            // `point with { y: 9 }` copies the object, spec section 16. It binds looser than unary `-` and the casts
+            // and tighter than `!`, at the level of PHP's `instanceof`, which PHP# does not have.
+            if self.dialect.is_sharp()
+                && next.kind == T![Identifier]
+                && next.value == b"with"
+                && self.stream.peek_kind(1)? == Some(T!["{"])
+            {
+                if Precedence::Instanceof < precedence {
+                    break;
+                }
+
+                left = self.arena.alloc(Expression::With(With {
+                    object: left,
+                    with: self.expect_any_keyword()?,
+                    initializer: self.parse_object_initializer()?,
+                }));
+                continue;
+            }
+
             // Don't allow function calls on error expressions.
             // This prevents `if(...)` from being parsed as a function call when `if` is an unexpected token.
             if matches!(left, Expression::Error(_)) && matches!(kind, T!["("]) {
@@ -306,6 +332,7 @@ where
                     name: self.parse_local_identifier()?,
                 }),
                 argument_list: self.parse_optional_argument_list()?,
+                initializer: self.parse_optional_object_initializer()?,
             })));
         }
 
@@ -480,6 +507,19 @@ where
         Ok((span, refused))
     }
 
+    /// The name before `::class` in a PHP# file as it is written, as `Order` in `Order::class`, `Self` in `Self::class`
+    /// or `Demo.Order` in `Demo.Order::class`, or `None` for any other `::`.
+    fn class_name_constant_name(
+        &mut self,
+        lhs: &Expression<'arena>,
+    ) -> Result<Option<std::boxed::Box<str>>, ParseError> {
+        if !self.dialect.is_sharp() || self.stream.peek_kind(1)? != Some(T!["class"]) {
+            return Ok(None);
+        }
+
+        Ok(written_name(lhs).map(String::into_boxed_str))
+    }
+
     fn parse_postfix_expression(
         &mut self,
         lhs: &'arena Expression<'arena>,
@@ -534,7 +574,16 @@ where
                 }
             }
             T!["::"] => {
-                let (double_colon, operator_refused) = self.consume_operator_span()?;
+                let (double_colon, operator_refused) = match self.class_name_constant_name(lhs)? {
+                    // PHP's `Order::class`, which spec section 25 writes `typeof(Order)`.
+                    Some(name) => {
+                        let span = self.stream.eat_span(T!["::"])?;
+                        self.errors.push(ParseError::ClassNameConstantInSharp(name, span));
+
+                        (span, true)
+                    }
+                    None => self.consume_operator_span()?,
+                };
                 refused = operator_refused;
                 let selector = self.parse_classlike_member_selector()?;
                 let current = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
@@ -636,6 +685,15 @@ where
             T!["?->"] => {
                 let (question_mark_arrow, operator_refused) = self.consume_operator_span()?;
                 refused = operator_refused;
+                // PHP#'s `f?.(x)`, spec section 14.4.
+                if self.dialect.is_sharp() && !refused && self.stream.is_at(T!["("])? {
+                    return Ok(self.arena.alloc(Expression::Call(Call::NullSafeFunction(NullSafeFunctionCall {
+                        function: lhs,
+                        question_mark_dot: question_mark_arrow,
+                        argument_list: self.parse_argument_list()?,
+                    }))));
+                }
+
                 let selector = self.parse_classlike_member_selector()?;
                 let type_arguments = if Precedence::CallDim > precedence {
                     self.parse_optional_call_type_argument_list()?
@@ -678,6 +736,35 @@ where
         Ok(if refused { self.arena.alloc(Expression::Error(expression.span())) } else { expression })
     }
 
+    /// Parses the `return`, `continue` or `break` the right side of `??` runs in a `.sharp` file, spec section 14.4.
+    /// It is its statement without the `;`, so `return` takes a value only when an expression follows it, and the
+    /// statement's terminator is the empty span where it ends.
+    fn parse_leave(&mut self) -> Result<Leave<'arena>, ParseError> {
+        let ends_value =
+            |kind: Option<TokenKind>| matches!(kind, None | Some(T![";" | "?>" | ")" | "]" | "}" | "," | ":" | "=>"]));
+        let end = |span: Span| Terminator::Missing(Span::new(span.file_id, span.end, span.end));
+
+        Ok(match self.stream.peek_kind(0)? {
+            Some(T!["return"]) => {
+                let r#return = self.expect_keyword(T!["return"])?;
+                let value = if ends_value(self.stream.peek_kind(0)?) { None } else { Some(self.parse_expression()?) };
+                let terminator = end(value.map_or(r#return.span, HasSpan::span));
+
+                Leave::Return(Return { r#return, value, terminator })
+            }
+            Some(T!["continue"]) => {
+                let r#continue = self.expect_keyword(T!["continue"])?;
+
+                Leave::Continue(Continue { r#continue, level: None, terminator: end(r#continue.span) })
+            }
+            _ => {
+                let r#break = self.expect_keyword(T!["break"])?;
+
+                Leave::Break(Break { r#break, level: None, terminator: end(r#break.span) })
+            }
+        })
+    }
+
     fn parse_infix_expression(
         &mut self,
         lhs: &'arena Expression<'arena>,
@@ -687,7 +774,13 @@ where
         Ok(self.arena.alloc(match operator.kind {
             T!["??"] => {
                 let qq = self.stream.consume_span()?;
-                let rhs = self.parse_expression_with_precedence(Precedence::NullCoalesce)?;
+                let rhs = if self.dialect.is_sharp()
+                    && matches!(self.stream.peek_kind(0)?, Some(T!["return" | "continue" | "break"]))
+                {
+                    self.arena.alloc(Expression::Leave(self.parse_leave()?))
+                } else {
+                    self.parse_expression_with_precedence(Precedence::NullCoalesce)?
+                };
 
                 Expression::Binary(Binary { lhs, operator: BinaryOperator::NullCoalesce(qq), rhs })
             }
@@ -701,12 +794,17 @@ where
                         r#else: self.parse_expression_with_precedence(Precedence::ElvisOrConditional)?,
                     })
                 } else {
+                    // PHP# reads `a ? b : c ? d : e` as `a ? b : (c ? d : e)`, as C# does (spec section 21): its else
+                    // branch takes another `? :`, and an assignment, as PHP's grammar already gives it one.
+                    let r#else =
+                        if self.dialect.is_sharp() { Precedence::Assignment } else { Precedence::ElvisOrConditional };
+
                     Expression::Conditional(Conditional {
                         condition: lhs,
                         question_mark: self.stream.consume_span()?,
                         then: Some(self.parse_expression_with_precedence(Precedence::Lowest)?),
                         colon: self.stream.eat_span(T![":"])?,
-                        r#else: self.parse_expression_with_precedence(Precedence::ElvisOrConditional)?,
+                        r#else: self.parse_expression_with_precedence(r#else)?,
                     })
                 }
             }
@@ -1052,5 +1150,21 @@ where
             })),
             _ => self.arena.alloc(Expression::Assignment(Assignment { lhs, operator, rhs })),
         }
+    }
+}
+
+/// The PHP# name `expression` writes, as `Order`, `this`, `Self`, or names joined with `.`, as `Demo.Order` and
+/// `this.kept`, or `None` for any other expression.
+fn written_name(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::Identifier(Identifier::Local(name)) => Some(String::from_utf8_lossy(name.value).into_owned()),
+        Expression::ConstantAccess(access) => Some(String::from_utf8_lossy(access.name.value()).into_owned()),
+        Expression::Self_(keyword) => Some(String::from_utf8_lossy(keyword.value).into_owned()),
+        Expression::Access(Access::Property(PropertyAccess {
+            object,
+            property: ClassLikeMemberSelector::Identifier(name),
+            ..
+        })) => Some(format!("{}.{}", written_name(object)?, String::from_utf8_lossy(name.value))),
+        _ => None,
     }
 }

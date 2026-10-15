@@ -2,13 +2,12 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::Argument;
-use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 
 use crate::code::IssueCode;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::FunctionCallHook;
 use crate::plugin::hook::HookResult;
+use crate::plugin::hook::NamedCall;
 use crate::plugin::provider::Provider;
 use crate::plugin::provider::ProviderMeta;
 
@@ -37,16 +36,12 @@ impl Provider for SetCookieHook {
 }
 
 impl FunctionCallHook for SetCookieHook {
-    fn after_function_call(&self, call: &FunctionCall<'_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
-        let Expression::Identifier(identifier) = call.function else {
-            return Ok(());
-        };
-
-        let name_bytes = identifier.value();
-        let name = mago_bytes::BytesDisplay(name_bytes);
-        if !name_bytes.eq_ignore_ascii_case(b"setcookie") && !name_bytes.eq_ignore_ascii_case(b"setrawcookie") {
+    fn after_function_call(&self, call: &NamedCall<'_, '_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
+        if !call.calls(&[b"setcookie", b"setrawcookie"]) {
             return Ok(());
         }
+
+        let name = call.name;
 
         let arguments = &call.argument_list.arguments;
         if arguments.len() <= 3 {
@@ -94,7 +89,7 @@ impl FunctionCallHook for SetCookieHook {
                     Annotation::primary(fourth_arg_span).with_message("Unexpected argument provided here"),
                 )
                 .with_annotation(
-                    Annotation::secondary(call.function.span()).with_message("For this function call"),
+                    Annotation::secondary(call.span).with_message("For this function call"),
                 )
                 .with_note(format!(
                     "When argument #3 (`$expires_or_options`) is an array, `{name}()` expects exactly 3 arguments, but received {}.",

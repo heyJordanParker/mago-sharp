@@ -36,6 +36,8 @@ use crate::plugin::hook::StaticCall;
 use crate::resolver::class_name::generic_class_type;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
+use crate::statement::class_like::listener::check_events_on;
+use crate::statement::class_like::r#struct::check_struct_parse;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_member;
 use crate::utils::quoted_source;
@@ -57,12 +59,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodCall<'arena> {
             span: self.span(),
         };
 
-        analyze_static_method_call(context, block_context, artifacts, call, None)
+        analyze_static_method_call(context, block_context, artifacts, call, None, false)
     }
 }
 
 /// Analyzes a static method call from its parts, whether PHP wrote it as `Class::m()` or PHP# as `Class.m()`, with
-/// the type arguments PHP# writes as `Class.m<A>()`.
+/// the type arguments PHP# writes as `Class.m<A>()`. A PHP# call through a class value, `type.m()`, analyzed its class
+/// value to find it is one, so it is `class_is_analyzed`.
 #[allow(clippy::expect_used)]
 pub(crate) fn analyze_static_method_call<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -70,6 +73,7 @@ pub(crate) fn analyze_static_method_call<'ctx, 'arena, A>(
     artifacts: &mut AnalysisArtifacts,
     call: StaticCall<'_, 'arena>,
     type_arguments: Option<&TypeArgumentList<'arena>>,
+    class_is_analyzed: bool,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
@@ -114,8 +118,15 @@ where
         }
     }
 
-    let mut method_resolution =
-        resolve_static_method_targets(context, block_context, artifacts, call.class, call.method, call.span)?;
+    let mut method_resolution = resolve_static_method_targets(
+        context,
+        block_context,
+        artifacts,
+        call.class,
+        call.method,
+        call.span,
+        class_is_analyzed,
+    )?;
     // A refused class, as `Missing<Order>`, reported itself, so the call reports nothing again.
     if artifacts.get_expression_type(call.class).is_some_and(is_refused_type) {
         artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));
@@ -161,6 +172,15 @@ where
             resolved_method.method_identifier.get_method_name(),
         );
         crate::utils::availability::check_method_availability(context, method_metadata, &method_display, call.span);
+
+        let method_name = resolved_method.method_identifier.get_method_name();
+        if context.dialect.is_sharp()
+            && context.codebase.parses(metadata.name.as_bytes())
+            && (method_name.as_bytes().eq_ignore_ascii_case(b"parse")
+                || method_name.as_bytes().eq_ignore_ascii_case(b"tryParse"))
+        {
+            check_struct_parse(context, metadata, method_name.as_bytes().eq_ignore_ascii_case(b"parse"), call.span);
+        }
 
         // Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`. PHP calls the static
         // method it runs as.
@@ -210,6 +230,14 @@ where
     }
 
     let has_resolved_methods = !invocation_targets.is_empty();
+    let starts_a_listener = context.dialect.is_sharp()
+        && invocation_targets.iter().any(|target| {
+            matches!(
+                target,
+                InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, method), .. }
+                    if class.as_bytes().eq_ignore_ascii_case(b"sharp\\events") && method.as_bytes().eq_ignore_ascii_case(b"on")
+            )
+        });
 
     record_external_method_call(context, artifacts, &invocation_targets, call.span);
     if !method_resolution.undocumented_methods.is_empty() {
@@ -256,6 +284,19 @@ where
         let span = (call.span.start.offset, call.span.end.offset);
         let own = artifacts.inferred_type_arguments.remove(&span).unwrap_or_default();
         artifacts.inferred_type_arguments.insert(span, class_type_arguments.into_iter().chain(own).collect());
+    }
+
+    // A type argument neither written nor inferred is `missing-template-parameter`'s to report.
+    if starts_a_listener
+        && let Some(listened) = artifacts
+            .inferred_type_arguments
+            .get(&(call.span.start.offset, call.span.end.offset))
+            .and_then(|t| t.first())
+        && (type_arguments.is_some() || !listened.is_mixed())
+    {
+        let at =
+            type_arguments.and_then(|type_arguments| type_arguments.arguments.first()).map_or(call.span, HasSpan::span);
+        check_events_on(context, &listened.clone(), at);
     }
 
     if !method_resolution.undocumented_methods.is_empty() {

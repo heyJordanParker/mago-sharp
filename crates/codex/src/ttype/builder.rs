@@ -951,6 +951,7 @@ fn get_reference_from_kind(
             is_static,
             is_this,
             remapped_parameters: false,
+            is_readonly: false,
         })))
     } else {
         Ok(TAtomic::Reference(TReference::Symbol {
@@ -958,6 +959,7 @@ fn get_reference_from_kind(
             parameters: type_parameters,
             variances: type_parameter_variances,
             intersection_types: None,
+            is_readonly: false,
         }))
     }
 }

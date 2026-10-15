@@ -460,7 +460,7 @@ where
             span: initializer.span(),
         };
 
-        return analyze_static_method_call(context, block_context, artifacts, call, None);
+        return analyze_static_method_call(context, block_context, artifacts, call, None, false);
     }
 
     if !initializer.argument_list.arguments.is_empty() {
@@ -503,6 +503,10 @@ pub(super) fn check_super_call<A>(
     else {
         return;
     };
+    // A struct can't be inherited, which `check_class_like_extends` reports, so its constructor isn't the class's to call.
+    if context.codebase.get_class_like(base.as_bytes()).is_some_and(|base| base.flags.is_struct()) {
+        return;
+    }
     let constructor = members.iter().find_map(|member| match member {
         ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => Some(method),
         _ => None,
@@ -656,7 +660,7 @@ fn written_default(default: &TUnion, hint: Option<&TUnion>) -> Option<String> {
 }
 
 /// Reports `class`'s `operator ==`, declared at `operator`, when neither `class` nor a parent declares a
-/// `public int hash()`, which equal values need to hash alike.
+/// `public int hash()`, which equal values need to hash alike. A struct has no parent, so its fix names it alone.
 fn check_hash<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, operator: Span)
 where
     A: Arena,
@@ -670,10 +674,11 @@ where
     }
 
     let class_name = display_class_like_name(context, class.name);
+    let or_parent = if class.flags.is_struct() { "" } else { " or a parent" };
     context.collector.report_with_code(
         IssueCode::UnimplementedAbstractMethod,
         Issue::error(format!(
-            "`{class_name}` declares `operator ==` without `public int hash()`: declare it in `{class_name}` or a parent, so equal values hash alike."
+            "`{class_name}` declares `operator ==` without `public int hash()`: declare it in `{class_name}`{or_parent}, so equal values hash alike."
         ))
         .with_annotation(Annotation::primary(operator).with_message("Declared here.")),
     );

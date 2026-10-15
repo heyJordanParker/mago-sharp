@@ -32,6 +32,7 @@ use mago_codex::ttype::get_literal_string;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_string;
+use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -45,7 +46,6 @@ use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::VariadicArrayElement;
-use mago_syntax::dialect::Dialect;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
@@ -57,10 +57,8 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
-use crate::statement::function_like::is_map_key;
-use crate::statement::function_like::map_key_error;
-use crate::statement::keys_mix_a_backed_enum;
-use crate::statement::report_keys_sharing_entries;
+use crate::statement::class_like::r#struct::report_class_held_by_key;
+use crate::statement::function_like::collection_key_error;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_atomic;
@@ -87,23 +85,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Array<'arena> {
     where
         A: Arena,
     {
-        analyze_array_elements(context, block_context, artifacts, self.span(), self.elements.as_slice())?;
-
-        // The engine holds a `Map`'s key as its backing value, so a literal whose keys, written or spread in, mix a
-        // backed enum with other types cannot tell a case from the key of its backing value.
-        if context.dialect.is_sharp()
-            && artifacts.get_expression_type(self).is_some_and(|literal| keys_mix_a_backed_enum(context, literal))
-        {
-            report_keys_sharing_entries(
-                context,
-                IssueCode::InvalidArrayElement,
-                self.span(),
-                "the literal",
-                Annotation::primary(self.span()).with_message("Its keys go in here."),
-            );
-        }
-
-        Ok(())
+        analyze_array_elements(context, block_context, artifacts, self.span(), self.elements.as_slice())
     }
 }
 
@@ -321,17 +303,21 @@ where
                     .get_expression_type(key_value_array_element.key)
                     .map_or((None, get_mixed()), |item_key_type| {
                         let key_type = if context.dialect.is_sharp() {
-                            // PHP# casts only between numbers, so a key PHP would cast, such as `1.5`, `true` or
-                            // `null`, names the rule a `Map` type keeps, and its error is its only report. A backed
-                            // enum key runs as its backing value.
-                            if is_map_key(context, item_key_type) {
-                                item_key_type.clone()
+                            // A `Map` keeps each key as itself, so `1.5`, `true` and `null` stay keys PHP would
+                            // cast. A key without `==` and `hash()` names the rule a `Map` type keeps, and its error is
+                            // its only report.
+                            if is_key_type(item_key_type, context.codebase) {
+                                let span = key_value_array_element.key.span();
+                                if report_class_held_by_key(context, item_key_type, false, span) {
+                                    get_never()
+                                } else {
+                                    item_key_type.clone()
+                                }
                             } else {
                                 let item_key_type_id = display_value_type(context, item_key_type, &get_arraykey());
-                                let error = map_key_error(
-                                    context,
-                                    item_key_type,
-                                    &item_key_type_id,
+                                let error = collection_key_error(
+                                    item_key_type_id.as_str(),
+                                    false,
                                     key_value_array_element.key.span(),
                                 );
                                 context.collector.report_with_code(IssueCode::InvalidArrayElementKey, error);
@@ -370,7 +356,12 @@ where
 
                         let item_key_value =
                             if let Some(item_key_literal_type) = key_type.get_single_literal_string_value() {
-                                Some(ArrayKey::from_string(word(item_key_literal_type)))
+                                // A `Map` keeps `"5"` a string, where PHP casts it to the int `5`.
+                                Some(if context.dialect.is_sharp() {
+                                    ArrayKey::String(word(item_key_literal_type))
+                                } else {
+                                    ArrayKey::from_string(word(item_key_literal_type))
+                                })
                             } else if let Some(literal_integer) = key_type.get_single_literal_int_value() {
                                 // The most recent integer key becomes the next available integer key
                                 array_creation_info.int_offset = literal_integer;
@@ -975,19 +966,12 @@ fn handle_variadic_array_element<'arena, A>(
 
                     (None, Cow::Borrowed(list_data.get_element_type()))
                 }
-                // A PHP# `Set` spread is refused above; plain PHP spreads the array it runs as, keyed by each
-                // element's backing value.
+                // A PHP# `Set` spread is refused above. Plain PHP spreads the `Sharp\Set` object, which gives its
+                // elements at positions 0 to n, as a list does.
                 TArray::Set(element_type) => {
                     all_non_empty = false;
-                    array_creation_info.is_list = false;
-                    array_creation_info.can_create_objectlike = false;
 
-                    (
-                        Some(Cow::Owned(
-                            get_backing_key_type(element_type, context.codebase, Dialect::Sharp).into_owned(),
-                        )),
-                        Cow::Borrowed(element_type.as_ref()),
-                    )
+                    (None, Cow::Borrowed(element_type.as_ref()))
                 }
             },
             atomic => {
@@ -1035,32 +1019,32 @@ fn handle_variadic_array_element<'arena, A>(
                 continue;
             }
 
-            // A PHP# `Map` keyed by a backed enum holds each key as its backing value.
-            let stored_key_type = if context.dialect.is_sharp() {
+            // A PHP# `Map` spread may hold any key a `Map` literal takes. Plain PHP spreads into a PHP array, whose
+            // keys are `int` or `string` alone.
+            let is_sharp = context.dialect.is_sharp();
+            let stored_key_type = if is_sharp {
                 get_backing_key_type(&key_type, context.codebase, context.dialect)
             } else {
                 Cow::Borrowed(&*key_type)
             };
-            let is_string_key = union_comparator::is_contained_by(
-                context.codebase,
-                &stored_key_type,
-                &get_string(),
-                false,
-                false,
-                false,
-                &mut ComparisonResult::new(),
-            );
-
-            let is_array_key_key = is_string_key
-                || union_comparator::is_contained_by(
+            let is_contained = |container: &TUnion| {
+                union_comparator::is_contained_by(
                     context.codebase,
                     &stored_key_type,
-                    &get_arraykey(),
+                    container,
                     false,
                     false,
                     false,
                     &mut ComparisonResult::new(),
-                );
+                )
+            };
+            let is_string_key = is_contained(&get_string());
+
+            let is_array_key_key = if is_sharp {
+                is_key_type(&key_type, context.codebase)
+            } else {
+                is_string_key || is_contained(&get_arraykey())
+            };
 
             if is_string_key {
                 array_creation_info.is_list = false;

@@ -25,6 +25,7 @@ use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::EnumCaseBackedItem;
+use mago_syntax::cst::EnumCaseDataItem;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::EnumCaseUnitItem;
 use mago_syntax::cst::Expression;
@@ -285,6 +286,9 @@ where
                 Statement::HaltCompiler(h) => h.format(f),
                 Statement::Unset(u) => u.format(f),
                 Statement::Noop(_) => Document::String(b";"),
+                Statement::PatternMatch(_) => {
+                    unreachable!("`mago format` skips PHP# files, the only ones with a `match` over patterns")
+                }
                 #[allow(clippy::unreachable)]
                 _ => unreachable!("A statement variant was not handled in formatter: {self:?}"),
             }
@@ -987,6 +991,7 @@ where
             match self {
                 EnumCaseItem::Unit(c) => c.format(f),
                 EnumCaseItem::Backed(c) => c.format(f),
+                EnumCaseItem::Data(c) => c.format(f),
             }
         })
     }
@@ -998,6 +1003,17 @@ where
 {
     fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
         wrap!(f, self, EnumCaseUnitItem, { self.name.format(f) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for EnumCaseDataItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, EnumCaseDataItem, {
+            Document::Array(vec_in![f.arena; self.name.format(f), self.parameter_list.format(f)])
+        })
     }
 }
 
@@ -1316,6 +1332,10 @@ where
     A: Arena,
 {
     fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        if self.sealed.is_some() || !self.modifiers.is_empty() {
+            unreachable!("`mago format` skips PHP# files, the only ones with an interface's modifiers or `sealed`");
+        }
+
         wrap!(f, self, Interface, {
             let mut attributes = vec_in![f.arena];
             for attribute_list in &self.attribute_lists {
@@ -1721,6 +1741,9 @@ where
                 Hint::Generic(_) => unreachable!("the formatter refuses a PHP# file, the only one with type arguments"),
                 Hint::Function(_) => {
                     unreachable!("the formatter refuses a PHP# file, the only one with function types")
+                }
+                Hint::Readonly(_) => {
+                    unreachable!("the formatter refuses a PHP# file, the only one with readonly types")
                 }
             }
         })

@@ -39,9 +39,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Break<'arena> {
 
         let available_levels = block_context.break_types.len() as u64;
         if available_levels == 0 {
+            // PHP# has no `switch`, so a `.sharp` file names the loop alone.
+            let message = if context.dialect.is_sharp() {
+                "A `break` stands only inside a loop."
+            } else {
+                "Break statement outside of a loop or switch."
+            };
             context.collector.report_with_code(
                 IssueCode::InvalidBreak,
-                Issue::error("Break statement outside of a loop or switch.").with_annotation(
+                Issue::error(message).with_annotation(
                     Annotation::primary(self.span()).with_message("This break statement is not valid here."),
                 ),
             );
@@ -209,12 +215,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Break<'arena> {
                 case_scope.record_break(&block_context.locals, context.codebase);
             }
         } else if !has_loop_scope {
-            context.collector.report_with_code(
-                IssueCode::InvalidBreak,
-                Issue::error("Break statement outside of a loop or switch.").with_annotation(
-                    Annotation::primary(self.span()).with_message("This break statement is not valid here."),
-                ),
-            );
+            unreachable!("each part of a loop runs with the loop's scope, so a `break` that targets a loop finds it")
         }
 
         block_context.flags.set_has_returned(true);

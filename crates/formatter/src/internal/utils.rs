@@ -74,6 +74,7 @@ pub fn get_left_side<'arena>(expression: &'arena Expression<'arena>) -> Option<&
         Expression::ArrayAppend(array_append) => Some(array_append.array),
         Expression::Call(call) => Some(match call {
             Call::Function(function_call) => function_call.function,
+            Call::NullSafeFunction(function_call) => function_call.function,
             Call::Method(method_call) => method_call.object,
             Call::NullSafeMethod(null_safe_method_call) => null_safe_method_call.object,
             Call::StaticMethod(static_method_call) => static_method_call.class,

@@ -2,6 +2,7 @@ use crate::T;
 use crate::cst::cst::AnonymousClass;
 use crate::cst::cst::AttributeList;
 use crate::cst::cst::Class;
+use crate::cst::cst::ClassLikeMember;
 use crate::cst::cst::Enum;
 use crate::cst::cst::EnumBackingTypeHint;
 use crate::cst::cst::Hint;
@@ -30,6 +31,43 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
+    /// A class-like's members up to its `}`. A member that fails to parse is reported and skipped, so the rest still
+    /// parse. `members_of` names the owner in the messages, as `A class` or `An enum`, and `type_parameters_of` the
+    /// type parameters it declares, as `T` or `TKey, TValue`.
+    pub(crate) fn parse_class_like_members(
+        &mut self,
+        members_of: &'static str,
+        type_parameters_of: Option<std::boxed::Box<str>>,
+    ) -> Result<Sequence<'arena, ClassLikeMember<'arena>>, ParseError> {
+        let mut members = self.new_vec();
+        loop {
+            if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
+                break;
+            }
+
+            let position_before = self.stream.current_position();
+            self.state.members_of = members_of;
+            self.state.type_parameters_of.clone_from(&type_parameters_of);
+            match self.parse_classlike_member() {
+                Ok(member) => members.push(member),
+                Err(err) => self.errors.push(err),
+            }
+            if self.stream.current_position() == position_before {
+                if let Ok(Some(token)) = self.stream.lookahead(0) {
+                    if token.kind == T!["}"] {
+                        break;
+                    }
+                    self.errors.push(self.stream.unexpected(Some(token), &[]));
+                    let _ = self.stream.consume();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(Sequence::new(members))
+    }
+
     pub(crate) fn parse_interface_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -48,11 +86,15 @@ where
             return Ok(Statement::Event(self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?));
         }
 
+        if self.is_at_struct()? {
+            return Ok(Statement::Struct(self.parse_struct_with_attributes_and_modifiers(attributes, modifiers)?));
+        }
+
         self.read_php_type_declaration()?;
 
         if self.dialect.is_sharp() {
             match self.stream.peek_kind(0)? {
-                Some(T!["interface"]) => {
+                Some(T!["interface"]) | Some(T![Identifier]) if self.is_at_interface()? => {
                     return Ok(Statement::Interface(
                         self.parse_interface_with_attributes_and_modifiers(attributes, modifiers)?,
                     ));
@@ -72,11 +114,24 @@ where
         Ok(Statement::Class(self.parse_class_with_attributes_and_modifiers(attributes, modifiers)?))
     }
 
+    /// Whether an interface starts here: `interface`, or in PHP# `sealed interface`, spec section 20.1. Everywhere else
+    /// `sealed` is a name, and `sealed` before anything but `interface` stays a parse error.
+    pub(crate) fn is_at_interface(&mut self) -> Result<bool, ParseError> {
+        let is_sealed =
+            self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"sealed");
+
+        Ok(match self.stream.peek_kind(0)? {
+            Some(T!["interface"]) => true,
+            _ => self.dialect.is_sharp() && is_sealed && self.stream.peek_kind(1)? == Some(T!["interface"]),
+        })
+    }
+
     fn parse_interface_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
     ) -> Result<Interface<'arena>, ParseError> {
+        let sealed = if self.stream.is_at(T!["interface"])? { None } else { Some(self.expect_any_keyword()?) };
         let interface = self.expect_keyword(T!["interface"])?;
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;
@@ -85,41 +140,14 @@ where
         Ok(Interface {
             attribute_lists: attributes,
             modifiers,
+            sealed,
             interface,
             name,
             type_parameters,
             extends: self.parse_optional_extends()?,
             inheritance: self.parse_optional_inheritance()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: {
-                let mut members = self.new_vec();
-                loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
-                        break;
-                    }
-
-                    let position_before = self.stream.current_position();
-                    self.state.members_of = "An interface";
-                    self.state.type_parameters_of.clone_from(&type_parameter_names);
-                    match self.parse_classlike_member() {
-                        Ok(member) => members.push(member),
-                        Err(err) => self.errors.push(err),
-                    }
-                    if self.stream.current_position() == position_before {
-                        if let Ok(Some(token)) = self.stream.lookahead(0) {
-                            if token.kind == T!["}"] {
-                                break;
-                            }
-                            self.errors.push(self.stream.unexpected(Some(token), &[]));
-                            let _ = self.stream.consume();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-
-                Sequence::new(members)
-            },
+            members: self.parse_class_like_members("An interface", type_parameter_names)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -153,35 +181,7 @@ where
             implements: self.parse_optional_implements()?,
             inheritance: self.parse_optional_inheritance()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: {
-                let mut members = self.new_vec();
-                loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
-                        break;
-                    }
-
-                    let position_before = self.stream.current_position();
-                    self.state.members_of = "A class";
-                    self.state.type_parameters_of.clone_from(&type_parameter_names);
-                    match self.parse_classlike_member() {
-                        Ok(member) => members.push(member),
-                        Err(err) => self.errors.push(err),
-                    }
-                    if self.stream.current_position() == position_before {
-                        if let Ok(Some(token)) = self.stream.lookahead(0) {
-                            if token.kind == T!["}"] {
-                                break;
-                            }
-                            self.errors.push(self.stream.unexpected(Some(token), &[]));
-                            let _ = self.stream.consume();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-
-                Sequence::new(members)
-            },
+            members: self.parse_class_like_members("A class", type_parameter_names)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -196,35 +196,7 @@ where
             extends: self.parse_optional_extends()?,
             implements: self.parse_optional_implements()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: {
-                let mut members = self.new_vec();
-                loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
-                        break;
-                    }
-
-                    let position_before = self.stream.current_position();
-                    self.state.members_of = "A class";
-                    self.state.type_parameters_of = None;
-                    match self.parse_classlike_member() {
-                        Ok(member) => members.push(member),
-                        Err(err) => self.errors.push(err),
-                    }
-                    if self.stream.current_position() == position_before {
-                        if let Ok(Some(token)) = self.stream.lookahead(0) {
-                            if token.kind == T!["}"] {
-                                break;
-                            }
-                            self.errors.push(self.stream.unexpected(Some(token), &[]));
-                            let _ = self.stream.consume();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-
-                Sequence::new(members)
-            },
+            members: self.parse_class_like_members("A class", None)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -247,34 +219,7 @@ where
             r#trait: self.expect_keyword(T!["trait"])?,
             name: self.parse_local_identifier()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: {
-                let mut members = self.new_vec();
-                loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
-                        break;
-                    }
-
-                    let position_before = self.stream.current_position();
-                    self.state.members_of = "A trait";
-                    self.state.type_parameters_of = None;
-                    match self.parse_classlike_member() {
-                        Ok(member) => members.push(member),
-                        Err(err) => self.errors.push(err),
-                    }
-                    if self.stream.current_position() == position_before {
-                        if let Ok(Some(token)) = self.stream.lookahead(0) {
-                            if token.kind == T!["}"] {
-                                break;
-                            }
-                            self.errors.push(self.stream.unexpected(Some(token), &[]));
-                            let _ = self.stream.consume();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                Sequence::new(members)
-            },
+            members: self.parse_class_like_members("A trait", None)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -304,34 +249,7 @@ where
             inheritance,
             implements: self.parse_optional_implements()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: {
-                let mut members = self.new_vec();
-                loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
-                        break;
-                    }
-
-                    let position_before = self.stream.current_position();
-                    self.state.members_of = "An enum";
-                    self.state.type_parameters_of = None;
-                    match self.parse_classlike_member() {
-                        Ok(member) => members.push(member),
-                        Err(err) => self.errors.push(err),
-                    }
-                    if self.stream.current_position() == position_before {
-                        if let Ok(Some(token)) = self.stream.lookahead(0) {
-                            if token.kind == T!["}"] {
-                                break;
-                            }
-                            self.errors.push(self.stream.unexpected(Some(token), &[]));
-                            let _ = self.stream.consume();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                Sequence::new(members)
-            },
+            members: self.parse_class_like_members("An enum", None)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }

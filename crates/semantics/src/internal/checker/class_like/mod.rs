@@ -22,6 +22,7 @@ use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyItem;
 use mago_syntax::cst::Sequence;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUseAliasAdaptation;
 
@@ -863,6 +864,15 @@ pub fn check_trait<'ast, 'arena>(r#trait: &'ast Trait<'arena>, context: &mut Con
     }
 }
 
+/// Checks a PHP# struct, spec section 10, as the final class it runs as: its members as a class's.
+#[inline]
+pub fn check_struct<'ast, 'arena>(r#struct: &'ast Struct<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
+    let struct_name = r#struct.name.value;
+    let struct_fqcn = context.get_name(r#struct.name.span.start);
+
+    check_members(&r#struct.members, r#struct.span(), "struct", struct_name, struct_fqcn, context);
+}
+
 #[inline]
 pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
     if !context.version.is_supported(Feature::Enums) {
@@ -965,6 +975,28 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
                                 ])
                                 .with_help(format!(
                                     "Remove the value from case `{item_name}` or make the enum `{enum_name}` backed."
+                                )),
+                            );
+                        }
+                    }
+                    // Spec section 20: an enum is backed, every case with a value, or not, its cases plain or
+                    // carrying data.
+                    EnumCaseItem::Data(item) => {
+                        if enum_is_backed {
+                            context.report(
+                                Issue::error(format!(
+                                    "Case `{item_name}` of backed enum `{enum_name}` must not carry data."
+                                ))
+                                .with_annotation(
+                                    Annotation::primary(item.parameter_list.span())
+                                        .with_message("Data the case carries."),
+                                )
+                                .with_annotation(
+                                    Annotation::secondary(r#enum.span())
+                                        .with_message(format!("Enum `{enum_fqcn}` defined here.")),
+                                )
+                                .with_help(format!(
+                                    "Remove the data from case `{item_name}` or remove the backing from the enum `{enum_name}`."
                                 )),
                             );
                         }

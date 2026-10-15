@@ -26,7 +26,6 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::comments::docblock::PrecedingDocblocks;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Keyword;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::Trivia;
@@ -219,53 +218,6 @@ where
         self.settings
             .applicable_class_initializers(metadata)
             .chain(self.class_initializers.get(&metadata.name).into_iter().flat_map(|methods| methods.iter().copied()))
-    }
-
-    /// Resolves the correct function name based on PHP's dynamic name resolution rules.
-    ///
-    /// This function determines the fully qualified name (FQN) of a function being called,
-    /// accounting for PHP's nuanced resolution rules:
-    ///
-    /// - If the function is explicitly imported via `use`, it resolves to the imported name.
-    /// - If the function name starts with a leading `\`, it is treated as a global function.
-    /// - If no `\` is present:
-    ///   1. The function name is checked in the current namespace.
-    ///   2. If not found, it falls back to the global namespace.
-    ///   3. If neither exists, it defaults to the current namespace's FQN.
-    ///
-    /// # Arguments
-    ///
-    /// - `identifier`: The identifier representing the function name in the source code.
-    ///
-    /// # Returns
-    ///
-    /// - A reference to the resolved function name as a string.
-    ///
-    /// # Note
-    ///
-    /// Function names in PHP are case-insensitive; they are stored and looked up in lowercase
-    /// within the codebase metadata.
-    pub fn resolve_function_name<'ast>(&self, identifier: &'ast Identifier<'arena>) -> &'arena [u8] {
-        if self.resolved_names.is_imported(identifier) {
-            return self.resolved_names.get(identifier);
-        }
-
-        let name = identifier.value();
-
-        if let Some(stripped) = name.strip_prefix(b"\\") {
-            return stripped;
-        }
-
-        let fqfn = self.resolved_names.get(&identifier);
-        if self.codebase.function_exists(fqfn) {
-            return fqfn;
-        }
-
-        if !name.contains(&b'\\') && self.codebase.function_exists(name) {
-            return name;
-        }
-
-        fqfn
     }
 
     pub fn get_assertion_context_from_block(

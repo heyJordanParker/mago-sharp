@@ -19,6 +19,7 @@ use mago_span::Span;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::TypeArgumentList;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
@@ -33,8 +34,6 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::control_action::ControlAction;
 use crate::error::AnalysisError;
-use crate::expression::access::analyze_null_safe_class_value;
-use crate::expression::access::class_value_classes;
 use crate::expression::access::report_full_name;
 use crate::expression::access::report_member_of_mixed_kinds;
 use crate::invocation::Invocation;
@@ -45,6 +44,8 @@ use crate::invocation::MethodTargetContext;
 use crate::invocation::analyzer::analyze_invocation;
 use crate::invocation::post_process::post_invocation_process;
 use crate::invocation::return_type_fetcher::fetch_invocation_return_type;
+use crate::invocation::template_result::seed_extension_type_arguments;
+use crate::plugin::hook::NamedCall;
 use crate::plugin::hook::StaticCall;
 use crate::reconciler::assertion_reconciler;
 use crate::utils::names::display_function_like_identifier;
@@ -118,7 +119,16 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
         A: Arena,
     {
         match self {
-            Call::Function(call) => call.analyze(context, block_context, artifacts),
+            Call::Function(call) => match NamedCall::from_call(context.resolved_names, context.codebase, self) {
+                Some(named_call) => function_call::analyze_with_function_call_hooks(
+                    context,
+                    block_context,
+                    artifacts,
+                    &named_call,
+                    |context, block_context, artifacts| call.analyze(context, block_context, artifacts),
+                ),
+                None => call.analyze(context, block_context, artifacts),
+            },
             // As a call with an invalid target, it gets no type, and only its arguments are analyzed.
             Call::Method(call) if report_full_name(context, call.object, None) => {
                 call.argument_list.analyze(context, block_context, artifacts)
@@ -126,9 +136,23 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
             // PHP# calls a plain PHP function through its namespace, `Pdf.render(html)` or `global.now()`.
             Call::Method(call)
                 if context.dialect.is_sharp()
-                    && let Some(function) = function_call::namespace_function_name(context, call) =>
+                    && let Some(named_call) = NamedCall::from_call(context.resolved_names, context.codebase, self) =>
             {
-                function_call::analyze_namespace_function_call(context, block_context, artifacts, call, function)
+                function_call::analyze_with_function_call_hooks(
+                    context,
+                    block_context,
+                    artifacts,
+                    &named_call,
+                    |context, block_context, artifacts| {
+                        function_call::analyze_namespace_function_call(
+                            context,
+                            block_context,
+                            artifacts,
+                            call,
+                            named_call.name,
+                        )
+                    },
+                )
             }
             // PHP# writes the static call `Class::m()` as `Class.m()`, with a bare name the binder bound to a class.
             Call::Method(call)
@@ -141,23 +165,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                     artifacts,
                     static_call,
                     call.type_arguments.as_ref(),
-                )
-            }
-            // PHP# calls a static method through a class value, `type.m()`, as PHP's `$type::m()`.
-            Call::Method(call) if class_value_classes(context, block_context, call.object).is_some() => {
-                let static_call = StaticCall {
-                    class: call.object,
-                    method: &call.method,
-                    argument_list: &call.argument_list,
-                    span: call.span(),
-                };
-
-                static_method_call::analyze_static_method_call(
-                    context,
-                    block_context,
-                    artifacts,
-                    static_call,
-                    call.type_arguments.as_ref(),
+                    false,
                 )
             }
             Call::Method(call) => {
@@ -166,32 +174,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
 
                 Ok(())
             }
-            // PHP# calls a static method through a class value that may be null, `type?.m()`, as PHP's `$type::m()`
-            // when `type` holds a class.
-            Call::NullSafeMethod(call) if class_value_classes(context, block_context, call.object).is_some() => {
-                let static_call = StaticCall {
-                    class: call.object,
-                    method: &call.method,
-                    argument_list: &call.argument_list,
-                    span: call.span(),
-                };
-
-                analyze_null_safe_class_value(
-                    context,
-                    block_context,
-                    artifacts,
-                    call.object,
-                    call.span(),
-                    |context, block_context, artifacts| {
-                        static_method_call::analyze_static_method_call(
-                            context,
-                            block_context,
-                            artifacts,
-                            static_call,
-                            call.type_arguments.as_ref(),
-                        )
-                    },
-                )
+            Call::NullSafeFunction(call) => {
+                function_call::analyze_null_safe_function_call(context, block_context, artifacts, call)
             }
             Call::NullSafeMethod(call) => {
                 call.analyze(context, block_context, artifacts)?;
@@ -405,8 +389,9 @@ where
 }
 
 /// Analyzes a member a PHP# extension adds to its receiver's type, spec section 26, as the call of the static method
-/// `extension` it runs as with `arguments`, whose first argument is the receiver. Through `?.`, a `null` receiver
-/// skips the call, so the result may be `null` too, as it may below a `?.` earlier in the chain.
+/// `extension` it runs as with `arguments`, whose first argument is the receiver. `type_arguments` are the member's
+/// own, written after its name. Through `?.`, a `null` receiver skips the call, so the result may be `null` too, as it
+/// may below a `?.` earlier in the chain.
 #[allow(clippy::expect_used)]
 pub(crate) fn analyze_extension_access<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -414,6 +399,7 @@ pub(crate) fn analyze_extension_access<'ctx, 'ast, 'arena, A>(
     artifacts: &mut AnalysisArtifacts,
     extension: MethodIdentifier,
     receiver: &'ast Expression<'arena>,
+    type_arguments: Option<&'ast TypeArgumentList<'arena>>,
     arguments: Option<&'ast ArgumentList<'arena>>,
     is_null_safe: bool,
     span: Span,
@@ -423,6 +409,18 @@ where
 {
     let class = extension.get_class_name();
     let metadata = context.codebase.get_method_by_id(&extension).expect("an extension is a method of its class");
+    let mut template_result = TemplateResult::default();
+    if let Some(type_arguments) = type_arguments {
+        seed_extension_type_arguments(
+            context,
+            block_context,
+            artifacts,
+            type_arguments,
+            class,
+            metadata,
+            &mut template_result,
+        );
+    }
     let class_like_metadata =
         context.codebase.get_class_like(class.as_bytes()).expect("an extension's class is a class-like");
     let target = InvocationTarget::FunctionLike {
@@ -446,7 +444,7 @@ where
         context,
         block_context,
         artifacts,
-        TemplateResult::default(),
+        template_result,
         vec![target],
         InvocationArgumentsSource::ExtensionReceiver(receiver, arguments),
         span,

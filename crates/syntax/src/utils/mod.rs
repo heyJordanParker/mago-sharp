@@ -11,8 +11,11 @@ use crate::cst::Construct;
 use crate::cst::Expression;
 use crate::cst::ForBody;
 use crate::cst::ForeachBody;
+use crate::cst::FunctionCall;
 use crate::cst::IfBody;
+use crate::cst::Leave;
 use crate::cst::MatchArm;
+use crate::cst::NullSafeFunctionCall;
 use crate::cst::PartialApplication;
 use crate::cst::Return;
 use crate::cst::Statement;
@@ -308,11 +311,13 @@ pub fn expression_has_yield(expression: &Expression) -> bool {
             }),
         },
         Expression::Throw(throw) => expression_has_yield(throw.exception),
+        Expression::Leave(Leave::Return(r#return)) => r#return.value.is_some_and(expression_has_yield),
         Expression::Clone(clone) => expression_has_yield(clone.object),
         Expression::Call(call) => match call {
-            Call::Function(function_call) => {
-                expression_has_yield(function_call.function)
-                    || function_call.argument_list.arguments.iter().any(|argument| match argument {
+            Call::Function(FunctionCall { function, argument_list })
+            | Call::NullSafeFunction(NullSafeFunctionCall { function, argument_list, .. }) => {
+                expression_has_yield(function)
+                    || argument_list.arguments.iter().any(|argument| match argument {
                         Argument::Positional(positional_argument) => expression_has_yield(positional_argument.value),
                         Argument::Named(named_argument) => expression_has_yield(named_argument.value),
                     })

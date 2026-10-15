@@ -3,6 +3,8 @@ use mago_span::HasSpan;
 use mago_syntax::cst;
 
 use crate::ir::item::annotation::generics::TypeParameterDefiningEntity;
+use crate::ir::item::modifier::Modifier;
+use crate::ir::item::modifier::ModifierKind;
 use crate::ir::item::statement::interface::Interface;
 use crate::lower::Lowering;
 
@@ -19,6 +21,13 @@ where
         let version_constraint = self.lower_version_constraint(&interface.attribute_lists);
         let name = self.lower_declaration_name(&interface.name);
         let extends = interface.extends.as_ref().map(|extends| self.lower_extends(extends));
+        let modifiers = self.arena.alloc_slice_fill_iter(
+            interface
+                .modifiers
+                .iter()
+                .map(|modifier| self.lower_modifier(modifier))
+                .chain(interface.sealed.map(|sealed| Modifier { span: sealed.span(), kind: ModifierKind::Sealed })),
+        );
 
         let document = self.phpdoc_resolution.get(interface.span());
         self.type_resolution.enter_scope(TypeParameterDefiningEntity::ClassLike(name));
@@ -31,6 +40,7 @@ where
             annotation,
             attributes,
             version_constraint,
+            modifiers,
             name,
             extends,
             members,

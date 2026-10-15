@@ -24,7 +24,10 @@ use crate::defaults_trait_name;
 use crate::diff::CodebaseDiff;
 use crate::identifier::method::MethodIdentifier;
 use crate::issue::ScanningIssueKind;
+use crate::metadata::attribute::ConstantExpression;
 use crate::metadata::class_like::ClassLikeMetadata;
+use crate::metadata::class_like::ParsedField;
+
 use crate::metadata::class_like_constant::ClassLikeConstantMetadata;
 use crate::metadata::constant::ConstantMetadata;
 use crate::metadata::enum_case::EnumCaseMetadata;
@@ -670,6 +673,88 @@ impl CodebaseMetadata {
         let declaring_class =
             self.get_class_like_by_word(lowercase_class)?.declaring_property_ids.get(&property_name)?;
         self.class_likes.get(declaring_class)?.properties.get(&property_name)
+    }
+
+    /// Whether `class` has the `parse` spec section 10 gives a struct or a PHP# class, rather than one it declares,
+    /// inherits from a parent that declares one, or none. The codex's spans the whole type, which no declared member
+    /// does.
+    #[must_use]
+    pub fn parses(&self, class: &[u8]) -> bool {
+        let Some(metadata) = self.get_class_like(class) else {
+            return false;
+        };
+
+        self.get_declaring_method_class(class, b"parse") == Some(metadata.name)
+            && self.get_method(class, b"parse").is_some_and(|parse| parse.span == metadata.span)
+    }
+
+    /// The fields a PHP# struct's or class's `parse` reads, spec section 10: its main constructor's parameters in
+    /// order, then each property an object initializer may set, a public `init` or `set` one, as creation from a `Map`
+    /// is the constructor call and then the initializer. A parameter that declares its property is that property's one
+    /// field. A property the main constructor sets on every path may be left out, as it may be from
+    /// the initializer, and is read once, by the parameter, when a parameter reads its key. Any other property a
+    /// parameter's key names is a second field of that key, which the struct check refuses.
+    #[must_use]
+    pub fn struct_parse_fields(&self, class: &[u8]) -> Vec<ParsedField<'_>> {
+        let constructor = self.get_declaring_method(class, b"__construct");
+        let parameters: Vec<ParsedField<'_>> = constructor
+            .into_iter()
+            .flat_map(|constructor| {
+                constructor.parameters.iter().filter_map(move |parameter| {
+                    let r#type = parameter.type_metadata.as_ref().or(parameter.type_declaration_metadata.as_ref())?;
+                    let name = parameter.name.0.as_bytes();
+                    let name = name.strip_prefix(b"$").unwrap_or(name);
+                    let key = parameter
+                        .attributes
+                        .iter()
+                        .find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Key"))
+                        .and_then(|attribute| match attribute.arguments.first()?.value.as_ref()? {
+                            ConstantExpression::String(key) => Some(key.as_bytes()),
+                            _ => None,
+                        });
+
+                    Some(ParsedField {
+                        name,
+                        key: key.unwrap_or(name),
+                        r#type: &r#type.type_union,
+                        has_default: parameter.flags.has_default(),
+                        is_parameter: true,
+                        span: Some(parameter.name_span),
+                    })
+                })
+            })
+            .collect();
+        let set_by_constructor = constructor
+            .and_then(|constructor| constructor.method_metadata.as_ref())
+            .map(|constructor| &constructor.assigned_properties);
+        let properties = self.get_class_like(class).into_iter().flat_map(|metadata| {
+            metadata
+                .struct_properties()
+                .into_iter()
+                .filter(|property| property.write_visibility.is_public() && !property.flags.is_promoted_property())
+                .filter_map(|property| {
+                    let r#type = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?;
+                    let name = property.name.0.as_bytes();
+                    let name = name.strip_prefix(b"$").unwrap_or(name);
+                    let set_by_constructor =
+                        set_by_constructor.is_some_and(|assigned| assigned.contains(&property.name.0));
+                    if set_by_constructor && parameters.iter().any(|parameter| parameter.key == name) {
+                        return None;
+                    }
+
+                    Some(ParsedField {
+                        name,
+                        key: name,
+                        r#type: &r#type.type_union,
+                        has_default: property.flags.has_default() || set_by_constructor,
+                        is_parameter: false,
+                        span: property.name_span,
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+
+        parameters.iter().copied().chain(properties).collect()
     }
 
     /// Retrieves magic `@property*` metadata, potentially from an inherited tag.

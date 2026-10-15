@@ -1733,7 +1733,13 @@ impl IncrementalAnalysisService {
                     analyzing_bar.inc(1);
                 }
 
-                Ok((file_id, analysis_result, snapshot, std::mem::take(&mut artifacts.effect_summaries)))
+                Ok((
+                    file_id,
+                    analysis_result,
+                    snapshot,
+                    std::mem::take(&mut artifacts.effect_summaries),
+                    std::mem::take(&mut artifacts.listings),
+                ))
             })
             .collect::<Result<Vec<_>, OrchestratorError>>()?;
         if let Some(analyzing_bar) = analyzing_bar {
@@ -1763,12 +1769,17 @@ impl IncrementalAnalysisService {
         let mut per_file_pragmas: HashMap<FileId, DeferredPragmas> = HashMap::default();
         let mut snapshots = Vec::new();
         let mut per_file_effect_summaries: HashMap<FileId, Vec<EffectSummary>> = HashMap::default();
+        // The sets each file's analysis read whole, which join what its extensions read from the codebase.
+        let mut reads_by_file: HashMap<FileId, FileReads> = HashMap::default();
 
-        for (file_id, mut result, snapshot, effect_summaries) in results {
+        for (file_id, mut result, snapshot, effect_summaries, listings) in results {
             let mut deferred_pragmas = result.take_deferred_pragmas();
             aggregated_result.symbol_references.extend(result.symbol_references);
             per_file_issues.insert(file_id, result.issues);
             per_file_effect_summaries.insert(file_id, effect_summaries);
+            if !listings.is_empty() {
+                reads_by_file.insert(file_id, FileReads { listings, ..FileReads::default() });
+            }
             if let Some(pragmas) = deferred_pragmas.pop() {
                 per_file_pragmas.insert(file_id, pragmas);
             }
@@ -1948,13 +1959,17 @@ impl IncrementalAnalysisService {
         codebase.safe_symbols.clear();
         codebase.safe_symbol_members.clear();
 
+        for (file_id, reads) in external_session.map(|session| session.take_reads()).unwrap_or_default() {
+            reads_by_file.entry(file_id).or_default().extend(reads);
+        }
+
         Ok(SelectiveAnalysisOutput {
             result: aggregated_result,
             native_symbol_references,
             external_symbol_references,
             late_symbol_references,
             late_symbol_references_by_file,
-            reads_by_file: external_session.map(|session| session.take_reads()).unwrap_or_default(),
+            reads_by_file,
             per_file_issues,
             per_file_pragmas,
             snapshots,

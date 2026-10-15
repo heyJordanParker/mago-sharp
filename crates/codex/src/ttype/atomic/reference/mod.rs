@@ -80,6 +80,8 @@ pub enum TReference {
         /// Represents additional types in an intersection type (`&B&S` part of `A&B&S`).
         /// Contains other *atomic* types (boxed due to potential recursion).
         intersection_types: Option<Vec<TAtomic>>,
+        /// Whether a PHP# type writes `readonly` before the name, spec section 13. The class it resolves to keeps it.
+        is_readonly: bool,
     },
     /// A reference to a member within a class-like scope (class constant, enum case).
     /// Example: `Client::THRESHOLD`, `Status::Ok`.
@@ -177,8 +179,11 @@ impl TType for TReference {
 
     fn get_id(&self) -> Word {
         match self {
-            TReference::Symbol { name, .. } => {
+            TReference::Symbol { name, is_readonly: false, .. } => {
                 concat_word!(b"unknown-ref(", name, b")")
+            }
+            TReference::Symbol { name, is_readonly: true, .. } => {
+                concat_word!(b"unknown-ref(readonly ", name, b")")
             }
             TReference::Member { class_like_name, member_selector } => match member_selector {
                 TReferenceMemberSelector::Wildcard => {

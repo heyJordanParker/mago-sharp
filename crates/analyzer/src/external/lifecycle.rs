@@ -28,6 +28,7 @@ use mago_span::Span;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NodeKind;
 use mago_syntax::cst::Program;
+use mago_syntax::dialect::Dialect;
 use mago_text_edit::Safety;
 use mago_text_edit::TextEdit;
 use mago_text_edit::TextRange;
@@ -352,6 +353,7 @@ impl FileAnalysisSnapshot {
         node_analysis_requirements: Option<&NodeAnalysisRequirements>,
         node_analysis: bool,
     ) -> Result<Self, ExternalAnalyzerError> {
+        let dialect = program.dialect;
         let node_analysis_plan = node_analysis_requirements
             .map(|requirements| build_node_analysis_plan(program, artifacts, resolved_names, codebase, requirements));
         let source = SourceSnapshot::complete_with_target_filter(program, resolved_names, |node| {
@@ -397,7 +399,7 @@ impl FileAnalysisSnapshot {
                     ))
                 })?;
                 let mut target_analysis_writer = PayloadWriter::new();
-                write_target_analysis(&mut target_analysis_writer, artifacts, codebase, plan, target_count)?;
+                write_target_analysis(&mut target_analysis_writer, artifacts, codebase, dialect, plan, target_count)?;
                 (
                     target_source_writer.finish().into_boxed_slice(),
                     target_analysis_writer.finish().into_boxed_slice(),
@@ -417,7 +419,7 @@ impl FileAnalysisSnapshot {
         for (span, union) in &artifacts.expression_types {
             expression_types.insert(
                 *span,
-                encode_snapshot_type(&mut writer, union, &mut type_handles, codebase).map_err(|error| {
+                encode_snapshot_type(&mut writer, union, &mut type_handles, codebase, dialect).map_err(|error| {
                     protocol(format!(
                         "failed to retain expression type at {}:{} in `{}`: {error}",
                         span.0,
@@ -433,11 +435,22 @@ impl FileAnalysisSnapshot {
             artifacts.inferred_return_types.iter().map(AsRef::as_ref),
             &mut type_handles,
             codebase,
+            dialect,
         )?;
-        let inferred_yield_key_types =
-            encode_snapshot_types(&mut writer, &artifacts.inferred_yield_key_types, &mut type_handles, codebase)?;
-        let inferred_yield_value_types =
-            encode_snapshot_types(&mut writer, &artifacts.inferred_yield_value_types, &mut type_handles, codebase)?;
+        let inferred_yield_key_types = encode_snapshot_types(
+            &mut writer,
+            &artifacts.inferred_yield_key_types,
+            &mut type_handles,
+            codebase,
+            dialect,
+        )?;
+        let inferred_yield_value_types = encode_snapshot_types(
+            &mut writer,
+            &artifacts.inferred_yield_value_types,
+            &mut type_handles,
+            codebase,
+            dialect,
+        )?;
 
         Ok(Self {
             file_id: file.id,
@@ -490,8 +503,9 @@ fn encode_snapshot_types<'type_info>(
     types: impl IntoIterator<Item = &'type_info TUnion>,
     handles: &mut Vec<Cow<'type_info, TUnion>>,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<Vec<Range<usize>>, ExternalAnalyzerError> {
-    types.into_iter().map(|ty| encode_snapshot_type(writer, ty, handles, codebase)).collect()
+    types.into_iter().map(|ty| encode_snapshot_type(writer, ty, handles, codebase, dialect)).collect()
 }
 
 fn encode_snapshot_type<'type_info>(
@@ -499,10 +513,11 @@ fn encode_snapshot_type<'type_info>(
     ty: &'type_info TUnion,
     handles: &mut Vec<Cow<'type_info, TUnion>>,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<Range<usize>, ExternalAnalyzerError> {
     handles.clear();
     let start = writer.len();
-    protocol::encode_union_snapshot(writer, ty, handles, codebase, 0)?;
+    protocol::encode_union_snapshot(writer, ty, handles, codebase, dialect, 0)?;
     Ok(start..writer.len())
 }
 
@@ -510,6 +525,7 @@ fn write_target_analysis(
     writer: &mut PayloadWriter,
     artifacts: &AnalysisArtifacts,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     plan: &NodeAnalysisPlan<'_, '_>,
     expected_count: usize,
 ) -> Result<(), ExternalAnalyzerError> {
@@ -524,13 +540,13 @@ fn write_target_analysis(
         let requested = target.requirements;
         writer.write_u8(requested);
         if requested & NODE_REQUIREMENT_TARGET_EXPRESSION_TYPES != 0 {
-            write_optional_expression_type(writer, artifacts, codebase, Some(target.node.span()))?;
+            write_optional_expression_type(writer, artifacts, codebase, dialect, Some(target.node.span()))?;
         }
         if requested & NODE_REQUIREMENT_RECEIVER_TYPE != 0 {
-            write_optional_expression_type(writer, artifacts, codebase, receiver_span(target.node))?;
+            write_optional_expression_type(writer, artifacts, codebase, dialect, receiver_span(target.node))?;
         }
         if requested & NODE_REQUIREMENT_ARGUMENT_TYPES != 0 {
-            write_argument_types(writer, artifacts, codebase, target.node)?;
+            write_argument_types(writer, artifacts, codebase, dialect, target.node)?;
         }
         if requested & NODE_REQUIREMENT_VARIABLE_DEFINEDNESS != 0 {
             write_variable_definedness(writer, artifacts, target.node.span())?;
@@ -574,12 +590,13 @@ fn write_optional_expression_type(
     writer: &mut PayloadWriter,
     artifacts: &AnalysisArtifacts,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     span: Option<Span>,
 ) -> Result<(), ExternalAnalyzerError> {
     let ty = span.and_then(|span| artifacts.expression_types.get(&(span.start.offset, span.end.offset)));
     writer.write_bool(ty.is_some());
     if let Some(ty) = ty {
-        write_type(writer, ty, codebase)?;
+        write_type(writer, ty, codebase, dialect)?;
     }
     Ok(())
 }
@@ -597,6 +614,7 @@ fn write_argument_types(
     writer: &mut PayloadWriter,
     artifacts: &AnalysisArtifacts,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     node: Node<'_, '_>,
 ) -> Result<(), ExternalAnalyzerError> {
     let arguments = match node {
@@ -613,7 +631,7 @@ fn write_argument_types(
 
     writer.write_u32(u32::try_from(arguments.len()).map_err(|_| protocol("too many call arguments"))?);
     for argument in arguments.iter() {
-        write_optional_expression_type(writer, artifacts, codebase, Some(argument.value().span()))?;
+        write_optional_expression_type(writer, artifacts, codebase, dialect, Some(argument.value().span()))?;
     }
     Ok(())
 }
@@ -659,14 +677,14 @@ enum FileView<'analysis> {
 }
 
 enum TypeView<'analysis> {
-    Union(&'analysis TUnion, &'analysis CodebaseMetadata),
+    Union(&'analysis TUnion, &'analysis CodebaseMetadata, Dialect),
     Encoded(&'analysis [u8]),
 }
 
 impl TypeView<'_> {
     fn write_to(self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
-            Self::Union(ty, codebase) => write_type(writer, ty, codebase),
+            Self::Union(ty, codebase, dialect) => write_type(writer, ty, codebase, dialect),
             Self::Encoded(bytes) => {
                 writer.write_raw(bytes);
                 Ok(())
@@ -699,8 +717,8 @@ impl FileView<'_> {
 
     fn expression_type(&self, span: &(u32, u32)) -> Option<TypeView<'_>> {
         match self {
-            Self::Artifacts(_, _, _, artifacts, codebase, _) => {
-                artifacts.expression_types.get(span).map(|ty| TypeView::Union(ty, codebase))
+            Self::Artifacts(_, program, _, artifacts, codebase, _) => {
+                artifacts.expression_types.get(span).map(|ty| TypeView::Union(ty, codebase, program.dialect))
             }
             Self::Snapshot(file) => file
                 .expression_types
@@ -770,7 +788,7 @@ impl FileView<'_> {
 
     fn write_expression_type_snapshot(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
-            Self::Artifacts(_, _, _, artifacts, codebase, _) => {
+            Self::Artifacts(_, program, _, artifacts, codebase, _) => {
                 let mut spans = artifacts.expression_types.keys().copied().collect::<Vec<_>>();
                 spans.sort_unstable();
                 let mut encoded = PayloadWriter::new();
@@ -781,7 +799,7 @@ impl FileView<'_> {
                         .expression_types
                         .get(&span)
                         .ok_or_else(|| protocol("expression type disappeared while snapshotting analysis artifacts"))?;
-                    let range = encode_snapshot_type(&mut encoded, ty, &mut handles, codebase)?;
+                    let range = encode_snapshot_type(&mut encoded, ty, &mut handles, codebase, program.dialect)?;
                     records.push((span, range));
                 }
                 write_expression_type_records(writer, &records, &encoded.finish())
@@ -802,13 +820,13 @@ impl FileView<'_> {
 
     fn write_inferred_return_types(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
-            Self::Artifacts(_, _, _, artifacts, codebase, _) => {
+            Self::Artifacts(_, program, _, artifacts, codebase, _) => {
                 writer.write_u32(
                     u32::try_from(artifacts.inferred_return_types.len())
                         .map_err(|_| protocol("too many inferred types"))?,
                 );
                 for ty in &artifacts.inferred_return_types {
-                    write_type(writer, ty, codebase)?;
+                    write_type(writer, ty, codebase, program.dialect)?;
                 }
             }
             Self::Snapshot(file) => {
@@ -834,8 +852,8 @@ impl FileView<'_> {
 
     fn write_inferred_yield_key_types(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
-            Self::Artifacts(_, _, _, artifacts, codebase, _) => {
-                write_types(writer, &artifacts.inferred_yield_key_types, codebase)
+            Self::Artifacts(_, program, _, artifacts, codebase, _) => {
+                write_types(writer, &artifacts.inferred_yield_key_types, codebase, program.dialect)
             }
             Self::Snapshot(file) => write_encoded_types(writer, &file.encoded_types, &file.inferred_yield_key_types),
         }
@@ -843,8 +861,8 @@ impl FileView<'_> {
 
     fn write_inferred_yield_value_types(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
-            Self::Artifacts(_, _, _, artifacts, codebase, _) => {
-                write_types(writer, &artifacts.inferred_yield_value_types, codebase)
+            Self::Artifacts(_, program, _, artifacts, codebase, _) => {
+                write_types(writer, &artifacts.inferred_yield_value_types, codebase, program.dialect)
             }
             Self::Snapshot(file) => write_encoded_types(writer, &file.encoded_types, &file.inferred_yield_value_types),
         }
@@ -914,7 +932,7 @@ impl FileView<'_> {
                         String::from_utf8_lossy(&file.name)
                     ))
                 })?;
-                write_target_analysis(writer, artifacts, codebase, plan, snapshot.target_count())
+                write_target_analysis(writer, artifacts, codebase, program.dialect, plan, snapshot.target_count())
             }
             Self::Snapshot(file) => {
                 writer.write_raw(&file.encoded_target_source);
@@ -1671,10 +1689,11 @@ fn write_types(
     writer: &mut PayloadWriter,
     types: &[TUnion],
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_u32(u32::try_from(types.len()).map_err(|_| protocol("too many inferred types"))?);
     for ty in types {
-        write_type(writer, ty, codebase)?;
+        write_type(writer, ty, codebase, dialect)?;
     }
 
     Ok(())
@@ -1700,8 +1719,9 @@ fn write_type(
     writer: &mut PayloadWriter,
     ty: &TUnion,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError> {
-    protocol::encode_union_snapshot(writer, ty, &mut Vec::new(), codebase, 0)
+    protocol::encode_union_snapshot(writer, ty, &mut Vec::new(), codebase, dialect, 0)
 }
 
 fn read_level(reader: &mut PayloadReader<'_>) -> Result<Level, ExternalAnalyzerError> {
@@ -1715,20 +1735,155 @@ fn read_level(reader: &mut PayloadReader<'_>) -> Result<Level, ExternalAnalyzerE
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
+    use std::rc::Rc;
+    use std::sync::Arc;
+
     use mago_codex::metadata::CodebaseMetadata;
     use mago_codex::metadata::class_like::ClassLikeMetadata;
     use mago_codex::metadata::flags::MetadataFlags;
     use mago_codex::reference::ReferenceOrigin;
+    use mago_codex::ttype::atomic::TAtomic;
+    use mago_codex::ttype::atomic::array::TArray;
+    use mago_codex::ttype::union::TUnion;
     use mago_extension::PayloadWriter;
     use mago_span::Span;
+    use mago_syntax::cst::NodeKind;
     use mago_word::empty_word;
     use mago_word::word;
 
+    use super::ANALYSIS_QUERY_REQUEST;
+    use super::AnalysisStore;
+    use super::FileAnalysisSnapshot;
+    use super::GET_ALL_EXPRESSION_TYPES;
+    use super::GET_EXPRESSION_TYPES;
+    use super::GET_INFERRED_RETURN_TYPES;
+    use super::GET_INFERRED_YIELD_KEY_TYPES;
+    use super::GET_INFERRED_YIELD_VALUE_TYPES;
     use super::class_like_matches_hook;
+    use super::encode_after_file_analysis_request;
+    use super::handle_analysis_query;
     use super::write_reference_origin;
     use super::write_symbol_identifier;
+    use crate::artifacts::AnalysisArtifacts;
     use crate::external::ClassLikeAnalysisHookRegistration;
+    use crate::external::ExternalAnalysisSession;
+    use crate::external::NODE_REQUIREMENTS_ALL;
+    use crate::external::NodeAnalysisRequirements;
+    use crate::external::protocol;
+    use crate::external::protocol::testing::Analysis;
+    use crate::external::protocol::testing::SHELF;
+    use crate::external::protocol::testing::SINK;
+    use crate::external::protocol::testing::analyzed;
+    use crate::external::protocol::testing::names;
+
+    /// The answer to the analysis query `operation` about the analyzed file, with `artifacts`, which asks for the
+    /// types of `spans`.
+    fn answer(
+        analysis: &Analysis<'_, '_>,
+        artifacts: &AnalysisArtifacts,
+        operation: u8,
+        spans: &[(u32, u32)],
+    ) -> Vec<u8> {
+        let session = ExternalAnalysisSession::from_files(analysis.files.iter().cloned());
+        let mut writer = protocol::message_writer(ANALYSIS_QUERY_REQUEST);
+        writer.write_u64(session.generation());
+        writer.write_u8(operation);
+        writer.write_bytes(&analysis.file().name).expect("the name should fit in a frame");
+        if operation == GET_EXPRESSION_TYPES {
+            writer.write_u32(spans.len() as u32);
+            for (start, end) in spans {
+                writer.write_u32(*start);
+                writer.write_u32(*end);
+            }
+        }
+        let store = AnalysisStore::File {
+            file: analysis.file(),
+            program: analysis.program,
+            resolved_names: analysis.names,
+            artifacts,
+            codebase: analysis.codebase,
+            node_analysis_targets: None,
+        };
+
+        handle_analysis_query(&writer.finish(), &session, &store).expect("the analysis query should succeed")
+    }
+
+    /// What an external analyzer reads of an analyzed PHP# file goes as the file's code sees it: each `Map` an
+    /// expression, a node-analysis target, an inferred return type or a yielded key or value holds goes as the
+    /// `Sharp\Map` object it runs as. The analyzer keeps the types a `return` and a `yield` give with their function,
+    /// not the file, so the file's inferred types are ones the test gives it.
+    #[test]
+    fn an_analyzed_file_sends_its_types_as_its_code_sees_them() {
+        analyzed(&[SHELF, SINK], |analysis| {
+            let mut targets = [false; NodeKind::COUNT];
+            let mut requirements = [0; NodeKind::COUNT];
+            for kind in [NodeKind::MethodCall, NodeKind::StaticMethodCall] {
+                targets[kind as usize] = true;
+                requirements[kind as usize] = NODE_REQUIREMENTS_ALL;
+            }
+            let requirements = NodeAnalysisRequirements::new(&targets, &requirements, Arc::from([]), Arc::from([]));
+            let snapshot = FileAnalysisSnapshot::new(
+                analysis.file(),
+                analysis.program,
+                analysis.names,
+                analysis.artifacts,
+                analysis.codebase,
+                Some(&requirements),
+                true,
+            )
+            .expect("the file should snapshot");
+            // An after-file request with the expression types alone, then with the node-analysis targets alone.
+            let after_file = [(true, None), (false, Some(&requirements))].map(|(expression_types, requirements)| {
+                encode_after_file_analysis_request(
+                    1,
+                    &[0],
+                    analysis.file(),
+                    analysis.program,
+                    analysis.names,
+                    analysis.artifacts,
+                    analysis.codebase,
+                    expression_types,
+                    requirements,
+                    0,
+                )
+                .expect("the request should encode")
+            });
+            let map = analysis
+                .artifacts
+                .expression_types
+                .iter()
+                .find(|(_, union)| union.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_)))))
+                .map(|(span, _)| *span)
+                .expect("an expression holds a `Map`");
+
+            assert!(snapshot.has_node_analysis_targets(), "the call of `take` is a node-analysis target");
+            assert!(names(&snapshot.encoded_types, b"Sharp\\Map"), "an expression's `Map`");
+            assert!(names(&snapshot.encoded_target_analysis, b"Sharp\\Map"), "the argument of `take`");
+            assert!(names(&after_file[0], b"Sharp\\Map"), "the after-file request's expression types");
+            assert!(names(&after_file[1], b"Sharp\\Map"), "the after-file request's node-analysis targets");
+            let map_type = &analysis.artifacts.expression_types[&map];
+            let mut inferred = analysis.artifacts.clone();
+            inferred.inferred_return_types.push(Rc::clone(map_type));
+            inferred.inferred_yield_key_types.push(TUnion::clone(map_type));
+            inferred.inferred_yield_value_types.push(TUnion::clone(map_type));
+            let rows = [
+                (GET_EXPRESSION_TYPES, analysis.artifacts),
+                (GET_ALL_EXPRESSION_TYPES, analysis.artifacts),
+                (GET_INFERRED_RETURN_TYPES, &inferred),
+                (GET_INFERRED_YIELD_KEY_TYPES, &inferred),
+                (GET_INFERRED_YIELD_VALUE_TYPES, &inferred),
+            ];
+
+            for (operation, artifacts) in rows {
+                assert!(
+                    names(&answer(analysis, artifacts, operation, &[map]), b"Sharp\\Map"),
+                    "analysis query {operation}"
+                );
+            }
+        });
+    }
 
     #[test]
     fn descendant_target_excludes_the_ancestor_declaration() {

@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use mago_word::Word;
 use std::collections::BTreeMap;
 
+use mago_names::binding::php_variable_name;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_phpdoc_syntax::cst::TagValue;
@@ -12,12 +13,14 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::AnonymousClass;
 use mago_syntax::cst::AttributeList;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Binding;
 use mago_syntax::cst::BindingValue;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
+use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Hint;
@@ -30,6 +33,7 @@ use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Sequence;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUseAdaptation;
 use mago_syntax::cst::TraitUseMethodReference;
@@ -49,6 +53,7 @@ use crate::issue::ScanningIssueKind;
 use crate::metadata::CodebaseMetadata;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::class_like::TemplateTypes;
+use crate::metadata::class_like_constant::ClassLikeConstantMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
@@ -73,8 +78,8 @@ use crate::scanner::docblock::parse_docblock;
 use crate::scanner::docblock::parse_docblock_trivia;
 use crate::scanner::enum_case::scan_enum_case;
 use crate::scanner::function_like::scan_binding_expression;
-use crate::scanner::function_like::scan_event_constructor;
 use crate::scanner::function_like::scan_law;
+use crate::scanner::function_like::scan_promoted_constructor;
 use crate::scanner::property::scan_properties;
 use crate::scanner::ttype::get_type_metadata_from_hint;
 use crate::scanner::ttype::get_type_metadata_from_type;
@@ -89,11 +94,15 @@ use crate::ttype::atomic::object::r#enum::TEnum;
 use crate::ttype::atomic::reference::TReference;
 use crate::ttype::atomic::scalar::TScalar;
 use crate::ttype::builder;
+use crate::ttype::get_bool;
+use crate::ttype::get_keyed_array;
 use crate::ttype::get_list;
 use crate::ttype::get_mixed;
 use crate::ttype::get_named_object;
 use crate::ttype::get_non_empty_list;
+use crate::ttype::get_object;
 use crate::ttype::get_string;
+use crate::ttype::get_void;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
 use crate::ttype::template::variance::Variance;
@@ -141,6 +150,8 @@ where
     finish_registration(codebase, class_like_metadata)
 }
 
+/// Registers a class. A PHP# class that can be created, neither abstract nor static, gets the `parse` and `tryParse`
+/// a struct gets, spec section 10, unless it declares a member of either name.
 #[inline]
 pub fn register_class<'arena, A>(
     codebase: &mut CodebaseMetadata,
@@ -152,7 +163,7 @@ where
     A: Arena,
 {
     let span = class.span();
-    let class_like_metadata = scan_class_like(
+    let mut class_like_metadata = scan_class_like(
         codebase,
         word(context.resolved_names.get(&class.name)),
         SymbolKind::Class,
@@ -171,6 +182,13 @@ where
         context,
         scope,
     )?;
+    if context.program.dialect.is_sharp()
+        && !class.modifiers.contains_abstract()
+        && !class.modifiers.contains_static()
+        && leaves_parse_free(&class.members)
+    {
+        create_parse_methods(codebase, &mut class_like_metadata, span);
+    }
 
     finish_registration(codebase, class_like_metadata)
 }
@@ -186,7 +204,7 @@ where
     A: Arena,
 {
     let span = interface.span();
-    let class_like_metadata = scan_class_like(
+    let mut class_like_metadata = scan_class_like(
         codebase,
         word(context.resolved_names.get(&interface.name)),
         SymbolKind::Interface,
@@ -205,6 +223,10 @@ where
         context,
         scope,
     )?;
+    // Spec section 20.1: the populator gathers a sealed interface's implementers, the classes of its namespace.
+    if interface.sealed.is_some() {
+        class_like_metadata.flags |= MetadataFlags::SEALED;
+    }
 
     finish_registration(codebase, class_like_metadata)
 }
@@ -254,10 +276,11 @@ where
     A: Arena,
 {
     let span = r#enum.span();
-    let class_like_metadata = scan_class_like(
+    let carries_data = r#enum.has_data_case();
+    let mut class_like_metadata = scan_class_like(
         codebase,
         word(context.resolved_names.get(&r#enum.name)),
-        SymbolKind::Enum,
+        if carries_data { SymbolKind::Class } else { SymbolKind::Enum },
         Some(r#enum.name.span),
         span,
         span.start.offset,
@@ -269,12 +292,107 @@ where
         r#enum.implements.as_ref(),
         r#enum.inheritance.as_ref(),
         None,
-        r#enum.backing_type_hint.as_ref(),
+        if carries_data { None } else { r#enum.backing_type_hint.as_ref() },
         context,
         scope,
     )?;
+    if carries_data {
+        register_case_classes(codebase, r#enum, &mut class_like_metadata, context, scope);
+        create_value_equality(codebase, &mut class_like_metadata, span);
+    }
 
     finish_registration(codebase, class_like_metadata)
+}
+
+/// Registers the classes a PHP# enum with a case that carries data runs as, spec section 20: the enum is an abstract
+/// class, and each case is a final subclass of it named in the enum's namespace, as `App\PaymentResult\Paid`. A case
+/// that carries data has a public constructor, which takes its fields and makes each a public get-only property, and
+/// the enum has a static method of the case's name that takes the same fields and gives the case, which
+/// `PaymentResult.Paid(…)` calls. A plain case is one object: its class has a private constructor and a static
+/// `instance()` that gives the object, and the enum has a constant of the case's name typed as the case, which
+/// `CheckoutState.Open` reads. The enum permits only its cases as subclasses, so a `match` that handles each is
+/// covered. A case whose class another file declares registers nothing, and the analyzer reports the clash.
+fn register_case_classes<'arena, A>(
+    codebase: &mut CodebaseMetadata,
+    r#enum: &'arena Enum<'arena>,
+    enum_metadata: &mut ClassLikeMetadata,
+    context: &Context<'_, 'arena, A>,
+    scope: &NamespaceScope,
+) where
+    A: Arena,
+{
+    enum_metadata.flags |= MetadataFlags::ABSTRACT;
+    let flags = MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP;
+
+    for member in &r#enum.members {
+        let ClassLikeMember::EnumCase(case) = member else {
+            continue;
+        };
+        let case_name = case.item.name();
+        let original_name = word([enum_metadata.original_name.as_bytes(), b"\\", case_name.value].concat());
+        let name = ascii_lowercase_word(original_name.as_bytes());
+        if codebase.class_likes.contains_key(&name) {
+            continue;
+        }
+
+        let span = case.span();
+        let mut case_metadata = ClassLikeMetadata::new(name, original_name, span, Some(case_name.span), flags);
+        case_metadata.kind = SymbolKind::Class;
+        case_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::ENUM_CASE_CLASS;
+        case_metadata.direct_parent_class = Some(enum_metadata.name);
+        case_metadata.all_parent_classes.insert(enum_metadata.name);
+        codebase.symbols.add_symbol_name(name, SymbolKind::Class);
+        enum_metadata.permitted_inheritors.get_or_insert_default().insert(name);
+        let case_type = TUnion::from_vec(vec![get_named_object(original_name, None).get_single_owned()]);
+
+        let factory = match &case.item {
+            EnumCaseItem::Data(item) => {
+                let constructor = scan_promoted_constructor(
+                    span,
+                    case_name.span,
+                    &item.parameter_list,
+                    &mut case_metadata,
+                    context,
+                    scope,
+                );
+                let mut factory = create_static_method("", span, constructor.parameters.clone(), case_type, vec![]);
+                add_method(codebase, b"__construct", &mut case_metadata, constructor);
+
+                factory.name = word(case_name.value);
+                factory.original_name = factory.name;
+                factory.name_span = Some(case_name.span);
+                factory.flags |= flags;
+                Some(factory)
+            }
+            EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => {
+                let mut constructor = create_static_method("__construct", span, vec![], get_void(), vec![]);
+                constructor.method_metadata = Some(MethodMetadata {
+                    is_constructor: true,
+                    visibility: Visibility::Private,
+                    ..MethodMetadata::default()
+                });
+                add_method(codebase, b"__construct", &mut case_metadata, constructor);
+                add_method(
+                    codebase,
+                    b"instance",
+                    &mut case_metadata,
+                    create_static_method("instance", span, vec![], case_type.clone(), vec![]),
+                );
+
+                let mut constant =
+                    ClassLikeConstantMetadata::new(word(case_name.value), span, Visibility::Public, flags);
+                constant.type_metadata = Some(TypeMetadata::new(case_type, span));
+                enum_metadata.constants.insert(constant.name, constant);
+                None
+            }
+        };
+
+        if let Some(factory) = factory {
+            add_method(codebase, case_name.value, enum_metadata, factory);
+        }
+
+        codebase.class_likes.insert(name, case_metadata);
+    }
 }
 
 /// Registers a PHP# event, spec section 15, as the final class it runs as: its constructor takes the event's
@@ -313,27 +431,62 @@ where
     )?;
     class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::EVENT;
 
-    let constructor = scan_event_constructor(event, &class_like_metadata, context, scope);
-    for parameter in &constructor.parameters {
-        let mut flags = MetadataFlags::PROMOTED_PROPERTY | MetadataFlags::READONLY;
-        flags |= MetadataFlags::origin_flags(context.file.file_type);
-        if parameter.flags.has_default() {
-            flags |= MetadataFlags::HAS_DEFAULT;
-        }
+    let constructor = scan_promoted_constructor(
+        span,
+        event.name.span,
+        &event.parameter_list,
+        &mut class_like_metadata,
+        context,
+        scope,
+    );
+    add_method(codebase, b"__construct", &mut class_like_metadata, constructor);
 
-        let mut property = PropertyMetadata::new(*parameter.get_name(), flags);
-        property.set_name_span(Some(parameter.get_name_span()));
-        property.set_span(Some(parameter.get_span()));
-        property.set_visibility(Visibility::Public, Visibility::Protected);
-        property.set_type_declaration_metadata(parameter.get_type_declaration_metadata().cloned());
-        class_like_metadata.add_property_metadata(property);
+    finish_registration(codebase, class_like_metadata)
+}
+
+/// Registers a PHP# struct, spec section 10, as the final class it runs as, with the `operator ==` that compares it by
+/// value and the `parse` and `tryParse` that read it, each unless it declares its own.
+#[inline]
+pub fn register_struct<'arena, A>(
+    codebase: &mut CodebaseMetadata,
+    r#struct: &'arena Struct<'arena>,
+    context: &Context<'_, 'arena, A>,
+    scope: &mut NamespaceScope,
+) -> ClassLikeRegistration
+where
+    A: Arena,
+{
+    let span = r#struct.span();
+    let mut class_like_metadata = scan_class_like(
+        codebase,
+        word(context.resolved_names.get(&r#struct.name)),
+        SymbolKind::Class,
+        Some(r#struct.name.span),
+        span,
+        span.start.offset,
+        r#struct.left_brace.start.offset,
+        &r#struct.attribute_lists,
+        Some(&r#struct.modifiers),
+        &r#struct.members,
+        None,
+        None,
+        r#struct.inheritance.as_ref(),
+        None,
+        None,
+        context,
+        scope,
+    )?;
+    class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::STRUCT;
+    require_struct_properties(&mut class_like_metadata, &r#struct.members);
+    let declares_equality = r#struct.members.iter().any(|member| {
+        matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
+    });
+    if !declares_equality {
+        create_value_equality(codebase, &mut class_like_metadata, span);
     }
-
-    let method_identifier = MethodIdentifier::new(class_like_metadata.name, constructor.name);
-    class_like_metadata.methods.insert(constructor.name);
-    class_like_metadata.add_declaring_method_id(constructor.name, method_identifier);
-    class_like_metadata.inheritable_method_ids.insert(constructor.name, method_identifier);
-    codebase.function_likes.insert((class_like_metadata.name, constructor.name), constructor);
+    if leaves_parse_free(&r#struct.members) {
+        create_parse_methods(codebase, &mut class_like_metadata, span);
+    }
 
     finish_registration(codebase, class_like_metadata)
 }
@@ -1446,7 +1599,8 @@ where
         }
     }
 
-    for member in members {
+    // An enum with a case that carries data registers as a class, and `register_enum` registers each case as a class.
+    for member in members.iter().filter(|_| class_like_metadata.kind.is_enum()) {
         let ClassLikeMember::EnumCase(enum_case) = member else {
             continue;
         };
@@ -1755,91 +1909,166 @@ where
     Some(class_like_metadata)
 }
 
-fn create_enum_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
-    let mut add_method =
-        |name: &[u8], class_like_metadata: &mut ClassLikeMetadata, function_like_metadata: FunctionLikeMetadata| {
-            let name = ascii_lowercase_word(name);
-            let method_id = (class_like_metadata.name, name);
+/// Adds `function_like_metadata`, a method no source declares, to `class_like_metadata` under `name`.
+fn add_method(
+    codebase: &mut CodebaseMetadata,
+    name: &[u8],
+    class_like_metadata: &mut ClassLikeMetadata,
+    function_like_metadata: FunctionLikeMetadata,
+) {
+    let name = ascii_lowercase_word(name);
+    let method_id = (class_like_metadata.name, name);
 
-            let method_identifier = MethodIdentifier::new(class_like_metadata.name, name);
+    let method_identifier = MethodIdentifier::new(class_like_metadata.name, name);
 
-            class_like_metadata.methods.insert(name);
-            class_like_metadata.add_declaring_method_id(name, method_identifier);
-            class_like_metadata.inheritable_method_ids.insert(name, method_identifier);
-            codebase.function_likes.insert(method_id, function_like_metadata);
+    class_like_metadata.methods.insert(name);
+    class_like_metadata.add_declaring_method_id(name, method_identifier);
+    class_like_metadata.inheritable_method_ids.insert(name, method_identifier);
+    codebase.function_likes.insert(method_id, function_like_metadata);
+}
+
+/// Marks each public `init` property of a struct written without an initial value as required, spec section 10: a
+/// struct has no default value, so a creation sets every such property, a `T?` one too. Only code inside the struct
+/// sets any other property, which is reported where it is declared when nothing sets it. Its main constructor's
+/// parameters are registered later, as their own properties, and are never required.
+fn require_struct_properties(class_like: &mut ClassLikeMetadata, members: &Sequence<ClassLikeMember<'_>>) {
+    for member in members {
+        let ClassLikeMember::Property(property) = member else {
+            continue;
+        };
+        if property.initial_value().is_some() {
+            continue;
+        }
+
+        for variable in property.variables() {
+            let name = php_variable_name(variable.name);
+            let Some(metadata) = class_like.properties.get_mut(&name) else {
+                continue;
+            };
+            if metadata.flags.is_static()
+                || metadata.flags.is_virtual_property()
+                || !metadata.write_visibility.is_public()
+            {
+                continue;
+            }
+
+            metadata.flags.insert(MetadataFlags::REQUIRED);
+            metadata.flags.remove(MetadataFlags::HAS_DEFAULT);
+            metadata.set_default_type_metadata(None);
+            class_like.initialized_properties.remove(&name);
+        }
+    }
+}
+
+/// The `operator ==` of a struct that declares none, or of an enum with a case that carries data, which the bridge
+/// writes to compare each property of a struct, or each field of the same case, spec sections 10, 19 and 20. It takes
+/// any value, so an `Any?` compares with one, and is false when the other value is no instance of the same struct or
+/// case. The analyzer decides which values `==` may compare with one. It spans the whole struct or enum, which no
+/// declared member does.
+fn create_value_equality(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
+    let operand = |name: &str| create_parameter(name, get_mixed(), span);
+    let equality = create_static_method("op_Equality", span, vec![operand("$a"), operand("$b")], get_bool(), vec![]);
+    add_method(codebase, b"op_Equality", class_like, equality);
+}
+
+/// Whether `members` declare no member named `parse` or `tryParse`, whose name the generated pair would take: a type
+/// that declares either keeps its own and gets neither.
+fn leaves_parse_free(members: &Sequence<ClassLikeMember<'_>>) -> bool {
+    !members.iter().any(|member| {
+        let name = match member {
+            ClassLikeMember::Method(method) => method.name.value,
+            ClassLikeMember::NamedConstructor(constructor) => constructor.name.value,
+            _ => return false,
         };
 
+        name.eq_ignore_ascii_case(b"parse") || name.eq_ignore_ascii_case(b"tryParse")
+    })
+}
+
+/// A struct's or a PHP# class's `parse` and `tryParse`, spec section 10, which read a `Map<string, Any?>` or an
+/// object's public properties. Each spans the whole type, which no declared member does.
+fn create_parse_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
+    let instance = get_named_object(class_like.original_name, None);
+    let input = || {
+        let map = get_keyed_array(get_string(), get_mixed());
+        create_parameter("$value", TUnion::from_vec([map.types.as_ref(), get_object().types.as_ref()].concat()), span)
+    };
+    let parse = create_static_method("parse", span, vec![input()], instance.clone(), vec![]);
+    add_method(codebase, b"parse", class_like, parse);
+    let try_parse = create_static_method("tryParse", span, vec![input()], instance.as_nullable(), vec![]);
+    add_method(codebase, b"tryParse", class_like, try_parse);
+}
+
+fn create_enum_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
     let enum_name_word = class_like.name;
     let backing_type = class_like.enum_type.clone();
 
     if let Some(backing_type) = backing_type {
-        let from_method = create_enum_method(
+        let value = || create_parameter("$value", TUnion::from_vec(vec![backing_type.clone()]), span);
+        let from_method = create_static_method(
             "from",
             span,
-            vec![create_enum_value_parameter(backing_type.clone(), span)],
+            vec![value()],
             enum_instance_union(enum_name_word),
             vec![TypeMetadata::new(get_named_object(word("ValueError"), None), span)],
         );
-        add_method(b"from", class_like, from_method);
+        add_method(codebase, b"from", class_like, from_method);
 
-        let try_from_method = create_enum_method(
+        let try_from_method = create_static_method(
             "tryFrom",
             span,
-            vec![create_enum_value_parameter(backing_type, span)],
+            vec![value()],
             TUnion::from_vec(vec![
                 TAtomic::Object(TObject::Enum(TEnum { name: enum_name_word, case: None })),
                 TAtomic::Null,
             ]),
             vec![],
         );
-        add_method(b"tryFrom", class_like, try_from_method);
+        add_method(codebase, b"tryFrom", class_like, try_from_method);
     }
 
     let case_list = enum_instance_union(enum_name_word);
     let cases_return_type =
         if class_like.enum_cases.is_empty() { get_list(case_list) } else { get_non_empty_list(case_list) };
-    let cases_method = create_enum_method("cases", span, vec![], cases_return_type, vec![]);
-    add_method(b"cases", class_like, cases_method);
+    let cases_method = create_static_method("cases", span, vec![], cases_return_type, vec![]);
+    add_method(codebase, b"cases", class_like, cases_method);
 }
 
 fn enum_instance_union(name: Word) -> TUnion {
     TUnion::from_vec(vec![TAtomic::Object(TObject::Enum(TEnum { name, case: None }))])
 }
 
-fn create_enum_value_parameter(backing_type: TAtomic, enum_method_span: Span) -> FunctionLikeParameterMetadata {
+fn create_parameter(name: &str, parameter_type: TUnion, span: Span) -> FunctionLikeParameterMetadata {
     FunctionLikeParameterMetadata {
         attributes: vec![],
-        name: VariableIdentifier(word("$value")),
-        type_declaration_metadata: Some(TypeMetadata::new(
-            TUnion::from_vec(vec![backing_type.clone()]),
-            enum_method_span,
-        )),
-        type_metadata: Some(TypeMetadata::new(TUnion::from_vec(vec![backing_type]), enum_method_span)),
+        name: VariableIdentifier(word(name)),
+        type_declaration_metadata: Some(TypeMetadata::new(parameter_type.clone(), span)),
+        type_metadata: Some(TypeMetadata::new(parameter_type, span)),
         out_type: None,
         closure_this_type: None,
         default_type: None,
-        span: enum_method_span,
-        name_span: enum_method_span,
+        span,
+        name_span: span,
         flags: MetadataFlags::empty(),
     }
 }
 
-fn create_enum_method(
+fn create_static_method(
     name: &str,
-    enum_method_span: Span,
+    span: Span,
     parameters: Vec<FunctionLikeParameterMetadata>,
     return_type: TUnion,
     thrown_types: Vec<TypeMetadata>,
 ) -> FunctionLikeMetadata {
     FunctionLikeMetadata {
         kind: FunctionLikeKind::Method,
-        span: enum_method_span,
+        span,
         name: word(name),
         original_name: word(name),
-        name_span: Some(enum_method_span),
+        name_span: Some(span),
         parameters,
-        return_type_declaration_metadata: Some(TypeMetadata::new(return_type.clone(), enum_method_span)),
-        return_type_metadata: Some(TypeMetadata::new(return_type, enum_method_span)),
+        return_type_declaration_metadata: Some(TypeMetadata::new(return_type.clone(), span)),
+        return_type_metadata: Some(TypeMetadata::new(return_type, span)),
         refined_this_type: None,
         return_from_body: None,
         template_types: TemplateTypes::default(),
@@ -1851,6 +2080,7 @@ fn create_enum_method(
             is_constructor: false,
             visibility: Visibility::Public,
             where_constraints: WordMap::default(),
+            assigned_properties: WordSet::default(),
         }),
         listens: vec![],
         uses: vec![],

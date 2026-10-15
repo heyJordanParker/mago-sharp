@@ -1,4 +1,5 @@
 use mago_analyzer::artifacts::AnalysisArtifacts;
+use mago_analyzer::effects::Effects;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_database::file::File;
 use mago_names::ResolvedNames;
@@ -34,6 +35,7 @@ use super::types::Types;
 /// #     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lower/checked.rs"));
 /// # }
 /// # use mago_analyzer::artifacts::AnalysisArtifacts;
+/// # use mago_analyzer::effects::Effects;
 /// # use mago_codex::metadata::CodebaseMetadata;
 /// # use mago_database::file::File;
 /// # use mago_names::ResolvedNames;
@@ -44,9 +46,12 @@ use super::types::Types;
 ///     names: ResolvedNames<'program>,
 ///     artifacts: &'program AnalysisArtifacts,
 ///     codebase: &'program CodebaseMetadata,
+///     effects: &'program Effects,
 ///     forms: &'program inline::InlineForms,
 /// ) -> Option<checked::CheckedProgram<'program>> {
-///     Some(checked::CheckedProgram { file, program, types: types::Types::new(file, names, artifacts, codebase, forms) })
+///     let types = types::Types::new(file, names, artifacts, codebase, effects, forms);
+///
+///     Some(checked::CheckedProgram { file, program, types })
 /// }
 /// # fn main() {}
 /// ```
@@ -69,6 +74,7 @@ use super::types::Types;
 /// #     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lower/checked.rs"));
 /// # }
 /// # use mago_analyzer::artifacts::AnalysisArtifacts;
+/// # use mago_analyzer::effects::Effects;
 /// # use mago_codex::metadata::CodebaseMetadata;
 /// # use mago_database::file::File;
 /// # use mago_names::ResolvedNames;
@@ -79,9 +85,10 @@ use super::types::Types;
 ///     names: ResolvedNames<'program>,
 ///     artifacts: &'program AnalysisArtifacts,
 ///     codebase: &'program CodebaseMetadata,
+///     effects: &'program Effects,
 ///     forms: &'program inline::InlineForms,
 /// ) -> Option<checked::CheckedProgram<'program>> {
-///     checked::check(file, program, names, artifacts, codebase, forms, &[]).ok()
+///     checked::check(file, program, names, artifacts, codebase, effects, forms, &[]).ok()
 /// }
 /// # fn main() {}
 /// ```
@@ -100,9 +107,10 @@ impl<'program> CheckedProgram<'program> {
         names: ResolvedNames<'program>,
         artifacts: &'program AnalysisArtifacts,
         codebase: &'program CodebaseMetadata,
+        effects: &'program Effects,
         inline_forms: &'program InlineForms,
     ) -> Self {
-        Self { file, program, types: Types::new(file, names, artifacts, codebase, inline_forms) }
+        Self { file, program, types: Types::new(file, names, artifacts, codebase, effects, inline_forms) }
     }
 
     #[must_use]
@@ -139,19 +147,22 @@ pub enum Refusal<'program> {
 /// Accepts `program` when it parsed without errors and the checks reported no error-level issue.
 ///
 /// `program` is the orchestrator's parse of `file`, and `artifacts` and `codebase` are the file's analysis, which the
-/// lowering reads its types from. `inline_forms` are the standard library's forms the lowering may inline, empty for
-/// a standard library file. `issues` must be every issue the orchestrator reported for `file`. `check` runs no check
-/// itself, so a caller that leaves an issue out owns the program it lowers.
+/// lowering reads its types from. `effects` is the effects solve of every file, which a function's type lists.
+/// `inline_forms` are the standard library's forms the lowering may inline, empty for a standard library file. `issues`
+/// must be every issue the orchestrator reported for `file`. `check` runs no check itself, so a caller that leaves an
+/// issue out owns the program it lowers.
 ///
 /// # Errors
 ///
 /// Returns the parser's errors, or else the error-level issues.
+#[allow(clippy::too_many_arguments)]
 pub fn check<'program>(
     file: &'program File,
     program: &'program Program<'program>,
     names: ResolvedNames<'program>,
     artifacts: &'program AnalysisArtifacts,
     codebase: &'program CodebaseMetadata,
+    effects: &'program Effects,
     inline_forms: &'program InlineForms,
     issues: &[Issue],
 ) -> Result<CheckedProgram<'program>, Refusal<'program>> {
@@ -164,7 +175,7 @@ pub fn check<'program>(
         return Err(Refusal::Compile(errors));
     }
 
-    Ok(CheckedProgram { file, program, types: Types::new(file, names, artifacts, codebase, inline_forms) })
+    Ok(CheckedProgram { file, program, types: Types::new(file, names, artifacts, codebase, effects, inline_forms) })
 }
 
 #[cfg(test)]
@@ -190,8 +201,9 @@ mod tests {
         let program = parse_file_with_dialect(&arena, &file, Dialect::Sharp, ParserSettings::default());
         let names = NameResolver::new(&arena).resolve(program);
         let (artifacts, codebase, forms) = (AnalysisArtifacts::new(), CodebaseMetadata::new(), InlineForms::default());
+        let effects = Effects::solve(&codebase, &[]);
 
-        let refusal = check(&file, program, names, &artifacts, &codebase, &forms, &[]);
+        let refusal = check(&file, program, names, &artifacts, &codebase, &effects, &forms, &[]);
 
         assert!(matches!(refusal, Err(Refusal::Parse(errors)) if errors.len() == 1));
     }
@@ -204,8 +216,9 @@ mod tests {
         let names = NameResolver::new(&arena).resolve(program);
         let (artifacts, codebase, forms) = (AnalysisArtifacts::new(), CodebaseMetadata::new(), InlineForms::default());
         let issues = [Issue::warning("a warning"), Issue::error("an error"), Issue::help("a help")];
+        let effects = Effects::solve(&codebase, &[]);
 
-        let refusal = check(&file, program, names, &artifacts, &codebase, &forms, &issues);
+        let refusal = check(&file, program, names, &artifacts, &codebase, &effects, &forms, &issues);
 
         assert!(
             matches!(&refusal, Err(Refusal::Compile(errors)) if errors.len() == 1 && errors[0].message == "an error")

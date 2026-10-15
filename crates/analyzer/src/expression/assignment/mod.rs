@@ -55,7 +55,6 @@ use crate::context::scope::var_has_root;
 use crate::context::scope::var_references_dynamic;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
-use crate::expression::access::written_static_property;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_empty_literal_type;
 use crate::expression::array::get_set_literal_type;
@@ -80,6 +79,8 @@ use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::quoted_source;
+use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
 
@@ -564,7 +565,7 @@ where
             );
         }
         Expression::Access(Access::Property(property_access)) => {
-            match written_static_property(context, block_context, property_access) {
+            match StaticProperty::from_property_access(property_access, context.resolved_names) {
                 Some(static_property) => static_property_assignment::analyze(
                     context,
                     block_context,
@@ -710,8 +711,8 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
                 &mut ComparisonResult::default(),
             )
         {
-            let assigned_type_str = assigned_type.get_id();
-            let constraint_type_str = constraint_type.get_id();
+            let assigned_type_str = display_type(context, &assigned_type);
+            let constraint_type_str = display_type(context, constraint_type);
             let primary_error_span = source_expression.map_or(variable_span, mago_span::HasSpan::span);
             let variable_id = display_variable_name(context, variable_id.as_bytes());
 
@@ -792,6 +793,30 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
         if !assigned_type.by_reference() {
             Rc::make_mut(&mut assigned_type).set_by_reference(true);
         }
+    }
+
+    // Spec section 13: a typed local holds a readonly value only when its type says `readonly`. The local keeps its
+    // written type, as it does after any refused value.
+    if context.dialect.is_sharp()
+        && let Some(value) = source_expression
+        && let Some((local_type, _)) = block_context.local_types.get(&variable_id).cloned()
+        && local_type.drops_readonly_of(&assigned_type)
+    {
+        let name = display_variable_name(context, variable_id.as_bytes());
+        let fix =
+            format!(". Declare it `{} {name}`.", display_type(context, &local_type.as_ref().clone().to_readonly()));
+        let action = format!("store {} in {name}", quoted_source(context, value.span()));
+        report_dropped_readonly(
+            context,
+            block_context,
+            IssueCode::InvalidLocalAssignmentValue,
+            value,
+            (&local_type, &assigned_type),
+            &action,
+            &fix,
+        );
+
+        assigned_type = local_type;
     }
 
     let mut comparison_result = ComparisonResult::for_dialect(context.dialect);

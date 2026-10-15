@@ -21,7 +21,6 @@ use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::MethodCall;
@@ -42,6 +41,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::plugin::hook::NamedCall;
 use crate::resolver::static_property::StaticProperty;
 use crate::utils::misc::unwrap_expression;
 
@@ -75,7 +75,11 @@ pub(crate) fn get_literal_array_key(expression: &Expression<'_>, artifacts: &Ana
 pub(crate) const fn expression_has_observable_side_effect(expression: &Expression<'_>) -> bool {
     match expression {
         Expression::Parenthesized(p) => expression_has_observable_side_effect(p.expression),
-        Expression::Assignment(_) | Expression::Throw(_) | Expression::Yield(_) | Expression::Clone(_) => true,
+        Expression::Assignment(_)
+        | Expression::Throw(_)
+        | Expression::Leave(_)
+        | Expression::Yield(_)
+        | Expression::Clone(_) => true,
         Expression::UnaryPrefix(u) => {
             matches!(
                 u.operator,
@@ -108,7 +112,7 @@ pub(crate) const fn expression_has_observable_side_effect(expression: &Expressio
 pub(crate) const fn expression_is_nullsafe(expr: &'_ Expression<'_>) -> bool {
     match expr {
         Expression::ArrayAccess(array_access) => expression_is_nullsafe(array_access.array),
-        Expression::Call(Call::NullSafeMethod(_)) => true,
+        Expression::Call(Call::NullSafeMethod(_) | Call::NullSafeFunction(_)) => true,
         Expression::Call(Call::Method(method_call)) => expression_is_nullsafe(method_call.object),
         Expression::Call(Call::StaticMethod(static_method_call)) => expression_is_nullsafe(static_method_call.class),
         Expression::Access(Access::NullSafeProperty(_)) => true,
@@ -183,6 +187,10 @@ pub(crate) fn get_nullsafe_base_expressions<'ast, 'arena>(
             Expression::Call(Call::NullSafeMethod(call)) => {
                 bases.push(call.object);
                 current = Some(unwrap_expression(call.object));
+            }
+            Expression::Call(Call::NullSafeFunction(call)) => {
+                bases.push(call.function);
+                current = Some(unwrap_expression(call.function));
             }
             Expression::Call(Call::Method(call)) => {
                 current = Some(unwrap_expression(call.object));
@@ -498,14 +506,6 @@ pub fn get_static_property_access_expression_id<'ast, 'arena>(
     resolved_names: &'ast ResolvedNames<'arena>,
     codebase: Option<&CodebaseMetadata>,
 ) -> Option<Word> {
-    // A static read through a PHP# class value, `type.count`, records the type arguments the value carries, as one
-    // through `Counter<Order>` records its own, which a memoized read skips, so neither is memoized.
-    if let Expression::ConstantAccess(local) = unwrap_expression(access.class)
-        && get_bare_name_variable_id(&local.name, resolved_names).is_some()
-    {
-        return None;
-    }
-
     let class = get_extended_expression_id(access.class, this_class_name, resolved_names, codebase, true)?;
     let property = access.name.direct_name()?;
 
@@ -559,22 +559,23 @@ pub fn get_index_id<'ast, 'arena>(
 pub fn get_function_like_id_from_call<'ast, 'arena>(
     call: &'ast Call<'arena>,
     resolved_names: &'ast ResolvedNames<'arena>,
+    codebase: &CodebaseMetadata,
     expression_types: &HashMap<(u32, u32), Rc<TUnion>>,
 ) -> Option<FunctionLikeIdentifier> {
-    get_static_functionlike_id_from_call(call, resolved_names)
+    get_static_functionlike_id_from_call(call, resolved_names, codebase)
         .or_else(|| get_method_id_from_call(call, expression_types))
 }
 
 pub fn get_static_functionlike_id_from_call<'ast, 'arena>(
     call: &'ast Call<'arena>,
     resolved_names: &'ast ResolvedNames<'arena>,
+    codebase: &CodebaseMetadata,
 ) -> Option<FunctionLikeIdentifier> {
-    match call {
-        Call::Function(FunctionCall { function: Expression::Identifier(identifier), .. }) => {
-            let function_name = resolved_names.get(&identifier);
+    if let Some(named_call) = NamedCall::from_call(resolved_names, codebase, call) {
+        return Some(FunctionLikeIdentifier::Function(named_call.name));
+    }
 
-            Some(FunctionLikeIdentifier::Function(word(function_name)))
-        }
+    match call {
         Call::StaticMethod(StaticMethodCall {
             class: Expression::Identifier(class_identifier),
             method: ClassLikeMemberSelector::Identifier(method),
@@ -586,6 +587,12 @@ pub fn get_static_functionlike_id_from_call<'ast, 'arena>(
             let method_id = word(method.value);
 
             Some(FunctionLikeIdentifier::Method(class_id, method_id))
+        }
+        // PHP# writes the static call `Class::m()` as `Class.m()`.
+        Call::Method(method_call @ MethodCall { method: ClassLikeMemberSelector::Identifier(method), .. }) => {
+            let class = resolved_names.static_call_class(method_call)?;
+
+            Some(FunctionLikeIdentifier::Method(word(resolved_names.get(&class.name)), word(method.value)))
         }
         _ => None,
     }

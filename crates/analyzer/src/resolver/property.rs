@@ -29,6 +29,8 @@ use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::get_signature_of_function_like_metadata;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_php_passed_type;
+use mago_codex::ttype::get_php_received_type;
 use mago_codex::ttype::template::TemplateBound;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
@@ -43,7 +45,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
-use mago_syntax::dialect::Dialect;
+use mago_syntax::cst::Variable;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
 use mago_word::WordSet;
@@ -57,12 +59,17 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
+use crate::expression::with::CREATED_OBJECT_PREFIX;
+use crate::expression::with::is_set_by_with;
 use crate::external::PropertyAccessKind;
 use crate::invocation::infer_parameter_templates_from_argument;
 use crate::invocation::rename_trait_objects;
+use crate::resolver::class_name::class_value_classes;
+use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
+use crate::resolver::method::check_call_through_readonly;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
 use crate::statement::function_like::closure_parameter_types;
@@ -72,9 +79,11 @@ use crate::utils::expression::analyze_member_object;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_enum_case;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_type;
+use crate::utils::names::readonly_writer;
 use crate::utils::quoted_source;
 use crate::utils::template::check_private_method_reach;
 use crate::utils::template::check_private_property_reach;
@@ -122,6 +131,9 @@ pub struct PropertyResolutionResult {
     /// The static method of the extension's computed property a PHP# read runs, spec section 26, which leaves the
     /// other properties empty.
     pub extension: Option<MethodIdentifier>,
+    /// True when the object is a PHP# class value and the member is no member of `Class`, so the access reads or
+    /// writes a static member of the classes the value holds, spec section 25, which leaves the properties empty.
+    pub class_value: bool,
 }
 
 /// Resolves all possible instance properties from an object expression and a member selector.
@@ -151,7 +163,7 @@ where
     let is_all_null = object_type.is_null() || object_type.is_void();
 
     if is_null_safe && !for_assignment {
-        check_redundant_nullsafe(context, operator_span, object_expression, &object_type);
+        check_redundant_nullsafe(context, operator_span, object_expression, &object_type, false);
     }
 
     if context.dialect.is_sharp()
@@ -176,6 +188,15 @@ where
         if object_type.is_nullable() && !is_null_safe && !object_type.has_nullsafe_null() {
             report_access_on_null(context, block_context, object_expression.span(), operator_span, false, false);
         }
+
+        return Ok(result);
+    }
+
+    if context.dialect.is_sharp()
+        && let ClassLikeMemberSelector::Identifier(_) = property_selector
+        && (class_value_classes(&object_type).is_some() || holds_no_class(&object_type))
+    {
+        result.class_value = true;
 
         return Ok(result);
     }
@@ -423,11 +444,26 @@ where
                 ),
             };
 
-            let Some(resolved_property) = resolved_property else {
+            let Some(mut resolved_property) = resolved_property else {
                 result.has_invalid_path = true;
 
                 continue;
             };
+
+            // Spec section 13: everything read through a readonly value is readonly, and nothing is written through it.
+            if context.dialect.is_sharp()
+                && let TObject::Named(named_object) = object
+                && named_object.is_readonly
+            {
+                if for_assignment {
+                    report_readonly_write(context, block_context, object_expression, property_selector);
+                    result.has_error_path = true;
+
+                    continue;
+                }
+
+                resolved_property.property_type = resolved_property.property_type.to_readonly();
+            }
 
             if resolved_property.is_magic {
                 if magic_method.is_none() {
@@ -470,6 +506,26 @@ where
         !result.properties.is_empty() && result.properties.iter().all(|p| !p.property_type.is_nullable());
 
     Ok(result)
+}
+
+/// Reports a write of `object.property` where `object` is readonly, spec section 13, once for the write.
+fn report_readonly_write<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    object: &Expression<'_>,
+    property: &ClassLikeMemberSelector<'_>,
+) where
+    A: Arena,
+{
+    let receiver = quoted_source(context, object.span());
+    let written = quoted_source(context, object.span().join(property.span()));
+    let writer = readonly_writer(block_context.scope.get_function_like());
+    context.collector.report_with_code(
+        IssueCode::InvalidPropertyWrite,
+        Issue::error(format!("{writer} cannot set {written}: {receiver} is readonly."))
+            .with_annotation(Annotation::primary(property.span()).with_message("Written here."))
+            .with_note("Through a `readonly` value, only `get` accessors and methods marked `readonly` run."),
+    );
 }
 
 enum ExternalPropertyResolution {
@@ -840,6 +896,36 @@ pub(crate) fn resolve_property_for_external_access<'ctx>(
     }
 }
 
+/// Whether `object_expr` is the object `new` with an object initializer or `with` creates, spec section 16, which
+/// they set properties of while it is created.
+fn is_created_object(object_expr: &Expression) -> bool {
+    matches!(object_expr, Expression::Variable(Variable::Direct(variable))
+        if variable.name.starts_with(CREATED_OBJECT_PREFIX))
+}
+
+/// The first method, in declaration order, that the struct `r#struct` declares on its objects and that returns the
+/// struct: a method that returns a changed copy, as spec section 10's `moved` does.
+fn first_copying_method<A>(context: &Context<'_, '_, A>, r#struct: &ClassLikeMetadata) -> Option<String>
+where
+    A: Arena,
+{
+    r#struct
+        .methods
+        .iter()
+        .filter_map(|method| context.codebase.get_method(r#struct.name.as_bytes(), method.as_bytes()))
+        .filter(|method| {
+            method.method_metadata.as_ref().is_some_and(|metadata| !metadata.is_static && !metadata.is_constructor)
+                && method.return_type_metadata.as_ref().is_some_and(|return_type| {
+                    return_type.type_union.types.iter().any(|atomic| {
+                        matches!(atomic, TAtomic::Object(TObject::Named(object))
+                            if object.name.as_bytes().eq_ignore_ascii_case(r#struct.name.as_bytes()))
+                    })
+                })
+        })
+        .min_by_key(|method| method.span.start.offset)
+        .map(|method| method.original_name.to_string())
+}
+
 /// Finds a property in a class, gets its type, and handles template localization. `written_atomic` is the receiver as
 /// it is typed, which is `object`'s type parameter when `object` is that type parameter's bound.
 fn find_property_in_class<'ctx, 'ast, 'arena, A>(
@@ -894,12 +980,19 @@ where
                 read_span,
             )
         {
-            check_private_method_reach(
-                context,
-                object_expr,
-                &MethodIdentifier::new(class_id, method_name),
-                selector.span(),
-            );
+            let method = MethodIdentifier::new(class_id, method_name);
+            check_private_method_reach(context, object_expr, &method, selector.span());
+            // Spec section 13: a method value runs its method, so through a readonly value it is a call of it.
+            if context.dialect.is_sharp() && matches!(object, TObject::Named(named) if named.is_readonly) {
+                check_call_through_readonly(
+                    context,
+                    block_context,
+                    &mut artifacts.readonly_calls,
+                    (object_expr, selector),
+                    &method,
+                    class_id,
+                );
+            }
 
             return Some(ResolvedProperty {
                 property_span: None,
@@ -1114,6 +1207,17 @@ where
     let mut read_type = (for_assignment && (resolution.is_magic() || used_set_hook_param))
         .then(|| resolution.declared_type(context.codebase));
 
+    // Plain PHP reads a PHP# property's `Map` or `Set` as the object it runs as, and writes either the object or the
+    // PHP array PHP# turns into one.
+    if !context.dialect.is_sharp() && resolution.declaring_class.flags.is_sharp() {
+        property_type = if for_assignment {
+            get_php_passed_type(&property_type, context.codebase)
+        } else {
+            get_php_received_type(&property_type, context.codebase)
+        };
+        read_type = read_type.map(|read_type| get_php_received_type(&read_type, context.codebase));
+    }
+
     let expand_and_localize = |ty: &mut TUnion| {
         expander::expand_union(
             context.codebase,
@@ -1145,13 +1249,57 @@ where
     // its class or a subclass, or in a named constructor, where C# allows an `init` accessor. A lambda may run after
     // the object is created, so it cannot set one, as C# refuses with CS8852. The property's own accessor body writes
     // its storage through `field`, on `this` only.
-    if for_assignment && context.dialect.is_sharp() && property_metadata.flags.is_init() {
+    // A struct never changes, spec section 10: every property is set only while the struct is created, `init` or not.
+    // An enum case never changes either, spec section 20: its fields are set only while the case is made.
+    let is_struct = declaring_class_metadata.flags.is_struct();
+    if for_assignment
+        && context.dialect.is_sharp()
+        && let Some(case) = display_enum_case(context, declaring_class_metadata)
+    {
+        context.collector.report_with_code(
+            IssueCode::InvalidPropertyWrite,
+            Issue::error(format!("An enum case never changes; return a changed copy made with `{case}(…)`."))
+                .with_annotation(Annotation::primary(selector.span()).with_message("Written here."))
+                .with_note("A case's fields are set only while it is made."),
+        );
+        result.has_error_path = true;
+
+        return None;
+    }
+    if for_assignment && context.dialect.is_sharp() && (is_struct || property_metadata.flags.is_init()) {
         let writes_its_storage = is_backing_store_access(object_expr, prop_name, block_context, context.resolved_names);
-        let creates_this = is_this(object_expr, context.resolved_names)
-            && block_context.scope.get_function_like().is_some_and(|function_like| {
-                function_like.flags.is_named_constructor()
-                    || function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
-            });
+        let creates_this = is_created_object(object_expr)
+            || is_this(object_expr, context.resolved_names)
+                && block_context.scope.get_function_like().is_some_and(|function_like| {
+                    function_like.flags.is_named_constructor()
+                        || function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
+                });
+
+        if is_struct && !writes_its_storage && !creates_this {
+            // `with` can't set a get-only property, so neither `with` nor a method, which may be a `with` on it, is
+            // named as its fix. The main constructor sets every property.
+            let message = if !is_set_by_with(property_metadata) {
+                let name = display_class_like_name(context, declaring_class_metadata.name);
+                let property = display_property_name(context, prop_name);
+
+                format!(
+                    "A struct never changes; return a changed copy built with its main constructor, `new {name}(…)`, or declare `{property}` `{{ get; init; }}` and return a changed copy built with `with`."
+                )
+            } else if let Some(method) = first_copying_method(context, declaring_class_metadata) {
+                format!("A struct never changes; return a changed copy from a method, such as `{method}`.")
+            } else {
+                "A struct never changes; return a changed copy built with `with`.".to_owned()
+            };
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(selector.span()).with_message("Written here."))
+                    .with_note("A struct's properties are set only while it is created."),
+            );
+            result.has_error_path = true;
+
+            return None;
+        }
 
         if !writes_its_storage && !creates_this {
             let property = display_property_name(context, prop_name);
@@ -1174,6 +1322,7 @@ where
             &resolution,
             access_span,
             Some(selector.span()),
+            is_created_object(object_expr),
         )
     } else {
         check_resolved_property_read_visibility(context, block_context, &resolution, access_span, Some(selector.span()))
@@ -1694,12 +1843,14 @@ fn report_access_on_null<'ctx, A>(
     }
 }
 
-/// Reports a nullsafe operator on an object that is never `null`.
+/// Reports a nullsafe operator on an object that is never `null`. `called` is whether the operator calls the object
+/// itself, as PHP#'s `f?.(x)` does, which a plain call replaces.
 pub(crate) fn check_redundant_nullsafe<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
     operator_span: Span,
     object_expr: &Expression<'arena>,
     object_type: &TUnion,
+    called: bool,
 ) where
     A: Arena,
 {
@@ -1709,7 +1860,16 @@ pub(crate) fn check_redundant_nullsafe<'arena, A>(
         return;
     }
 
-    let (nullsafe, access) = if context.dialect.is_sharp() { ("?.", ".") } else { ("?->", "->") };
+    let (nullsafe, access) = match (context.dialect.is_sharp(), called) {
+        (true, true) => ("?.", ""),
+        (true, false) => ("?.", "."),
+        (false, _) => ("?->", "->"),
+    };
+    let help = if called {
+        "Call the function directly, as in `f(x)`.".to_owned()
+    } else {
+        format!("Consider using the direct property access operator (`{access}`) for clarity.")
+    };
 
     // A PHP# file that writes PHP's `?->` already has a parse error at the operator.
     let written =
@@ -1730,7 +1890,7 @@ pub(crate) fn check_redundant_nullsafe<'arena, A>(
                     .with_message(format!("This expression (type `{object_type_str}`) is never `null`")),
             )
             .with_note(format!("The nullsafe operator (`{nullsafe}`) short-circuits the access if the object is `null`. Since this expression is guaranteed not to be `null`, this check is unnecessary."))
-            .with_help(format!("Consider using the direct property access operator (`{access}`) for clarity.")),
+            .with_help(help),
     );
 
     context.collector.propose_with_code(IssueCode::RedundantNullsafeOperator, issue, |edits| {
@@ -1942,7 +2102,6 @@ where
                     index,
                     span,
                     false,
-                    Dialect::Sharp,
                 ));
             }
         }

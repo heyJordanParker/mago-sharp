@@ -32,6 +32,8 @@ use crate::context::scope::case_scope::CaseScope;
 use crate::context::scope::loop_scope::LoopScope;
 use crate::effects::EffectSummary;
 use crate::effects::FunctionValue;
+use crate::effects::ReadonlyCall;
+use crate::external::Listing;
 use crate::readonly::PendingReadonlyPropertyWrite;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +101,9 @@ pub struct AnalysisArtifacts {
     pub body_returns: HashMap<(Word, Word), TUnion>,
     /// What each PHP# body of the file does by itself, for [`Effects::solve`](crate::effects::Effects::solve).
     pub effect_summaries: Vec<EffectSummary>,
+    /// Each set of names the file's analysis read whole, as a `match` over a sealed interface reads its implementers,
+    /// spec section 20.1. A later analysis analyzes the file again when a name joins or leaves one.
+    pub listings: HashSet<Listing>,
     /// What each PHP# call runs, keyed by the call's span.
     pub(crate) call_targets: HashMap<(u32, u32), Vec<CallTarget>>,
     /// The type each PHP# `is`, `as`, `match` arm, catch clause or `typeof` reads while the code runs, a type parameter
@@ -110,6 +115,9 @@ pub struct AnalysisArtifacts {
     /// The function values the analysis gave places whose function types list effects, until the body that gives them
     /// records its summary.
     pub(crate) function_values: Vec<FunctionValue>,
+    /// The calls of PHP# methods without `readonly` through readonly values, until the body that makes them records
+    /// its summary.
+    pub(crate) readonly_calls: Vec<ReadonlyCall>,
     pub(crate) variable_definedness: HashMap<(u32, u32), WordMap<VariableDefinedness>>,
     variable_definedness_targets: Option<Arc<[bool; NodeKind::COUNT]>>,
     pub(crate) pending_readonly_property_writes: Vec<PendingReadonlyPropertyWrite>,
@@ -147,10 +155,12 @@ impl AnalysisArtifacts {
             resolved_method_calls: Vec::new(),
             body_returns: HashMap::default(),
             effect_summaries: Vec::new(),
+            listings: HashSet::default(),
             call_targets: HashMap::default(),
             tested_types: HashMap::default(),
             namespace_constants: HashMap::default(),
             function_values: Vec::new(),
+            readonly_calls: Vec::new(),
             variable_definedness: HashMap::default(),
             variable_definedness_targets: None,
             pending_readonly_property_writes: Vec::new(),

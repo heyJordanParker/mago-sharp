@@ -8,7 +8,6 @@ use mago_syntax::cst::ClassLikeConstant;
 use mago_syntax::cst::Constant;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCase;
-use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Function;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Method;
@@ -270,12 +269,7 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for SignatureBuilder<'arena> {
         // Enum cases don't have bodies — signature_hash == hash
         let signature_hash = hash;
 
-        // Extract enum case name
-        let name = match &case.item {
-            EnumCaseItem::Unit(unit) => unit.name.value,
-            EnumCaseItem::Backed(backed) => backed.name.value,
-        };
-
+        let name = case.item.name().value;
         let node = self.create_node(name, false, true, false, hash, signature_hash);
 
         // Add enum case to the current enum if we're inside one

@@ -19,6 +19,7 @@ use foldhash::HashSet;
 use mago_allocator::LocalArena;
 use mago_analyzer::Analyzer;
 use mago_analyzer::analysis_result::AnalysisResult;
+use mago_analyzer::effects::Effects;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
 use mago_codex::populator::populate_codebase;
@@ -77,7 +78,8 @@ fn main() {
         let issues: Vec<_> = issues.into_iter().chain(result.issues).collect();
 
         let forms = InlineForms::default();
-        let checked = check(&file, program, names, &artifacts, &metadata, &forms, &issues)
+        let effects = Effects::solve(&metadata, &artifacts.effect_summaries);
+        let checked = check(&file, program, names, &artifacts, &metadata, &effects, &forms, &issues)
             .unwrap_or_else(|refusal| panic!("{path} is accepted: {refusal:?}"));
         println!("{path}: {} nodes", lower(&checked).nodes().len());
     }

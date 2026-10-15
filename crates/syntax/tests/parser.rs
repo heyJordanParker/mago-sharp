@@ -157,6 +157,9 @@ mod runner {
                 }
                 Expression::Call(call) => match call {
                     Call::Function(function_call) => format!("({}())", format_expression(function_call.function)),
+                    Call::NullSafeFunction(function_call) => {
+                        format!("({}?.())", format_expression(function_call.function))
+                    }
                     Call::Method(method_call) => {
                         format!(
                             "({}->{}())",

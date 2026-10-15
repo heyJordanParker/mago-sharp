@@ -16,12 +16,15 @@ use crate::cst::Expression;
 use crate::cst::ForBody;
 use crate::cst::ForeachBody;
 use crate::cst::ForeachTarget;
+use crate::cst::FunctionCall;
 use crate::cst::IfBody;
+use crate::cst::Leave;
 use crate::cst::LegacyArray;
 use crate::cst::List;
 use crate::cst::Literal;
 use crate::cst::LiteralInteger;
 use crate::cst::MatchArm;
+use crate::cst::NullSafeFunctionCall;
 use crate::cst::PartialApplication;
 use crate::cst::PatternMatch;
 use crate::cst::PatternMatchArm;
@@ -280,6 +283,8 @@ fn statement_control_flows<'arena>(statement: &'arena Statement<'arena>, control
         Statement::Expression(expression_statement) => {
             expression_control_flows(expression_statement.expression, controls);
         }
+        Statement::LocalDeclaration(declaration) => expression_control_flows(declaration.value, controls),
+        Statement::Emit(emit) => expression_control_flows(emit.value, controls),
         Statement::Echo(echo) => {
             for expression in &echo.values {
                 expression_control_flows(expression, controls);
@@ -468,13 +473,25 @@ fn expression_control_flows<'arena>(expression: &'arena Expression<'arena>, cont
         Expression::Throw(throw) => {
             controls.push(ControlFlow::Throw(throw));
         }
+        Expression::Leave(leave) => match leave {
+            Leave::Return(r#return) => {
+                if let Some(value) = r#return.value {
+                    expression_control_flows(value, controls);
+                }
+
+                controls.push(ControlFlow::Return(r#return));
+            }
+            Leave::Continue(r#continue) => controls.push(ControlFlow::Continue(r#continue)),
+            Leave::Break(r#break) => controls.push(ControlFlow::Break(r#break)),
+        },
         Expression::Clone(clone) => {
             expression_control_flows(clone.object, controls);
         }
         Expression::Call(call) => match call {
-            Call::Function(function_call) => {
-                expression_control_flows(function_call.function, controls);
-                for argument in &function_call.argument_list.arguments {
+            Call::Function(FunctionCall { function, argument_list })
+            | Call::NullSafeFunction(NullSafeFunctionCall { function, argument_list, .. }) => {
+                expression_control_flows(function, controls);
+                for argument in &argument_list.arguments {
                     expression_control_flows(argument.value(), controls);
                 }
             }

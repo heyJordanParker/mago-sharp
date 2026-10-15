@@ -213,6 +213,7 @@ final class AnalyzerCodeModuleGenerator
         'ambiguous-class-like-constant-access',
         'invalid-class-constant-on-string',
         'unknown-member-selector-type',
+        'unknown-function-type',
         'string-member-selector',
         'invalid-member-selector',
         'invalid-static-method-call',
@@ -354,6 +355,7 @@ final class AnalyzerCodeModuleGenerator
         'native-body-outside-library',
         'silence-outside-library',
         'reserved-name-outside-library',
+        'internal-outside-library',
         'wrapped-function',
         'replaced-by-syntax',
         'bare-function-call',
@@ -371,6 +373,8 @@ final class AnalyzerCodeModuleGenerator
         'named-constructor-without-new',
         'named-constructor-clash',
         'invalid-event',
+        'invalid-struct',
+        'missing-required-property',
         'invalid-effect',
         'foreign-in-static',
         'incompatible-effects',
@@ -380,6 +384,7 @@ final class AnalyzerCodeModuleGenerator
         'captive-service',
         'ambiguous-inherited-member',
         'abstract-super-call',
+        'missing-readonly-marker',
     ];
 
     /**

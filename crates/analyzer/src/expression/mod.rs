@@ -6,16 +6,31 @@ use mago_algebra::clause::Clause;
 use mago_algebra::find_satisfying_assignments;
 use mago_algebra::saturate_clauses;
 use mago_allocator::Arena;
+use mago_bytes::BytesDisplay;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::r#enum::TEnum;
+use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_literal_string;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_mixed_list;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_null;
+use mago_codex::ttype::get_true;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
+use mago_names::binding::Binding;
+use mago_names::binding::Local;
+use mago_names::binding::LocalKind;
 use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -24,20 +39,29 @@ use mago_span::HasPosition;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::As;
+use mago_syntax::cst::Binary;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::Leave;
+use mago_syntax::cst::ListPattern;
+use mago_syntax::cst::ListPatternElement;
+use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Parenthesized;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PatternMatchArm;
+use mago_syntax::cst::PatternMatchPatternArm;
 use mago_syntax::cst::PropertiesPattern;
+use mago_syntax::cst::RestPattern;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::utils::pattern::PatternNames;
 use mago_syntax::utils::pattern::PhpShape;
-use mago_syntax::utils::pattern::called_function;
+use mago_syntax::utils::pattern::called_functions;
 use mago_syntax::utils::pattern::has_type_test;
 use mago_syntax::walker::Walker;
 use mago_syntax_core::stack::ensure_sufficient_stack;
@@ -49,10 +73,12 @@ use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::context::assertion::CodebasePatternNames;
 use crate::context::block::BlockContext;
 use crate::context::scope::var_has_root;
 use crate::error::AnalysisError;
 use crate::expression::instantiation::analyze_anonymous_class_constructor;
+use crate::external::Listing;
 use crate::formula::get_formula;
 use crate::formula::negate_or_synthesize;
 use crate::plugin::ExpressionHookResult;
@@ -64,10 +90,15 @@ use crate::statement::class_like::override_attribute;
 use crate::statement::get_type_from_hint;
 use crate::statement::report_erased_type_test;
 use crate::statement::report_hint_type_arguments;
+use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::misc::check_for_paradox;
+use crate::utils::names::article;
+use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
+use crate::utils::names::display_enum_case;
 use crate::utils::names::display_member;
 use crate::utils::names::display_missing_imports;
+use crate::utils::names::display_sharp_type;
 use crate::utils::quoted_source;
 
 pub mod access;
@@ -93,6 +124,7 @@ pub mod throw;
 pub mod type_of;
 pub mod unary;
 pub mod variable;
+pub mod with;
 pub mod r#yield;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
@@ -209,6 +241,18 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                 Expression::Yield(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Construct(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Throw(expr) => expr.analyze(context, block_context, artifacts),
+                // Spec section 14.4: `a ?? return`, `a ?? continue` and `a ?? break` run their statement, which leaves,
+                // so the expression has no value.
+                Expression::Leave(leave) => {
+                    match leave {
+                        Leave::Return(r#return) => r#return.analyze(context, block_context, artifacts)?,
+                        Leave::Continue(r#continue) => r#continue.analyze(context, block_context, artifacts)?,
+                        Leave::Break(r#break) => r#break.analyze(context, block_context, artifacts)?,
+                    }
+                    artifacts.set_expression_type(&self, get_never());
+
+                    Ok(())
+                }
                 Expression::Clone(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Error(_)
                 | Expression::Access(_)
@@ -222,7 +266,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                 {
                     if let Expression::Is(is) = self {
                         for (hint, variable) in Node::Pattern(is.pattern).filter_map(|node| match node {
-                            Node::TypePattern(TypePattern { hint, variable: Some(variable) }) => Some((hint, variable)),
+                            Node::TypePattern(TypePattern { hint, variable: Some(variable), .. }) => {
+                                Some((hint, variable))
+                            }
                             _ => None,
                         }) {
                             let variable_id = php_variable_name(variable.value);
@@ -261,6 +307,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                     artifacts,
                 ),
                 Expression::TypeOf(expr) => expr.analyze(context, block_context, artifacts),
+                Expression::With(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::GenericClass(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::List(list_expr) => {
                     context.collector.report_with_code(
@@ -376,21 +423,31 @@ pub(crate) fn analyze_php_shape<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    // Its PHP would read such a name as a class, so the form is refused as a whole.
+    if report_pattern_reads(node, context, block_context, artifacts) {
+        if let Node::Expression(expression) = node {
+            artifacts.set_expression_type(expression, TUnion::from_atomic(TAtomic::Error));
+        }
+
+        return Ok(());
+    }
+
+    let tests_function_type = hints.iter().any(|hint| names_function_type(hint));
     let mut is_refused = false;
     for hint in hints {
         is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint);
         is_refused |= report_erased_type_test(context, hint);
 
-        // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any` or of a
-        // union is `instanceof` a name spanning the whole type, and narrows to the type written, which the analysis
-        // records as the type the test reads. So is a test of a plain PHP trait, spec section 22, since no value is
-        // `instanceof` one.
+        // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any`, of a
+        // function type or of a union is `instanceof` a name spanning the whole type, and narrows to the type written,
+        // which the analysis records as the type the test reads. So is a test of a plain PHP trait, spec section 22,
+        // since no value is `instanceof` one.
         let reads_type_arguments = match hint {
             Hint::Identifier(name) => {
                 context.resolved_names.is_type_parameter(name)
                     || context.codebase.get_trait(context.resolved_names.get(name)).is_some()
             }
-            Hint::Generic(_) | Hint::Mixed(_) | Hint::Union(_) => has_type_test(hint),
+            Hint::Generic(_) | Hint::Mixed(_) | Hint::Function(_) | Hint::Union(_) => has_type_test(hint),
             _ => false,
         };
         if reads_type_arguments {
@@ -398,12 +455,22 @@ where
             artifacts.record_tested_type(hint, tested);
         }
     }
+    // A list pattern's first test is `instanceof` a name spanning its `[`, which reads `List<Any?>`.
+    for left_bracket in node.filter_map(|node| match node {
+        Node::ListPattern(list) => Some(list.left_bracket),
+        _ => None,
+    }) {
+        artifacts.record_tested_type(&left_bracket, get_mixed_list());
+    }
 
     let Some(PhpShape { php, temporaries, tests }) =
         context.get_assertion_context_from_block(block_context).php_shape(node)
     else {
+        // A refused form is the error type, so nothing that reads it reports again.
+        let refused = report_case_patterns_without_php(node, context);
         if let Node::Expression(expression) = node {
-            artifacts.set_expression_type(expression, get_mixed());
+            let refused_type = if refused { TUnion::from_atomic(TAtomic::Error) } else { get_mixed() };
+            artifacts.set_expression_type(expression, refused_type);
         }
 
         return Ok(());
@@ -431,16 +498,24 @@ where
     context.patterns.truncate(patterns);
 
     // The PHP of a pattern calls a type test that no source the user wrote calls. It is the PHP# syntax itself, so it is
-    // never a bare call to refuse. A properties pattern's `is_object` is its null check, which a value that cannot be null
-    // makes redundant. C# reports nothing there, and no source the user wrote can drop the check.
-    let mut pattern_calls = Vec::new();
+    // never a bare call to refuse. Some calls are the shape of the pattern, which no source the user wrote can drop, so
+    // C# reports nothing there when they always hold: a properties pattern's `is_object` and a list pattern's
+    // `is List<Any?>`, their null checks, a list pattern's `count`, and the type test of a list's element or rest, which
+    // the list's own type can make always true, as `[int, ...List<int> rest]` writes "any element".
+    let mut pattern_calls = PatternCalls::default();
     match node {
-        Node::Expression(expression) => PatternCalls.walk_expression(expression, &mut pattern_calls),
-        Node::Statement(statement) => PatternCalls.walk_statement(statement, &mut pattern_calls),
+        Node::Expression(expression) => PatternCallWalker.walk_expression(expression, &mut pattern_calls),
+        Node::Statement(statement) => PatternCallWalker.walk_statement(statement, &mut pattern_calls),
         _ => {}
     }
-    let pattern_call =
-        |span: Span| pattern_calls.iter().find(|call: &&LocalIdentifier| call.span.start.offset == span.start.offset);
+    let list_reads = list_reads(php, &pattern_calls.lists);
+    let issues = refuse_list_patterns_on_other_values(&list_reads, artifacts, issues);
+    let pattern_call = |span: Span| {
+        pattern_calls.calls.iter().find(|call: &&LocalIdentifier| call.span.start.offset == span.start.offset)
+    };
+    let is_shape = |call: &LocalIdentifier| {
+        matches!(call.value, b"is_object" | b"count") || pattern_calls.element_tests.contains(&call.span)
+    };
     // The last arm of a `match` without `default` takes every value the arms before it leave, as `default` does, so its
     // test is always true and not redundant. An arm before it that is always true leaves nothing for the arms after it.
     let last_arm_test: Option<Span> = match node {
@@ -457,10 +532,29 @@ where
         }
         _ => None,
     };
+    // A `match` on a list has `default` even when its list patterns cover every list, as `[]` and `[Line first,
+    // ...List<Line> rest]` do, because spec section 21 skips `default` only on an enum or a sealed interface. The last
+    // list arm before that `default` is then always true, which is the shape the spec asks for, not a mistake.
+    let covering_list_arm: Option<u32> = match node {
+        Node::Expression(Expression::PatternMatch(pattern_match))
+        | Node::Statement(Statement::PatternMatch(pattern_match)) => {
+            let last = pattern_match.arms.iter().rposition(|arm| !arm.is_default());
+            last.and_then(|last| match &pattern_match.arms.as_slice()[last] {
+                PatternMatchArm::Pattern(arm) if arm.guard.is_none() && holds_list_pattern(arm.pattern) => {
+                    Some(arm.pattern.span().start.offset)
+                }
+                _ => None,
+            })
+        }
+        _ => None,
+    };
     // An `as`, or an `is` of a type, whose value is always of the type tests nothing. PHP# says so in the words the user
-    // wrote, in place of PHP's report on the conditional it runs as.
+    // wrote, in place of PHP's report on the conditional it runs as. A type with fields or properties tests them too,
+    // and each reports its own redundant test.
     let redundant_test = match node {
-        Node::Expression(Expression::Is(is)) if let Pattern::Type(TypePattern { hint, .. }) = is.pattern => {
+        Node::Expression(Expression::Is(is))
+            if let Pattern::Type(TypePattern { hint, fields: None, properties: None, .. }) = is.pattern =>
+        {
             Some((is.value, hint.span(), is.is.span.join(is.pattern.span())))
         }
         Node::Expression(Expression::As(r#as)) => {
@@ -490,9 +584,14 @@ where
 
             // PHP's report on `match (true)` names `true`, so a PHP# `match` reports what it misses itself.
             !is_code(issue, IssueCode::MatchNotExhaustive)
+                && (!is_code(issue, IssueCode::MatchArmAlwaysTrue)
+                    || span.is_none_or(|span| Some(span.start.offset) != covering_list_arm))
                 && (!(is_code(issue, IssueCode::ReplacedBySyntax) || is_code(issue, IssueCode::BareFunctionCall))
                     || called.is_none())
-                && (!redundant || called.is_none_or(|call| call.value != b"is_object"))
+                && (!always_true || called.is_none_or(|call| !is_shape(call)))
+                && (!always_true
+                    || span.is_none_or(|span| !list_reads.iter().any(|(_, read)| read.span().start == span.start)))
+                && (!always_true || span.is_none_or(|span| !pattern_calls.case_patterns.contains(&span.start.offset)))
                 && (!always_true
                     || span.is_none_or(|span| {
                         !last_arm_test.is_some_and(|test| test.contains(&span.start))
@@ -504,11 +603,18 @@ where
         })
         .collect();
 
-    if let Some((value, hint, test)) = redundant_test {
+    // Spec section 21: a function value from plain PHP keeps no PHP# type while the code runs, so a function-type test
+    // of a value whose source declares none, such as the `Closure` a plain PHP method returns, is an error, and never
+    // always true.
+    let tested = tested_value(node);
+    let tests_unknown_function =
+        tests_function_type && artifacts.get_expression_type(tested).is_some_and(has_undeclared_function);
+    if let Some((value, hint, test)) = redundant_test
+        && !tests_unknown_function
+    {
         let value_text = quoted_source(context, value.span());
         let hint_text = quoted_source(context, hint);
-        let article =
-            if hint_text.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+        let article = article(&hint_text);
         let (consequence, help) = if let Node::Expression(Expression::As(_)) = node {
             ("changes nothing", format!("Write `{value_text}` alone."))
         } else {
@@ -526,6 +632,18 @@ where
         );
     }
 
+    if tests_unknown_function {
+        let tested_text = quoted_source(context, tested.span());
+        context.collector.report_with_code(
+            IssueCode::UnknownFunctionType,
+            Issue::error(format!(
+                "The type of `{tested_text}`'s function is unknown: its source declares no parameter or result types."
+            ))
+            .with_annotation(Annotation::primary(tested.span()).with_message("Tested here."))
+            .with_help("Call it from a PHP# lambda that declares its types, and test the lambda."),
+        );
+    }
+
     if let Node::Expression(Expression::PatternMatch(pattern_match))
     | Node::Statement(Statement::PatternMatch(pattern_match)) = node
         && !pattern_match.arms.iter().any(PatternMatchArm::is_default)
@@ -540,6 +658,7 @@ where
                 }
                 _ => None,
             })
+            .map(|test| handled_test(test, context.arena, artifacts))
             .collect();
 
         report_unhandled(pattern_match, &handled, context, block_context, artifacts);
@@ -557,13 +676,7 @@ where
             continue;
         }
 
-        context.collector.report_with_code(
-            IssueCode::ImpossibleTypeComparison,
-            Issue::error("This pattern never matches the value it tests.")
-                .with_annotation(Annotation::primary(pattern).with_message("Never matches."))
-                .with_note("PHP# makes a pattern that can never match an error, as C# does (CS8121).")
-                .with_help("Remove the pattern, or test a value that can match it."),
-        );
+        context.collector.report(never_matches(pattern));
     }
     context.collector.extend(issues);
     result?;
@@ -592,7 +705,7 @@ fn report_unhandled<'ctx, 'arena, A>(
     handled: &[&Expression<'arena>],
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
-    artifacts: &AnalysisArtifacts,
+    artifacts: &mut AnalysisArtifacts,
 ) where
     A: Arena,
 {
@@ -604,18 +717,19 @@ fn report_unhandled<'ctx, 'arena, A>(
         .and_then(|id| block_context.locals.get(&id).map(|value| (**value).clone()))
         .or_else(|| artifacts.get_expression_type(pattern_match.expression).cloned())
         .unwrap_or_else(get_mixed);
-    let is_enum = value_type
-        .types
-        .iter()
-        .all(|atomic| matches!(atomic, TAtomic::Null) || enum_value(atomic, context.codebase).is_some());
+    let is_closed = value_type.types.iter().all(|atomic| {
+        matches!(atomic, TAtomic::Null)
+            || enum_value(atomic, context.codebase).is_some()
+            || closed_class(atomic, context.codebase).is_some()
+    });
 
-    let (missing, enums) = if is_enum {
-        missing_cases(pattern_match.span(), &value_type, handled, context, block_context, artifacts)
+    let (missing, enums) = if is_closed {
+        missing_cases(pattern_match, &value_type, handled, context, block_context, artifacts)
     } else {
         (vec![], vec![])
     };
     let message = match missing.as_slice() {
-        _ if !is_enum => "A `match` needs a `default` arm.".to_owned(),
+        _ if !is_closed => "A `match` needs a `default` arm.".to_owned(),
         [] => return,
         [only] => format!("This `match` misses `{only}`."),
         [rest @ .., last] => {
@@ -640,19 +754,28 @@ fn report_unhandled<'ctx, 'arena, A>(
     );
 }
 
-/// The cases of the enum `value_type` that no `handled` test of the `match` at `span` matches, as PHP# writes them,
+/// The cases of the enum `value_type` that no `handled` test of `pattern_match` matches, as PHP# writes them,
 /// `Status.Open`, in the order the enum declares them, and `null` last, with the enums those cases name.
 fn missing_cases<'ctx, 'arena, A>(
-    span: Span,
+    pattern_match: &PatternMatch<'arena>,
     value_type: &TUnion,
     handled: &[&Expression<'arena>],
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
-    artifacts: &AnalysisArtifacts,
+    artifacts: &mut AnalysisArtifacts,
 ) -> (Vec<String>, Vec<Word>)
 where
     A: Arena,
 {
+    // A new implementer of a sealed interface joins its set without changing the interface, so the file is analyzed
+    // again when the classes that implement it change, spec section 20.1. The `match` reads the set whether or not its
+    // arms leave a class of it.
+    for atomic in value_type.types.iter() {
+        if let Some(interface) = closed_class(atomic, context.codebase).filter(|class| class.flags.is_sealed()) {
+            artifacts.listings.insert(Listing::DirectDescendants(interface.name));
+        }
+    }
+
     let thresholds = context.settings.algebra_thresholds();
     let size_threshold = context.settings.formula_size_threshold;
     let assertion_context = context.get_assertion_context_from_block(block_context);
@@ -677,7 +800,7 @@ where
             &mut unhandled_context,
             &mut WordSet::default(),
             &WordSet::default(),
-            &span,
+            &pattern_match.span(),
             false,
             false,
         );
@@ -712,11 +835,208 @@ where
             }
         }
     }
+    // A closed set of classes leaves each class no arm tests, of all the cases of an enum with data or all the
+    // implementers of a sealed interface while the value is still the set's type, and else each class left.
+    let together = cases_handled_together(pattern_match, context, block_context, artifacts);
+    let tested: Vec<&[u8]> = handled
+        .iter()
+        .filter_map(|test| match test.unparenthesized() {
+            Expression::Binary(Binary {
+                operator: BinaryOperator::Instanceof(_),
+                rhs: Expression::Identifier(class),
+                ..
+            }) => context.resolved_names.resolve(class),
+            _ => None,
+        })
+        .chain(together.iter().map(|case| case.as_bytes()))
+        .collect();
+    let mut left_classes: Vec<&ClassLikeMetadata> = Vec::new();
+    for class in atomics().filter_map(|atomic| closed_class(atomic, context.codebase)) {
+        // A member of the set inherits the set's `permitted_inheritors` from its parent, so only a class outside its
+        // own set, the enum or the sealed interface, stands for the whole set.
+        let members: Vec<&ClassLikeMetadata> = match &class.permitted_inheritors {
+            Some(inheritors) if !inheritors.contains(&class.name) => inheritors
+                .iter()
+                .filter_map(|inheritor| context.codebase.get_class_like(inheritor.as_bytes()))
+                .collect(),
+            _ => vec![class],
+        };
+        for member in members {
+            let is_tested = tested.iter().any(|tested| tested.eq_ignore_ascii_case(member.name.as_bytes()));
+            if !is_tested && !left_classes.iter().any(|known| known.name == member.name) {
+                left_classes.push(member);
+            }
+        }
+    }
+    left_classes.sort_by_key(|class| (class.span.file_id, class.span.start.offset));
+    for class in left_classes {
+        missing.push(
+            display_enum_case(context, class)
+                .unwrap_or_else(|| display_class_like_name(context, class.original_name).to_string()),
+        );
+    }
+
     if atomics().any(|atomic| matches!(atomic, TAtomic::Null)) {
         missing.push("null".to_owned());
     }
 
     (missing, named)
+}
+
+/// What an arm's `test` handles of the value a `match` tests, spec section 20. A type pattern that names its value is
+/// `($p = s) instanceof C`, which narrows `$p`, and a case pattern adds the tests of its fields and properties, so a
+/// test whose first part is `instanceof` and whose other parts are always true, as a field unpacked with the type the
+/// case declares, handles the class: it is `s instanceof C`. Any other test handles what it tests.
+fn handled_test<'arena, A>(
+    test: &'arena Expression<'arena>,
+    arena: &'arena A,
+    artifacts: &AnalysisArtifacts,
+) -> &'arena Expression<'arena>
+where
+    A: Arena,
+{
+    let mut parts = Vec::new();
+    let mut rest = test.unparenthesized();
+    while let Expression::Binary(Binary { lhs, operator: BinaryOperator::And(_), rhs }) = rest {
+        parts.push(*rhs);
+        rest = lhs.unparenthesized();
+    }
+    let Expression::Binary(Binary { lhs, operator: operator @ BinaryOperator::Instanceof(_), rhs }) = rest else {
+        return test;
+    };
+    if !parts.iter().all(|part| artifacts.get_expression_type(part).is_some_and(TUnion::is_true)) {
+        return test;
+    }
+    let subject = match lhs.unparenthesized() {
+        Expression::Assignment(assignment) => assignment.rhs,
+        subject => subject,
+    };
+
+    arena.alloc(Expression::Binary(Binary { lhs: subject, operator: *operator, rhs }))
+}
+
+/// The cases of an enum with data that the arms of `pattern_match` without `when` handle together, spec section 20:
+/// arms that unpack one case, whose patterns hold every value of each field's declared type but one field's, and
+/// together hold every value of that field's type, as `Delivery.Noted(string note)` and `Delivery.Noted(null)` hold
+/// every `string?`.
+fn cases_handled_together<'ctx, A>(
+    pattern_match: &PatternMatch<'_>,
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Vec<Word>
+where
+    A: Arena,
+{
+    // Each arm's case, the types its fields declare, and the type each field's pattern holds every value of. A case
+    // pattern's PHP exists only for a case of an enum with data, so its hint names one, and the case's class has a
+    // constructor, which takes no field for a plain case.
+    let unpacking = pattern_match.arms.iter().filter_map(|arm| match arm {
+        PatternMatchArm::Pattern(PatternMatchPatternArm {
+            pattern: Pattern::Type(TypePattern { hint, fields: Some(fields), properties: None, .. }),
+            guard: None,
+            ..
+        }) => Some((hint, fields)),
+        _ => None,
+    });
+    let mut arms: Vec<(Word, Vec<TUnion>, Vec<Option<TUnion>>)> = Vec::new();
+    for (hint, fields) in unpacking {
+        let case = context.resolved_names.resolve(hint).and_then(|name| context.codebase.get_class_like(name));
+        let constructor = case.and_then(|case| context.codebase.get_method(case.name.as_bytes(), b"__construct"));
+        let (Some(case), Some(constructor)) = (case, constructor) else {
+            unreachable!("a case pattern with PHP names a case's class, which has a constructor")
+        };
+        let declared = constructor
+            .parameters
+            .iter()
+            .map(|parameter| {
+                parameter.get_type_metadata().map_or_else(get_mixed, |declared| declared.type_union.clone())
+            })
+            .collect();
+        let held = fields.fields.iter().map(|field| held_type(field, context, block_context, artifacts)).collect();
+        arms.push((case.name, declared, held));
+    }
+
+    let holds = |held: &Option<TUnion>, declared: &TUnion| {
+        held.as_ref().is_some_and(|held| {
+            union_comparator::is_contained_by(
+                context.codebase,
+                declared,
+                held,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::new(),
+            )
+        })
+    };
+    let mut together: Vec<Word> = Vec::new();
+    for (case, declared, _) in &arms {
+        let case_arms: Vec<&Vec<Option<TUnion>>> =
+            arms.iter().filter(|(other, _, _)| other == case).map(|(_, _, held)| held).collect();
+        let handles_case = (0..declared.len()).any(|varying| {
+            let others_hold = case_arms.iter().all(|held| {
+                held.iter()
+                    .zip(declared)
+                    .enumerate()
+                    .all(|(field, (held, declared))| field == varying || holds(held, declared))
+            });
+            let varying_held = case_arms.iter().map(|held| held[varying].clone()).reduce(|left, right| {
+                Some(combine_union_types(&left?, &right?, context.codebase, CombinerOptions::default()))
+            });
+
+            others_hold && varying_held.is_some_and(|held| holds(&held, &declared[varying]))
+        });
+        if handles_case && !together.contains(case) {
+            together.push(*case);
+        }
+    }
+
+    together
+}
+
+/// The type a field pattern holds every value of: a type pattern's type, without fields or properties, the type of
+/// `null`, `true` or `false`, which is the value itself, and both sides' of `or`. `None` for any other pattern, which
+/// holds only some values of a type.
+fn held_type<'ctx, A>(
+    pattern: &Pattern<'_>,
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    match pattern {
+        Pattern::Type(TypePattern { hint, fields: None, properties: None, .. }) => {
+            Some(get_type_from_hint(context, block_context, artifacts, hint))
+        }
+        Pattern::Value(Expression::Literal(Literal::Null(_))) => Some(get_null()),
+        Pattern::Value(Expression::Literal(Literal::True(_))) => Some(get_true()),
+        Pattern::Value(Expression::Literal(Literal::False(_))) => Some(get_false()),
+        Pattern::Binary(binary) if !binary.is_and() => {
+            let left = held_type(binary.left, context, block_context, artifacts)?;
+            let right = held_type(binary.right, context, block_context, artifacts)?;
+
+            Some(combine_union_types(&left, &right, context.codebase, CombinerOptions::default()))
+        }
+        Pattern::Parenthesized(parenthesized) => held_type(parenthesized.pattern, context, block_context, artifacts),
+        _ => None,
+    }
+}
+
+/// The class a value of `atomic` is in a closed set of, spec section 20: a case of an enum with data, an enum with
+/// data, a sealed interface, or a class its permitted inheritors name.
+fn closed_class<'codebase>(
+    atomic: &TAtomic,
+    codebase: &'codebase CodebaseMetadata,
+) -> Option<&'codebase ClassLikeMetadata> {
+    let TAtomic::Object(TObject::Named(object)) = atomic else {
+        return None;
+    };
+    let class = codebase.get_class_like(object.name.as_bytes())?;
+
+    (class.flags.is_enum_case_class() || class.permitted_inheritors.is_some()).then_some(class)
 }
 
 /// The enum and the case a type holds: one case, or every case of the enum when the case is `None`. `None` for a type
@@ -731,24 +1051,281 @@ fn enum_value(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Option<(Word, Op
     }
 }
 
-/// Collects each function a pattern's PHP calls to test a value's type, at the span `called_function` gives it.
-struct PatternCalls;
+/// The error at a pattern that can never match the value it tests.
+fn never_matches(pattern: Span) -> Issue {
+    Issue::error("This pattern never matches the value it tests.")
+        .with_code(IssueCode::ImpossibleTypeComparison.as_str())
+        .with_annotation(Annotation::primary(pattern).with_message("Never matches."))
+        .with_note("PHP# makes a pattern that can never match an error, as C# does (CS8121).")
+        .with_help("Remove the pattern, or test a value that can match it.")
+}
 
-impl<'ast, 'arena> Walker<'ast, 'arena, Vec<LocalIdentifier<'static>>> for PatternCalls {
-    fn walk_in_type_pattern(&self, type_pattern: &'ast TypePattern<'arena>, calls: &mut Vec<LocalIdentifier<'static>>) {
-        calls.extend(called_function(Node::TypePattern(type_pattern)));
+/// Each list pattern of `lists`, by its span and its `[`, with the value its PHP's first test, the `is List<Any?>` at
+/// the `[`, reads.
+fn list_reads<'ast, 'arena>(php: Node<'ast, 'arena>, lists: &[(Span, Span)]) -> Vec<(Span, &'ast Expression<'arena>)> {
+    let mut reads = ListReads::default();
+    match php {
+        Node::Expression(expression) => ListReadWalker.walk_expression(expression, &mut reads),
+        Node::Statement(statement) => ListReadWalker.walk_statement(statement, &mut reads),
+        _ => unreachable!("the PHP of a pattern is an expression or a statement"),
     }
 
-    fn walk_in_as(&self, r#as: &'ast As<'arena>, calls: &mut Vec<LocalIdentifier<'static>>) {
-        calls.extend(called_function(Node::As(r#as)));
+    lists
+        .iter()
+        .filter_map(|&(list, left_bracket)| {
+            reads
+                .0
+                .iter()
+                .find(|(class, _)| class.start.offset == left_bracket.start.offset)
+                .map(|&(_, read)| (list, read))
+        })
+        .collect()
+}
+
+/// Checks the value each list pattern tests, its PHP's first read, may be a `List`. A value that can hold no `List`, as
+/// a `Map`, a `string` or another array, never matches, and the refusal replaces the issues inside the list pattern
+/// and inside its value's read, which count and index the value as a list.
+fn refuse_list_patterns_on_other_values(
+    list_reads: &[(Span, &Expression<'_>)],
+    artifacts: &AnalysisArtifacts,
+    issues: impl IntoIterator<Item = Issue>,
+) -> Vec<Issue> {
+    let mut refused = Vec::new();
+    let mut refusals = Vec::new();
+    for &(list, read) in list_reads {
+        // A read the analysis gave no type has no type to refuse.
+        if artifacts.get_expression_type(read).is_none_or(|read_type| read_type.types.iter().any(may_be_list)) {
+            continue;
+        }
+
+        refused.extend([list, read.span()]);
+        refusals.push(never_matches(list));
     }
 
-    fn walk_in_properties_pattern(
-        &self,
-        properties: &'ast PropertiesPattern<'arena>,
-        calls: &mut Vec<LocalIdentifier<'static>>,
-    ) {
-        calls.extend(called_function(Node::PropertiesPattern(properties)));
+    issues
+        .into_iter()
+        .filter(|issue| issue.primary_span().is_none_or(|span| !refused.iter().any(|at| at.contains(&span.start))))
+        .chain(refusals)
+        .collect()
+}
+
+/// Whether a value of `atomic` may be a `List`: a list, a type that may be any value, as `Any` or a type parameter,
+/// or the type of an expression a parse error refused. Another array, a scalar, an object and null are none.
+fn may_be_list(atomic: &TAtomic) -> bool {
+    match atomic {
+        TAtomic::Array(array) => matches!(array, TArray::List(_)),
+        TAtomic::Scalar(_)
+        | TAtomic::Object(_)
+        | TAtomic::Callable(_)
+        | TAtomic::Resource(_)
+        | TAtomic::Null
+        | TAtomic::Void
+        | TAtomic::Never => false,
+        _ => true,
+    }
+}
+
+/// The value each `instanceof` of a pattern's PHP tests, by the span of its class name.
+#[derive(Default)]
+struct ListReads<'ast, 'arena>(Vec<(Span, &'ast Expression<'arena>)>);
+
+struct ListReadWalker;
+
+impl<'ast, 'arena> Walker<'ast, 'arena, ListReads<'ast, 'arena>> for ListReadWalker {
+    fn walk_in_binary(&self, binary: &'ast Binary<'arena>, reads: &mut ListReads<'ast, 'arena>) {
+        if let (BinaryOperator::Instanceof(_), Expression::Identifier(class)) = (binary.operator, binary.rhs) {
+            reads.0.push((class.span(), binary.lhs));
+        }
+    }
+}
+
+/// Whether a pattern holds a list pattern.
+fn holds_list_pattern(pattern: &Pattern<'_>) -> bool {
+    match pattern {
+        Pattern::List(_) => true,
+        Pattern::Not(not) => holds_list_pattern(not.pattern),
+        Pattern::Binary(binary) => holds_list_pattern(binary.left) || holds_list_pattern(binary.right),
+        Pattern::Parenthesized(parenthesized) => holds_list_pattern(parenthesized.pattern),
+        Pattern::Type(_) | Pattern::Value(_) | Pattern::Comparison(_) | Pattern::Properties(_) => false,
+    }
+}
+
+/// Reports each local, parameter and `this` that a pattern of a PHP# `is` or `match` reads, and returns whether it
+/// reported one. Spec section 21 takes types and constants only in a pattern and compares a value read from code in
+/// `when`, so the report writes that `when` with the type of the value the pattern compares and the pattern's
+/// operator, as `int n when n == top`. A bare member is the semantic check's error.
+fn report_pattern_reads<'ctx, 'arena, A>(
+    node: Node<'_, 'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> bool
+where
+    A: Arena,
+{
+    // Each value a pattern compares with: a bare name, which the binder binds to a local of that name, or a value.
+    let compared = node.filter_map(|node| match node {
+        Node::Pattern(Pattern::Type(TypePattern {
+            hint: Hint::Identifier(name),
+            fields: None,
+            properties: None,
+            variable: None,
+        })) => Some((Node::Identifier(name), "==".to_owned())),
+        Node::Pattern(Pattern::Value(value)) => Some((Node::Expression(value), "==".to_owned())),
+        Node::ComparisonPattern(comparison) => Some((
+            Node::Expression(comparison.value),
+            String::from_utf8_lossy(comparison.operator.as_bytes()).into_owned(),
+        )),
+        _ => None,
+    });
+
+    let mut reported = false;
+    for (value, operator) in compared {
+        let reads = value.filter_map(|node| match node {
+            Node::Identifier(name) => match context.resolved_names.binding(*name) {
+                Some(Binding::Local(Local { kind: LocalKind::Parameter, .. })) => Some((*name, "a parameter")),
+                Some(Binding::Local(_)) => Some((*name, "a local")),
+                Some(Binding::This) => Some((*name, "the object the method runs on")),
+                _ => None,
+            },
+            _ => None,
+        });
+        if reads.is_empty() {
+            continue;
+        }
+
+        // The value's own type, as the pattern's binding of it would be typed. The value is read where `when` would
+        // read it, and its issues wait until the pattern is written so.
+        let compared_type = match value {
+            Node::Expression(expression) => {
+                let mut value_context = block_context.clone();
+                let _ = context.record(|context| expression.analyze(context, &mut value_context, artifacts));
+
+                artifacts.get_expression_type(expression).cloned()
+            }
+            Node::Identifier(name) => get_bare_name_variable_id(name, context.resolved_names)
+                .and_then(|id| block_context.locals.get(&id))
+                .map(|local| (**local).clone()),
+            _ => unreachable!("a pattern compares a bare name or a value"),
+        };
+        let mut compared_type = compared_type.unwrap_or_else(get_mixed).to_non_nullable();
+        compared_type.widen_literals();
+        let type_text = display_sharp_type(context, &compared_type);
+        let value_text = quoted_source(context, value.span());
+        for (name, what) in reads {
+            let name_text = quoted_source(context, name.span());
+            context.collector.report_with_code(
+                IssueCode::ReplacedBySyntax,
+                Issue::error(format!(
+                    "`{name_text}` is {what}: compare its value in `when`, as in `{type_text} n when n {operator} {value_text}`."
+                ))
+                .with_annotation(Annotation::primary(name.span()).with_message("Read here."))
+                .with_note("A pattern takes types and constants only, such as `Circle`, `200` or `Status.Paid`."),
+            );
+            reported = true;
+        }
+    }
+
+    reported
+}
+
+/// Reports each case pattern of a PHP# `is` or `match` that `php_shape` builds no PHP for, spec section 21: one whose
+/// type is no case of an enum with data, or whose fields are not the case's in number. Returns whether it reported one.
+fn report_case_patterns_without_php<A>(node: Node<'_, '_>, context: &mut Context<'_, '_, A>) -> bool
+where
+    A: Arena,
+{
+    let names = CodebasePatternNames { names: context.resolved_names, codebase: context.codebase };
+    let case_patterns = node.filter_map(|node| match node {
+        Node::TypePattern(TypePattern { hint, fields: Some(fields), .. }) => Some((hint.span(), *fields)),
+        _ => None,
+    });
+    let mut reported = false;
+    for (hint, fields) in case_patterns {
+        let written = BytesDisplay(&context.source_file.contents[hint.start.offset as usize..hint.end.offset as usize]);
+        let message = match names.case_fields(hint) {
+            // A dotted name of a class that is no case has the error `report_dotted_types` gives where it is read.
+            None if context
+                .resolved_names
+                .resolve(&hint)
+                .and_then(|class| context.codebase.get_class_like(class))
+                .is_some() =>
+            {
+                reported = true;
+                continue;
+            }
+            None => format!("`{written}` is no case of an enum whose cases carry data, so it has no fields to unpack."),
+            Some(names) if names.len() != fields.fields.len() => {
+                let count = |count: usize, word: &str| {
+                    if count == 1 { format!("1 {word}") } else { format!("{count} {word}s") }
+                };
+
+                format!(
+                    "`{written}` has {}, and this pattern unpacks {}.",
+                    count(names.len(), "field"),
+                    fields.fields.len()
+                )
+            }
+            Some(_) => continue,
+        };
+
+        context.collector.report_with_code(
+            IssueCode::InvalidArgument,
+            Issue::error(message).with_annotation(Annotation::primary(fields.span()).with_message("Unpacked here.")),
+        );
+        reported = true;
+    }
+
+    reported
+}
+
+/// Each function a pattern's PHP calls to test a value, at the span `called_functions` gives it, the type a list
+/// pattern's element or a case pattern's field is tested against, each list pattern with its `[`, and the start of
+/// each case pattern with fields, whose tests the case's own field types can make always true, as
+/// `PaymentResult.Paid(string transactionId)` unpacks the field the case declares a `string`.
+#[derive(Default)]
+struct PatternCalls {
+    calls: Vec<LocalIdentifier<'static>>,
+    element_tests: Vec<Span>,
+    lists: Vec<(Span, Span)>,
+    case_patterns: Vec<u32>,
+}
+
+/// Collects the `PatternCalls` of a PHP# `is`, `as` or `match`.
+struct PatternCallWalker;
+
+impl<'ast, 'arena> Walker<'ast, 'arena, PatternCalls> for PatternCallWalker {
+    fn walk_in_type_pattern(&self, type_pattern: &'ast TypePattern<'arena>, calls: &mut PatternCalls) {
+        calls.calls.extend(called_functions(Node::TypePattern(type_pattern)));
+        if let Some(fields) = type_pattern.fields {
+            calls.case_patterns.push(type_pattern.hint.span().start.offset);
+            calls.element_tests.extend(fields.fields.iter().filter_map(|field| match field {
+                Pattern::Type(TypePattern { hint, .. }) => Some(hint.span()),
+                _ => None,
+            }));
+        }
+    }
+
+    fn walk_in_as(&self, r#as: &'ast As<'arena>, calls: &mut PatternCalls) {
+        calls.calls.extend(called_functions(Node::As(r#as)));
+    }
+
+    fn walk_in_properties_pattern(&self, properties: &'ast PropertiesPattern<'arena>, calls: &mut PatternCalls) {
+        calls.calls.extend(called_functions(Node::PropertiesPattern(properties)));
+    }
+
+    fn walk_in_list_pattern(&self, list: &'ast ListPattern<'arena>, calls: &mut PatternCalls) {
+        calls.calls.extend(called_functions(Node::ListPattern(list)));
+        calls.lists.push((list.span(), list.left_bracket));
+        calls.element_tests.extend(list.elements.iter().filter_map(|element| match element {
+            ListPatternElement::Pattern(Pattern::Type(TypePattern { hint, .. })) => Some(hint.span()),
+            ListPatternElement::Rest(rest) => rest.hint.map(HasSpan::span),
+            ListPatternElement::Pattern(_) => None,
+        }));
+    }
+
+    fn walk_in_rest_pattern(&self, rest: &'ast RestPattern<'arena>, calls: &mut PatternCalls) {
+        calls.calls.extend(called_functions(Node::RestPattern(rest)));
     }
 }
 
@@ -809,16 +1386,69 @@ pub(crate) fn is_refused_match(pattern_match: &PatternMatch<'_>) -> bool {
     match_arm_hints(pattern_match).into_iter().any(|hint| !has_type_test(hint))
 }
 
-/// The type of each type pattern in `pattern`, itself or a pattern inside it.
+/// Whether `hint` is a function type, or a union with one.
+fn names_function_type(hint: &Hint<'_>) -> bool {
+    match hint {
+        Hint::Function(_) => true,
+        Hint::Union(union) => names_function_type(union.left) || names_function_type(union.right),
+        _ => false,
+    }
+}
+
+/// The value a PHP# `is`, `as` or `match` tests.
+fn tested_value<'ast, 'arena>(node: Node<'ast, 'arena>) -> &'ast Expression<'arena> {
+    match node {
+        Node::Expression(Expression::Is(is)) => is.value,
+        Node::Expression(Expression::As(r#as)) => r#as.value,
+        Node::Expression(Expression::PatternMatch(pattern_match))
+        | Node::Statement(Statement::PatternMatch(pattern_match)) => pattern_match.expression,
+        _ => unreachable!("only an `is`, an `as` and a `match` have the PHP of a pattern"),
+    }
+}
+
+/// Whether `value_type` has a function whose source declares no PHP# type: a `Closure`, or the signature of a function
+/// plain PHP wrote, as a plain PHP method named as a value. The engine finds no type on such a function.
+fn has_undeclared_function(value_type: &TUnion) -> bool {
+    value_type.types.iter().any(|atomic| match atomic {
+        TAtomic::Callable(TCallable::Signature(signature)) => signature.effects.is_none(),
+        TAtomic::Object(TObject::Named(object)) => object.name.as_bytes().eq_ignore_ascii_case(b"Closure"),
+        _ => false,
+    })
+}
+
+/// The type of each type pattern in `pattern`, itself or a pattern inside it, and of each list pattern's named rest,
+/// which tests the elements the others leave as a typed element is tested.
 fn type_pattern_hints<'ast>(pattern: &'ast Pattern<'ast>) -> Vec<&'ast Hint<'ast>> {
+    let properties_hints = |properties: &'ast PropertiesPattern<'ast>| -> Vec<&'ast Hint<'ast>> {
+        properties.properties.iter().flat_map(|property| type_pattern_hints(property.pattern)).collect()
+    };
+
     match pattern {
-        Pattern::Type(type_pattern) => vec![&type_pattern.hint],
+        Pattern::Type(type_pattern) => {
+            let mut hints = vec![&type_pattern.hint];
+            hints.extend(
+                type_pattern
+                    .fields
+                    .iter()
+                    .flat_map(|fields| fields.fields.iter())
+                    .flat_map(|field| type_pattern_hints(field)),
+            );
+            hints.extend(type_pattern.properties.into_iter().flat_map(properties_hints));
+
+            hints
+        }
         Pattern::Not(not) => type_pattern_hints(not.pattern),
         Pattern::Binary(binary) => [type_pattern_hints(binary.left), type_pattern_hints(binary.right)].concat(),
         Pattern::Parenthesized(parenthesized) => type_pattern_hints(parenthesized.pattern),
-        Pattern::Properties(properties) => {
-            properties.properties.iter().flat_map(|property| type_pattern_hints(property.pattern)).collect()
-        }
+        Pattern::Properties(properties) => properties_hints(properties),
+        Pattern::List(list) => list
+            .elements
+            .iter()
+            .flat_map(|element| match element {
+                ListPatternElement::Pattern(pattern) => type_pattern_hints(pattern),
+                ListPatternElement::Rest(rest) => rest.hint.into_iter().collect(),
+            })
+            .collect(),
         Pattern::Value(_) | Pattern::Comparison(_) => Vec::new(),
     }
 }

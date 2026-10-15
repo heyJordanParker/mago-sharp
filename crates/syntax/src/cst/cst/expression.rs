@@ -37,21 +37,39 @@ use crate::cst::cst::instantiation::GenericClass;
 use crate::cst::cst::instantiation::Instantiation;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::literal::Literal;
+use crate::cst::cst::r#loop::Break;
+use crate::cst::cst::r#loop::Continue;
 use crate::cst::cst::magic_constant::MagicConstant;
 use crate::cst::cst::partial_application::PartialApplication;
 use crate::cst::cst::pattern::As;
 use crate::cst::cst::pattern::Is;
 use crate::cst::cst::pipe::Pipe;
+use crate::cst::cst::r#return::Return;
 use crate::cst::cst::string::CompositeString;
 use crate::cst::cst::string::StringPart;
 use crate::cst::cst::super_of::SuperOf;
 use crate::cst::cst::throw::Throw;
+use crate::cst::cst::type_hint::Hint;
 use crate::cst::cst::type_of::TypeOf;
 use crate::cst::cst::unary::UnaryPostfix;
 use crate::cst::cst::unary::UnaryPrefix;
 use crate::cst::cst::variable::Variable;
+use crate::cst::cst::with::With;
 use crate::cst::cst::r#yield::Yield;
 use crate::cst::node::NodeKind;
+
+/// Represents leaving the method or the loop from the right side of `??` when its left side is null, spec section
+/// 14.4: the `return`, `continue` or `break` statement it runs, which has no `;`.
+///
+/// Example: `a ?? return`, `a ?? return -1`, `a ?? continue`, `a ?? break`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
+pub enum Leave<'arena> {
+    Return(Return<'arena>),
+    Continue(Continue<'arena>),
+    Break(Break<'arena>),
+}
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -89,6 +107,7 @@ pub enum Expression<'arena> {
     Yield(Yield<'arena>),
     Construct(Construct<'arena>),
     Throw(Throw<'arena>),
+    Leave(Leave<'arena>),
     Clone(Clone<'arena>),
     Call(Call<'arena>),
     PartialApplication(PartialApplication<'arena>),
@@ -103,6 +122,7 @@ pub enum Expression<'arena> {
     As(As<'arena>),
     PatternMatch(PatternMatch<'arena>),
     TypeOf(TypeOf<'arena>),
+    With(With<'arena>),
     GenericClass(GenericClass<'arena>),
     SuperOf(SuperOf<'arena>),
     Error(Span),
@@ -126,8 +146,9 @@ impl<'arena> Expression<'arena> {
             Self::Literal(_) => true,
             Self::Identifier(_) => true,
             Self::MagicConstant(_) => true,
-            // A class value with type arguments is created while the code runs, spec section 25.
-            Self::TypeOf(type_of) => type_of.type_arguments.is_none(),
+            // `typeof(Order)` is PHP's `Order::class`. The class value of any other type, `Self` and a class with type
+            // arguments included, is created while the code runs, spec section 25.
+            Self::TypeOf(type_of) => matches!(type_of.r#type, Hint::Identifier(_)),
             Self::GenericClass(generic_class) => generic_class.class.is_constant(version, initialization),
             Self::ConstantAccess(_) => true,
             Self::Self_(_) => true,
@@ -155,7 +176,8 @@ impl<'arena> Expression<'arena> {
             Self::Instantiation(instantiation)
                 if initialization && version.is_supported(Feature::NewInInitializers) =>
             {
-                instantiation.class.is_constant(version, initialization)
+                instantiation.initializer.is_none()
+                    && instantiation.class.is_constant(version, initialization)
                     && instantiation.argument_list.as_ref().is_none_or(|arguments| {
                         arguments.arguments.iter().all(|argument| match &argument {
                             Argument::Positional(positional_argument) => {
@@ -455,6 +477,7 @@ impl<'arena> Expression<'arena> {
             Expression::Yield(_) => NodeKind::Yield,
             Expression::Construct(_) => NodeKind::Construct,
             Expression::Throw(_) => NodeKind::Throw,
+            Expression::Leave(_) => NodeKind::Leave,
             Expression::Clone(_) => NodeKind::Clone,
             Expression::Call(_) => NodeKind::Call,
             Expression::PartialApplication(_) => NodeKind::PartialApplication,
@@ -469,6 +492,7 @@ impl<'arena> Expression<'arena> {
             Expression::As(_) => NodeKind::As,
             Expression::PatternMatch(_) => NodeKind::PatternMatch,
             Expression::TypeOf(_) => NodeKind::TypeOf,
+            Expression::With(_) => NodeKind::With,
             Expression::GenericClass(_) => NodeKind::GenericClass,
             Expression::SuperOf(_) => NodeKind::SuperOf,
             Expression::Error(_) => NodeKind::Error,
@@ -479,6 +503,16 @@ impl<'arena> Expression<'arena> {
 impl HasSpan for Parenthesized<'_> {
     fn span(&self) -> Span {
         self.left_parenthesis.join(self.right_parenthesis)
+    }
+}
+
+impl HasSpan for Leave<'_> {
+    fn span(&self) -> Span {
+        match self {
+            Leave::Return(r#return) => r#return.span(),
+            Leave::Continue(r#continue) => r#continue.span(),
+            Leave::Break(r#break) => r#break.span(),
+        }
     }
 }
 
@@ -508,6 +542,7 @@ impl HasSpan for Expression<'_> {
             Expression::Yield(expression) => expression.span(),
             Expression::Construct(expression) => expression.span(),
             Expression::Throw(expression) => expression.span(),
+            Expression::Leave(expression) => expression.span(),
             Expression::Clone(expression) => expression.span(),
             Expression::Call(expression) => expression.span(),
             Expression::PartialApplication(expression) => expression.span(),
@@ -522,6 +557,7 @@ impl HasSpan for Expression<'_> {
             Expression::As(expression) => expression.span(),
             Expression::PatternMatch(expression) => expression.span(),
             Expression::TypeOf(expression) => expression.span(),
+            Expression::With(expression) => expression.span(),
             Expression::GenericClass(expression) => expression.span(),
             Expression::SuperOf(expression) => expression.span(),
             Expression::Error(span) => *span,

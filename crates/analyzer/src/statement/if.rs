@@ -176,7 +176,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for If<'arena> {
         if_block_context.clauses = combined_clauses.into_iter().map(Rc::new).collect();
 
         // Extract function_exists/defined assertions.
-        extract_function_constant_existence(self.condition, artifacts, &mut if_block_context, false);
+        extract_function_constant_existence(
+            context.resolved_names,
+            context.codebase,
+            self.condition,
+            artifacts,
+            &mut if_block_context,
+            false,
+        );
 
         if !if_block_context.reconciled_expression_clauses.is_empty() {
             if_block_context.clauses.retain(|clause| !if_block_context.reconciled_expression_clauses.contains(clause));
@@ -352,7 +359,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for If<'arena> {
                 block_context.locals.insert(variable_id, variable_type);
             }
 
-            extract_function_constant_existence(self.condition, artifacts, block_context, true);
+            extract_function_constant_existence(
+                context.resolved_names,
+                context.codebase,
+                self.condition,
+                artifacts,
+                block_context,
+                true,
+            );
 
             // When the if-body exits and the condition involved isset/empty checks on array keys,
             // the post-if code knows the keys exist. Remove empty array variants from base variables

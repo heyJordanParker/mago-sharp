@@ -21,12 +21,13 @@ where
         let span = enum_case.span();
 
         match &enum_case.item {
-            cst::EnumCaseItem::Unit(unit) => EnumCase {
+            // The HIR models no PHP# construct, and a PHP# case that carries data has no value, as a plain case.
+            cst::EnumCaseItem::Unit(_) | cst::EnumCaseItem::Data(_) => EnumCase {
                 span,
                 annotation,
                 attributes,
                 version_constraint,
-                name: self.lower_name(&unit.name),
+                name: self.lower_name(enum_case.item.name()),
                 value: None,
             },
             cst::EnumCaseItem::Backed(backed) => EnumCase {

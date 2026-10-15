@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -8,7 +7,6 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::scanner::get_union_from_hint;
-use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
@@ -21,8 +19,6 @@ use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
-use mago_codex::ttype::get_backing_key_type;
-use mago_codex::ttype::get_sole_backed_enum;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::union::populate_union_type;
 use mago_codex::ttype::wrap_atomic;
@@ -74,6 +70,7 @@ use crate::expression::is_refused_match;
 use crate::expression::match_arm_hints;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
+use crate::plugin::hook::NamedCall;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_types;
@@ -84,8 +81,8 @@ use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_function_like_id_from_call;
 use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
+use crate::utils::names::display_function_like_identifier;
 use crate::utils::names::display_sharp_type;
-use crate::utils::quoted_source;
 
 pub mod attributes;
 pub mod class_like;
@@ -183,6 +180,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                     {
                         for item in &sequence.items {
                             use_statement::check_sharp_import(context, &item.name);
+                            use_statement::check_internal_import(context, &item.name);
                             let imported_name = item
                                 .alias
                                 .as_ref()
@@ -206,6 +204,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Namespace(namespace) => {
                     match &namespace.name {
                         Some(name) => {
+                            report_standard_library_namespace(context, name);
                             context.scope = Arc::new(NamespaceScope::for_namespace(php_name(name)));
                         }
                         None => {
@@ -249,6 +248,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                     Arc::make_mut(&mut context.scope).add(NameKind::Default, event_name, &None::<&str>);
 
                     event.analyze(context, block_context, artifacts)
+                }
+                Statement::Struct(r#struct) => {
+                    let struct_name = context.resolved_names.get(&r#struct.name);
+
+                    Arc::make_mut(&mut context.scope).add(NameKind::Default, struct_name, &None::<&str>);
+
+                    r#struct.analyze(context, block_context, artifacts)
                 }
                 Statement::Constant(constant) => {
                     for item in &constant.items {
@@ -575,97 +581,7 @@ where
         body: ForeachBody::Statement(for_of.body),
     });
 
-    foreach.analyze(context, block_context, artifacts)?;
-
-    if let ForOfTarget::KeyValue(pair) = &for_of.target
-        && artifacts
-            .get_expression_type(for_of.expression)
-            .is_some_and(|map_type| keys_mix_a_backed_enum(context, map_type))
-    {
-        report_keys_read_back(context, IssueCode::InvalidForeachKey, for_of.expression, "the loop", pair.key.span());
-    }
-
-    Ok(())
-}
-
-/// Whether the keys of the `Map`s that `map_type` may be, taken together, mix a backed enum with other types, as
-/// `Status|int` or `Status|Rank` do. The engine holds each key of a `Map` as its backing value, and reads it back as a
-/// case only through one enum.
-pub(crate) fn keys_mix_a_backed_enum<A>(context: &Context<'_, '_, A>, map_type: &TUnion) -> bool
-where
-    A: Arena,
-{
-    let key_type = map_type.types.iter().fold(None, |key_type, atomic| match atomic {
-        TAtomic::Array(map @ TArray::Keyed(_)) => {
-            let key = get_array_parameters(map, context.codebase).0;
-            Some(add_optional_union_type(key, key_type.as_ref(), context.codebase))
-        }
-        _ => key_type,
-    });
-
-    key_type.is_some_and(|key_type| key_type_mixes_a_backed_enum(context, &key_type))
-}
-
-/// Whether `key_type` mixes a backed enum with other types, as `Status|int` or `Status|Rank` do: its keys need their
-/// backing values, and no one backed enum, the one [`get_sole_backed_enum`] finds, reads them all back.
-pub(crate) fn key_type_mixes_a_backed_enum<A>(context: &Context<'_, '_, A>, key_type: &TUnion) -> bool
-where
-    A: Arena,
-{
-    matches!(get_backing_key_type(key_type, context.codebase, context.dialect), Cow::Owned(_))
-        && get_sole_backed_enum(key_type, context.codebase, context.dialect).is_none()
-}
-
-/// Reports the `Map` `collection`, whose keys mix a backed enum with other types, where `reader`, the loop or `keys()`,
-/// reads them back at `span`.
-pub(crate) fn report_keys_read_back<A>(
-    context: &mut Context<'_, '_, A>,
-    code: IssueCode,
-    collection: &Expression<'_>,
-    reader: &str,
-    span: Span,
-) where
-    A: Arena,
-{
-    let collection = quoted_source(context, collection.span());
-
-    context.collector.report_with_code(
-        code,
-        Issue::error(format!(
-            "The keys of `{collection}` mix a backed enum with other types, so {reader} cannot read them back."
-        ))
-        .with_annotation(Annotation::primary(span).with_message("Its key is read here."))
-        .with_note(
-            "The engine holds each key as its backing value, and reads it back as a case through one enum's `from`.",
-        )
-        .with_help("Key the `Map` by one backed enum alone."),
-    );
-}
-
-/// Reports the `Map` at `collection`, whose keys mix a backed enum with other types, where `finder`, such as `has`,
-/// an index or a literal, looks a key up or puts one in, as `annotation` marks it.
-pub(crate) fn report_keys_sharing_entries<A>(
-    context: &mut Context<'_, '_, A>,
-    code: IssueCode,
-    collection: Span,
-    finder: &str,
-    annotation: Annotation,
-) where
-    A: Arena,
-{
-    let collection = quoted_source(context, collection);
-
-    context.collector.report_with_code(
-        code,
-        Issue::error(format!(
-            "The keys of `{collection}` mix a backed enum with other types, so {finder} cannot tell them apart."
-        ))
-        .with_annotation(annotation)
-        .with_note(
-            "The engine holds each key as its backing value, so a case and the `int` or `string` key of its backing value share one entry.",
-        )
-        .with_help("Key the `Map` by one backed enum alone."),
-    );
+    foreach.analyze(context, block_context, artifacts)
 }
 
 /// Analyzes a PHP# `emit`, spec section 15: it raises an event, so its value's type is an event. A refused value is
@@ -872,6 +788,33 @@ where
 }
 
 /// Checks statement expressions for unused results or lack of side effects.
+/// Refuses a PHP# file outside the standard library that declares `namespace Sharp` or a namespace under it. The name
+/// would reach the standard library's own classes and `Sharp.Internal` with no import, and only the analyzer knows the
+/// file's package: the engine compiles the library from `vendor/` knowing only the file.
+fn report_standard_library_namespace<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>)
+where
+    A: Arena,
+{
+    let namespace = php_name(name);
+    if !context.dialect.is_sharp()
+        || context.source_file.is_standard_library
+        || !namespace.get(..b"Sharp".len()).is_some_and(|root| root.eq_ignore_ascii_case(b"Sharp"))
+        || !matches!(namespace.get(b"Sharp".len()), None | Some(b'\\'))
+    {
+        return;
+    }
+
+    let written = String::from_utf8_lossy(&namespace).replace('\\', ".");
+    context.collector.report_with_code(
+        IssueCode::ReservedNameOutsideLibrary,
+        Issue::error(format!(
+            "`{written}` is a namespace of the standard library, and only the standard library declares code in it."
+        ))
+        .with_annotation(Annotation::primary(name.span()).with_message("Declared here."))
+        .with_help("Declare the file in a namespace of the app."),
+    );
+}
+
 fn detect_unused_statement_expressions<'ast, 'arena, A>(
     expression: &'ast Expression<'arena>,
     statement: &'ast Statement<'arena>,
@@ -880,14 +823,28 @@ fn detect_unused_statement_expressions<'ast, 'arena, A>(
 ) where
     A: Arena,
 {
-    if let Some((issue_kind, name)) = has_unused_must_use(expression, context, artifacts) {
-        context.collector.report_with_code(
-            issue_kind,
+    if let Some((issue_kind, identifier, no_discard)) = has_unused_must_use(expression, context, artifacts) {
+        let issue = if context.dialect.is_sharp() {
+            let name = display_function_like_identifier(context, &identifier);
+            let marker = if no_discard { "`[NoDiscard]`" } else { "`@must-use`" };
+
+            Issue::error(format!("The value `{name}` returns must be used."))
+                .with_annotation(Annotation::primary(statement.span()).with_message("Its value is dropped here."))
+                .with_note(format!("{marker} on `{name}` says the value it returns matters."))
+                .with_help("Keep the value in a local, pass it on, or return it.")
+        } else {
+            let name = match identifier {
+                FunctionLikeIdentifier::Function(name)
+                | FunctionLikeIdentifier::Closure(name)
+                | FunctionLikeIdentifier::Method(_, name) => name,
+            };
+
             Issue::error(format!("The return value of '{name}' must be used."))
                 .with_annotation(Annotation::primary(statement.span()).with_message("The result of this call is ignored"))
                 .with_note(format!("The function or method '{name}' is marked with @must-use or #[NoDiscard], indicating its return value is important and should not be discarded."))
                 .with_help("Assign the result to a variable, pass it to another function, or use it in an expression.")
-        );
+        };
+        context.collector.report_with_code(issue_kind, issue);
 
         return;
     }
@@ -924,17 +881,10 @@ fn detect_unused_statement_expressions<'ast, 'arena, A>(
 
             "A binary operation used as a statement likely has no effect."
         }
-        Expression::Call(Call::Function(FunctionCall { function, .. })) => {
-            let Expression::Identifier(function_name) = function else {
-                return;
-            };
-
-            let unqualified_name = function_name.value();
-            let name = context.resolved_names.get(function_name);
-
-            let Some(function) = context.codebase.get_function(name).or_else(|| {
-                if function_name.is_local() { context.codebase.get_function(unqualified_name) } else { None }
-            }) else {
+        Expression::Call(call) => {
+            let Some(function) = NamedCall::from_call(context.resolved_names, context.codebase, call)
+                .and_then(|call| context.codebase.get_function(call.name.as_bytes()))
+            else {
                 return;
             };
 
@@ -985,7 +935,8 @@ where
         return false;
     };
 
-    let Some(identifier) = get_function_like_id_from_call(call, context.resolved_names, &artifacts.expression_types)
+    let Some(identifier) =
+        get_function_like_id_from_call(call, context.resolved_names, context.codebase, &artifacts.expression_types)
     else {
         return true;
     };
@@ -1000,13 +951,13 @@ where
         || metadata.parameters.iter().any(|parameter| parameter.flags.is_by_reference())
 }
 
-/// Checks if an expression is a call to a `@must-use` function/method
-/// and returns the appropriate issue kind and the name identifier if the result is unused.
+/// Checks if an expression is a call to a `@must-use` function/method and returns the appropriate issue kind, the
+/// function it calls, and whether `[NoDiscard]` marks it, if the result is unused.
 fn has_unused_must_use<'arena, A>(
     expression: &Expression<'arena>,
     context: &Context<'_, 'arena, A>,
     artifacts: &AnalysisArtifacts,
-) -> Option<(IssueCode, Word)>
+) -> Option<(IssueCode, FunctionLikeIdentifier, bool)>
 where
     A: Arena,
 {
@@ -1015,23 +966,23 @@ where
     };
 
     let check_target = |identifier| {
-        let (code, name) = match identifier {
-            FunctionLikeIdentifier::Function(name) | FunctionLikeIdentifier::Closure(name) => {
-                (IssueCode::UnusedFunctionCall, name)
-            }
-            FunctionLikeIdentifier::Method(_, name) => (IssueCode::UnusedMethodCall, name),
+        let code = match identifier {
+            FunctionLikeIdentifier::Function(_) | FunctionLikeIdentifier::Closure(_) => IssueCode::UnusedFunctionCall,
+            FunctionLikeIdentifier::Method(..) => IssueCode::UnusedMethodCall,
         };
 
         let metadata = context.codebase.get_function_like(&identifier)?;
-        let must_use = metadata.flags.must_use()
-            || metadata.attributes.iter().any(|attr| attr.name.as_bytes().eq_ignore_ascii_case(b"NoDiscard"));
+        let no_discard = metadata.attributes.iter().any(|attr| attr.name.as_bytes().eq_ignore_ascii_case(b"NoDiscard"));
 
-        must_use.then_some((code, name))
+        (no_discard || metadata.flags.must_use()).then_some((code, identifier, no_discard))
     };
 
-    if let Some(identifier) =
-        get_function_like_id_from_call(call_expression, context.resolved_names, &artifacts.expression_types)
-    {
+    if let Some(identifier) = get_function_like_id_from_call(
+        call_expression,
+        context.resolved_names,
+        context.codebase,
+        &artifacts.expression_types,
+    ) {
         return check_target(identifier);
     }
 

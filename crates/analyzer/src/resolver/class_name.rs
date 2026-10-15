@@ -15,6 +15,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
 use mago_codex::ttype::builder::get_class_strings_of;
+use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -37,6 +38,7 @@ use crate::expression::is_refused_type;
 use crate::statement::get_type_from_hint;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_type;
 
 /// Describes the origin and nature of a class name resolution.
 ///
@@ -348,13 +350,65 @@ where
     classes
 }
 
+/// The classes a value of `class_value_type` holds when it is a PHP# class value, spec section 25, leaving out `null`,
+/// or none when part of it is no class value. A `Class<T>` value holds `T` or a subclass, which has the same kind of
+/// member, so `T` stands for it. Whatever expression gives the value, its members are `Class`'s and the statics of
+/// these classes.
+pub(crate) fn class_value_classes(class_value_type: &TUnion) -> Option<Vec<Word>> {
+    let classes = class_value_type
+        .types
+        .iter()
+        .filter(|atomic| !atomic.is_null())
+        .map(|atomic| match atomic {
+            TAtomic::Scalar(TScalar::ClassLikeString(class)) => {
+                class.literal_value().or_else(|| class.constraint()?.get_object_or_enum_name())
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    (!classes.is_empty()).then_some(classes)
+}
+
+/// Whether `class_value_type` holds a PHP# class value of a type that is no class, as a `Class<int>` or a
+/// `Class<int|string>`, spec section 25. Only a class's `Class` creates objects and has statics.
+pub(crate) fn holds_no_class(class_value_type: &TUnion) -> bool {
+    class_value_type.types.iter().any(|atomic| {
+        matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(class_value @ TClassLikeString::OfType { .. }))
+            if !matches!(class_value.constraint(), Some(TAtomic::Object(_) | TAtomic::GenericParameter(_))))
+    })
+}
+
+/// Reports `value`, of the type `value_type` that [`holds_no_class`], where only a class's `Class` does what `does`
+/// says: "creates objects" for `new (value)()`, and "has statics" for a static member read, written or called through
+/// it. The caller types the refused expression `TAtomic::Error`, so nothing reports again on it.
+pub(crate) fn report_class_value_of_no_class<A>(
+    context: &mut Context<'_, '_, A>,
+    value: &Expression<'_>,
+    value_type: &TUnion,
+    does: &str,
+    help: &str,
+) where
+    A: Arena,
+{
+    let written = String::from_utf8_lossy(&context.source_file.contents[value.span().to_range_usize()]);
+    context.collector.report_with_code(
+        IssueCode::InvalidClassStringExpression,
+        Issue::error(format!(
+            "`{written}` is a `{}`, and only a class's `Class` {does}.",
+            display_type(context, value_type)
+        ))
+        .with_annotation(Annotation::primary(value.span()).with_message("Used as a class value here."))
+        .with_help(help.to_owned()),
+    );
+}
+
 /// The class with type arguments a PHP# class value holds, as `Counter<Order>` for a `Class<Counter<Order>>`, spec
 /// section 25. None for a class value of a class without type arguments, or one that names none, as `Class<Counter>`.
 pub(crate) fn class_value_class(class_value: &TClassLikeString) -> Option<&TNamedObject> {
-    let TClassLikeString::OfType { constraint, .. } = class_value else {
-        return None;
-    };
-    let TAtomic::Object(TObject::Named(class)) = constraint.as_ref() else {
+    let (TClassLikeString::OfType { .. }, Some(TAtomic::Object(TObject::Named(class)))) =
+        (class_value, class_value.constraint())
+    else {
         return None;
     };
 
@@ -687,9 +741,10 @@ pub fn get_class_name_from_atomic(codebase: &CodebaseMetadata, atomic: &TAtomic)
                     TClassLikeString::Any { .. } => {
                         ResolvedClassname::new(None, ResolutionOrigin::AnyClassString, false)
                     }
-                    TClassLikeString::OfType { constraint, .. } | TClassLikeString::Generic { constraint, .. } => {
-                        // This is a `class-string<T>`. We resolve `T` to get the class name.
-                        get_class_name_from_atomic_impl(codebase, constraint.as_ref(), Some(class_string))?
+                    TClassLikeString::OfType { .. } | TClassLikeString::Generic { .. } => {
+                        // This is a `class-string<T>`. We resolve `T` to get the class name. A PHP# class value of
+                        // several types, as `Class<int|string>`, names no one class.
+                        get_class_name_from_atomic_impl(codebase, class_string.constraint()?, Some(class_string))?
                     }
                     TClassLikeString::Literal { value } => ResolvedClassname::new(
                         Some(*value),

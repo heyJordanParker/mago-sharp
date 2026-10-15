@@ -16,7 +16,7 @@ use mago_sharp_bridge::CheckedProgram;
 use mago_sharp_bridge::DeclarationKind;
 use mago_span::HasSpan;
 use mago_span::Span;
-use mago_syntax::cst::Class;
+
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Enum;
@@ -27,6 +27,7 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Law as LawNode;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
@@ -148,7 +149,10 @@ impl Translator<'_, '_> {
                     self.statement(statement);
                 }
             }
-            Statement::Class(class) => self.class(class),
+            Statement::Class(class) => self.class(&class.name, class.inheritance.as_ref(), &class.members),
+            Statement::Struct(r#struct) => {
+                self.class(&r#struct.name, r#struct.inheritance.as_ref(), &r#struct.members);
+            }
             Statement::Enum(r#enum) => self.r#enum(r#enum),
             Statement::Interface(interface) => self.interface(interface),
             Statement::Module(module) => self.module(module),
@@ -182,33 +186,39 @@ impl Translator<'_, '_> {
         }
     }
 
-    fn class(&mut self, class: &Class) {
-        let full = self.checked.names().get(&class.name);
-        self.name_module(full, class.name.span);
-        if !self.states_laws(&class.members) && !self.reach.reaches(full, b"") {
+    /// A class, or a struct, which is the `final` class it lowers to, spec section 10.
+    fn class(
+        &mut self,
+        name: &LocalIdentifier,
+        inheritance: Option<&Inheritance>,
+        members: &Sequence<'_, ClassLikeMember<'_>>,
+    ) {
+        let full = self.checked.names().get(name);
+        self.name_module(full, name.span);
+        if !self.states_laws(members) && !self.reach.reaches(full, b"") {
             return;
         }
 
         let lean = names::full_name(full);
         let short = names::short_name(full);
         let mut body = Body::new(self.checked, self.reach, full, short.clone());
-        for name in class.inheritance.iter().flat_map(|inheritance| inheritance.types.iter()) {
-            let parent = self.checked.names().get(name);
+        for parent in inheritance.iter().flat_map(|inheritance| inheritance.types.iter()) {
+            let parent = self.checked.names().get(parent);
             if self.checked.types().class_declaration(parent).kind == DeclarationKind::Class {
                 body.unmodeled(
-                    class.name.span,
+                    name.span,
                     format!("the class {short}, which extends {}", names::short_name(parent)),
                     issues::INHERITANCE,
                 );
             }
         }
 
-        let constructor = class.members.iter().find_map(|member| match member {
+        let constructor = members.iter().find_map(|member| match member {
             ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => Some(method),
             _ => None,
         });
         let mut fields: Vec<Field> = Vec::new();
-        for member in &class.members {
+        for member in members {
             match member {
                 ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => {
                     for parameter in
@@ -239,10 +249,10 @@ impl Translator<'_, '_> {
         }
         let mut types = Vec::new();
         for field in &fields {
-            let r#type = body.declared_type(field.hint, class.name.span);
+            let r#type = body.declared_type(field.hint, name.span);
             if names::RESERVED.contains(&String::from_utf8_lossy(field.name).as_ref()) {
                 body.unmodeled(
-                    class.name.span,
+                    name.span,
                     format!("the property {short}.{}", String::from_utf8_lossy(field.name)),
                     issues::RESERVED_NAME,
                 );
@@ -251,11 +261,11 @@ impl Translator<'_, '_> {
             types.push(r#type);
         }
         lines.push("  deriving Repr, DecidableEq, Inhabited".to_owned());
-        lines.extend(self.coercions(&mut body, &lean, class.inheritance.as_ref()));
-        self.declare(body, lean.clone(), class.name.span, lines.join("\n"), false);
+        lines.extend(self.coercions(&mut body, &lean, inheritance));
+        self.declare(body, lean.clone(), name.span, lines.join("\n"), false);
 
-        self.constructor(full, &lean, &short, class.name.span, constructor, &fields, &types);
-        self.members(full, &lean, &short, &class.members);
+        self.constructor(full, &lean, &short, name.span, constructor, &fields, &types);
+        self.members(full, &lean, &short, members);
     }
 
     /// `Class.__construct`, a `@[simp]` definition that builds the structure: from each promoted parameter, and from each
@@ -336,9 +346,21 @@ impl Translator<'_, '_> {
                     issues::RESERVED_NAME,
                 );
             }
-            lines.push(format!("  | {}", names::identifier(name.value)));
-            if let EnumCaseItem::Backed(item) = &case.item {
-                values.push((names::identifier(name.value), body.value(item.value)));
+            match &case.item {
+                // Spec section 20: a case that carries data is a constructor of its fields.
+                EnumCaseItem::Data(item) => {
+                    let mut constructor = vec![format!("  | {}", names::identifier(name.value))];
+                    for field in &item.parameter_list.parameters {
+                        let r#type = field.hint.as_ref().map_or_else(|| "Unit".to_owned(), |hint| body.r#type(hint));
+                        constructor.push(format!("({} : {type})", names::identifier(field.variable.name)));
+                    }
+                    lines.push(constructor.join(" "));
+                }
+                EnumCaseItem::Backed(item) => {
+                    lines.push(format!("  | {}", names::identifier(name.value)));
+                    values.push((names::identifier(name.value), body.value(item.value)));
+                }
+                EnumCaseItem::Unit(_) => lines.push(format!("  | {}", names::identifier(name.value))),
             }
         }
         lines.push("  deriving Repr, DecidableEq, Inhabited".to_owned());

@@ -52,6 +52,8 @@ pub enum ParseError {
     RecursionLimitExceeded(Span),
     /// PHP syntax written in a PHP# file, such as `->` where PHP# writes `.`.
     PhpSyntaxInSharp(TokenKind, Span),
+    /// PHP's `Order::class` written in a PHP# file, with the name before `::` as written, at the `::`.
+    ClassNameConstantInSharp(Box<str>, Span),
     /// A `\` name written in a PHP# file, such as `\Lib\Calc`, with the dotted name its `import` line takes.
     QualifiedNameInSharp(Box<str>, Span),
     /// A PHP# parameter written without its type, such as `run(extra)`, at its name.
@@ -80,6 +82,9 @@ pub enum ParseError {
     /// A `uses` clause written after a PHP# function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, at
     /// the clause. A function type lists its effects inside its brackets.
     UsesAfterFunctionTypeInSharp(Span),
+    /// A PHP# method's `readonly` written before its `on` or `uses` clause, at the `readonly`. Spec section 13: it is
+    /// always the last clause.
+    ReadonlyNotLastInSharp(Span),
     /// A member other than a binding or a law written in a PHP# module, such as a method or a statement, at the
     /// member. Spec section 32: a module holds no statements, branches, loops or methods.
     OtherMemberInSharpModule(Span),
@@ -96,6 +101,9 @@ pub enum ParseError {
     /// class-like as a message names it, `A class`, and the type's name, at the whole type. Every type, events and
     /// interfaces included, is declared in its own file.
     NestedTypeInSharp(&'static str, Box<str>, Span),
+    /// A type other than an interface name in a PHP# struct's header, as in `struct Username : string`, at the type.
+    /// Spec section 10: a struct implements interfaces, and keys a `Map` by its whole value.
+    StructHeaderTypeInSharp(Span),
     /// Type parameters written on a PHP# named constructor, as in `Plain.of<T>(T value)`, with its class's name and the
     /// names of the type parameters its class declares, at the type parameters. A named constructor takes its class's
     /// type arguments, as Dart's does, and declares none.
@@ -125,6 +133,7 @@ impl HasFileId for ParseError {
             ParseError::UnclosedLiteralString(_, span) => span.file_id,
             ParseError::RecursionLimitExceeded(span) => span.file_id,
             ParseError::PhpSyntaxInSharp(_, span)
+            | ParseError::ClassNameConstantInSharp(_, span)
             | ParseError::QualifiedNameInSharp(_, span)
             | ParseError::UntypedParameterInSharp(span)
             | ParseError::UntypedFieldInSharp(span)
@@ -137,11 +146,13 @@ impl HasFileId for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span) => span.file_id,
         }
@@ -170,6 +181,7 @@ impl HasSpan for ParseError {
             ParseError::UnclosedLiteralString(_, span) => *span,
             ParseError::RecursionLimitExceeded(span) => *span,
             ParseError::PhpSyntaxInSharp(_, span)
+            | ParseError::ClassNameConstantInSharp(_, span)
             | ParseError::QualifiedNameInSharp(_, span)
             | ParseError::UntypedParameterInSharp(span)
             | ParseError::UntypedFieldInSharp(span)
@@ -182,11 +194,13 @@ impl HasSpan for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span) => *span,
         }
@@ -258,6 +272,16 @@ impl std::fmt::Display for ParseError {
                 }
                 kind => format!("`{kind}` is PHP syntax that PHP# does not have"),
             },
+            // Spec section 24 capitalizes every type but the built-in ones, so a name whose last part is lowercase is a
+            // value, and a class is written by its short name.
+            ParseError::ClassNameConstantInSharp(name, _) => {
+                let class = name.rsplit('.').next().unwrap_or(name);
+                if class.starts_with(|first: char| first.is_ascii_uppercase()) {
+                    format!("`{name}::class` is PHP syntax: PHP# writes `typeof({class})`")
+                } else {
+                    format!("`{name}::class` is PHP syntax: PHP# writes `Class.of({name})`")
+                }
+            }
             ParseError::QualifiedNameInSharp(name, _) => {
                 match ["null", "true", "false"].into_iter().find(|keyword| name.eq_ignore_ascii_case(keyword)) {
                     Some(keyword) => format!("A `\\` name is PHP syntax: write `{keyword}`"),
@@ -299,6 +323,10 @@ impl std::fmt::Display for ParseError {
                 "A function type lists its effects inside its brackets, as in `Function<Charge(Cart) uses Http>`."
                     .to_string()
             }
+            ParseError::ReadonlyNotLastInSharp(_) => {
+                "A method's `readonly` is its last clause, after `on` and `uses`, as in `Money quote(Cart cart) uses Http readonly;`."
+                    .to_string()
+            }
             ParseError::OtherMemberInSharpModule(_) => {
                 "A module holds only service bindings and laws: give each binding one expression.".to_string()
             }
@@ -314,6 +342,10 @@ impl std::fmt::Display for ParseError {
             }
             ParseError::NestedTypeInSharp(owner, name, _) => {
                 format!("{owner} can't declare a type inside it: declare `{name}` in its own file.")
+            }
+            ParseError::StructHeaderTypeInSharp(_) => {
+                "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value."
+                    .to_string()
             }
             ParseError::NamedConstructorTypeParametersInSharp(..) => {
                 "A named constructor takes its class's type arguments and declares none of its own.".to_string()
@@ -359,6 +391,7 @@ impl From<&ParseError> for Issue {
             ParseError::SyntaxError(syntax_error) => syntax_error.into(),
             // A PHP# parse error names the rule it breaks, so its message is the title.
             ParseError::PhpSyntaxInSharp(..)
+            | ParseError::ClassNameConstantInSharp(..)
             | ParseError::QualifiedNameInSharp(..)
             | ParseError::UntypedParameterInSharp(..)
             | ParseError::UntypedFieldInSharp(..)
@@ -369,11 +402,13 @@ impl From<&ParseError> for Issue {
             | ParseError::ConditionalInGuardInSharp(..)
             | ParseError::UndeclarableOperatorInSharp(..)
             | ParseError::UsesAfterFunctionTypeInSharp(..)
+            | ParseError::ReadonlyNotLastInSharp(..)
             | ParseError::OtherMemberInSharpModule(..)
             | ParseError::ComputedParameterInSharp(..)
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)
             | ParseError::NestedTypeInSharp(..)
+            | ParseError::StructHeaderTypeInSharp(..)
             | ParseError::MiscasedKeywordInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),

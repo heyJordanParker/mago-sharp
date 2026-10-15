@@ -7,12 +7,47 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::IntersectionHint;
 use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::ParenthesizedHint;
+use mago_syntax::cst::TypeArgumentList;
+use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::UnionHint;
 use mago_syntax::cst::Uses;
 
 use crate::FingerprintOptions;
 use crate::Fingerprintable;
+
+impl Fingerprintable for TypeOf<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "typeof".hash(hasher);
+        self.r#type.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for TypeArgumentList<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "type_arguments".hash(hasher);
+        self.arguments.len().hash(hasher);
+        for argument in &self.arguments {
+            argument.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
 
 impl Fingerprintable for Hint<'_> {
     #[inline]
@@ -51,6 +86,10 @@ impl Fingerprintable for Hint<'_> {
             Hint::Iterable(_) => "iterable".hash(hasher),
             Hint::Generic(g) => g.fingerprint_with_hasher(hasher, resolved_names, options),
             Hint::Function(f) => f.fingerprint_with_hasher(hasher, resolved_names, options),
+            Hint::Readonly(r) => {
+                "readonly".hash(hasher);
+                r.hint.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
         }
     }
 }

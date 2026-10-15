@@ -50,19 +50,35 @@ pub enum Pattern<'arena> {
     Parenthesized(ParenthesizedPattern<'arena>),
     /// The matched object's properties, each tested against a pattern, as in `{ status: 200, body: string body }`.
     Properties(PropertiesPattern<'arena>),
+    /// The matched list's elements, each tested against a pattern, and the rest, as in `[Line first, ...List<Line> rest]`.
+    List(ListPattern<'arena>),
 }
 
-/// Represents a type pattern: a type, and the name of a variable the matched value is assigned to.
+/// Represents a type pattern: a type, its fields, its properties and the name it assigns the matched value to.
 ///
-/// A bare name without a variable is a local's value when a local of that name is in scope, which the binder
-/// decides.
+/// The fields are a case's that carries data, by their position. A bare name without a variable is a type, never a
+/// local's value: a pattern takes types and constants only.
 ///
-/// Example: `int`, `Paid paid`
+/// Example: `int`, `Paid paid`, `Paid { amount: > 1000 } big`, `PaymentResult.Paid(string transactionId)`
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TypePattern<'arena> {
     pub hint: Hint<'arena>,
+    pub fields: Option<&'arena FieldsPattern<'arena>>,
+    pub properties: Option<&'arena PropertiesPattern<'arena>>,
     pub variable: Option<LocalIdentifier<'arena>>,
+}
+
+/// Represents the fields of a case that carries data, spec section 20, in the order the case declares them, each with
+/// the pattern its value matches.
+///
+/// Example: `(string transactionId)`, `(> 1000, _)`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct FieldsPattern<'arena> {
+    pub left_parenthesis: Span,
+    pub fields: TokenSeparatedSequence<'arena, &'arena Pattern<'arena>>,
+    pub right_parenthesis: Span,
 }
 
 /// Represents a comparison pattern: `==`, `<`, `<=`, `>` or `>=` and the value the matched value is compared with.
@@ -109,6 +125,9 @@ pub struct PropertiesPattern<'arena> {
     pub left_brace: Span,
     pub properties: TokenSeparatedSequence<'arena, PropertyPattern<'arena>>,
     pub right_brace: Span,
+    /// A name written after a properties pattern without a type, as in `{ status: 200 } r`, which the semantic check
+    /// refuses, since a pattern creates a variable only through a typed declaration. A type pattern holds its own name.
+    pub variable: Option<LocalIdentifier<'arena>>,
 }
 
 /// Represents one property of a properties pattern and the pattern its value matches, as in `status: 200`.
@@ -118,6 +137,40 @@ pub struct PropertyPattern<'arena> {
     pub name: LocalIdentifier<'arena>,
     pub colon: Span,
     pub pattern: &'arena Pattern<'arena>,
+}
+
+/// Represents a list pattern, which matches a list of exactly its elements, or of at least them when a rest ends it.
+///
+/// Example: `[]`, `[Line only]`, `[Line first, ...List<Line> rest]`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct ListPattern<'arena> {
+    pub left_bracket: Span,
+    pub elements: TokenSeparatedSequence<'arena, ListPatternElement<'arena>>,
+    pub right_bracket: Span,
+}
+
+/// Represents one element of a list pattern: a pattern the element at its place matches, or the rest.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
+pub enum ListPatternElement<'arena> {
+    Pattern(&'arena Pattern<'arena>),
+    Rest(RestPattern<'arena>),
+}
+
+/// Represents the rest of a list pattern: the elements the others leave, at its place among them.
+///
+/// A named rest holds them in a list of its type, and a bare one skips them. The parser gives a rest both a type and a
+/// name, or neither.
+///
+/// Example: `...List<Line> rest`, `...`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct RestPattern<'arena> {
+    pub ellipsis: Span,
+    pub hint: Option<&'arena Hint<'arena>>,
+    pub variable: Option<LocalIdentifier<'arena>>,
 }
 
 impl BinaryPattern<'_> {
@@ -151,16 +204,46 @@ impl HasSpan for Pattern<'_> {
             Pattern::Binary(pattern) => pattern.span(),
             Pattern::Parenthesized(pattern) => pattern.span(),
             Pattern::Properties(pattern) => pattern.span(),
+            Pattern::List(pattern) => pattern.span(),
         }
+    }
+}
+
+impl HasSpan for ListPattern<'_> {
+    fn span(&self) -> Span {
+        self.left_bracket.join(self.right_bracket)
+    }
+}
+
+impl HasSpan for ListPatternElement<'_> {
+    fn span(&self) -> Span {
+        match self {
+            ListPatternElement::Pattern(pattern) => pattern.span(),
+            ListPatternElement::Rest(rest) => rest.span(),
+        }
+    }
+}
+
+impl HasSpan for RestPattern<'_> {
+    fn span(&self) -> Span {
+        self.variable.map_or(self.ellipsis, |variable| self.ellipsis.join(variable.span))
     }
 }
 
 impl HasSpan for TypePattern<'_> {
     fn span(&self) -> Span {
-        match &self.variable {
-            Some(variable) => self.hint.span().join(variable.span),
-            None => self.hint.span(),
+        match (&self.fields, &self.properties, &self.variable) {
+            (_, _, Some(variable)) => self.hint.span().join(variable.span),
+            (_, Some(properties), None) => self.hint.span().join(properties.span()),
+            (Some(fields), None, None) => self.hint.span().join(fields.span()),
+            (None, None, None) => self.hint.span(),
         }
+    }
+}
+
+impl HasSpan for FieldsPattern<'_> {
+    fn span(&self) -> Span {
+        self.left_parenthesis.join(self.right_parenthesis)
     }
 }
 
@@ -190,7 +273,7 @@ impl HasSpan for ParenthesizedPattern<'_> {
 
 impl HasSpan for PropertiesPattern<'_> {
     fn span(&self) -> Span {
-        self.left_brace.join(self.right_brace)
+        self.left_brace.join(self.variable.map_or(self.right_brace, |variable| variable.span))
     }
 }
 

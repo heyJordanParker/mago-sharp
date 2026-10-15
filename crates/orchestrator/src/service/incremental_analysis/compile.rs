@@ -9,10 +9,14 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use mago_allocator::LocalArena;
 use mago_analyzer::analysis_result::AnalysisResult;
+use mago_analyzer::effects::EffectSummary;
+use mago_analyzer::effects::Effects;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::Listing;
+use mago_codex::metadata::module::BindingMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
+use mago_codex::metadata::module::top_dispatcher_namespaces;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferences;
@@ -97,6 +101,16 @@ pub struct Listener {
     pub takes_event: bool,
 }
 
+/// The app's module whose binding of `Sharp.Dispatcher` serves the whole app, spec section 15, which `emit` reads
+/// wherever the event is emitted.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DispatcherModule {
+    /// The workspace-relative name of its file.
+    pub file: Word,
+    /// The namespace it binds for, in lowercase.
+    pub namespace: Word,
+}
+
 impl IncrementalAnalysisService {
     /// Every PHP# listener of the last analysis, in the order the engine runs them: by its class's full name, then by
     /// its place in its class.
@@ -137,6 +151,26 @@ impl IncrementalAnalysisService {
         listeners.into_iter().map(|(_, _, listener)| listener).collect()
     }
 
+    /// The app's module whose binding of `Sharp.Dispatcher` serves the whole app, spec section 15: a module of the one
+    /// namespace `top_dispatcher_namespaces` gives. `None` when no app module binds it, and the standard library's
+    /// binding serves, and when two namespaces tie, which the analyzer refuses.
+    #[must_use]
+    pub fn dispatcher_module(&self) -> Option<DispatcherModule> {
+        let [namespace] = top_dispatcher_namespaces(&self.codebase.modules)[..] else {
+            return None;
+        };
+
+        self.codebase
+            .modules
+            .iter()
+            .find(|module| {
+                module.kind != ModuleKind::Test
+                    && module.namespace == namespace
+                    && module.bindings.iter().any(BindingMetadata::binds_dispatcher)
+            })
+            .map(|module| DispatcherModule { file: module.file, namespace })
+    }
+
     /// Compiles each `.sharp` file of the last analysis, in file name order.
     ///
     /// A file is accepted when the analysis reported no error-level issue in it. The standard library's files, those
@@ -145,8 +179,9 @@ impl IncrementalAnalysisService {
     /// An accepted file's inputs are its own source, `composer.lock`, and each file outside `vendor/` whose edit makes
     /// the warm path re-analyze it: each file whose signature edit reaches it through the cascade or reaches a symbol
     /// its extension hooks or providers read, every file when they listed names, each file that declares a class alias
-    /// or a patch, and each file that declares a method whose return it reads from that method's body, along every
-    /// chain of such returns, with that file's own inputs.
+    /// or a patch, and each file that declares a method whose return it reads from that method's body or a body its
+    /// calls reach, whose effects its functions' types list, along every chain of such returns and calls, with that
+    /// file's own inputs.
     ///
     /// A file that states a law also lists its proof file and every source its laws reach. A file that declares a
     /// module or a listener also lists the module files its check resolves services through, each folder's
@@ -194,14 +229,16 @@ impl IncrementalAnalysisService {
         let session = self.plugin_registry.create_external_analysis_session(self.database.files());
         let (library, rest): (Vec<_>, Vec<_>) = files.iter().partition(|file| file.is_standard_library);
         let reach = Reach::new(&self.codebase, &self.native_symbol_references);
+        let effects = self.effects();
 
-        let lowered_library = self.lower_all(&library, &InlineForms::default(), &errors, &reach, session.as_ref())?;
+        let lowered_library =
+            self.lower_all(&library, &InlineForms::default(), &errors, &reach, &effects, session.as_ref())?;
         let forms: InlineForms = lowered_library
             .iter()
             .filter_map(|lowered| lowered.as_ref().ok())
             .flat_map(|(_, forms, _)| forms.iter().cloned())
             .collect();
-        let lowered_rest = self.lower_all(&rest, &forms, &errors, &reach, session.as_ref())?;
+        let lowered_rest = self.lower_all(&rest, &forms, &errors, &reach, &effects, session.as_ref())?;
         let mut translations = Vec::new();
         let mut lowered: HashMap<FileId, Result<LoweredUnit, IssueCollection>> = library
             .iter()
@@ -222,7 +259,9 @@ impl IncrementalAnalysisService {
             .codebase
             .class_likes
             .values()
-            .filter(|class_like| !class_like.flags.is_built_in())
+            // A case of an enum whose cases carry data runs as a class in the namespace named as its enum, which Lean
+            // declares as the enum's inductive type, spec section 20.
+            .filter(|class_like| !class_like.flags.is_built_in() && !class_like.flags.is_enum_case_class())
             .filter_map(|class_like| {
                 let name = class_like.original_name.as_str_lossy();
                 let (namespace, _) = name.rsplit_once('\\')?;
@@ -235,7 +274,7 @@ impl IncrementalAnalysisService {
         let mut refused = check(translations, &namespaces)
             .map_err(|error| OrchestratorError::General(format!("The Lean step failed: {error}.")))?;
 
-        let mut reads = self.reads();
+        let mut reads = self.reads(&effects);
         let read_by_every_file: HashSet<FileId> = self
             .codebase
             .class_like_alias_declarations()
@@ -253,8 +292,8 @@ impl IncrementalAnalysisService {
         for (file, LoweredUnit { namespace_classes, reaches_extension, .. }) in
             files.iter().filter_map(|file| Some((file, lowered.get(&file.id)?.as_ref().ok()?)))
         {
-            // A method whose return comes from its body can return another such method's return, so the body files
-            // close over the body files of each file they hold.
+            // A method whose return comes from its body can return another such method's return, and a body has the
+            // effects of each body it calls, so the body files close over the body files of each file they hold.
             let mut body_files: HashSet<FileId> = HashSet::default();
             let mut pending = vec![file.id];
             while let Some(next) = pending.pop() {
@@ -338,6 +377,7 @@ impl IncrementalAnalysisService {
                 (Ok(LoweredUnit { unit, .. }), None) => {
                     let (mut reads, _) = reads.remove(&file.id).unwrap_or_default();
                     reads.inlined = unit.inlined().to_vec();
+                    reads.function_types = unit.function_types().to_vec();
                     let key = key(source_hash(&file.contents), &reads);
 
                     let paths = input_paths.remove(&file.id).unwrap_or_default();
@@ -368,9 +408,10 @@ impl IncrementalAnalysisService {
     }
 
     /// What each file's analysis read from other files: each declaration it read through its signature, each method
-    /// whose return is taken from its body, with the files that declare those methods, and each declaration and set of
-    /// names its extensions read.
-    fn reads(&self) -> HashMap<FileId, (Reads, HashSet<FileId>)> {
+    /// whose return is taken from its body, and each declaration and set of names its extensions read. With them, the
+    /// files whose bodies it read: those that declare those methods, and those whose bodies its calls reach, which
+    /// `effects` solved its functions' effects from.
+    fn reads(&self, effects: &Effects) -> HashMap<FileId, (Reads, HashSet<FileId>)> {
         let mut declarations: HashMap<SymbolIdentifier, (FileId, u64)> = HashMap::default();
         for (file_id, signature) in &self.codebase.file_signatures {
             for node in &signature.ast_nodes {
@@ -455,6 +496,9 @@ impl IncrementalAnalysisService {
                     .push(Read { name: listing_name(listing), fingerprint: listing.answer(&self.codebase) });
             }
         }
+        for (file_id, callee_files) in effects.callee_files(&self.codebase) {
+            reads.entry(file_id).or_default().1.extend(callee_files);
+        }
 
         reads
     }
@@ -527,6 +571,18 @@ impl IncrementalAnalysisService {
         classes.chain(class_like.all_parent_interfaces.iter().copied()).chain(traits).collect()
     }
 
+    /// The effects solve over every file's bodies, as the analysis ran it, which a PHP# function's type lists, spec
+    /// section 29.
+    fn effects(&self) -> Effects {
+        let mut summaries: Vec<(&FileId, &[EffectSummary])> =
+            self.file_states.iter().map(|(file_id, state)| (file_id, state.effect_summaries.as_slice())).collect();
+        summaries.sort_unstable_by_key(|(file_id, _)| **file_id);
+        let summaries: Vec<EffectSummary> =
+            summaries.into_iter().flat_map(|(_, summaries)| summaries.iter().cloned()).collect();
+
+        Effects::solve(&self.codebase, &summaries)
+    }
+
     /// Lowers each of `files` with `forms` to inline, and translates it to Lean as far as `reach` asks, the files the
     /// analysis reported `errors` in refused.
     fn lower_all(
@@ -535,6 +591,7 @@ impl IncrementalAnalysisService {
         forms: &InlineForms,
         errors: &HashMap<FileId, IssueCollection>,
         reach: &Reach,
+        effects: &Effects,
         session: Option<&ExternalAnalysisSession>,
     ) -> Result<Vec<Lowered>, OrchestratorError> {
         files
@@ -559,7 +616,7 @@ impl IncrementalAnalysisService {
                         });
                 });
 
-                Ok(match check(file, program, names, &artifacts, &self.codebase, forms, &issues) {
+                Ok(match check(file, program, names, &artifacts, &self.codebase, effects, forms, &issues) {
                     Ok(checked) => Ok((
                         LoweredUnit { unit: lower(&checked), namespace_classes, reaches_extension },
                         inline_forms(&checked),
@@ -1211,6 +1268,58 @@ mod tests {
         assert!(title.windows(b"strtoupper".len()).any(|window| window == b"strtoupper"), "the form is inlined");
         accepted(&before, TEXT_PATH);
         assert_ne!(compiled_key(title), compiled_key(accepted(&after, "app/Title.sharp")));
+    }
+
+    /// Spec section 21: a lambda's function type lists the effects of each body it calls, in any file, so the file
+    /// of each body a call reaches is an input, along every chain of calls. An edit two calls away that gives or takes
+    /// an effect changes the lambda's type text and its key on a warm compile, as on a clean one. An edit that keeps
+    /// the effects keeps the key.
+    #[test]
+    fn a_body_edit_two_calls_away_that_changes_its_effects_changes_the_callers_function_type() {
+        let meter = "namespace App;\n\npublic foreign class Meter\n{\n    public int now() => 7;\n}\n";
+        let clerk = "namespace App;\n\npublic class Clerk\n{\n    public int count(Meter meter) => new Ledger().tally(meter);\n}\n";
+        let ledger = |tally: &str| {
+            format!("namespace App;\n\npublic class Ledger\n{{\n    public int tally(Meter meter) => {tally};\n}}\n")
+        };
+        // Desk names neither `Ledger` nor its method, so only the effects reach its file from there.
+        let desk = "namespace App;\n\npublic class Desk\n{\n    public Any? counter(Clerk clerk, Meter meter) => () => clerk.count(meter);\n}\n";
+        let files = |tally: &str| {
+            let ledger = ledger(tally);
+
+            project(&[
+                ("app/Meter.sharp", meter),
+                ("app/Clerk.sharp", clerk),
+                ("app/Ledger.sharp", ledger.as_str()),
+                ("app/Desk.sharp", desk),
+            ])
+        };
+        let spells = |bytes: &[u8], text: &[u8]| bytes.windows(text.len()).any(|window| window == text);
+
+        let (pure, kept, metered) = (files("1"), files("2"), files("meter.now()"));
+        for (before, after, text) in
+            [(&pure, &metered, b"Function<int() uses App.Meter>".as_slice()), (&metered, &pure, b"Function<int()>")]
+        {
+            let mut warm = analyzed(before);
+            let before_compiled = compile(&mut warm, empty_stamp);
+            warm.update_database(after.read_only());
+            warm.analyze_incremental(None).expect("the warm path runs");
+            let warm_compiled = compile(&mut warm, empty_stamp);
+            let clean_compiled = compile(&mut analyzed(after), empty_stamp);
+
+            let desk = accepted(&warm_compiled, "app/Desk.sharp");
+            assert!(input_paths(desk).contains(&"app/Ledger.sharp".to_string()), "{:?}", input_paths(desk));
+            assert!(spells(desk, text), "{}", String::from_utf8_lossy(text));
+            assert_ne!(compiled_key(accepted(&before_compiled, "app/Desk.sharp")), compiled_key(desk));
+            assert_eq!(bodies(&warm_compiled), bodies(&clean_compiled));
+        }
+
+        let pure = compile(&mut analyzed(&pure), empty_stamp);
+        let kept = compile(&mut analyzed(&kept), empty_stamp);
+        assert_eq!(
+            compiled_key(accepted(&pure, "app/Desk.sharp")),
+            compiled_key(accepted(&kept, "app/Desk.sharp")),
+            "an edit that keeps the effects keeps the key"
+        );
     }
 
     /// One edit to the shop project, and the files the edit truly reaches.
@@ -2151,6 +2260,55 @@ mod tests {
                 assert_eq!(named_like_a_namespace(&clean), expected, "{row}");
                 assert_eq!(named_like_a_namespace(&warm), expected, "{row}");
                 assert_eq!(outcomes(&warm_compiled), outcomes(&clean_compiled), "{row}");
+            }
+        }
+    }
+
+    /// Spec section 20.1: a `match` over a sealed interface handles each class of its namespace that implements it, so a
+    /// file added to or removed from that namespace changes whether the unchanged file of the `match` is refused, in a
+    /// one-off compile and under `mago analyze --watch`, which analyzes with `diff`.
+    #[test]
+    fn a_compile_after_a_sealed_interface_gains_or_loses_an_implementer_matches_a_clean_compile() {
+        let implementer = |name: &str| {
+            (
+                if name == "Popup" { "app/PopupInteraction.sharp" } else { "app/ScrollInteraction.sharp" },
+                format!(
+                    "namespace App;\n\npublic class {name}Interaction : Interaction\n{{\n    public string name() => \"{name}\";\n}}\n"
+                ),
+            )
+        };
+        let interaction = (
+            "app/Interaction.sharp",
+            "namespace App;\n\npublic sealed interface Interaction\n{\n    string name();\n}\n".to_string(),
+        );
+        let shop = (
+            "app/Shop.sharp",
+            "namespace App;\n\npublic class Shop\n{\n    public string run(Interaction interaction) => match (interaction) {\n        PopupInteraction popup => popup.name(),\n    };\n}\n"
+                .to_string(),
+        );
+        let popup_only = vec![interaction.clone(), shop.clone(), implementer("Popup")];
+        let both = vec![interaction, shop, implementer("Popup"), implementer("Scroll")];
+
+        for diff in [false, true] {
+            for (before, after, refused) in [(&popup_only, &both, true), (&both, &popup_only, false)] {
+                let (base, edited) = (shop_project(before), shop_project(after));
+
+                let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
+                compile(&mut warm, empty_stamp);
+                warm.update_database(edited.read_only());
+                warm.analyze_incremental(None).expect("the warm path runs");
+                let warm = compile(&mut warm, empty_stamp);
+                let clean = compile(&mut analyzed(&edited), empty_stamp);
+
+                let row = format!("diff {diff}: {} to {} files", before.len(), after.len());
+                let shop_refusal = match &clean["app/Shop.sharp"] {
+                    Compilation::Refused(issues) => messages(issues),
+                    Compilation::Accepted(_) => Vec::new(),
+                };
+                let expected: Vec<String> =
+                    if refused { vec!["This `match` misses `ScrollInteraction`.".to_string()] } else { Vec::new() };
+                assert_eq!(shop_refusal, expected, "{row}");
+                assert_eq!(outcomes(&warm), outcomes(&clean), "{row}");
             }
         }
     }
