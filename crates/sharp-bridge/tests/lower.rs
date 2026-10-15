@@ -1798,7 +1798,7 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 /// class Tally
 /// {
 ///     public static function {'doubled#get'}(): int { return Tally::{'total#get'}() * 2; }
-///     public private(set) static int $total = 0;
+///     private static int $total = 0;
 ///     public static function {'total#get'}(): int { return self::$total; }
 ///     private static function {'total#set'}(int $value) { self::$total = $value + 1; }
 ///
@@ -1814,12 +1814,12 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 /// Decision 3: PHP has no hooks on a static, so a static computed property or one with an accessor body runs its
 /// accessors as its class's hidden static methods, `name#get` at the property's level and `name#set` at its `set`'s,
 /// `[17]` being `ZEND_ACC_PUBLIC | ZEND_ACC_STATIC` and `[20]` `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`. Its storage is a
-/// static only they write, under `private(set)`. Every read calls `name#get`, and every write `name#set`, with the
+/// private static only they reach, `[20]`. Every read calls `name#get`, and every write `name#set`, with the
 /// value written held in a hidden variable, so the write's value is the value written, and a postfix `++` the value
 /// read.
 /// ```php
 /// public static function {'twice#get'}(): int { return 2; }
-/// private(set) static int $hits;
+/// private static int $hits;
 /// public static function {'hits#set'}(int $value) { Meter::log("hit"); self::$hits = $value; }
 /// protected static function {'label#set'}(string $value) { self::$label = $value; Meter::log(self::$label); }
 ///
@@ -1873,7 +1873,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                         ZVAL 3
                     ZVAL [1] "int"
                     null
-                  PROP_GROUP [4113]
+                  PROP_GROUP [20]
                     ZVAL [1] "int"
                     PROP_DECL
                       PROP_ELEM
@@ -1918,7 +1918,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                             ZVAL "value"
                     null
                     null
-                  PROP_GROUP [4113]
+                  PROP_GROUP [20]
                     ZVAL [1] "string"
                     PROP_DECL
                       PROP_ELEM
@@ -1965,7 +1965,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                               ZVAL "label"
                     null
                     null
-                  PROP_GROUP [4113]
+                  PROP_GROUP [20]
                     ZVAL [257] "string"
                     PROP_DECL
                       PROP_ELEM
@@ -2176,7 +2176,7 @@ fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
                         ZVAL 2
                   ZVAL [1] "int"
                   null
-                PROP_GROUP [4113]
+                PROP_GROUP [20]
                   ZVAL [1] "int"
                   PROP_DECL
                     PROP_ELEM

@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use std::rc::Rc;
 
 use mago_codex::context::ScopeContext;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -56,6 +57,8 @@ use crate::statement::function_like::report_missing_return;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::r#return::handle_return_value;
 use crate::utils::int_refused_for_float;
+use crate::visibility::is_visible_from_scope;
+use crate::visibility::reaches_internal;
 use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
@@ -353,6 +356,17 @@ fn check_behavior<A>(
             ),
             format!("Give `{parameter}` a default value, or keep what it holds in the behavior's own fields."),
         )
+    } else if let Some(access) = closed_constructor(context, block_context, class) {
+        let owner = block_context
+            .scope
+            .get_class_like()
+            .map_or_else(String::new, |owner| display_class_like_name(context, owner.original_name).to_string());
+        (
+            format!(
+                "`{owner}` can't create `{behavior_name}`: its constructor is `{access}`, and PHP# creates each behavior as `new {behavior_name}()` in `{owner}`."
+            ),
+            format!("Make the constructor of `{behavior_name}` reachable from `{owner}`, as `public` is."),
+        )
     } else {
         let behavior_type = TUnion::from_atomic(TAtomic::Object(TObject::new_named(class.original_name)));
         let expected = TUnion::from_atomic(TAtomic::Object(TObject::Named(
@@ -403,6 +417,31 @@ fn check_behavior<A>(
             .with_note("A behavior runs the property's `get` and `set`: it is a class that implements `Behavior` for the property's type, and PHP# creates one for each object with no arguments.")
             .with_help(help),
     );
+}
+
+/// The access level of the constructor of the behavior `class` when the class being analyzed, which creates each of
+/// its behaviors with `new`, can't call it: `private` or `protected` outside the class that declares it, or `internal`
+/// outside its namespace, spec section 5.
+fn closed_constructor<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    class: &ClassLikeMetadata,
+) -> Option<String>
+where
+    A: Arena,
+{
+    let declaring = class.declaring_method_ids.get(&word(b"__construct"))?.get_class_name();
+    let constructor = context.codebase.get_method(declaring.as_bytes(), b"__construct")?;
+    let visibility = constructor.method_metadata.as_ref()?.visibility;
+    let is_internal = constructor.flags.is_internal_reach();
+    let reached = is_visible_from_scope(
+        context.codebase,
+        visibility,
+        declaring.as_bytes(),
+        block_context.scope.get_class_like_name(),
+    ) && reaches_internal(context, class, is_internal);
+
+    (!reached).then(|| if is_internal { "internal".to_owned() } else { visibility.to_string() })
 }
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for PropertyHook<'arena> {

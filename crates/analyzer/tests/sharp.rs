@@ -15962,9 +15962,9 @@ fn a_behavior_implements_behavior_for_the_property_s_type() {
     );
     let behaviors = (
         "src/Demo/Behaviors.sharp",
-        "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n\npublic abstract class Base : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public abstract string set(string value);\n}\n\npublic class Logged : Behavior<string>\n{\n    public Logged(private string prefix)\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => this.prefix + value;\n}\n\npublic class Plain\n{\n}\n",
+        "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n\npublic abstract class Base : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public abstract string set(string value);\n}\n\npublic class Logged : Behavior<string>\n{\n    public Logged(private string prefix)\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => this.prefix + value;\n}\n\npublic class Plain\n{\n}\n\npublic class Hidden : Behavior<string>\n{\n    private Hidden()\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => value;\n}\n",
     );
-    let order = "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Order\n{\n    public string name { get; set; } via Trimmed = \"\";\n    public int count { get; set; } via Trimmed = 0;\n    public string code { get; set; } via Missing = \"\";\n    public string kind { get; set; } via Behavior = \"\";\n    public string base { get; set; } via Base = \"\";\n    public string log { get; set; } via Logged = \"\";\n    public string note { get; set; } via Plain = \"\";\n}\n";
+    let order = "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Order\n{\n    public string name { get; set; } via Trimmed = \"\";\n    public int count { get; set; } via Trimmed = 0;\n    public string code { get; set; } via Missing = \"\";\n    public string kind { get; set; } via Behavior = \"\";\n    public string base { get; set; } via Base = \"\";\n    public string log { get; set; } via Logged = \"\";\n    public string note { get; set; } via Plain = \"\";\n    public string word { get; set; } via Hidden = \"\";\n}\n";
     let note = "A behavior runs the property's `get` and `set`: it is a class that implements `Behavior` for the property's type, and PHP# creates one for each object with no arguments.";
 
     assert_eq!(
@@ -15985,6 +15985,9 @@ fn a_behavior_implements_behavior_for_the_property_s_type() {
             ),
             format!(
                 "13:42 invalid-property-behavior `Plain` is no `Behavior`, so it can't run the `get` and `set` of `note`. | Named here. | {note} | Name a behavior that implements `Behavior<string>`, as `note` is a `string`."
+            ),
+            format!(
+                "14:42 invalid-property-behavior `Order` can't create `Hidden`: its constructor is `private`, and PHP# creates each behavior as `new Hidden()` in `Order`. | Named here. | {note} | Make the constructor of `Hidden` reachable from `Order`, as `public` is."
             ),
         ]
     );

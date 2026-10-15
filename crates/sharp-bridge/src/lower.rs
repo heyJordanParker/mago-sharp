@@ -2531,12 +2531,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 (flags, &hooked.attribute_lists, self.abstract_hooks(&hooked.hook_list))
             }
-            // A static property's accessors are its class's hidden static methods, which alone write its storage.
-            Property::Hooked(hooked) if runs_static_accessors(property) => (
-                if hooked.modifiers.contains_private() { 0 } else { ZEND_ACC_PRIVATE_SET },
-                &hooked.attribute_lists,
-                NULL,
-            ),
+            // A static property's accessors are its class's hidden static methods, which alone reach its storage, so
+            // the storage is private whatever the property's access level, and plain PHP reaches it only through a
+            // method.
+            Property::Hooked(hooked) if runs_static_accessors(property) => (0, &hooked.attribute_lists, NULL),
             Property::Hooked(hooked @ HookedProperty { behaviors: Some(behaviors), .. }) => (
                 accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
                 &hooked.attribute_lists,
@@ -2592,10 +2590,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, default, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+        let access_flags = ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE;
         let flags = modifier_flags(property.modifiers()) | accessor_flags;
+        let flags = if runs_static_accessors(property) { flags & !access_flags } else { flags };
         // A member with no access modifier is private, spec section 5.
-        let access =
-            if flags & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE) == 0 { ZEND_ACC_PRIVATE } else { 0 };
+        let access = if flags & access_flags == 0 { ZEND_ACC_PRIVATE } else { 0 };
         let flags = flags | access;
         let crossing = self.crossing_attribute(property.hint());
         let attributes = self.attributes(attribute_lists, r#override, crossing);
