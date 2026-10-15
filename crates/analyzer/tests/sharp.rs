@@ -4195,9 +4195,9 @@ fn equality_of_a_class_instance_is_refused_until_the_class_declares_operator_equ
 }
 
 /// Spec section 19: two lists compare element by element and two maps entry by entry, each element with its own `==`,
-/// so a list of a class compares only where the class declares `operator ==`, a list never equals a map, and `Any?`
-/// against a collection is not supported yet. The refusal names why the elements can't compare, through nested lists:
-/// a class with no `operator ==`, a `Set`, or element types that never match.
+/// so a list of a class compares only where the class declares `operator ==`, and a list never equals a map. `Any?`
+/// against a collection compares by value, spec section 24. The refusal names why the elements can't compare, through
+/// nested lists: a class with no `operator ==`, a `Set`, or element types that never match.
 #[test]
 fn collections_compare_by_value() {
     let sharp = "namespace Demo;\n\nimport App.Money;\n\nclass Report\n{\n    public static bool a(List<int> items, List<int> others) => items == others;\n\n    public static bool b(Any? value, List<int> items) => value != items;\n\n    public static bool c(Map<string, int> a, Map<string, int> b, List<Money> m, List<Money> n, List<List<int>> d, List<List<int>> e) => a == b && m != n && d == e && d.contains(Report.items(1));\n\n    public static bool f(List<Cart> carts, List<Cart> others, List<int> items, Map<string, int> counts) => carts == others || items == counts;\n\n    public static bool g(List<List<Cart>> nested, List<List<Cart>> again, List<Set<int>> sets, List<Set<int>> others, List<int> numbers, List<string> words) => nested == again || sets == others || numbers == words;\n\n    public static List<int> items(int count) => [count];\n}\n";
@@ -4207,7 +4207,6 @@ fn collections_compare_by_value() {
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[("src/Demo/Cart.php", CART), MONEY_OPERATORS]),
         [
-            "9:58 not-supported-yet `!=` on a collection is not supported yet, so it cannot compare `Any?` with `List<int>`. | Compare the elements one by one.",
             "13:108 invalid-operand `==` compares `List<Cart>` with `List<Cart>` element by element, and `Cart` declares no `operator ==`. | ",
             "13:127 invalid-operand `==` cannot compare `List<int>` with `Map<string, int>`. | Convert one side so both sides have the same type.",
             "15:161 invalid-operand `==` compares `List<List<Cart>>` with `List<List<Cart>>` element by element, and `Cart` declares no `operator ==`. | ",
@@ -7637,11 +7636,19 @@ fn a_php_non_null_mixed_keeps_accepting_a_value_that_may_be_null() {
     assert_eq!(issues(("src/Demo/Inbox.php", php), &[]), Vec::<String>::new());
 }
 
-/// An `Any?` compares by value with a string or a number. Against another `Any?` each side is reported, naming `Any?` as
-/// PHP# writes it. PHP keeps its report on `mixed`.
+/// Spec section 24: an `Any?` compares by value with a string, a number, a `bool`, an enum case, a struct or a
+/// collection. Against another `Any?` each side is reported, naming `Any?` as PHP# writes it, and against an object
+/// `==` is refused, since it can't tell the same object from an equal value, while `===` asks only for the same object.
+/// PHP keeps its report on `mixed`.
 #[test]
 fn an_unchecked_any_compares_with_a_string_or_a_number_but_not_with_another_value() {
     let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public bool same(Any? value, Any? other, Inbox inbox)\n    {\n        const a = value == \"1\";\n        const b = value != 2;\n        const c = 1.5 == value;\n        const d = value == other;\n        const e = value == inbox;\n        return a && b && c && d && e;\n    }\n}\n";
+    let values = "namespace Demo;\n\nclass Values\n{\n    public List<bool> same(Any? value, List<int> numbers, Map<string, int> counts, Set<int> seen, Suit suit, Point point, Inbox inbox)\n    {\n        return [value == true, value == numbers, counts != value, value == seen, value == suit, value == point, value === inbox, inbox !== value];\n    }\n}\n\nenum Suit\n{\n    case Hearts;\n}\n\nstruct Point\n{\n    public Point(public int x { get; }) { }\n}\n\nclass Inbox\n{\n}\n";
+    assert_eq!(issues(("src/Demo/Values.sharp", values), &[]), Vec::<String>::new());
+    assert_eq!(
+        refusals(("src/Demo/Inbox.sharp", sharp), &[])[2],
+        "11:19 invalid-operand `value` is unchecked: is it the same object as `inbox`, or an equal value? Check it with `is` first. | Write `value === inbox` to test for the same object."
+    );
     let php = "<?php\n\nnamespace Demo;\n\nclass Inbox\n{\n    public function same(mixed $value, mixed $other): bool { return $value == $other; }\n}\n";
     let mixed = |at: &str, side: &str| {
         format!(
@@ -7650,7 +7657,7 @@ fn an_unchecked_any_compares_with_a_string_or_a_number_but_not_with_another_valu
     };
     let any = |at: &str, side: &str| {
         format!(
-            "{at} mixed-operand {side} operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | An `Any` may hold any value, so `==` cannot compare it strictly until it is checked. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`."
+            "{at} mixed-operand {side} operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | An `Any` may hold any value, so `==` cannot compare it strictly until it is checked. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`."
         )
     };
 
@@ -9126,15 +9133,15 @@ fn a_search_needs_equality_on_the_element_type() {
             "8:33 invalid-argument `indexOf` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
             "13:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Coin` and `Coin`.",
             "14:34 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `ls.any(element => element === l)`.",
-            "15:35 mixed-operand Each element of `List<Any?>` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
-            "15:60 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
-            "15:65 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "15:35 mixed-operand Each element of `List<Any?>` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "15:60 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "15:65 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
             "16:37 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(l => l === line)`.",
             "18:37 invalid-argument `remove` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
             "20:37 invalid-operand `==` cannot compare `Line` with `Line`: `Line` declares no `operator ==`. | Use `===` to test whether both sides are the same object.",
             "21:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Money` does not take `Line|Money` and `Money`. | Make the `operator ==` of `Money` take `Line|Money` and `Money`.",
             "21:63 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Money.op_Equality`: expected `Money`, but possibly received `Line|Money`. | Ensure the argument always has the expected type using checks or assertions.",
-            "22:36 mixed-operand Each element of `List<Any?>` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "22:36 invalid-argument `contains` compares elements with `==`, and an unchecked `Any?` element can't tell the same object as `price` from an equal value. | Test for the same object with `loose.any(element => element === price)`.",
             "23:40 invalid-argument `indexOf` compares elements with `==`, and the `operator ==` of `Money` does not take `int|Money` and `Money`. | Make the `operator ==` of `Money` take `int|Money` and `Money`.",
             "24:37 invalid-argument `remove` compares elements with `==`, and the `operator ==` of `Money` does not take `Ticket|Money` and `Money`. | Make the `operator ==` of `Money` take `Ticket|Money` and `Money`.",
             "25:41 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Line|Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Line|Coin` and `Coin`.",
@@ -9627,7 +9634,7 @@ fn a_struct_compares_by_value() {
             "77:43 invalid-operand `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
             "79:42 invalid-operand `==` cannot compare `Spot` with `int`.",
             "81:56 invalid-operand `==` compares `List<Order>` with `List<Order>` element by element, and `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
-            "85:39 invalid-operand `Bag` can't compare by value: `data` is an `Any`, which compares by value only with a string, a number or an enum case.",
+            "85:39 invalid-operand `Bag` can't compare by value: `data` is an `Any`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection.",
             "87:42 invalid-operand `Pair` can't compare by value: `order` is an `Order`, which can't compare by value.",
             "89:47 invalid-operand `Tagged` can't compare by value: `tags` is a `Set<int>`, and `==` on a collection is not supported yet.",
             "91:48 invalid-operand `Basket` can't compare by value: `plans` is a `List<Plan>`, whose elements `==` cannot compare.",

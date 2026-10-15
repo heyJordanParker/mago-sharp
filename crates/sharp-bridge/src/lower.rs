@@ -4758,25 +4758,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `lhs == rhs`, or `lhs != rhs` when `negated`, as spec section 19 compares a value of `lhs`'s type with one of
-    /// `rhs`'s: the `op_Equality` the class of an instance side declares, which lifts a null side itself, two class
-    /// values by their whole type through `\Sharp\Internal\equals`, as C# compares two `Type`s, an int and a float as two
-    /// floats, and `===` otherwise. `== null` tests for null and runs no operator. A collection search compares each
-    /// element with its value through it, so a search never compares differently from `==`.
+    /// `rhs`'s: an unchecked `Any?` with whatever it holds, spec section 24, and two class values by their whole type, as
+    /// C# compares two `Type`s, through `\Sharp\Internal\equals`, the `op_Equality` the class of an instance side
+    /// declares, which lifts a null side itself, an int and a float as two floats, and `===` otherwise. `== null` tests
+    /// for null and runs no operator. A collection search compares each element with its value through it, so a search
+    /// never compares differently from `==`.
     fn equality(&mut self, line: u32, lhs: Side, rhs: Side, negated: bool) -> u32 {
         let (lhs_type, rhs_type) = (self.side_type(&lhs), self.side_type(&rhs));
-        if let Some((class, name)) = self.declared_equality(lhs_type, rhs_type) {
-            let lhs = self.side(&lhs);
-            let rhs = self.side(&rhs);
-            let call = self.operator_call(line, class, name, &[lhs, rhs]);
-
-            return if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call };
-        }
-        if holds_class_value(lhs_type) || holds_class_value(rhs_type) {
+        let unchecked = (lhs_type.is_mixed() || rhs_type.is_mixed()) && !lhs_type.is_null() && !rhs_type.is_null();
+        if unchecked || holds_class_value(lhs_type) || holds_class_value(rhs_type) {
             let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\equals");
             let lhs = self.side(&lhs);
             let rhs = self.side(&rhs);
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[lhs, rhs]);
             let call = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+
+            return if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call };
+        }
+        if let Some((class, name)) = self.declared_equality(lhs_type, rhs_type) {
+            let lhs = self.side(&lhs);
+            let rhs = self.side(&rhs);
+            let call = self.operator_call(line, class, name, &[lhs, rhs]);
 
             return if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call };
         }
