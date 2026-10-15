@@ -115,7 +115,10 @@ use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Variable;
 use mago_syntax::cst::WhileBody;
 use mago_syntax::cst::With;
+use mago_syntax::cst::Yield;
+use mago_syntax::cst::YieldValue;
 use mago_syntax::cst::built_in_generic_arity;
+use mago_syntax::utils::block_has_yield;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::php_shape;
 use mago_syntax_core::stack::ensure_sufficient_stack;
@@ -220,6 +223,8 @@ use crate::sharp_kind::SHARP_AST_UNSET;
 use crate::sharp_kind::SHARP_AST_VAR;
 use crate::sharp_kind::SHARP_AST_VERIFY_TYPE_ARGS;
 use crate::sharp_kind::SHARP_AST_WHILE;
+use crate::sharp_kind::SHARP_AST_YIELD;
+use crate::sharp_kind::SHARP_AST_YIELD_FROM;
 use crate::sharp_kind::SHARP_AST_ZVAL;
 use crate::sharp_node;
 use crate::sharp_str;
@@ -256,6 +261,7 @@ const ZEND_ACC_INTERFACE: u32 = 1 << 0;
 const ZEND_ACC_READONLY: u32 = 1 << 7;
 const ZEND_ACC_PROTECTED_SET: u32 = 1 << 11;
 const ZEND_ACC_PRIVATE_SET: u32 = 1 << 12;
+const ZEND_ACC_GENERATOR: u32 = 1 << 24;
 const ZEND_ACC_ENUM: u32 = 1 << 28;
 const ZEND_ACC_SHARP_HIDDEN: u32 = 1 << 13;
 const ZEND_SHARP_TYPE_OF_LIST: u32 = 1;
@@ -2022,10 +2028,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.static_type_parameters = None;
         let r#override = method.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
         let attributes = self.attributes(&method.attribute_lists, r#override, None);
+        // A method whose body yields is a generator, as php-src's grammar flags a function whose body holds a `yield`.
+        let generator = match &method.body {
+            MethodBody::Concrete(block) if block_has_yield(block) => ZEND_ACC_GENERATOR,
+            _ => 0,
+        };
 
         self.declaration(
             SHARP_AST_METHOD,
-            flags,
+            flags | generator,
             start,
             method.body.span(),
             php_method_name(method),
@@ -3721,6 +3732,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let exception = self.expression(throw.exception);
 
                 self.node(SHARP_AST_THROW, 0, line, &[exception])
+            }
+            // `yield value;` is php-src's `yield $value;`, a `YIELD` of its value and no key, and `yield ...other;` is
+            // `yield from $other;`. `check_slice` keeps both as statements of a method that returns `Iterable<T>`.
+            Expression::Yield(Yield::Value(YieldValue { value: Some(value), .. })) => {
+                let value = self.expression(value);
+
+                self.node(SHARP_AST_YIELD, 0, line, &[value, NULL])
+            }
+            Expression::Yield(Yield::Spread(spread)) => {
+                let iterator = self.expression(spread.iterator);
+
+                self.node(SHARP_AST_YIELD_FROM, 0, line, &[iterator])
             }
             // Spec section 14.4: the engine compiles the statement of `a ?? return`, `continue` or `break` in the
             // middle of the expression, after the ZEND_SHARP_LEAVE that frees what the expression holds.

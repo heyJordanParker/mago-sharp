@@ -291,6 +291,7 @@ pub use crate::cst::cst::with::With;
 pub use crate::cst::cst::r#yield::Yield;
 pub use crate::cst::cst::r#yield::YieldFrom;
 pub use crate::cst::cst::r#yield::YieldPair;
+pub use crate::cst::cst::r#yield::YieldSpread;
 pub use crate::cst::cst::r#yield::YieldValue;
 
 pub mod access;

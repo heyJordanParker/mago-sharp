@@ -4076,6 +4076,78 @@ fn a_map_key_without_equality_by_its_kind_is_an_error() {
     );
 }
 
+/// Spec section 12: a method that returns `Iterable<T>` produces its values with `yield value;` and every element of
+/// another `Iterable<T>` with `yield ...other;`, and a bare `return;` ends it. PHP compiles a `?iterable` generator, so
+/// `Iterable<T>?` takes `yield` too. In PHP#, `=>` is the lambda arrow, so `yield x => x;` yields a lambda.
+#[test]
+fn yield_and_yield_spread_are_statements_of_a_method_that_returns_an_iterable() {
+    let code = "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield ...pending;\n        yield latest;\n        if (count(pending) > 1) {\n            return;\n        }\n    }\n\n    public Iterable<Order>? maybe(Order latest)\n    {\n        yield latest;\n    }\n\n    public Iterable<Function<int(int)>> lambdas()\n    {\n        yield x => x;\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A constructor, a method that returns another type and a lambda produce no `Iterable<T>`, so `yield` in them is an
+/// error, spec section 12.
+#[test]
+fn yield_outside_a_method_that_returns_an_iterable_is_an_error() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(Order latest)\n    {\n        yield latest;\n    }\n\n    public List<Order> recent(Order latest)\n    {\n        yield latest;\n    }\n\n    public Iterable<Order> lazy(Order latest)\n    {\n        const read = () => { yield latest; };\n        const arrow = () => yield latest;\n        yield latest;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:9 `yield` needs a method that returns `Iterable<T>`.",
+            "12:9 `yield` needs a method that returns `Iterable<T>`.",
+            "17:30 `yield` needs a method that returns `Iterable<T>`.",
+            "18:29 `yield` needs a method that returns `Iterable<T>`.",
+        ]
+    );
+}
+
+/// PHP's `send()` and two-way generators are not part of PHP#, spec section 12, so `yield` is a statement with a value.
+#[test]
+fn yield_as_a_value_or_without_a_value_is_an_error() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Iterable<Order> all(Order latest)\n    {\n        const kept = yield latest;\n        Store.keep(yield latest);\n        yield;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:22 `yield` gives no value back: write it as a statement, as in `yield value;`.",
+            "8:20 `yield` gives no value back: write it as a statement, as in `yield value;`.",
+            "9:9 PHP# has no `yield;`: write `yield value;`.",
+        ]
+    );
+}
+
+#[test]
+fn php_yield_from_and_a_yielded_key_are_errors_that_name_the_php_sharp_form() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield from pending;\n        yield 1 => latest;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:9 PHP# has no `yield from`: write `yield ...other;`.",
+            "8:9 PHP# has no `yield key => value`: write `yield value;`.",
+        ]
+    );
+}
+
+/// A method that yields produces only the values it yields, as C#'s CS1622 "Cannot return a value from an iterator"
+/// says, so `return value;` there is an error and a bare `return;` ends it. A method that returns `Iterable<T>` without
+/// yielding returns its value, and a lambda in a method that yields returns its own.
+#[test]
+fn a_return_with_a_value_in_a_method_that_yields_is_an_error() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield latest;\n        const read = () => { return latest; };\n        if (count(pending) > 0) {\n            return;\n        }\n        return pending;\n    }\n\n    public Iterable<Order> copy(List<Order> pending)\n    {\n        return pending;\n    }\n}\n";
+
+    assert_eq!(issues(code), ["12:9 A method that yields cannot return a value: write `return;` to end it."]);
+}
+
+#[test]
+fn php_keeps_every_form_of_yield() {
+    let code = "<?php\n\nfunction rows(): iterable\n{\n    $sent = yield 1;\n    yield 2 => $sent;\n    yield from [3];\n    yield;\n    return 4;\n}\n";
+
+    assert_eq!(issues_in("src/rows.php", code), Vec::<String>::new());
+}
+
 #[test]
 fn a_literal_element_outside_the_slice_is_not_supported_yet() {
     let code = leak(method(
@@ -5415,7 +5487,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         ),
         (
             body,
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`.",
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`.",
         ),
     ] {
         assert_eq!(

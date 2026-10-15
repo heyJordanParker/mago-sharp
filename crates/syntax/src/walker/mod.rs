@@ -288,6 +288,7 @@ use crate::cst::cst::With;
 use crate::cst::cst::Yield;
 use crate::cst::cst::YieldFrom;
 use crate::cst::cst::YieldPair;
+use crate::cst::cst::YieldSpread;
 use crate::cst::cst::YieldValue;
 
 /// Helper macro to generate the core walk logic.
@@ -2627,6 +2628,9 @@ generate_ast_walker! {
             Yield::From(yield_from) => {
                 walker.walk_yield_from(yield_from, context);
             }
+            Yield::Spread(yield_spread) => {
+                walker.walk_yield_spread(yield_spread, context);
+            }
         }
     }
 
@@ -2648,6 +2652,11 @@ generate_ast_walker! {
         walker.walk_keyword(&yield_from.r#yield, context);
         walker.walk_keyword(&yield_from.from, context);
         walker.walk_expression(yield_from.iterator, context);
+    }
+
+    'arena YieldSpread as yield_spread => {
+        walker.walk_keyword(&yield_spread.r#yield, context);
+        walker.walk_expression(yield_spread.iterator, context);
     }
 
     'arena Construct as construct => {

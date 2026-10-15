@@ -93,6 +93,7 @@ use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::PropertyHookList;
 use mago_syntax::cst::PropertyItem;
 use mago_syntax::cst::ReadonlyHint;
+use mago_syntax::cst::Return;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::StringPart;
@@ -114,6 +115,9 @@ use mago_syntax::cst::UseItems;
 use mago_syntax::cst::Variable;
 use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
+use mago_syntax::cst::Yield;
+use mago_syntax::cst::YieldSpread;
+use mago_syntax::cst::YieldValue;
 use mago_syntax::cst::built_in_generic_arity;
 use mago_syntax::token::GetPrecedence;
 use mago_syntax::token::Precedence;
@@ -291,6 +295,10 @@ const OBJECT: &[u8] = b"Object";
 ///   above but `void`. An expression statement whose operator is binary, as in `flags | MASK;`, is an error that
 ///   names its compound assignment or its result, because the result is never used, except `??` and an assignment
 ///   that PHP's `and`, `or` and `xor` bind looser than.
+/// - `yield value;` and `yield ...other;`, spec section 12: statements of a method that returns `Iterable<T>` or
+///   `Iterable<T>?`, which PHP compiles as a generator too, outside any lambda in it. `yield` gives no value back, so
+///   any other use of it is an error, and so is `return value;` in a method that yields, as C#'s CS1622. PHP's
+///   `yield from`, `yield key => value` and bare `yield` are errors that name the PHP# form.
 /// - Writes: `=`, compound assignment, `++` and `--` write only a local, a parameter, a member written
 ///   `object.name` or, when static, `Class.name`, or an index of one of them written `target[key]`. The analyzer,
 ///   which knows the types, allows an index write only on a `Map`, and a read not under `??` or `?.` only on a `List`,
@@ -1167,6 +1175,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 }
 
                 check_method_uses(method, context);
+                check_iterator_returns(method, context);
                 check_extern(method, context)
             }
             Err((message, help)) => report_refusal(
@@ -1785,6 +1794,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::FunctionLikeParameterList(_), Lambda) => Some(Lambda),
         (Node::Block(_), Lambda) => Some(Body),
         (Node::Expression(_), Lambda) => enter(node, Body, context),
+        // `check_yield` reports a `yield` at its keyword, so its value is still checked as the method body's.
+        (Node::Expression(Expression::Yield(r#yield)), Body) => {
+            check_yield(r#yield, context);
+
+            Some(Body)
+        }
+        (Node::Yield(_) | Node::YieldValue(_) | Node::YieldSpread(_) | Node::YieldFrom(_) | Node::YieldPair(_), Body) => {
+            Some(Body)
+        }
         (Node::BinaryOperator(operator), Body | Constant) if is_slice_binary_operator(operator) => Some(place),
         // Spec section 21 removes PHP's word operators, so `=` can no longer bind before `and`.
         (
@@ -4724,7 +4742,7 @@ fn supported(place: Place) -> &'static str {
         | Place::SuperCall
         | Place::SelfCall
         | Place::RefusedPart(_) => {
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
         }
         Place::Attribute => {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
@@ -5531,6 +5549,134 @@ fn enclosing_class_method<'ast, 'arena>(
         ClassLikeMember::Method(method) if method.name.value.eq_ignore_ascii_case(name) => Some(method),
         _ => None,
     })
+}
+
+/// Decides `yield`, spec section 12. `yield value;` and `yield ...other;` are statements of a method that returns
+/// `Iterable<T>`, outside any lambda in it, because `yield` gives no value back. PHP's `yield from other`,
+/// `yield key => value` and a bare `yield` are errors that name the PHP# form. Each error is reported at the `yield`
+/// keyword, so the value is still checked.
+fn check_yield(r#yield: &Yield, context: &mut Context<'_, '_, '_>) {
+    let span = r#yield.span();
+    let keyword = match r#yield {
+        Yield::From(from) => {
+            return report_removed(
+                from.r#yield.span.join(from.from.span),
+                b"yield from",
+                "write `yield ...other;`.",
+                "PHP#'s spread replaces `yield from`: `yield ...other;` produces every element of `other`.",
+                context,
+            );
+        }
+        Yield::Pair(pair) => {
+            return report_removed(
+                pair.r#yield.span,
+                b"yield key => value",
+                "write `yield value;`.",
+                "An `Iterable<T>` produces values, and `=>` is the lambda arrow in PHP#.",
+                context,
+            );
+        }
+        Yield::Value(YieldValue { r#yield, value: None }) => {
+            return report_removed(
+                r#yield.span,
+                b"yield;",
+                "write `yield value;`.",
+                "PHP's bare `yield` produces null, and a method that returns `Iterable<T>` produces values of `T`.",
+                context,
+            );
+        }
+        Yield::Value(YieldValue { r#yield, .. }) | Yield::Spread(YieldSpread { r#yield, .. }) => r#yield.span,
+    };
+
+    let Some(method) = enclosing_iterator_method(context.program, span) else {
+        return context.report(
+            Issue::error("`yield` needs a method that returns `Iterable<T>`.")
+                .with_annotation(Annotation::primary(keyword).with_message("Written here."))
+                .with_note("A method that returns `Iterable<T>` produces its values with `yield value;` and `yield ...other;`. A lambda never yields."),
+        );
+    };
+
+    let is_statement = !Node::Method(method)
+        .filter_map(|node| match node {
+            Node::ExpressionStatement(statement) if statement.expression.span() == span => Some(()),
+            _ => None,
+        })
+        .is_empty();
+    if !is_statement {
+        context.report(
+            Issue::error("`yield` gives no value back: write it as a statement, as in `yield value;`.")
+                .with_annotation(Annotation::primary(keyword).with_message("Used as a value here."))
+                .with_note("PHP's `send()` and two-way generators are not part of PHP#."),
+        );
+    }
+}
+
+/// The method that returns `Iterable<T>` or `Iterable<T>?` and whose body holds `span` outside any lambda in it. PHP
+/// compiles a generator of `?iterable`, so a nullable `Iterable<T>` takes `yield` too.
+fn enclosing_iterator_method<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> Option<&'ast Method<'arena>> {
+    let method = enclosing_class(program, span)?.members.iter().find_map(|member| match member {
+        ClassLikeMember::Method(method) if method.span().contains(&span.start) => Some(method),
+        _ => None,
+    })?;
+    let in_lambda = !Node::Method(method)
+        .filter_map(|node| {
+            (matches!(node, Node::ArrowFunction(_) | Node::Closure(_)) && node.span().contains(&span.start))
+                .then_some(())
+        })
+        .is_empty();
+
+    (returns_iterable(method) && !in_lambda).then_some(method)
+}
+
+/// Whether a method's declared return type is `Iterable<T>` or `Iterable<T>?`.
+fn returns_iterable(method: &Method) -> bool {
+    let Some(return_type) = &method.return_type_hint else {
+        return false;
+    };
+    let hint = match &return_type.hint {
+        Hint::Nullable(nullable) => nullable.hint,
+        hint => hint,
+    };
+
+    matches!(hint, Hint::Generic(generic) if generic.name.value == b"Iterable")
+}
+
+/// Reports `return value;` in a method that returns `Iterable<T>` and yields, outside the lambdas in it. Its values
+/// are the ones it yields, spec section 12, as C#'s CS1622 says: "Cannot return a value from an iterator". A bare
+/// `return;` ends it.
+fn check_iterator_returns(method: &Method, context: &mut Context<'_, '_, '_>) {
+    if !returns_iterable(method) {
+        return;
+    }
+
+    let mut lambdas = Vec::new();
+    let mut yields = Vec::new();
+    let mut returns = Vec::new();
+    for node in Node::Method(method).filter_map(|node| match node {
+        Node::ArrowFunction(_) | Node::Closure(_) | Node::Yield(_) | Node::Return(Return { value: Some(_), .. }) => {
+            Some(*node)
+        }
+        _ => None,
+    }) {
+        match node {
+            Node::Yield(_) => yields.push(node.span()),
+            Node::Return(_) => returns.push(node.span()),
+            _ => lambdas.push(node.span()),
+        }
+    }
+
+    let outside_lambdas = |span: &Span| !lambdas.iter().any(|lambda| lambda.contains(&span.start));
+    if !yields.iter().any(outside_lambdas) {
+        return;
+    }
+
+    for span in returns.into_iter().filter(outside_lambdas) {
+        context.report(
+            Issue::error("A method that yields cannot return a value: write `return;` to end it.")
+                .with_annotation(Annotation::primary(span).with_message("Returns a value here."))
+                .with_note("A method that yields produces only the values it yields, as in C#."),
+        );
+    }
 }
 
 /// Refuses a lambda that captures a loop variable that code changes. Spec section 3 gives each loop pass its own

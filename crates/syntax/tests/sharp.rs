@@ -3771,6 +3771,56 @@ fn extern_before_a_parenthesis_stays_a_call_in_php_sharp() {
     assert_eq!(source(CODE, call.function), "extern");
 }
 
+#[test]
+fn yield_spread_produces_every_element_of_another_iterable() {
+    const CODE: &str = "class OrderImport\n{\n    Iterable<Order> all()\n    {\n        yield ...this.pending;\n        yield this.latest;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/OrderImport.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [spread, value] = method_body(program) else {
+        panic!("expected two statements, got {:#?}", method_body(program));
+    };
+    let Expression::Yield(Yield::Spread(spread)) = expression(spread) else {
+        panic!("expected `yield ...this.pending`, got {spread:#?}");
+    };
+    assert_eq!(source(CODE, spread), "yield ...this.pending");
+    assert_eq!(source(CODE, &spread.ellipsis), "...");
+    assert_eq!(source(CODE, spread.iterator), "this.pending");
+    let Expression::Yield(Yield::Value(YieldValue { value: Some(value), .. })) = expression(value) else {
+        panic!("expected `yield this.latest`, got {value:#?}");
+    };
+    assert_eq!(source(CODE, *value), "this.latest");
+}
+
+#[test]
+fn a_name_before_an_arrow_after_yield_is_a_lambda() {
+    const CODE: &str = "class Report\n{\n    Iterable<Function<int(int)>> all()\n    {\n        yield x => x;\n        yield \"key\" => 1;\n        yield from rows;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [lambda, pair, from] = method_body(program) else {
+        panic!("expected three statements, got {:#?}", method_body(program));
+    };
+    let Expression::Yield(Yield::Value(YieldValue { value: Some(Expression::ArrowFunction(lambda)), .. })) =
+        expression(lambda)
+    else {
+        panic!("expected `yield` of a lambda, got {lambda:#?}");
+    };
+    assert_eq!(source(CODE, lambda), "x => x");
+    assert!(matches!(expression(pair), Expression::Yield(Yield::Pair(_))), "{pair:#?}");
+    assert!(matches!(expression(from), Expression::Yield(Yield::From(_))), "{from:#?}");
+}
+
+#[test]
+fn yield_spread_in_php_is_a_parse_error() {
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.php", "<?php function all() { yield ...$pending; }\n");
+
+    assert!(!program.errors.is_empty());
+}
+
 /// PHP has no `extern` declaration, so a `.php` statement that starts with `extern` stays a call or a constant.
 #[test]
 fn extern_starting_a_php_statement_stays_a_call_or_a_constant() {

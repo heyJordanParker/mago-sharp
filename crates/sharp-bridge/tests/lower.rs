@@ -14593,6 +14593,73 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 }
 
 /// ```php
+/// yield from $pending; yield $latest; yield fn($x) => $x; return;
+/// ```
+///
+/// `yield value;` is a `YIELD` of its value and a null key, alone as a statement, as php-src's grammar builds
+/// `yield $value;`, and `yield ...other;` is PHP's `yield from`, a `YIELD_FROM` of `other`. `yield x => x;` yields a
+/// lambda, because `=>` is the lambda arrow in PHP#.
+#[test]
+fn yield_is_a_yield_statement_and_yield_spread_is_yield_from() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<Any> run(List<int> pending, int latest)\n    {\n        yield ...pending;\n        yield latest;\n        yield x => x;\n        return;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              YIELD_FROM
+                VAR
+                  ZVAL "pending"
+              YIELD
+                VAR
+                  ZVAL "latest"
+                null
+              YIELD
+                ARROW_FUNC "" @9-9
+                  PARAM_LIST
+                    PARAM
+                      null
+                      ZVAL "x"
+                      null
+                      null
+                      null
+                      null
+                  null
+                  VAR
+                    ZVAL "x"
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<Any?(Any?)>"
+                  null
+                null
+              RETURN
+                null
+        "#}
+    );
+}
+
+/// A method that yields is a generator: `[16777217]` is `ZEND_ACC_PUBLIC | ZEND_ACC_GENERATOR`, which php-src's grammar
+/// puts on a function whose body holds a `yield`, so the engine compiles it to start with `GENERATOR_CREATE`. A yield
+/// nested in a loop or an `if` counts, and a method that returns an `Iterable<T>` without a yield stays `[1]`.
+#[test]
+fn a_method_that_yields_is_a_generator() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<int> lines(List<int> rows)\n    {\n        for (const row of rows) {\n            if (row > 0) {\n                yield row;\n            }\n        }\n    }\n\n    public Iterable<int> all(List<int> rows)\n    {\n        yield ...rows;\n    }\n\n    public Iterable<int> kept(List<int> rows)\n    {\n        return rows;\n    }\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    let methods: Vec<String> = lowered
+        .nodes()
+        .iter()
+        .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD)
+        .map(|node| format!("{} [{}]", lowered.text(node.text), node.attr))
+        .collect();
+    assert_eq!(methods, ["lines [16777217]", "all [16777217]", "kept [1]", "parse [17]", "tryParse [17]"]);
+}
+
+/// ```php
 /// $code = $extra > 0 ? $extra : throw new \App\Tenant\Failure(0);
 /// throw new \App\Tenant\Failure($code);
 /// ```

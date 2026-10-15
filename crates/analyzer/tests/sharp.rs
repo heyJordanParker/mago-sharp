@@ -9814,6 +9814,97 @@ fn a_method_call_on_a_php_iterable_stays_an_error_in_php() {
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["10:18 invalid-method-access"]);
 }
 
+/// Spec section 12: "Each yielded value is checked against `T`", as PHP checks a value yielded from a method that
+/// returns `iterable<Order>`, with the same code. The message names the types as PHP# writes them.
+#[test]
+fn a_yielded_value_that_is_not_the_element_type_is_reported_as_in_php() {
+    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public OrderImport(private List<Order> pending, private Order latest)\n    {\n    }\n\n    public Iterable<Order> all()\n    {\n        yield ...this.pending;\n        yield this.latest;\n    }\n\n    public Iterable<Order> numbers()\n    {\n        yield this.latest.number();\n    }\n}\n\nclass Order\n{\n    public string number()\n    {\n        return \"1\";\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass OrderImport\n{\n    /** @param list<Order> $pending */\n    public function __construct(private array $pending, private Order $latest)\n    {\n    }\n\n    /** @return iterable<Order> */\n    public function all(): iterable\n    {\n        yield from $this->pending;\n        yield $this->latest;\n    }\n\n    /** @return iterable<Order> */\n    public function numbers(): iterable\n    {\n        yield $this->latest->number();\n    }\n}\n\nclass Order\n{\n    public function number(): string\n    {\n        return \"1\";\n    }\n}\n";
+
+    let sharp_issues = issues(("src/Demo/OrderImport.sharp", sharp), &[]);
+
+    assert_eq!(sharp_issues, ["17:15 invalid-yield-value-type"]);
+    assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/OrderImport.php", php), &[])));
+    assert_eq!(
+        messages(("src/Demo/OrderImport.sharp", sharp), &[]),
+        ["Invalid value type yielded; expected `Order`, but found `string`."]
+    );
+}
+
+/// A method that yields anywhere in its body, as in a `for … of` loop or a block arm of a `match` statement, is a
+/// generator, which returns no value, as a PHP method that yields in a `foreach` is.
+#[test]
+fn a_method_that_yields_only_inside_a_loop_or_a_match_arm_returns_no_value() {
+    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public Iterable<Order> paid(List<Order> orders)\n    {\n        for (const order of orders) {\n            yield order;\n        }\n    }\n\n    public Iterable<Order> picked(Order latest, int count)\n    {\n        match (count) {\n            0 => {\n                yield latest;\n            },\n            default => {},\n        }\n    }\n}\n\nclass Order\n{\n}\n";
+
+    assert_eq!(issues(("src/Demo/OrderImport.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// PHP compiles a generator of `?iterable`, so `check_slice` lets `Iterable<T>?` yield, and the analyzer reports it as
+/// it reports a plain PHP generator of `?iterable`: a generator never returns null.
+#[test]
+fn a_nullable_iterable_that_yields_is_reported_as_a_php_nullable_iterable_generator() {
+    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public Iterable<Order>? maybe(Order latest)\n    {\n        yield latest;\n    }\n}\n\nclass Order\n{\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass OrderImport\n{\n    /** @return ?iterable<Order> */\n    public function maybe(Order $latest): ?iterable\n    {\n        yield $latest;\n    }\n}\n\nclass Order\n{\n}\n";
+
+    let sharp_issues = issues(("src/Demo/OrderImport.sharp", sharp), &[]);
+
+    assert_eq!(sharp_issues, ["5:12 invalid-generator-return-type"]);
+    assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/OrderImport.php", php), &[])));
+}
+
+/// Spec section 12: "`yield ...other;` replaces PHP's `yield from`", and "`other` is an `Iterable<T>`": a `List<T>` or
+/// an `Iterable<T>` of the method's element type. It runs as PHP's `yield from`, and is checked as PHP checks it.
+#[test]
+fn a_yielded_spread_of_another_element_type_is_reported_as_php_reports_yield_from() {
+    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<Order> pending, Iterable<Order> more, List<string> numbers)\n    {\n        yield ...pending;\n        yield ...more;\n        yield ...numbers;\n    }\n}\n\nclass Order\n{\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass OrderImport\n{\n    /**\n     * @param list<Order> $pending\n     * @param iterable<Order> $more\n     * @param list<string> $numbers\n     *\n     * @return iterable<Order>\n     */\n    public function all(array $pending, iterable $more, array $numbers): iterable\n    {\n        yield from $pending;\n        yield from $more;\n        yield from $numbers;\n    }\n}\n\nclass Order\n{\n}\n";
+
+    let sharp_issues = issues(("src/Demo/OrderImport.sharp", sharp), &[]);
+
+    assert_eq!(sharp_issues, ["9:18 yield-from-invalid-value-type"]);
+    assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/OrderImport.php", php), &[])));
+}
+
+/// An error about `yield ...other;` names `yield ...`, the form the `.sharp` file writes, where PHP's error about the
+/// same check names `yield from`, a form PHP# refuses.
+#[test]
+fn a_yielded_spread_error_writes_the_spread_as_the_file_does() {
+    let feed = "<?php\n\nnamespace Lib;\n\nfinal class Feed\n{\n    /** @return \\Generator<int, \\Demo\\Order, string, void> */\n    public static function orders(): \\Generator\n    {\n        yield new \\Demo\\Order();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Feed;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<int> numbers, int count)\n    {\n        yield ...numbers;\n        yield ...count;\n        yield ...Feed.orders();\n    }\n}\n\nclass Order\n{\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Feed;\n\nclass OrderImport\n{\n    /**\n     * @param list<int> $numbers\n     *\n     * @return iterable<Order>\n     */\n    public function all(array $numbers, int $count): iterable\n    {\n        yield from $numbers;\n        yield from $count;\n        yield from Feed::orders();\n    }\n}\n\nclass Order\n{\n}\n";
+    let others = [("src/Lib/Feed.php", feed)];
+    let texts = |issues: &[Issue]| -> Vec<String> {
+        issues
+            .iter()
+            .flat_map(|issue| {
+                std::iter::once(issue.message.clone())
+                    .chain(issue.annotations.iter().filter_map(|annotation| annotation.message.clone()))
+                    .chain(issue.notes.iter().cloned())
+                    .chain(issue.help.clone())
+            })
+            .collect()
+    };
+
+    let sharp_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/OrderImport.sharp", sharp), &others);
+    let php_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/OrderImport.php", php), &others);
+
+    assert_eq!(
+        issues(("src/Demo/OrderImport.sharp", sharp), &others),
+        ["9:18 yield-from-invalid-value-type", "10:18 yield-from-non-iterable", "11:18 yield-from-invalid-send-type"]
+    );
+    assert_eq!(
+        sharp_issues[0].message,
+        "Invalid value type from `yield ...`: current generator expects to yield `Order`, but the inner iterable yields `int`."
+    );
+    assert_eq!(
+        php_issues[0].message,
+        "Invalid value type from `yield from`: current generator expects to yield `Demo\\Order`, but the inner iterable yields `int`."
+    );
+    assert!(texts(&sharp_issues).iter().all(|text| !text.contains("yield from")), "{:#?}", texts(&sharp_issues));
+    assert!(texts(&php_issues).iter().all(|text| !text.contains("yield ...")), "{:#?}", texts(&php_issues));
+}
+
 /// `Sharp\Set` is the engine's class that makes each `Set` parameter a `Set`, which only the lowering calls, as
 /// `Sharp\Collection` is the class each collection method runs on. Neither is a class PHP# code imports and calls, so
 /// `Set.from` is an unknown method, as `\Sharp\Set::from` is in PHP.

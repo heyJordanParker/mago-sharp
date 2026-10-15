@@ -2,6 +2,7 @@ use mago_names::ResolvedNames;
 use mago_syntax::cst::Yield;
 use mago_syntax::cst::YieldFrom;
 use mago_syntax::cst::YieldPair;
+use mago_syntax::cst::YieldSpread;
 use mago_syntax::cst::YieldValue;
 
 use crate::FingerprintOptions;
@@ -20,12 +21,14 @@ impl Fingerprintable for Yield<'_> {
     {
         use Yield::From;
         use Yield::Pair;
+        use Yield::Spread;
         use Yield::Value;
 
         match self {
             Value(y) => y.fingerprint_with_hasher(hasher, resolved_names, options),
             Pair(y) => y.fingerprint_with_hasher(hasher, resolved_names, options),
             From(y) => y.fingerprint_with_hasher(hasher, resolved_names, options),
+            Spread(y) => y.fingerprint_with_hasher(hasher, resolved_names, options),
         }
     }
 }
@@ -72,6 +75,21 @@ impl Fingerprintable for YieldFrom<'_> {
         H: std::hash::Hasher,
     {
         "yield_from".hash(hasher);
+        self.iterator.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for YieldSpread<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "yield_spread".hash(hasher);
         self.iterator.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }

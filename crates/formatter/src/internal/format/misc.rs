@@ -321,6 +321,7 @@ pub fn is_expandable_expression<'arena>(node: &'arena Expression<'arena>, includ
                     || is_expandable_expression(yield_pair.value, include_calls)
             }
             Yield::From(yield_from) => is_expandable_expression(yield_from.iterator, include_calls),
+            Yield::Spread(yield_spread) => is_expandable_expression(yield_spread.iterator, include_calls),
         };
     }
 

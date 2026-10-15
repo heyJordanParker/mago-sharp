@@ -245,6 +245,7 @@ enum NodeKind: string
     case Yield = 'Yield';
     case YieldFrom = 'YieldFrom';
     case YieldPair = 'YieldPair';
+    case YieldSpread = 'YieldSpread';
     case YieldValue = 'YieldValue';
     case Statement = 'Statement';
     case ExpressionStatement = 'ExpressionStatement';
