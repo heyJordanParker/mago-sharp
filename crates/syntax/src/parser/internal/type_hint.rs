@@ -267,13 +267,35 @@ where
     /// a type and a name follow, as in `[Searchable] string name`, or the class's own name and `(`, as in
     /// `[Deprecated] Report(…)`, its constructor. After a list an operator or `.` follows.
     pub(crate) fn is_at_tuple_hint(&self) -> Result<bool, ParseError> {
-        if !self.dialect.is_sharp() {
+        let Some((name, after)) = self.peek_after_tuple_hint()? else {
             return Ok(false);
+        };
+        if after.kind == T!["("] && self.state.members_name.as_deref() == Some(name.value) {
+            return Ok(false);
+        }
+
+        Ok(matches!(after.kind, T!["(" | "," | ")" | "=" | ";" | "{"]))
+    }
+
+    /// Whether a PHP# loop variable with a tuple type starts here, as in `[string, int] entry of stock`: the name after
+    /// the type is followed by `of`, or TypeScript's `in`, which `parse_of_keyword` reports. In `[key, count] of stock`
+    /// no name follows the brackets, so they unpack each element.
+    pub(crate) fn is_at_tuple_loop_variable(&self) -> Result<bool, ParseError> {
+        Ok(self
+            .peek_after_tuple_hint()?
+            .is_some_and(|(_, after)| after.kind == T![Identifier] && matches!(after.value, b"of" | b"in")))
+    }
+
+    /// The name after the PHP# tuple type that may start here, and the token after that name: a `[` whose closing `]`,
+    /// and an optional `?` written right after it, are followed by a name.
+    fn peek_after_tuple_hint(&self) -> Result<Option<(Token<'_>, Token<'_>)>, ParseError> {
+        if !self.dialect.is_sharp() {
+            return Ok(None);
         }
 
         let mut tokens = self.stream.peek_tokens();
         if !matches!(tokens.next().transpose()?, Some(token) if token.kind == T!["["]) {
-            return Ok(false);
+            return Ok(None);
         }
         let mut depth = 1usize;
         let mut closing = None;
@@ -288,12 +310,12 @@ where
                         break;
                     }
                 }
-                T![";" | "{" | "}"] => return Ok(false),
+                T![";" | "{" | "}"] => return Ok(None),
                 _ => {}
             }
         }
         let Some(closing) = closing else {
-            return Ok(false);
+            return Ok(None);
         };
 
         let mut name = tokens.next().transpose()?;
@@ -304,16 +326,10 @@ where
             name = tokens.next().transpose()?;
         }
         let Some(name) = name.filter(|name| name.kind.is_identifier_maybe_reserved()) else {
-            return Ok(false);
+            return Ok(None);
         };
-        let Some(after) = tokens.next().transpose()? else {
-            return Ok(false);
-        };
-        if after.kind == T!["("] && self.state.members_name.as_deref() == Some(name.value) {
-            return Ok(false);
-        }
 
-        Ok(matches!(after.kind, T!["(" | "," | ")" | "=" | ";" | "{"]))
+        Ok(tokens.next().transpose()?.map(|after| (name, after)))
     }
 
     /// Parses a PHP# tuple type, spec section 30: element types in brackets, each followed by its optional name, as in

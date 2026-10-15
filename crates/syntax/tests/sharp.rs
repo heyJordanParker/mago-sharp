@@ -2418,6 +2418,36 @@ fn a_const_loop_variable_can_have_its_type_written() {
     assert_eq!(source(CODE, declaration.hint.expect("a type")), "List<int>");
 }
 
+/// Spec section 30: a loop variable takes a tuple type as any local does, as in
+/// `for (const [string, int] entry of stock)`, where `[key, count]` with no name after it unpacks each element. A
+/// lambda parameter takes one too.
+#[test]
+fn a_const_loop_variable_can_have_a_tuple_type_written() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        for (const [string, int] entry of stock) {\n        }\n        for (const [string key, int count]? maybe of entries) {\n        }\n        for (const [key, count] of stock) {\n        }\n        const keyOf = ([string, int] entry) => entry;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [Statement::ForOf(typed), Statement::ForOf(named), Statement::ForOf(unpacked), Statement::LocalDeclaration(_)] =
+        method_body(program)
+    else {
+        panic!("expected three for … of loops and a local, got {:#?}", method_body(program));
+    };
+
+    let ForOfTarget::Value(entry) = &typed.target else {
+        panic!("expected one loop variable, got {:#?}", typed.target);
+    };
+    assert_eq!(source(CODE, entry.hint.expect("a type")), "[string, int]");
+    assert_eq!(entry.name.value, b"entry");
+
+    let ForOfTarget::Value(maybe) = &named.target else {
+        panic!("expected one loop variable, got {:#?}", named.target);
+    };
+    assert_eq!(source(CODE, maybe.hint.expect("a type")), "[string key, int count]?");
+
+    assert!(matches!(unpacked.target, ForOfTarget::Unpack(_)), "{:#?}", unpacked.target);
+}
+
 /// A typed local never takes `let`, so neither does a typed loop variable.
 #[test]
 fn a_let_loop_variable_with_its_type_written_is_a_parse_error() {

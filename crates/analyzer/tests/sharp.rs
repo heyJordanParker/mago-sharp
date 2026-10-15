@@ -10282,9 +10282,12 @@ fn a_named_tuple_element_reads_by_its_name() {
 /// `entry` is no `Plan`.
 #[test]
 fn a_single_loop_variable_over_a_map_is_its_entry_tuple() {
-    let sharp = "namespace Demo;\n\nclass Store\n{\n    public void run(Map<string, Plan> plans)\n    {\n        for (const entry of plans) {\n            const [key, plan] = entry;\n            string name = key;\n            Plan kept = plan;\n            [string, Plan] again = entry;\n            Plan wrong = entry;\n        }\n    }\n}\n\nclass Plan\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public void run(Map<string, Plan> plans)\n    {\n        for (const entry of plans) {\n            const [key, plan] = entry;\n            string name = key;\n            Plan kept = plan;\n            [string, Plan] again = entry;\n            Plan wrong = entry;\n        }\n        for (const [string, Plan] typed of plans) {\n            const [name, plan] = typed;\n            Plan kept = plan;\n        }\n        for (const [int, Plan] mistyped of plans) {\n        }\n    }\n}\n\nclass Plan\n{\n}\n";
 
-    assert_eq!(issues(("src/Demo/Store.sharp", sharp), &[]), ["12:26 invalid-local-assignment-value"]);
+    assert_eq!(
+        issues(("src/Demo/Store.sharp", sharp), &[]),
+        ["12:26 invalid-local-assignment-value", "18:32 invalid-local-assignment-value"]
+    );
 }
 
 /// Spec section 30: a loop's `[a, b]` unpacks each element, as `const [a, b] = t` unpacks a tuple, so it reads a `List`

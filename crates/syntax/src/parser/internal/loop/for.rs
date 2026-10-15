@@ -28,7 +28,7 @@ where
         let declaration = if self.is_at_loop_variable_keyword()? {
             let keyword = self.expect_any_keyword()?;
             let is_const = keyword.value.eq_ignore_ascii_case(b"const");
-            if matches!(self.stream.peek_kind(0)?, Some(T!["["])) {
+            if matches!(self.stream.peek_kind(0)?, Some(T!["["])) && !(is_const && self.is_at_tuple_loop_variable()?) {
                 let target = ForOfTarget::Unpack(self.parse_for_of_unpack_target(is_const)?);
 
                 return Ok(Statement::ForOf(self.parse_for_of(r#for, left_parenthesis, keyword, target)?));
