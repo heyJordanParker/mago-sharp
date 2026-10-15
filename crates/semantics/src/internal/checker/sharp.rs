@@ -5973,9 +5973,14 @@ fn check_yield(r#yield: &Yield, context: &mut Context<'_, '_, '_>) {
     }
 }
 
-/// The method that returns `Iterable<T>` and whose body holds `span` outside any lambda in it.
+/// The method that returns `Iterable<T>` and whose body holds `span` outside any lambda in it, in a class or in one of
+/// its extension blocks.
 fn enclosing_iterator_method<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> Option<&'ast Method<'arena>> {
-    let method = enclosing_class(program, span)?.members.iter().find_map(|member| match member {
+    let members = match enclosing_extension(program, span) {
+        Some(extension) => &extension.members,
+        None => &enclosing_class(program, span)?.members,
+    };
+    let method = members.iter().find_map(|member| match member {
         ClassLikeMember::Method(method) if method.span().contains(&span.start) => Some(method),
         _ => None,
     })?;

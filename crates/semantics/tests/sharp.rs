@@ -4275,6 +4275,21 @@ fn yield_outside_a_method_that_returns_an_iterable_is_an_error() {
     );
 }
 
+/// An extension method that returns `Iterable<T>` yields as a method of its class does, spec sections 12 and 26, and
+/// one that yields returns no value.
+#[test]
+fn an_extension_method_that_returns_an_iterable_yields() {
+    let code = "namespace App.Tenant;\n\npublic static class Words\n{\n    extension(string text)\n    {\n        public Iterable<string> letters()\n        {\n            yield text;\n        }\n\n        public List<string> listed()\n        {\n            yield text;\n        }\n\n        public Iterable<string> ended()\n        {\n            yield text;\n            return [text];\n        }\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "14:13 `yield` needs a method that returns `Iterable<T>`.",
+            "20:13 A method that yields cannot return a value: write `return;` to end it.",
+        ]
+    );
+}
+
 /// PHP's `send()` and two-way generators are not part of PHP#, spec section 12, so `yield` is a statement with a value.
 #[test]
 fn yield_as_a_value_or_without_a_value_is_an_error() {
