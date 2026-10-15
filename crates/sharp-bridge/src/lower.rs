@@ -3365,6 +3365,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 rhs: Expression::Identifier(class),
             }) => {
                 let value = self.expression(lhs);
+                // `is List<Any?>` on a `List` or null, as a list pattern's first test on a `List?`, is the null check,
+                // and PHP's `\is_array` gives it without walking the elements.
+                if self.types.tests_only_for_null(lhs, class) {
+                    let line = self.line(class);
+                    let function = self.string(ZEND_NAME_FQ, line, b"is_array");
+                    let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+
+                    return self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+                }
                 // A test of a type parameter or of a class with type arguments reads them while the code runs.
                 if let Some(tested) = self.types.tested_type(class) {
                     let tested = self.type_text(line, &tested);

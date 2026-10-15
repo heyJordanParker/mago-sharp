@@ -16395,6 +16395,50 @@ fn a_list_pattern_tests_the_count_then_each_element_then_takes_the_rest() {
     );
 }
 
+/// ```php
+/// $a = $value is List<Any?> && \count($value) === 1 && \is_int($one = $value[0]);
+/// ```
+///
+/// A value that may be a list or anything else is tested with the engine's test of `List<Any?>` first, where a `List`
+/// needs only `\is_array`.
+#[test]
+fn a_list_pattern_on_any_value_tests_it_is_a_list_first() {
+    assert_eq!(
+        body_in("int run(Any value)", "        const a = value is [int one];\n        return 0;\n", &[]),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                AND
+                  AND
+                    SHARP_IS_TYPE
+                      VAR
+                        ZVAL "value"
+                      ZVAL "List<Any?>"
+                    BINARY_OP [16]
+                      CALL
+                        ZVAL "count"
+                        ARG_LIST
+                          VAR
+                            ZVAL "value"
+                      ZVAL 1
+                  CALL
+                    ZVAL "is_int"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "one"
+                        DIM
+                          VAR
+                            ZVAL "value"
+                          ZVAL 0
+              RETURN
+                ZVAL 0
+            "#}
+    );
+}
+
 #[test]
 fn a_type_with_properties_tests_the_type_then_each_property() {
     assert_eq!(

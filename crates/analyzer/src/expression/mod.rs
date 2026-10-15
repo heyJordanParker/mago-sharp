@@ -16,6 +16,7 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::r#enum::TEnum;
 use mago_codex::ttype::get_literal_string;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_mixed_list;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::union::TUnion;
@@ -31,9 +32,7 @@ use mago_syntax::cst::As;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Hint;
-use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Leave;
 use mago_syntax::cst::ListPattern;
 use mago_syntax::cst::ListPatternElement;
@@ -84,7 +83,6 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
 use crate::utils::names::display_missing_imports;
-use crate::utils::names::display_type;
 use crate::utils::quoted_source;
 
 pub mod access;
@@ -422,6 +420,13 @@ where
             artifacts.record_tested_type(hint, tested);
         }
     }
+    // A list pattern's first test is `instanceof` a name spanning its `[`, which reads `List<Any?>`.
+    for left_bracket in node.filter_map(|node| match node {
+        Node::ListPattern(list) => Some(list.left_bracket),
+        _ => None,
+    }) {
+        artifacts.record_tested_type(&left_bracket, get_mixed_list());
+    }
 
     let Some(PhpShape { php, temporaries, tests }) =
         context.get_assertion_context_from_block(block_context).php_shape(node)
@@ -460,20 +465,21 @@ where
     // The PHP of a pattern calls a type test that no source the user wrote calls. It is the PHP# syntax itself, so it is
     // never a bare call to refuse. Some calls are the shape of the pattern, which no source the user wrote can drop, so
     // C# reports nothing there when they always hold: a properties pattern's `is_object` and a list pattern's
-    // `is_array`, their null checks, a list pattern's `count`, and the type test of a list's element or rest, which the
-    // list's own type can make always true, as `[int, ...List<int> rest]` writes "any element".
+    // `is List<Any?>`, their null checks, a list pattern's `count`, and the type test of a list's element or rest, which
+    // the list's own type can make always true, as `[int, ...List<int> rest]` writes "any element".
     let mut pattern_calls = PatternCalls::default();
     match node {
         Node::Expression(expression) => PatternCallWalker.walk_expression(expression, &mut pattern_calls),
         Node::Statement(statement) => PatternCallWalker.walk_statement(statement, &mut pattern_calls),
         _ => {}
     }
-    let issues = refuse_list_patterns_on_other_values(php, &pattern_calls.lists, context, artifacts, issues);
+    let list_reads = list_reads(php, &pattern_calls.lists);
+    let issues = refuse_list_patterns_on_other_values(&list_reads, artifacts, issues);
     let pattern_call = |span: Span| {
         pattern_calls.calls.iter().find(|call: &&LocalIdentifier| call.span.start.offset == span.start.offset)
     };
     let is_shape = |call: &LocalIdentifier| {
-        matches!(call.value, b"is_object" | b"count" | b"is_array") || pattern_calls.element_tests.contains(&call.span)
+        matches!(call.value, b"is_object" | b"count") || pattern_calls.element_tests.contains(&call.span)
     };
     // The last arm of a `match` without `default` takes every value the arms before it leave, as `default` does, so its
     // test is always true and not redundant. An arm before it that is always true leaves nothing for the arms after it.
@@ -548,6 +554,7 @@ where
                 && (!(is_code(issue, IssueCode::ReplacedBySyntax) || is_code(issue, IssueCode::BareFunctionCall))
                     || called.is_none())
                 && (!always_true || called.is_none_or(|call| !is_shape(call)))
+                && (!always_true || span.is_none_or(|span| !list_reads.iter().any(|(_, read)| read.span().start == span.start)))
                 && (!always_true || span.is_none_or(|span| !pattern_calls.case_patterns.contains(&span.start.offset)))
                 && (!always_true
                     || span.is_none_or(|span| {
@@ -909,20 +916,9 @@ fn never_matches(pattern: Span) -> Issue {
         .with_help("Remove the pattern, or test a value that can match it.")
 }
 
-/// Checks the value each list pattern tests, as its PHP's first read, the argument of the `\is_array` at its `[`, holds
-/// it. A list pattern tests a `List`: a value that holds no `List` never matches it, and a value that may be a `List` or
-/// another array, as `Any` may, waits for the type test of `List<T>`. Either one replaces the issues inside the list
-/// pattern and inside its value's read, which count and index the value as a list.
-fn refuse_list_patterns_on_other_values<A>(
-    php: Node<'_, '_>,
-    lists: &[(Span, Span)],
-    context: &Context<'_, '_, A>,
-    artifacts: &AnalysisArtifacts,
-    issues: impl IntoIterator<Item = Issue>,
-) -> Vec<Issue>
-where
-    A: Arena,
-{
+/// Each list pattern of `lists`, by its span and its `[`, with the value its PHP's first test, the `is List<Any?>` at
+/// the `[`, reads.
+fn list_reads<'ast, 'arena>(php: Node<'ast, 'arena>, lists: &[(Span, Span)]) -> Vec<(Span, &'ast Expression<'arena>)> {
     let mut reads = ListReads::default();
     match php {
         Node::Expression(expression) => ListReadWalker.walk_expression(expression, &mut reads),
@@ -930,36 +926,34 @@ where
         _ => {}
     }
 
+    lists
+        .iter()
+        .filter_map(|&(list, left_bracket)| {
+            reads.0.iter().find(|(class, _)| class.start.offset == left_bracket.start.offset).map(|&(_, read)| (list, read))
+        })
+        .collect()
+}
+
+/// Checks the value each list pattern tests, its PHP's first read, may be a `List`. A value that can hold no `List`, as
+/// a `Map`, a `string` or another array, never matches, and the refusal replaces the issues inside the list pattern
+/// and inside its value's read, which count and index the value as a list.
+fn refuse_list_patterns_on_other_values(
+    list_reads: &[(Span, &Expression<'_>)],
+    artifacts: &AnalysisArtifacts,
+    issues: impl IntoIterator<Item = Issue>,
+) -> Vec<Issue> {
     let mut refused = Vec::new();
     let mut refusals = Vec::new();
-    for &(list, left_bracket) in lists {
-        let Some((read, read_type)) = reads
-            .0
-            .iter()
-            .find(|(function, _)| function.start.offset == left_bracket.start.offset)
-            .and_then(|(_, read)| Some((read.span(), artifacts.get_expression_type(*read)?)))
-        else {
+    for &(list, read) in list_reads {
+        let Some(read_type) = artifacts.get_expression_type(read) else {
             continue;
         };
-
-        let kinds: Vec<ListKind> = read_type.types.iter().map(list_kind).collect();
-        let refusal = if kinds.contains(&ListKind::Unknown)
-            || (kinds.contains(&ListKind::List) && kinds.contains(&ListKind::OtherArray))
-        {
-            let read_type = display_type(context, read_type);
-
-            Issue::error(format!("A list pattern on a `{read_type}` is not supported yet in PHP#."))
-                .with_code(IssueCode::NotSupportedYet.as_str())
-                .with_annotation(Annotation::primary(list).with_message("Not supported yet."))
-                .with_note("A list pattern tests a `List`, and a value that may be another array needs the type test of `List<T>` first.")
-        } else if kinds.contains(&ListKind::List) || kinds.contains(&ListKind::Error) {
+        if read_type.types.iter().any(may_be_list) {
             continue;
-        } else {
-            never_matches(list)
-        };
+        }
 
-        refused.extend([list, read]);
-        refusals.push(refusal);
+        refused.extend([list, read.span()]);
+        refusals.push(never_matches(list));
     }
 
     issues
@@ -969,48 +963,32 @@ where
         .collect()
 }
 
-/// What a value's type is to a list pattern.
-#[derive(PartialEq)]
-enum ListKind {
-    List,
-    OtherArray,
-    /// A type that is never an array, as `int`, `string`, an object or null.
-    NotArray,
-    /// A type that may be any array, as `Any` or a type parameter.
-    Unknown,
-    /// The type of an expression a parse error refused.
-    Error,
-}
-
-fn list_kind(atomic: &TAtomic) -> ListKind {
+/// Whether a value of `atomic` may be a `List`: a list, a type that may be any value, as `Any` or a type parameter,
+/// or the type of an expression a parse error refused. Another array, a scalar, an object and null are none.
+fn may_be_list(atomic: &TAtomic) -> bool {
     match atomic {
-        TAtomic::Array(TArray::List(_)) => ListKind::List,
-        TAtomic::Array(_) => ListKind::OtherArray,
+        TAtomic::Array(array) => matches!(array, TArray::List(_)),
         TAtomic::Scalar(_)
         | TAtomic::Object(_)
         | TAtomic::Callable(_)
         | TAtomic::Resource(_)
         | TAtomic::Null
         | TAtomic::Void
-        | TAtomic::Never => ListKind::NotArray,
-        TAtomic::Error => ListKind::Error,
-        _ => ListKind::Unknown,
+        | TAtomic::Never => false,
+        _ => true,
     }
 }
 
-/// The value each `\is_array` call of a pattern's PHP tests, by the span of its function name.
+/// The value each `instanceof` of a pattern's PHP tests, by the span of its class name.
 #[derive(Default)]
 struct ListReads<'ast, 'arena>(Vec<(Span, &'ast Expression<'arena>)>);
 
 struct ListReadWalker;
 
 impl<'ast, 'arena> Walker<'ast, 'arena, ListReads<'ast, 'arena>> for ListReadWalker {
-    fn walk_in_function_call(&self, call: &'ast FunctionCall<'arena>, reads: &mut ListReads<'ast, 'arena>) {
-        if let Expression::Identifier(Identifier::Local(function)) = call.function
-            && function.value == b"is_array"
-            && let Some(argument) = call.argument_list.arguments.first()
-        {
-            reads.0.push((function.span, argument.value()));
+    fn walk_in_binary(&self, binary: &'ast Binary<'arena>, reads: &mut ListReads<'ast, 'arena>) {
+        if let (BinaryOperator::Instanceof(_), Expression::Identifier(class)) = (binary.operator, binary.rhs) {
+            reads.0.push((class.span(), binary.lhs));
         }
     }
 }

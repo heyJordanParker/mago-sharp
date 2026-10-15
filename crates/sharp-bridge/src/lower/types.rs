@@ -286,6 +286,21 @@ impl<'analysis> Types<'analysis> {
         Some(text(tested, self.codebase, Parameter::Index))
     }
 
+    /// Whether the test at `name` is of `List<Any?>` and the analysis knows `value` is a `List` or null, as a list
+    /// pattern's first test on a `List?` is, so the test asks only whether `value` is not null.
+    pub(crate) fn tests_only_for_null(&self, value: &Expression, name: &impl HasSpan) -> bool {
+        let is_list = |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(_)));
+        let tests_any_list = self.artifacts.get_tested_type(name).is_some_and(|tested| {
+            tested.types.iter().all(|atomic| {
+                matches!(atomic, TAtomic::Array(TArray::List(list))
+                    if list.element_type.is_mixed() && list.known_elements.is_none() && !list.non_empty)
+            })
+        });
+
+        tests_any_list
+            && self.expression_type(value).types.iter().all(|atomic| is_list(atomic) || matches!(atomic, TAtomic::Null))
+    }
+
     /// The classes the type argument of the type parameter `name`, written as a class in `TItem.member`, can be: the
     /// classes of its bound, as [`receiver_classes`] gives them. None for a class.
     pub(crate) fn type_parameter_classes(&self, name: &impl HasSpan) -> Option<Vec<&'analysis [u8]>> {

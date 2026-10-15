@@ -138,8 +138,8 @@ where
 /// The PHP functions a pattern node calls to test a value, as the identifiers its PHP calls.
 ///
 /// They are `is_int`, `is_float`, `is_string` or `is_bool` at a scalar type of a type pattern or `as`, `is_object` at
-/// the `{` of a properties pattern, `is_array` at the `[` and `count` at the `]` of a list pattern, and `array_slice` at
-/// the `...` of a list pattern's named rest. The binder records each as the name resolved
+/// the `{` of a properties pattern, `count` at the `]` of a list pattern, and `array_slice` at the `...` of a list
+/// pattern's named rest. The binder records each as the name resolved
 /// at that span, as it records a call's name.
 pub fn called_functions(node: Node<'_, '_>) -> impl Iterator<Item = LocalIdentifier<'static>> {
     let called = |span, value: &'static [u8]| Some(LocalIdentifier { span, value });
@@ -147,7 +147,7 @@ pub fn called_functions(node: Node<'_, '_>) -> impl Iterator<Item = LocalIdentif
         Node::TypePattern(type_pattern) => [scalar_test(&type_pattern.hint), None],
         Node::As(r#as) => [scalar_test(r#as.hint), None],
         Node::PropertiesPattern(properties) => [called(properties.left_brace, b"is_object"), None],
-        Node::ListPattern(list) => [called(list.left_bracket, b"is_array"), called(list.right_bracket, b"count")],
+        Node::ListPattern(list) => [called(list.right_bracket, b"count"), None],
         // The rest's type is a type test of its own, whose name the binder records at its span.
         Node::RestPattern(RestPattern { ellipsis, hint: Some(_), .. }) => [called(*ellipsis, b"array_slice"), None],
         _ => [None, None],
@@ -540,13 +540,14 @@ where
         })
     }
 
-    /// `\is_array(s) && \count(s) === n`, or `\count(s) >= n` with a rest, then `&&` each element's test, then the
-    /// rest's `\is_array($rest = \array_slice(s, k, \count(s) - n))`, which is always true and assigns the rest of the
-    /// list from its place `k`, and is `\array_slice(s, k)` for a rest at the end. The first `\is_array` is the null
-    /// check of a `List?`, as `\is_object` is a properties pattern's. An element before the rest reads `s[i]` by its
-    /// place, and one after it `s[\count(s) - m]`, the `m`th from the end. Each element is read at the start of its
-    /// pattern, so an issue at the read is never taken for the `\is_array` at the `[`. The count each read calls is the
-    /// one the binder records at the `]`.
+    /// `s is List<Any?> && \count(s) === n`, or `\count(s) >= n` with a rest, then `&&` each element's test, then the
+    /// rest's `($rest = \array_slice(s, k, \count(s) - n)) is List<T>`, which assigns the rest of the list from its
+    /// place `k`, and is `\array_slice(s, k)` for a rest at the end. The first test is #102's, `instanceof` a name that
+    /// spans the `[`, where the analysis records `List<Any?>`: on a `List` or a `List?` it is the null check, which the
+    /// bridge lowers as `\is_array`, and on any other value it tests the value is a list. An element before the rest
+    /// reads `s[i]` by its place, and one after it `s[\count(s) - m]`, the `m`th from the end. Each element is read at
+    /// the start of its pattern, so an issue at the read is never taken for the test at the `[`. The count each read
+    /// calls is the one the binder records at the `]`.
     fn list_test(
         &mut self,
         list: &'arena ListPattern<'arena>,
@@ -559,10 +560,9 @@ where
         });
         let patterns = elements - usize::from(rest.is_some());
 
-        let mut functions = called_functions(Node::ListPattern(list));
-        let (is_array, count) = (functions.next()?, functions.next()?);
+        let count = called_functions(Node::ListPattern(list)).next()?;
         let read = self.read(subject, list.left_bracket);
-        let array = self.call(is_array, read);
+        let array = self.instance_of(read, Identifier::Local(LocalIdentifier { span: list.left_bracket, value: b"List" }));
         let length = self.integer(patterns, start_of(list.right_bracket));
         let operator = if rest.is_some() {
             BinaryOperator::GreaterThanOrEqual(start_of(list.right_bracket))
@@ -681,12 +681,21 @@ where
     ) -> Option<&'arena Expression<'arena>> {
         Some(match type_test_of(hint)? {
             TypeTest::Scalar(function) => self.call(function, operand),
-            TypeTest::Class(class) => self.binary(
-                operand,
-                BinaryOperator::Instanceof(Keyword { span: start_of(hint.span()), value: b"instanceof" }),
-                self.alloc(Expression::Identifier(class)),
-            ),
+            TypeTest::Class(class) => self.instance_of(operand, class),
         })
+    }
+
+    /// `operand instanceof class`, with `instanceof` at the start of the class's name.
+    fn instance_of(
+        &self,
+        operand: &'arena Expression<'arena>,
+        class: Identifier<'arena>,
+    ) -> &'arena Expression<'arena> {
+        self.binary(
+            operand,
+            BinaryOperator::Instanceof(Keyword { span: start_of(class.span()), value: b"instanceof" }),
+            self.alloc(Expression::Identifier(class)),
+        )
     }
 
     /// A tested value: itself when it is a local or a parameter, and a hidden `$match#N` otherwise.

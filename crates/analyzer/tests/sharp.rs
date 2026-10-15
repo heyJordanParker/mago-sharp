@@ -4882,18 +4882,20 @@ fn list_patterns_test_the_count_and_each_element() {
     let anywhere = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static float last(List<Circle> circles) => match (circles) {\n        [...List<Circle> before, Circle last] => last.radius + before.count(),\n        default => 0.0,\n    };\n\n    public static int ends(List<int> values)\n    {\n        if (values is [int first, ..., int last]) {\n            return first + last;\n        }\n        return 0;\n    }\n\n    public static int middle(List<int> values) => match (values) {\n        [1, ...List<int> inner, int end] => inner.count() + end,\n        [..., > 9] => 9,\n        default => 0,\n    };\n}\n";
     assert_eq!(issues(("src/Demo/Report.sharp", anywhere), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
 
-    // A value that holds no `List` never matches, and one that may be another array waits for the type test of
-    // `List<T>`.
-    let other = "namespace Demo;\n\nclass Report\n{\n    public static bool mapped(Map<string, int> entries) => entries is [int one];\n\n    public static bool text(string name) => name is [] or \"\";\n\n    public static bool any(Any value) => value is [1];\n\n    public static bool inner(List<Any> values) => values is [[]];\n}\n";
+    // A value that holds no `List` never matches.
+    let other = "namespace Demo;\n\nclass Report\n{\n    public static bool mapped(Map<string, int> entries) => entries is [int one];\n\n    public static bool text(string name) => name is [] or \"\";\n}\n";
     assert_eq!(
         refusals(("src/Demo/Report.sharp", other), &[]),
         [
             "5:71 impossible-type-comparison This pattern never matches the value it tests. | Remove the pattern, or test a value that can match it.",
             "7:53 impossible-type-comparison This pattern never matches the value it tests. | Remove the pattern, or test a value that can match it.",
-            "9:51 not-supported-yet A list pattern on a `Any` is not supported yet in PHP#. | ",
-            "11:62 not-supported-yet A list pattern on a `Any` is not supported yet in PHP#. | ",
         ]
     );
+
+    // A value that may be a `List` or anything else, as an `Any` or an element of a `List<Any>`, is tested with
+    // `is List<Any?>` first, and its elements and rest are typed by their patterns.
+    let any = "namespace Demo;\n\nclass Report\n{\n    public static int first(Any value) => match (value) {\n        [int one] => one,\n        [int head, ...List<int> rest] => head + rest.count(),\n        default => 0,\n    };\n\n    public static bool inner(List<Any> values) => values is [[]];\n\n    public static bool maybe(Any? value) => value is [string];\n}\n";
+    assert_eq!(refusals(("src/Demo/Report.sharp", any), &[]), Vec::<String>::new());
 
     // A rest's type is tested as a typed element's is: one no element can have never matches, and `rest` has the type
     // written.
