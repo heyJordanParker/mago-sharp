@@ -340,11 +340,10 @@ where
     };
     let behavior_type = get_type_from_hint(context, block_context, artifacts, behavior);
     if !class.template_types.is_empty() {
-        let type_arguments = match behavior_type.get_single() {
-            TAtomic::Object(TObject::Named(named)) => named.type_parameters.clone(),
-            _ => None,
+        let TAtomic::Object(TObject::Named(named)) = behavior_type.get_single() else {
+            unreachable!("a generic class written as a type is a named object");
         };
-        let type_arguments = type_arguments.unwrap_or_default();
+        let type_arguments = named.type_parameters.clone().unwrap_or_default();
         artifacts.record_type_arguments(
             behavior.span(),
             (0..class.template_types.len()).map(|index| type_arguments.get(index).cloned()),
@@ -421,16 +420,15 @@ where
         let property = display_property_name(context, property_name);
         let property_type = display_sharp_type(context, &property_type);
         let expected = display_sharp_type(context, &expected);
-        let type_arguments = match behavior_type.get_single() {
-            TAtomic::Object(TObject::Named(named)) => named.type_parameters.as_deref(),
-            _ => None,
+        let TAtomic::Object(TObject::Named(named)) = behavior_type.get_single() else {
+            unreachable!("a class written as a type is a named object");
         };
         let implemented = get_specialized_template_type(
             context.codebase,
             word(b"T"),
             word(b"Sharp\\Behavior"),
             class,
-            type_arguments,
+            named.type_parameters.as_deref(),
         )
         .filter(|_| context.codebase.class_implements(class.name.as_bytes(), b"Sharp\\Behavior"));
         let message = match implemented {

@@ -16561,6 +16561,11 @@ fn a_behavior_implements_behavior_for_the_property_s_type() {
     // An untyped property is the parser's error, so its behaviors have no type to be checked against.
     let untyped = "namespace Demo;\n\npublic class Order\n{\n    public name { get; set; } via Trimmed = \"\";\n}\n";
     assert_eq!(issues(("src/Demo/Order.sharp", untyped), &[behavior, behaviors]), ["5:12 parse"]);
+
+    // A behavior that names no class is semantics' error, so the analyzer checks nothing more of it.
+    let no_class =
+        "namespace Demo;\n\npublic class Order\n{\n    public string name { get; set; } via string = \"\";\n}\n";
+    assert_eq!(issues(("src/Demo/Order.sharp", no_class), &[behavior, behaviors]), Vec::<String>::new());
 }
 
 /// Spec section 6.2: an observer sees `value`, the written value, and `field`, the stored one, each of

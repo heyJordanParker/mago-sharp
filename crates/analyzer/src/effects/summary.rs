@@ -116,7 +116,7 @@ pub(crate) fn record_behaviors<A>(
     A: Arena,
 {
     let Some(class) = block_context.scope.get_class_like() else {
-        return;
+        unreachable!("a property is analyzed in its class's scope");
     };
     if !context.dialect.is_sharp() || behaviors.is_empty() {
         return;
