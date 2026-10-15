@@ -32,6 +32,8 @@ use mago_names::ResolvedNames;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
+use mago_syntax::cst::Argument;
+use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
@@ -479,6 +481,73 @@ impl<'analysis> Types<'analysis> {
     /// spec section 12 lets in, wherever it goes next. A collection's elements are tested only in the result of the
     /// project's own plain PHP: PHP's internal functions and the prelude's stubs have types the engine guarantees.
     pub(crate) fn call_check(&self, call: &Expression) -> Option<(String, String)> {
+        let (name, metadata) = self.plain_php_call(call)?;
+        let text = self.checked_text(self.artifacts.get_expression_type(call)?, metadata.flags.is_user_defined())?;
+
+        Some((text, name))
+    }
+
+    /// The check a call into plain PHP takes where its result, an object of a plain PHP class that is a `Traversable`,
+    /// as a generator, an `IteratorAggregate` or Laravel's `LazyCollection` is, enters a place of the type `declared`
+    /// that holds an `Iterable<T>`: `declared`'s text, whose `Iterable<T>` checks each element as it is read, spec
+    /// section 12, and the call's name. Until it is held as an `Iterable<T>`, the result keeps its own class and
+    /// methods, so [`Self::call_check`] gives the call alone no check.
+    pub(crate) fn lazy_call_check(&self, call: &Expression, declared: &TUnion) -> Option<(String, String)> {
+        let (name, _) = self.plain_php_call(call)?;
+        let is_lazy_source = |atomic: &TAtomic| match atomic {
+            TAtomic::Object(TObject::Named(object)) => {
+                self.codebase.get_class_like(object.name.as_bytes()).is_some_and(|class| !class.flags.is_sharp())
+                    && self.codebase.is_instance_of(object.name.as_bytes(), b"Traversable")
+            }
+            atomic => atomic.is_null(),
+        };
+        let holds_iterable = declared.types.iter().any(|atomic| {
+            matches!(atomic, TAtomic::Iterable(iterable) if iterable.holds_map_entries && !iterable.get_value_type().is_mixed())
+        });
+        let result = self.artifacts.get_expression_type(call)?;
+
+        (holds_iterable && result.types.iter().all(is_lazy_source) && is_written_in_sharp(declared))
+            .then(|| (text(declared, self.codebase, Parameter::Index), name))
+    }
+
+    /// The check each positional argument of `list` takes where it enters an `Iterable<T>` parameter of the PHP#
+    /// function, method or constructor `callee`, as [`Self::lazy_call_check`] says. The engine checks the arguments of a
+    /// call from plain PHP only, so a call from PHP# checks a lazy source where it passes one.
+    pub(crate) fn lazy_argument_checks(
+        &self,
+        callee: &FunctionLikeMetadata,
+        list: &ArgumentList,
+    ) -> Vec<Option<(String, String)>> {
+        list.arguments
+            .iter()
+            .zip(&callee.parameters)
+            .map(|(argument, parameter)| match argument {
+                Argument::Positional(positional) if positional.ellipsis.is_none() => {
+                    self.lazy_call_check(positional.value, &parameter.type_metadata.as_ref()?.type_union)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The PHP# function or method the checker resolved `call` to.
+    pub(crate) fn sharp_callee(&self, call: &Expression) -> Option<&'analysis FunctionLikeMetadata> {
+        let mut callees = self.artifacts.get_callees(call);
+        let (Some(CallTarget::FunctionLike { callee, .. }), None) = (callees.next(), callees.next()) else {
+            return None;
+        };
+
+        self.codebase.get_function_like(callee).filter(|metadata| metadata.flags.is_sharp())
+    }
+
+    /// The constructor `new` runs for the fully qualified class name `class` when PHP# declares it.
+    pub(crate) fn sharp_constructor(&self, class: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
+        self.codebase.get_declaring_method(class, b"__construct").filter(|metadata| metadata.flags.is_sharp())
+    }
+
+    /// The name PHP's return check gives `call`, as `Lib\Pager::orders()`, and the metadata of the plain PHP function or
+    /// method the checker resolved it to.
+    fn plain_php_call(&self, call: &Expression) -> Option<(String, &'analysis FunctionLikeMetadata)> {
         let (callee, metadata) = self.artifacts.get_callees(call).find_map(|target| match target {
             CallTarget::FunctionLike { callee, .. } | CallTarget::MagicMethod { callee, .. } => self
                 .codebase
@@ -487,7 +556,6 @@ impl<'analysis> Types<'analysis> {
                 .map(|metadata| (callee, metadata)),
             CallTarget::Property { .. } => None,
         })?;
-        let text = self.checked_text(self.artifacts.get_expression_type(call)?, metadata.flags.is_user_defined())?;
         let name = match callee {
             FunctionLikeIdentifier::Method(class, _) => {
                 let class = self.codebase.get_class_like(class.as_bytes()).map_or(*class, |class| class.original_name);
@@ -496,7 +564,7 @@ impl<'analysis> Types<'analysis> {
             _ => metadata.original_name.to_string(),
         };
 
-        Some((text, format!("{name}()")))
+        Some((format!("{name}()"), metadata))
     }
 
     /// The type text the property `property` of the fully qualified class name `class` checks a value from plain PHP

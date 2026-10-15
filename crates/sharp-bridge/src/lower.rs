@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use mago_allocator::LocalArena;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::service_id;
@@ -2097,8 +2098,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             && self.types.parent_constructor(self.class).is_some()
         {
             let parameters = self.types.parent_constructor_parameters(self.class);
+            let callee = self.types.parent_constructor(self.class).filter(|constructor| constructor.flags.is_sharp());
             let line = self.line(initializer);
-            let construct = self.call(&initializer.argument_list, None, parameters, |this, arguments| {
+            let construct = self.call(&initializer.argument_list, None, parameters, callee, |this, arguments| {
                 this.parent_construct(line, arguments)
             });
             statements.push(construct);
@@ -2432,10 +2434,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some(arguments) => match (class_name, &instantiation.constructor) {
                 (Some(name), None) => {
                     let parameters = self.types.new_parameters(name);
+                    let callee = self.types.sharp_constructor(name);
 
-                    self.call(arguments, None, parameters, |_, arguments| arguments)
+                    self.call(arguments, None, parameters, callee, |_, arguments| arguments)
                 }
-                (_, Some(_)) => self.call(arguments, type_arguments.clone(), None, |_, arguments| arguments),
+                (_, Some(_)) => self.call(arguments, type_arguments.clone(), None, None, |_, arguments| arguments),
                 (None, None) => self.arguments(arguments),
             },
             None => self.node(SHARP_AST_ARG_LIST, 0, line, &[]),
@@ -4353,7 +4356,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     _ => (self.string(ZEND_NAME_FQ, self.line(function), function.value()), None),
                 };
 
-                self.call(argument_list, None, parameters, |this, arguments| {
+                self.call(argument_list, None, parameters, self.types.sharp_callee(expression), |this, arguments| {
                     this.node(SHARP_AST_CALL, 0, line, &[function, arguments])
                 })
             }
@@ -4423,8 +4426,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let method = self.member(&call.method);
                     let type_arguments = self.types.call_type_arguments(expression);
                     let parameters = self.types.call_parameters(expression);
+                    let callee = self.types.sharp_callee(expression);
 
-                    return self.call(&call.argument_list, type_arguments, parameters, |this, arguments| {
+                    return self.call(&call.argument_list, type_arguments, parameters, callee, |this, arguments| {
                         this.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
                     });
                 }
@@ -4440,8 +4444,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 let type_arguments = self.types.call_type_arguments(expression);
                 let parameters = self.types.call_parameters(expression);
+                let callee = self.types.sharp_callee(expression);
 
-                self.call(&call.argument_list, type_arguments, parameters, |this, arguments| {
+                self.call(&call.argument_list, type_arguments, parameters, callee, |this, arguments| {
                     if is_property_call {
                         let property = this.node(SHARP_AST_PROP, 0, line, &[object, method]);
 
@@ -6427,7 +6432,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let line = self.line(call);
             let function = self.string(ZEND_NAME_FQ, line, function.as_bytes());
 
-            return self.call(&call.argument_list, None, self.types.call_parameters(expression), |this, arguments| {
+            let (parameters, callee) = (self.types.call_parameters(expression), self.types.sharp_callee(expression));
+
+            return self.call(&call.argument_list, None, parameters, callee, |this, arguments| {
                 this.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             });
         }
@@ -6482,8 +6489,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let property_call = kind == SHARP_AST_METHOD_CALL && self.is_property_call(expression, call.object);
         let type_arguments = self.types.call_type_arguments(expression);
         let parameters = self.types.call_parameters(expression);
+        let callee = self.types.sharp_callee(expression);
 
-        self.call(&call.argument_list, type_arguments, parameters, |this, arguments| {
+        self.call(&call.argument_list, type_arguments, parameters, callee, |this, arguments| {
             if property_call {
                 let property = this.node(SHARP_AST_PROP, 0, line, &[object, method]);
 
@@ -6619,6 +6627,26 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_ARG_LIST, 0, self.line(list), &arguments)
     }
 
+    /// The arguments of `list` as the PHP# function, method or constructor `callee` takes them, each lazy plain PHP
+    /// source checked where it enters an `Iterable<T>` parameter, as [`Types::lazy_argument_checks`] says.
+    fn sharp_arguments(&mut self, list: &ArgumentList, callee: &FunctionLikeMetadata) -> Vec<u32> {
+        let checks = self.types.lazy_argument_checks(callee, list);
+        list.arguments
+            .iter()
+            .enumerate()
+            .map(|(position, argument)| match (argument, checks.get(position)) {
+                (Argument::Positional(positional), Some(Some((text, target)))) => {
+                    let line = self.line(positional.value);
+                    let value = self.expression(positional.value);
+
+                    self.verified(line, value, text, target.as_bytes())
+                }
+                (Argument::Positional(positional), _) => self.positional_argument(positional),
+                (Argument::Named(named), _) => self.named_argument(named),
+            })
+            .collect()
+    }
+
     fn argument_nodes(&mut self, list: &ArgumentList) -> Vec<u32> {
         list.arguments
             .iter()
@@ -6651,12 +6679,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         list: &ArgumentList,
         type_arguments: Option<String>,
         parameters: Option<Vec<PlainParameter>>,
+        callee: Option<&FunctionLikeMetadata>,
         call: impl FnOnce(&mut Self, u32) -> u32,
     ) -> u32 {
         let line = self.line(list);
-        let (mut arguments, written) = match parameters {
-            Some(parameters) => self.crossing_arguments(list, &parameters),
-            None => (self.argument_nodes(list), Vec::new()),
+        let (mut arguments, written) = match (parameters, callee) {
+            (Some(parameters), _) => self.crossing_arguments(list, &parameters),
+            (None, Some(callee)) => (self.sharp_arguments(list, callee), Vec::new()),
+            (None, None) => (self.argument_nodes(list), Vec::new()),
         };
         if let Some(type_arguments) = type_arguments {
             arguments.push(self.type_arguments_argument(line, &type_arguments));
@@ -6825,13 +6855,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `\is_array($crossing#N = value) ? \Sharp\Map::from($crossing#N) : $crossing#N`. A value
     /// [`Self::may_be_php_array`] rules out is the object already, and a place without a declared type takes the value
     /// as it is. `[]` entering a `Set` place is the empty `Set`, which the analysis types as the empty array of any
-    /// collection.
+    /// collection. A plain PHP lazy source a call gives is checked element by element where it enters an `Iterable<T>`
+    /// place, as [`Types::lazy_call_check`] says.
     fn crossed_value(&mut self, value: &Expression, declared: Option<&TUnion>) -> u32 {
         if let (Expression::Array(array), Some(true)) = (value.unparenthesized(), declared.and_then(table_kind)) {
             return self.set_literal(array);
         }
         if declared.is_some_and(holds_entries) && self.types.holds_map(value) {
             return self.map_entries(value);
+        }
+        if let Some((text, target)) = declared.and_then(|declared| self.types.lazy_call_check(value, declared)) {
+            let line = self.line(value);
+            let lowered = self.expression(value);
+
+            return self.verified(line, lowered, &text, target.as_bytes());
         }
         let Some(r#type) =
             declared.filter(|declared| self.may_be_php_array(value) && self.crossing_array(declared).is_some())

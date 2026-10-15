@@ -15950,6 +15950,63 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 }
 
 /// ```php
+/// $names = \VERIFY_TYPE_ARGS(\Lib\Calc::lazy(), 'Iterable<string>', 'Lib\Calc::lazy()');
+/// return Report::tally(\VERIFY_TYPE_ARGS(\Lib\Calc::lazy(), …)) + \Lib\Calc::lazy()->count();
+/// ```
+///
+/// Spec section 12: a lazy plain PHP source is checked element by element as it is read. A call that gives an object
+/// of a plain PHP class that is a `Traversable`, as a generator or Laravel's `LazyCollection`, is checked in a
+/// `VERIFY_TYPE_ARGS` of the place's type where an `Iterable<T>` holds it, a local or a PHP# parameter, which puts a
+/// checking `Sequence` in its place. The engine checks the arguments of a call from plain PHP only, so a call from
+/// PHP# checks the one it passes. Until then the value keeps its own class, so a call of its own `count` takes no check.
+#[test]
+fn a_lazy_plain_php_source_is_checked_where_an_iterable_holds_it() {
+    assert_eq!(
+        body_in(
+            "int run()",
+            "        Iterable<string> names = Calc.lazy();\n        return Report.tally(Calc.lazy()) + Calc.lazy().count();\n    }\n\n    private static int tally(Iterable<string> names)\n    {\n        return 0;\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib;\n/**\n * @template TKey of array-key\n * @template TValue\n * @implements \\IteratorAggregate<TKey, TValue>\n */\nfinal class Lazy implements \\IteratorAggregate { public function getIterator(): \\Generator { yield 'a'; } public function count(): int { return 1; } }\nfinal class Calc { /** @return Lazy<int, string> */ public static function lazy(): Lazy { return new Lazy(); } }",
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "names"
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "Lib\\Calc"
+                    ZVAL "lazy"
+                    ARG_LIST
+                  ZVAL "Iterable<string>"
+                  ZVAL "Lib\\Calc::lazy()"
+              RETURN
+                BINARY_OP [1]
+                  STATIC_CALL
+                    ZVAL "App\\Tenant\\Report"
+                    ZVAL "tally"
+                    ARG_LIST
+                      VERIFY_TYPE_ARGS
+                        STATIC_CALL
+                          ZVAL "Lib\\Calc"
+                          ZVAL "lazy"
+                          ARG_LIST
+                        ZVAL "Iterable<string>"
+                        ZVAL "Lib\\Calc::lazy()"
+                  METHOD_CALL
+                    STATIC_CALL
+                      ZVAL "Lib\\Calc"
+                      ZVAL "lazy"
+                      ARG_LIST
+                    ZVAL "count"
+                    ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
 /// $pair = [1, 'a']; [$count, $label] = $pair;
 /// ```
 ///
