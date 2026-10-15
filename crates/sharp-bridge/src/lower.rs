@@ -2556,7 +2556,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         self.declaration(
             SHARP_AST_METHOD,
-            modifier_flags(&constructor.modifiers) | ZEND_ACC_STATIC,
+            member_flags(&constructor.modifiers) | ZEND_ACC_STATIC,
             constructor.class,
             constructor.body.span(),
             constructor.name.value,
@@ -3442,7 +3442,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         self.node(
             SHARP_AST_CLASS_CONST_GROUP,
-            modifier_flags(&constant.modifiers),
+            member_flags(&constant.modifiers),
             self.line(constant),
             &[declaration, NULL, hint],
         )
@@ -3789,7 +3789,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The type PHP writes for a type that is not a union, with generics erased. A built-in type is its name, `Object`
-    /// included, which only a type parameter's bound writes, and `Any` is `mixed`. A class is its full name. `Self` is `static`. A `List` is a PHP array, so its type is `array`, and a
+    /// is `object`, and `Any` is `mixed`. A class is its full name. `Self` is `static`. A `List` is a PHP array, so its type is `array`, and a
     /// `Map` or a `Set` is the engine's `\Sharp\Map` or `\Sharp\Set`. A generic class type is its class, and `Class<T>` is `string`, because plain PHP receives a class
     /// value as its class-name string (spec section 25). A function type runs as PHP's `\Closure`. A type parameter is
     /// its bound, or `mixed` without one, as the PHP twin written with `@template` declares it, and the classes a bound
@@ -3804,8 +3804,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             | Hint::Float(name)
             | Hint::Bool(name)
             | Hint::String(name)
-            | Hint::Void(name)
-            | Hint::Object(name) => PhpType::Named(name.value),
+            | Hint::Void(name) => PhpType::Named(name.value),
+            Hint::Object(_) => PhpType::Named(b"object"),
             Hint::Mixed(_) => PhpType::Mixed,
             Hint::Identifier(name) => match self.names.binding(name) {
                 Some(Binding::TypeParameter { declaration }) => {
@@ -7044,6 +7044,14 @@ fn lazy_flag_name(property: &[u8]) -> Vec<u8> {
 /// `name#viaN`, the hidden slot of the behavior at `index` of the property `name`, spec section 6.4.
 fn behavior_slot_name(property: &[u8], index: usize) -> Vec<u8> {
     [property, format!("#via{index}").as_bytes()].concat()
+}
+
+/// The flags of a class member's modifiers, with `ZEND_ACC_PRIVATE` when they name no access: a PHP# member written
+/// without an access modifier is `private`, spec section 5, where PHP makes it `public`.
+fn member_flags(modifiers: &Sequence<Modifier>) -> u32 {
+    let flags = modifier_flags(modifiers);
+
+    if flags & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE) == 0 { flags | ZEND_ACC_PRIVATE } else { flags }
 }
 
 /// The flags of a member's modifiers. Every modifier is named, so a new one does not compile until it is decided.

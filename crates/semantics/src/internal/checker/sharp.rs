@@ -152,7 +152,8 @@ const OBJECT: &[u8] = b"Object";
 ///   the interfaces when it links the class.
 /// - An extension, spec section 26: one receiver parameter and the methods and computed properties it adds, each with
 ///   only an access modifier. `check_extension` holds its rules.
-/// - A named constructor, spec section 9.1: an access modifier, its class's name, a `.` and its own name, parameters
+/// - A member without an access modifier is `private`, spec section 5, outside an interface.
+/// - A named constructor, spec section 9.1: an optional access modifier, its class's name, a `.` and its own name, parameters
 ///   that declare no property, `: this(…)` without `this` in its arguments, and a body. `check_named_constructor`
 ///   decides each part, and an interface, an enum and a static class declare none.
 /// - A law, spec section 28, in a class or an enum: `law`, a name, parameters checked as a method's and an expression
@@ -194,10 +195,10 @@ const OBJECT: &[u8] = b"Object";
 ///   `[Name(arguments)]`, several in one list, as in `[Field("Name"), Searchable]`, or in several lists. An argument
 ///   is positional or named, and is a constant expression as a parameter default is, list and map literals included.
 ///   PHP's own check reports a spread argument. An attribute target, as in `[return: NotNull]`, is a parse error.
-/// - A constant: `public`, `protected` or `private`, an optional type from the types below but `void`, one name, and a
-///   value as a parameter default is.
-/// - A field: `private` or `protected`, an optional `static`, a type, one name and an optional initial value. A
-///   `public` field is an error, because spec section 6 has no public fields.
+/// - A constant: an optional `public`, `protected` or `private`, an optional type from the types below but `void`, one
+///   name, and a value as a parameter default is. Several names in one declaration are an error.
+/// - A field: an optional `private` or `protected`, an optional `static`, a type, one name and an optional initial
+///   value. A `public` field is an error, because spec section 6 has no public fields, and so are several names.
 /// - An override: a field written `override`, which replaces a plain PHP parent's property, spec section 6.1. It may
 ///   be `public`, as the parent's property is, and has a constant initial value. The analyzer checks the parent.
 /// - A static field or property: an initial value, and a `set` accessor, because PHP has no `readonly` static
@@ -205,7 +206,7 @@ const OBJECT: &[u8] = b"Object";
 /// - An initial value: any expression a method body has, without `this`, which is an error. A constant initial value,
 ///   as a parameter default is, becomes the member's default, and any other runs at the start of the constructor, or
 ///   a static's when a request first uses its class's statics.
-/// - A property: `public`, `protected` or `private`, an optional `static`, a type, one name, the accessors `get` and
+/// - A property: an optional `public`, `protected` or `private`, an optional `static`, a type, one name, the accessors `get` and
 ///   an optional `set` that may take an access modifier narrower than the property's, and an optional initial value
 ///   after the accessors, which is a field's. A property without `get`, an accessor declared twice, or a `set` access
 ///   modifier as wide as the property's is an error, as in C#. A get-only property is set only where `readonly`
@@ -1148,14 +1149,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             ),
             FieldOrProperty,
         ) => Some(FieldOrProperty),
-        (Node::Hint(Hint::Mixed(mixed)), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body)
-            if mixed.value != ANY =>
+        (Node::Hint(hint), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body)
+            if let Some(issue) = misspelled_type(hint) =>
         {
-            context.report(
-                Issue::error("PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.")
-                    .with_annotation(Annotation::primary(mixed.span).with_message("Written here."))
-                    .with_note("`Any` holds a value of any type but null, and `Any?` also allows null."),
-            );
+            context.report(issue);
 
             None
         }
@@ -2810,8 +2807,6 @@ fn is_slice_property(property: &Property) -> Result<(), Box<Issue>> {
             .with_annotation(Annotation::primary(span).with_message("Not supported yet."))
             .with_note(note)
     };
-    let no_access_modifier = "A PHP# member without an access modifier is `private`, while PHP makes it `public`.";
-
     if property.modifiers().contains_static() {
         if let Property::Hooked(auto_property) = property
             && let Some(init) = auto_property.hook_list.setter().filter(|setter| setter.name.value == b"init")
@@ -2919,23 +2914,13 @@ fn is_slice_property(property: &Property) -> Result<(), Box<Issue>> {
                         )),
                 ))
             } else if field.items.len() > 1 {
-                Err(Box::new(not_supported(
-                    field.span(),
-                    "A field declaring several names is not supported yet in PHP#.",
-                    supported(Place::FieldOrProperty),
-                )))
+                Err(Box::new(several_names(field.span(), "field")))
             } else {
                 Ok(())
             }
         }
         Property::Hooked(auto_property) => {
-            if !writes_access(&auto_property.modifiers) {
-                Err(Box::new(not_supported(
-                    property.first_variable().span,
-                    "A property without `public`, `protected` or `private` is not supported yet in PHP#.",
-                    no_access_modifier,
-                )))
-            } else if let PropertyItem::Concrete(item) = &auto_property.item {
+            if let PropertyItem::Concrete(item) = &auto_property.item {
                 Err(Box::new(not_supported(
                     item.span(),
                     "An initial value before the accessors is not supported yet in PHP#.",
@@ -2945,18 +2930,15 @@ fn is_slice_property(property: &Property) -> Result<(), Box<Issue>> {
                 Ok(())
             }
         }
-        Property::Computed(computed) => {
-            if !writes_access(&computed.modifiers) {
-                Err(Box::new(not_supported(
-                    computed.variable.span,
-                    "A property without `public`, `protected` or `private` is not supported yet in PHP#.",
-                    no_access_modifier,
-                )))
-            } else {
-                Ok(())
-            }
-        }
+        Property::Computed(_) => Ok(()),
     }
+}
+
+/// The error for a field or a constant, the `kind`, at `span` that declares several names. One member per declaration
+/// keeps a member's type, initial value and attributes in one place.
+fn several_names(span: Span, kind: &str) -> Issue {
+    Issue::error(format!("A {kind} declares one name: declare each {kind} on its own line."))
+        .with_annotation(Annotation::primary(span).with_message("Several names here."))
 }
 
 /// Reports each accessor body of a member declared on a constructor parameter. Spec section 9: such a member takes
@@ -3095,36 +3077,9 @@ fn report_methods_named_as_properties(class: ClassLike, context: &mut Context<'_
     }
 }
 
-/// Whether a member writes its access, spec section 5's `internal` included.
-fn writes_access(modifiers: &Sequence<Modifier>) -> bool {
-    modifiers.contains_visibility() || modifiers.contains_internal()
-}
-
-/// Whether the slice has a class constant, with the refusal when it does not: an access modifier and one name.
+/// Whether the slice has a class constant, with the error when it does not: a constant declares one name.
 fn is_slice_constant(constant: &ClassLikeConstant) -> Result<(), Box<Issue>> {
-    let not_supported = |span: Span, message: &str, note: &str| {
-        Box::new(
-            Issue::error(message)
-                .with_annotation(Annotation::primary(span).with_message("Not supported yet."))
-                .with_note(note),
-        )
-    };
-
-    if constant.items.len() > 1 {
-        Err(not_supported(
-            constant.span(),
-            "A constant declaring several names is not supported yet in PHP#.",
-            supported(Place::ClassConstant),
-        ))
-    } else if !writes_access(&constant.modifiers) {
-        Err(not_supported(
-            constant.first_item().name.span,
-            "A constant without `public`, `protected` or `private` is not supported yet in PHP#.",
-            "A PHP# member without an access modifier is `private`, while PHP makes it `public`.",
-        ))
-    } else {
-        Ok(())
-    }
+    if constant.items.len() > 1 { Err(Box::new(several_names(constant.span(), "constant"))) } else { Ok(()) }
 }
 
 /// Checks the accessors of a property, declared in the class body or on a constructor parameter: `get` once, and an
@@ -4054,10 +4009,55 @@ fn is_slice_type(hint: &Hint) -> bool {
         | Hint::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
         | Hint::Nullable(_) => true,
         Hint::Mixed(any) => any.value == ANY,
+        Hint::Object(object) => object.value == OBJECT,
         Hint::Generic(_) => true,
         Hint::Function(function) => !function.parameters.iter().any(|parameter| matches!(parameter, Hint::Void(_))),
         _ => false,
     }
+}
+
+/// The error for a type PHP# writes another way, spec section 24: the built-in types are lowercase, every other type is
+/// capitalized, and PHP's `mixed`, `object`, `array`, `callable`, `true`, `false` and a lone `null` each have a PHP#
+/// form. `None` for a type written as PHP# writes it, and for `never`, which PHP# has no form for yet.
+fn misspelled_type(hint: &Hint) -> Option<Issue> {
+    let written = match hint {
+        Hint::Identifier(Identifier::Local(name)) => name.value,
+        Hint::Void(name)
+        | Hint::Float(name)
+        | Hint::Bool(name)
+        | Hint::Integer(name)
+        | Hint::String(name)
+        | Hint::Object(name)
+        | Hint::Mixed(name) => name.value,
+        Hint::Null(keyword) | Hint::True(keyword) | Hint::False(keyword) | Hint::Array(keyword) | Hint::Callable(keyword) => {
+            keyword.value
+        }
+        _ => return None,
+    };
+    let lowercase = written.to_ascii_lowercase();
+    let (message, note) = match lowercase.as_slice() {
+        b"int" | b"float" | b"bool" | b"string" | b"void" if written != lowercase.as_slice() => {
+            (format!("PHP# writes the type `{}`.", BytesDisplay(&lowercase)), None)
+        }
+        b"object" if written != OBJECT => ("PHP# writes `Object` for PHP's `object`.".to_owned(), None),
+        b"any" if written != ANY => ("PHP# writes `Any`.".to_owned(), None),
+        b"mixed" => (
+            "PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.".to_owned(),
+            Some("`Any` holds a value of any type but null, and `Any?` also allows null."),
+        ),
+        b"null" => ("A type holds null only with `?` after it: write the type, as in `int?`.".to_owned(), None),
+        b"true" | b"false" => (format!("PHP# has no `{}` type: write `bool`.", BytesDisplay(written)), None),
+        b"array" => ("PHP# has no `array`: write `List<T>` or `Map<TKey, TValue>`.".to_owned(), None),
+        b"callable" => ("PHP# has no `callable`: write `Function<R(P)>`.".to_owned(), None),
+        _ => return None,
+    };
+
+    let issue = Issue::error(message).with_annotation(Annotation::primary(hint.span()).with_message("Written here."));
+
+    Some(match note {
+        Some(note) => issue.with_note(note),
+        None => issue,
+    })
 }
 
 /// Refuses the expression at `span` in a constant value: it reads a type argument, which only the running code has.
@@ -4265,12 +4265,7 @@ fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_
     for (index, member) in members.iter().enumerate() {
         let is_slice_member = match member {
             Hint::Null(_) => {
-                report_not_supported(
-                    member.span(),
-                    "union that holds null",
-                    "PHP# writes a union that holds null in parentheses with `?` after it, as in `(int|string)?`.",
-                    context,
-                );
+                report_null_in_union(member, &members, context);
 
                 false
             }
@@ -4283,7 +4278,10 @@ fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_
             }
             _ if is_slice_type(member) => true,
             _ => {
-                report_not_supported(member.span(), "type", supported(place), context);
+                match misspelled_type(member) {
+                    Some(issue) => context.report(issue),
+                    None => report_not_supported(member.span(), "type", supported(place), context),
+                }
 
                 false
             }
@@ -4325,6 +4323,22 @@ fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_
         };
         context.report(issue);
     }
+}
+
+/// Reports `null` written in a union, spec section 24: a union holds null only through `?`, so the error names the
+/// union of the other `members` in parentheses with `?` after it, or `T?` when one type is left.
+fn report_null_in_union(null: &Hint, members: &[&Hint], context: &mut Context<'_, '_, '_>) {
+    let rest: Vec<String> = members
+        .iter()
+        .filter(|member| !matches!(member, Hint::Null(_)))
+        .map(|member| BytesDisplay(context.get_code_snippet(*member)).to_string())
+        .collect();
+    let message = match rest.as_slice() {
+        [single] => format!("A type that holds null is written `{single}?`."),
+        _ => format!("A union that holds null is written `({})?`.", rest.join("|")),
+    };
+
+    context.report(Issue::error(message).with_annotation(Annotation::primary(null.span()).with_message("Written here.")));
 }
 
 /// How two members of a union overlap, which the engine can't tell apart while the code runs.
@@ -4633,14 +4647,6 @@ fn check_named_constructor(
             ),
             modifier.span(),
             "Written here.",
-        );
-    }
-
-    if !constructor.modifiers.iter().any(is_access) {
-        report(
-            "A named constructor without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
-            constructor.name.span,
-            "Declared here.",
         );
     }
 

@@ -1515,10 +1515,20 @@ fn report_call_on_non_object<A>(
     );
 }
 
+/// Reports a method call on a value of the general type `object`. A PHP# `Object` has no members until `is` narrows it,
+/// as an `Any` has none, spec section 24, so in a PHP# file the call is an error.
 fn report_call_on_ambiguous_object<A>(context: &mut Context<'_, '_, A>, obj_span: Span, selector_span: Span)
 where
     A: Arena,
 {
+    if context.dialect.is_sharp() {
+        context
+            .collector
+            .report_with_code(IssueCode::AmbiguousObjectMethodAccess, object_has_no_members(obj_span, selector_span));
+
+        return;
+    }
+
     context.collector.report_with_code(
         IssueCode::AmbiguousObjectMethodAccess,
         Issue::warning("Cannot statically verify method call on a generic `object` type.")
@@ -1528,6 +1538,14 @@ where
             )
             .with_help("Provide a more specific type hint for the object for robust analysis."),
     );
+}
+
+/// The PHP# error for a member of an `Object` at `selector_span`, read or called on the value at `object_span`.
+pub(crate) fn object_has_no_members(object_span: Span, selector_span: Span) -> Issue {
+    Issue::error("An `Object` has no members: check its type with `is` first.")
+        .with_annotation(Annotation::primary(selector_span).with_message("A member of an `Object`."))
+        .with_annotation(Annotation::secondary(object_span).with_message("This is an `Object`."))
+        .with_help("Write `if (value is Order order)`, and call `order`'s members.")
 }
 
 pub(crate) fn report_non_existent_method<A>(

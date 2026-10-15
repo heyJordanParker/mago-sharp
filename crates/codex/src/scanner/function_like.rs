@@ -167,11 +167,11 @@ where
         is_abstract: method.modifiers.contains_abstract(),
         is_static: method.modifiers.contains_static(),
         is_constructor: method_name_str.eq_ignore_ascii_case(b"__construct"),
-        visibility: if let Some(v) = method.modifiers.get_first_visibility() {
-            Visibility::try_from(v).unwrap_or(Visibility::Public)
-        } else {
-            Visibility::Public
-        },
+        // A PHP# method or named constructor written with no access modifier is `private`, spec section 5.
+        visibility: Visibility::of_member(
+            method.modifiers,
+            context.program.dialect.is_sharp() && !class_like_metadata.kind.is_interface(),
+        ),
         where_constraints: WordMap::default(),
         assigned_properties: WordSet::default(),
     };

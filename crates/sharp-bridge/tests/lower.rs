@@ -3526,6 +3526,16 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 /// `\Sharp\Internal\build` binds the closure as `Closure::call` does while the object is still being built, so the
 /// body's writes run no observer, spec section 6.2.
 #[test]
+fn a_named_constructor_without_an_access_modifier_is_a_private_static_method() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Report\n{\n    public Report(int size) { }\n\n    Report.empty() : this(0) { }\n}\n",
+    );
+
+    // `[20]` is `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`: a member with no access modifier is `private`, spec section 5.
+    assert!(lowered.render(lowered.method_named("empty")).starts_with("METHOD [20] \"empty\""));
+}
+
+#[test]
 fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
     let lowered = Lowered::new(
         "namespace App;\n\nclass Base\n{\n    public Base() { }\n    public string describe() => \"base\";\n}\n\nclass Report : Base\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) : super() { }\n\n    public Report.sized(int size, string ...notes) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = super.describe();\n        let read = () => { return this.label; };\n        let skip = () => { return; };\n    }\n}\n",
@@ -8158,7 +8168,7 @@ fn a_type_parameter_bounded_by_object_is_php_object() {
         indoc! {r#"
             PARAM_LIST
               PARAM
-                ZVAL [1] "Object"
+                ZVAL [1] "object"
                 ZVAL "value"
                 null
                 null
@@ -8168,7 +8178,7 @@ fn a_type_parameter_bounded_by_object_is_php_object() {
                 ZVAL "Object"
                 null
             SHARP_TYPE_ARGS
-              ZVAL [1] "Object"
+              ZVAL [1] "object"
               ZVAL "Function<#0(#0)>"
         "#}
     );
@@ -10210,6 +10220,50 @@ fn a_public_enum_is_an_enum() {
     let internal = Lowered::new("namespace App.Tenant;\n\nenum Suit\n{\n    case Hearts;\n}\n");
 
     assert_eq!(public.tree(), internal.tree());
+}
+
+/// ```php
+/// public function keep(object $first, ?object $source = null): object { return $first; }
+/// ```
+///
+/// `Object` is PHP's `object`, a built-in type, so its type is the name `object` with `ZEND_NAME_NOT_FQ`, which is 1,
+/// as php-src's grammar builds it, and `[257]` adds `ZEND_TYPE_NULLABLE`. The result carries the method's function type,
+/// as a method's does when a function type can say its whole type.
+#[test]
+fn an_object_type_is_the_object_name() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Object keep(Object first, Object? source = null) { return first; }\n}\n",
+    );
+    let method = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_METHOD).expect("a method");
+
+    assert_eq!(
+        lowered.render(lowered.child(method as u32, 0)),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM
+                ZVAL [1] "object"
+                ZVAL "first"
+                null
+                null
+                null
+                null
+              PARAM
+                ZVAL [257] "object"
+                ZVAL "source"
+                ZVAL null
+                null
+                null
+                null
+        "#}
+    );
+    assert_eq!(
+        lowered.render(lowered.child(method as u32, 3)),
+        indoc! {r#"
+            SHARP_TYPE_ARGS
+              ZVAL [1] "object"
+              ZVAL "Function<Object(Object, Object?)>"
+        "#}
+    );
 }
 
 /// ```php
@@ -12610,14 +12664,16 @@ fn typeof_in_an_attribute_argument_is_the_class_name() {
 /// ```php
 /// public const int MAX = 3;
 /// protected const LIMIT = \PHP_INT_MAX - 1;
+/// private const int MIN = 0;
 /// ```
 ///
 /// A constant is a class constant group of one constant, as php-src's grammar builds it: the constant list, no
-/// attributes, then the type. `[1]` and `[2]` on the groups are `ZEND_ACC_PUBLIC` and `ZEND_ACC_PROTECTED`.
+/// attributes, then the type. `[1]`, `[2]` and `[4]` on the groups are `ZEND_ACC_PUBLIC`, `ZEND_ACC_PROTECTED` and
+/// `ZEND_ACC_PRIVATE`, which a constant written with no access modifier has, spec section 5.
 #[test]
 fn a_class_constant_is_a_class_constant_group_of_one_constant() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 3;\n    protected const LIMIT = global.PHP_INT_MAX - 1;\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 3;\n    protected const LIMIT = global.PHP_INT_MAX - 1;\n    const int MIN = 0;\n}\n",
     );
     let class = lowered.child(lowered.root(), 2);
 
@@ -12644,6 +12700,14 @@ fn a_class_constant_is_a_class_constant_group_of_one_constant() {
                     null
                 null
                 null
+              CLASS_CONST_GROUP [4]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "MIN"
+                    ZVAL 0
+                    null
+                null
+                ZVAL [1] "int"
         "#}
     );
 }

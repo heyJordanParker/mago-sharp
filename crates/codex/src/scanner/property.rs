@@ -192,6 +192,7 @@ where
 
     let mut flags = MetadataFlags::origin_flags(context.file.file_type);
     let is_sharp = context.program.dialect.is_sharp();
+    let in_sharp_class = is_sharp && !class_like_metadata.kind.is_interface();
 
     match property {
         Property::Plain(plain_property) => {
@@ -239,11 +240,7 @@ where
                         item_flags |= MetadataFlags::FINAL;
                     }
 
-                    let read_visibility = match plain_property.modifiers.get_first_read_visibility() {
-                        Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
-                        None if is_sharp => Visibility::Private,
-                        None => Visibility::Public,
-                    };
+                    let read_visibility = Visibility::of_member(&plain_property.modifiers, in_sharp_class);
 
                     let write_visibility = match plain_property.modifiers.get_first_write_visibility() {
                         Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
@@ -313,10 +310,7 @@ where
                 flags |= MetadataFlags::REQUIRED;
             }
 
-            let read_visibility = match hooked_property.modifiers.get_first_read_visibility() {
-                Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
-                None => Visibility::Public,
-            };
+            let read_visibility = Visibility::of_member(&hooked_property.modifiers, in_sharp_class);
 
             let write_visibility = match hooked_property.modifiers.get_first_write_visibility() {
                 Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
@@ -394,10 +388,7 @@ where
         }
         // A PHP# computed property runs as PHP's virtual property with one `get => expr;` hook.
         Property::Computed(computed_property) => {
-            let read_visibility = match computed_property.modifiers.get_first_read_visibility() {
-                Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
-                None => Visibility::Public,
-            };
+            let read_visibility = Visibility::of_member(&computed_property.modifiers, in_sharp_class);
 
             if is_sharp && is_sharp_closed(&computed_property.modifiers, read_visibility, class_like_metadata) {
                 flags |= MetadataFlags::FINAL;

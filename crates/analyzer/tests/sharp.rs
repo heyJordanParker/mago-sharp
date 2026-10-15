@@ -592,6 +592,31 @@ fn a_static_method_named_through_its_class_without_a_call_is_a_closure_of_its_si
     assert_eq!(&sharp_issues[..2], ["11:48 invalid-argument", "11:60 non-existent-property"]);
 }
 
+/// Spec section 5: a member without an access modifier is `private`, so a property, a computed property, a constant
+/// and a named constructor written bare are reported where their `private` twins are, and an `internal` one is not.
+#[test]
+fn a_member_without_an_access_modifier_is_private() {
+    let bare = "namespace Demo;\n\npublic class Order\n{\n    int views { get; set; } = 0;\n    int size => 2;\n    const int MAX = 3;\n    internal int shared { get; } = 1;\n\n    public Order(int start) { }\n\n    Order.empty() : this(0) { }\n}\n";
+    let private = "namespace Demo;\n\npublic class Order\n{\n    private int views { get; set; } = 0;\n    private int size => 2;\n    private const int MAX = 3;\n    internal int shared { get; } = 1;\n\n    public Order(int start) { }\n\n    private Order.empty() : this(0) { }\n}\n";
+    let report = "namespace Demo;\n\npublic class Report\n{\n    public static void run(Order order)\n    {\n        Report.keep(new Order.empty());\n        Report.keep(order.views);\n        Report.keep(order.size);\n        Report.keep(Order.MAX);\n        Report.keep(order.shared);\n    }\n\n    public static void keep(Any? value)\n    {\n    }\n}\n";
+
+    let from_bare = issues(("src/Demo/Report.sharp", report), &[("src/Demo/Order.sharp", bare)]);
+
+    assert_eq!(from_bare, issues(("src/Demo/Report.sharp", report), &[("src/Demo/Order.sharp", private)]));
+    // The analyzer checks no constant's access, `private const` included, and the engine refuses line 10 as it runs.
+    assert_eq!(
+        from_bare,
+        [
+            "7:21 invalid-method-access",
+            "7:21 no-value",
+            "8:27 invalid-property-read",
+            "8:21 no-value",
+            "9:27 invalid-property-read",
+            "9:21 no-value",
+        ]
+    );
+}
+
 /// A method read as a value obeys the method's visibility, as `$order->secret(...)` does in PHP.
 #[test]
 fn a_private_method_read_as_a_value_from_outside_its_class_is_an_error() {
@@ -7816,6 +7841,81 @@ fn a_bare_map_read_with_a_key_outside_its_key_type_is_an_error() {
         ]
     );
     assert_eq!(sharp_issues[2].message, "`Map<string, int>` is keyed by `string`, but this key is `int`.");
+}
+
+/// An `Object` has no members until `is` narrows it, as an `Any` has none, spec section 24, so a member read or call on
+/// it is an error where PHP warns that a member of `object` is ambiguous.
+#[test]
+fn a_member_of_an_object_is_an_error_where_php_warns_it_is_ambiguous() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static Any? read(Object source)\n    {\n        source.run();\n        return source.id;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function read(object $source): mixed\n    {\n        $source->run();\n        return $source->id;\n    }\n}\n";
+    let levelled = |(name, code): (&'static str, &'static str)| {
+        analyze(&PLUGIN_REGISTRY, settings(), (name, code), &[])
+            .iter()
+            .map(|issue| (issue.level, located(code, issue)))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        levelled(("src/Demo/Report.sharp", sharp)),
+        [
+            (Level::Error, "7:16 ambiguous-object-method-access".to_owned()),
+            (Level::Error, "8:23 ambiguous-object-property-access".to_owned()),
+        ]
+    );
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "7:16 ambiguous-object-method-access An `Object` has no members: check its type with `is` first. | Write `if (value is Order order)`, and call `order`'s members.",
+            "8:23 ambiguous-object-property-access An `Object` has no members: check its type with `is` first. | Write `if (value is Order order)`, and call `order`'s members.",
+        ]
+    );
+    assert_eq!(
+        levelled(("src/Demo/Report.php", php)),
+        [
+            (Level::Warning, "9:18 ambiguous-object-method-access".to_owned()),
+            (Level::Warning, "10:25 ambiguous-object-property-access".to_owned()),
+        ]
+    );
+}
+
+/// `is` narrows an `Object` to a class, whose members it then has, spec sections 21 and 24.
+#[test]
+fn is_narrows_an_object_to_a_class_whose_members_it_has() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int sync(Object source)\n    {\n        if (source is Order order) {\n            return order.total();\n        }\n        return 0;\n    }\n}\n\nclass Order\n{\n    public int total()\n    {\n        return 1;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// A plain PHP value typed `object` arrives as an `Object`, spec section 24: it passes to an `Object` and has no members.
+#[test]
+fn a_plain_php_object_arrives_as_an_object() {
+    let source = "<?php\n\nnamespace Lib;\n\nfinal class Source\n{\n    public static function make(): object\n    {\n        return new \\stdClass();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Source;\n\nclass Report\n{\n    public static Any? run()\n    {\n        const made = Source.make();\n        Report.keep(made);\n        return made.id;\n    }\n\n    public static void keep(Object source)\n    {\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Source.php", source)]),
+        ["11:21 ambiguous-object-property-access"]
+    );
+}
+
+/// An `Object` passes where an `Any` is expected, spec section 24, as PHP's `object` passes to `mixed`.
+#[test]
+fn an_object_passes_where_an_any_is_expected() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static Any run(Object source, Object? maybe)\n    {\n        Report.keep(source);\n        Report.hold(maybe);\n        return source;\n    }\n\n    public static void keep(Any value)\n    {\n    }\n\n    public static void hold(Any? value)\n    {\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// `Object` holds any object and nothing else, spec section 24, so `5` passed to an `Object` is the invalid argument
+/// PHP reports for `5` passed to `object`.
+#[test]
+fn a_value_that_is_not_an_object_passed_to_an_object_is_an_invalid_argument() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void run()\n    {\n        Report.keep(5);\n    }\n\n    public static void keep(Object source)\n    {\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function run(): void\n    {\n        Report::keep(5);\n    }\n\n    public static function keep(object $source): void\n    {\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:21 invalid-argument"]);
+    assert_eq!(codes(&issues(("src/Demo/Report.sharp", sharp), &[])), codes(&issues(("src/Demo/Report.php", php), &[])));
 }
 
 /// `for (const [k, v] of x)` reads the keys of a `Map`. A `List`'s indexes come from `entries()`, as spec section 12
