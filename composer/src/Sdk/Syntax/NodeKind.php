@@ -45,6 +45,7 @@ enum NodeKind: string
     case Block = 'Block';
     case Call = 'Call';
     case FunctionCall = 'FunctionCall';
+    case NullSafeFunctionCall = 'NullSafeFunctionCall';
     case MethodCall = 'MethodCall';
     case NullSafeMethodCall = 'NullSafeMethodCall';
     case StaticMethodCall = 'StaticMethodCall';
@@ -58,6 +59,7 @@ enum NodeKind: string
     case EnumCaseBackedItem = 'EnumCaseBackedItem';
     case EnumCaseItem = 'EnumCaseItem';
     case EnumCaseUnitItem = 'EnumCaseUnitItem';
+    case EnumCaseDataItem = 'EnumCaseDataItem';
     case Extends = 'Extends';
     case Implements = 'Implements';
     case Inheritance = 'Inheritance';
@@ -259,6 +261,7 @@ enum NodeKind: string
     case ShortOpeningTag = 'ShortOpeningTag';
     case Terminator = 'Terminator';
     case Throw = 'Throw';
+    case Leave = 'Leave';
     case Hint = 'Hint';
     case IntersectionHint = 'IntersectionHint';
     case NullableHint = 'NullableHint';
@@ -282,7 +285,11 @@ enum NodeKind: string
     case BinaryPattern = 'BinaryPattern';
     case ParenthesizedPattern = 'ParenthesizedPattern';
     case PropertiesPattern = 'PropertiesPattern';
+    case FieldsPattern = 'FieldsPattern';
     case PropertyPattern = 'PropertyPattern';
+    case ListPattern = 'ListPattern';
+    case ListPatternElement = 'ListPatternElement';
+    case RestPattern = 'RestPattern';
     case PatternMatch = 'PatternMatch';
     case PatternMatchArm = 'PatternMatchArm';
     case PatternMatchPatternArm = 'PatternMatchPatternArm';

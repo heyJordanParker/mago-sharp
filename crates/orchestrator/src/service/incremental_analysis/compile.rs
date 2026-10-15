@@ -1271,39 +1271,55 @@ mod tests {
     }
 
     /// Spec section 21: a lambda's function type lists the effects of each body it calls, in any file, so the file
-    /// of each body a call reaches is an input, along every chain of calls, and a body edit that changes the effects
-    /// changes the caller's key. One that keeps them keeps it.
+    /// of each body a call reaches is an input, along every chain of calls. An edit two calls away that gives or takes
+    /// an effect changes the lambda's type text and its key on a warm compile, as on a clean one. An edit that keeps
+    /// the effects keeps the key.
     #[test]
-    fn a_body_edit_that_changes_a_callees_effects_changes_the_callers_key() {
+    fn a_body_edit_two_calls_away_that_changes_its_effects_changes_the_callers_function_type() {
         let meter = "namespace App;\n\npublic foreign class Meter\n{\n    public int now() => 7;\n}\n";
-        let clerk = |count: &str| {
-            format!(
-                "namespace App;\n\npublic class Clerk\n{{\n    public int count(Meter meter) => this.tally(meter);\n\n    public int tally(Meter meter) => {count};\n}}\n"
-            )
+        let clerk = "namespace App;\n\npublic class Clerk\n{\n    public int count(Meter meter) => new Ledger().tally(meter);\n}\n";
+        let ledger = |tally: &str| {
+            format!("namespace App;\n\npublic class Ledger\n{{\n    public int tally(Meter meter) => {tally};\n}}\n")
         };
+        // Desk names neither `Ledger` nor its method, so only the effects reach its file from there.
         let desk = "namespace App;\n\npublic class Desk\n{\n    public Any? counter(Clerk clerk, Meter meter) => () => clerk.count(meter);\n}\n";
-        let compiled = |count: &str| {
-            let clerk = clerk(count);
-            let files = [("app/Meter.sharp", meter), ("app/Clerk.sharp", clerk.as_str()), ("app/Desk.sharp", desk)];
+        let files = |tally: &str| {
+            let ledger = ledger(tally);
 
-            compile(&mut analyzed(&project(&files)), empty_stamp)
+            project(&[
+                ("app/Meter.sharp", meter),
+                ("app/Clerk.sharp", clerk),
+                ("app/Ledger.sharp", ledger.as_str()),
+                ("app/Desk.sharp", desk),
+            ])
         };
-
-        let pure = compiled("1");
-        let kept = compiled("2");
-        let metered = compiled("meter.now()");
-        let (pure, kept, metered) = (
-            accepted(&pure, "app/Desk.sharp"),
-            accepted(&kept, "app/Desk.sharp"),
-            accepted(&metered, "app/Desk.sharp"),
-        );
         let spells = |bytes: &[u8], text: &[u8]| bytes.windows(text.len()).any(|window| window == text);
 
-        assert!(input_paths(pure).contains(&"app/Clerk.sharp".to_string()), "{:?}", input_paths(pure));
-        assert!(spells(pure, b"Function<int()>"));
-        assert!(spells(metered, b"Function<int() uses App.Meter>"));
-        assert_eq!(compiled_key(pure), compiled_key(kept));
-        assert_ne!(compiled_key(pure), compiled_key(metered));
+        let (pure, kept, metered) = (files("1"), files("2"), files("meter.now()"));
+        for (before, after, text) in
+            [(&pure, &metered, b"Function<int() uses App.Meter>".as_slice()), (&metered, &pure, b"Function<int()>")]
+        {
+            let mut warm = analyzed(before);
+            let before_compiled = compile(&mut warm, empty_stamp);
+            warm.update_database(after.read_only());
+            warm.analyze_incremental(None).expect("the warm path runs");
+            let warm_compiled = compile(&mut warm, empty_stamp);
+            let clean_compiled = compile(&mut analyzed(after), empty_stamp);
+
+            let desk = accepted(&warm_compiled, "app/Desk.sharp");
+            assert!(input_paths(desk).contains(&"app/Ledger.sharp".to_string()), "{:?}", input_paths(desk));
+            assert!(spells(desk, text), "{}", String::from_utf8_lossy(text));
+            assert_ne!(compiled_key(accepted(&before_compiled, "app/Desk.sharp")), compiled_key(desk));
+            assert_eq!(bodies(&warm_compiled), bodies(&clean_compiled));
+        }
+
+        let pure = compile(&mut analyzed(&pure), empty_stamp);
+        let kept = compile(&mut analyzed(&kept), empty_stamp);
+        assert_eq!(
+            compiled_key(accepted(&pure, "app/Desk.sharp")),
+            compiled_key(accepted(&kept, "app/Desk.sharp")),
+            "an edit that keeps the effects keeps the key"
+        );
     }
 
     /// One edit to the shop project, and the files the edit truly reaches.

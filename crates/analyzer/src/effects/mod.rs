@@ -383,18 +383,16 @@ impl Effects {
     }
 
     /// The files whose PHP# bodies a call in each file reaches, an override a call can run included, so an edit of
-    /// one can change the effects of the calling file's functions. A method, an accessor and an initial value are in
-    /// their class's file. A lambda adds none: a body calls it only where its own file writes it.
+    /// one can change the effects of the calling file's functions. A method is in its file, and an accessor in its
+    /// class's.
     #[must_use]
     pub fn callee_files(&self, codebase: &CodebaseMetadata) -> HashMap<FileId, HashSet<FileId>> {
         let file_of = |body: Body| match body {
             Body::Method(class, method) => {
                 codebase.get_method(class.as_bytes(), method.as_bytes()).map(|method| method.span.file_id)
             }
-            Body::Accessor(class, _, _) | Body::InitialValue(class, _) => {
-                codebase.get_class_like(class.as_bytes()).map(|class| class.span.file_id)
-            }
-            Body::Lambda(_) => None,
+            Body::Accessor(class, _, _) => codebase.get_class_like(class.as_bytes()).map(|class| class.span.file_id),
+            Body::InitialValue(..) | Body::Lambda(_) => unreachable!("a call reaches a method or an accessor"),
         };
 
         let mut files: HashMap<FileId, HashSet<FileId>> = HashMap::default();
@@ -445,7 +443,7 @@ impl Effects {
                 Body::Method(ascii_lowercase_word(class.as_bytes()), ascii_lowercase_word(method.as_bytes()))
             }
             FunctionLikeIdentifier::Closure(name) => Body::Lambda(*name),
-            _ => return None,
+            FunctionLikeIdentifier::Function(_) => unreachable!("PHP# declares no function outside a class"),
         };
 
         let mut effects = Vec::new();

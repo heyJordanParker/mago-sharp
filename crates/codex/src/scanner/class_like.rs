@@ -355,8 +355,7 @@ fn register_case_classes<'arena, A>(
                     context,
                     scope,
                 );
-                let mut factory =
-                    create_static_method("", span, constructor.parameters.clone(), case_type.clone(), vec![]);
+                let mut factory = create_static_method("", span, constructor.parameters.clone(), case_type, vec![]);
                 add_method(codebase, b"__construct", &mut case_metadata, constructor);
 
                 factory.name = word(case_name.value);

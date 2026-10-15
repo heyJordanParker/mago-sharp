@@ -58,6 +58,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::parser::parse_file;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
+use mago_word::word;
 
 #[path = "../../../tests/support/sharp_words.rs"]
 mod sharp_words;
@@ -16305,6 +16306,44 @@ fn a_recursive_pair_of_methods_solves_without_looping() {
         effects.impurity(&codebase, &even).as_deref(),
         Some("reaches `Tree.odd`, which calls `global.now` with the effect `Clock`")
     );
+}
+
+/// Spec section 21: a function type lists the effects of each body its function calls, in any file, so an edit of one
+/// can change it. `callee_files` gives the file of each method a call reaches, every override it can run, and each
+/// accessor's class, but never the calling file itself. A change of state is no effect, so the type lists none for it.
+#[test]
+fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
+    let base = (
+        "app/Shop/Base.sharp",
+        "namespace App.Shop;\n\npublic abstract class Base\n{\n    public virtual int price() => 1;\n}\n",
+    );
+    let sale = (
+        "app/Shop/Sale.sharp",
+        "namespace App.Shop;\n\npublic class Sale : Base\n{\n    public override int price() => global.now();\n}\n",
+    );
+    let stock = (
+        "app/Shop/Stock.sharp",
+        "namespace App.Shop;\n\npublic class Stock\n{\n    public int count { get => 2; }\n}\n",
+    );
+    let till = (
+        "app/Shop/Till.sharp",
+        "namespace App.Shop;\n\npublic class Till\n{\n    private int rung = 0;\n\n    public int ring(Base item, Stock stock) => item.price() + stock.count + this.add();\n\n    public int add()\n    {\n        this.rung += 1;\n        return this.rung;\n    }\n}\n",
+    );
+    let (codebase, summaries) = summarized(&[base, sale, stock, till, CLOCK_STUB, NOW]);
+    let effects = Effects::solve(&codebase, &summaries);
+    let file = |class: &[u8]| codebase.get_class_like(class).expect("the class is declared").span.file_id;
+    let method = |name: &[u8]| {
+        FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Till"), ascii_lowercase_word(name))
+    };
+
+    let callee_files = effects.callee_files(&codebase);
+    assert_eq!(
+        callee_files.get(&file(b"App\\Shop\\Till")),
+        Some(&[file(b"App\\Shop\\Base"), file(b"App\\Shop\\Sale"), file(b"App\\Shop\\Stock")].into_iter().collect())
+    );
+    assert_eq!(callee_files.get(&file(b"App\\Shop\\Sale")), None);
+    assert_eq!(effects.function_effects(&method(b"add")), Some(Vec::new()));
+    assert_eq!(effects.function_effects(&method(b"ring")), Some(vec![word("Sharp\\Clock")]));
 }
 
 /// An operator on an instance runs the operator its class declares (spec section 19), so a getter that applies one
