@@ -5969,8 +5969,7 @@ fn check_yield(r#yield: &Yield, context: &mut Context<'_, '_, '_>) {
     }
 }
 
-/// The method that returns `Iterable<T>` or `Iterable<T>?` and whose body holds `span` outside any lambda in it. PHP
-/// compiles a generator of `?iterable`, so a nullable `Iterable<T>` takes `yield` too.
+/// The method that returns `Iterable<T>` and whose body holds `span` outside any lambda in it.
 fn enclosing_iterator_method<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> Option<&'ast Method<'arena>> {
     let method = enclosing_class(program, span)?.members.iter().find_map(|member| match member {
         ClassLikeMember::Method(method) if method.span().contains(&span.start) => Some(method),
@@ -5986,17 +5985,13 @@ fn enclosing_iterator_method<'ast, 'arena>(program: &'ast Program<'arena>, span:
     (returns_iterable(method) && !in_lambda).then_some(method)
 }
 
-/// Whether a method's declared return type is `Iterable<T>` or `Iterable<T>?`.
+/// Whether a method's declared return type is `Iterable<T>`. A method that yields gives one, which is never null, so
+/// `Iterable<T>?` is not one.
 fn returns_iterable(method: &Method) -> bool {
-    let Some(return_type) = &method.return_type_hint else {
-        return false;
-    };
-    let hint = match &return_type.hint {
-        Hint::Nullable(nullable) => nullable.hint,
-        hint => hint,
-    };
-
-    matches!(hint, Hint::Generic(generic) if generic.name.value == b"Iterable")
+    method
+        .return_type_hint
+        .as_ref()
+        .is_some_and(|return_type| matches!(&return_type.hint, Hint::Generic(generic) if generic.name.value == b"Iterable"))
 }
 
 /// Reports `return value;` in a method that returns `Iterable<T>` and yields, outside the lambdas in it. Its values

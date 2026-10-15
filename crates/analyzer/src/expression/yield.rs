@@ -475,35 +475,32 @@ where
                     sent = Some(get_mixed());
                     r#return = Some(get_mixed());
                 } else {
-                    // `check_slice` lets only `Iterable<T>` and `Iterable<T>?` yield in PHP#, so its error is the `?`.
-                    let declared = display_type(context, iterable_type);
-                    let (note, help) = if context.dialect.is_sharp() {
-                        (
-                            "A method that yields produces an `Iterable<T>`, which is never null.",
-                            "Remove the `?` from the return type.",
-                        )
-                    } else {
-                        (
-                            "Functions containing `yield` are generators. Their return type hint must be `Generator`, `Iterator`, `Traversable`, or `iterable`.",
-                            "Adjust the return type hint to a valid Generator signature (e.g., `Generator<K, V, S, R>`) or a compatible iterable type.",
-                        )
-                    };
+                    // `check_slice` decides which PHP# methods yield, and refuses this one.
+                    if context.dialect.is_sharp() {
+                        return None;
+                    }
+
                     context.collector.report_with_code(
                     IssueCode::InvalidGeneratorReturnType,
                     Issue::error(format!(
-                        "Declared return type `{declared}` for generator function `{}` is not a valid Generator or iterable type.",
+                        "Declared return type `{}` for generator function `{}` is not a valid Generator or iterable type.",
+                        iterable_type.get_id(),
                         function.name
                     ))
                     .with_annotation(
                         Annotation::primary(return_type_metadata.span)
-                            .with_message(format!("Declared return type is `{declared}`")),
+                            .with_message(format!("Declared return type is `{}`", iterable_type.get_id())),
                     )
                     .with_annotation(
                         Annotation::secondary(yield_span)
                             .with_message("`yield` used in a generator function with an invalid return type")
                     )
-                    .with_note(note)
-                    .with_help(help),
+                    .with_note(
+                        "Functions containing `yield` are generators. Their return type hint must be `Generator`, `Iterator`, `Traversable`, or `iterable`."
+                    )
+                    .with_help(
+                        "Adjust the return type hint to a valid Generator signature (e.g., `Generator<K, V, S, R>`) or a compatible iterable type.",
+                    ),
                 );
 
                     return None;

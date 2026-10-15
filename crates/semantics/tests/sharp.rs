@@ -4247,20 +4247,21 @@ fn a_map_key_without_equality_by_its_kind_is_an_error() {
 }
 
 /// Spec section 12: a method that returns `Iterable<T>` produces its values with `yield value;` and every element of
-/// another `Iterable<T>` with `yield ...other;`, and a bare `return;` ends it. PHP compiles a `?iterable` generator, so
-/// `Iterable<T>?` takes `yield` too. In PHP#, `=>` is the lambda arrow, so `yield x => x;` yields a lambda.
+/// another `Iterable<T>` with `yield ...other;`, and a bare `return;` ends it. In PHP#, `=>` is the lambda arrow, so
+/// `yield x => x;` yields a lambda.
 #[test]
 fn yield_and_yield_spread_are_statements_of_a_method_that_returns_an_iterable() {
-    let code = "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield ...pending;\n        yield latest;\n        if (count(pending) > 1) {\n            return;\n        }\n    }\n\n    public Iterable<Order>? maybe(Order latest)\n    {\n        yield latest;\n    }\n\n    public Iterable<Function<int(int)>> lambdas()\n    {\n        yield x => x;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield ...pending;\n        yield latest;\n        if (count(pending) > 1) {\n            return;\n        }\n    }\n\n    public Iterable<Function<int(int)>> lambdas()\n    {\n        yield x => x;\n    }\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// A constructor, a method that returns another type and a lambda produce no `Iterable<T>`, so `yield` in them is an
-/// error, spec section 12.
+/// A constructor, a method that returns another type, `Iterable<T>?` among them, and a lambda produce no
+/// `Iterable<T>`, so `yield` in them is an error, spec section 12: a method that yields gives an `Iterable<T>`, which
+/// is never null.
 #[test]
 fn yield_outside_a_method_that_returns_an_iterable_is_an_error() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(Order latest)\n    {\n        yield latest;\n    }\n\n    public List<Order> recent(Order latest)\n    {\n        yield latest;\n    }\n\n    public Iterable<Order> lazy(Order latest)\n    {\n        const read = () => { yield latest; };\n        const arrow = () => yield latest;\n        yield latest;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(Order latest)\n    {\n        yield latest;\n    }\n\n    public List<Order> recent(Order latest)\n    {\n        yield latest;\n    }\n\n    public Iterable<Order> lazy(Order latest)\n    {\n        const read = () => { yield latest; };\n        const arrow = () => yield latest;\n        yield latest;\n    }\n\n    public Iterable<Order>? maybe(Order latest)\n    {\n        yield latest;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -4269,6 +4270,7 @@ fn yield_outside_a_method_that_returns_an_iterable_is_an_error() {
             "12:9 `yield` needs a method that returns `Iterable<T>`.",
             "17:30 `yield` needs a method that returns `Iterable<T>`.",
             "18:29 `yield` needs a method that returns `Iterable<T>`.",
+            "24:9 `yield` needs a method that returns `Iterable<T>`.",
         ]
     );
 }

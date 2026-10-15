@@ -10162,17 +10162,18 @@ fn a_method_that_yields_only_inside_a_loop_or_a_match_arm_returns_no_value() {
     assert_eq!(issues(("src/Demo/OrderImport.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// PHP compiles a generator of `?iterable`, so `check_slice` lets `Iterable<T>?` yield, and the analyzer reports it as
-/// it reports a plain PHP generator of `?iterable`: a generator never returns null.
+/// `check_slice` decides which PHP# methods yield, and refuses `yield` in one that returns `Iterable<T>?` or `int`, so
+/// the analyzer reports no PHP# generator's return type, where it reports their plain PHP twins.
 #[test]
-fn a_nullable_iterable_that_yields_is_reported_as_a_php_nullable_iterable_generator() {
-    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public Iterable<Order>? maybe(Order latest)\n    {\n        yield latest;\n    }\n}\n\nclass Order\n{\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass OrderImport\n{\n    /** @return ?iterable<Order> */\n    public function maybe(Order $latest): ?iterable\n    {\n        yield $latest;\n    }\n}\n\nclass Order\n{\n}\n";
+fn check_slice_alone_refuses_a_php_sharp_generator_of_another_type() {
+    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public Iterable<Order>? maybe(Order latest)\n    {\n        yield latest;\n    }\n\n    public int count(Order latest)\n    {\n        yield latest;\n    }\n}\n\nclass Order\n{\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass OrderImport\n{\n    /** @return ?iterable<Order> */\n    public function maybe(Order $latest): ?iterable\n    {\n        yield $latest;\n    }\n\n    public function count(Order $latest): int\n    {\n        yield $latest;\n    }\n}\n\nclass Order\n{\n}\n";
 
-    let sharp_issues = issues(("src/Demo/OrderImport.sharp", sharp), &[]);
-
-    assert_eq!(sharp_issues, ["5:12 invalid-generator-return-type"]);
-    assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/OrderImport.php", php), &[])));
+    assert_eq!(issues(("src/Demo/OrderImport.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(
+        issues(("src/Demo/OrderImport.php", php), &[]),
+        ["7:17 invalid-generator-return-type", "13:43 invalid-generator-return-type"]
+    );
 }
 
 /// Spec section 12: "`yield ...other;` replaces PHP's `yield from`", and "`other` is an `Iterable<T>`": a `List<T>` or
