@@ -3767,7 +3767,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn for_of(&mut self, for_of: &ForOf) -> u32 {
         let line = self.line(for_of);
         let holds_map = self.types.holds_map(for_of.expression);
-        let collection = self.expression(for_of.expression);
+        // Spec section 12: PHP holds an all-digit `string` key as an `int`, so a plain PHP array keyed by `string` or by
+        // a backed enum becomes the `\Sharp\Map` first, which takes each key back, whichever variables the loop takes.
+        let r#type = self.types.expression_type(for_of.expression).clone();
+        let collection = if holds_map && self.may_be_php_array(for_of.expression) && self.takes_keys_back(&r#type) {
+            self.crossed_value(for_of.expression, Some(&r#type))
+        } else {
+            self.expression(for_of.expression)
+        };
         let variable =
             |this: &mut Self, variable: &ForOfVariable| this.variable(variable.name.span, variable.name.value);
         let taken = self.temporaries;
@@ -5893,6 +5900,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let itself = self.variable(span, name);
 
         self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_array, built, itself])
+    }
+
+    /// Whether `r#type` is a `Map` whose keys [`Self::crossed`] takes back from a PHP array, as [`Self::key_crossing`]
+    /// says: one keyed by `string` and no `int`, or by a backed enum.
+    fn takes_keys_back(&self, r#type: &TUnion) -> bool {
+        self.crossing_array(r#type).is_some_and(|array| {
+            matches!(array, TArray::Keyed(_))
+                && !matches!(self.key_crossing(&self.types.array_parameters(array).0), KeyCrossing::AsHeld)
+        })
     }
 
     /// How a `Map` keyed by `key_type` takes back a key plain PHP's array holds, as [`Self::crossed`] and

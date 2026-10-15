@@ -16036,6 +16036,110 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
 }
 
 /// ```php
+/// foreach (\is_array($crossing#1 = \Lib\Calc::prices()) ? new \Sharp\Map(…(string) $key#2…) : $crossing#1
+///     as $sku => $count) {}
+/// foreach (\Lib\Calc::counts() as $id => $count) {}
+/// ```
+///
+/// Spec section 12: PHP holds an all-digit `string` key as an `int`, so a loop over a plain PHP array keyed by `string`
+/// runs over the `\Sharp\Map` that takes each key back as its `string`. One keyed by `int|string` keeps its keys.
+#[test]
+fn a_loop_over_a_plain_php_array_keyed_by_string_takes_its_keys_back() {
+    assert_eq!(
+        body_in(
+            "void run()",
+            "        for (const [sku, count] of Calc.prices()) {\n        }\n        for (const [id, count] of Calc.counts()) {\n        }\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib;\nfinal class Calc { /** @return array<string, int> */ public static function prices(): array { return []; } /** @return array<array-key, int> */ public static function counts(): array { return []; } }",
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              FOREACH
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "crossing#1"
+                        VERIFY_TYPE_ARGS
+                          STATIC_CALL
+                            ZVAL "Lib\\Calc"
+                            ZVAL "prices"
+                            ARG_LIST
+                          ZVAL "Map<string, int>"
+                          ZVAL "Lib\\Calc::prices()"
+                  NEW
+                    ZVAL "Sharp\\Map"
+                    ARG_LIST
+                      CALL
+                        ZVAL "array_merge"
+                        ARG_LIST
+                          ARRAY [3]
+                          UNPACK
+                            CALL
+                              ZVAL "array_map"
+                              ARG_LIST
+                                ARROW_FUNC "" @9-9
+                                  PARAM_LIST
+                                    PARAM
+                                      null
+                                      ZVAL "key#2"
+                                      null
+                                      null
+                                      null
+                                      null
+                                    PARAM
+                                      null
+                                      ZVAL "value#3"
+                                      null
+                                      null
+                                      null
+                                      null
+                                  null
+                                  ARRAY [3]
+                                    ARRAY_ELEM
+                                      CAST [6]
+                                        VAR
+                                          ZVAL "key#2"
+                                      null
+                                    ARRAY_ELEM
+                                      VAR
+                                        ZVAL "value#3"
+                                      null
+                                  null
+                                  null
+                                CALL
+                                  ZVAL "array_keys"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "crossing#1"
+                                VAR
+                                  ZVAL "crossing#1"
+                  VAR
+                    ZVAL "crossing#1"
+                VAR
+                  ZVAL "count"
+                VAR
+                  ZVAL "sku"
+                STMT_LIST
+              FOREACH
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "counts"
+                  ARG_LIST
+                VAR
+                  ZVAL "count"
+                VAR
+                  ZVAL "id"
+                STMT_LIST
+        "#}
+    );
+}
+
+/// ```php
 /// $names = \VERIFY_TYPE_ARGS(\Lib\Calc::lazy(), 'Iterable<string>', 'Lib\Calc::lazy()');
 /// return Report::tally(\VERIFY_TYPE_ARGS(\Lib\Calc::lazy(), …)) + \Lib\Calc::lazy()->count();
 /// ```
