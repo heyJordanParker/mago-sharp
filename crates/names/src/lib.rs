@@ -51,7 +51,7 @@ pub const INLINED_COLLECTION_METHODS: [(&str, &str); 8] = [
 
 /// The class-likes directly in `Sharp` that a bare name in a `.sharp` file names by default, spec section 23, and that
 /// a class-like of the file's namespace can win over: the standard library's ten effect classes and `Events`, the
-/// effect of `emit` (spec section 29), then `Position`.
+/// effect of `emit` (spec section 29), then `Position`, `Key` and `Result` (spec section 31).
 pub(crate) fn shadowable_default_classes() -> impl Iterator<Item = &'static str> {
     [
         "Sharp\\Database",
@@ -67,8 +67,16 @@ pub(crate) fn shadowable_default_classes() -> impl Iterator<Item = &'static str>
         "Sharp\\Events",
         "Sharp\\Position",
         "Sharp\\Key",
+        "Sharp\\Result",
     ]
     .into_iter()
+}
+
+/// The default class-like that a bare name in a `.sharp` file always names, whatever the file imports or declares or
+/// its namespace holds: `Error`, the standard library's interface of every failure, spec section 31. PHP's engine class
+/// `Error` is never named in PHP# code.
+pub(crate) fn fixed_default_class(name: &[u8]) -> Option<&'static [u8]> {
+    (name == b"Error").then_some(b"Sharp\\Error".as_slice())
 }
 
 /// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`. PHP

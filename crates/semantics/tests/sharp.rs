@@ -796,6 +796,15 @@ fn redeclaring_a_name_an_enclosing_block_declares_is_an_error() {
     );
 }
 
+/// A case's fields are the parameters of its constructor, and a computed property runs as a function of its own, so
+/// neither sees the other's names, as spec section 31's `PaymentError` reads its case's `reason` in `message`.
+#[test]
+fn a_case_field_and_a_computed_property_declare_their_own_names() {
+    let code = "namespace App;\n\nenum PaymentError\n{\n    case Declined(string reason);\n    case Held(string reason);\n\n    public string message => match (this) {\n        PaymentError.Declined(string reason) => reason,\n        PaymentError.Held(string reason) => reason,\n    };\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
 #[test]
 fn using_a_local_after_its_block_closes_is_an_error() {
     let code = leak(method("        {\n            let inner = 1;\n        }\n        return inner;\n"));
@@ -5650,11 +5659,87 @@ fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union()
     );
 }
 
+/// Spec section 31: every enum may declare a computed property, a backed enum and one whose cases carry data included,
+/// and no enum declares a stored or static one.
 #[test]
-fn a_property_in_an_enum_reports_only_the_php_error() {
-    let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    private int count = 0;\n}\n";
+fn an_enum_declares_a_computed_property_and_no_stored_one() {
+    for (declaration, expected) in [
+        (
+            "enum Status\n{\n    case Active;\n\n    private int count = 0;\n\n    public string label => \"active\";\n}\n",
+            [
+                "7:5 Enum `Status` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+            ]
+            .as_slice(),
+        ),
+        (
+            "enum Plan : string\n{\n    case Pro = \"pro\";\n\n    public string label => \"Pro\";\n\n    public static int total { get; set; } = 0;\n}\n",
+            &[
+                "9:5 Enum `Plan` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+            ],
+        ),
+        (
+            "enum Payment\n{\n    case Declined(string reason);\n\n    public string message => \"declined\";\n\n    public string code { get; set; } = \"x\";\n\n    public static string kind => \"payment\";\n\n    public string name => \"payment\";\n}\n",
+            &[
+                "9:5 Enum `Payment` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+                "13:19 Enum `Payment` already has the property `name`, which every enum has.",
+            ],
+        ),
+        (
+            "enum Tier : string\n{\n    case Gold = \"gold\";\n\n    public static string first => \"gold\";\n\n    public string name => \"tier\";\n\n    public string value => \"tier\";\n}\n",
+            &[
+                "9:19 Enum `Tier` already has the property `name`, which every enum has.",
+                "11:19 Enum `Tier` already has the property `value`, which a backed enum has.",
+            ],
+        ),
+        ("enum Level\n{\n    case High;\n\n    public string value => \"high\";\n}\n", &[]),
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
 
-    assert_eq!(issues(code), ["7:5 Enum `Status` cannot have properties."]);
+        assert_eq!(issues(code), expected, "{declaration}");
+    }
+}
+
+/// Spec section 31: an enum without a backing type declares type parameters as a class does, with bounds and without
+/// `in` or `out`. A backed enum runs as a PHP enum, which holds none.
+#[test]
+fn an_enum_declares_type_parameters_without_a_backing_type() {
+    for (declaration, expected) in [
+        (
+            "enum Outcome<T, TFailure : Failure>\n{\n    case Done(T value);\n    case Failed(TFailure failure);\n    case Waiting;\n}\n",
+            None,
+        ),
+        (
+            "enum Covariant<out T>\n{\n    case Some(T value);\n}\n",
+            Some(
+                "3:16 An enum's type parameter takes no `out`: only a class or an interface declares variance, so remove it.",
+            ),
+        ),
+        (
+            "enum Backed<T> : string\n{\n    case Pro = \"pro\";\n}\n",
+            Some("3:12 A backed enum takes no type parameters: it runs as a PHP enum, which holds none."),
+        ),
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
+
+        assert_eq!(issues(code), Vec::from_iter(expected), "{declaration}");
+    }
+}
+
+/// Spec section 31: `Error` is PHP#'s interface of every failure, so no import names it, nor gives a name `Error`. An
+/// import renames another library's `Error`.
+#[test]
+fn no_import_names_error() {
+    let refused = ["3:8 `Error` is PHP#'s interface of every failure, so no import names it."];
+    for (import, expected) in [
+        ("import Error;", refused.as_slice()),
+        ("import Vendor.Payments.Error;", refused.as_slice()),
+        ("import Vendor.Payments.Failure as Error;", refused.as_slice()),
+        ("import Vendor.Payments.Error as VendorError;", [].as_slice()),
+    ] {
+        let code: &'static str = format!("namespace App.Tenant;\n\n{import}\n\nclass Report\n{{\n}}\n").leak();
+
+        assert_eq!(issues(code), expected, "{import}");
+    }
 }
 
 #[test]
@@ -5687,8 +5772,8 @@ fn enum_shapes_are_backed_or_not() {
         issues(timing),
         [
             "9:16 The method `later` shares its name with the case `Later`, which `Timing.Later(…)` creates.",
-            "6:10 A case of an enum whose cases carry data is a class, so it can't be named `Never`.",
-            "7:10 A case of an enum whose cases carry data is a class, so it can't be named `Void`.",
+            "6:10 A case of an enum whose cases carry data or type arguments is a class, so it can't be named `Never`.",
+            "7:10 A case of an enum whose cases carry data or type arguments is a class, so it can't be named `Void`.",
         ]
     );
 
@@ -6309,7 +6394,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         ),
         (
             body,
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`.",
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `try` before a `Result`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`.",
         ),
     ] {
         assert_eq!(

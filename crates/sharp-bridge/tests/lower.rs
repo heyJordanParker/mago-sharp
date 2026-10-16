@@ -26336,3 +26336,239 @@ fn a_static_member_read_in_an_enum_case_value_is_an_error() {
         ]
     );
 }
+
+/// The standard library's `Result` and `Error`, and an enum of failures that implements `Error`, spec section 31.
+const RESULTS: [(&str, &str); 3] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Result.sharp",
+        "namespace Sharp;\n\npublic enum Result<T, TError : Error>\n{\n    case Ok(T value);\n    case Err(TError error);\n}\n",
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Error.sharp",
+        "namespace Sharp;\n\npublic interface Error { string message { get; } }\n",
+    ),
+    (
+        "src/App/ChargeError.sharp",
+        "namespace App;\n\npublic enum ChargeError : Error\n{\n    case Declined(string reason);\n\n    public string message => \"declined\";\n}\n",
+    ),
+];
+
+/// Spec section 31: `try result` reads `result` once into a hidden local, and when it is an `Err`, returns a new `Err`
+/// holding its error with the type arguments of the method's `Result`, as
+/// `($try#1 = $result) instanceof \Sharp\Result\Err ? return new \Sharp\Result\Err<int, App.ChargeError>($try#1->error)
+/// : $try#1->value`. The `return` inside the expression is a leave, as `?? return` is. A case factory of a generic enum
+/// creates its case with the type arguments the call fixed.
+#[test]
+fn try_returns_the_err_and_gives_the_ok_value() {
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Report\n{\n    public Result<int, ChargeError> run(Result<int, ChargeError> result) => Result.Ok(try result + 1);\n}\n",
+        &RESULTS,
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Result\\Ok"
+                    ARG_LIST
+                      BINARY_OP [1]
+                        CONDITIONAL [1]
+                          INSTANCEOF
+                            ASSIGN
+                              VAR
+                                ZVAL "try#1"
+                              VAR
+                                ZVAL "result"
+                            ZVAL "Sharp\\Result\\Err"
+                          RETURN
+                            SHARP_TYPE_ARGS
+                              NEW
+                                ZVAL "Sharp\\Result\\Err"
+                                ARG_LIST
+                                  PROP
+                                    VAR
+                                      ZVAL "try#1"
+                                    ZVAL "error"
+                              ZVAL "int, App.ChargeError"
+                          PROP
+                            VAR
+                              ZVAL "try#1"
+                            ZVAL "value"
+                        ZVAL 1
+                  ZVAL "int, App.ChargeError"
+        "#}
+    );
+}
+
+/// Spec section 31: every enum may declare a computed property, which runs as a virtual property hook of the PHP enum
+/// or the class the enum runs as, and its type text tells the engine that the enum may hold it.
+#[test]
+fn an_enum_computed_property_is_a_virtual_property() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic enum Status\n{\n    case Active;\n\n    public string label => \"active\";\n}\n",
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App"
+                null
+              CLASS [268435488] "Status" @3-8
+                null
+                null
+                STMT_LIST
+                  ENUM_CASE
+                    ZVAL "Active"
+                    null
+                    null
+                    null
+                  PROP_GROUP [1]
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "label"
+                        null
+                        null
+                        STMT_LIST
+                          PROPERTY_HOOK "get" @7-7
+                            null
+                            null
+                            PROPERTY_HOOK_SHORT_BODY
+                              ZVAL "active"
+                            null
+                            null
+                    null
+                null
+                null
+        "#}
+    );
+
+    let cases = Lowered::new(
+        "namespace App;\n\npublic enum Charge\n{\n    case Declined(string reason);\n\n    public string message => \"declined\";\n\n    public static string kind => \"charge\";\n}\n",
+    );
+
+    assert!(
+        cases.tree().contains(r#"ZVAL "message""#) && cases.tree().contains(r#"PROPERTY_HOOK "get" @7-7"#),
+        "{}",
+        cases.tree()
+    );
+    // A static computed property runs as a class's does, as the hidden static method `kind#get`.
+    assert!(cases.tree().contains(r#"METHOD [17] "kind#get" @9-9"#), "{}", cases.tree());
+
+    let plain = Lowered::new(
+        "namespace App;\n\npublic enum Status\n{\n    case Active;\n\n    public static string first => \"active\";\n}\n",
+    );
+
+    assert!(plain.tree().contains(r#"METHOD [17] "first#get" @7-7"#), "{}", plain.tree());
+
+    // An interface's computed default is a property of the enum that gets it, with its type text, as an enum's own is.
+    let defaulted = Lowered::with(
+        "namespace App;\n\npublic enum Tone : Labeled\n{\n    case Calm;\n}\n",
+        &[("src/Labeled.sharp", "namespace App;\n\npublic interface Labeled\n{\n    string label => \"label\";\n}\n")],
+    );
+
+    assert!(
+        defaulted.tree().contains("SHARP_TYPE_ARGS\n          ZVAL [1] \"mixed\"\n          ZVAL \"string\""),
+        "{}",
+        defaulted.tree()
+    );
+}
+
+/// Spec sections 19 and 31: a value of a type parameter compares by its type argument's `==`, which only the running
+/// code knows, through `\Sharp\Internal\equals`, so a `Result<int, ChargeError>`'s `==` compares its errors by value.
+#[test]
+fn a_type_parameter_compares_by_its_type_arguments_equality() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic class Report\n{\n    public static bool run<T>(T a, T b) => a == b;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  ZVAL "Sharp\\Internal\\equals"
+                  ARG_LIST
+                    VAR
+                      ZVAL "a"
+                    VAR
+                      ZVAL "b"
+        "#}
+    );
+}
+
+/// Spec section 31: a plain case of a generic enum is one object for each list of type arguments, which its class keeps
+/// as a static field of its own, as a generic class keeps each static field, spec section 11. A read passes the type
+/// arguments it gives the case to `instance()`, as a static call of a generic class passes the class's.
+#[test]
+fn a_plain_case_of_a_generic_enum_is_the_object_of_its_type_arguments() {
+    let lookup = "namespace App;\n\nenum Lookup<T>\n{\n    case Found(T value);\n    case Missing;\n}\n";
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Report\n{\n    public Lookup<int> run() => Lookup.Missing;\n\n    public Lookup<T> forward<T>() => Lookup<T>.Missing;\n}\n",
+        &[("src/Lookup.sharp", lookup)],
+    );
+
+    let read = |type_arguments: &str| {
+        format!(
+            indoc! {r#"
+                STMT_LIST
+                  RETURN
+                    STATIC_CALL
+                      ZVAL "App\\Lookup\\Missing"
+                      ZVAL "instance"
+                      ARG_LIST
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "{}"
+            "#},
+            type_arguments
+        )
+    };
+    assert_eq!(lowered.body(), read("int"));
+    assert_eq!(lowered.body_of("forward"), read("#0"));
+    assert_eq!(
+        Lowered::new(lookup).declared("instance"),
+        indoc! {r##"
+            METHOD [17] "instance" @6-6
+              PARAM_LIST
+                SHARP_TYPE_ARGS
+                  ZVAL "Any?"
+                  null
+              null
+              STMT_LIST
+                RETURN
+                  ASSIGN_COALESCE
+                    DIM
+                      CALL
+                        ZVAL "Sharp\\Internal\\statics"
+                        ARG_LIST
+                          CLASS_NAME
+                            ZVAL "App\\Lookup\\Missing"
+                          SHARP_TYPE_OF [1]
+                            ZVAL "#0"
+                      ZVAL "instance"
+                    SHARP_TYPE_ARGS
+                      NEW
+                        ZVAL [1] "self"
+                        ARG_LIST
+                      ZVAL "#0"
+              ZVAL [1] "self"
+              null
+        "##}
+    );
+}

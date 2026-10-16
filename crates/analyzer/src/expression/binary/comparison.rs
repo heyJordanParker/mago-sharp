@@ -44,6 +44,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::ancestor_type_arguments;
 use crate::expression::binary::utils::analyze_operator_call;
 use crate::expression::binary::utils::are_definitely_loosely_equal;
 use crate::expression::binary::utils::are_definitely_not_identical;
@@ -57,6 +58,7 @@ use crate::expression::binary::utils::is_always_identical_to;
 use crate::expression::binary::utils::is_always_less_than;
 use crate::expression::binary::utils::is_always_less_than_or_equal;
 use crate::expression::binary::utils::takes_operands;
+use crate::expression::with_type_arguments;
 use crate::statement::class_like::r#struct::data_enum;
 use crate::statement::class_like::r#struct::declares_equality;
 use crate::statement::class_like::r#struct::value_properties;
@@ -998,7 +1000,15 @@ fn refusal(
                 lhs.iter()
                     .chain(&rhs)
                     .find_map(|comparand| match comparand {
-                        Comparand::Enum(name) => struct_property_refusal(*name, lhs_type, codebase, visiting),
+                        Comparand::Enum(name) => {
+                            // A generic enum's type arguments are those of the side that gives them.
+                            let typed = [lhs_type, rhs_type]
+                                .into_iter()
+                                .find(|side| enum_type_arguments(*name, [*side], codebase).is_some())
+                                .unwrap_or(lhs_type);
+
+                            struct_property_refusal(*name, typed, codebase, visiting)
+                        }
                         _ => None,
                     })
                     .map(|_| Refusal::StructProperty)
@@ -1407,8 +1417,9 @@ pub(crate) fn check_element_equality<A>(
 /// `==` cannot compare with another of its type, with why, spec sections 10 and 20: a struct or a case compares by
 /// value only when each of its properties does, a property of a generic struct's type parameter as the type argument
 /// `type_of` gives the struct, so `Pair<int, string>` compares and `Pair<Order, int>` does not when `Order` declares no
-/// `operator ==`, with the property's type as those type arguments give it. `visiting` holds the structs and enums being
-/// checked, so one that holds itself, as in `Node? next`, compares by the rest.
+/// `operator ==`, and a field of a generic enum's case as the type argument `type_of` gives the enum, spec section 31,
+/// with the property's type as those type arguments give it. `visiting` holds the structs and enums being checked, so
+/// one that holds itself, as in `Node? next`, compares by the rest.
 fn struct_property_refusal<'codebase>(
     name: Word,
     type_of: &TUnion,
@@ -1427,11 +1438,18 @@ fn struct_property_refusal<'codebase>(
         _ => None,
     });
     let type_arguments = class_type_arguments(class, type_arguments.unwrap_or_default());
+    // A field of a case of a generic enum reads the type arguments `type_of` gives the enum, also through a case's
+    // value, as `Ok`'s `value` is an `int` in a `Result<int, PaymentError>.Ok`, spec section 31.
+    let enum_type_arguments =
+        data_enum(codebase, class).and_then(|_| enum_type_arguments(class.name, [type_of], codebase));
     visiting.push(class.name);
 
     let refused = properties.into_iter().find_map(|property| {
         let declared = &property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?.type_union;
-        let r#type = inferred_type_replacer::replace(declared, &type_arguments, codebase);
+        let r#type = match &enum_type_arguments {
+            Some(enum_type_arguments) => with_type_arguments(declared, class.name, Some(enum_type_arguments), codebase),
+            None => inferred_type_replacer::replace(declared, &type_arguments, codebase),
+        };
         // `==` on two `Any` values is refused: an `Any` compares by value only with a value of a known type.
         if comparands(&r#type, codebase).contains(&Comparand::Any) {
             return Some((property, r#type, None));
@@ -1443,6 +1461,21 @@ fn struct_property_refusal<'codebase>(
     visiting.pop();
 
     refused
+}
+
+/// The type arguments a value of one of `unions` gives the generic enum `name`, as a `Result<int, PaymentError>.Ok`
+/// gives `Result` `int` and `PaymentError`, spec section 31. None for an enum without type parameters.
+fn enum_type_arguments<'union>(
+    name: Word,
+    unions: impl IntoIterator<Item = &'union TUnion>,
+    codebase: &CodebaseMetadata,
+) -> Option<Vec<TUnion>> {
+    let r#enum = codebase.get_class_like(name.as_bytes())?;
+
+    unions
+        .into_iter()
+        .flat_map(|union| union.types.iter())
+        .find_map(|atomic| ancestor_type_arguments(codebase, atomic, r#enum))
 }
 
 /// The issue that refuses `==` on the struct or the enum one of `lhs_type` and `rhs_type` holds, naming the first

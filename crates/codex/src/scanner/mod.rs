@@ -101,7 +101,6 @@ use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
 use crate::ttype::template::TemplateResult;
 use crate::ttype::template::inferred_type_replacer;
-use crate::ttype::union::TUnion;
 use crate::ttype::wrap_atomic;
 use crate::visibility::Visibility;
 
@@ -1114,18 +1113,7 @@ where
             method_metadata.assigned_properties =
                 function_like::definitely_assigned_properties(&named_constructor.body, context);
             method.flags |= MetadataFlags::NAMED_CONSTRUCTOR;
-            let type_parameters: Vec<TUnion> = class
-                .template_types
-                .iter()
-                .map(|(name, template)| {
-                    wrap_atomic(TAtomic::GenericParameter(TGenericParameter {
-                        parameter_name: *name,
-                        constraint: Arc::new(template.constraint.clone()),
-                        defining_entity: template.defining_entity,
-                        intersection_types: None,
-                    }))
-                })
-                .collect();
+            let type_parameters = class_like::template_arguments(&class.template_types);
             let object = TNamedObject::new_with_type_parameters(
                 class.original_name,
                 (!type_parameters.is_empty()).then_some(type_parameters),

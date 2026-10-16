@@ -5583,8 +5583,7 @@ fn check_readonly_class_trait_properties<'ctx, 'arena, A>(
 /// body for, unless the class writes the method itself: two of its header traits and the traits of its interfaces'
 /// default bodies, which PHP refuses, or a default body and the base class, whose body PHP would replace. A header
 /// trait replaces the base class's method, as PHP's `use` does. A computed property's default body beside another
-/// default body, a header trait's property or the base class's property is reported alike, and an enum, which has no
-/// property, gets none.
+/// default body, a header trait's property or the base class's property is reported alike.
 fn check_members_given_twice<A>(
     context: &mut Context<'_, '_, A>,
     class_like_metadata: &ClassLikeMetadata,
@@ -5694,31 +5693,6 @@ fn check_members_given_twice<A>(
             continue;
         }
         let property = mago_bytes::BytesDisplay(mago_bytes::trim_start_byte(name.as_bytes(), b'$'));
-        // An enum has no property, its own or a default body's, as PHP gives an enum none. An enum with a case that
-        // carries data runs as the class its cases extend.
-        if class_like_metadata.kind.is_enum()
-            || class_like_metadata.permitted_inheritors.iter().flatten().any(|inheritor| {
-                context
-                    .codebase
-                    .get_class_like(inheritor.as_bytes())
-                    .is_some_and(|case| case.flags.is_enum_case_class())
-            })
-        {
-            let Some((_, interface, _)) = given.iter().find(|(_, _, default)| *default) else {
-                unreachable!("the group holds a default body");
-            };
-            let interface = display_class_like_name(context, interface.original_name);
-            context.collector.report_with_code(
-                IssueCode::InvalidImplement,
-                Issue::error(format!(
-                    "Enum `{class_name}` cannot have properties, and `{interface}` gives it the computed property `{property}`."
-                ))
-                .with_annotation(Annotation::primary(name_span).with_message(format!("`{class_name}` gets `{property}` here.")))
-                .with_help(format!("Make `{property}` a method of `{interface}`, or implement `{interface}` in a class.")),
-            );
-
-            continue;
-        }
         // A sub-interface's default body replaces its parent's here too.
         let givers: Vec<Word> = parent
             .filter(|parent| parent.properties.contains_key(&name))

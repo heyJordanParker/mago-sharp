@@ -185,7 +185,11 @@ where
             T!["break"] => self.parse_break().map(Statement::Break),
             T!["unset"] => self.parse_unset().map(Statement::Unset),
             T!["{"] => self.parse_block().map(Statement::Block),
-            T!["try"] => self.parse_try().map(Statement::Try),
+            // In PHP#, `try` before a value is the expression that passes a failure up, spec section 31, so only a `try`
+            // before `{` starts the statement.
+            T!["try"] if !self.dialect.is_sharp() || self.stream.peek_kind(1)? == Some(T!["{"]) => {
+                self.parse_try().map(Statement::Try)
+            }
             T!["echo"] => self.parse_echo().map(Statement::Echo),
             T!["goto"] => self.parse_goto().map(Statement::Goto),
             kind if kind.is_identifier_maybe_reserved() && matches!(self.stream.peek_kind(1)?, Some(T![":"])) => {

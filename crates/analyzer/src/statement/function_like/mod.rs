@@ -298,7 +298,7 @@ where
 /// return type, as a call gives an argument its parameter's type. Spec section 14.2: a PHP# lambda takes its parameter
 /// types from it. A member read takes them too, because a method value of a generic method infers its type arguments
 /// from them (section 14.3), and a generic call infers the type arguments nothing else fixes from it (section 11).
-/// `??` and `?:` give it to the sides their value comes from.
+/// `??`, `?:` and `match` give it to the sides and arms their value comes from.
 pub fn expect_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -324,6 +324,7 @@ pub fn takes_declared_type(expression: &Expression<'_>) -> bool {
             | Expression::Closure(_)
             | Expression::Call(_)
             | Expression::Conditional(_)
+            | Expression::Match(_)
             | Expression::PatternMatch(_)
             | Expression::Binary(Binary { operator: BinaryOperator::NullCoalesce(_), .. })
     ) || is_member_read(expression)

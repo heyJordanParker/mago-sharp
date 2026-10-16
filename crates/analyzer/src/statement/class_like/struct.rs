@@ -250,7 +250,7 @@ pub(crate) fn data_enum(codebase: &CodebaseMetadata, class: &ClassLikeMetadata) 
 }
 
 /// The classes the cases of `class` run as, when it is an enum with a case that carries data, spec section 20.
-fn data_cases<'codebase>(
+pub(crate) fn data_cases<'codebase>(
     codebase: &'codebase CodebaseMetadata,
     class: &ClassLikeMetadata,
 ) -> Vec<&'codebase ClassLikeMetadata> {
