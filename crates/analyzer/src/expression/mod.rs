@@ -87,6 +87,8 @@ use crate::reconciler::reconcile_keyed_types;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::override_attribute;
+use crate::statement::function_like::HintPlace;
+use crate::statement::function_like::expect_type;
 use crate::statement::get_type_from_hint;
 use crate::statement::report_erased_type_test;
 use crate::statement::report_hint_type_arguments;
@@ -437,7 +439,7 @@ where
     let tests_function_type = hints.iter().any(|hint| names_function_type(hint));
     let mut is_refused = false;
     for hint in hints {
-        is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint);
+        is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint, HintPlace::TypeTest);
         is_refused |= report_erased_type_test(context, hint);
 
         // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any`, of a
@@ -497,6 +499,12 @@ where
             }));
         }
         _ => {}
+    }
+    // The declared type a `match`'s value goes into is the one its PHP's value goes into, which gives it to each arm.
+    if let (Node::Expression(expression), Node::Expression(php)) = (node, php)
+        && let Some(expected) = artifacts.get_expected_type(expression).cloned()
+    {
+        expect_type(context, artifacts, php, Some(&expected));
     }
     context.temporaries += temporaries;
     let (result, issues) = context.record(|context| match php {

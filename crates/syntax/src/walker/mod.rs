@@ -970,6 +970,9 @@ generate_ast_walker! {
 
         walker.walk_keyword(&r#struct.r#struct, context);
         walker.walk_local_identifier(&r#struct.name, context);
+        if let Some(type_parameters) = &r#struct.type_parameters {
+            walker.walk_type_parameter_list(type_parameters, context);
+        }
 
         if let Some(inheritance) = &r#struct.inheritance {
             walker.walk_inheritance(inheritance, context);

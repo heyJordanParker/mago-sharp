@@ -4,8 +4,10 @@ use mago_php_version::PHPVersion;
 use mago_span::HasSpan;
 use mago_span::Span;
 
+use crate::cst::cst::access::PropertyAccess;
 use crate::cst::cst::attribute::AttributeList;
 use crate::cst::cst::block::Block;
+use crate::cst::cst::class_like::member::ClassLikeMemberSelector;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
 use crate::cst::cst::identifier::LocalIdentifier;
@@ -18,6 +20,8 @@ use crate::cst::cst::variable::DirectVariable;
 
 use crate::cst::sequence::Sequence;
 use crate::cst::sequence::TokenSeparatedSequence;
+use crate::walker::MutWalker;
+use crate::walker::walk_expression_mut;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -347,11 +351,33 @@ impl<'arena> Property<'arena> {
     }
 
     /// Returns `true` when a PHP# static member's initial value runs once, when a request first uses its class's
-    /// statics, instead of being PHP's default: a value that is not a constant expression.
+    /// statics, instead of being PHP's default: a value that is not a constant expression, or one that reads a static
+    /// member of a class, `Class.name`, which PHP's constant expression can't read. PHP# names a property or method in
+    /// camel case, and a constant or enum case with a capital (spec section 24), so `Class.count` reads a static
+    /// member and `Order.Ascending` an enum case.
     #[must_use]
     pub fn initial_value_runs_after_class(&self) -> bool {
         self.modifiers().contains_static()
-            && self.initial_value().is_some_and(|value| !value.is_constant(&PHPVersion::PHP85, false))
+            && self.initial_value().is_some_and(|value| {
+                let mut read = ClassMemberRead { found: false };
+                walk_expression_mut(&mut read, value, &mut ());
+
+                read.found || !value.is_constant(&PHPVersion::PHP85, false)
+            })
+    }
+}
+
+/// Finds a static member read, `Class.name` or `Counter<T>.name`, in an initial value, for
+/// [`Property::initial_value_runs_after_class`].
+struct ClassMemberRead {
+    found: bool,
+}
+
+impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for ClassMemberRead {
+    fn walk_in_property_access(&mut self, access: &'ast PropertyAccess<'arena>, _context: &mut ()) {
+        self.found |= matches!(access.object, Expression::ConstantAccess(_) | Expression::GenericClass(_))
+            && matches!(&access.property, ClassLikeMemberSelector::Identifier(name)
+                if name.value.first().is_some_and(u8::is_ascii_lowercase));
     }
 }
 

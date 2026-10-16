@@ -15,6 +15,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::resolution::TypeResolutionContext;
@@ -275,6 +276,7 @@ const ZEND_ACC_TRAIT: u32 = 1 << 1;
 const ZEND_ACC_READONLY: u32 = 1 << 7;
 const ZEND_ACC_PROTECTED_SET: u32 = 1 << 11;
 const ZEND_ACC_PRIVATE_SET: u32 = 1 << 12;
+const ZEND_ACC_RETURN_REFERENCE: u32 = 1 << 12;
 const ZEND_ACC_FIELD: u32 = 1 << 15;
 const ZEND_ACC_GENERATOR: u32 = 1 << 24;
 const ZEND_ACC_ENUM: u32 = 1 << 28;
@@ -291,6 +293,8 @@ const ZEND_BIND_REF: u32 = 1;
 const TYPE_ARGUMENTS: &[u8] = b"\0<sharp>\0types";
 /// The hidden static that keeps each type argument's own static fields of a generic class.
 const STATICS: &[u8] = b"\0<sharp>\0statics";
+/// The hidden static method that returns one type argument's entry of [`STATICS`].
+const STATICS_ENTRY: &[u8] = b"#entry";
 const IS_LONG: u32 = 4;
 const IS_DOUBLE: u32 = 5;
 const IS_STRING: u32 = 6;
@@ -408,6 +412,15 @@ enum ListWrite<'write, 'ast> {
     Step { decrement: bool, postfix: bool },
 }
 
+/// What an access does with the place it reaches: reads its value, writes it after reading it, as a compound
+/// assignment, `++` and `--` do, or writes it alone, as `=` and `??=` do.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlaceUse {
+    Read,
+    Update,
+    Write,
+}
+
 /// What a `List`'s search by `==` gives: whether an element equals the value, the index of the first one that does, or
 /// whether `remove` removed it.
 #[derive(Clone, Copy)]
@@ -506,6 +519,10 @@ struct Lowering<'lowering, 'arena> {
     texts: Vec<u8>,
     /// How many hidden variables the pattern forms and null-safe chains being lowered hold.
     temporaries: u32,
+    /// How many checked updates of a generic class's statics the file holds, each with its own hidden `$statics#N`,
+    /// which [`Self::statics_field`] binds inside the update's index. PHP runs every index of a chain before it fetches,
+    /// so no other access in the chain may reuse it.
+    checked_statics: u32,
     /// The receivers of the null-safe chains being lowered that their hidden variable holds, by span, with its name.
     null_safe_receivers: Vec<(Span, Vec<u8>)>,
     /// The null-safe links whose chain's conditional already tests the receiver, so each is its plain form.
@@ -556,6 +573,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             children: Vec::new(),
             texts: Vec::new(),
             temporaries: 0,
+            checked_statics: 0,
             null_safe_receivers: Vec::new(),
             tested_links: Vec::new(),
             by_reference: HashSet::default(),
@@ -838,9 +856,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if self.tested {
             members.extend(self.test_hooks(class));
         }
-        if self.types.bounds(self.class).is_some() {
-            members.extend(self.statics_store(class));
-        }
+        members.extend(self.generic_statics(&class.name, &class.members));
         members.extend(self.class_metadata(self.line(class.name)));
         members.splice(0..0, self.trait_members(class.inheritance.as_ref(), class.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
@@ -878,6 +894,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.push(self.value_equality(r#struct.name.span, &[self.class]));
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
+        members.extend(self.generic_statics(&r#struct.name, &r#struct.members));
         members.extend(self.class_metadata(self.line(r#struct.name.span)));
         members.splice(0..0, self.trait_members(r#struct.inheritance.as_ref(), r#struct.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
@@ -1003,6 +1020,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let fields = self.types.struct_parse_fields(self.class);
         let texts = fields.iter().map(|field| self.types.type_text(field.r#type)).collect::<Option<Vec<_>>>()?;
         self.enter(b"parse");
+        // A generic type's `parse` takes its type arguments as a static method does, spec section 11.
+        self.static_type_parameters = self.types.static_type_parameters(self.class);
         let line = self.line(span);
         let taken = self.temporaries;
         let [input, problems, arguments, properties, object, name, property] =
@@ -1058,7 +1077,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let spread = self.variable(span, &arguments);
         let spread = self.node(SHARP_AST_UNPACK, 0, line, &[spread]);
         let spread = self.node(SHARP_AST_ARG_LIST, 0, line, &[spread]);
-        let created = self.node(SHARP_AST_NEW, 0, line, &[class, spread]);
+        let mut created = self.node(SHARP_AST_NEW, 0, line, &[class, spread]);
+        if let Some(count) = self.static_type_parameters {
+            let own = self.type_text(line, &type_parameters_text(count));
+            created = self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[created, own]);
+        }
         statements.push(self.assign(span, &Place::variable(&object), created));
         let object_read = self.variable(span, &object);
         let property_name = self.variable(span, &name);
@@ -1073,6 +1096,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.temporaries = taken;
 
         let parameters = self.parse_parameters(span);
+        self.static_type_parameters = None;
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let return_type = self.string(ZEND_NAME_FQ, line, self.class);
 
@@ -1097,11 +1121,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// ```
     fn try_parse(&mut self, span: Span) -> u32 {
         self.enter(b"tryParse");
+        self.static_type_parameters = self.types.static_type_parameters(self.class);
         let line = self.line(span);
         let class = self.string(ZEND_NAME_FQ, line, self.class);
         let method = self.string(0, line, b"parse");
-        let value = self.variable(span, b"value");
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+        let mut arguments = vec![self.variable(span, b"value")];
+        if let Some(count) = self.static_type_parameters {
+            arguments.push(self.type_arguments_argument(line, &type_parameters_text(count)));
+        }
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
         let parsed = self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
         let parsed = self.node(SHARP_AST_RETURN, 0, line, &[parsed]);
         let parsed = self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed]);
@@ -1115,6 +1143,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let r#try = self.node(SHARP_AST_TRY, 0, line, &[parsed, catches, NULL]);
 
         let parameters = self.parse_parameters(span);
+        self.static_type_parameters = None;
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#try]);
         let return_type = self.string(ZEND_NAME_FQ, line, self.class);
         self.nodes[return_type as usize].attr |= ZEND_TYPE_NULLABLE;
@@ -1129,16 +1158,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// `(array|object $value)`, what `parse` and `tryParse` take: a `Map<string, Any?>` or an object.
+    /// `(array|object $value)`, what `parse` and `tryParse` take: a `Map<string, Any?>` or an object. A generic type's
+    /// ends with the bounds of its type parameters, as any static method of it does.
     fn parse_parameters(&mut self, span: Span) -> u32 {
         let line = self.line(span);
         let array = self.node(SHARP_AST_TYPE, IS_ARRAY, line, &[]);
         let object = self.string(ZEND_NAME_NOT_FQ, line, b"object");
         let hint = self.node(SHARP_AST_TYPE_UNION, 0, line, &[array, object]);
         let name = self.string(0, line, b"value");
-        let parameter = self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL]);
+        let mut parameters = vec![self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL])];
+        parameters.extend(self.parameter_metadata((self.types.bounds(self.class), None), line));
 
-        self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter])
+        self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters)
     }
 
     /// The read of a field present in the input, from `source` into `target`. Each nested struct is built from its
@@ -1189,7 +1220,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements.extend(built);
 
         let arguments = [
-            self.string(0, line, text.as_bytes()),
+            self.type_text(line, text),
             self.variable(span, &read),
             self.string(0, line, key),
             self.variable(span, fields),
@@ -1257,26 +1288,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let written = hint.map(written_members).unwrap_or_default();
         let mut statements = Vec::new();
 
-        let mut structs: Vec<&[u8]> = members
+        let mut structs: Vec<&TNamedObject> = members
             .iter()
             .filter_map(|atomic| match atomic {
-                TAtomic::Object(TObject::Named(object)) if self.types.parses(object.name.as_bytes()) => {
-                    Some(object.name.as_bytes())
-                }
+                TAtomic::Object(TObject::Named(object)) if self.types.parses(object.name.as_bytes()) => Some(object),
                 _ => None,
             })
             .collect();
         structs.sort_by_key(|class| {
-            written.iter().position(
-                |member| matches!(member, Hint::Identifier(name) if self.names.get(name).eq_ignore_ascii_case(class)),
-            )
+            written.iter().position(|member| {
+                matches!(member, Hint::Identifier(name) if self.names.get(name).eq_ignore_ascii_case(class.name.as_bytes()))
+            })
         });
         if !structs.is_empty() {
             let readable =
                 [self.global_call_of(span, b"is_array", &value), self.global_call_of(span, b"is_object", &value)];
             let mut condition = self.node(SHARP_AST_OR, 0, line, &readable);
             for class in &structs {
-                let is_struct = self.instance_of(span, &value, class);
+                let is_struct = self.instance_of(span, &value, class.name.as_bytes());
                 let is_not = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[is_struct]);
                 condition = self.node(SHARP_AST_AND, 0, line, &[is_not, condition]);
             }
@@ -1353,13 +1382,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements
     }
 
-    /// `try { $read#N = \App\Address::parse($read#N); }`, the struct `class` built from the value of `variable`.
-    fn nested_parse(&mut self, span: Span, class: &[u8], variable: &[u8]) -> u32 {
+    /// `try { $read#N = \App\Address::parse($read#N); }`, the struct `class` built from the value of `variable`, a
+    /// generic one with the type arguments the field gives it, as `\App\Pair::parse($read#N, <int, string>)`.
+    fn nested_parse(&mut self, span: Span, class: &TNamedObject, variable: &[u8]) -> u32 {
         let line = self.line(span);
-        let name = self.string(ZEND_NAME_FQ, line, class);
+        let name = self.string(ZEND_NAME_FQ, line, class.name.as_bytes());
         let method = self.string(0, line, b"parse");
-        let value = self.variable(span, variable);
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+        let mut arguments = vec![self.variable(span, variable)];
+        if let Some(type_arguments) = class.get_type_parameters() {
+            let text = self.types.argument_texts(type_arguments);
+            arguments.push(self.type_arguments_argument(line, &text));
+        }
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
         let parsed = self.node(SHARP_AST_STATIC_CALL, 0, line, &[name, method, arguments]);
         let parsed = self.assign(span, &Place::variable(variable), parsed);
 
@@ -1371,7 +1405,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn parse_nested(
         &mut self,
         span: Span,
-        class: &[u8],
+        class: &TNamedObject,
         variable: &[u8],
         path: &[PathPart],
         fields: &[u8],
@@ -1555,7 +1589,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
         for member in class_members.iter().filter(|member| !matches!(member, ClassLikeMember::Law(_))) {
             let member = match member {
-                ClassLikeMember::Property(property) if keeps_statics && property.modifiers().contains_static() => {
+                // A generic class keeps its static fields in `statics_store`, and its statics with accessors' storage.
+                ClassLikeMember::Property(property)
+                    if keeps_statics && property.modifiers().contains_static() && !runs_static_accessors(property) =>
+                {
                     continue;
                 }
                 ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => {
@@ -1643,7 +1680,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             ));
         }
         members.extend(self.copy_resets(class_members, parent_name.is_some(), keyword, right_brace));
-        members.extend(self.static_initial_values(class_members));
+        if !keeps_statics {
+            members.extend(self.static_initial_values(class_members));
+        }
 
         members
     }
@@ -1712,32 +1751,48 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         ))
     }
 
-    /// The hidden static a generic PHP# class keeps each type argument's own static fields in, spec section 11, as
+    /// The [`Self::statics_store`] and [`Self::statics_entry`] of a generic PHP# class or struct named `name` with
+    /// `members` that declares static fields, spec section 11, or none.
+    fn generic_statics(&mut self, name: &LocalIdentifier, members: &Sequence<ClassLikeMember>) -> Vec<u32> {
+        if self.types.bounds(self.class).is_none() {
+            return Vec::new();
+        }
+        let Some(store) = self.statics_store(name, members) else {
+            return Vec::new();
+        };
+
+        vec![store, self.statics_entry(name, members)]
+    }
+
+    /// The hidden static a generic PHP# class or struct, named `name` with `members`, keeps each type argument's own
+    /// static fields in, spec section 11, as
     /// `public static $"\0<sharp>\0statics" = ["" => ["count" => 0, "items" => []]];` with `ZEND_ACC_SHARP_HIDDEN`:
-    /// under the key "" the defaults, each field's initial value, which
-    /// `\Sharp\Internal\statics()` copies for each type argument text on its first use. None for a class without static
-    /// fields.
-    fn statics_store(&mut self, class: &Class) -> Option<u32> {
-        let line = self.line(class.name);
+    /// under the key "" the defaults, each constant initial value, which `\Sharp\Internal\statics()` copies for each
+    /// type argument text on its first use. An initial value that runs as code is set by the class's
+    /// [`Self::statics_entry`]. None for a class without static fields.
+    fn statics_store(&mut self, name: &LocalIdentifier, members: &Sequence<ClassLikeMember>) -> Option<u32> {
+        let line = self.line(name);
+        let mut stores = false;
         let mut fields = Vec::new();
-        for member in &class.members {
+        for member in members {
             let ClassLikeMember::Property(property) = member else {
                 continue;
             };
-            if !property.modifiers().contains_static() {
+            let Some(value) = property.initial_value().filter(|_| property.modifiers().contains_static()) else {
+                continue;
+            };
+            stores = true;
+            if property.initial_value_runs_after_class() {
                 continue;
             }
 
             let variable = property.first_variable();
             let field_line = self.line(variable);
-            let value = match property.initial_value() {
-                Some(value) => self.expression(value),
-                None => continue,
-            };
+            let value = self.expression(value);
             let name = self.string(0, field_line, variable.name);
             fields.push(self.node(SHARP_AST_ARRAY_ELEM, 0, field_line, &[value, name]));
         }
-        if fields.is_empty() {
+        if !stores {
             return None;
         }
 
@@ -1755,6 +1810,169 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             line,
             &[NULL, declaration, NULL],
         ))
+    }
+
+    /// The hidden static method of a generic PHP# class or struct, named `name` with `members`, with static fields that
+    /// every access of them calls, spec section 11. It takes the class's type arguments as its own, as any static method
+    /// of the class does, and returns
+    /// by reference their entry of [`Self::statics_store`]. The call that adds the entry runs each initial value that
+    /// runs as code, in declaration order, as C# runs a closed type's static initializer on its first use:
+    /// `public static function &'#entry'() { $entry#1 = &\Sharp\Internal\statics(\App\Counter::class,
+    /// <the type arguments' text>, $created#2); if ($created#2) { $entry#1['made'] = …; } return $entry#1; }`. A throw
+    /// leaves the entry's other fields as they are and runs nothing again, as a class's `#statics` does. A class whose
+    /// initial values are all constant returns the entry the call gives, `return \Sharp\Internal\statics(…);`. Its
+    /// accesses are its only callers, so it declares no return type for PHP to check on each one.
+    fn statics_entry(&mut self, name: &LocalIdentifier, members: &Sequence<ClassLikeMember>) -> u32 {
+        let line = self.line(name);
+        let span = name.span;
+        self.static_type_parameters = self.types.static_type_parameters(self.class);
+        let initial_values: Vec<&Property> = members
+            .iter()
+            .filter_map(|member| match member {
+                ClassLikeMember::Property(property) if property.initial_value_runs_after_class() => Some(property),
+                _ => None,
+            })
+            .collect();
+        let name = self.string(ZEND_NAME_FQ, line, self.class);
+        let mut arguments = vec![self.node(SHARP_AST_CLASS_NAME, 0, line, &[name]), self.own_type_arguments(line)];
+        let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\statics");
+
+        let statements = if initial_values.is_empty() {
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+            let call = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+
+            vec![self.node(SHARP_AST_RETURN, 0, line, &[call])]
+        } else {
+            let taken = self.temporaries;
+            let entry = self.hidden("entry");
+            let created = self.hidden("created");
+            arguments.push(self.variable(span, &created));
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+            let call = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+            let variable = self.variable(span, &entry);
+            let held = self.node(SHARP_AST_ASSIGN_REF, 0, line, &[variable, call]);
+            let mut writes = Vec::new();
+            for property in initial_values {
+                let variable = property.first_variable();
+                let Some(value) = property.initial_value() else {
+                    unreachable!("a static whose initial value runs after its class has one");
+                };
+                let field_line = self.line(variable);
+                let value = self.expression(value);
+                let entry = self.variable(variable.span, &entry);
+                let name = self.string(0, field_line, variable.name);
+                let field = self.node(SHARP_AST_DIM, 0, field_line, &[entry, name]);
+                writes.push(self.node(SHARP_AST_ASSIGN, 0, field_line, &[field, value]));
+            }
+            let writes = self.node(SHARP_AST_STMT_LIST, 0, line, &writes);
+            let condition = self.variable(span, &created);
+            let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[condition, writes]);
+            let returned = self.variable(span, &entry);
+            self.temporaries = taken;
+
+            vec![held, self.node(SHARP_AST_IF, 0, line, &[branch]), self.node(SHARP_AST_RETURN, 0, line, &[returned])]
+        };
+        self.static_type_parameters = None;
+
+        let bounds = self.types.bounds(self.class);
+        let parameters: Vec<u32> = self.parameter_metadata((bounds, None), line).into_iter().collect();
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC | ZEND_ACC_RETURN_REFERENCE,
+            span,
+            span,
+            STATICS_ENTRY,
+            &[parameters, NULL, body, NULL, NULL],
+        )
+    }
+
+    /// `Class::{'#entry'}(<type arguments>)`, the entry of the type arguments `type_arguments` among the statics of the
+    /// generic PHP# class `class` that declares them, as [`Self::statics_entry`] returns it.
+    fn statics_entry_call(&mut self, line: u32, class: &[u8], type_arguments: &str) -> u32 {
+        let class = self.string(ZEND_NAME_FQ, line, class);
+        let method = self.string(0, line, STATICS_ENTRY);
+        let type_arguments = self.type_arguments_argument(line, type_arguments);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[type_arguments]);
+
+        self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
+    }
+
+    /// The field `name` of the entry of the type arguments `type_arguments` among the statics of the generic PHP# class
+    /// `class` that declares it, `\App\Counter::{'#entry'}(<App.Order>)['count']`, as `place_use` uses it. A throw in
+    /// a static's initial value that runs as code leaves it out of the entry, so a use that reads such a static checks
+    /// that its entry holds it, and throws the error PHP throws for a typed static read before it is set, as a class
+    /// that isn't generic does. A read checks only a value that is not there or null, after it reads:
+    /// `\App\Counter::{'#entry'}(<App.Order>)['made'] ?? (\array_key_exists('made', \App\Counter::{'#entry'}(<App.Order>))
+    /// ? null : throw new \Error('Typed static property App\Counter::$made must not be accessed before initialization'))`.
+    /// An update checks before it writes, inside the index, which PHP runs before it fetches the field:
+    /// `$statics#N[\array_key_exists('made', $statics#N = &\App\Counter::{'#entry'}(<App.Order>)) ? 'made' : throw …]`.
+    /// A write alone sets the field.
+    fn statics_field(
+        &mut self,
+        line: u32,
+        class: &[u8],
+        type_arguments: &str,
+        name: &[u8],
+        place_use: PlaceUse,
+    ) -> u32 {
+        let entry = self.statics_entry_call(line, class, type_arguments);
+        let field = self.string(0, line, name);
+        if place_use == PlaceUse::Write || !self.types.has_runtime_initial_value(class, name) {
+            return self.node(SHARP_AST_DIM, 0, line, &[entry, field]);
+        }
+
+        if place_use == PlaceUse::Read {
+            let read = self.node(SHARP_AST_DIM, 0, line, &[entry, field]);
+            let entry = self.statics_entry_call(line, class, type_arguments);
+            let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+            let checked = self.unset_static_check(line, class, name, entry, null);
+
+            return self.node(SHARP_AST_COALESCE, 0, line, &[read, checked]);
+        }
+        self.checked_statics += 1;
+        let hidden = format!("statics#{}", self.checked_statics).into_bytes();
+        let [bound, container] = [(); 2].map(|()| {
+            let variable = self.string(0, line, &hidden);
+            self.node(SHARP_AST_VAR, 0, line, &[variable])
+        });
+        let bound = self.node(SHARP_AST_ASSIGN_REF, 0, line, &[bound, entry]);
+        let checked = self.unset_static_check(line, class, name, bound, field);
+
+        self.node(SHARP_AST_DIM, 0, line, &[container, checked])
+    }
+
+    /// `\array_key_exists('made', entry) ? held : throw new \Error('Typed static property App\Counter::$made must not
+    /// be accessed before initialization')`: `held` when `entry` holds the static `name` of `class`, or else the error
+    /// PHP throws for a typed static read before it is set.
+    fn unset_static_check(&mut self, line: u32, class: &[u8], name: &[u8], entry: u32, held: u32) -> u32 {
+        let field = self.string(0, line, name);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[field, entry]);
+        let function = self.string(ZEND_NAME_FQ, line, b"array_key_exists");
+        let holds = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+        let message =
+            [b"Typed static property ".as_slice(), class, b"::$", name, b" must not be accessed before initialization"]
+                .concat();
+        let message = self.string(0, line, &message);
+        let message = self.node(SHARP_AST_ARG_LIST, 0, line, &[message]);
+        let error = self.string(ZEND_NAME_FQ, line, b"Error");
+        let error = self.node(SHARP_AST_NEW, 0, line, &[error, message]);
+        let throw = self.node(SHARP_AST_THROW, 0, line, &[error]);
+
+        self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[holds, held, throw])
+    }
+
+    /// The type text `$0, $1, …` of the type parameters of the generic class being lowered, which a static member reads
+    /// as its own leading type arguments, as a `SHARP_TYPE_OF` list: the text of the type arguments the code runs with.
+    fn own_type_arguments(&mut self, line: u32) -> u32 {
+        let count = self.types.static_type_parameters(self.class).unwrap_or_else(|| {
+            unreachable!("a static member reads its own type arguments only in a generic PHP# class")
+        });
+        let own = self.type_text(line, &type_parameters_text(count));
+
+        self.node(SHARP_AST_SHARP_TYPE_OF, ZEND_SHARP_TYPE_OF_LIST, line, &[own])
     }
 
     /// The metadata of the PHP# class-like being lowered, which the engine keeps with the class: the type arguments its
@@ -1895,8 +2113,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // the engine counts a body's `$i` among the interface's type arguments the class gives.
         if let Some(parameters) = &interface.type_parameters {
             let line = self.line(interface.name);
-            let indexes: Vec<String> = (0..parameters.parameters.len()).map(|index| format!("${index}")).collect();
-            let header = format!("{}<{}>", interface_name.as_str_lossy().replace('\\', "."), indexes.join(", "));
+            let indexes = type_parameters_text(parameters.parameters.len());
+            let header = format!("{}<{indexes}>", interface_name.as_str_lossy().replace('\\', "."));
             let header = self.string(0, line, header.as_bytes());
             members.push(self.node(SHARP_AST_SHARP_CLASS_METADATA, 0, line, &[header, NULL, NULL]));
         }
@@ -2326,7 +2544,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return None;
         }
 
-        let bounds = bounds.map_or(NULL, |bounds| self.string(0, line, bounds.as_bytes()));
+        // A static method's reads its class's type parameters as its own leading ones, as its checks do.
+        let bounds = bounds.map_or(NULL, |bounds| self.type_text(line, &bounds));
         let checks = checks.map_or(NULL, |checks| self.type_text(line, &checks));
 
         Some(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[bounds, checks]))
@@ -2531,8 +2750,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let arguments = self.arguments(&initializer.argument_list);
         let mut new = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
         if let Some(count) = self.static_type_parameters {
-            let own = (0..count).map(|index| format!("${index}")).collect::<Vec<_>>().join(", ");
-            let own = self.type_text(line, &own);
+            let own = self.type_text(line, &type_parameters_text(count));
             new = self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[new, own]);
         }
         statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[object, new]));
@@ -3211,7 +3429,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// A throw in `expr` keeps nothing, so the next read runs it again.
     fn lazy_body(&mut self, computed: &ComputedProperty) -> u32 {
         let line = self.line(computed.body.arrow);
-        let storage = self.storage(line);
+        let storage = self.storage(line, PlaceUse::Write);
         let value = self.expression(computed.body.expression);
         let keep = self.node(SHARP_AST_ASSIGN, 0, line, &[storage, value]);
         let flag = self.lazy_flag_fetch(line, computed.variable.name);
@@ -3222,7 +3440,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let not_ran = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[flag]);
         let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[not_ran, first_read]);
         let r#if = self.node(SHARP_AST_IF, 0, line, &[branch]);
-        let storage = self.storage(line);
+        let storage = self.storage(line, PlaceUse::Read);
         let r#return = self.node(SHARP_AST_RETURN, 0, line, &[storage]);
 
         self.node(SHARP_AST_STMT_LIST, 0, line, &[r#if, r#return])
@@ -3323,7 +3541,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 lowering.node(SHARP_AST_METHOD_CALL, 0, line, &[slot, method, arguments])
             };
 
-            let mut read = lowering.storage(line);
+            let mut read = lowering.storage(line, PlaceUse::Read);
             for index in (0..count).rev() {
                 read = call(lowering, index, b"get", read);
             }
@@ -3334,7 +3552,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             for index in 0..count {
                 written = call(lowering, index, b"set", written);
             }
-            let storage = lowering.storage(line);
+            let storage = lowering.storage(line, PlaceUse::Write);
             let store = lowering.node(SHARP_AST_ASSIGN, 0, line, &[storage, written]);
             let store = lowering.node(SHARP_AST_STMT_LIST, 0, line, &[store]);
             let set = lowering.hook(b"set", setter.name, setter, NULL, store);
@@ -3356,7 +3574,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn storage_body(&mut self, accessor: &PropertyHook) -> u32 {
         if accessor.name.value == b"get" {
             let line = self.line(accessor);
-            let storage = self.storage(line);
+            let storage = self.storage(line, PlaceUse::Read);
             self.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[storage])
         } else {
             self.storage_set(accessor.name.span)
@@ -3366,7 +3584,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `set { $this->name = $value; }`, a `set` body over the storage, on the line of `span`.
     fn storage_set(&mut self, span: Span) -> u32 {
         let line = self.line(span);
-        let storage = self.storage(line);
+        let storage = self.storage(line, PlaceUse::Write);
         let value = self.variable(span, b"value");
         let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[storage, value]);
 
@@ -3374,13 +3592,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `field`: `$this->name` of the property whose accessor body is being lowered, which PHP reads and writes as the
-    /// storage inside the property's own hook.
-    fn storage(&mut self, line: u32) -> u32 {
-        // A static property's storage is its class's own static, `self::$name`.
+    /// storage inside the property's own hook. In a generic class, a static's storage is used as `place_use` says, as
+    /// [`Self::statics_field`] writes it.
+    fn storage(&mut self, line: u32, place_use: PlaceUse) -> u32 {
+        // A static property's storage is its class's own static, `self::$name`, or in a generic class the field of the
+        // entry of the accessor's own type arguments, which are the class's.
         if self.types.is_static_accessor(self.class, &self.property) {
-            let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+            if let Some(count) = self.static_type_parameters {
+                let property = self.property.clone();
+
+                return self.statics_field(line, self.class, &type_parameters_text(count), &property, place_use);
+            }
             let name = store_text(&mut self.texts, &self.property);
             let name = self.zval(line, sharp_value::SHARP_STRING, |node| node.text = name);
+            let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
 
             return self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, name]);
         }
@@ -3530,18 +3755,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// when it has one, is a plain static only its class writes, and its accessors are the hidden static methods
     /// `name#get` and `name#set`, which every PHP# read and write calls, as [`Lowering::accessor_call`] writes them.
     /// `name#get` returns the `get` body's value, or the storage for `get;`. `name#set` runs the observers around the
-    /// `set` body, or around the storage write for `set;`, as an instance property's `set` hook does.
+    /// `set` body, or around the storage write for `set;`, as an instance property's `set` hook does. In a generic class
+    /// each type argument has its own: both take the class's type arguments as their own, as any static method of the
+    /// class does, and the storage is a field of their entry of `statics_store`.
     fn static_accessors(&mut self, property: &Property, parent: Option<&[u8]>) -> Vec<u32> {
         let mut members = Vec::new();
+        let generic = self.types.static_type_parameters(self.class);
         let accessors = match property {
             Property::Hooked(hooked) => {
-                if self.names.has_storage(&hooked.hook_list) {
+                if self.names.has_storage(&hooked.hook_list) && generic.is_none() {
                     members.push(self.property(property, parent));
                 }
                 Some(&hooked.hook_list)
             }
             _ => None,
         };
+        self.static_type_parameters = generic;
         let variable = property.first_variable();
         let Some(hint) = property.hint() else {
             unreachable!("the PHP# parser gives every field and property its type");
@@ -3572,20 +3801,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     returned(lowering, value)
                 }
                 _ => {
-                    let storage = lowering.storage(line);
+                    let storage = lowering.storage(line, PlaceUse::Read);
                     returned(lowering, storage)
                 }
             };
             let return_type = lowering.hint(hint);
 
-            lowering.accessor_method(variable, b"get", read_visibility, NULL, body, return_type)
+            lowering.accessor_method(variable, b"get", read_visibility, &[], body, return_type)
         });
         members.push(get);
 
-        let Some(accessors) = accessors else {
-            return members;
-        };
-        let Some(setter) = accessors.setter() else {
+        let Some((accessors, setter)) = accessors.and_then(|accessors| Some((accessors, accessors.setter()?))) else {
+            self.static_type_parameters = None;
+
             return members;
         };
         let named = |name: &[u8]| accessors.hooks.iter().find(|accessor| accessor.name.value == name);
@@ -3610,31 +3838,60 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let accepted = lowering.hint(hint);
             let value = lowering.string(0, line, b"value");
             let parameter = lowering.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, NULL, NULL, NULL]);
-            let parameters = lowering.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
 
-            lowering.accessor_method(variable, b"set", write_visibility, parameters, body, NULL)
+            lowering.accessor_method(variable, b"set", write_visibility, &[parameter], body, NULL)
         });
         members.push(set);
+        self.static_type_parameters = None;
 
         members
     }
 
     /// The value a `static lazy` property's `name#get` returns, spec section 6.5:
     /// `\Sharp\Internal\keep('App\Report::name', static fn () => body)`, which runs the body on the first read and keeps
-    /// its value for a singleton's lifetime.
+    /// its value for a singleton's lifetime. In a generic class each type argument keeps its own, under a key with the
+    /// text of `name#get`'s own type arguments, `'App\Counter<' . <App.Order> . '>::name'`, and a body that reads them
+    /// is a closure that captures them.
     fn static_lazy_value(&mut self, computed: &ComputedProperty) -> u32 {
         let line = self.line(computed.body.arrow);
-        let key = self.string(0, line, &[self.class, b"::", computed.variable.name].concat());
+        let key = match self.static_type_parameters {
+            None => self.string(0, line, &[self.class, b"::", computed.variable.name].concat()),
+            Some(_) => {
+                let class = self.string(0, line, &[self.class, b"<"].concat());
+                let own = self.own_type_arguments(line);
+                let name = self.string(0, line, &[b">::", computed.variable.name].concat());
+                let key = self.node(SHARP_AST_BINARY_OP, ZEND_CONCAT, line, &[class, own]);
+
+                self.node(SHARP_AST_BINARY_OP, ZEND_CONCAT, line, &[key, name])
+            }
+        };
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
-        let value = self.expression(computed.body.expression);
-        let compute = self.declaration(
-            SHARP_AST_ARROW_FUNC,
-            ZEND_ACC_STATIC,
-            computed.body.arrow,
-            computed.body.expression,
-            b"",
-            &[parameters, NULL, value, NULL, NULL],
-        );
+        let (value, captures_type_arguments) =
+            self.lambda_body(|lowering| lowering.expression(computed.body.expression));
+        let compute = if captures_type_arguments {
+            let uses = self.string(0, line, TYPE_ARGUMENTS);
+            let uses = self.node(SHARP_AST_CLOSURE_USES, 0, line, &[uses]);
+            let value = self.node(SHARP_AST_RETURN, 0, line, &[value]);
+            let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[value]);
+
+            self.declaration(
+                SHARP_AST_CLOSURE,
+                ZEND_ACC_STATIC,
+                computed.body.arrow,
+                computed.body.expression,
+                b"",
+                &[parameters, uses, body, NULL, NULL],
+            )
+        } else {
+            self.declaration(
+                SHARP_AST_ARROW_FUNC,
+                ZEND_ACC_STATIC,
+                computed.body.arrow,
+                computed.body.expression,
+                b"",
+                &[parameters, NULL, value, NULL, NULL],
+            )
+        };
         let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\keep");
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[key, compute]);
 
@@ -3658,12 +3915,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `Class::{'name#get'}()` or `Class::{'name#set'}(value)`: the call of the hidden method `accessor` of the static
-    /// property `name` of `class`, with `arguments`.
-    fn accessor_call(&mut self, class: &ConstantAccess, name: &[u8], accessor: &[u8], arguments: &[u32]) -> u32 {
+    /// property `name` of `class`, which the access at `span` reaches, with `arguments`, and last the access's type
+    /// arguments when `class` is a generic PHP# class, whose type arguments each have their own static.
+    fn accessor_call(
+        &mut self,
+        class: &ConstantAccess,
+        name: &[u8],
+        accessor: &[u8],
+        arguments: &[u32],
+        span: Span,
+    ) -> u32 {
         let line = self.line(class);
         let (class, _) = self.static_class(class);
         let method = self.string(0, line, &[name, b"#", accessor].concat());
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, arguments);
+        let mut arguments = arguments.to_vec();
+        if let Some(type_arguments) = self.types.statics_type_arguments(&span) {
+            arguments.push(self.type_arguments_argument(line, &type_arguments));
+        }
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
 
         self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
     }
@@ -3676,7 +3945,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let hidden = self.hidden("value");
         let variable = self.variable(span, &hidden);
         let held = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, value]);
-        let call = self.accessor_call(class, name, b"set", &[held]);
+        let call = self.accessor_call(class, name, b"set", &[held], span);
         let written = self.variable(span, &hidden);
         self.temporaries -= 1;
 
@@ -3689,7 +3958,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn accessor_step(&mut self, class: &ConstantAccess, name: &[u8], operation: u32, postfix: bool, span: Span) -> u32 {
         let line = self.line(span);
         let one = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = 1);
-        let read = self.accessor_call(class, name, b"get", &[]);
+        let read = self.accessor_call(class, name, b"get", &[], span);
         if !postfix {
             let value = self.node(SHARP_AST_BINARY_OP, operation, line, &[read, one]);
 
@@ -3700,7 +3969,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let old = self.variable(span, &hidden);
         let held = self.node(SHARP_AST_ASSIGN, 0, line, &[old, read]);
         let value = self.node(SHARP_AST_BINARY_OP, operation, line, &[held, one]);
-        let call = self.accessor_call(class, name, b"set", &[value]);
+        let call = self.accessor_call(class, name, b"set", &[value], span);
         let old = self.variable(span, &hidden);
         self.temporaries -= 1;
 
@@ -3708,18 +3977,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The hidden static method `name#get` or `name#set` of the static property `variable`, with the visibility
-    /// `visibility`, spanning the property's name.
+    /// `visibility` and `parameters`, spanning the property's name. In a generic class its parameter list ends with
+    /// the class's bounds, as any static method of the class does.
     fn accessor_method(
         &mut self,
         variable: &DirectVariable,
         accessor: &[u8],
         visibility: u32,
-        parameters: u32,
+        parameters: &[u32],
         body: u32,
         return_type: u32,
     ) -> u32 {
-        let parameters =
-            if parameters == NULL { self.node(SHARP_AST_PARAM_LIST, 0, self.line(variable), &[]) } else { parameters };
+        let line = self.line(variable);
+        let mut parameters = parameters.to_vec();
+        if self.static_type_parameters.is_some() {
+            let bounds = self.types.bounds(self.class);
+            parameters.extend(self.parameter_metadata((bounds, None), line));
+        }
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
         let name = [variable.name, b"#", accessor].concat();
 
         self.declaration(
@@ -4278,7 +4553,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CONDITIONAL, 0, line, &[condition, then, r#else])
             }
-            Expression::ConstantAccess(name) => self.name(name),
+            Expression::ConstantAccess(name) => self.name(name, PlaceUse::Read),
             Expression::Is(_) | Expression::As(_) | Expression::PatternMatch(_) => {
                 self.pattern(Node::Expression(expression))
             }
@@ -4409,7 +4684,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 let (kind, attr) = prefix_kind(&unary.operator);
                 let operand = if unary.operator.is_increment_or_decrement() {
-                    self.target(unary.operand)
+                    self.target(unary.operand, PlaceUse::Update)
                 } else {
                     self.expression(unary.operand)
                 };
@@ -4438,7 +4713,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     UnaryPostfixOperator::PostIncrement(_) => SHARP_AST_POST_INC,
                     UnaryPostfixOperator::PostDecrement(_) => SHARP_AST_POST_DEC,
                 };
-                let operand = self.target(unary.operand);
+                let operand = self.target(unary.operand, PlaceUse::Update);
 
                 self.node(kind, 0, line, &[operand])
             }
@@ -4454,7 +4729,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                             return self.accessor_write(class, name, value, span);
                         }
                         AssignmentOperator::Coalesce(_) => {
-                            let read = self.accessor_call(class, name, b"get", &[]);
+                            let read = self.accessor_call(class, name, b"get", &[], span);
                             let value = self.expression(assignment.rhs);
                             let write = self.accessor_write(class, name, value, span);
 
@@ -4506,7 +4781,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         })
                     }
                     (AssignmentOperator::Addition(_), Operands::Strings) => {
-                        let lhs = self.target(assignment.lhs);
+                        let lhs = self.target(assignment.lhs, PlaceUse::Update);
                         let rhs = self.expression(assignment.rhs);
 
                         self.node(SHARP_AST_ASSIGN_OP, ZEND_CONCAT, line, &[lhs, rhs])
@@ -4525,7 +4800,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     }
                     (operator, _) => {
                         let (kind, attr) = assignment_kind(operator);
-                        let lhs = self.target(assignment.lhs);
+                        // `=` and `??=` set the target without reading it, as PHP's do.
+                        let place_use = match operator {
+                            AssignmentOperator::Assign(_) | AssignmentOperator::Coalesce(_) => PlaceUse::Write,
+                            _ => PlaceUse::Update,
+                        };
+                        let lhs = self.target(assignment.lhs, place_use);
                         let rhs = match operator {
                             AssignmentOperator::Assign(_) => {
                                 let declared = self
@@ -4809,7 +5089,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             DeclarationKind::Constant | DeclarationKind::EnumCase => {
                 self.node(SHARP_AST_CLASS_CONST, 0, line, &[class, member])
             }
-            DeclarationKind::StaticProperty => self.static_property(read, class, classes, name.value, member, line),
+            DeclarationKind::StaticProperty => {
+                self.static_property(read, class, classes, name.value, member, line, PlaceUse::Read)
+            }
             DeclarationKind::StaticMethod => self.method_value(read, SHARP_AST_STATIC_CALL, class, member),
             kind => unreachable!("a class's member read names a static member, not a {kind:?}"),
         }
@@ -4817,8 +5099,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The static property `name` of `class`, whose node is `class` and whose possible classes are `classes`, that the
     /// read or write `access` reaches as `member`: PHP's `Class::$name`, or for a static field of a generic PHP# class
-    /// the entry of the access's type arguments, `\Sharp\Internal\statics(Counter::class, 'App.Order')['count']`, which
-    /// the call returns by reference, so every write is PHP's own array write, spec section 11.
+    /// the entry of the access's type arguments, `\App\Counter::{'#entry'}(<App.Order>)['count']`, which the call
+    /// returns by reference, so every write is PHP's own array write, spec section 11. The access uses the field as
+    /// `place_use` says, as [`Self::statics_field`] writes it.
     fn static_property(
         &mut self,
         access: &Expression,
@@ -4827,29 +5110,28 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         name: &[u8],
         member: u32,
         line: u32,
+        place_use: PlaceUse,
     ) -> u32 {
+        let type_arguments = self.types.statics_type_arguments(access);
         // A static that runs accessors is read through its hidden `name#get`, `Class::{'name#get'}()`.
         if classes.iter().any(|class| self.types.is_static_accessor(class, name)) {
             let method = self.string(0, line, &[name, b"#get"].concat());
-            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+            let arguments: Vec<u32> = type_arguments
+                .map(|type_arguments| self.type_arguments_argument(line, &type_arguments))
+                .into_iter()
+                .collect();
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
 
             return self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
         }
-        let Some(type_arguments) = self.types.statics_type_arguments(access) else {
+        let Some(type_arguments) = type_arguments else {
             return self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, member]);
         };
 
         let declaring = self.types.member_declaration(classes[0], name).class;
         let declaring = self.types.class_declaration(declaring.as_bytes()).name;
-        let declaring = self.string(ZEND_NAME_FQ, line, declaring.as_bytes());
-        let declaring = self.node(SHARP_AST_CLASS_NAME, 0, line, &[declaring]);
-        let type_arguments = self.type_text(line, &type_arguments);
-        let key = self.node(SHARP_AST_SHARP_TYPE_OF, ZEND_SHARP_TYPE_OF_LIST, line, &[type_arguments]);
-        let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\statics");
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[declaring, key]);
-        let entry = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
 
-        self.node(SHARP_AST_DIM, 0, line, &[entry, member])
+        self.statics_field(line, declaring.as_bytes(), &type_arguments, name, place_use)
     }
 
     /// The class name node of `typeof(X)` of a class `X`, which PHP writes `X::class`: the name `X`, without the type
@@ -5413,7 +5695,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     ) -> u32 {
         // A static that runs accessors reads through `name#get` and writes through `name#set`.
         if let Some((class, name)) = self.static_accessor(assignment.lhs) {
-            let read = self.accessor_call(class, name, b"get", &[]);
+            let read = self.accessor_call(class, name, b"get", &[], assignment.lhs.span());
             let value = self.expression(assignment.rhs);
             let result = operation(self, read, value);
 
@@ -5445,7 +5727,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 (target, read)
             }
-            None => (self.target(assignment.lhs), self.expression(assignment.lhs)),
+            None => (self.target(assignment.lhs, PlaceUse::Write), self.expression(assignment.lhs)),
         };
         let value = self.expression(assignment.rhs);
         let result = operation(self, read, value);
@@ -6476,7 +6758,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// (spec section 12).
     fn read_collection(&mut self, collection: &mut CollectionReceiver, line: u32, null_safe: bool) -> u32 {
         match collection {
-            CollectionReceiver::Place(place) => self.target(place),
+            CollectionReceiver::Place(place) => self.target(place, PlaceUse::Write),
             CollectionReceiver::Property(object, property) => {
                 let object = self.read(object);
                 let property = self.member(property);
@@ -6606,13 +6888,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// What an assignment, a compound assignment, `++` or `--` writes: a local or parameter, `object.name`,
     /// `Class.name`, which php-src's grammar builds as the static property `Class::$name`, or an index of one of them,
-    /// as php-src's `variable` rule takes them.
-    fn target(&mut self, target: &Expression) -> u32 {
+    /// as php-src's `variable` rule takes them. `place_use` says whether the write reads the target first, as a
+    /// compound assignment, `++` and `--` do, which a generic class's static checks.
+    fn target(&mut self, target: &Expression, place_use: PlaceUse) -> u32 {
         match target {
             Expression::ConstantAccess(name)
                 if matches!(self.names.binding(&name.name), Some(Binding::Local(_) | Binding::Field)) =>
             {
-                self.name(name)
+                self.name(name, place_use)
             }
             // The hidden variable of an `is`, `as` or `match`, which `php_shape` writes.
             Expression::Variable(Variable::Direct(_)) => self.expression(target),
@@ -6625,12 +6908,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let (class, classes) = self.static_class(class);
                     let property = self.member(&access.property);
 
-                    self.static_property(target, class, &classes, name.value, property, line)
+                    self.static_property(target, class, &classes, name.value, property, line, place_use)
                 }
                 None => self.expression(target),
             },
             Expression::ArrayAccess(access) => {
-                let value = self.target(access.array);
+                let value = self.target(access.array, place_use);
                 let key = self.expression(access.index);
 
                 self.node(SHARP_AST_DIM, 0, self.line(target), &[value, key])
@@ -6659,16 +6942,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         index
     }
 
-    /// A local, a parameter or `this` is a PHP variable of the same name, and `field` is the storage. Any other bare
-    /// name outside a call is a constant, which the engine looks up in the namespace, then globally, as PHP does for
-    /// an unqualified name.
-    fn name(&mut self, name: &ConstantAccess) -> u32 {
+    /// A local, a parameter or `this` is a PHP variable of the same name, and `field` is the storage, used as
+    /// `place_use` says, as [`Self::storage`] reads it. Any other bare name outside a call is a constant, which the
+    /// engine looks up in the namespace, then globally, as PHP does for an unqualified name.
+    fn name(&mut self, name: &ConstantAccess, place_use: PlaceUse) -> u32 {
         let line = self.line(name);
 
         match self.names.binding(&name.name) {
             Some(Binding::Local(_)) => self.variable(name.span(), name.name.value()),
             Some(Binding::This) => self.variable(name.span(), b"this"),
-            Some(Binding::Field) => self.storage(line),
+            Some(Binding::Field) => self.storage(line, place_use),
             Some(Binding::Constant) => {
                 let constant = self.string(ZEND_NAME_NOT_FQ, line, name.name.value());
 
@@ -7575,6 +7858,11 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
     }
 
     flags
+}
+
+/// The type text `$0, $1, …` of a class-like's `count` type parameters, each by its index.
+fn type_parameters_text(count: usize) -> String {
+    (0..count).map(|index| format!("${index}")).collect::<Vec<_>>().join(", ")
 }
 
 /// `text`, a type text in a static member of a class with `count` type parameters, with the class's `$i` written as the

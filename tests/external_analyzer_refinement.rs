@@ -302,7 +302,7 @@ fn compiled_consumer(
         ));
     }
     let consumer = format!(
-        "namespace Proof;\n\npublic class SharpConsumer\n{{\n    public Box unwrap({read} source)\n    {{\n        return source.make();\n    }}\n}}\n"
+        "namespace Proof;\n\npublic class SharpConsumer\n{{\n    public Any unwrap({read} source)\n    {{\n        return source.make();\n    }}\n}}\n"
     );
     database.add(File::new(
         Cow::Borrowed(b"src/SharpConsumer.sharp"),

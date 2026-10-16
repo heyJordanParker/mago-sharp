@@ -326,6 +326,30 @@ where
     let calling_instance_type = calling_class_like.and_then(|(_, atomic)| atomic);
     let method_class_type = method_call_context.map(|ctx| &ctx.class_type);
 
+    // Spec section 11: the declared type the PHP# call's result goes into, read before an argument takes its own. It
+    // fixes the type arguments nothing else fixes. `declared_type_arguments` adds what it fixes to the ones known before
+    // any argument, and an argument whose parameter's type nothing else has fixed yet takes that type from them, so
+    // `this.keep(cache.get("nested"))` fixes both calls, as Swift and TypeScript infer nested calls.
+    let declared_type =
+        context.dialect.is_sharp().then(|| artifacts.get_expected_type(&invocation.span).cloned()).flatten();
+    let declared_return_type = declared_type.as_ref().and(invocation.target.get_return_type()).map(|return_type| {
+        resolve_type_in_class_context(
+            context,
+            return_type.clone(),
+            base_class_metadata,
+            calling_class_like_metadata,
+            calling_instance_type,
+            method_class_type,
+        )
+    });
+    let declared_type_arguments =
+        declared_type.as_ref().zip(declared_return_type.as_ref()).map(|(declared, returned)| {
+            let mut fixed = template_result.clone();
+            let returned = inferred_type_replacer::replace(returned, &fixed, context.codebase);
+            infer_unfixed_templates(context, &returned, declared, &mut fixed);
+            fixed
+        });
+
     for (argument_offset, argument) in &non_closure_arguments {
         let Some(argument_expression) = argument.value() else {
             continue;
@@ -333,8 +357,9 @@ where
 
         let parameter = get_parameter_of_argument(&invocation.target, argument, *argument_offset);
         // A PHP# argument takes its parameter's type as the declared type its value goes into, as `expect_type` gives a
-        // typed local's, once that type holds no type parameter of this call that nothing has fixed yet. A method value
-        // takes it even then, as `pages.map(this.take)` fixes both calls' type arguments together.
+        // typed local's, once that type holds no type parameter of this call that nothing has fixed yet, by an argument
+        // or by the declared type the call's result goes into. A method value takes it even then, as
+        // `pages.map(this.take)` fixes both calls' type arguments together.
         let expected_type = parameter
             .filter(|_| context.dialect.is_sharp() && takes_declared_type(argument_expression))
             .map(|(_, parameter)| {
@@ -347,8 +372,15 @@ where
                     calling_instance_type,
                     method_class_type,
                 );
+                let parameter_type =
+                    inferred_type_replacer::replace(&parameter_type, template_result, context.codebase);
 
-                inferred_type_replacer::replace(&parameter_type, template_result, context.codebase)
+                match &declared_type_arguments {
+                    Some(declared) if holds_unfixed_template(&parameter_type, template_result) => {
+                        inferred_type_replacer::replace(&parameter_type, declared, context.codebase)
+                    }
+                    _ => parameter_type,
+                }
             })
             .filter(|parameter_type| {
                 is_member_read(argument_expression) || !holds_unfixed_template(parameter_type, template_result)
@@ -463,12 +495,21 @@ where
                 parameter_type_had_template_types = true;
                 // Store the original type before replacement for inference
                 base_parameter_type_for_inference = Some(base_parameter_type.clone());
-                inferred_type_replacer::replace_with_polarity(
+                let parameter_type = inferred_type_replacer::replace_with_polarity(
                     &base_parameter_type,
                     template_result,
                     context.codebase,
                     mago_codex::ttype::template::variance::Variance::Contravariant,
-                )
+                );
+
+                // A PHP# lambda takes the type arguments the declared type the call's result goes into fixes, as any
+                // other argument does, so `this.call(() => this.make())` into a `Box<Order>` fixes both calls.
+                match &declared_type_arguments {
+                    Some(declared) if holds_unfixed_template(&parameter_type, template_result) => {
+                        inferred_type_replacer::replace(&parameter_type, declared, context.codebase)
+                    }
+                    _ => parameter_type,
+                }
             } else {
                 base_parameter_type
             };
@@ -1045,19 +1086,10 @@ where
     // Spec section 11: a PHP# call takes the type arguments its arguments and the ones it writes leave unfixed from the
     // declared type its result goes into, as Swift infers them from the contextual type of the result. A declared type
     // outside a type parameter's bound fixes nothing, and the declared type's own check reports the call's result.
-    if context.dialect.is_sharp()
-        && let Some(expected_type) = artifacts.get_expected_type(&invocation.span)
-        && let Some(return_type) = invocation.target.get_return_type()
+    if let Some(expected_type) = &declared_type
+        && let Some(return_type) = &declared_return_type
     {
-        let return_type = resolve_type_in_class_context(
-            context,
-            return_type.clone(),
-            base_class_metadata,
-            calling_class_like_metadata,
-            calling_instance_type,
-            method_class_type,
-        );
-        let return_type = inferred_type_replacer::replace(&return_type, template_result, context.codebase);
+        let return_type = inferred_type_replacer::replace(return_type, template_result, context.codebase);
 
         violated_templates.extend(
             infer_unfixed_templates(context, &return_type, expected_type, template_result)

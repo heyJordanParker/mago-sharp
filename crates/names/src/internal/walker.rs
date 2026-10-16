@@ -1390,10 +1390,12 @@ where
 
         self.resolved_names.insert_at(r#struct.name.span, classlike, false);
         self.class_members.push(class_member_names(&r#struct.members));
+        self.enter_type_parameters(r#struct.type_parameters.as_ref());
     }
 
     fn walk_out_struct(&mut self, _struct: &'ast Struct<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         self.class_members.pop();
+        self.exit_type_parameters();
     }
 
     fn walk_in_trait_use(&mut self, trait_use: &'ast TraitUse<'arena>, context: &mut NameResolutionContext<'arena, A>) {

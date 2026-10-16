@@ -2820,11 +2820,12 @@ fn a_constructor_in_a_refused_namespace_is_a_constructor() {
 }
 
 /// A `Map` key whose type is outside the slice is refused once, as that type, and a key of a type the slice has but a
-/// key cannot take is refused as a key.
+/// key cannot take is refused as a key. A generic struct or class, as `Pair<int, string>`, keys one as its plain name
+/// does, also inside a `List`, and the analyzer checks its `==` and `hash()`.
 #[test]
 fn a_map_key_is_refused_once() {
     let code = leak(method(
-        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        return 1;\n",
+        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        Map<Pair<int, string>, int> pairs = [:];\n        Map<List<Pair<int, string>>, int> paths = [:];\n        return 1;\n",
     ));
     let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.";
 
@@ -3812,20 +3813,15 @@ fn a_get_only_nullable_property_without_an_initial_value_is_in_the_slice() {
 }
 
 /// Spec section 6: a get-only static is set once, by its initial value, which runs once when a request first uses its
-/// class's statics when it isn't constant, as any static's does. A generic class's statics start as a copy of constant initial values
-/// for each type argument, so one that runs as code is not supported yet there.
+/// class's statics when it isn't constant, as any static's does, or when it reads another static. A generic class's
+/// runs once for each type argument, when its statics are first used, spec section 11.
 #[test]
 fn a_static_member_takes_any_initial_value_and_is_get_only_or_settable() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n}\n";
-    let generic = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n    public static int next { get; } = Report.size + 1;\n}\n";
+    let generic = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n    private static int next = Box<T>.count + 1;\n}\n";
 
     assert_eq!(issues(code), ["7:23 Give `id` an initial value: no constructor sets a static."]);
-    assert_eq!(
-        issues(generic),
-        [
-            "7:32 A static member of a generic class with an initial value that runs as code is not supported yet in PHP#."
-        ]
-    );
+    assert_eq!(issues(generic), Vec::<String>::new());
 }
 
 #[test]
@@ -4168,20 +4164,14 @@ fn an_initial_value_on_a_property_whose_set_has_a_body_is_in_the_slice() {
 }
 
 /// Decision 3: a static property takes accessor bodies, observers and a computed body, as an instance property does,
-/// except in a generic class, whose statics are entries of one table that runs no accessors.
+/// in a generic class too, whose type arguments each have their own, spec section 11.
 #[test]
-fn a_static_property_takes_accessors_except_in_a_generic_class() {
+fn a_static_property_takes_accessors() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int b { get; set; didSet => Report.a = 1; } = 0;\n    public static int c => Report.a + 1;\n}\n";
     let generic = "namespace App.Tenant;\n\nclass Box<T>\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int c => 1;\n    public static int d { get; set; } = 0;\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
-    assert_eq!(
-        issues(generic),
-        [
-            "5:23 A static property with accessors in a generic class is not supported yet in PHP#.",
-            "6:23 A static property with accessors in a generic class is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(generic), Vec::<String>::new());
 }
 
 /// Spec section 6.1: `init` sets a property while its object is created, and no object creates a static property.
@@ -5323,16 +5313,18 @@ fn the_generics_examples_of_the_spec_are_in_the_slice() {
     }
 }
 
-/// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11.
+/// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11, a struct's too.
 #[test]
 fn a_type_parameter_whose_name_does_not_start_with_t_and_an_uppercase_letter_is_an_error() {
     let code = "namespace App.Tenant;\n\npublic class Box<Item, T, TKey, Tkey, T1, TK>\n{\n    public void run<Value>() { }\n}\n";
+    let r#struct = "namespace App.Tenant;\n\npublic struct Pair<Item, out TOther>\n{\n}\n";
     let refusal = "A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.";
 
     assert_eq!(
         issues(code),
         [format!("3:18 {refusal}"), format!("3:33 {refusal}"), format!("3:39 {refusal}"), format!("5:21 {refusal}")]
     );
+    assert_eq!(issues(r#struct), [format!("3:20 {refusal}")]);
 }
 
 /// A type parameter is a type, so it starts with a capital letter as every PHP# type does: the rule that names it `T`
@@ -5398,29 +5390,52 @@ fn in_or_out_is_an_error_only_on_a_method_type_parameter() {
     );
 }
 
-/// A bound is `Object`, a class or an interface, a generic class type, or several classes and interfaces joined with
-/// `&`, spec section 11. `Object` holds any object, as C#'s `where T : class` and TypeScript's `T extends object` do,
-/// and joins no other bound, as mago's own check of an intersection says. A union of classes names `&`, which joins
-/// several bounds.
+/// A bound is `Object`, a class or an interface, a generic class type, several classes and interfaces joined with
+/// `&`, or another type parameter, spec section 11. `Object` holds any object, as C#'s `where T : class` and
+/// TypeScript's `T extends object` do, and joins no other bound, as mago's own check of an intersection says. A type
+/// parameter stands alone too, as Java's `<U extends T>` does. A union of classes names `&`, which joins several
+/// bounds.
 #[test]
-fn a_bound_that_is_not_object_a_class_an_interface_or_a_generic_class_type_is_an_error() {
+fn a_bound_that_is_not_object_a_class_an_interface_a_generic_class_type_or_a_type_parameter_is_an_error() {
     let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable, TM : Object>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n    public void j<TN : object>() { }\n    public void k<TO : Object & Shareable>() { }\n    public void l<TP : Object?>() { }\n    public void m<TQ : Object>(TQ value) { }\n}\n";
 
     assert_eq!(
         issues(code),
         (5..=16)
+            .filter(|line| *line != 12)
             .map(|line| match line {
                 8 => "8:24 A bound can't be a union: join several bounds with `&`.".to_owned(),
+                13 => "13:24 A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."
+                    .to_owned(),
                 15 => "15:24 Type `Object` cannot be part of an intersection.".to_owned(),
                 line => format!(
-                    "{line}:24 A bound is `Object`, a class or an interface, as in `<TItem : DatabaseEntity>`."
+                    "{line}:24 A bound is `Object`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
                 ),
             })
             .collect::<Vec<_>>()
     );
     assert!(check_in_type_file(code).iter().filter(|issue| issue.message.starts_with("A bound")).all(|issue| issue
         .notes
-        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+}
+
+/// A type parameter's bound never leads back to it, directly or through the bounds of the others in its list, as C#
+/// refuses a circular constraint (CS0454). Each type parameter on the cycle is reported. A chain that ends, and one that
+/// reaches a cycle it is not on, are bounds like any other.
+#[test]
+fn a_type_parameter_whose_bound_leads_back_to_it_is_an_error() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TA : TA>\n{\n    public void a<TB : TC, TC : TB>() { }\n    public void b<TD : TE, TE : TF, TF : Order>() { }\n    public void c<TG : TH, TH : TI, TI : TH>() { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:23 A type parameter can't bound itself: the bound of `TA` leads back to `TA`.",
+            "5:24 A type parameter can't bound itself: the bound of `TB` leads back to `TB`.",
+            "5:33 A type parameter can't bound itself: the bound of `TC` leads back to `TC`.",
+            "7:33 A type parameter can't bound itself: the bound of `TH` leads back to `TH`.",
+            "7:42 A type parameter can't bound itself: the bound of `TI` leads back to `TI`.",
+        ]
+    );
 }
 
 /// A bound's type arguments are a parameter's types, so a `void` among them is refused as one, alone or joined with

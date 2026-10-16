@@ -112,6 +112,8 @@ use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::TryFinallyClause;
 use mago_syntax::cst::TupleHint;
 use mago_syntax::cst::TypeOf;
+use mago_syntax::cst::TypeParameter;
+use mago_syntax::cst::TypeParameterBound;
 use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPostfix;
@@ -185,8 +187,9 @@ const OBJECT: &[u8] = b"Object";
 ///   `<out TItem : DatabaseEntity & Shareable, TKey>`. A name is `T`, or `T` and an uppercase ASCII letter, as in
 ///   `TItem`, and any other name is an error, as C# names them. A list that declares a name twice is an error. `in` and
 ///   `out` on a method's type parameter are errors, because only a class or an interface declares variance, spec
-///   section 11.1. A bound is `Object`, a class or an interface, a generic class type, as in `Comparable<TItem>`, or
-///   several classes and interfaces joined with `&`, and any other bound is an error. A type parameter is in scope in its class's or interface's
+///   section 11.1. A bound is `Object`, a class or an interface, a generic class type, as in `Comparable<TItem>`,
+///   several classes and interfaces joined with `&`, or another type parameter alone, as in `<TSub : T>`, and any
+///   other bound is an error. A type parameter is in scope in its class's or interface's
 ///   whole declaration, its header included, and in its method's signature and body, as the binder decides. A
 ///   constant uses none of its class's type parameters, because every `Box<…>` shares it. A static field, property or
 ///   method uses them, because each type argument has its own, as `Box<int>.count` reaches it. The analyzer checks
@@ -383,10 +386,11 @@ const OBJECT: &[u8] = b"Object";
 ///   CS8780, except under the `not` that starts the pattern of `is`. `not` beside `or` is an error that names both
 ///   readings, as decision 045 decides, and `!x is T`, which reads as `(!x) is T`, is an error that writes
 ///   `x is not T`, as decision 044 decides. A list pattern has one rest.
-/// - What reads a type argument while the code runs, which R3 compiles, is not supported yet: a type parameter in a
+/// - What reads a type argument while the code runs, which R3 compiles, passes this check: a type parameter in a
 ///   pattern, a `match` arm, `as` or a catch clause, `typeof` and `new` of a type parameter, a static member reached
-///   through a type parameter, as in `TItem.make()` and `TItem.LIMIT`, and any type with type arguments in a pattern or
-///   `as`, as in `value is List<int>`, `value as PaginatedList<Order>` and `value is Class<Order>`.
+///   through a type parameter, as in `TItem.make()` and `TItem.LIMIT`, and a type with type arguments in a pattern or
+///   `as`, as in `value is List<int>`. The analyzer refuses what no test can read, as a plain PHP class's type
+///   arguments. A named constructor through a type parameter, as in `new TItem.from(…)`, is not supported yet.
 /// - Casts: `(int)`, `(float)` and `(string)` in a method body, as spec section 24 writes them. PHP's other casts and
 ///   its cast aliases, such as `(bool)` and `(integer)`, are errors. A cast is lowercase only, so the lexer reads
 ///   `(Int)` as the class `Int` in parentheses, as in `typeof(Int)`.
@@ -788,7 +792,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         {
             Some(Parameter)
         }
-        (Node::TypeParameterList(list), Class | Interface | Method | Signature) => {
+        (Node::TypeParameterList(list), Class | Interface | Method | Signature | Place::Struct) => {
             check_type_parameters(list, place, context);
 
             Some(Place::TypeParameter)
@@ -801,8 +805,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             let message = if matches!(bound.hint, Hint::Union(_)) {
                 "A bound can't be a union: join several bounds with `&`."
+            } else if joins_type_parameter(&bound.hint, context) {
+                "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."
             } else {
-                "A bound is `Object`, a class or an interface, as in `<TItem : DatabaseEntity>`."
+                "A bound is `Object`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
             };
             context.report(
                 Issue::error(message)
@@ -1062,7 +1068,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                     let kind = if matches!(property, Property::Plain(_)) { "Field" } else { "Property" };
                     check_member_name(property.modifiers(), variable.name, variable.span, kind, context);
                     report_static_without_initial_value(property, context);
-                    report_generic_static(property, context);
 
                     Some(FieldOrProperty)
                 }
@@ -1144,10 +1149,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // A computed property's expression runs on each read, as a method body does.
         (Node::ComputedProperty(_), FieldOrProperty) => Some(FieldOrProperty),
         (Node::Block(_) | Node::PropertyHookConcreteExpressionBody(_), FieldOrProperty | Parameter) => Some(Body),
-        // A constant initial value is the member's default, which PHP evaluates as a constant expression.
+        // A constant initial value is the member's default, which PHP evaluates as a constant expression. A static
+        // member's that reads a static member, `Class.name`, runs as code, as `Property::initial_value_runs_after_class`
+        // decides.
         (Node::Expression(value), FieldOrProperty) => {
             let uses_this = report_this_in_initial_value(node, context);
-            let place = if !uses_this && value.is_constant(&context.version, false) { Constant } else { Body };
+            let place = if !uses_this
+                && value.is_constant(&context.version, false)
+                && !is_static_initial_value_run_as_code(value, context)
+            {
+                Constant
+            } else {
+                Body
+            };
 
             enter(node, place, context)
         }
@@ -3019,49 +3033,6 @@ fn report_parameter_accessor_bodies(
     }
 }
 
-/// Reports a static member of a generic class whose initial value runs as code, or that runs accessors. Each type
-/// argument's statics are an entry of one hidden table, spec section 11, which starts as a copy of constant initial
-/// values, and the engine runs no code on that first use and gives the entry no accessors.
-fn report_generic_static(property: &Property, context: &mut Context<'_, '_, '_>) {
-    if !property.modifiers().contains_static()
-        || enclosing_class(context.program, property.span()).is_none_or(|class| class.type_parameters.is_none())
-    {
-        return;
-    }
-
-    let runs_accessors = match property {
-        Property::Computed(_) => true,
-        Property::Hooked(hooked) => {
-            hooked.hook_list.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
-        }
-        Property::Plain(_) => false,
-    };
-    let refused = if runs_accessors {
-        Some((
-            property.first_variable().span,
-            "A static property with accessors in a generic class is not supported yet in PHP#.",
-        ))
-    } else if property.initial_value_runs_after_class()
-        && let Some(value) = property.initial_value()
-    {
-        Some((
-            value.span(),
-            "A static member of a generic class with an initial value that runs as code is not supported yet in PHP#.",
-        ))
-    } else {
-        None
-    };
-    let Some((span, message)) = refused else {
-        return;
-    };
-
-    context.report(
-        Issue::error(message)
-            .with_annotation(Annotation::primary(span).with_message("Not supported yet."))
-            .with_note("Each type argument's statics are an entry of one table, which starts as a copy of constant initial values, and the engine runs no code on that first use."),
-    );
-}
-
 /// Reports a static field or a static property with storage that has no initial value, spec section 6. No constructor
 /// sets a static, so it would be read before anything set it, and a `T?` one has no implicit `null` either.
 fn report_static_without_initial_value(property: &Property, context: &mut Context<'_, '_, '_>) {
@@ -4046,6 +4017,8 @@ fn is_key_hint(hint: &Hint) -> bool {
         Hint::Generic(collection) if matches!(collection.name.value, b"List" | b"Set" | b"Map") => {
             collection.type_arguments.arguments.iter().all(is_key_hint)
         }
+        // A generic struct or class, as `Pair<int, string>`, is a named type, whose `==` and `hash()` the analyzer checks.
+        Hint::Generic(generic) => built_in_generic_arity(generic.name.value).is_none(),
         _ => false,
     }
 }
@@ -4232,11 +4205,23 @@ fn report_static_member_use(span: Span, refusal: String, context: &mut Context<'
 }
 
 /// Reports each type parameter of a list whose name is not `T`, or `T` and an uppercase letter, as C# names them, a
-/// name the list declares twice, and `in` or `out` on a method's, because only a class or an interface declares
-/// variance, spec section 11.1.
+/// name the list declares twice, a bound that leads back to its type parameter, as C# refuses a circular constraint
+/// (CS0454), and `in` or `out` on a method's, because only a class or an interface declares variance, spec section
+/// 11.1.
 fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut Context<'_, '_, '_>) {
     for (index, parameter) in list.parameters.iter().enumerate() {
         let name = parameter.name.value;
+        if let Some(bound) = &parameter.bound
+            && bounds_itself(list, parameter)
+        {
+            context.report(
+                Issue::error(format!(
+                    "A type parameter can't bound itself: the bound of `{0}` leads back to `{0}`.",
+                    BytesDisplay(name)
+                ))
+                .with_annotation(Annotation::primary(bound.hint.span()).with_message("Bound written here.")),
+            );
+        }
         if !matches!(name, [b'T'] | [b'T', b'A'..=b'Z', ..]) {
             context.report(
                 Issue::error("A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.")
@@ -4267,9 +4252,50 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
     }
 }
 
-/// Whether a type parameter's bound is `Object`, a class or an interface, a generic class type, or several of them
-/// joined with `&`, as spec section 11 writes it. Mago's own check of an intersection refuses `Object` in one.
+/// Whether the bound of `parameter` names it, through the bounds of the other type parameters of `list` it names, as
+/// `<T : T>` and `<TA : TB, TB : TA>` do.
+fn bounds_itself(list: &TypeParameterList, parameter: &TypeParameter) -> bool {
+    let mut current = parameter;
+    for _ in 0..list.parameters.len() {
+        let Some(TypeParameterBound { hint: Hint::Identifier(Identifier::Local(bound)), .. }) = &current.bound else {
+            return false;
+        };
+        if bound.value == parameter.name.value {
+            return true;
+        }
+        let Some(next) = list.parameters.iter().find(|other| other.name.value == bound.value) else {
+            return false;
+        };
+        current = next;
+    }
+
+    false
+}
+
+/// Whether a type parameter's bound is another type parameter, as in `<TSub : T>`, or a class bound, as spec section
+/// 11 writes it.
 fn is_slice_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
+    is_type_parameter_bound(hint, context) || is_class_bound(hint, context)
+}
+
+/// Whether `hint` is a type parameter, a bound that stands alone, as Java's `<U extends T>` does.
+fn is_type_parameter_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
+    matches!(hint, Hint::Identifier(name @ Identifier::Local(_)) if context.names.is_type_parameter(name))
+}
+
+/// Whether `hint` joins a type parameter with other bounds by `&`, as in `<TL : Order & TA>`.
+fn joins_type_parameter(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
+    match hint {
+        Hint::Intersection(intersection) => {
+            joins_type_parameter(intersection.left, context) || joins_type_parameter(intersection.right, context)
+        }
+        hint => is_type_parameter_bound(hint, context),
+    }
+}
+
+/// Whether `hint` is `Object`, a class or an interface, a generic class type, or several of them joined with `&`.
+/// Mago's own check of an intersection refuses `Object` in one.
+fn is_class_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
     match hint {
         Hint::Object(object) => object.value == OBJECT,
         Hint::Identifier(name @ Identifier::Local(_)) => !context.names.is_type_parameter(name),
@@ -4277,7 +4303,7 @@ fn is_slice_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
             built_in_generic_arity(generic.name.value).is_none() && !context.names.is_type_parameter(&generic.name)
         }
         Hint::Intersection(intersection) => {
-            is_slice_bound(intersection.left, context) && is_slice_bound(intersection.right, context)
+            is_class_bound(intersection.left, context) && is_class_bound(intersection.right, context)
         }
         _ => false,
     }
@@ -5229,7 +5255,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# header names each base class and interface by its short name, as in `: DatabaseEntity, Linkable`, and a generic one with its type arguments, as in `: PaginatedList<Order>`."
         }
         Place::TypeParameter => {
-            "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
+            "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
         }
         Place::Event => {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
@@ -5915,7 +5941,7 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
         Self {
             name: &r#struct.name,
             span: r#struct.span(),
-            type_parameters: None,
+            type_parameters: r#struct.type_parameters.as_ref(),
             members: &r#struct.members,
             is_static: false,
             is_foreign: false,
@@ -6392,6 +6418,18 @@ fn enclosing_class<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> 
     }
 
     classes.into_iter().find(|class| class.span.contains(&span.start))
+}
+
+/// Whether `value` is the initial value of a static member that runs as code once the class is built, which
+/// `Property::initial_value_runs_after_class` decides for the checker, the analyzer and the engine alike.
+fn is_static_initial_value_run_as_code(value: &Expression, context: &Context<'_, '_, '_>) -> bool {
+    enclosing_class(context.program, value.span()).is_some_and(|class| {
+        class.members.iter().any(|member| {
+            matches!(member, ClassLikeMember::Property(property)
+                if property.initial_value().is_some_and(|initial_value| initial_value.span() == value.span())
+                    && property.initial_value_runs_after_class())
+        })
+    })
 }
 
 /// The name of the class, struct, interface or enum of a PHP# file whose body holds `span`, in any of the file's
