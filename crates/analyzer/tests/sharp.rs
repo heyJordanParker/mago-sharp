@@ -16939,6 +16939,30 @@ fn a_call_of_a_method_has_the_effects_of_each_function_passed_to_it() {
     );
 }
 
+/// Spec section 29: the standard library's collection methods take on the effects of each function they are given, as
+/// a PHP# method does, so list code with pure functions stays pure. A lambda, a method value and a function value
+/// passed to a collection method of a `List`, a `Map`, a `Set` or an `Iterable` give the call their effects.
+#[test]
+fn a_collection_method_takes_on_the_effects_of_each_function_it_is_given() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Function<int(int) uses Clock> tick, private List<int> prices, private Map<string, int> named, private Set<int> kept, private Iterable<int> lazy) { }\n\n    public int stamp(int price) => global.now() + price;\n\n    public int pure => this.prices.map(price => price * 2).count() + this.named.filter(price => price > 0).count() + this.kept.filter(price => price > 1).count() + this.lazy.map(price => price + 1).toList().count();\n\n    public int viaLambda => this.prices.map(price => global.now() + price).count();\n\n    public int viaMethodValue => this.prices.map(this.stamp).count();\n\n    public int viaFunctionValue => this.prices.map(this.tick).count();\n\n    public int viaMap => this.named.filter(price => global.now() > price).count();\n\n    public bool viaSet => this.kept.any(price => global.now() > price);\n\n    public int viaIterable => this.lazy.map(price => global.now() + price).toList().count();\n\n    law pure(Pricing pricing) => pricing.pure >= 0;\n\n    law lambda(Pricing pricing) => pricing.viaLambda >= 0;\n\n    law methodValue(Pricing pricing) => pricing.viaMethodValue >= 0;\n\n    law functionValue(Pricing pricing) => pricing.viaFunctionValue >= 0;\n\n    law onMap(Pricing pricing) => pricing.viaMap >= 0;\n\n    law onSet(Pricing pricing) => pricing.viaSet;\n\n    law onIterable(Pricing pricing) => pricing.viaIterable >= 0;\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Pricing.sharp:25:36 impure-law: Law `lambda` reaches `Pricing.viaLambda`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:27:41 impure-law: Law `methodValue` reaches `Pricing.stamp`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:29:43 impure-law: Law `functionValue` reaches `Pricing.viaFunctionValue`, which calls `this.tick` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:31:35 impure-law: Law `onMap` reaches `Pricing.viaMap`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:33:35 impure-law: Law `onSet` reaches `Pricing.viaSet`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:35:40 impure-law: Law `onIterable` reaches `Pricing.viaIterable`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+        ]
+    );
+}
+
 /// A method value of a method without a body has the effects its `uses` lists wherever it runs, as a call of the
 /// method does: passed to a function parameter, or to plain PHP, which may run what it is given.
 #[test]

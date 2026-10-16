@@ -908,13 +908,15 @@ where
             return;
         }
 
+        // A collection method takes on the effects of each function it is given above, as a PHP# method does, and
+        // plain PHP may run any function it is given.
         if is_prelude_stub(declaring_class) {
-            self.prelude_stub_call(metadata, span, receiver, arguments);
+            self.prelude_stub_call(metadata, span, receiver);
         } else {
             let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
+            self.callbacks(arguments);
         }
-        self.callbacks(arguments);
     }
 
     /// Records each function a call of a PHP# method passes to a function parameter whose type states no effects, spec
@@ -1042,25 +1044,15 @@ where
         }
     }
 
+    /// Records a call of a prelude stub, such as `List.add`, which changes its receiver unless the stub is free of
+    /// mutation.
     // Deleted once the standard library's `.sharp` sources replace the prelude stubs (php-sharp issue #60).
     fn prelude_stub_call(
         &mut self,
         metadata: &FunctionLikeMetadata,
         span: Span,
         receiver: Option<&'ast Expression<'arena>>,
-        arguments: &'ast ArgumentList<'arena>,
     ) {
-        // A function passed to the stub runs on the receiver's elements, as a function parameter of a PHP# method does.
-        let elements = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
-        for argument in &arguments.arguments {
-            let value = argument.value();
-            if let Some(lambda) = self.lambda(value) {
-                self.inline(lambda, |_| elements.clone());
-            } else {
-                self.method_value(value, span, &elements);
-            }
-        }
-
         if !metadata.flags.is_mutation_free()
             && let Some(receiver) = receiver
         {

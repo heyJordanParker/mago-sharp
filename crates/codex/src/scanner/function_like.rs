@@ -57,6 +57,7 @@ use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::function_like::MethodMetadata;
+use crate::metadata::parameter::FunctionLikeParameterMetadata;
 use crate::metadata::property::PropertyMetadata;
 use crate::metadata::ttype::TypeMetadata;
 use crate::misc::GenericParent;
@@ -147,7 +148,8 @@ where
                 context,
                 scope,
             )?;
-            parameter.flags.set(MetadataFlags::TAKES_ON_EFFECTS, takes_on_effects(p));
+            let takes_on = takes_on_effects(p) || runs_inside_collection_method(class_like_metadata, &parameter);
+            parameter.flags.set(MetadataFlags::TAKES_ON_EFFECTS, takes_on);
 
             Some(parameter)
         })
@@ -263,6 +265,22 @@ where
     }
 
     Some(metadata)
+}
+
+/// Spec section 29: whether `parameter` is a function a standard library collection method runs only inside its call,
+/// as `List.map` runs its lambda, so the call takes on that function's effects, as a PHP# method's function parameter
+/// whose type states no effects does. The prelude declares the collection methods on `Sharp\Internal\ListMethods`,
+/// `MapMethods`, `SetMethods` and `IterableMethods`, each taking its function as a `\Closure`.
+fn runs_inside_collection_method(class: &ClassLikeMetadata, parameter: &FunctionLikeParameterMetadata) -> bool {
+    [
+        "Sharp\\Internal\\ListMethods",
+        "Sharp\\Internal\\MapMethods",
+        "Sharp\\Internal\\SetMethods",
+        "Sharp\\Internal\\IterableMethods",
+    ]
+    .iter()
+    .any(|collection| collection.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()))
+        && parameter.type_metadata.as_ref().is_some_and(|declared| declared.type_union.has_callable())
 }
 
 /// Scans a PHP# law, spec section 28, as a static method that returns `bool`, so its body is analyzed as one.
