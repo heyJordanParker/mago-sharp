@@ -1257,6 +1257,9 @@ fn nullable_properties_with_accessor_bodies_have_the_issues_of_their_php_twins()
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
+/// `typeof(X)` of a class is its class name, as PHP's `X::class` is, so passing either where another class's name is
+/// expected reports the same. Of a missing class, PHP's `Missing::class` is still a string and reports where it is
+/// passed too, while a PHP# file's `typeof(Missing)` has no type, so it reports only that the class is missing.
 #[test]
 fn typeof_is_the_class_name_as_in_php() {
     let registry = "<?php\n\nnamespace Lib;\n\nfinal class Registry\n{\n    /** @param class-string<Calc> $class */\n    public static function keep(string $class): string\n    {\n        return $class;\n    }\n}\n";
@@ -1267,8 +1270,8 @@ fn typeof_is_the_class_name_as_in_php() {
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &others);
     let php_issues = issues(("src/Demo/Report.php", php), &others);
 
-    assert_eq!(sharp_issues, ["10:23 invalid-argument", "11:30 non-existent-class-like", "11:23 invalid-argument"]);
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    assert_eq!(sharp_issues, ["10:23 invalid-argument", "11:30 non-existent-class-like"]);
+    assert_eq!(php_issues, ["12:24 invalid-argument", "13:24 non-existent-class-like", "13:24 invalid-argument"]);
 }
 
 /// A static member written through its class name is checked as PHP checks `Class::$name`.
@@ -7351,6 +7354,7 @@ fn a_full_name_anywhere_in_code_names_the_import_to_add() {
         ("class Report", "    public Any make() => new App.Shared.Money();\n", money),
         ("class Report", "    public string name() => nameof(App.Shared.Money.cents);\n", money),
         ("class Report", "    public Any kind() => typeof(App.Shared.Money);\n", money),
+        ("class Report", "    public string kind() => typeof(App.Shared.Money).name;\n", money),
         ("class Report", "    [App.Shared.Money]\n    public void run() { }\n", money),
         (
             "class Report",

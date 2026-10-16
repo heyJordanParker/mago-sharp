@@ -86,7 +86,7 @@ fn class_of(held: &TUnion) -> TUnion {
 /// The class value of the class `name` names, with the type arguments of `generic`, its generic type, when written:
 /// `typeof(PaginatedList<Order>)` is a `Class<PaginatedList<Order>>`, spec section 25. A PHP# generic class's value
 /// carries its type arguments while the code runs, so its type is recorded as a tested type's is. A class that does
-/// not exist is reported, and its value is the literal class string of the name.
+/// not exist is reported, and its value has no type, so nothing that reads it reports again.
 fn class_value<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     block_context: &BlockContext<'ctx>,
@@ -98,17 +98,20 @@ where
     A: Arena,
 {
     let mut class = word(context.resolved_names.get(name));
-    let metadata = context.codebase.get_class_like(class.as_bytes());
-    match metadata {
-        Some(metadata) => class = metadata.original_name,
-        None => report_non_existent_class_like(context, name.span(), class),
-    }
-
     artifacts.symbol_references.add_reference_to_symbol(
         &block_context.scope,
         ascii_lowercase_word(class.as_bytes()),
         false,
     );
+    let metadata = context.codebase.get_class_like(class.as_bytes());
+    match metadata {
+        Some(metadata) => class = metadata.original_name,
+        None => {
+            report_non_existent_class_like(context, name.span(), class);
+
+            return TUnion::from_atomic(TAtomic::Error);
+        }
+    }
 
     if let Some(hint @ Hint::Generic(generic)) = generic
         && let Some(metadata) = metadata
