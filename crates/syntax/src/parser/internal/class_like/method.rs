@@ -13,6 +13,7 @@ use crate::cst::cst::MethodBody;
 use crate::cst::cst::MethodExpressionBody;
 use crate::cst::cst::Modifier;
 use crate::cst::cst::NamedConstructor;
+use crate::cst::cst::NullableHint;
 use crate::cst::cst::On;
 use crate::cst::cst::Operator;
 use crate::cst::sequence::Sequence;
@@ -190,6 +191,22 @@ where
         let on = self.parse_optional_on()?.map(|on| &*self.arena.alloc(on));
         let after_on = self.parse_optional_readonly_marker()?;
         let uses = self.parse_optional_uses()?.map(|uses| &*self.arena.alloc(uses));
+        // Spec section 29: a method takes on the effects of each function it is given, so `uses` names no function
+        // parameter, as the old `apply(Function<int()> f) uses f` did.
+        for name in uses.iter().flat_map(|uses| uses.names.iter()) {
+            if parameter_list.parameters.iter().any(|parameter| {
+                parameter.variable.name == name.value
+                    && matches!(
+                        parameter.hint,
+                        Some(Hint::Function(_) | Hint::Nullable(NullableHint { hint: Hint::Function(_), .. }))
+                    )
+            }) {
+                self.errors.push(ParseError::FunctionParameterInUsesInSharp(
+                    String::from_utf8_lossy(name.value).into(),
+                    name.span,
+                ));
+            }
+        }
         let last = self.parse_optional_readonly_marker()?;
         // Spec section 13: `readonly` is the last clause, so one written before `on` or `uses` names that place.
         let misplaced = [

@@ -5743,6 +5743,25 @@ fn readonly_before_another_clause_is_an_error_that_names_the_last_place() {
     );
 }
 
+/// Spec section 29: a method takes on the effects of each function it is given, with nothing written, so a function
+/// parameter in `uses`, nullable or not, with or without a body, is an error at its name that says to delete it. An
+/// effect, and a parameter that is no function, are other names, which semantics checks.
+#[test]
+fn a_function_parameter_in_uses_is_an_error_that_says_to_delete_it() {
+    const CODE: &str = "class Pricing\n{\n    public int apply(Function<int()> f) uses f => f();\n    public int maybe(Function<int()>? g, int n) uses Http, g, n;\n    public int plain(int n) uses n, Http;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Pricing.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    let message = |name: &str| {
+        format!(
+            "`{name}` is a function parameter, and a method takes on the effects of each function it is given, so `uses` names no parameter: delete it."
+        )
+    };
+    assert_eq!(errors, [(message("f"), "f"), (message("g"), "g")]);
+}
+
 /// Before `class` or another modifier, `readonly` stays a modifier, and the checker refuses it there. In plain PHP it
 /// is always PHP's own modifier.
 #[test]

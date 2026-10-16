@@ -175,24 +175,12 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
     }
 
     /// The effects the method's `uses` names, spec section 29: every name but one of its function-typed parameters,
-    /// which semantics refuses there.
+    /// which the parser refuses there.
     pub fn uses_effects(&self) -> impl Iterator<Item = &'ast LocalIdentifier<'arena>> + '_ {
-        self.uses_names().filter(move |name| !self.names_function_parameter(name))
-    }
-
-    /// The names in the method's `uses` that name one of its function-typed parameters, as the old
-    /// `apply(Function<int(int)> f) uses f` did. A method takes on the effects of each function it is given with
-    /// nothing written, spec section 29, so semantics refuses each.
-    pub fn uses_function_parameters(&self) -> impl Iterator<Item = &'ast LocalIdentifier<'arena>> + '_ {
-        self.uses_names().filter(move |name| self.names_function_parameter(name))
-    }
-
-    fn uses_names(&self) -> impl Iterator<Item = &'ast LocalIdentifier<'arena>> + use<'ast, 'arena> {
-        self.uses.into_iter().flat_map(|uses| uses.names.iter())
-    }
-
-    fn names_function_parameter(&self, name: &LocalIdentifier<'_>) -> bool {
-        self.parameter_list.parameters.iter().any(|parameter| names_function(parameter, name))
+        self.uses
+            .into_iter()
+            .flat_map(|uses| uses.names.iter())
+            .filter(move |name| !self.parameter_list.parameters.iter().any(|parameter| names_function(parameter, name)))
     }
 
     /// The parts of an operator, named at its symbol, or none for an operator a class cannot declare, which semantics
