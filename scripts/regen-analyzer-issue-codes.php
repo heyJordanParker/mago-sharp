@@ -378,6 +378,7 @@ final class AnalyzerCodeModuleGenerator
         'missing-required-property',
         'invalid-effect',
         'foreign-in-static',
+        'foreign-outside-module',
         'incompatible-effects',
         'invalid-binding',
         'missing-service',

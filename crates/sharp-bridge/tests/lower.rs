@@ -15213,7 +15213,7 @@ fn a_file_lowers_to_the_same_bytes_from_any_workspace_root_and_names_no_path() {
 }
 
 /// ```php
-/// $settings = new \Sharp\Environment();
+/// $settings = \Sharp\Environment::class;
 /// $lines = \Sharp\List::wrap($extra);
 /// $type = \Sharp\Class::of($this);
 /// return 1;
@@ -15223,7 +15223,7 @@ fn environment_list_and_class_are_the_classes_of_the_sharp_namespace() {
     assert_eq!(
         body_in(
             RUN,
-            "        const settings = new Environment();\n        const lines = List.wrap(extra);\n        const type = Class.of(this);\n        return 1;\n",
+            "        const settings = typeof(Environment);\n        const lines = List.wrap(extra);\n        const type = Class.of(this);\n        return 1;\n",
             &[common::ENVIRONMENT]
         ),
         indoc! {r#"
@@ -15231,9 +15231,8 @@ fn environment_list_and_class_are_the_classes_of_the_sharp_namespace() {
               ASSIGN
                 VAR
                   ZVAL "settings"
-                NEW
+                CLASS_NAME
                   ZVAL "Sharp\\Environment"
-                  ARG_LIST
               ASSIGN
                 VAR
                   ZVAL "lines"

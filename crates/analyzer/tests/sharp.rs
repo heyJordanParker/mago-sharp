@@ -3851,11 +3851,11 @@ fn position_current_has_the_types_of_the_sharp_library_class() {
 /// set, and `require`, which a module binding calls, throws instead.
 #[test]
 fn an_environment_variable_is_a_nullable_string_and_a_required_one_a_string() {
-    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public static Deploy make() => new Deploy(new Environment());\n\n    public string region() => this.environment.variable(\"X\") ?? \"d\";\n\n    public int wrong() => this.environment.variable(\"X\") ?? \"d\";\n\n    public string url() => this.environment.require(\"X\");\n\n    public int port() => this.environment.require(\"X\");\n}\n";
+    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string region() => this.environment.variable(\"X\") ?? \"d\";\n\n    public int wrong() => this.environment.variable(\"X\") ?? \"d\";\n\n    public string url() => this.environment.require(\"X\");\n\n    public int port() => this.environment.require(\"X\");\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Deploy.sharp", sharp), &[ENVIRONMENT]),
-        ["11:27 invalid-return-statement", "15:26 invalid-return-statement"]
+        ["9:27 invalid-return-statement", "13:26 invalid-return-statement"]
     );
 }
 
@@ -17879,6 +17879,38 @@ fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
             "app/Cache/PlainReader.sharp:9:41 invalid-return-statement: This lambda reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`, so a `Function<int()>` cannot hold it.",
         ]
     );
+}
+
+/// Spec section 29: a `foreign` object is created in a module binding and nowhere else, so a `.sharp` file's `new` of a
+/// `foreign` class, or of a class that extends one, is refused outside a binding's expression. Plain PHP creates one
+/// freely.
+#[test]
+fn a_foreign_object_is_created_only_in_a_module_binding() {
+    let store = ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore\n{\n}\n");
+    let fake = ("app/Cache/FakeStore.sharp", "namespace App.Cache;\n\npublic class FakeStore : RedisStore\n{\n}\n");
+    let factory = (
+        "app/Cache/Factory.sharp",
+        "namespace App.Cache;\n\npublic class Factory\n{\n    public RedisStore make() => new RedisStore();\n\n    public RedisStore fake()\n    {\n        const make = () => new FakeStore();\n        return make();\n    }\n}\n",
+    );
+    let help = "A `foreign` object reaches code only through constructors. | Take it as a constructor parameter, and create it in a module binding.";
+
+    assert_eq!(
+        worded(factory, &[store, fake]),
+        [
+            format!("5:37 foreign-outside-module `RedisStore` is `foreign`, so only a module binding creates it. | {help}"),
+            format!("9:32 foreign-outside-module `FakeStore` is a `foreign` `RedisStore`, so only a module binding creates it. | {help}"),
+        ]
+    );
+    let module = (
+        "app/Cache/Module.sharp",
+        "namespace App.Cache;\n\nmodule\n{\n    singleton RedisStore = new RedisStore();\n\n    singleton Function<RedisStore()> = () => new FakeStore();\n}\n",
+    );
+    assert_eq!(worded(module, &[store, fake]), Vec::<String>::new());
+    let php = (
+        "src/Make.php",
+        "<?php\n\nnamespace App;\n\nfinal class Make\n{\n    public function store(): \\App\\Cache\\RedisStore\n    {\n        return new \\App\\Cache\\RedisStore();\n    }\n}\n",
+    );
+    assert_eq!(worded(php, &[store]), Vec::<String>::new());
 }
 
 /// Spec section 29: a `foreign` object reaches code only through constructors, so a static field holds none, alone or
