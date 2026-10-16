@@ -2439,7 +2439,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return None;
         }
 
-        let bounds = bounds.map_or(NULL, |bounds| self.string(0, line, bounds.as_bytes()));
+        // A static method's reads its class's type parameters as its own leading ones, as its checks do.
+        let bounds = bounds.map_or(NULL, |bounds| self.type_text(line, &bounds));
         let checks = checks.map_or(NULL, |checks| self.type_text(line, &checks));
 
         Some(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[bounds, checks]))

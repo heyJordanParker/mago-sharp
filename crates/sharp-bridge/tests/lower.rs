@@ -11062,17 +11062,20 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
 
 /// A call from plain PHP gives a method's own type parameters no type arguments, spec section 11, so a parameter whose
 /// type is one of them, alone or nullable, checks the type parameter's bound: `boxed<TBox : Box<Order>>(TBox box)`
-/// checks `App.Box<App.Order>`, and `add<TSub : TItem>(TSub item)` the class's `$0`. A bound PHP's own type checks, as
-/// a plain class, needs none, and so does a type parameter nested in a type, as `Box<TOther>`, which takes any type
+/// checks `App.Box<App.Order>`, and `add<TSub : TItem>(TSub item)` the class's `$0`. A static method reads the class's
+/// type parameters as its own leading ones, `#0`, in its bounds as in its checks. A bound PHP's own type checks, as a
+/// plain class, needs none, and so does a type parameter nested in a type, as `Box<TOther>`, which takes any type
 /// argument.
 #[test]
 fn a_parameter_of_a_methods_own_type_parameter_checks_its_bound_from_plain_php() {
     let lowered = Lowered::new(
-        "namespace App;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n}\n\npublic class Rack<TItem>\n{\n    public string add<TSub : TItem>(TSub item) => \"added\";\n\n    public string boxed<TBox : Box<Order>>(TBox box) => \"boxed\";\n\n    public string maybe<TBox : Box<Order>>(TBox? box) => \"maybe\";\n\n    public string plain<TOrder : Order>(TOrder order) => \"plain\";\n\n    public string nested<TOther : Order>(Box<TOther> box) => \"nested\";\n}\n",
+        "namespace App;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n}\n\npublic class Rack<TItem>\n{\n    public string add<TSub : TItem>(TSub item) => \"added\";\n\n    public string boxed<TBox : Box<Order>>(TBox box) => \"boxed\";\n\n    public string maybe<TBox : Box<Order>>(TBox? box) => \"maybe\";\n\n    public string plain<TOrder : Order>(TOrder order) => \"plain\";\n\n    public string nested<TOther : Order>(Box<TOther> box) => \"nested\";\n\n    public static string put<TSub : TItem>(TSub item) => \"put\";\n\n    public static string held<TBox : Box<TItem>>(TBox box) => \"held\";\n}\n",
     );
     let metadata = |bounds: &str, parameters: &str| format!("  SHARP_TYPE_ARGS\n    {bounds}\n    {parameters}\n");
 
     for (method, bounds, parameters) in [
+        ("put", r##"ZVAL "Any?, #0""##, r##"ZVAL "#0""##),
+        ("held", r##"ZVAL "Any?, App.Box<#0>""##, r##"ZVAL "App.Box<#0>""##),
         ("add", r#"ZVAL "$0""#, r#"ZVAL "$0""#),
         ("boxed", r#"ZVAL "App.Box<App.Order>""#, r#"ZVAL "App.Box<App.Order>""#),
         ("maybe", r#"ZVAL "App.Box<App.Order>""#, r#"ZVAL "App.Box<App.Order>?""#),
