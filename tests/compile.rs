@@ -169,7 +169,9 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
     let root = directory.path();
     compile_succeeds(root);
 
-    std::fs::rename(root.join("app/Order.sharp"), root.join("app/Invoice.sharp")).unwrap();
+    // A file is named like its type, so renaming the file renames the class.
+    std::fs::remove_file(root.join("app/Order.sharp")).unwrap();
+    std::fs::write(root.join("app/Invoice.sharp"), ORDER.replace("class Order", "class Invoice")).unwrap();
     compile_succeeds(root);
     assert!(!compiled(root, "app/Order.sharp").exists());
     assert!(compiled(root, "app/Invoice.sharp").exists());
@@ -2665,7 +2667,14 @@ fn compile_refuses_an_unproven_law_whatever_pragma_ignore_entry_or_baseline_entr
 /// Compiles `source` as `app/Shared/Shape.sharp` and checks that the compile refuses it with the unmodeled-construct
 /// error `message`, before any Lean process starts.
 fn assert_unmodeled(source: &str, message: &str) {
-    let directory = lawful_project(&[("app/Shared/Shape.sharp", source)]);
+    assert_unmodeled_beside(source, &[], message);
+}
+
+/// [`assert_unmodeled`] with the project's `others` files, each a path and its code, beside `app/Shared/Shape.sharp`.
+fn assert_unmodeled_beside(source: &str, others: &[(&str, &str)], message: &str) {
+    let files: Vec<(&str, &str)> =
+        [("app/Shared/Shape.sharp", source)].into_iter().chain(others.iter().copied()).collect();
+    let directory = lawful_project(&files);
     let root = directory.path();
 
     let output = compile_without_lean(root);
@@ -2757,8 +2766,9 @@ fn a_law_reaching_a_lambda_is_refused() {
 
 #[test]
 fn a_law_reaching_an_inherited_class_is_refused() {
-    assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Base\n{\n}\n\npublic class Shape : Base\n{\n    law any(Shape s) => true;\n}\n",
+    assert_unmodeled_beside(
+        "namespace App.Shared;\n\npublic class Shape : Base\n{\n    law any(Shape s) => true;\n}\n",
+        &[("app/Shared/Base.sharp", "namespace App.Shared;\n\npublic class Base\n{\n}\n")],
         "Law any reaches the class Shape, which extends Base in Shape. Mago does not translate inheritance to Lean.",
     );
 }
@@ -2773,8 +2783,12 @@ fn a_law_reaching_a_named_constructor_is_refused() {
 
 #[test]
 fn a_law_reaching_an_extension_member_lean_cannot_see_is_refused() {
-    assert_unmodeled(
-        "namespace App.Shared;\n\npublic final class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    law summed(Shape s) => s.sum() >= 0;\n}\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int sum()\n        {\n            let total = 0;\n            for (let i = 0; i < shape.sides; i++) {\n                total += i;\n            }\n            return total;\n        }\n    }\n}\n",
+    assert_unmodeled_beside(
+        "namespace App.Shared;\n\npublic final class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    law summed(Shape s) => s.sum() >= 0;\n}\n",
+        &[(
+            "app/Shared/ShapeMath.sharp",
+            "namespace App.Shared;\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int sum()\n        {\n            let total = 0;\n            for (let i = 0; i < shape.sides; i++) {\n                total += i;\n            }\n            return total;\n        }\n    }\n}\n",
+        )],
         "Law summed reaches a loop in ShapeMath.sum. Mago does not translate loops to Lean.",
     );
 }

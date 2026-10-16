@@ -13,20 +13,33 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
+    /// Parses a PHP opening tag. A `.sharp` file has none, spec section 27, so there the tag is an error, and the file
+    /// parses on.
     pub(crate) fn parse_opening_tag(&mut self) -> Result<OpeningTag<'arena>, ParseError> {
         let token = self.stream.consume()?;
+        let span = token.span_for(self.stream.file_id());
+        if self.dialect.is_sharp() {
+            self.errors.push(ParseError::PhpSyntaxInSharp(token.kind, span));
+        }
 
         Ok(match token.kind {
-            T!["<?php"] => {
-                OpeningTag::Full(FullOpeningTag { span: token.span_for(self.stream.file_id()), value: token.value })
-            }
-            T!["<?"] => OpeningTag::Short(ShortOpeningTag { span: token.span_for(self.stream.file_id()) }),
+            T!["<?php"] => OpeningTag::Full(FullOpeningTag { span, value: token.value }),
+            T!["<?"] => OpeningTag::Short(ShortOpeningTag { span }),
             _ => return Err(self.stream.unexpected(Some(token), &[T!["<?php"], T!["<?="]])),
         })
     }
 
+    /// Parses a PHP closing tag. A `.sharp` file lexes `?>` as `?` and `>`, which close a nullable type argument, as in
+    /// `List<int?>`. No statement starts with `?`, so there the two are a closing tag, an error, and the file parses on.
     pub(crate) fn parse_closing_tag(&mut self) -> Result<ClosingTag, ParseError> {
-        let span = self.stream.eat_span(T!["?>"])?;
+        let span = if self.dialect.is_sharp() {
+            let span = self.stream.eat_span(T!["?"])?.join(self.stream.eat_span(T![">"])?);
+            self.errors.push(ParseError::PhpSyntaxInSharp(T!["?>"], span));
+
+            span
+        } else {
+            self.stream.eat_span(T!["?>"])?
+        };
 
         Ok(ClosingTag { span })
     }

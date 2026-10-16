@@ -4,6 +4,7 @@ use mago_span::Span;
 use mago_span::HasPosition;
 use mago_span::Position;
 use mago_syntax::cst::ArrowFunction;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
@@ -268,6 +269,18 @@ impl<'arena> ResolvedNames<'arena> {
     #[must_use]
     pub fn static_call_class<'ast>(&self, call: &MethodCall<'ast>) -> Option<&'ast ConstantAccess<'ast>> {
         self.class_object(call.object)
+    }
+
+    /// Returns whether `call` is the standard library's `Position.current()`, spec section 27: a static call of
+    /// `Sharp\Position`'s `current` without arguments, both names compared ignoring case, as PHP compares them.
+    /// Returns `false` for every call in a PHP file.
+    ///
+    /// The scanner, the checker and the engine all read this, so they never disagree on the caller's position.
+    #[must_use]
+    pub fn is_current_position(&self, call: &MethodCall<'_>) -> bool {
+        self.static_call_class(call).is_some_and(|class| self.get(&class.name).eq_ignore_ascii_case(b"Sharp\\Position"))
+            && matches!(&call.method, ClassLikeMemberSelector::Identifier(method) if method.value.eq_ignore_ascii_case(b"current"))
+            && call.argument_list.arguments.is_empty()
     }
 
     /// Returns the class of a PHP# static property access, `Class.name`: the object of `access` when the binder bound

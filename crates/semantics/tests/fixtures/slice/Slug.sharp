@@ -1,0 +1,10 @@
+namespace App.Tenant;
+
+public static class Slug
+{
+    public const string SEPARATOR = "-";
+    private static int made = 0;
+    public static int calls { get; private set; } = 0;
+
+    public static string join(string title) => title + Slug.SEPARATOR;
+}

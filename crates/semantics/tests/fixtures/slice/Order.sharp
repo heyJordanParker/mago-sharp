@@ -1,0 +1,13 @@
+namespace App.Tenant;
+
+public class Order
+{
+    public OrderPaid pay(int orderId) => new OrderPaid(orderId);
+
+    public int amountOf(OrderPaid paid) => paid.amount;
+
+    public void settle(int orderId)
+    {
+        emit new OrderPaid(orderId);
+    }
+}

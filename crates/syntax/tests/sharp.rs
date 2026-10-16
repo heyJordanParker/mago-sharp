@@ -2644,6 +2644,99 @@ fn foreach_is_a_php_syntax_error() {
     assert_eq!(messages, ["`foreach` is PHP syntax: PHP# loops over a collection with `for … of`"]);
 }
 
+/// Spec section 27: a `.sharp` file starts in code, so an opening tag is one error, and the file parses on.
+#[test]
+fn an_opening_tag_is_a_php_syntax_error() {
+    const CODE: &str = "<?php\nnamespace App;\n\nclass Report\n{\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/App/Report.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(
+        errors,
+        [("`<?php` is PHP syntax: a `.sharp` file has no opening tag, so delete it".to_owned(), "<?php")]
+    );
+    assert!(matches!(program.statements.get(1), Some(Statement::Namespace(_))), "{:#?}", program.statements);
+}
+
+/// Each other PHP tag is one error that names it, and the file parses on: a short opening tag, an echo tag and a
+/// closing tag, which a `.sharp` file lexes as `?` and `>` because they close a nullable type argument there.
+#[test]
+fn every_php_tag_is_a_php_syntax_error() {
+    for (code, message, tag) in [
+        (
+            "<?\nnamespace App;\n\nclass Report\n{\n}\n",
+            "`<?` is PHP syntax: a `.sharp` file has no opening tag, so delete it",
+            "<?",
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n}\n<?= 1;\n",
+            "`<?=` is PHP syntax: a `.sharp` file has no tags, and writes output with `global.printf`",
+            "<?=",
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n}\n?>\n",
+            "`?>` is PHP syntax: a `.sharp` file has no closing tag, so delete it",
+            "?>",
+        ),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/App/Report.sharp", code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        assert_eq!(errors, [(message.to_owned(), tag)], "{code}");
+    }
+
+    // `<?` before a type is PHP's nullable type, and `?>` ends a nullable type argument.
+    let arena = LocalArena::new();
+    let nullable = "namespace App;\n\nclass Report\n{\n    List<?int> a = [];\n    List<int?> b = [];\n}\n";
+    let program = parse(&arena, "src/App/Report.sharp", nullable);
+    let errors: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
+    assert_eq!(errors, ["`?` before a type is PHP syntax: PHP# writes it after the type, as in `int?`"]);
+}
+
+/// Spec section 27: a class lives in one file, so C#'s `partial` before a type is one error, and the type parses on.
+#[test]
+fn a_partial_type_is_an_error() {
+    for code in [
+        "namespace App;\n\npublic partial class Report { }\n",
+        "namespace App;\n\npartial class Report { }\n",
+        "namespace App;\n\n[Searchable]\npartial class Report { }\n",
+        "namespace App;\n\npartial static class Report { }\n",
+        "namespace App;\n\npublic partial struct Report { }\n",
+        "namespace App;\n\npartial interface Report { }\n",
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/App/Report.sharp", code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        assert_eq!(
+            errors,
+            [("PHP# has no partial classes: a class lives in one file.".to_owned(), "partial")],
+            "{code}"
+        );
+    }
+
+    // Everywhere else `partial` is a name.
+    let arena = LocalArena::new();
+    let local = "namespace App;\n\nclass Report\n{\n    void run()\n    {\n        const partial = 1;\n    }\n}\n";
+    assert!(parse(&arena, "src/App/Report.sharp", local).errors.is_empty());
+}
+
+/// Spec section 27: an editor may save a `.sharp` file with a UTF-8 byte order mark, which is no code.
+#[test]
+fn a_byte_order_mark_is_skipped() {
+    const CODE: &str = "\u{FEFF}namespace App;\n\nclass Report\n{\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/App/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    assert!(matches!(program.statements.first(), Some(Statement::Namespace(_))), "{:#?}", program.statements);
+}
+
 #[test]
 fn a_php_for_loop_has_no_declaration() {
     let arena = LocalArena::new();

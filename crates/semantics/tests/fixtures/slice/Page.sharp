@@ -1,0 +1,23 @@
+namespace App.Tenant;
+
+public class Page<TItem : Record & Sized, TKey : Comparable<Version>> : Listing<TItem>, Source<TItem>, Sized
+{
+    private Map<string, Class<TItem>> kinds = [:];
+    private Page<TItem, TKey>? previous = null;
+    public List<TItem> items { get; private set; } = [];
+
+    public TItem? first(TKey key, Page<Entry, Version>? fallback = null)
+    {
+        const page = new Page<Entry, Version>();
+        const found = this.convert<Entry>(this.items[0]);
+        const again = this.previous?.convert<Entry>(this.items[0]);
+        Class<TItem>? kind = null;
+        return null;
+    }
+
+    public TResult convert<TResult : Record>(TItem item) => this.convert<TResult>(item);
+
+    public bool accepts(TItem item) => true;
+
+    public TItem next() => this.items[0];
+}

@@ -27,7 +27,6 @@ use mago_syntax::cst::Statement;
 use super::Lines;
 use super::Lowering;
 use super::NULL;
-use super::is_current_position;
 use super::types::Declaration;
 use super::types::DeclarationKind;
 use super::types::receiver_classes;
@@ -301,10 +300,7 @@ impl Lowering<'_, '_> {
         steps: &mut Vec<Step>,
     ) -> bool {
         match self.names.static_call_class(call) {
-            Some(class)
-                if self.names.is_type_parameter(&class.name)
-                    || is_current_position(self.names.get(&class.name), call) =>
-            {
+            Some(class) if self.names.is_type_parameter(&class.name) || self.names.is_current_position(call) => {
                 return false;
             }
             Some(_) => {}

@@ -17,9 +17,9 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         // loop, PHP# syntax not supported yet, an escape a PHP# template refuses, an operator symbol a class cannot
         // declare, effects after a function type's `>` or on an import, a module member that is no law, a computed
         // property's body after a parameter, anything but `super(…)` or `this(…)` after a constructor's `:`, a body
-        // after an event, a type declared inside another, type parameters on a named constructor, a keyword in another
-        // case, a class cast, a function parameter a method names in `uses`, or a name after a pattern without a type, is
-        // a token the PHP# grammar does not expect there.
+        // after an event, a type declared inside another, `partial` before a type, type parameters on a named
+        // constructor, a keyword in another case, a class cast, a function parameter a method names in `uses`, or a name
+        // after a pattern without a type, is a token the PHP# grammar does not expect there.
         ParseError::UnexpectedToken(..)
         | ParseError::PhpSyntaxInSharp(..)
         | ParseError::ClassNameConstantInSharp(..)
@@ -45,6 +45,7 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         | ParseError::EventBodyInSharp(..)
         | ParseError::StructHeaderTypeInSharp(..)
         | ParseError::NestedTypeInSharp(..)
+        | ParseError::PartialTypeInSharp(..)
         | ParseError::NamedConstructorTypeParametersInSharp(..)
         | ParseError::MiscasedKeywordInSharp(..)
         | ParseError::ClassCastInSharp(..)

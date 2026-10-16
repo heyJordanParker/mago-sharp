@@ -24,6 +24,7 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
@@ -692,9 +693,22 @@ impl<'analysis> Types<'analysis> {
         self.codebase.get_function_like(callee).filter(|metadata| metadata.flags.is_sharp())
     }
 
-    /// The constructor `new` runs for the fully qualified class name `class` when PHP# declares it.
-    pub(crate) fn sharp_constructor(&self, class: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
-        self.codebase.get_declaring_method(class, b"__construct").filter(|metadata| metadata.flags.is_sharp())
+    /// Whether the list the spread `spread` spreads may hold a value of `parameter`'s type, and so may fill it, as a
+    /// list of `Any` or of the parameter's own type does. Only a `List` spreads into a call, spec section 7.
+    pub(crate) fn spread_can_fill(&self, spread: &Expression, parameter: &FunctionLikeParameterMetadata) -> bool {
+        let Some(metadata) = &parameter.type_metadata else {
+            unreachable!("semantics refuses a PHP# parameter without a type");
+        };
+        let elements = self.element_type(self.expression_type(spread));
+
+        can_expression_types_be_identical(self.codebase, &elements, &metadata.type_union, false, false)
+    }
+
+    /// The method `method` of the fully qualified class name `class` runs, where it declares it or inherits it, when
+    /// PHP# declares it: `__construct` for `new`, a named constructor, or the static method an extension's member runs
+    /// as.
+    pub(crate) fn sharp_method(&self, class: &[u8], method: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
+        self.codebase.get_declaring_method(class, method).filter(|metadata| metadata.flags.is_sharp())
     }
 
     /// The name PHP's return check gives `call`, as `Lib\Pager::orders()`, and the metadata of the plain PHP function or
@@ -1166,18 +1180,19 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The type of the elements a value of `r#type` holds, the `T` of a `List<T>`, leaving out `null`. The caller asks
-    /// only about a value the checker typed as a collection.
+    /// only about a value the checker typed as a collection: a collection method's receiver, an operand of a
+    /// collection's `==`, or a spread.
     pub(crate) fn element_type(&self, r#type: &TUnion) -> TUnion {
         let mut element_type = None;
         for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
             let TAtomic::Array(array) = atomic else {
-                unreachable!("the checker runs a collection method only on a collection, not on {atomic:?}");
+                unreachable!("the checker types the value as a collection, not as {atomic:?}");
             };
             let (_, value) = get_array_parameters(array, self.codebase);
             element_type = Some(add_optional_union_type(value, element_type.as_ref(), self.codebase));
         }
 
-        element_type.unwrap_or_else(|| unreachable!("a collection method's receiver is a collection"))
+        element_type.unwrap_or_else(|| unreachable!("the checker types the value as a collection"))
     }
 
     /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the collection method the analyzer checked

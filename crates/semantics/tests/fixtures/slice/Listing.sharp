@@ -1,0 +1,6 @@
+namespace App.Tenant;
+
+public interface Listing<in TItem : Record & Sized> : Sized
+{
+    bool accepts(TItem item);
+}
