@@ -495,12 +495,21 @@ where
                 parameter_type_had_template_types = true;
                 // Store the original type before replacement for inference
                 base_parameter_type_for_inference = Some(base_parameter_type.clone());
-                inferred_type_replacer::replace_with_polarity(
+                let parameter_type = inferred_type_replacer::replace_with_polarity(
                     &base_parameter_type,
                     template_result,
                     context.codebase,
                     mago_codex::ttype::template::variance::Variance::Contravariant,
-                )
+                );
+
+                // A PHP# lambda takes the type arguments the declared type the call's result goes into fixes, as any
+                // other argument does, so `this.call(() => this.make())` into a `Box<Order>` fixes both calls.
+                match &declared_type_arguments {
+                    Some(declared) if holds_unfixed_template(&parameter_type, template_result) => {
+                        inferred_type_replacer::replace(&parameter_type, declared, context.codebase)
+                    }
+                    _ => parameter_type,
+                }
             } else {
                 base_parameter_type
             };
