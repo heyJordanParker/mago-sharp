@@ -11612,8 +11612,16 @@ fn a_type_new_a_type_test_and_a_static_member_name_the_type_arguments_of_a_gener
     let statics = "namespace Demo;\n\npublic class Report\n{\n    public static int read() => Counter.count;\n\n    public static void write()\n    {\n        Counter.count = 4;\n        Counter.count += 2;\n        Counter.count++;\n        Counter.items.add(new Order());\n        Counter.reset();\n    }\n\n    public static int named() => Counter<Order>.count + Counter.LIMIT + Orders.count;\n}\n";
     let php_statics = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function write(): void\n    {\n        Counter::reset();\n    }\n}\n";
     let note = "A type, `new` and a static member name the type arguments of a generic class.";
-    let one = |class: &str| format!("`{class}` needs its type argument. | `{class}` has type parameters | {note}");
-    let two = |class: &str| format!("`{class}` needs its 2 type arguments. | `{class}` has type parameters | {note}");
+    let one = |class: &str| {
+        format!(
+            "`{class}` needs its type argument. | `{class}` has type parameters | {note} | Write a type for its type parameter: `{class}<TItem>`."
+        )
+    };
+    let two = |class: &str| {
+        format!(
+            "`{class}` needs its 2 type arguments. | `{class}` has type parameters | {note} | Write a type for each of its type parameters: `{class}<TFirst, TSecond>`."
+        )
+    };
 
     assert_eq!(explained(("src/Demo/Report.php", php_types), &[]), Vec::<String>::new());
     assert_eq!(
@@ -11656,6 +11664,38 @@ fn a_type_new_a_type_test_and_a_static_member_name_the_type_arguments_of_a_gener
             format!("11:9 missing-template-parameter {}", one("Counter")),
             format!("12:9 missing-template-parameter {}", one("Counter")),
             format!("13:9 missing-template-parameter {}", one("Counter")),
+        ]
+    );
+}
+
+/// A PHP# type names the type arguments of a plain PHP `@template` class too, spec section 11, as TypeScript and Kotlin
+/// require them: a property's, a parameter's, a return type, a typed local's, one nested in a `List`, and a type argument
+/// a call writes, each reported once with the type parameters to write. A type parameter with a default needs none. A
+/// type test reads no type arguments of a plain PHP class, so it tests the class alone, and a class type names the
+/// class itself. The plain PHP twin keeps Mago's issues.
+#[test]
+fn a_type_names_the_type_arguments_of_a_plain_php_generic_class() {
+    let library = "<?php\n\nnamespace Lib;\n\n/** @template TItem */\nclass Shelf\n{\n}\n\n/**\n * @template TKey\n * @template TValue\n */\nclass Pairs\n{\n}\n\n/** @template TLabel = string */\nclass Labels\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Labels;\nimport Lib.Pairs;\nimport Lib.Shelf;\n\npublic class Report\n{\n    public Shelf? shelf { get; set; } = null;\n\n    public void stocked(Shelf shelf)\n    {\n    }\n\n    public Pairs? paired() => null;\n\n    public void listed(List<Shelf> shelves)\n    {\n    }\n\n    public void local(Shelf<int> given)\n    {\n        Shelf kept = given;\n    }\n\n    public T? kept<T>() => null;\n\n    public void written()\n    {\n        this.kept<Shelf>();\n    }\n\n    public void labeled(Labels labels)\n    {\n    }\n\n    public bool held(Any? value) => value is Shelf;\n\n    public Class<Shelf> kind(Class<Shelf> shelf) => shelf;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Labels;\nuse Lib\\Pairs;\nuse Lib\\Shelf;\n\nclass Report\n{\n    public ?Shelf $shelf = null;\n\n    public function stocked(Shelf $shelf): void\n    {\n    }\n\n    public function paired(): ?Pairs\n    {\n        return null;\n    }\n\n    public function labeled(Labels $labels): void\n    {\n    }\n}\n";
+    let library = [("src/Lib/Shelf.php", library)];
+    let note = "A type, `new` and a static member name the type arguments of a generic class.";
+    let shelf = format!(
+        "missing-template-parameter `Shelf` needs its type argument. | `Shelf` has type parameters | {note} | Write a type for its type parameter: `Shelf<TItem>`."
+    );
+
+    assert_eq!(explained(("src/Demo/Report.php", php), &library), Vec::<String>::new());
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &library),
+        [
+            format!("9:12 {shelf}"),
+            format!("11:25 {shelf}"),
+            format!(
+                "15:12 missing-template-parameter `Pairs` needs its 2 type arguments. | `Pairs` has type parameters | {note} | Write a type for each of its type parameters: `Pairs<TKey, TValue>`."
+            ),
+            format!("17:24 {shelf}"),
+            format!("23:9 {shelf}"),
+            format!("30:19 {shelf}"),
         ]
     );
 }
@@ -11963,7 +12003,7 @@ fn a_call_template_no_argument_binds_records_mixed() {
 /// `SplObjectStorage`'s too, though the analyzer types its object with `never` arguments.
 #[test]
 fn new_on_a_templated_class_without_a_constructor_records_mixed() {
-    let sharp = "namespace Demo;\n\nimport Lib.Bag;\n\nclass Report\n{\n    public Bag run()\n    {\n        return new Bag();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Bag;\n\nclass Report\n{\n    public Any run()\n    {\n        return new Bag();\n    }\n}\n";
     let library = "<?php\n\nnamespace Lib;\n\n/**\n * @template K\n * @template V\n */\nfinal class Bag\n{\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfunction storage(): \\SplObjectStorage\n{\n    return new \\SplObjectStorage();\n}\n";
 
@@ -12748,7 +12788,7 @@ fn new_through_a_class_value_gives_the_object_the_type_arguments_it_names_or_the
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
         [
-            "11:31 missing-template-parameter `Box` needs its type argument. | `Box` has type parameters | A type, `new` and a static member name the type arguments of a generic class.",
+            "11:31 missing-template-parameter `Box` needs its type argument. | `Box` has type parameters | A type, `new` and a static member name the type arguments of a generic class. | Write a type for its type parameter: `Box<TItem>`.",
             "13:32 invalid-return-statement Box<string> cannot be used as Box<int>. | This has type `Box<string>`. | A type parameter without `out` or `in` is invariant, so neither substitution is allowed.",
             "17:34 invalid-return-statement Box<Order> cannot be used as Box<int>. | This has type `Box<Order>`. | A type parameter without `out` or `in` is invariant, so neither substitution is allowed.",
             "19:43 invalid-class-string-expression `kind` is a `string`, not a `Class`: `new (…)` creates an object from a class value. | Used as a class value here. | Get a class value with `typeof`, as in `typeof(Order)`.",
@@ -13559,7 +13599,7 @@ fn a_type_argument_php_sharp_cant_write_is_refused() {
             refused(15, 9, "Registry.keep", "scalar"),
             refused(16, 9, "Registry.keep", "numeric"),
             refused(17, 9, "Registry.hold", "resource"),
-            "25:28 missing-template-parameter `Crate` needs its type argument. | `Crate` has type parameters | A type, `new` and a static member name the type arguments of a generic class.".to_owned(),
+            "25:28 missing-template-parameter `Crate` needs its type argument. | `Crate` has type parameters | A type, `new` and a static member name the type arguments of a generic class. | Write a type for its type parameter: `Crate<T>`.".to_owned(),
         ]
     );
 }

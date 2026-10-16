@@ -417,7 +417,7 @@ where
         .arguments
         .iter()
         .map(|argument| {
-            report_hint_type_arguments(context, block_context, artifacts, argument);
+            report_hint_type_arguments(context, block_context, artifacts, argument, false);
             let argument_type = get_type_from_hint(context, block_context, artifacts, argument);
             report_undefined_types(context, &argument_type, argument.span());
 

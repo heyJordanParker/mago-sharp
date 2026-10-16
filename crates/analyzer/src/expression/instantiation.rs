@@ -967,21 +967,37 @@ pub(crate) fn report_missing_type_arguments<A>(
 where
     A: Arena,
 {
-    if !context.dialect.is_sharp() || !class.flags.is_sharp() || class.template_types.is_empty() {
+    class.flags.is_sharp() && report_unnamed_type_arguments(context, class, span)
+}
+
+/// Reports `class`, a generic class of PHP# or of plain PHP's `@template`, written at `span` in a PHP# file without the
+/// type arguments of its type parameters that have no default, spec section 11, with the type parameters to write.
+/// Returns whether it refused it.
+pub(crate) fn report_unnamed_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || class.template_types.values().all(|template| template.default.is_some()) {
         return false;
     }
 
     let class_name = short_name(class.original_name);
-    let arguments = match class.template_types.len() {
-        1 => "type argument".to_owned(),
-        count => format!("{count} type arguments"),
+    let parameters = class.template_types.keys().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+    let (arguments, help) = match class.template_types.len() {
+        1 => ("type argument".to_owned(), "Write a type for its type parameter"),
+        count => (format!("{count} type arguments"), "Write a type for each of its type parameters"),
     };
 
     context.collector.report_with_code(
         IssueCode::MissingTemplateParameter,
         Issue::error(format!("`{class_name}` needs its {arguments}."))
             .with_annotation(Annotation::primary(span).with_message(format!("`{class_name}` has type parameters")))
-            .with_note("A type, `new` and a static member name the type arguments of a generic class."),
+            .with_note("A type, `new` and a static member name the type arguments of a generic class.")
+            .with_help(format!("{help}: `{class_name}<{parameters}>`.")),
     );
 
     true

@@ -424,7 +424,7 @@ where
     };
 
     // A refused type gives the local no type, so its later uses report nothing again.
-    let local_type = if report_hint_type_arguments(context, block_context, artifacts, hint) {
+    let local_type = if report_hint_type_arguments(context, block_context, artifacts, hint, false) {
         wrap_atomic(TAtomic::Error)
     } else {
         get_type_from_hint(context, block_context, artifacts, hint)
@@ -442,21 +442,23 @@ where
     Some(local_type)
 }
 
-/// Reports the type arguments a PHP# `hint` in a body leaves out or gets wrong, as a local's type, a type test or a
-/// `catch` writes it, spec section 11: a type names the type arguments of a generic class. Returns whether it refused a
-/// class's type arguments, as [`report_invalid_template_arguments`] does.
+/// Reports the type arguments a PHP# `hint` in a body leaves out or gets wrong, as a local's type, a call's type
+/// argument, a type test or a `catch` writes it, spec section 11: a type names the type arguments of a generic class.
+/// A type test, `tested`, tests a plain PHP class alone. Returns whether it refused a class's type arguments, as
+/// [`report_invalid_template_arguments`] does.
 pub(crate) fn report_hint_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
     artifacts: &mut AnalysisArtifacts,
     hint: &Hint<'_>,
+    tested: bool,
 ) -> bool
 where
     A: Arena,
 {
     let written_type = get_written_type_from_hint(context, block_context, artifacts, hint);
 
-    report_invalid_template_arguments(context, &TypeMetadata::new(written_type, hint.span()))
+    report_invalid_template_arguments(context, &TypeMetadata::new(written_type, hint.span()), tested)
 }
 
 /// Refuses each type a PHP# type test of `hint` gives a plain PHP class type arguments for, at any depth, as `value is

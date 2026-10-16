@@ -203,7 +203,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
             let (caught_classes, caught_types) =
                 get_caught_classes(context, &catch_block_context, artifacts, &catch_clause.hint);
             if context.dialect.is_sharp() {
-                report_hint_type_arguments(context, &catch_block_context, artifacts, &catch_clause.hint);
+                report_hint_type_arguments(context, &catch_block_context, artifacts, &catch_clause.hint, true);
                 report_erased_type_test(context, &catch_clause.hint);
             }
 

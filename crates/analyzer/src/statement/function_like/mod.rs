@@ -82,6 +82,7 @@ use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::instantiation::report_missing_type_arguments;
+use crate::expression::instantiation::report_unnamed_type_arguments;
 use crate::resolver::property::localize_property_type;
 use crate::resolver::property::resolve_declared_property;
 use crate::statement::analyze_statements;
@@ -392,7 +393,7 @@ where
 
     if let Some(return_type) = &function_like_metadata.return_type_metadata {
         report_undefined_type_references(context, return_type);
-        report_invalid_template_arguments(context, return_type);
+        report_invalid_template_arguments(context, return_type, false);
 
         // Only check native declaration if effective type is from docblock (to avoid duplicates)
         if return_type.from_docblock
@@ -606,7 +607,7 @@ where
 
         if let Some(parameter_type) = parameter_metadata.get_type_metadata() {
             report_undefined_type_references(context, parameter_type);
-            report_invalid_template_arguments(context, parameter_type);
+            report_invalid_template_arguments(context, parameter_type, false);
 
             // Only check native declaration if effective type is from docblock (to avoid duplicates)
             if parameter_type.from_docblock
@@ -1950,15 +1951,21 @@ pub(crate) fn known_type_or_error(declared: TUnion) -> TUnion {
 }
 
 /// Reports generic classes a declared type applies with the wrong number of arguments, or with an
-/// argument outside its type parameter's bound, and a generic PHP# class a `.sharp` type writes
-/// without type arguments. `Self` names its class's own type parameters, so it needs none, and a
-/// PHP# class type names the class itself, as `Class<PaginatedList>` does, so its class needs none.
+/// argument outside its type parameter's bound, and a generic class a `.sharp` type writes without
+/// type arguments, of PHP# or of plain PHP's `@template`. `Self` names its class's own type
+/// parameters, so it needs none, and a PHP# class type names the class itself, as
+/// `Class<PaginatedList>` does, so its class needs none. A type test, `tested`, reads no type
+/// arguments of a plain PHP class, so it tests the class alone.
 ///
 /// A declaration is checked where it is written, so the mistake is reported at the declaration
 /// rather than at whichever call first happens to reach it. Returns whether a class in it has the
 /// wrong number of type arguments or none, so a type in a body gives what it tests no type the
 /// next check would report again.
-pub fn report_invalid_template_arguments<A>(context: &mut Context<'_, '_, A>, type_metadata: &TypeMetadata) -> bool
+pub fn report_invalid_template_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    type_metadata: &TypeMetadata,
+    tested: bool,
+) -> bool
 where
     A: Arena,
 {
@@ -1995,8 +2002,9 @@ where
                 type_metadata.span,
                 &TemplateResult::default(),
             ),
-            None if !named.is_static => report_missing_type_arguments(context, class, type_metadata.span),
-            None => false,
+            None if named.is_static => false,
+            None if tested => report_missing_type_arguments(context, class, type_metadata.span),
+            None => report_unnamed_type_arguments(context, class, type_metadata.span),
         };
     }
 

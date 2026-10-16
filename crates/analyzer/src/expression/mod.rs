@@ -438,7 +438,7 @@ where
     let tests_function_type = hints.iter().any(|hint| names_function_type(hint));
     let mut is_refused = false;
     for hint in hints {
-        is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint);
+        is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint, true);
         is_refused |= report_erased_type_test(context, hint);
 
         // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any`, of a

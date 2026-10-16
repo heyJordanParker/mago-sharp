@@ -1506,7 +1506,7 @@ where
                         && let Some(type_meta) = &prop_meta.type_metadata
                     {
                         report_undefined_type_references(context, type_meta);
-                        report_invalid_template_arguments(context, type_meta);
+                        report_invalid_template_arguments(context, type_meta, false);
 
                         if type_meta.from_docblock
                             && let Some(type_decl_meta) = &prop_meta.type_declaration_metadata
