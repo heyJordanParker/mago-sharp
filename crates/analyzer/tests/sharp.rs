@@ -43,6 +43,7 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_names::CHANGING_COLLECTION_METHODS;
 use mago_names::INLINED_COLLECTION_METHODS;
+use mago_names::STANDARD_EXCEPTIONS;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_prelude::Prelude;
@@ -14451,6 +14452,17 @@ fn a_class_of_the_files_namespace_wins_over_a_default_class() {
     assert_eq!(issues(("app/App/Here.sharp", here), &[cache]), Vec::<String>::new());
 }
 
+/// Spec section 23: `ProcessResult`, what `Process.run` gives back, is in `Sharp`, so a bare name names it.
+#[test]
+fn the_result_of_a_process_needs_no_import() {
+    let runner = (
+        "app/App/Runner.sharp",
+        "namespace App;\n\npublic class Runner\n{\n    public int code(ProcessResult result) => result.exitCode;\n}\n",
+    );
+
+    assert_eq!(issues(runner, &[]), Vec::<String>::new());
+}
+
 /// The names of the standard effects, short as a file writes them, spec section 29.
 fn sharp_effect_names() -> Vec<String> {
     ["Database", "Http", "Files", "Console", "Process", "Clock", "Random", "Cache", "Mail", "Environment", "Events"]
@@ -16912,6 +16924,80 @@ fn creating_a_built_in_exception_is_pure() {
             "app/Shop/Gauge.sharp:13:62 impure-law: Law `parsed` calls `JsonException`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern JsonException;` when it has no effect, or name its effects after `uses`.",
         ]
     );
+}
+
+/// The standard exceptions a bare name names are the exception classes in PHP's root namespace that `Builtins.sharp`
+/// declares: each one it declares with no import.
+#[test]
+fn the_standard_exceptions_are_the_root_exception_classes_the_standard_library_declares() {
+    let imported: HashSet<&str> = BUILTINS
+        .1
+        .lines()
+        .filter_map(|line| line.strip_prefix("import ")?.strip_suffix(';'))
+        .map(|import| import.rsplit([' ', '.']).next().unwrap())
+        .collect();
+    let mut root: Vec<&str> = BUILTINS
+        .1
+        .lines()
+        .filter_map(|line| line.strip_prefix("extern ")?.strip_suffix(';'))
+        .filter(|name| !name.starts_with("global.") && !imported.contains(name))
+        .collect();
+    root.sort_unstable();
+    let mut standard = STANDARD_EXCEPTIONS.to_vec();
+    standard.sort_unstable();
+
+    assert_eq!(standard, root);
+}
+
+/// Spec section 23: a bare name of a standard exception class names PHP's own with no import, as `Sharp`'s names do. A
+/// class of the file's namespace, or one it imports, wins over it, so `kind()`, which only those declare, resolves.
+#[test]
+fn a_standard_exception_needs_no_import_and_a_class_of_the_namespace_or_an_import_wins_over_it() {
+    let own = (
+        "app/Shop/ValueError.sharp",
+        "namespace App.Shop;\n\npublic class ValueError\n{\n    public ValueError(public string reason { get; }) { }\n\n    public string kind() => \"shop\";\n}\n",
+    );
+    let imported = (
+        "vendor/lib/src/ValueError.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class ValueError extends \\Exception\n{\n    public function kind(): string\n    {\n        return 'lib';\n    }\n}\n",
+    );
+
+    for (row, analyzed, others) in [
+        (
+            "a bare ValueError in a namespaced file",
+            (
+                "app/Shop/Gauge.sharp",
+                "namespace App.Shop;\n\npublic class Gauge\n{\n    public int first(List<int> values) => values.count() > 0 ? values[0] : throw new ValueError(\"empty\");\n}\n",
+            ),
+            vec![BUILTINS],
+        ),
+        (
+            "a ValueError of the file's namespace",
+            (
+                "app/Shop/Gauge.sharp",
+                "namespace App.Shop;\n\npublic class Gauge\n{\n    public string kind() => new ValueError(\"empty\").kind();\n}\n",
+            ),
+            vec![BUILTINS, own],
+        ),
+        (
+            "an imported ValueError",
+            (
+                "app/Shop/Gauge.sharp",
+                "namespace App.Shop;\n\nimport Lib.ValueError;\n\npublic class Gauge\n{\n    public string kind() => new ValueError(\"empty\").kind();\n}\n",
+            ),
+            vec![BUILTINS, imported],
+        ),
+        (
+            "a catch of OutOfRangeException",
+            (
+                "app/Shop/Gauge.sharp",
+                "namespace App.Shop;\n\npublic class Gauge\n{\n    public int first(Function<int()> read)\n    {\n        try {\n            return read();\n        } catch (OutOfRangeException e) {\n            return 0;\n        }\n    }\n}\n",
+            ),
+            vec![BUILTINS],
+        ),
+    ] {
+        assert_eq!(issues(analyzed, &others), Vec::<String>::new(), "{row}");
+    }
 }
 
 /// A call of a method without a body has the effects its `uses` lists, which every implementation is held to, so a

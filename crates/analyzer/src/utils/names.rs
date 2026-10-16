@@ -20,6 +20,7 @@ use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
+use mago_names::STANDARD_EXCEPTIONS;
 use mago_names::binding::sharp_operator_symbol;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
@@ -213,8 +214,8 @@ fn sharp_import_alias(
 
 /// Whether a `.sharp` file with the `imported_names` and `scope` of its imports and namespace binds the short name
 /// `name` to a class-like, as [`binds_class_like`] binds one: by an import, by a class-like of its namespace, or by the
-/// class-like of `Sharp` it imports by default. A class-like the name would bind only by sharing the namespace counts
-/// when it exists.
+/// class-like of `Sharp` or standard exception it imports by default. A class-like the name would bind only by sharing
+/// the namespace counts when it exists.
 fn binds_short_name(
     codebase: &CodebaseMetadata,
     imported_names: &WordMap<Word>,
@@ -223,7 +224,7 @@ fn binds_short_name(
 ) -> bool {
     let (bound, imported) = scope.resolve(NameKind::Default, name);
 
-    [bound, format!("Sharp\\{name}").into_bytes()].into_iter().any(|class_like| {
+    [bound, format!("Sharp\\{name}").into_bytes(), name.as_bytes().to_vec()].into_iter().any(|class_like| {
         (imported || codebase.class_like_exists(&class_like))
             && binds_class_like(imported_names, scope, word(&class_like))
     })
@@ -243,15 +244,16 @@ fn binds_class_like(imported_names: &WordMap<Word>, scope: &NamespaceScope, name
     bound.eq_ignore_ascii_case(full_name) || imports_by_default(scope, name)
 }
 
-/// Whether spec section 23's default import of `Sharp` binds the class-like `name` in a `.sharp` file with the `scope`
-/// of its imports and namespace: `name` is directly in `Sharp`, and the file imports or declares no other class-like
-/// of its short name.
+/// Whether spec section 23's default import of `Sharp` and the standard exceptions binds the class-like `name` in a
+/// `.sharp` file with the `scope` of its imports and namespace: `name` is directly in `Sharp` or is a standard
+/// exception, and the file imports or declares no other class-like of its short name.
 pub(crate) fn imports_by_default(scope: &NamespaceScope, name: Word) -> bool {
     let name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
     let (_, imported) = scope.resolve(NameKind::Default, short_name(name));
 
     !imported
-        && name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(b"Sharp"))
+        && (name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(b"Sharp"))
+            || STANDARD_EXCEPTIONS.iter().any(|exception| exception.as_bytes().eq_ignore_ascii_case(name)))
 }
 
 /// Returns the property `name`, which the codebase keys with its `$`, as the analyzed file names it in prose: `total`

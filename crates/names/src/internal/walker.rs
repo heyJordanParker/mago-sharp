@@ -108,6 +108,7 @@ use crate::binding::BindingError;
 use crate::binding::Local;
 use crate::binding::LocalKind;
 use crate::default_class;
+use crate::default_short_name;
 use crate::internal::context::NameResolutionContext;
 use crate::internal::locals::LocalScopes;
 use crate::kind::NameKind;
@@ -656,8 +657,8 @@ where
         }
     }
 
-    /// An `extern` target is a class when it is `Class.member` or the file imports or declares it, and a global
-    /// function otherwise, since PHP# declares no functions. `Class.member` resolves its class and keeps the member as
+    /// An `extern` target is a class when it is `Class.member` or the file imports, declares or names it by default,
+    /// and a global function otherwise, since PHP# declares no functions. `Class.member` resolves its class and keeps the member as
     /// written. `global.now` is the function `now` of PHP's root namespace, spec section 23, and `Pdf.render` binds as
     /// a class whose member the analysis finds as a function when the import names a namespace.
     fn walk_in_extern(&mut self, r#extern: &'ast Extern<'arena>, context: &mut NameResolutionContext<'arena, A>) {
@@ -678,6 +679,7 @@ where
             && !target.is_dotted()
             && !imported
             && !self.declared_classes.contains(&IgnoringCase(class))
+            && default_class(class) != Some(fqn)
         {
             self.resolved_names.insert_at(target.span(), written, false);
 
@@ -1655,10 +1657,10 @@ where
     /// help reads it, and a refused file is analyzed again on every run.
     fn walk_out_namespace(&mut self, _namespace: &Namespace<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
-            for class in shadowable_default_classes().map(str::as_bytes) {
-                let ((meaning, _), _) = self.class_meaning(context, &class[b"Sharp\\".len()..]);
-                if meaning != class {
-                    self.resolved_names.shadow_default_class(class);
+            for class in shadowable_default_classes() {
+                let ((meaning, _), _) = self.class_meaning(context, default_short_name(class));
+                if meaning != class.as_bytes() {
+                    self.resolved_names.shadow_default_class(class.as_bytes());
                 }
             }
         }
