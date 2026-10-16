@@ -4037,9 +4037,11 @@ fn misspelled_type(hint: &Hint) -> Option<Issue> {
         | Hint::String(name)
         | Hint::Object(name)
         | Hint::Mixed(name) => name.value,
-        Hint::Null(keyword) | Hint::True(keyword) | Hint::False(keyword) | Hint::Array(keyword) | Hint::Callable(keyword) => {
-            keyword.value
-        }
+        Hint::Null(keyword)
+        | Hint::True(keyword)
+        | Hint::False(keyword)
+        | Hint::Array(keyword)
+        | Hint::Callable(keyword) => keyword.value,
         _ => return None,
     };
     let lowercase = written.to_ascii_lowercase();
@@ -4346,7 +4348,8 @@ fn report_null_in_union(null: &Hint, members: &[&Hint], context: &mut Context<'_
         _ => format!("A union that holds null is written `({})?`.", rest.join("|")),
     };
 
-    context.report(Issue::error(message).with_annotation(Annotation::primary(null.span()).with_message("Written here.")));
+    context
+        .report(Issue::error(message).with_annotation(Annotation::primary(null.span()).with_message("Written here.")));
 }
 
 /// How two members of a union overlap, which the engine can't tell apart while the code runs.
