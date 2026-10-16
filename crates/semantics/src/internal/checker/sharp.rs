@@ -1157,8 +1157,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             ),
             FieldOrProperty,
         ) => Some(FieldOrProperty),
-        (Node::Hint(hint), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body)
-            if let Some(issue) = misspelled_type(hint) =>
+        (Node::Hint(hint), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Place::Pattern)
+            if let Some(issue) = type_written_another_way(hint, place) =>
         {
             context.report(issue);
 
@@ -4026,8 +4026,9 @@ fn is_slice_type(hint: &Hint) -> bool {
 
 /// The error for a type PHP# writes another way, spec section 24: the built-in types are lowercase, every other type is
 /// capitalized, and PHP's `mixed`, `object`, `array`, `callable`, `true`, `false` and a lone `null` each have a PHP#
-/// form. `None` for a type written as PHP# writes it, and for `never`, which PHP# has no form for yet.
-fn misspelled_type(hint: &Hint) -> Option<Issue> {
+/// form. `never` is a type only as a method's return type, at `place` [`Place::Method`], which keeps PHP's handling.
+/// `None` for a type written as PHP# writes it.
+fn type_written_another_way(hint: &Hint, place: Place) -> Option<Issue> {
     let written = match hint {
         Hint::Identifier(Identifier::Local(name)) => name.value,
         Hint::Void(name)
@@ -4042,6 +4043,7 @@ fn misspelled_type(hint: &Hint) -> Option<Issue> {
         | Hint::False(keyword)
         | Hint::Array(keyword)
         | Hint::Callable(keyword) => keyword.value,
+        Hint::Never(keyword) if !matches!(place, Place::Method) => keyword.value,
         _ => return None,
     };
     let lowercase = written.to_ascii_lowercase();
@@ -4059,6 +4061,7 @@ fn misspelled_type(hint: &Hint) -> Option<Issue> {
         b"true" | b"false" => (format!("PHP# has no `{}` type: write `bool`.", BytesDisplay(written)), None),
         b"array" => ("PHP# has no `array`: write `List<T>` or `Map<TKey, TValue>`.".to_owned(), None),
         b"callable" => ("PHP# has no `callable`: write `Function<R(P)>`.".to_owned(), None),
+        b"never" => ("PHP# has no `never` type outside a return type.".to_owned(), None),
         _ => return None,
     };
 
@@ -4288,7 +4291,7 @@ fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_
             }
             _ if is_slice_type(member) => true,
             _ => {
-                match misspelled_type(member) {
+                match type_written_another_way(member, place) {
                     Some(issue) => context.report(issue),
                     None => report_not_supported(member.span(), "type", supported(place), context),
                 }

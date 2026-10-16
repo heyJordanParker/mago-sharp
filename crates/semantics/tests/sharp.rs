@@ -4223,6 +4223,37 @@ fn a_type_php_sharp_writes_another_way_is_an_error_that_names_its_form() {
         method("        return 1;\n").replace("int extra", "int a, float b, bool c, string d, Any e, Any? f, Object g"),
     );
     assert_eq!(issues(written), Vec::<String>::new());
+
+    // A type pattern names a type too, so `value is Int` is no test of the static class `Sharp.Int`, which no value is.
+    for (written, message) in &rows[..9] {
+        let code = leak(method(&format!(
+            "        const tested = extra is {written};\n        return match (extra) {{ {written} n => 1, default => 0 }};\n"
+        )));
+
+        assert_eq!(issues(code), [format!("7:33 {message}"), format!("8:32 {message}")], "{written}");
+    }
+    for written in ["array", "callable"] {
+        let code = leak(method(&format!("        return match (extra) {{ {written} n => 1, default => 0 }};\n")));
+
+        assert_eq!(
+            issues(code),
+            [format!("7:32 {}", rows.iter().find(|row| row.0 == written).unwrap().1)],
+            "{written}"
+        );
+    }
+
+    // `never` keeps its handling as a return type, and is a type PHP# doesn't have anywhere else.
+    let never = leak(method("        never local = extra;\n        return 1;\n").replace("int extra", "never extra"));
+    assert_eq!(
+        issues(never),
+        [
+            "5:20 Invalid parameter type: bottom type `never` cannot be used as a parameter type.",
+            "5:20 PHP# has no `never` type outside a return type.",
+            "7:9 PHP# has no `never` type outside a return type.",
+        ]
+    );
+    let returned = leak(method("        throw new Error();\n").replace("public int run", "public never run"));
+    assert_eq!(issues(returned), ["5:12 This type is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -5807,7 +5838,7 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
 fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
     let body = leak(method("        const copy = clone this;\n        return extra;\n"));
-    let pattern = leak(method("        const called = extra is callable;\n        return extra;\n"));
+    let pattern = leak(method("        const iterated = extra is iterable;\n        return extra;\n"));
 
     for (code, note) in [
         (
