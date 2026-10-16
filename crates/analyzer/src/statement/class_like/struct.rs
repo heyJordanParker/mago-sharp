@@ -475,16 +475,12 @@ fn unreadable_field(
 /// The part of `r#type` that `parse` builds before the walk checks the value: a struct or a class through its own
 /// `parse`, an enum case from its backing value, or a `Map` or a `Set` from the array plain PHP passes, also inside a
 /// `List`. The bridge writes one `parse` for a generic type, which reads a field of a type parameter through the walk
-/// alone, so it reads a type argument that holds none of them.
+/// alone, so it reads a type argument that holds none of them. A type argument is written, as `List<Address>`, so a
+/// `List` of it has no known elements.
 fn built_part(r#type: &TUnion) -> Option<&TAtomic> {
     r#type.types.iter().find_map(|atomic| match atomic {
         TAtomic::Object(_) | TAtomic::Array(TArray::Keyed(_) | TArray::Set(_)) => Some(atomic),
-        TAtomic::Array(TArray::List(list)) => built_part(&list.element_type).or_else(|| {
-            list.known_elements
-                .iter()
-                .flat_map(|elements| elements.values())
-                .find_map(|(_, element)| built_part(element))
-        }),
+        TAtomic::Array(TArray::List(list)) => built_part(&list.element_type),
         _ => None,
     })
 }
