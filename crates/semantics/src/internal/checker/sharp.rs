@@ -4474,14 +4474,16 @@ fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_
                 .with_annotation(Annotation::primary(member.span()).with_message("Written again here."))
                 .with_annotation(Annotation::secondary(first.span()).with_message("First written here."))
                 .with_help("Remove the second one, as PHP refuses a union that names a type twice."),
-            Overlap::Array => Issue::error(format!(
-                "`{}` and `{}` both run as a PHP array, so a union can't hold both.",
-                written(first),
-                written(member)
-            ))
-            .with_annotation(Annotation::primary(member.span()).with_message("A PHP array here."))
-            .with_annotation(Annotation::secondary(first.span()).with_message("A PHP array here too."))
-            .with_help("Keep one collection type, as the literal rules need to know which one a place holds."),
+            Overlap::Array => {
+                Issue::error(format!("A type can't be both a `{}` and a `{}`.", written(first), written(member)))
+                    .with_annotation(Annotation::primary(member.span()).with_message("The second collection."))
+                    .with_annotation(Annotation::secondary(first.span()).with_message("The first collection."))
+                    .with_help(format!(
+                        "Take the `{}` and the `{}` as two parameters, or as an enum with one case that holds each.",
+                        written(first),
+                        written(member)
+                    ))
+            }
             Overlap::Iterated { collection, iterable } => Issue::error(format!(
                 "`{}` is already an `{}`, so the union is `{}`.",
                 written(collection),
@@ -4517,7 +4519,7 @@ fn report_null_in_union(null: &Hint, members: &[&Hint], context: &mut Context<'_
 enum Overlap<'hint, 'arena> {
     /// One type written twice.
     Written,
-    /// Two of `List`, `Map` and `Set`, which share PHP's one array kind.
+    /// Two of `List`, `Map` and `Set`: a type is one collection, as in C#, Java, Kotlin and Swift.
     Array,
     /// A collection beside an `Iterable` of its element type, which already holds it.
     Iterated { collection: &'hint Hint<'arena>, iterable: &'hint Hint<'arena> },
