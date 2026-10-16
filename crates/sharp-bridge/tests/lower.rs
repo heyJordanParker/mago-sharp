@@ -25759,13 +25759,32 @@ fn an_enum_computed_property_is_a_virtual_property() {
     );
 
     let cases = Lowered::new(
-        "namespace App;\n\npublic enum Charge\n{\n    case Declined(string reason);\n\n    public string message => \"declined\";\n}\n",
+        "namespace App;\n\npublic enum Charge\n{\n    case Declined(string reason);\n\n    public string message => \"declined\";\n\n    public static string kind => \"charge\";\n}\n",
     );
 
     assert!(
         cases.tree().contains(r#"ZVAL "message""#) && cases.tree().contains(r#"PROPERTY_HOOK "get" @7-7"#),
         "{}",
         cases.tree()
+    );
+    // A static computed property runs as a class's does, as the hidden static method `kind#get`.
+    assert!(cases.tree().contains(r#"METHOD [17] "kind#get" @9-9"#), "{}", cases.tree());
+
+    let plain = Lowered::new(
+        "namespace App;\n\npublic enum Status\n{\n    case Active;\n\n    public static string first => \"active\";\n}\n",
+    );
+
+    assert!(plain.tree().contains(r#"METHOD [17] "first#get" @7-7"#), "{}", plain.tree());
+
+    // An interface's computed default is a property of the enum that gets it, with its type text, as an enum's own is.
+    let defaulted = Lowered::new(
+        "namespace App;\n\npublic interface Labeled\n{\n    string label => \"label\";\n}\n\npublic enum Tone : Labeled\n{\n    case Calm;\n}\n",
+    );
+
+    assert!(
+        defaulted.tree().contains("SHARP_TYPE_ARGS\n          ZVAL [1] \"mixed\"\n          ZVAL \"string\""),
+        "{}",
+        defaulted.tree()
     );
 }
 

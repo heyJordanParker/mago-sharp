@@ -6,7 +6,6 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
-use mago_codex::misc::GenericParent;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::scalar::TScalar;
@@ -16,8 +15,6 @@ use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_true;
-use mago_codex::ttype::template::TemplateResult;
-use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::php_operator_name;
 use mago_reporting::Annotation;
@@ -59,6 +56,7 @@ use crate::expression::binary::utils::is_always_identical_to;
 use crate::expression::binary::utils::is_always_less_than;
 use crate::expression::binary::utils::is_always_less_than_or_equal;
 use crate::expression::binary::utils::takes_operands;
+use crate::expression::with_type_arguments;
 use crate::statement::class_like::r#struct::data_enum;
 use crate::statement::class_like::r#struct::declares_equality;
 use crate::statement::class_like::r#struct::value_properties;
@@ -1453,32 +1451,6 @@ fn enum_type_arguments<'union>(
         .into_iter()
         .flat_map(|union| union.types.iter())
         .find_map(|atomic| ancestor_type_arguments(codebase, atomic, r#enum))
-}
-
-/// `declared`, the type of a field of a case of `name`, a generic enum or one of its cases, with the enum's
-/// `type_arguments` for its type parameters, which every case declares in the enum's order. `declared` itself without
-/// them.
-fn with_type_arguments(
-    declared: &TUnion,
-    name: Word,
-    type_arguments: Option<&[TUnion]>,
-    codebase: &CodebaseMetadata,
-) -> TUnion {
-    let Some((type_arguments, class)) = type_arguments.zip(codebase.get_class_like(name.as_bytes())) else {
-        return declared.clone();
-    };
-    let r#enum = data_enum(codebase, class).and_then(|r#enum| codebase.get_class_like(r#enum.as_bytes()));
-    let entities = r#enum
-        .into_iter()
-        .flat_map(|r#enum| std::iter::once(r#enum.name).chain(r#enum.permitted_inheritors.iter().flatten().copied()));
-    let mut template_result = TemplateResult::default();
-    for entity in entities {
-        for (template, argument) in class.template_types.keys().zip(type_arguments) {
-            template_result.add_lower_bound(*template, GenericParent::ClassLike(entity), argument.clone());
-        }
-    }
-
-    inferred_type_replacer::replace(declared, &template_result, codebase)
 }
 
 /// The issue that refuses `==` on the struct or the enum one of `lhs_type` and `rhs_type` holds, naming the first

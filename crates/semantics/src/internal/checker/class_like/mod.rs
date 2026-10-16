@@ -1061,13 +1061,26 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
                 );
             }
             // Spec section 22: a PHP# enum declares no stored property, and a computed one holds nothing, so the engine
-            // gives it to every enum.
-            ClassLikeMember::Property(property @ Property::Computed(_))
-                if context.program.dialect.is_sharp() && !property.modifiers().contains_static() => {}
+            // gives it to every enum, beside the `name` every enum has and the `value` a backed enum has.
+            ClassLikeMember::Property(Property::Computed(computed)) if context.program.dialect.is_sharp() => {
+                let name = computed.variable.name.strip_prefix(b"$").unwrap_or(computed.variable.name);
+                let has_it = name == b"name" || (enum_is_backed && name == b"value");
+                if has_it {
+                    let property_name = BytesDisplay(name);
+                    let which = if name == b"name" { "every enum has" } else { "a backed enum has" };
+                    context.report(
+                        Issue::error(format!(
+                            "Enum `{enum_name}` already has the property `{property_name}`, which {which}."
+                        ))
+                        .with_annotation(Annotation::primary(computed.variable.span()).with_message("Declared here."))
+                        .with_help("Give the computed property another name."),
+                    );
+                }
+            }
             ClassLikeMember::Property(property) if context.program.dialect.is_sharp() => {
                 context.report(
                     Issue::error(format!(
-                        "Enum `{enum_name}` declares no stored or static property: a computed property, as in `public string label => …;`, is allowed."
+                        "Enum `{enum_name}` declares no stored property: a computed property, as in `public string label => …;`, is allowed."
                     ))
                     .with_annotation(Annotation::primary(property.span()).with_message("Declared here."))
                     .with_note("Each case is one value, and a computed property reads it on each access."),

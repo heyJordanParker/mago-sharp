@@ -1992,10 +1992,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// and in a class that gets the body, `body`, `public mixed $designKey { get => $this->{'designKey@App\HasDesign'}(); }`,
     /// which runs the trait's method that holds it. Its PHP type is `mixed`, since the class's file has no type to
     /// write, so an override, or a plain PHP class, writes the property with its own type, as a `get` hook narrows it,
-    /// and the trait's method checks the value the body gives.
+    /// and the trait's method checks the value the body gives. Its type text, [`Lowering::property_hint`], tells the
+    /// engine that an enum may hold it, spec section 31.
     fn defaulted_property(&mut self, name: &[u8], span: Span, body: u32) -> u32 {
         let line = self.line(span);
-        let hint = self.php_type(&PhpType::Mixed, line);
+        let mixed = self.php_type(&PhpType::Mixed, line);
+        let hint = self.property_hint(mixed, name, line);
         let name = self.string(0, line, name);
         let hook = self.hook(b"get", span, span, NULL, body);
         let hooks = self.node(SHARP_AST_STMT_LIST, 0, line, &[hook]);
@@ -2076,6 +2078,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.method(method, modifier_flags_or_private(&method.modifiers), &[])
                 }
                 ClassLikeMember::Constant(constant) => self.constant(constant),
+                ClassLikeMember::Property(property) if runs_static_accessors(property) => {
+                    members.extend(self.static_accessors(property, None));
+
+                    continue;
+                }
                 ClassLikeMember::Property(property @ Property::Computed(_)) => self.property(property, None),
                 ClassLikeMember::EnumCase(_) | ClassLikeMember::Law(_) => continue,
                 _ => unreachable!("check_slice refuses the enum member `{member}`"),
@@ -2234,6 +2241,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 ClassLikeMember::EnumCase(case) => self.enum_case(case),
                 ClassLikeMember::Constant(constant) => self.constant(constant),
+                ClassLikeMember::Property(property) if runs_static_accessors(property) => {
+                    members.extend(self.static_accessors(property, None));
+
+                    continue;
+                }
                 // Spec section 31: a computed property has no storage, which a PHP# enum's property may lack.
                 ClassLikeMember::Property(property @ Property::Computed(_)) => self.property(property, None),
                 _ => unreachable!("check_slice refuses the enum member `{member}`"),

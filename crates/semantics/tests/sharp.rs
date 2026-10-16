@@ -5341,14 +5341,17 @@ fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union()
 /// and no enum declares a stored or static one.
 #[test]
 fn an_enum_declares_a_computed_property_and_no_stored_one() {
-    let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    private int count = 0;\n\n    public string label => \"active\";\n}\n\nenum Plan : string\n{\n    case Pro = \"pro\";\n\n    public string label => \"Pro\";\n\n    public static int total { get; set; } = 0;\n}\n\nenum Payment\n{\n    case Declined(string reason);\n\n    public string message => \"declined\";\n\n    public string code { get; set; } = \"x\";\n}\n";
+    let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    private int count = 0;\n\n    public string label => \"active\";\n}\n\nenum Plan : string\n{\n    case Pro = \"pro\";\n\n    public string label => \"Pro\";\n\n    public static int total { get; set; } = 0;\n}\n\nenum Payment\n{\n    case Declined(string reason);\n\n    public string message => \"declined\";\n\n    public string code { get; set; } = \"x\";\n\n    public static string kind => \"payment\";\n\n    public string name => \"payment\";\n}\n\nenum Tier : string\n{\n    case Gold = \"gold\";\n\n    public static string first => \"gold\";\n\n    public string name => \"tier\";\n\n    public string value => \"tier\";\n}\n\nenum Level\n{\n    case High;\n\n    public string value => \"high\";\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "7:5 Enum `Status` declares no stored or static property: a computed property, as in `public string label => …;`, is allowed.",
-            "18:5 Enum `Plan` declares no stored or static property: a computed property, as in `public string label => …;`, is allowed.",
-            "27:5 Enum `Payment` declares no stored or static property: a computed property, as in `public string label => …;`, is allowed.",
+            "7:5 Enum `Status` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+            "18:5 Enum `Plan` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+            "27:5 Enum `Payment` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+            "31:19 Enum `Payment` already has the property `name`, which every enum has.",
+            "40:19 Enum `Tier` already has the property `name`, which every enum has.",
+            "42:19 Enum `Tier` already has the property `value`, which a backed enum has.",
         ]
     );
 }

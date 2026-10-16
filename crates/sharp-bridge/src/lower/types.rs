@@ -784,7 +784,7 @@ impl<'analysis> Types<'analysis> {
     /// PHP's typed property check tests it on every write plain PHP makes, through reflection too, whatever the
     /// property's visibility.
     pub(crate) fn property_check(&self, class: &[u8], property: &[u8]) -> Option<String> {
-        let metadata = self.codebase.get_property(class, &[b"$", property].concat())?;
+        let metadata = self.codebase.get_declaring_property(class, &[b"$", property].concat())?;
         let r#type = &metadata.type_metadata.as_ref()?.type_union;
 
         // A property of a PHP enum, which only PHP# declares, a computed one, carries its type text always, which tells

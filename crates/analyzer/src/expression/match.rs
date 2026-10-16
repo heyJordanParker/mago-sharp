@@ -49,6 +49,7 @@ use crate::formula::add_nullsafe_base_clauses;
 use crate::formula::get_formula;
 use crate::formula::negate_or_synthesize;
 use crate::reconciler::reconcile_keyed_types;
+use crate::statement::function_like::expect_type;
 use crate::utils::expression::get_expression_id;
 use crate::utils::expression::get_literal_array_key;
 use crate::utils::misc::unwrap_expression;
@@ -220,6 +221,8 @@ where
     context: &'anlyz mut Context<'ctx, 'arena, A>,
     block_context: &'anlyz mut BlockContext<'ctx>,
     artifacts: &'anlyz mut AnalysisArtifacts,
+    /// The declared type the `match`'s value goes into, which each arm's value goes into, spec section 11.
+    expected: Option<TUnion>,
 }
 
 impl<'anlyz, 'ctx, 'ast, 'arena, A> MatchAnalyzer<'anlyz, 'ctx, 'ast, 'arena, A>
@@ -234,7 +237,9 @@ where
         block_context: &'anlyz mut BlockContext<'ctx>,
         artifacts: &'anlyz mut AnalysisArtifacts,
     ) -> Self {
-        Self { stmt, context, block_context, artifacts }
+        let expected = artifacts.get_expected_type(stmt).cloned();
+
+        Self { stmt, context, block_context, artifacts, expected }
     }
 
     fn analyze(&mut self) -> Result<(), AnalysisError>
@@ -263,6 +268,7 @@ where
         if expression_arms.is_empty() {
             if let Some(default_arm) = first_default_arm {
                 self.report_only_default_arm();
+                expect_type(self.context, self.artifacts, default_arm.expression, self.expected.as_ref());
                 default_arm.expression.analyze(self.context, self.block_context, self.artifacts)?;
                 if let Some(expr_type) = self.artifacts.get_rc_expression_type(&default_arm.expression).cloned() {
                     self.artifacts.set_rc_expression_type(self.stmt, expr_type);
@@ -615,6 +621,7 @@ where
             );
         }
 
+        expect_type(self.context, self.artifacts, expression_arm.expression, self.expected.as_ref());
         expression_arm.expression.analyze(self.context, &mut arm_body_context, self.artifacts)?;
         arm_body_types.push(
             self.artifacts
@@ -676,6 +683,7 @@ where
         }
 
         let mut default_context = running_else_context.clone();
+        expect_type(self.context, self.artifacts, default_arm.expression, self.expected.as_ref());
         default_arm.expression.analyze(self.context, &mut default_context, self.artifacts)?;
 
         arm_body_types.push(

@@ -1616,18 +1616,15 @@ fn sharp_code_never_names_the_trait_of_default_bodies() {
     );
 }
 
-/// Spec sections 20 and 22: an enum has no property, as PHP gives an enum none, so it implements no interface that
-/// gives a computed property a default body, and an interface's default methods are its methods.
+/// Spec sections 22 and 31: an enum takes an interface's default bodies as a class does, its computed properties as
+/// well as its methods, whether it is a plain enum, a backed enum or an enum whose cases carry data.
 #[test]
-fn an_enum_gets_no_computed_property_from_a_default_body() {
-    let sharp = "namespace Demo;\n\npublic interface Tagged\n{\n    string tag => \"t\";\n\n    string label() => \"l\";\n}\n\npublic enum Mood : Tagged\n{\n    case Calm;\n}\n\npublic enum Verdict : Tagged\n{\n    case Pending;\n    case Ruled(string by);\n}\n";
+fn an_enum_gets_a_computed_property_from_a_default_body() {
+    let sharp = "namespace Demo;\n\npublic interface Tagged\n{\n    string code { get; }\n\n    string tag => `tag ${this.code}`;\n\n    string label() => \"l\";\n}\n\npublic enum Mood : Tagged\n{\n    case Calm;\n\n    public string code => \"calm\";\n}\n\npublic enum Kind : string, Tagged\n{\n    case Big = \"big\";\n\n    public string code => \"big\";\n}\n\npublic enum Verdict : Tagged\n{\n    case Pending;\n    case Ruled(string by);\n\n    public string code => \"verdict\";\n}\n\npublic class Reads\n{\n    public string mood() => Mood.Calm.tag;\n\n    public string kind() => Kind.Big.tag;\n\n    public string verdict() => Verdict.Ruled(\"judge\").tag;\n\n    public int wrong() => Mood.Calm.tag;\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Tagged.sharp", sharp), &[]),
-        [
-            "Enum `Mood` cannot have properties, and `Tagged` gives it the computed property `tag`.",
-            "Enum `Verdict` cannot have properties, and `Tagged` gives it the computed property `tag`.",
-        ]
+        ["Invalid return type for method `Reads.wrong`: expected `int`, but found `string`."]
     );
 }
 
@@ -20075,19 +20072,24 @@ fn try_takes_a_result_in_a_function_that_returns_one() {
     );
 }
 
-/// Spec section 31: `try` returns its failure from a method, so in a computed property, which is no method, it is
-/// refused. An operand of either case of `Result` gives the `Ok` value of both, and an operand or a result type already
-/// refused reports nothing more.
+/// Spec section 31: `try` stands anywhere an expression can, and returns its failure from the method it is in. A
+/// property's `get` accessor is the method a computed property's `try` is in, and it returns the property's type. A
+/// constructor returns nothing, as a `void` method does, and a field's initial value is in no method. An operand of
+/// either case of `Result` gives the `Ok` value of both, and an operand or a result type already refused reports nothing
+/// more.
 #[test]
-fn try_returns_only_from_a_method_and_reads_either_case() {
-    let code = "namespace App;\n\nclass Checkout\n{\n    public Checkout(private Gateway gateway) { }\n\n    public int total => (try this.gateway.charge()).total;\n\n    public Result<int, PaymentError> either(bool paid, Result<int, PaymentError>.Ok ok, Result<int, PaymentError>.Err err) => Result.Ok(try (paid ? ok : err));\n\n    public Result<int, PaymentError> unknown(Missing value) => Result.Ok(try value);\n\n    public Result<Unknown, PaymentError> unknownResult() => Result.Ok(try this.gateway.charge());\n}\n";
+fn try_returns_from_a_method_or_a_get_accessor_and_reads_either_case() {
+    let code = "namespace App;\n\nclass Checkout\n{\n    public Checkout(private Gateway gateway)\n    {\n        const order = try this.gateway.charge();\n    }\n\n    public int total => (try this.gateway.charge()).total;\n\n    public Result<int, PaymentError> charged => Result.Ok((try this.gateway.charge()).total);\n\n    public Result<int, PaymentError> either(bool paid, Result<int, PaymentError>.Ok ok, Result<int, PaymentError>.Err err) => Result.Ok(try (paid ? ok : err));\n\n    public Result<int, PaymentError> unknown(Missing value) => Result.Ok(try value);\n\n    public Result<Unknown, PaymentError> unknownResult() => Result.Ok(try this.gateway.charge());\n}\n\nclass Fields\n{\n    public Order first = try new Gateway().charge();\n\n    public int count { get => field; set { field = (try new Gateway().charge()).total; } } = 0;\n}\n";
 
     assert_eq!(
         messages(("src/App/Checkout.sharp", code), &payments()),
         [
-            "`try` returns its failure from the method it is in, and it stands in no method here.",
+            "`try` returns its failure, so its function returns a `Result`, and this one returns `void`.",
+            "`try` returns its failure, so its function returns a `Result`, and this one returns `int`.",
             "Cannot find type `Missing`.",
             "Cannot find type `Unknown`.",
+            "`try` returns its failure from the method it is in, and it stands in no method here.",
+            "`try` returns its failure, so its function returns a `Result`, and this one returns `void`.",
         ]
     );
 }
@@ -20120,7 +20122,7 @@ fn a_static_call_on_a_generic_class_fixes_its_type_arguments() {
 /// the class it is written on, and a case type writes them on the enum, as in `Result<Order, PaymentError>.Ok`.
 #[test]
 fn a_case_of_a_generic_enum_takes_its_type_arguments_from_the_declared_type() {
-    let code = "namespace App;\n\nclass Charges\n{\n    public Result<Order, PaymentError> declined() => Result.Err(PaymentError.Declined(\"card expired\"));\n\n    public Result<Order, PaymentError> paid()\n    {\n        return Result.Ok(new Order());\n    }\n\n    public Result<int, PaymentError> written() => Result<int, PaymentError>.Ok(5);\n\n    public Order value(Result<Order, PaymentError>.Ok ok) => ok.value;\n\n    public void unfixed()\n    {\n        const result = Result.Ok(5);\n    }\n}\n";
+    let code = "namespace App;\n\nclass Charges\n{\n    public Result<Order, PaymentError> declined() => Result.Err(PaymentError.Declined(\"card expired\"));\n\n    public Result<Order, PaymentError> paid()\n    {\n        return Result.Ok(new Order());\n    }\n\n    public Result<int, PaymentError> written() => Result<int, PaymentError>.Ok(5);\n\n    public Order value(Result<Order, PaymentError>.Ok ok) => ok.value;\n\n    public void unfixed()\n    {\n        const result = Result.Ok(5);\n    }\n\n    public Result<int, PaymentError> arms(int mode) => match (mode) {\n        1 => Result.Ok(1),\n        default => Result.Err(PaymentError.Declined(\"card expired\")),\n    };\n\n    public Result<int, PaymentError> returned(int mode)\n    {\n        return match (mode) {\n            1 => Result.Ok(1),\n            default => Result.Err(PaymentError.Declined(\"card expired\")),\n        };\n    }\n\n    public Result<int, PaymentError> computed => Result.Ok(5);\n}\n";
 
     assert_eq!(issues(("src/App/Charges.sharp", code), &payments()), ["18:24 missing-template-parameter"]);
     assert_eq!(
@@ -20138,7 +20140,7 @@ fn a_plain_case_of_a_generic_enum_takes_its_type_arguments_from_the_declared_typ
         "src/App/Lookup.sharp",
         "namespace App;\n\npublic enum Lookup<T>\n{\n    case Found(T value);\n    case Missing;\n}\n",
     );
-    let code = "namespace App;\n\nclass Reads\n{\n    public Lookup<int> missing() => Lookup.Missing;\n\n    public Lookup<int> written() => Lookup<int>.Missing;\n\n    public Lookup<string> mismatched() => Lookup<int>.Missing;\n\n    public void unfixed()\n    {\n        const lookup = Lookup.Missing;\n    }\n\n    public void optional()\n    {\n        Lookup<int>? lookup = Lookup.Missing;\n    }\n}\n";
+    let code = "namespace App;\n\nclass Reads\n{\n    public Lookup<int> missing() => Lookup.Missing;\n\n    public Lookup<int> written() => Lookup<int>.Missing;\n\n    public Lookup<string> mismatched() => Lookup<int>.Missing;\n\n    public void unfixed()\n    {\n        const lookup = Lookup.Missing;\n    }\n\n    public void optional()\n    {\n        Lookup<int>? lookup = Lookup.Missing;\n    }\n\n    public Lookup<int> arms(int mode) => match (mode) {\n        1 => Lookup.Found(1),\n        default => Lookup.Missing,\n    };\n}\n";
 
     assert_eq!(
         issues(("src/App/Reads.sharp", code), &[lookup]),
@@ -20158,10 +20160,27 @@ fn a_plain_case_of_a_generic_enum_takes_its_type_arguments_from_the_declared_typ
 /// `Result<Order, PaymentError>`.
 #[test]
 fn match_and_is_on_a_result_take_the_subjects_type_arguments() {
-    let code = "namespace App;\n\nclass Reads\n{\n    public string describe(Result<Order, PaymentError> result) => match (result) {\n        Result.Ok(Order order) => \"paid\",\n        Result.Err(PaymentError error) => error.message,\n    };\n\n    public string missing(Result<Order, PaymentError> result) => match (result) {\n        Result.Ok(Order order) => \"paid\",\n    };\n\n    public string failure(Result<Order, PaymentError> result) => result is Result.Err e ? e.error.message : \"paid\";\n\n    public int total(Result<Order, PaymentError> result) => result is Result.Ok(Order order) ? order.total : 0;\n\n    public int optional(Result<Order, PaymentError>? result) => result is Result.Ok(Order order) ? order.total : 0;\n}\n";
+    let code = "namespace App;\n\nclass Reads\n{\n    public string describe(Result<Order, PaymentError> result) => match (result) {\n        Result.Ok(Order order) => \"paid\",\n        Result.Err(PaymentError error) => error.message,\n    };\n\n    public string missing(Result<Order, PaymentError> result) => match (result) {\n        Result.Ok(Order order) => \"paid\",\n    };\n\n    public string failure(Result<Order, PaymentError> result) => result is Result.Err e ? e.error.message : \"paid\";\n\n    public int total(Result<Order, PaymentError> result) => result is Result.Ok(Order order) ? order.total : 0;\n\n    public int optional(Result<Order, PaymentError>? result) => result is Result.Ok(Order order) ? order.total : 0;\n\n    public int nested(Result<Option<int>, PaymentError> result) => match (result) {\n        Result.Ok(Option.Some(int value)) => value,\n        Result.Ok(Option.None) => 0,\n        Result.Err e => -1,\n    };\n\n    public int nestedMissing(Result<Option<int>, PaymentError> result) => match (result) {\n        Result.Ok(Option.Some(int value)) => value,\n        Result.Err e => -1,\n    };\n\n    public bool nestedIs(Result<Option<int>, PaymentError> result) => result is Result.Ok(Option.Some s);\n\n    public Result<Order, PaymentError>.Ok? okay(Result<Order, PaymentError> result) => result as Result.Ok;\n\n    public string defaulted(Result<Order, PaymentError> result) => match (result) {\n        Result.Ok(Order order) => \"paid\",\n        default => \"failed\",\n    };\n\n    public bool notOk(Result<Order, PaymentError> result) => result is not Result.Ok(Order);\n\n    public bool grouped(Result<Order, PaymentError> result) => result is (Result.Ok(Order));\n\n    public bool either(Result<Order, PaymentError>? result) => result is Result.Ok(Order) or Result.Err(PaymentError);\n\n    public int nullable(Result<Option<int?>, PaymentError> result) => match (result) {\n        Result.Ok(Option.Some(int value)) => value,\n        Result.Ok(Option.None) => 0,\n        Result.Err e => -1,\n    };\n\n    public int shaped(Result<Shape, PaymentError> result) => match (result) {\n        Result.Ok(Shape.Circle(int radius)) => radius,\n        Result.Ok(Shape.Dot) => 0,\n        Result.Err e => -1,\n    };\n}\n";
+    let option = (
+        "src/App/Option.sharp",
+        "namespace App;\n\npublic enum Option<T>\n{\n    case Some(T value);\n    case None;\n}\n",
+    );
+    let shape = (
+        "src/App/Shape.sharp",
+        "namespace App;\n\npublic enum Shape\n{\n    case Circle(int radius);\n    case Dot;\n}\n",
+    );
+    let mut files = payments();
+    files.push(option);
+    files.push(shape);
 
-    assert_eq!(issues(("src/App/Reads.sharp", code), &payments()), ["10:66 match-not-exhaustive"]);
-    assert_eq!(messages(("src/App/Reads.sharp", code), &payments()), ["This `match` misses `Result.Err`."]);
+    assert_eq!(
+        issues(("src/App/Reads.sharp", code), &files),
+        ["10:66 match-not-exhaustive", "26:75 match-not-exhaustive", "46:71 match-not-exhaustive"]
+    );
+    assert_eq!(
+        messages(("src/App/Reads.sharp", code), &files),
+        ["This `match` misses `Result.Err`.", "This `match` misses `Result.Ok`.", "This `match` misses `Result.Ok`.",]
+    );
 }
 
 /// Spec sections 20 and 31: two cases of `Result` are `==` when they are the same case with equal fields, so
