@@ -82,19 +82,19 @@ use crate::utils::names::is_prelude_stub;
 use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 
-/// Whether `parameter` is a function parameter its method's `uses` names, spec section 29: a call has the effects of
-/// the function it passes there, so that function is held to no effect list.
-fn is_uses_parameter(parameter: InvocationTargetParameter<'_>) -> bool {
-    matches!(parameter, InvocationTargetParameter::FunctionLike(metadata) if metadata.flags.is_uses_parameter())
+/// Whether `parameter` is a PHP# function parameter whose type states no effects, spec section 29: a call takes on the
+/// effects of the function it passes there, so that function is held to no effect list.
+fn takes_on_effects(parameter: InvocationTargetParameter<'_>) -> bool {
+    matches!(parameter, InvocationTargetParameter::FunctionLike(metadata) if metadata.flags.takes_on_effects())
 }
 
-/// The type an argument for `parameter`, of the type `parameter_type`, meets: a `uses` parameter takes a function with
-/// any effects, so its function types list none to compare.
+/// The type an argument for `parameter`, of the type `parameter_type`, meets: a parameter that takes on effects takes
+/// a function with any effects, so its function types list none to compare.
 fn effect_free_parameter_type<'parameter>(
     parameter: InvocationTargetParameter<'_>,
     parameter_type: &'parameter TUnion,
 ) -> Cow<'parameter, TUnion> {
-    if !is_uses_parameter(parameter) {
+    if !takes_on_effects(parameter) {
         return Cow::Borrowed(parameter_type);
     }
 
@@ -876,7 +876,7 @@ where
                         argument_expression,
                         &invocation.target,
                     )
-                    && !is_uses_parameter(parameter_ref)
+                    && !takes_on_effects(parameter_ref)
                 {
                     record_function_values(
                         context,

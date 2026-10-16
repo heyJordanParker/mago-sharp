@@ -99,9 +99,9 @@ impl MetadataFlags {
     pub const INTERNAL_REACH: MetadataFlags = MetadataFlags(1 << 59);
     /// A PHP# field, spec section 6: storage that is never a property, as `ReflectionProperty::isField()` tells.
     pub const FIELD: MetadataFlags = MetadataFlags(1 << 60);
-    /// A PHP# function parameter its method's `uses` names, spec section 29, as `f` in `map(Function<R(T)> f) uses f`:
-    /// each call of the method has the effects of the function it passes there, which its type does not limit.
-    pub const USES_PARAMETER: MetadataFlags = MetadataFlags(1 << 61);
+    /// A PHP# function parameter whose type states no effects, spec section 29, as `f` in `map(Function<R(T)> f)`: each
+    /// call of the method takes on the effects of the function it passes there, which the type does not limit.
+    pub const TAKES_ON_EFFECTS: MetadataFlags = MetadataFlags(1 << 61);
 }
 
 impl MetadataFlags {
@@ -314,8 +314,8 @@ impl MetadataFlags {
 
     #[inline]
     #[must_use]
-    pub const fn is_uses_parameter(self) -> bool {
-        self.contains(Self::USES_PARAMETER)
+    pub const fn takes_on_effects(self) -> bool {
+        self.contains(Self::TAKES_ON_EFFECTS)
     }
 
     #[inline]
@@ -619,7 +619,7 @@ mod tests {
             ("PROJECT", MetadataFlags::PROJECT),
             ("INTERNAL_REACH", MetadataFlags::INTERNAL_REACH),
             ("FIELD", MetadataFlags::FIELD),
-            ("USES_PARAMETER", MetadataFlags::USES_PARAMETER),
+            ("TAKES_ON_EFFECTS", MetadataFlags::TAKES_ON_EFFECTS),
         ];
 
         let mut seen = MetadataFlags::empty();

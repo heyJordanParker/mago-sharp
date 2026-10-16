@@ -268,8 +268,9 @@ where
         scope: Arc::clone(&scope),
     };
 
-    // A method's `uses` parameters, whose functions each caller runs as part of its call.
-    let uses_parameters = match body {
+    // The method's function parameters whose types state no effects, whose functions each caller runs as part of
+    // its call.
+    let effect_taking_parameters = match body {
         Body::Method(class, method) => context
             .codebase
             .get_method(class.as_bytes(), method.as_bytes())
@@ -278,7 +279,7 @@ where
                     .parameters
                     .iter()
                     .zip(&parameters)
-                    .filter(|(parameter, _)| parameter.flags.is_uses_parameter())
+                    .filter(|(parameter, _)| parameter.flags.takes_on_effects())
                     .map(|(_, declaration)| *declaration)
                     .collect()
             })
@@ -290,7 +291,7 @@ where
         artifacts,
         class,
         parameters,
-        uses_parameters,
+        effect_taking_parameters,
         locals: HashMap::default(),
         lambdas: HashMap::default(),
         subjects: Vec::new(),
@@ -348,9 +349,9 @@ where
     class: Word,
     /// Where each parameter of the body is declared, by index.
     parameters: Vec<Span>,
-    /// Where each parameter the method's `uses` names is declared, spec section 29: a call of its function adds no
-    /// effect here, since each caller of the method adds the effects of the function it passes.
-    uses_parameters: Vec<Span>,
+    /// Where each function parameter whose type states no effects is declared, spec section 29: a call of its function
+    /// adds no effect here, since each caller of the method adds the effects of the function it passes.
+    effect_taking_parameters: Vec<Span>,
     /// The roots of each local and lambda parameter, by where it is declared.
     locals: HashMap<Span, Roots>,
     /// The lambda literal each local holds, by where the local is declared.
@@ -666,9 +667,9 @@ where
         Some(local)
     }
 
-    /// Whether an expression names one of the method's `uses` parameters.
-    fn is_uses_parameter(&self, expression: &Expression<'arena>) -> bool {
-        self.local(expression).is_some_and(|local| self.uses_parameters.contains(&local.declaration))
+    /// Whether an expression names one of the method's function parameters whose types state no effects.
+    fn is_effect_taking_parameter(&self, expression: &Expression<'arena>) -> bool {
+        self.local(expression).is_some_and(|local| self.effect_taking_parameters.contains(&local.declaration))
     }
 
     /// Walks a lambda's body as part of the call that runs it, with its parameters given `parameter_roots`.
@@ -744,7 +745,7 @@ where
         }
 
         if let Some(function) = function
-            && !self.is_uses_parameter(function)
+            && !self.is_effect_taking_parameter(function)
             && let Some(function_type) = self.artifacts.get_expression_type(function)
         {
             let cause = (empty_word(), self.text(function.span()));
@@ -880,7 +881,7 @@ where
         let cause = (class_name, metadata.original_name);
         let receiver_roots = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
         let roots = self.argument_roots(arguments, &metadata.parameters);
-        self.uses_arguments(arguments, &metadata.parameters, &receiver_roots, &roots);
+        self.passed_functions(arguments, &metadata.parameters, &receiver_roots, &roots);
         if let Some(effect) = foreign_class(codebase, class) {
             self.summary.effects.push((Effect::Foreign(effect), span, cause));
 
@@ -915,10 +916,10 @@ where
         self.callbacks(arguments);
     }
 
-    /// Records each function a call of a PHP# method passes to a parameter the method's `uses` names, spec section 29,
-    /// since the call has that function's effects. The method may run it on its receiver, with the roots `receiver`,
+    /// Records each function a call of a PHP# method passes to a function parameter whose type states no effects, spec
+    /// section 29, since the call takes on that function's effects. The method may run it on its receiver, with the roots `receiver`,
     /// and on anything it is given, with the roots `roots` by parameter.
-    fn uses_arguments(
+    fn passed_functions(
         &mut self,
         arguments: &'ast ArgumentList<'arena>,
         parameters: &[FunctionLikeParameterMetadata],
@@ -929,7 +930,7 @@ where
         for (position, argument) in arguments.arguments.iter().enumerate() {
             if parameters
                 .get(parameter_index(argument, position, parameters))
-                .is_some_and(|parameter| parameter.flags.is_uses_parameter())
+                .is_some_and(|parameter| parameter.flags.takes_on_effects())
             {
                 self.passed_function(argument.value(), &reached);
             }
@@ -1006,7 +1007,7 @@ where
             let mut roots = Vec::new();
             if let Some(arguments) = &instantiation.argument_list {
                 roots = self.argument_roots(arguments, &metadata.parameters);
-                self.uses_arguments(arguments, &metadata.parameters, &Roots::new(), &roots);
+                self.passed_functions(arguments, &metadata.parameters, &Roots::new(), &roots);
             }
             let callee = Body::Method(ascii_lowercase_word(declaring.name.as_bytes()), constructor);
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: roots });
@@ -1041,7 +1042,7 @@ where
         receiver: Option<&'ast Expression<'arena>>,
         arguments: &'ast ArgumentList<'arena>,
     ) {
-        // A function passed to the stub runs on the receiver's elements, as `uses f` will declare.
+        // A function passed to the stub runs on the receiver's elements, as a function parameter of a PHP# method does.
         let elements = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
         for argument in &arguments.arguments {
             let value = argument.value();
@@ -1328,7 +1329,11 @@ fn foreign_class(codebase: &CodebaseMetadata, class: Word) -> Option<Word> {
 
 /// The index of the parameter of `parameters` that `argument`, at `position` in its call, is given to: the one it
 /// names, or the one at its position. Arguments past the last parameter are its variadic values.
-fn parameter_index(argument: &Argument<'_>, position: usize, parameters: &[FunctionLikeParameterMetadata]) -> usize {
+pub(crate) fn parameter_index(
+    argument: &Argument<'_>,
+    position: usize,
+    parameters: &[FunctionLikeParameterMetadata],
+) -> usize {
     match argument {
         Argument::Named(named) => {
             let name = php_variable_name(named.name.value);

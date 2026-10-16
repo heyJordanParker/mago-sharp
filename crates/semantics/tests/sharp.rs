@@ -3160,12 +3160,16 @@ fn an_extern_method_is_static_in_a_static_or_foreign_class_with_no_body_in_any_n
 }
 
 /// Spec section 29 works a body's effects out from its code, so only a method without a body, an interface's or an
-/// abstract class's, names effects in `uses`. A method with a body names only its function parameters there, as in
-/// `charge(…) uses prepare => …`.
+/// abstract class's, names effects in `uses`. A method takes on the effects of each function it is given with nothing
+/// written, so a function parameter in `uses`, as the old `charge(…) uses prepare => …` wrote it, is refused with or
+/// without a body, and says to delete it.
 #[test]
-fn a_method_with_a_body_names_only_its_function_parameters_in_uses() {
-    let refused = |name: &str| {
-        format!("A method with a body takes no effect in `uses`, and `{name}` is not one of its function parameters.")
+fn a_method_names_no_function_parameter_in_uses() {
+    let refused = |name: &str| format!("A method with a body takes no effect in `uses`, and it names `{name}`.");
+    let parameter = |name: &str| {
+        format!(
+            "`{name}` is a function parameter, and a method takes on the effects of each function it is given, so `uses` names no parameter."
+        )
     };
     for (code, expected) in [
         (
@@ -3178,15 +3182,23 @@ fn a_method_with_a_body_names_only_its_function_parameters_in_uses() {
         ),
         (
             "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
-            vec![],
+            vec![format!("5:67 {}", parameter("prepare"))],
         ),
         (
             "public class Gateway\n{\n    public int charge(int cents, Function<int(int)>? prepare) uses prepare => cents;\n}\n",
-            vec![],
+            vec![format!("5:68 {}", parameter("prepare"))],
         ),
         (
             "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare, cents, Http => cents;\n}\n",
-            vec![format!("5:76 {}", refused("cents")), format!("5:83 {}", refused("Http"))],
+            vec![
+                format!("5:67 {}", parameter("prepare")),
+                format!("5:76 {}", refused("cents")),
+                format!("5:83 {}", refused("Http")),
+            ],
+        ),
+        (
+            "public interface Gateway\n{\n    int charge(int cents, Function<int(int)> prepare) uses prepare, Http;\n}\n",
+            vec![format!("5:60 {}", parameter("prepare"))],
         ),
         ("public interface Gateway\n{\n    int charge(int cents) uses Http;\n}\n", vec![]),
         ("public abstract class Gateway\n{\n    public abstract int charge(int cents) uses Http;\n}\n", vec![]),

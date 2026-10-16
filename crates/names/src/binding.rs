@@ -29,13 +29,32 @@ use mago_word::concat_word;
 use mago_word::word;
 
 /// Whether `name`, written in a method's `uses`, names `parameter` and the parameter has a function type, nullable or
-/// not, as `f` in `apply(Function<int(int)> f) uses f` does: a function parameter, never an effect, spec section 29.
+/// not, as `f` in the old `apply(Function<int(int)> f) uses f` did: a function parameter, never an effect.
 fn names_function(parameter: &FunctionLikeParameter<'_>, name: &LocalIdentifier<'_>) -> bool {
     parameter.variable.name == name.value
         && matches!(
             parameter.hint,
             Some(Hint::Function(_) | Hint::Nullable(NullableHint { hint: Hint::Function(_), .. }))
         )
+}
+
+/// Whether `parameter` has a function type, nullable or not, that states no effects, as `f` in `map(Function<R(T)> f)`.
+///
+/// Spec section 29: each call of the method takes on the effects of the function it passes there, so the function runs
+/// only inside the call. A function type that states its effects, as `Function<Charge(Cart) uses Http>`, caps them
+/// instead. A promoted constructor parameter is its field, whose function type without `uses` is pure, as every
+/// field's is.
+#[must_use]
+pub fn takes_on_effects(parameter: &FunctionLikeParameter<'_>) -> bool {
+    if parameter.is_promoted_property() {
+        return false;
+    }
+
+    match &parameter.hint {
+        Some(Hint::Function(function)) => function.uses.is_none(),
+        Some(Hint::Nullable(NullableHint { hint: Hint::Function(function), .. })) => function.uses.is_none(),
+        _ => false,
+    }
 }
 
 /// Returns the PHP variable a PHP# local, parameter or `this` runs as: `total` runs as `$total`.
@@ -156,20 +175,24 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
     }
 
     /// The effects the method's `uses` names, spec section 29: every name but one of its function-typed parameters,
-    /// nullable or not, as `f` in `apply(Function<int(int)> f) uses f`, whose effects a call takes from the function
-    /// it passes.
+    /// which semantics refuses there.
     pub fn uses_effects(&self) -> impl Iterator<Item = &'ast LocalIdentifier<'arena>> + '_ {
-        self.uses
-            .into_iter()
-            .flat_map(|uses| uses.names.iter())
-            .filter(move |name| !self.parameter_list.parameters.iter().any(|parameter| names_function(parameter, name)))
+        self.uses_names().filter(move |name| !self.names_function_parameter(name))
     }
 
-    /// Whether the method's `uses` names `parameter`, one of its function-typed parameters, spec section 29: each call
-    /// of the method has the effects of the function it passes there.
-    #[must_use]
-    pub fn uses_parameter(&self, parameter: &FunctionLikeParameter<'arena>) -> bool {
-        self.uses.into_iter().flat_map(|uses| uses.names.iter()).any(|name| names_function(parameter, name))
+    /// The names in the method's `uses` that name one of its function-typed parameters, as the old
+    /// `apply(Function<int(int)> f) uses f` did. A method takes on the effects of each function it is given with
+    /// nothing written, spec section 29, so semantics refuses each.
+    pub fn uses_function_parameters(&self) -> impl Iterator<Item = &'ast LocalIdentifier<'arena>> + '_ {
+        self.uses_names().filter(move |name| self.names_function_parameter(name))
+    }
+
+    fn uses_names(&self) -> impl Iterator<Item = &'ast LocalIdentifier<'arena>> + use<'ast, 'arena> {
+        self.uses.into_iter().flat_map(|uses| uses.names.iter())
+    }
+
+    fn names_function_parameter(&self, name: &LocalIdentifier<'_>) -> bool {
+        self.parameter_list.parameters.iter().any(|parameter| names_function(parameter, name))
     }
 
     /// The parts of an operator, named at its symbol, or none for an operator a class cannot declare, which semantics

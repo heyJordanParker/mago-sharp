@@ -1289,7 +1289,7 @@ fn a_field_is_a_property_group_of_one_property() {
 #[test]
 fn a_field_without_an_access_modifier_is_a_private_property() {
     let lowered = Lowered::with(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Money(Offer)> priceOf, Function<Charge(Cart) uses Http> charge)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n    }\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer) uses Http> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Money(Offer) uses Http> priceOf, Function<Charge(Cart) uses Http> charge)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n    }\n}\n",
         &[
             SHOP,
             (
@@ -7808,10 +7808,11 @@ fn an_emptied_list_loop_by_key_and_value_is_refused_before_lowering() {
 /// ```
 ///
 /// A function type runs as PHP's `\Closure`, so its type is the full name `Closure` with `ZEND_NAME_FQ`, which is 0.
+/// `step` states its effect, since a function parameter whose type states none is never returned (spec section 29).
 #[test]
 fn a_function_type_is_the_closure_class() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public Function<int(string, int)> apply(Function<int(string, int)> step, Function<void()>? other = null) { return step; }\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Function<int(string, int) uses Http> apply(Function<int(string, int) uses Http> step, Function<void()>? other = null) { return step; }\n}\n",
     );
     let method = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_METHOD).expect("a method");
 
@@ -7840,7 +7841,7 @@ fn a_function_type_is_the_closure_class() {
         indoc! {r#"
             SHARP_TYPE_ARGS
               ZVAL "Closure"
-              ZVAL "Function<Function<int(string, int)>(Function<int(string, int)>, Function<void()>?)>"
+              ZVAL "Function<Function<int(string, int) uses Sharp.Http>(Function<int(string, int) uses Sharp.Http>, Function<void()>?)>"
         "#}
     );
 }
@@ -7917,7 +7918,7 @@ fn a_map_of_function_types_with_two_effects_is_the_map_class() {
 #[test]
 fn a_function_type_taking_a_function_type_with_effects_is_the_closure_class() {
     let (hint, declaration) = lowered_field(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Function<int(Function<int(int) uses Http>) uses Mail> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>) uses Mail> apply)\n    {\n        this.apply = apply;\n    }\n}\n",
     );
 
     assert_eq!(hint, "ZVAL \"Closure\"\n");

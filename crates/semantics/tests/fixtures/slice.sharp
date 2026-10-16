@@ -281,7 +281,7 @@ public class Report
         return items[0]?.rate == null ? null : ["all": numbers];
     }
 
-    public Function<int(int)> lambdas(int extra, Function<bool(string, int)> check)
+    public Function<int(int) uses Http> lambdas(int extra, Function<bool(string, int) uses Http> check)
     {
         let count = 0;
         Function<int(int)> twice = a => a * extra;

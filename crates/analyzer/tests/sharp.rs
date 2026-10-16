@@ -8158,7 +8158,7 @@ fn a_map_of_function_types_with_two_effects_is_accepted() {
 
 #[test]
 fn a_function_type_taking_a_function_type_with_an_effect_is_accepted() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    public Checkout(private Function<int(Function<int(int) uses Http>)> apply) { }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
 }
@@ -8171,7 +8171,7 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
         "src/App/Shop/Offers.php",
         "<?php\n\nnamespace App\\Shop;\n\nfinal class Plan\n{\n}\n\nfinal class Money\n{\n}\n\nfinal class Offer\n{\n}\n",
     );
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback = null;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers = [:];\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<Money(Offer)> priceOf, Function<Charge(Cart) uses Http> charge, Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n        this.apply = apply;\n    }\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer) uses Http> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback = null;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers = [:];\n    Function<int(Function<int(int) uses Http>) uses Http> apply;\n\n    public Checkout(Function<Money(Offer) uses Http> priceOf, Function<Charge(Cart) uses Http> charge, Function<int(Function<int(int) uses Http>) uses Http> apply)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n        this.apply = apply;\n    }\n}\n";
     let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, Plan> */\n    private array $cache = [];\n    /** @var \\Closure(Offer): Money */\n    private \\Closure $priceOf;\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers = [];\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n\n    /**\n     * @param \\Closure(Offer): Money $priceOf\n     * @param \\Closure(Cart): Charge $charge\n     * @param \\Closure(\\Closure(int): int): int $apply\n     */\n    public function __construct(\\Closure $priceOf, \\Closure $charge, \\Closure $apply)\n    {\n        $this->priceOf = $priceOf;\n        $this->charge = $charge;\n        $this->apply = $apply;\n    }\n}\n";
     let sharp_reader = "namespace App.Shop;\n\npublic class Receipt\n{\n    public static int size(Checkout checkout) => global.count(checkout.cache);\n}\n";
     let php_reader = "<?php\n\nnamespace App\\Shop;\n\nfinal class Receipt\n{\n    public static function size(Checkout $checkout): int { return count($checkout->cache); }\n}\n";
@@ -8184,8 +8184,8 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
             "8:39 unused-property",
             "9:57 unused-property",
             "5:23 unused-property",
-            "10:49 write-only-property",
-            "6:28 write-only-property",
+            "10:59 write-only-property",
+            "6:38 write-only-property",
             "7:38 write-only-property",
         ]
     );
@@ -8225,8 +8225,9 @@ fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() 
     );
 }
 
-/// Spec section 29: a function type without `uses` is pure, so it holds no function value with an effect, whether the
-/// value is assigned, passed or returned, and a function type that uses `Mail` holds none that uses `Http`.
+/// Spec section 29: a function type without `uses` is pure in a field, a local or a return type, so it holds no
+/// function value with an effect there, and a parameter whose function type uses `Mail` holds none that uses `Http`. A
+/// parameter whose function type states no effects takes on those of the value each call passes, so `apply` takes it.
 #[test]
 fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
     let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int)> rate;\n\n    public Pricing(Function<int(int) uses Http> fetch)\n    {\n        this.rate = fetch;\n        Function<int(int)> local = fetch;\n        Pricing.apply(fetch);\n        Pricing.mail(fetch);\n    }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static int mail(Function<int(int) uses Mail> step) => step(1);\n\n    public Function<int(int)> current(Function<int(int) uses Http> fetch) => fetch;\n\n    public int price() => this.rate(2);\n}\n";
@@ -8239,7 +8240,6 @@ fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
         [
             "9:21 invalid-property-assignment-value Invalid type for property `Pricing.rate`: expected `Function<int(int)>`, but got `Function<int(int) uses Http>`.",
             "10:36 invalid-local-assignment-value Invalid assignment to `local`: it is declared as `Function<int(int)>`.",
-            "11:23 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int)>`, but found `Function<int(int) uses Http>`.",
             "12:22 invalid-argument Invalid argument type for argument #1 of `Pricing.mail`: expected `Function<int(int) uses Mail>`, but found `Function<int(int) uses Http>`.",
             "19:78 invalid-return-statement Invalid return type for method `Pricing.current`: expected `Function<int(int)>`, but found `Function<int(int) uses Http>`.",
         ]
@@ -8250,7 +8250,7 @@ fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
 /// may be `null` possibly fits it.
 #[test]
 fn a_nullable_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
-    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int)>? step) => step == null ? 0 : step(1);\n\n    public int run(Function<int(int) uses Http> fetch, Function<int(int) uses Http>? maybe) => Pricing.apply(fetch) + Pricing.apply(maybe);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int) uses Mail>? step) => step == null ? 0 : step(1);\n\n    public int run(Function<int(int) uses Http> fetch, Function<int(int) uses Http>? maybe) => Pricing.apply(fetch) + Pricing.apply(maybe);\n}\n";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shop/Pricing.sharp", sharp), &[])
@@ -8258,8 +8258,8 @@ fn a_nullable_function_type_refuses_a_function_value_with_an_effect_it_does_not_
             .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
             .collect::<Vec<_>>(),
         [
-            "7:110 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int)>?`, but found `Function<int(int) uses Http>`.",
-            "7:133 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Pricing.apply`: expected `Function<int(int)>?`, but possibly received `Function<int(int) uses Http>?`.",
+            "7:110 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int) uses Mail>?`, but found `Function<int(int) uses Http>`.",
+            "7:133 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Pricing.apply`: expected `Function<int(int) uses Mail>?`, but possibly received `Function<int(int) uses Http>?`.",
         ]
     );
 }
@@ -8272,10 +8272,10 @@ fn a_function_type_holds_a_function_value_whose_effects_it_lists() {
     assert_eq!(issues(("src/App/Shop/Pricing.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// A pure function value has no effect, so every function type holds it.
+/// A pure function value, a lambda or a method value, has no effect, so every function type holds it.
 #[test]
 fn a_function_type_with_an_effect_holds_a_pure_function_value() {
-    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate;\n\n    public Pricing(Function<int(int)> fixed)\n    {\n        this.rate = fixed;\n    }\n\n    public static int apply(Function<int(int) uses Http> step) => step(1);\n\n    public int run(Function<int(int)> fixed) => Pricing.apply(fixed);\n\n    public int price() => this.rate(2);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate;\n\n    public Pricing()\n    {\n        this.rate = n => n;\n    }\n\n    public static int apply(Function<int(int) uses Http> step) => step(1);\n\n    public int run() => Pricing.apply(this.fixed) + Pricing.apply(n => n + 1);\n\n    public int fixed(int n) => n;\n\n    public int price() => this.rate(2);\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Pricing.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -8285,7 +8285,7 @@ fn a_function_type_with_an_effect_holds_a_pure_function_value() {
 #[test]
 fn a_function_value_keeps_its_parameter_collections_through_a_copy_a_template_and_a_list() {
     let pass = "<?php\n\nnamespace Lib;\n\nfinal class Pass\n{\n    /**\n     * @template T\n     * @param T $value\n     * @return T\n     */\n    public static function keep(mixed $value): mixed\n    {\n        return $value;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Pass;\n\nclass Counter\n{\n    public int run(Function<int(List<string>)> size)\n    {\n        let copy = size;\n        const kept = Pass.keep(size);\n        List<Function<int(List<string>)>> all = [size];\n        int total = copy([:]) + kept([:]);\n        for (const each of all) {\n            total += each([:]);\n        }\n        return total;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Pass;\n\nclass Counter\n{\n    public int run(Function<int(List<string>) uses Http> size)\n    {\n        let copy = size;\n        const kept = Pass.keep(size);\n        List<Function<int(List<string>) uses Http>> all = [size];\n        int total = copy([:]) + kept([:]);\n        for (const each of all) {\n            total += each([:]);\n        }\n        return total;\n    }\n}\n";
 
     let message = "invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.";
     assert_eq!(
@@ -11737,7 +11737,7 @@ fn recording_type_arguments_leaves_the_issues_of_a_php_generic_call_unchanged() 
 /// of `TItem` passes as itself. The PHP twin, whose closures take and return any value, keeps Mago's issues.
 #[test]
 fn a_function_type_is_checked_by_its_type_parameters() {
-    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Function<TItem()> maker() => () => 1;\n\n    public Function<void(int)> taker(Function<void(TItem)> visit) => visit;\n\n    public Function<TItem(TItem)> same() => (TItem item) => item;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Function<TItem()> maker() => () => 1;\n\n    public Function<void(int) uses Http> taker(Function<void(TItem) uses Http> visit) => visit;\n\n    public Function<TItem(TItem)> same() => (TItem item) => item;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass Box\n{\n    /** @return \\Closure(): TItem */\n    public function maker(): \\Closure\n    {\n        return fn() => 1;\n    }\n\n    /**\n     * @param \\Closure(TItem): void $visit\n     * @return \\Closure(int): void\n     */\n    public function taker(\\Closure $visit): \\Closure\n    {\n        return $visit;\n    }\n\n    /** @return \\Closure(TItem): TItem */\n    public function same(): \\Closure\n    {\n        return static fn($item) => $item;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Box.php", php), &[]), Vec::<String>::new());
@@ -11745,7 +11745,7 @@ fn a_function_type_is_checked_by_its_type_parameters() {
         worded(("src/Demo/Box.sharp", sharp), &[]),
         [
             "5:41 invalid-return-statement Invalid return type for method `Box.maker`: expected `Function<TItem()>`, but found `Function<1()>`. | This has type `Function<1()>` | The type `Function<1()>` returned here is not compatible with the declared return type `Function<TItem()>`. | Change the return value to match `Function<TItem()>`, or update the method's return type declaration.",
-            "7:70 invalid-return-statement Invalid return type for method `Box.taker`: expected `Function<void(int)>`, but found `Function<void(TItem)>`. | This has type `Function<void(TItem)>` | The type `Function<void(TItem)>` returned here is not compatible with the declared return type `Function<void(int)>`. | Change the return value to match `Function<void(int)>`, or update the method's return type declaration.",
+            "7:90 invalid-return-statement Invalid return type for method `Box.taker`: expected `Function<void(int) uses Http>`, but found `Function<void(TItem) uses Http>`. | This has type `Function<void(TItem) uses Http>` | The type `Function<void(TItem) uses Http>` returned here is not compatible with the declared return type `Function<void(int) uses Http>`. | Change the return value to match `Function<void(int) uses Http>`, or update the method's return type declaration.",
         ]
     );
 }
@@ -11932,17 +11932,17 @@ fn a_property_of_a_generic_receiver_has_the_receivers_type_arguments() {
 /// refuses it, and a lambda that returns nothing is no `Function<TItem()>`. The PHP twin keeps Mago's issues.
 #[test]
 fn a_function_type_checks_its_any_parameters_and_its_any_return() {
-    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Function<void(Any?)> widen(Function<void(TItem)> visit) => visit;\n\n    public Function<Any()> sure(Function<TItem()> make) => make;\n\n    public Function<TItem()> empty() => () => { };\n\n    public Function<Any?()> loose(Function<TItem()> make) => make;\n\n    public Function<void(TItem)> kept(Function<void(TItem)> visit) => visit;\n}\n\npublic class Plain\n{\n    public Function<void(Any)> any(Function<void(int)> visit) => visit;\n\n    public Function<void(int)> narrow(Function<void(Any?)> visit) => visit;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Function<void(Any?) uses Http> widen(Function<void(TItem) uses Http> visit) => visit;\n\n    public Function<Any() uses Http> sure(Function<TItem() uses Http> make) => make;\n\n    public Function<TItem()> empty() => () => { };\n\n    public Function<Any?() uses Http> loose(Function<TItem() uses Http> make) => make;\n\n    public Function<void(TItem) uses Http> kept(Function<void(TItem) uses Http> visit) => visit;\n}\n\npublic class Plain\n{\n    public Function<void(Any) uses Http> any(Function<void(int) uses Http> visit) => visit;\n\n    public Function<void(int) uses Http> narrow(Function<void(Any?) uses Http> visit) => visit;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass Box\n{\n    /**\n     * @param \\Closure(TItem): void $visit\n     * @return \\Closure(mixed): void\n     */\n    public function widen(\\Closure $visit): \\Closure\n    {\n        return $visit;\n    }\n\n    /**\n     * @param \\Closure(): TItem $make\n     * @return \\Closure(): non-empty-mixed\n     */\n    public function sure(\\Closure $make): \\Closure\n    {\n        return $make;\n    }\n\n    /** @return \\Closure(): TItem */\n    public function empty(): \\Closure\n    {\n        return function (): void {\n        };\n    }\n\n    /**\n     * @param \\Closure(): TItem $make\n     * @return \\Closure(): mixed\n     */\n    public function loose(\\Closure $make): \\Closure\n    {\n        return $make;\n    }\n\n    /**\n     * @param \\Closure(TItem): void $visit\n     * @return \\Closure(TItem): void\n     */\n    public function kept(\\Closure $visit): \\Closure\n    {\n        return $visit;\n    }\n}\n\nclass Plain\n{\n    /**\n     * @param \\Closure(int): void $visit\n     * @return \\Closure(non-empty-mixed): void\n     */\n    public function any(\\Closure $visit): \\Closure\n    {\n        return $visit;\n    }\n\n    /**\n     * @param \\Closure(mixed): void $visit\n     * @return \\Closure(int): void\n     */\n    public function narrow(\\Closure $visit): \\Closure\n    {\n        return $visit;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Box.php", php), &[]), Vec::<String>::new());
     assert_eq!(
         issues(("src/Demo/Box.sharp", sharp), &[]),
         [
-            "5:71 invalid-return-statement",
-            "7:60 invalid-return-statement",
+            "5:91 invalid-return-statement",
+            "7:80 invalid-return-statement",
             "9:41 invalid-return-statement",
-            "18:66 invalid-return-statement",
+            "18:86 invalid-return-statement",
         ]
     );
 }
@@ -15425,47 +15425,143 @@ fn a_uses_takes_a_foreign_class_and_refuses_any_other_class() {
     }
 }
 
-/// Spec section 29: a method names a function parameter in `uses`, with or without a body, as
-/// `charge(…) uses prepare => …` and `apply(Function<int(int)> f) uses f;` do. That name is no effect, so the effect
-/// check passes it, and a caller has no effect of that name.
+/// Spec section 29: a method takes on the effects of each function it is given, with nothing written, as Swift's
+/// `rethrows` does. A pure caller passing a pure lambda stays pure, a caller passing a lambda with `Http` has `Http`, a
+/// method that passes its parameter on to `map` carries it on, a nullable parameter takes them on too, a static and an
+/// instance method value give the call their method's effects, and a parameter whose type states its effects keeps them
+/// as a cap: it refuses a function with a wider effect.
 #[test]
-fn a_method_with_a_body_names_a_function_parameter_in_uses() {
-    let checkout = (
-        "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\npublic class Checkout\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
+fn a_method_takes_on_the_effects_of_each_function_it_is_given() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int()> f) => f();\n\n    public static List<int> each(List<int> prices, Function<int(int)> f) => prices.map(f);\n\n    public static int capped(Function<int() uses Http> f) => f();\n\n    public static int live() => global.fetch(1);\n\n    public int fetchOne() => global.fetch(1);\n\n    public int pure => Pricing.apply(() => 1) + Pricing.each([1], (int price) => price).count();\n\n    public int fetched => Pricing.apply(() => global.fetch(1));\n\n    public int fetchedEach => Pricing.each([1], (int price) => global.fetch(price)).count();\n\n    public int fetchedCapped => Pricing.capped(() => global.fetch(1));\n\n    public int clockCapped => Pricing.capped(() => global.now());\n\n    public int viaStatic => Pricing.apply(Pricing.live);\n\n    public int viaInstance => Pricing.apply(this.fetchOne);\n\n    public static int maybe(Function<int()>? f) => f == null ? 0 : f();\n\n    public int fetchedMaybe => Pricing.maybe(() => global.fetch(1));\n\n    law pureHolds(Pricing pricing) => pricing.pure > 0;\n\n    law fetchedRefused(Pricing pricing) => pricing.fetched > 0;\n\n    law eachRefused(Pricing pricing) => pricing.fetchedEach > 0;\n\n    law staticRefused(Pricing pricing) => pricing.viaStatic > 0;\n\n    law instanceRefused(Pricing pricing) => pricing.viaInstance > 0;\n\n    law maybeRefused(Pricing pricing) => pricing.fetchedMaybe > 0;\n}\n",
     );
 
-    assert_eq!(issues(checkout, &[]), Vec::<String>::new());
-
-    let doubler = (
-        "app/Shop/Doubler.sharp",
-        "namespace App.Shop;\n\npublic class Doubler\n{\n    public Doubler(private Mapper mapper) { }\n\n    public int twice => this.mapper.apply(x => x * 2);\n}\n",
+    assert_eq!(issues(pricing, &[FETCH, FETCH_STUB, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, FETCH, FETCH_STUB, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Pricing.sharp:35:44 impure-law: Law `fetchedRefused` reaches `Pricing.fetched`, which calls `global.fetch` with the effect `Http`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:37:41 impure-law: Law `eachRefused` reaches `Pricing.fetchedEach`, which calls `global.fetch` with the effect `Http`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:39:43 impure-law: Law `staticRefused` reaches `Pricing.live`, which calls `global.fetch` with the effect `Http`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:41:45 impure-law: Law `instanceRefused` reaches `Pricing.fetchOne`, which calls `global.fetch` with the effect `Http`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:43:42 impure-law: Law `maybeRefused` reaches `Pricing.fetchedMaybe`, which calls `global.fetch` with the effect `Http`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:23:46 invalid-argument: This lambda calls `global.now`, which has the effect `Clock`, so a `Function<int() uses Http>` cannot hold it.",
+        ]
     );
-    for declaration in [
-        "namespace App.Shop;\n\npublic interface Mapper\n{\n    int apply(Function<int(int)> f) uses f;\n}\n",
-        "namespace App.Shop;\n\npublic abstract class Mapper\n{\n    public abstract int apply(Function<int(int)>? f) uses f;\n}\n",
-    ] {
-        let mapper = ("app/Shop/Mapper.sharp", declaration);
-
-        assert_eq!(issues(mapper, &[doubler]), Vec::<String>::new(), "{declaration}");
-        assert_eq!(effect_issues(&[doubler, mapper]), Vec::<String>::new(), "{declaration}");
-    }
 }
 
-/// Spec section 29: a method that writes `uses f` has, at each call, its body's own effects plus the effects of the
-/// function passed as `f`: a lambda's, a method value's method's, or a function value's type's. The function passed is
-/// not held to `f`'s type, a `uses g` that forwards it to another `uses f` carries it on, and a method without a body
-/// carries it as one with a body does. A call of `f` in the body adds nothing, since each caller adds what it passes.
+/// Spec section 29: a function parameter whose type states no effects takes on each caller's, so it runs only inside the
+/// call, as Swift's closure parameters do without `@escaping`. Storing it in a field, a collection or a new object,
+/// returning it, passing it where it may be kept, and a local or a lambda that holds it doing any of these are refused,
+/// each naming the type to take instead. Calling it, and passing it on to another function parameter, plain PHP's
+/// included, compile.
 #[test]
-fn a_call_of_a_method_with_uses_f_has_the_effects_of_the_function_passed_as_f() {
+fn a_function_parameter_whose_type_states_no_effects_never_escapes() {
+    let holder = (
+        "app/Shop/Holder.sharp",
+        "namespace App.Shop;\n\npublic class Holder\n{\n    public Holder(private Function<int() uses Http> body) { }\n}\n",
+    );
+    let keeper = (
+        "app/Shop/Keeper.sharp",
+        "namespace App.Shop;\n\nimport Lib.Runner;\n\npublic class Keeper\n{\n    private Function<int()> kept = () => 0;\n\n    private Function<int() uses Http>? spare = null;\n\n    private Function<int(Function<int()>)> handler = (Function<int()> g) => g();\n\n    private static Function<int()>? cached = null;\n\n    public void store(Function<int()> f) { this.kept = f; }\n\n    public void spared(Function<int()> f) => this.spare = f;\n\n    public void cache(Function<int()> f) { Keeper.cached = f; }\n\n    public int local(Function<int()> f)\n    {\n        const g = f;\n        Function<int()> h = () => 0;\n        h = () => g();\n        this.kept = h;\n        return g();\n    }\n\n    public List<Function<int()>> listed(Function<int()> f) => [f];\n\n    public void indexed(Map<string, Function<int()>> all, Function<int()> f) { all[\"a\"] = f; }\n\n    public void added(List<Function<int()>> all, Function<int()> f) => all.add(f);\n\n    public Holder held(Function<int()> f) => new Holder(f);\n\n    public Function<int()> returned(Function<int()> f) => f;\n\n    public Function<int()> either(Function<int()>? f) => f ?? (() => 0);\n\n    public Function<int()> wrapped(Function<int()> f) => () => f() + 1;\n\n    public Function<int()> wrappedBlock(Function<int()> f) => () => { return f() + 2; };\n\n    public int capped(Function<int()> f) => Keeper.capping(f);\n\n    public static int capping(Function<int() uses Http> g) => g();\n\n    public int handled(Function<int()> f) => this.handler(f);\n\n    public int valued(Function<int(Function<int()>)> run, Function<int()> f) => run(f);\n\n    public int called(Function<int()> f) => f() + Keeper.passing(f) + Keeper.passing(() => f()) + global.call_user_func(f) + Runner.run(f);\n\n    public static int passing(Function<int()> g) => g();\n\n    public Keeper chained(Function<int()> f) => this;\n\n    public int lambda(Function<int()> f)\n    {\n        const r = (Function<int()> g) => g();\n        return r(f);\n    }\n\n    public int run() => this.kept() + (this.spare?.() ?? 0) + (Keeper.cached?.() ?? 0);\n}\n",
+    );
+    let lib = (
+        "src/Lib/Lib.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Runner\n{\n    public static function run(\\Closure $body): int\n    {\n        return $body();\n    }\n}\n",
+    );
+    let stub = ("app/Stubs/Builtins.sharp", "namespace App.Stubs;\n\nextern global.call_user_func;\n");
+
+    assert_eq!(
+        worded(keeper, &[holder, lib, stub]),
+        [
+            ("15:56 invalid-property-assignment-value", "`f` can't be stored in a field", "Stored", "Function<int() uses …>"),
+            (
+                "17:59 invalid-property-assignment-value",
+                "`f` can't be stored in a field",
+                "Stored",
+                "Function<int() uses Http>?",
+            ),
+            ("19:60 invalid-property-assignment-value", "`f` can't be stored in a field", "Stored", "Function<int() uses …>"),
+            (
+                "26:21 invalid-property-assignment-value",
+                "This local can't be stored in a field: it holds `f`, a function parameter whose type states no effects.",
+                "Stored",
+                "Function<int() uses …>",
+            ),
+            ("30:64 invalid-array-element", "`f` can't be stored in a collection", "Stored", "Function<int() uses …>"),
+            ("32:91 invalid-array-element", "`f` can't be stored in a collection", "Stored", "Function<int() uses …>"),
+            (
+                "34:80 invalid-argument",
+                "`f` can't be passed to `List.add`, which may keep it",
+                "Passed",
+                "Function<int() uses …>",
+            ),
+            ("36:57 invalid-argument", "`f` can't be stored in a new object", "Passed", "Function<int() uses Http>"),
+            ("38:59 invalid-return-statement", "`f` can't be returned", "Returned", "Function<int() uses …>"),
+            ("40:58 invalid-return-statement", "`f` can't be returned", "Returned", "Function<int() uses …>?"),
+            (
+                "42:58 invalid-return-statement",
+                "This lambda can't be returned: it captures `f`, a function parameter whose type states no effects.",
+                "Returned",
+                "Function<int() uses …>",
+            ),
+            (
+                "44:63 invalid-return-statement",
+                "This lambda can't be returned: it captures `f`, a function parameter whose type states no effects.",
+                "Returned",
+                "Function<int() uses …>",
+            ),
+            (
+                "46:60 invalid-argument",
+                "`f` can't be passed to `Keeper.capping`, which may keep it",
+                "Passed",
+                "Function<int() uses Http>",
+            ),
+            (
+                "50:59 invalid-argument",
+                "`f` can't be passed to `Keeper.handler`, which may keep it",
+                "Passed",
+                "Function<int() uses …>",
+            ),
+            (
+                "52:85 invalid-argument",
+                "`f` can't be passed to a function value, which may keep it",
+                "Passed",
+                "Function<int() uses …>",
+            ),
+            (
+                "63:18 invalid-argument",
+                "`f` can't be passed to a function value, which may keep it",
+                "Passed",
+                "Function<int() uses …>",
+            ),
+        ]
+        .map(|(at, message, verb, take)| {
+            let message =
+                if message.ends_with('.') { message.to_owned() } else { format!("{message}: its type states no effects.") };
+            format!(
+                "{at} {message} | {verb} here. | A method takes on the effects of each function it is given, so that function runs only inside the method's call. | Take a `{take}`, whose type states the effects it may have."
+            )
+        })
+    );
+}
+
+/// Spec section 29: a method has, at each call, its body's own effects plus the effects of each function passed to a
+/// function parameter whose type states none: a lambda's, a method value's method's, or a function value's type's. The
+/// function passed is not held to the parameter's type, a parameter passed on to another such parameter carries it on,
+/// and a method without a body carries it as one with a body does. A call of the parameter in the body adds nothing,
+/// since each caller adds what it passes.
+#[test]
+fn a_call_of_a_method_has_the_effects_of_each_function_passed_to_it() {
     let mapper = (
         "app/Shop/Mapper.sharp",
-        "namespace App.Shop;\n\npublic interface Mapper\n{\n    int apply(Function<int()> f) uses f;\n}\n",
+        "namespace App.Shop;\n\npublic interface Mapper\n{\n    int apply(Function<int()> f);\n}\n",
     );
     let runner = ("app/Shop/Runner.sharp", "namespace App.Shop;\n\npublic interface Runner\n{\n    int go();\n}\n");
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\npublic class Pricing : Runner\n{\n    public Pricing(private Function<int() uses Clock> tick, private Mapper mapper) { }\n\n    public static int carried(Function<int()> body) uses body => body();\n\n    public static int forwarded(Function<int()> body) uses body => Pricing.carried(body);\n\n    public int stamp() => global.now();\n\n    public int go() => Pricing.carried(() => global.now());\n\n    public int pure => Pricing.carried(() => 1) + Pricing.forwarded(() => 2) + this.mapper.apply(() => 3);\n\n    public int viaLambda => Pricing.carried(() => global.now());\n\n    public int viaMethodValue => Pricing.carried(this.stamp);\n\n    public int viaFunctionValue => Pricing.carried(this.tick);\n\n    public int viaForwarded => Pricing.forwarded(() => global.now());\n\n    public int viaDeclaration => this.mapper.apply(() => global.now());\n\n    law pure(Pricing pricing) => pricing.pure > 0;\n\n    law lambda(Pricing pricing) => pricing.viaLambda > 0;\n\n    law methodValue(Pricing pricing) => pricing.viaMethodValue > 0;\n\n    law functionValue(Pricing pricing) => pricing.viaFunctionValue > 0;\n\n    law relayed(Pricing pricing) => pricing.viaForwarded > 0;\n\n    law declaration(Pricing pricing) => pricing.viaDeclaration > 0;\n}\n",
+        "namespace App.Shop;\n\npublic class Pricing : Runner\n{\n    public Pricing(private Function<int() uses Clock> tick, private Mapper mapper) { }\n\n    public static int carried(Function<int()> body) => body();\n\n    public static int forwarded(Function<int()> body) => Pricing.carried(body);\n\n    public int stamp() => global.now();\n\n    public int go() => Pricing.carried(() => global.now());\n\n    public int pure => Pricing.carried(() => 1) + Pricing.forwarded(() => 2) + this.mapper.apply(() => 3);\n\n    public int viaLambda => Pricing.carried(() => global.now());\n\n    public int viaMethodValue => Pricing.carried(this.stamp);\n\n    public int viaFunctionValue => Pricing.carried(this.tick);\n\n    public int viaForwarded => Pricing.forwarded(() => global.now());\n\n    public int viaDeclaration => this.mapper.apply(() => global.now());\n\n    law pure(Pricing pricing) => pricing.pure > 0;\n\n    law lambda(Pricing pricing) => pricing.viaLambda > 0;\n\n    law methodValue(Pricing pricing) => pricing.viaMethodValue > 0;\n\n    law functionValue(Pricing pricing) => pricing.viaFunctionValue > 0;\n\n    law relayed(Pricing pricing) => pricing.viaForwarded > 0;\n\n    law declaration(Pricing pricing) => pricing.viaDeclaration > 0;\n}\n",
     );
 
     assert_eq!(issues(pricing, &[mapper, runner, CLOCK_STUB, NOW]), Vec::<String>::new());
@@ -15483,14 +15579,14 @@ fn a_call_of_a_method_with_uses_f_has_the_effects_of_the_function_passed_as_f() 
 }
 
 /// A method value of a method without a body has the effects its `uses` lists wherever it runs, as a call of the
-/// method does: passed to a `uses f` parameter, or to plain PHP, which may run what it is given.
+/// method does: passed to a function parameter, or to plain PHP, which may run what it is given.
 #[test]
 fn a_method_value_of_a_method_without_a_body_has_its_uses_where_it_runs() {
     let rates =
         ("app/Shop/Rates.sharp", "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate() uses Clock;\n}\n");
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Rates rates) { }\n\n    public static int carried(Function<int()> body) uses body => body();\n\n    public int carriedRate => Pricing.carried(this.rates.rate);\n\n    public int calledRate => global.call_user_func(this.rates.rate);\n\n    law viaUses(Pricing pricing) => pricing.carriedRate > 0;\n\n    law viaPlain(Pricing pricing) => pricing.calledRate > 0;\n}\n",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Rates rates) { }\n\n    public static int carried(Function<int()> body) => body();\n\n    public int carriedRate => Pricing.carried(this.rates.rate);\n\n    public int calledRate => global.call_user_func(this.rates.rate);\n\n    law viaUses(Pricing pricing) => pricing.carriedRate > 0;\n\n    law viaPlain(Pricing pricing) => pricing.calledRate > 0;\n}\n",
     );
     let stub = ("app/Stubs/Builtins.sharp", "namespace App.Stubs;\n\nextern global.call_user_func;\n");
 
@@ -15505,7 +15601,7 @@ fn a_method_value_of_a_method_without_a_body_has_its_uses_where_it_runs() {
 }
 
 /// A method value of plain PHP has the effects its `extern` declares wherever it runs, as a call of the method does:
-/// passed to a `uses f` parameter, or to plain PHP, which may run what it is given.
+/// passed to a function parameter, or to plain PHP, which may run what it is given.
 #[test]
 fn a_plain_php_method_value_has_its_extern_s_effects_where_it_runs() {
     let stub = (
@@ -15514,7 +15610,7 @@ fn a_plain_php_method_value_has_its_extern_s_effects_where_it_runs() {
     );
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\nimport Lib.Meter;\n\npublic class Pricing\n{\n    public Pricing(private Meter meter) { }\n\n    public static int carried(Function<int()> body) uses body => body();\n\n    public int carriedRead => Pricing.carried(this.meter.read);\n\n    public int calledRead => global.call_user_func(this.meter.read);\n\n    law viaUses(Pricing pricing) => pricing.carriedRead > 0;\n\n    law viaPlain(Pricing pricing) => pricing.calledRead > 0;\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Meter;\n\npublic class Pricing\n{\n    public Pricing(private Meter meter) { }\n\n    public static int carried(Function<int()> body) => body();\n\n    public int carriedRead => Pricing.carried(this.meter.read);\n\n    public int calledRead => global.call_user_func(this.meter.read);\n\n    law viaUses(Pricing pricing) => pricing.carriedRead > 0;\n\n    law viaPlain(Pricing pricing) => pricing.calledRead > 0;\n}\n",
     );
 
     assert_eq!(issues(pricing, &[METER, stub]), Vec::<String>::new());
@@ -16141,7 +16237,7 @@ fn a_lambda_with_an_effect_stored_in_a_function_type_that_lists_it_passes() {
 fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_is_refused() {
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int live(int n) => global.fetch(n);\n\n    public int fixed(int n) => n;\n\n    public int run() => Pricing.apply(this.live) + Pricing.apply(this.fixed);\n}\n",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int) uses Mail> step) => step(1);\n\n    public int live(int n) => global.fetch(n);\n\n    public int fixed(int n) => n;\n\n    public int run() => Pricing.apply(this.live) + Pricing.apply(this.fixed);\n}\n",
     );
     let php = (
         "app/Shop/Pricing.php",
@@ -16153,7 +16249,7 @@ fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_i
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
         [
-            "app/Shop/Pricing.sharp:11:39 invalid-argument: `Pricing.live` calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+            "app/Shop/Pricing.sharp:11:39 invalid-argument: `Pricing.live` calls `global.fetch`, which has the effect `Http`, so a `Function<int(int) uses Mail>` cannot hold it."
         ]
     );
 }
@@ -16168,14 +16264,14 @@ fn a_method_value_of_a_method_without_a_body_is_held_to_its_uses() {
     );
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Rates rates) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.rates.rate) + Pricing.apply(this.rates.fixed);\n}\n",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Rates rates) { }\n\n    public static int apply(Function<int(int) uses Mail> step) => step(1);\n\n    public int run() => Pricing.apply(this.rates.rate) + Pricing.apply(this.rates.fixed);\n}\n",
     );
 
     assert_eq!(issues(pricing, &[rates]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing, rates]),
         [
-            "app/Shop/Pricing.sharp:9:39 invalid-argument: `Rates.rate` has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+            "app/Shop/Pricing.sharp:9:39 invalid-argument: `Rates.rate` has the effect `Http`, so a `Function<int(int) uses Mail>` cannot hold it."
         ]
     );
 }
@@ -16194,7 +16290,7 @@ fn a_method_value_of_a_prelude_method_is_pure() {
 }
 
 /// A static method value has its method's effects wherever it runs, as a method value read from an object has: passed
-/// to a `uses f` parameter, as `Scope.run(Job.ping)`, or to plain PHP, as `global.call_user_func(Job.ping)`. So a pure
+/// to a function parameter, as `Scope.run(Job.ping)`, or to plain PHP, as `global.call_user_func(Job.ping)`. So a pure
 /// interface method refuses an implementation that runs one.
 #[test]
 fn a_static_method_value_has_its_method_s_effects_where_it_runs() {
@@ -16219,12 +16315,12 @@ fn a_static_method_value_has_its_method_s_effects_where_it_runs() {
 }
 
 /// A method value of a `foreign` class has that class's effect wherever it runs, as a call of the method has, so a law
-/// that runs `environment.require` through a `uses f` parameter is impure.
+/// that runs `environment.require` through a function parameter is impure.
 #[test]
 fn a_method_value_of_a_foreign_class_has_its_effect_where_it_runs() {
     let shelf = (
         "app/Shop/Shelf.sharp",
-        "namespace App.Shop;\n\npublic class Shelf\n{\n    public Shelf(private Environment environment) { }\n\n    public static string carried(Function<string(string)> body) uses body => body(\"HOME\");\n\n    public string home => Shelf.carried(this.environment.require);\n\n    law reads(Shelf shelf) => shelf.home != \"\";\n}\n",
+        "namespace App.Shop;\n\npublic class Shelf\n{\n    public Shelf(private Environment environment) { }\n\n    public static string carried(Function<string(string)> body) => body(\"HOME\");\n\n    public string home => Shelf.carried(this.environment.require);\n\n    law reads(Shelf shelf) => shelf.home != \"\";\n}\n",
     );
 
     assert_eq!(issues(shelf, &[ENVIRONMENT]), Vec::<String>::new());
@@ -16242,7 +16338,7 @@ fn a_method_value_of_a_foreign_class_has_its_effect_where_it_runs() {
 fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
     let branch = (
         "app/Shop/Branch.sharp",
-        "namespace App.Shop;\n\npublic class Branch\n{\n    private Function<int(int)> rate;\n\n    public Branch(bool live, Function<int(int)> fixed)\n    {\n        this.rate = live ? (int n) => global.fetch(n) : (int n) => n + 1;\n        this.rate = live ? (int n) => n + 2 : (int n) => global.fetch(n) + 3;\n        this.rate = live ? (int n) => global.fetch(n) + 4 : fixed;\n        this.rate = live ? fixed : (int n) => global.fetch(n) + 5;\n        this.rate = live ? (int n) => global.fetch(n) + 6 : (int n) => global.fetch(n) + 7;\n    }\n\n    public int price() => this.rate(2);\n}\n",
+        "namespace App.Shop;\n\npublic class Branch\n{\n    private Function<int(int)> rate;\n\n    public Branch(bool live)\n    {\n        this.rate = live ? (int n) => global.fetch(n) : (int n) => n + 1;\n        this.rate = live ? (int n) => n + 2 : (int n) => global.fetch(n) + 3;\n        this.rate = live ? (int n) => global.fetch(n) + 4 : this.fixed;\n        this.rate = live ? this.fixed : (int n) => global.fetch(n) + 5;\n        this.rate = live ? (int n) => global.fetch(n) + 6 : (int n) => global.fetch(n) + 7;\n    }\n\n    public int fixed(int n) => n;\n\n    public int price() => this.rate(2);\n}\n",
     );
 
     assert_eq!(issues(branch, &[FETCH, FETCH_STUB]), Vec::<String>::new());
@@ -16301,9 +16397,6 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect(
                 format!(
                     "app/Shop/Checkout.sharp:15:21 invalid-property-assignment-value: This lambda calls `Store.get`, which has no `extern` declaration, so a `Function<int(int) uses {name}>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`."
                 ),
-                format!(
-                    "app/Shop/Checkout.sharp:22:55 invalid-argument: `Client.get` has the effect `{name}`, so a `Function<int(int)>` cannot hold it."
-                ),
             ],
             "{name}"
         );
@@ -16329,16 +16422,16 @@ const SERVICES_STUB: (&str, &str) = (
 fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\nimport Sharp.Environment;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store, private Environment environment) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static string? read(Function<string?(string)> lookup) => lookup(\"HOME\");\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n\n    public string? home() => Pricing.read(this.environment.variable);\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\nimport Sharp.Environment;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store, private Environment environment) { }\n\n    public static int apply(Function<int(int) uses Mail> step) => step(1);\n\n    public static string? read(Function<string?(string) uses Mail> lookup) => lookup(\"HOME\");\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n\n    public string? home() => Pricing.read(this.environment.variable);\n}\n",
     );
 
     assert_eq!(issues(pricing, &[SERVICES, SERVICES_STUB, ENVIRONMENT]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing, SERVICES, SERVICES_STUB, ENVIRONMENT]),
         [
-            "app/Shop/Pricing.sharp:16:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
-            "app/Shop/Pricing.sharp:16:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int)>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`.",
-            "app/Shop/Pricing.sharp:18:43 invalid-argument: `Environment.variable` has the effect `Environment`, so a `Function<string?(string)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:16:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int) uses Mail>` cannot hold it.",
+            "app/Shop/Pricing.sharp:16:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int) uses Mail>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Pricing.sharp:18:43 invalid-argument: `Environment.variable` has the effect `Environment`, so a `Function<string?(string) uses Mail>` cannot hold it.",
         ]
     );
 }
@@ -16358,11 +16451,12 @@ fn a_plain_php_method_value_read_through_a_subclass_is_held_to_the_subclass_exte
     );
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed, private QuietChild quiet) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get) + Pricing.apply((this.feed.get));\n\n    public int viaLocal()\n    {\n        let step = this.feed.get;\n        return Pricing.apply(step);\n    }\n\n    public int price => this.feed.get(1);\n\n    public int stepped\n    {\n        get\n        {\n            let step = this.feed.get;\n            return step(1);\n        }\n    }\n\n    public int calm() => Pricing.apply(this.quiet.get) + Pricing.apply((this.quiet.get));\n\n    public int calmViaLocal()\n    {\n        let step = this.quiet.get;\n        return Pricing.apply(step);\n    }\n\n    public int quietly\n    {\n        get\n        {\n            let step = this.quiet.get;\n            return step(1);\n        }\n    }\n\n    law priced(Pricing pricing) => pricing.price > 0;\n\n    law stepping(Pricing pricing) => pricing.stepped > 0;\n\n    law quiets(Pricing pricing) => pricing.quietly > 0;\n}\n",
+        "namespace App.Shop;\n\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed, private QuietChild quiet) { }\n\n    public static int apply(Function<int(int) uses Mail> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get) + Pricing.apply((this.feed.get));\n\n    public int viaLocal()\n    {\n        let step = this.feed.get;\n        return Pricing.apply(step);\n    }\n\n    public int price => this.feed.get(1);\n\n    public int stepped\n    {\n        get\n        {\n            let step = this.feed.get;\n            return step(1);\n        }\n    }\n\n    public int calm() => Pricing.apply(this.quiet.get) + Pricing.apply((this.quiet.get));\n\n    public int calmViaLocal()\n    {\n        let step = this.quiet.get;\n        return Pricing.apply(step);\n    }\n\n    public int quietly\n    {\n        get\n        {\n            let step = this.quiet.get;\n            return step(1);\n        }\n    }\n\n    law priced(Pricing pricing) => pricing.price > 0;\n\n    law stepping(Pricing pricing) => pricing.stepped > 0;\n\n    law quiets(Pricing pricing) => pricing.quietly > 0;\n}\n",
     );
 
     assert_eq!(issues(pricing, &[feeds, stub]), Vec::<String>::new());
-    let message = "invalid-argument: `RemoteFeed.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.";
+    let message =
+        "invalid-argument: `RemoteFeed.get` has the effect `Http`, so a `Function<int(int) uses Mail>` cannot hold it.";
     assert_eq!(
         effect_issues(&[pricing, feeds, stub]),
         [
@@ -16882,7 +16976,7 @@ fn a_call_of_a_virtual_method_has_the_effects_of_its_overrides() {
     );
 }
 
-/// A collection method has the effects of the lambda passed to it, as `uses f` will declare, and the lambda is part of
+/// A collection method has the effects of the lambda passed to it, as a function parameter of a PHP# method takes them on, and the lambda is part of
 /// the law, so the error points into it.
 #[test]
 fn a_law_whose_list_map_lambda_calls_an_undeclared_function_is_refused() {

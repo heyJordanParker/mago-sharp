@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use mago_names::binding;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
+use mago_names::binding::takes_on_effects;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_phpdoc_syntax::cst::AssertPattern;
@@ -146,7 +147,7 @@ where
                 context,
                 scope,
             )?;
-            parameter.flags.set(MetadataFlags::USES_PARAMETER, method.uses_parameter(p));
+            parameter.flags.set(MetadataFlags::TAKES_ON_EFFECTS, takes_on_effects(p));
 
             Some(parameter)
         })
