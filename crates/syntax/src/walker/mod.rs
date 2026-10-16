@@ -205,6 +205,7 @@ use crate::cst::cst::PlaceholderArgument;
 use crate::cst::cst::PlainProperty;
 use crate::cst::cst::PositionalArgument;
 use crate::cst::cst::PrintConstruct;
+use crate::cst::cst::Propagate;
 use crate::cst::cst::PropertiesPattern;
 use crate::cst::cst::Property;
 use crate::cst::cst::PropertyAbstractItem;
@@ -941,6 +942,9 @@ generate_ast_walker! {
 
         walker.walk_keyword(&r#enum.r#enum, context);
         walker.walk_local_identifier(&r#enum.name, context);
+        if let Some(type_parameters) = &r#enum.type_parameters {
+            walker.walk_type_parameter_list(type_parameters, context);
+        }
 
         if let Some(backing_type_hint) = &r#enum.backing_type_hint {
             walker.walk_enum_backing_type_hint(backing_type_hint, context);
@@ -970,6 +974,9 @@ generate_ast_walker! {
 
         walker.walk_keyword(&r#struct.r#struct, context);
         walker.walk_local_identifier(&r#struct.name, context);
+        if let Some(type_parameters) = &r#struct.type_parameters {
+            walker.walk_type_parameter_list(type_parameters, context);
+        }
 
         if let Some(inheritance) = &r#struct.inheritance {
             walker.walk_inheritance(inheritance, context);
@@ -2103,6 +2110,7 @@ generate_ast_walker! {
             Expression::Construct(construct) => walker.walk_construct(construct, context),
             Expression::Throw(throw) => walker.walk_throw(throw, context),
             Expression::Leave(leave) => walker.walk_leave(leave, context),
+            Expression::Propagate(propagate) => walker.walk_propagate(propagate, context),
             Expression::Clone(clone) => walker.walk_clone(clone, context),
             Expression::Call(call) => walker.walk_call(call, context),
             Expression::PartialApplication(partial_application) => walker.walk_partial_application(partial_application, context),
@@ -2788,6 +2796,11 @@ generate_ast_walker! {
         }
     }
 
+    'arena Propagate as propagate => {
+        walker.walk_keyword(&propagate.r#try, context);
+        walker.walk_expression(propagate.value, context);
+    }
+
     'arena Clone as clone => {
         walker.walk_keyword(&clone.clone, context);
         walker.walk_expression(clone.object, context);
@@ -3110,6 +3123,9 @@ generate_ast_walker! {
     'arena GenericHint as generic_hint => {
         walker.walk_local_identifier(&generic_hint.name, context);
         walker.walk_type_argument_list(&generic_hint.type_arguments, context);
+        if let Some(case) = &generic_hint.case {
+            walker.walk_local_identifier(case, context);
+        }
     }
 
     'arena TypeArgumentList as type_argument_list => {

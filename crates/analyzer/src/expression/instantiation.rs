@@ -970,10 +970,11 @@ where
     Ok(wrap_atomic(result_atomic))
 }
 
-/// Reports `class` written at `span` in a PHP# file without type arguments, as a type, after `new` or before a static
-/// member, when it is a generic PHP# class, which spec section 11 refuses, as C# does (CS0305). Each type argument has
-/// its own static members, so a bare `Counter.count` names none of them. Returns whether it refused it, so the caller
-/// gives the refused type no type the next check would report again.
+/// Reports `class`, a generic class of PHP# or of plain PHP's `@template`, written at `span` in a PHP# file without the
+/// type arguments of its type parameters that have no default, as a type, after `new` or before a static member of a
+/// PHP# class, which spec section 11 refuses, as C# does (CS0305), with the type parameters to write. Each type
+/// argument of a PHP# class has its own static members, so a bare `Counter.count` names none of them. Returns whether
+/// it refused it, so the caller gives the refused type no type the next check would report again.
 pub(crate) fn report_missing_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     class: &ClassLikeMetadata,
@@ -982,21 +983,23 @@ pub(crate) fn report_missing_type_arguments<A>(
 where
     A: Arena,
 {
-    if !context.dialect.is_sharp() || !class.flags.is_sharp() || class.template_types.is_empty() {
+    if !context.dialect.is_sharp() || class.template_types.values().all(|template| template.default.is_some()) {
         return false;
     }
 
     let class_name = short_name(class.original_name);
-    let arguments = match class.template_types.len() {
-        1 => "type argument".to_owned(),
-        count => format!("{count} type arguments"),
+    let parameters = class.template_types.keys().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+    let (arguments, help) = match class.template_types.len() {
+        1 => ("type argument".to_owned(), "Write a type for its type parameter"),
+        count => (format!("{count} type arguments"), "Write a type for each of its type parameters"),
     };
 
     context.collector.report_with_code(
         IssueCode::MissingTemplateParameter,
         Issue::error(format!("`{class_name}` needs its {arguments}."))
             .with_annotation(Annotation::primary(span).with_message(format!("`{class_name}` has type parameters")))
-            .with_note("A type, `new` and a static member name the type arguments of a generic class."),
+            .with_note("A type, `new` and a static member name the type arguments of a generic class.")
+            .with_help(format!("{help}: `{class_name}<{parameters}>`.")),
     );
 
     true

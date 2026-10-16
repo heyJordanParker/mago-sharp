@@ -273,11 +273,33 @@ where
     parameter_types
 }
 
+/// The result type a lambda takes from the callable types it is written for, as its parameters take theirs. A `void`
+/// result gives its body no declared type, as a `void` method's body gets none.
+fn closure_result_type<A>(context: &Context<'_, '_, A>, expected: &TUnion) -> Option<TUnion>
+where
+    A: Arena,
+{
+    expected
+        .types
+        .iter()
+        .filter_map(|atomic| match atomic {
+            TAtomic::Callable(TCallable::Signature(signature)) => signature.get_return_type(),
+            _ => None,
+        })
+        .filter(|result| !result.is_void())
+        .fold(None, |joined, result| {
+            Some(match joined {
+                Some(joined) => add_union_type(joined, result, context.codebase, CombinerOptions::default()),
+                None => result.clone(),
+            })
+        })
+}
+
 /// Gives `expression` the declared type `expected` its value goes into, such as a typed local's or property's, or a
 /// return type, as a call gives an argument its parameter's type. Spec section 14.2: a PHP# lambda takes its parameter
 /// types from it. A member read takes them too, because a method value of a generic method infers its type arguments
 /// from them (section 14.3), and a generic call infers the type arguments nothing else fixes from it (section 11).
-/// `??` and `?:` give it to the sides their value comes from.
+/// `??`, `?:` and `match` give it to the sides and arms their value comes from.
 pub fn expect_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -294,8 +316,8 @@ pub fn expect_type<A>(
     }
 }
 
-/// Whether `expression` takes the declared type its value goes into: a lambda, a call, a member read, or `??` and `?:`,
-/// which give it to their sides.
+/// Whether `expression` takes the declared type its value goes into: a lambda, a call, a member read, or `??`, `?:` and
+/// `match`, which give it to their sides and arms.
 pub fn takes_declared_type(expression: &Expression<'_>) -> bool {
     matches!(
         expression.unparenthesized(),
@@ -303,6 +325,8 @@ pub fn takes_declared_type(expression: &Expression<'_>) -> bool {
             | Expression::Closure(_)
             | Expression::Call(_)
             | Expression::Conditional(_)
+            | Expression::Match(_)
+            | Expression::PatternMatch(_)
             | Expression::Binary(Binary { operator: BinaryOperator::NullCoalesce(_), .. })
     ) || is_member_read(expression)
 }
@@ -361,10 +385,18 @@ where
 
     let mut artifacts =
         AnalysisArtifacts::new().with_variable_definedness_targets(parent_artifacts.variable_definedness_targets());
+    if context.dialect.is_sharp()
+        && (function_like_metadata.kind.is_closure() || function_like_metadata.kind.is_arrow_function())
+        && function_like_metadata.return_type_metadata.is_none()
+    {
+        artifacts.lambda_result = parent_artifacts
+            .get_expected_type(&function_like_metadata.span)
+            .and_then(|expected| closure_result_type(context, expected));
+    }
 
     if let Some(return_type) = &function_like_metadata.return_type_metadata {
         report_undefined_type_references(context, return_type);
-        report_invalid_template_arguments(context, return_type);
+        report_invalid_template_arguments(context, return_type, HintPlace::Declaration);
 
         // Only check native declaration if effective type is from docblock (to avoid duplicates)
         if return_type.from_docblock
@@ -480,7 +512,10 @@ where
             }
             FunctionLikeBody::Expression(value) => {
                 let return_type = function_like_metadata.return_type_metadata.as_ref();
-                expect_type(context, &mut artifacts, value, return_type.map(|return_type| &return_type.type_union));
+                let declared = return_type
+                    .map(|return_type| return_type.type_union.clone())
+                    .or_else(|| artifacts.lambda_result.clone());
+                expect_type(context, &mut artifacts, value, declared.as_ref());
                 if let Some(return_type) = return_type {
                     check_sharp_literal_kind(context, value, &return_type.type_union);
                 }
@@ -575,7 +610,7 @@ where
 
         if let Some(parameter_type) = parameter_metadata.get_type_metadata() {
             report_undefined_type_references(context, parameter_type);
-            report_invalid_template_arguments(context, parameter_type);
+            report_invalid_template_arguments(context, parameter_type, HintPlace::Declaration);
 
             // Only check native declaration if effective type is from docblock (to avoid duplicates)
             if parameter_type.from_docblock
@@ -1922,16 +1957,30 @@ pub(crate) fn known_type_or_error(declared: TUnion) -> TUnion {
     if names_unknown_type { TUnion::from_atomic(TAtomic::Error) } else { declared }
 }
 
+/// Where a type is written, which decides whether a plain PHP class in it names its type arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintPlace {
+    /// A type test, `is` or `catch`, which reads no type arguments of a plain PHP class, so it tests the class alone.
+    TypeTest,
+    /// Any other type: a declaration, a local's type or a call's type argument.
+    Declaration,
+}
+
 /// Reports generic classes a declared type applies with the wrong number of arguments, or with an
-/// argument outside its type parameter's bound, and a generic PHP# class a `.sharp` type writes
-/// without type arguments. `Self` names its class's own type parameters, so it needs none, and a
+/// argument outside its type parameter's bound, and a generic class a `.sharp` type writes without
+/// type arguments, of PHP# or of plain PHP's `@template`, except a plain PHP class in a
+/// [`HintPlace::TypeTest`]. `Self` names its class's own type parameters, so it needs none, and a
 /// PHP# class type names the class itself, as `Class<PaginatedList>` does, so its class needs none.
 ///
 /// A declaration is checked where it is written, so the mistake is reported at the declaration
 /// rather than at whichever call first happens to reach it. Returns whether a class in it has the
 /// wrong number of type arguments or none, so a type in a body gives what it tests no type the
 /// next check would report again.
-pub fn report_invalid_template_arguments<A>(context: &mut Context<'_, '_, A>, type_metadata: &TypeMetadata) -> bool
+pub fn report_invalid_template_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    type_metadata: &TypeMetadata,
+    place: HintPlace,
+) -> bool
 where
     A: Arena,
 {
@@ -1968,8 +2017,8 @@ where
                 type_metadata.span,
                 &TemplateResult::default(),
             ),
-            None if !named.is_static => report_missing_type_arguments(context, class, type_metadata.span),
-            None => false,
+            None if named.is_static || (place == HintPlace::TypeTest && !class.flags.is_sharp()) => false,
+            None => report_missing_type_arguments(context, class, type_metadata.span),
         };
     }
 

@@ -1,10 +1,16 @@
 use mago_allocator::Arena;
 use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::union::TUnion;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassConstantAccess;
@@ -13,10 +19,14 @@ use mago_syntax::cst::Expression;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::ancestor_type_arguments;
 use crate::resolver::class_constant::resolve_class_constants;
+use crate::resolver::class_name::generic_class_type;
+use crate::utils::names::display_type;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassConstantAccess<'arena> {
     fn analyze<'ctx, A>(
@@ -71,12 +81,73 @@ where
         );
     }
 
+    if context.dialect.is_sharp()
+        && let Some(resulting_type) = &mut resulting_type
+    {
+        give_case_type_arguments(context, artifacts, class, span, resulting_type);
+    }
+
     artifacts.set_expression_type(
         &span,
         if resolution.has_invalid_path { get_never() } else { resulting_type.unwrap_or_else(get_mixed) },
     );
 
     Ok(())
+}
+
+/// Spec section 31: a plain case of a generic enum is one object for each list of type arguments, which the read
+/// `class.case` at `span` gives `case_type`: those it writes, as `Lookup<int>.Missing`, or else those of the declared
+/// type it goes into, as `Lookup<int> lookup = Lookup.Missing;`. The bridge reads them where the analysis records them.
+/// A read that has neither is refused, as a call none of whose type arguments is fixed is.
+fn give_case_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    class: &Expression<'_>,
+    span: Span,
+    case_type: &mut TUnion,
+) where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let [TAtomic::Object(TObject::Named(case))] = case_type.types.as_ref() else {
+        return;
+    };
+    let Some((case_class, r#enum)) = codebase
+        .get_class_like(case.name.as_bytes())
+        .filter(|class| class.flags.is_enum_case_class() && !class.template_types.is_empty())
+        .and_then(|class| Some((class, codebase.get_class_like(class.direct_parent_class?.as_bytes())?)))
+    else {
+        return;
+    };
+
+    let arguments = match generic_class_type(artifacts, class) {
+        Some(written) => written.get_type_parameters().map(<[_]>::to_vec),
+        None => artifacts.get_expected_type(&span).and_then(|expected| {
+            expected.types.iter().find_map(|atomic| ancestor_type_arguments(codebase, atomic, r#enum))
+        }),
+    };
+    let Some(arguments) = arguments else {
+        let case_name = display_type(context, case_type);
+        let names: Vec<String> = case_class.template_types.keys().map(|name| format!("`{name}`")).collect();
+        let noun = if names.len() == 1 { "argument" } else { "arguments" };
+        context.collector.report_with_code(
+            IssueCode::MissingTemplateParameter,
+            Issue::error(format!("Nothing fixes the type {noun} {} of `{case_name}`.", names.join(", ")))
+                .with_annotation(Annotation::primary(span).with_message("The case is read here"))
+                .with_note(
+                    "A plain case of a generic enum takes its type arguments from the ones it writes and from the declared type it goes into.",
+                )
+                .with_help(format!("Write the type {noun} on the enum, or give the case a declared type.")),
+        );
+
+        return;
+    };
+
+    *case_type = TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(
+        case.name,
+        Some(arguments.clone()),
+    ))));
+    artifacts.inferred_type_arguments.insert((span.start.offset, span.end.offset), arguments);
 }
 
 #[cfg(test)]

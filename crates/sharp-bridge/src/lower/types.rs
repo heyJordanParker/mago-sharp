@@ -410,8 +410,9 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The type arguments the static property access `access` reads a generic PHP# class's own statics with, spec
-    /// section 11, as the checker found them, written as [`Self::type_arguments`] writes those of a `new`. None for a
-    /// static property of any other class.
+    /// section 11, or the read of a plain case of a generic enum gives the case, whose object is one of its statics,
+    /// spec section 31, as the checker found them, written as [`Self::type_arguments`] writes those of a `new`. None
+    /// for a static property of any other class or any other case.
     pub(crate) fn statics_type_arguments(&self, access: &impl HasSpan) -> Option<String> {
         let span = access.span();
         let arguments = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?;
@@ -449,7 +450,8 @@ impl<'analysis> Types<'analysis> {
         receiver_classes(self.artifacts.get_tested_type(name)?)
     }
 
-    fn argument_texts(&self, arguments: &[TUnion]) -> String {
+    /// The type texts of `arguments`, joined by `, `, as a `SHARP_TYPE_ARGS` spells them.
+    pub(crate) fn argument_texts(&self, arguments: &[TUnion]) -> String {
         arguments.iter().map(|argument| text(argument, self.codebase, Parameter::Index)).collect::<Vec<_>>().join(", ")
     }
 
@@ -784,9 +786,14 @@ impl<'analysis> Types<'analysis> {
     /// PHP's typed property check tests it on every write plain PHP makes, through reflection too, whatever the
     /// property's visibility.
     pub(crate) fn property_check(&self, class: &[u8], property: &[u8]) -> Option<String> {
-        let metadata = self.codebase.get_property(class, &[b"$", property].concat())?;
+        let metadata = self.codebase.get_declaring_property(class, &[b"$", property].concat())?;
+        let r#type = &metadata.type_metadata.as_ref()?.type_union;
 
-        self.checked_text(&metadata.type_metadata.as_ref()?.type_union, true)
+        // A property of a PHP enum, which only PHP# declares, a computed one, carries its type text always, which tells
+        // the engine the enum may hold it, spec section 31.
+        let is_enum = self.codebase.get_class_like(class).is_some_and(|class| class.kind.is_enum());
+
+        self.checked_text(r#type, true).or_else(|| is_enum.then(|| type_text(r#type, self.codebase)))
     }
 
     /// `r#type` as the type text an entry check tests a value from plain PHP against, when part of it is an `Any`, which
@@ -796,7 +803,8 @@ impl<'analysis> Types<'analysis> {
     /// since PHP's own `array` type checks none. None for a type only a plain PHP docblock writes, such as
     /// `array<array-key, int>`, since the engine reads the check as PHP#. None otherwise: plain PHP's generics are
     /// erased, since an object of a plain PHP generic class carries no type arguments, and a call from plain PHP gives a
-    /// method's own type parameters none, so they match any value.
+    /// method's own type parameters none, so one nested in a type matches any type argument, and a value whose type is
+    /// one of them is checked as its bound.
     fn checked_text(&self, r#type: &TUnion, collections: bool) -> Option<String> {
         let is_method_parameter = |r#type: &TUnion| {
             r#type.types.iter().filter(|atomic| !atomic.is_null()).all(|atomic| {
@@ -818,23 +826,23 @@ impl<'analysis> Types<'analysis> {
                 matches!(part, TAtomic::Object(TObject::Named(part)) if self.codebase.get_trait(part.name.as_bytes()).is_some())
             })
         };
-        // A method's own type parameter matches any value from plain PHP, so one bounded by a trait checks its bound.
-        let bounded_by_trait = |atomic: &TAtomic| match atomic {
+        // A call from plain PHP gives a method's own type parameters no type arguments, so a value whose type is one of
+        // them checks its bound, spec section 11. One nested in a type matches any type argument.
+        let bound_of = |atomic: &TAtomic| match atomic {
             TAtomic::GenericParameter(parameter)
-                if matches!(parameter.defining_entity, GenericParent::FunctionLike(_))
-                    && parameter.constraint.types.iter().any(names_trait) =>
+                if matches!(parameter.defining_entity, GenericParent::FunctionLike(_)) =>
             {
                 Some(parameter.constraint.types.to_vec())
             }
             _ => None,
         };
         let bounded;
-        let r#type = if r#type.types.iter().any(|atomic| bounded_by_trait(atomic).is_some()) {
+        let r#type = if r#type.types.iter().any(|atomic| bound_of(atomic).is_some()) {
             bounded = TUnion::from_vec(
                 r#type
                     .types
                     .iter()
-                    .flat_map(|atomic| bounded_by_trait(atomic).unwrap_or_else(|| vec![atomic.clone()]))
+                    .flat_map(|atomic| bound_of(atomic).unwrap_or_else(|| vec![atomic.clone()]))
                     .collect(),
             );
             &bounded
@@ -1097,9 +1105,9 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// `r#type` as the type text generics R3c's walk reads, php-sharp's decision 72: a class by its full dotted name as
-    /// it is declared, `int`, `float`, `string`, `bool`, `Any`, `List<T>`, `Set<T>`, `Map<K, V>`, and `T?`,
-    /// `A|B` and `(A|B)?` with union members sorted by their text. These are the types a struct's `parse` reads, so a
-    /// type that holds a function, which no input holds, has none.
+    /// it is declared, `int`, `float`, `string`, `bool`, `Any`, `List<T>`, `Set<T>`, `Map<K, V>`, a class's type
+    /// parameter by its index, `$0`, and `T?`, `A|B` and `(A|B)?` with union members sorted by their text. These are
+    /// the types a struct's `parse` reads, so a type that holds a function, which no input holds, has none.
     pub(crate) fn type_text(&self, r#type: &TUnion) -> Option<String> {
         if let Some(TAtomic::Mixed(mixed)) = r#type.types.iter().find(|atomic| atomic.is_mixed()) {
             return Some(if mixed.is_non_null() { "Any" } else { "Any?" }.to_owned());
@@ -1139,6 +1147,8 @@ impl<'analysis> Types<'analysis> {
                     TArray::Keyed(_) => format!("Map<{}, {}>", self.type_text(&key)?, self.type_text(&element)?),
                 }
             }
+            // A generic type's field of its type parameter reads as the type argument `parse` runs with: `$0`.
+            TAtomic::GenericParameter(_) => text(&TUnion::from_atomic(atomic.clone()), self.codebase, Parameter::Index),
             _ => return None,
         })
     }
@@ -1327,6 +1337,16 @@ impl<'analysis> Types<'analysis> {
         self.codebase
             .get_declaring_property(class, &variable)
             .is_some_and(|metadata| metadata.flags.is_static() && !metadata.hooks.is_empty())
+    }
+
+    /// Whether the static property `property` of `class` has an initial value that runs as code, which a throw leaves
+    /// unset, spec section 6.
+    pub(crate) fn has_runtime_initial_value(&self, class: &[u8], property: &[u8]) -> bool {
+        let variable = [b"$", property].concat();
+
+        self.codebase
+            .get_declaring_property(class, &variable)
+            .is_some_and(|metadata| metadata.flags.has_runtime_initial_value())
     }
 
     /// The property `class` declares or inherits by the name `property`, if any.

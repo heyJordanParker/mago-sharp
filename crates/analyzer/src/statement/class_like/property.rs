@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use mago_codex::context::ScopeContext;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -26,7 +27,6 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::PlainProperty;
 use mago_syntax::cst::Property;
-use mago_syntax::cst::PropertyConcreteItem;
 use mago_syntax::cst::PropertyHook;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
@@ -52,6 +52,7 @@ use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::add_properties_to_context;
+use crate::statement::function_like::expect_type;
 use crate::statement::function_like::get_this_type;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_missing_return;
@@ -81,79 +82,22 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Property<'arena> {
     where
         A: Arena,
     {
+        // A static member's initial value that reads `Class.name` runs as code, though PHP would read it as a constant
+        // expression, as `Property::initial_value_runs_after_class` decides for the checker and the engine too.
+        let runs_as_code = self.initial_value_runs_after_class();
         match self {
-            Property::Plain(plain) => plain.analyze(context, block_context, artifacts),
-            Property::Hooked(hooked) => hooked.analyze(context, block_context, artifacts),
+            Property::Plain(plain) => analyze_plain_property(plain, runs_as_code, context, block_context, artifacts),
+            Property::Hooked(hooked) => {
+                analyze_hooked_property(hooked, runs_as_code, context, block_context, artifacts)
+            }
             Property::Computed(computed) => computed.analyze(context, block_context, artifacts),
         }
     }
 }
 
-impl<'ast, 'arena> Analyzable<'ast, 'arena> for PlainProperty<'arena> {
-    fn analyze<'ctx, A>(
-        &'ast self,
-        context: &mut Context<'ctx, 'arena, A>,
-        block_context: &mut BlockContext<'ctx>,
-        artifacts: &mut AnalysisArtifacts,
-    ) -> Result<(), AnalysisError>
-    where
-        A: Arena,
-    {
-        analyze_attributes(
-            context,
-            block_context,
-            artifacts,
-            self.attribute_lists.as_slice(),
-            AttributeTarget::Property,
-        )?;
-
-        for item in &self.items {
-            item.analyze(context, block_context, artifacts)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl<'ast, 'arena> Analyzable<'ast, 'arena> for PropertyItem<'arena> {
-    fn analyze<'ctx, A>(
-        &'ast self,
-        context: &mut Context<'ctx, 'arena, A>,
-        block_context: &mut BlockContext<'ctx>,
-        artifacts: &mut AnalysisArtifacts,
-    ) -> Result<(), AnalysisError>
-    where
-        A: Arena,
-    {
-        if let PropertyItem::Concrete(property_concrete_item) = self {
-            property_concrete_item.analyze(context, block_context, artifacts)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl<'ast, 'arena> Analyzable<'ast, 'arena> for PropertyConcreteItem<'arena> {
-    fn analyze<'ctx, A>(
-        &'ast self,
-        context: &mut Context<'ctx, 'arena, A>,
-        block_context: &mut BlockContext<'ctx>,
-        artifacts: &mut AnalysisArtifacts,
-    ) -> Result<(), AnalysisError>
-    where
-        A: Arena,
-    {
-        analyze_default_value(self.variable.name, self.value, context, block_context, artifacts)
-    }
-}
-
-/// Analyzes a property's default value and reports it when its type is not assignable to the property's. A PHP#
-/// initial value that is not constant runs in the constructor, and the same check covers it. In PHP# a `null` or
-/// `false` that the type does not hold is an error too, as the engine refuses it. Such an initial value is recorded as
-/// a body of its own for the effect rules.
-fn analyze_default_value<'ctx, 'arena, A>(
-    variable_name: &[u8],
-    value: &Expression<'arena>,
+fn analyze_plain_property<'ctx, 'arena, A>(
+    property: &PlainProperty<'arena>,
+    runs_as_code: bool,
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
@@ -161,7 +105,39 @@ fn analyze_default_value<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let is_constant = value.is_constant(&context.settings.version, false);
+    analyze_attributes(
+        context,
+        block_context,
+        artifacts,
+        property.attribute_lists.as_slice(),
+        AttributeTarget::Property,
+    )?;
+
+    for item in &property.items {
+        if let PropertyItem::Concrete(item) = item {
+            analyze_default_value(item.variable.name, item.value, runs_as_code, context, block_context, artifacts)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Analyzes a property's default value and reports it when its type is not assignable to the property's. A PHP#
+/// initial value that is not constant runs in the constructor, and the same check covers it, as it does a static
+/// member's initial value that `runs_as_code`. In PHP# a `null` or `false` that the type does not hold is an error
+/// too, as the engine refuses it. Such an initial value is recorded as a body of its own for the effect rules.
+fn analyze_default_value<'ctx, 'arena, A>(
+    variable_name: &[u8],
+    value: &Expression<'arena>,
+    runs_as_code: bool,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let is_constant = !runs_as_code && value.is_constant(&context.settings.version, false);
     if is_constant {
         block_context.in_constant_expression(|block_context| value.analyze(context, block_context, artifacts))?;
     } else {
@@ -262,42 +238,44 @@ where
     Ok(())
 }
 
-impl<'ast, 'arena> Analyzable<'ast, 'arena> for HookedProperty<'arena> {
-    fn analyze<'ctx, A>(
-        &'ast self,
-        context: &mut Context<'ctx, 'arena, A>,
-        block_context: &mut BlockContext<'ctx>,
-        artifacts: &mut AnalysisArtifacts,
-    ) -> Result<(), AnalysisError>
-    where
-        A: Arena,
-    {
-        analyze_attributes(
-            context,
-            block_context,
-            artifacts,
-            self.attribute_lists.as_slice(),
-            AttributeTarget::Property,
-        )?;
-        self.item.analyze(context, block_context, artifacts)?;
-        if let Some(initial_value) = &self.initial_value {
-            analyze_default_value(self.item.variable().name, initial_value.value, context, block_context, artifacts)?;
-        }
-
-        let property_name = php_variable_name(self.item.variable().name);
-        for hook in &self.hook_list.hooks {
-            analyze_property_hook(hook, property_name, context, block_context, artifacts)?;
-        }
-        if let Some(behaviors) = &self.behaviors {
-            let mut classes = Vec::new();
-            for behavior in behaviors.behaviors.iter() {
-                classes.extend(check_behavior(behavior, property_name, context, block_context, artifacts));
-            }
-            effects::summary::record_behaviors(context, block_context, artifacts, property_name, &classes);
-        }
-
-        Ok(())
+fn analyze_hooked_property<'ctx, 'arena, A>(
+    property: &HookedProperty<'arena>,
+    runs_as_code: bool,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    analyze_attributes(
+        context,
+        block_context,
+        artifacts,
+        property.attribute_lists.as_slice(),
+        AttributeTarget::Property,
+    )?;
+    let name = property.item.variable().name;
+    if let PropertyItem::Concrete(item) = &property.item {
+        analyze_default_value(name, item.value, runs_as_code, context, block_context, artifacts)?;
     }
+    if let Some(initial_value) = &property.initial_value {
+        analyze_default_value(name, initial_value.value, runs_as_code, context, block_context, artifacts)?;
+    }
+
+    let property_name = php_variable_name(name);
+    for hook in &property.hook_list.hooks {
+        analyze_property_hook(hook, property_name, context, block_context, artifacts)?;
+    }
+    if let Some(behaviors) = &property.behaviors {
+        let mut classes = Vec::new();
+        for behavior in behaviors.behaviors.iter() {
+            classes.extend(check_behavior(behavior, property_name, context, block_context, artifacts));
+        }
+        effects::summary::record_behaviors(context, block_context, artifacts, property_name, &classes);
+    }
+
+    Ok(())
 }
 
 /// Spec section 6.4: a behavior runs a property's `get` and `set`, so it is a class that implements
@@ -718,6 +696,12 @@ fn analyze_hook_expression<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    // A `get` accessor returns its property's value, so its expression goes into the property's type, as a method's
+    // goes into its result type.
+    if hook_name == b"get" {
+        let declared = accessor_property_type(hook_block_context).map(|r#type| r#type.type_union.clone());
+        expect_type(context, artifacts, expr_body.expression, declared.as_ref());
+    }
     expr_body.expression.analyze(context, hook_block_context, artifacts)?;
 
     if hook_name == b"get" {
@@ -735,6 +719,13 @@ where
     }
 
     Ok(())
+}
+
+/// The declared type of the property whose accessor `block_context` runs, which its `get` accessor returns.
+pub(crate) fn accessor_property_type<'ctx>(block_context: &BlockContext<'ctx>) -> Option<&'ctx TypeMetadata> {
+    let (property, _) = block_context.scope.get_property_hook()?;
+
+    block_context.scope.get_class_like()?.properties.get(&property)?.type_metadata.as_ref()
 }
 
 fn get_value_type_for_set_hook(

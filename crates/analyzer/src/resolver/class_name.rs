@@ -447,6 +447,24 @@ pub(crate) fn generic_class_type<'artifacts>(
     }
 }
 
+/// The type arguments a static member read or called through `class_expression` takes its class's statics with:
+/// those of [`generic_class_type`], or for a type parameter those of its bound, as `Order` for `TCounter :
+/// Counter<Order>`, which the type argument the code runs with fits, as a class value takes those its type names, spec
+/// section 11.
+pub(crate) fn statics_type_arguments<'artifacts>(
+    artifacts: &'artifacts AnalysisArtifacts,
+    class_expression: &Expression<'_>,
+) -> Option<&'artifacts [TUnion]> {
+    // `resolve_type_parameter` records a type parameter written as a class as its tested type.
+    let tested = artifacts.get_tested_type(class_expression.unparenthesized());
+    let bound = match tested.map(|tested| tested.types.as_ref()) {
+        Some([TAtomic::GenericParameter(parameter)]) => parameter.constraint.get_single_named_object(),
+        _ => None,
+    };
+
+    bound.or_else(|| generic_class_type(artifacts, class_expression)).and_then(TNamedObject::get_type_parameters)
+}
+
 /// Resolves a CST `Expression` to one or more `ResolvedClassname` instances.
 ///
 /// This function analyzes various forms of expressions that can represent a class name

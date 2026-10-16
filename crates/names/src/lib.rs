@@ -66,9 +66,19 @@ pub const NAMED_EFFECTS: [&str; 9] = [
 
 /// The names directly in `Sharp` that a bare name in a `.sharp` file names by default, spec section 23, and that a
 /// class-like of the file's namespace can win over: the [named effects](NAMED_EFFECTS), then every class-like the
-/// standard library or the prelude declares directly in `Sharp`.
+/// standard library or the prelude declares directly in `Sharp`, but the [fixed one](fixed_default_class).
 pub(crate) fn default_classes() -> impl Iterator<Item = &'static str> {
-    NAMED_EFFECTS.into_iter().chain(sharp_classes::SHARP_CLASSES)
+    NAMED_EFFECTS
+        .into_iter()
+        .chain(sharp_classes::SHARP_CLASSES)
+        .filter(|class| fixed_default_class(&class.as_bytes()[b"Sharp\\".len()..]).is_none())
+}
+
+/// The default class-like that a bare name in a `.sharp` file always names, whatever the file imports or declares or
+/// its namespace holds: `Error`, the standard library's interface of every failure, spec section 31. PHP's engine class
+/// `Error` is never named in PHP# code.
+pub(crate) fn fixed_default_class(name: &[u8]) -> Option<&'static [u8]> {
+    (name == b"Error").then_some(b"Sharp\\Error".as_slice())
 }
 
 /// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`. A

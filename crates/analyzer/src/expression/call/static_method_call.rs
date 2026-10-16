@@ -3,7 +3,6 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
-use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
@@ -27,6 +26,7 @@ use crate::expression::call::method_call::analyze_undocumented_method_return_typ
 use crate::expression::call::method_call::prepare_unresolved_method_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
+use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -37,6 +37,7 @@ use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::StaticCall;
 use crate::resolver::class_name::generic_class_type;
+use crate::resolver::class_name::statics_type_arguments;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
 use crate::statement::class_like::listener::check_events_on;
@@ -144,6 +145,8 @@ where
     // of `Counter<Order>` does, spec section 11, and so does a call through a `Class<Counter<Order>>`. `Orders.track(order)`
     // runs it with the type arguments `Orders`'s header gives `Counter`.
     let generic_class = generic_class_type(artifacts, call.class).cloned();
+    // `Holder.of(5)` fixes `Holder`'s type arguments as the method's own, ahead of them, spec section 11.
+    let fixes_class_type_arguments = generic_class.is_none() && bare_generic_class(context, call.class).is_some();
 
     let mut invocation_targets = vec![];
     let mut class_type_arguments = None;
@@ -151,12 +154,12 @@ where
         if let Some(generic_class) = &generic_class {
             resolved_method.static_class_type = StaticClassType::Object(TObject::Named(generic_class.clone()));
         }
-        if context.dialect.is_sharp() && resolved_method.is_static {
+        if context.dialect.is_sharp() && resolved_method.is_static && !fixes_class_type_arguments {
             class_type_arguments = static_member_type_arguments(
                 context,
                 resolved_method.classname,
                 resolved_method.method_identifier.get_class_name(),
-                generic_class.as_ref().and_then(TNamedObject::get_type_parameters),
+                statics_type_arguments(artifacts, call.class),
             );
         }
 
@@ -183,7 +186,13 @@ where
             && (method_name.as_bytes().eq_ignore_ascii_case(b"parse")
                 || method_name.as_bytes().eq_ignore_ascii_case(b"tryParse"))
         {
-            check_struct_parse(context, metadata, method_name.as_bytes().eq_ignore_ascii_case(b"parse"), call.span);
+            check_struct_parse(
+                context,
+                metadata,
+                class_type_arguments.as_deref().unwrap_or_default(),
+                method_name.as_bytes().eq_ignore_ascii_case(b"parse"),
+                call.span,
+            );
         }
 
         // Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`. PHP calls the static

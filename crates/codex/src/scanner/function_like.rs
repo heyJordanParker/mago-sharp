@@ -346,12 +346,13 @@ where
 
 /// Scans the constructor of the class a PHP# event, spec section 15, or a case that carries data, spec section 20, runs
 /// as, which spans `span` and is named at `name_span`: it takes `parameters`, and each sets the public get-only property
-/// of its name, which this adds to the class.
+/// of its name, which this adds to the class. A parameter's type reads the class's type parameters from `type_context`.
 #[inline]
 pub(crate) fn scan_promoted_constructor<'arena, A>(
     span: Span,
     name_span: Span,
     parameters: &'arena FunctionLikeParameterList<'arena>,
+    type_context: &TypeResolutionContext,
     class_like_metadata: &mut ClassLikeMetadata,
     context: &Context<'_, 'arena, A>,
     scope: &NamespaceScope,
@@ -368,12 +369,11 @@ where
         MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,
     );
     metadata.name_span = Some(name_span);
-    let type_context = TypeResolutionContext::default();
     metadata.parameters = parameters
         .parameters
         .iter()
         .filter_map(|p| {
-            scan_function_like_parameter(p, Some(class_like_metadata.original_name), &type_context, context, scope)
+            scan_function_like_parameter(p, Some(class_like_metadata.original_name), type_context, context, scope)
         })
         .collect();
     metadata.method_metadata =

@@ -901,6 +901,36 @@ fn a_file_records_each_default_class_its_short_name_no_longer_names() {
     }
 }
 
+/// Spec section 31: a bare `Error` in a `.sharp` file always names the standard library's interface, whatever the file
+/// declares or its namespace holds, while `Result` names the standard library's enum unless a class-like of the file's
+/// namespace wins over it, as the other default classes do. A case written through `Result` resolves under the enum.
+#[test]
+fn error_always_names_the_standard_interface_and_result_is_a_default_class() {
+    let namespace_classes = NamespaceClasses::new(["App\\Error", "Shop\\Result"]);
+
+    for (code, error, result) in [
+        (
+            "namespace App;\n\nclass Paths\n{\n    public Result<int, Error> run(Error e) => Result.Err(e);\n}\n",
+            "Sharp\\Error",
+            "Sharp\\Result",
+        ),
+        (
+            "namespace Shop;\n\nclass Paths\n{\n    public Result<int, Error> run(Error e) => Result.Err(e);\n}\n",
+            "Sharp\\Error",
+            "Shop\\Result",
+        ),
+    ] {
+        let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(code.as_bytes()));
+        let arena = LocalArena::new();
+        let names = NameResolver::new(&arena).resolve_in(parse_file(&arena, &file), &namespace_classes);
+
+        assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Error e", 0)), error, "{code}");
+        assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Error>", 0)), error, "{code}");
+        assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Result<", 0)), result, "{code}");
+        assert_eq!(names.shadows_default_class(b"Sharp\\Result"), result != "Sharp\\Result", "{code}");
+    }
+}
+
 #[test]
 fn a_php_file_resolves_a_standard_library_name_in_its_namespace() {
     const CODE: &str =

@@ -92,16 +92,22 @@ pub struct ReadonlyHint<'arena> {
 /// Represents a PHP# type with type arguments, as spec sections 11 and 12 write `List<Line>` and
 /// `Map<string, Plan>`.
 ///
+/// A case of a generic enum writes the enum's type arguments before the case, as spec section 31 writes
+/// `Result<Order, PaymentError>.Ok`.
+///
 /// # Examples
 ///
 /// ```csharp
 /// Map<string, List<Line>>
+/// Result<Order, PaymentError>.Ok
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct GenericHint<'arena> {
     pub name: LocalIdentifier<'arena>,
     pub type_arguments: TypeArgumentList<'arena>,
+    /// The case after the type arguments, as `Ok` in `Result<Order, PaymentError>.Ok`.
+    pub case: Option<LocalIdentifier<'arena>>,
 }
 
 /// The number of type arguments a PHP# generic type takes when `name` is one of PHP#'s own `List`, `Map`, `Set`,
@@ -458,7 +464,7 @@ impl HasSpan for ReadonlyHint<'_> {
 
 impl HasSpan for GenericHint<'_> {
     fn span(&self) -> Span {
-        self.name.span().join(self.type_arguments.span())
+        self.name.span().join(self.case.as_ref().map_or_else(|| self.type_arguments.span(), HasSpan::span))
     }
 }
 

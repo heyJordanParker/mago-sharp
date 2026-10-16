@@ -647,6 +647,15 @@ fn redeclaring_a_name_an_enclosing_block_declares_is_an_error() {
     );
 }
 
+/// A case's fields are the parameters of its constructor, and a computed property runs as a function of its own, so
+/// neither sees the other's names, as spec section 31's `PaymentError` reads its case's `reason` in `message`.
+#[test]
+fn a_case_field_and_a_computed_property_declare_their_own_names() {
+    let code = "namespace App;\n\nenum PaymentError\n{\n    case Declined(string reason);\n    case Held(string reason);\n\n    public string message => match (this) {\n        PaymentError.Declined(string reason) => reason,\n        PaymentError.Held(string reason) => reason,\n    };\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
 #[test]
 fn using_a_local_after_its_block_closes_is_an_error() {
     let code = leak(method("        {\n            let inner = 1;\n        }\n        return inner;\n"));
@@ -2646,11 +2655,12 @@ fn a_constructor_in_a_refused_namespace_is_a_constructor() {
 }
 
 /// A `Map` key whose type is outside the slice is refused once, as that type, and a key of a type the slice has but a
-/// key cannot take is refused as a key.
+/// key cannot take is refused as a key. A generic struct or class, as `Pair<int, string>`, keys one as its plain name
+/// does, also inside a `List`, and the analyzer checks its `==` and `hash()`.
 #[test]
 fn a_map_key_is_refused_once() {
     let code = leak(method(
-        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        return 1;\n",
+        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        Map<Pair<int, string>, int> pairs = [:];\n        Map<List<Pair<int, string>>, int> paths = [:];\n        return 1;\n",
     ));
     let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.";
 
@@ -3626,19 +3636,13 @@ fn a_get_only_nullable_property_without_an_initial_value_is_in_the_slice() {
 }
 
 /// Spec section 6: a get-only static is set once, by its initial value, which runs once when a request first uses its
-/// class's statics when it isn't constant, as any static's does. A generic class's statics start as a copy of constant initial values
-/// for each type argument, so one that runs as code is not supported yet there.
+/// class's statics when it isn't constant, as any static's does, or when it reads another static. A generic class's
+/// runs once for each type argument, when its statics are first used, spec section 11.
 #[test]
 fn a_static_member_takes_any_initial_value_and_is_get_only_or_settable() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n}\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n    public static int next { get; } = Report.size + 1;\n}\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n    private static int next = Box<T>.count + 1;\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:23 Give `id` an initial value: no constructor sets a static.",
-            "15:32 A static member of a generic class with an initial value that runs as code is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), ["7:23 Give `id` an initial value: no constructor sets a static."]);
 }
 
 #[test]
@@ -3975,18 +3979,12 @@ fn an_initial_value_on_a_property_whose_set_has_a_body_is_in_the_slice() {
 }
 
 /// Decision 3: a static property takes accessor bodies, observers and a computed body, as an instance property does,
-/// except in a generic class, whose statics are entries of one table that runs no accessors.
+/// in a generic class too, whose type arguments each have their own, spec section 11.
 #[test]
-fn a_static_property_takes_accessors_except_in_a_generic_class() {
+fn a_static_property_takes_accessors() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int b { get; set; didSet => Report.a = 1; } = 0;\n    public static int c => Report.a + 1;\n}\n\nclass Box<T>\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int c => 1;\n    public static int d { get; set; } = 0;\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "12:23 A static property with accessors in a generic class is not supported yet in PHP#.",
-            "13:23 A static property with accessors in a generic class is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// Spec section 6.1: `init` sets a property while its object is created, and no object creates a static property.
@@ -5111,15 +5109,21 @@ fn the_generics_examples_of_the_spec_are_in_the_slice() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11.
+/// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11, a struct's too.
 #[test]
 fn a_type_parameter_whose_name_does_not_start_with_t_and_an_uppercase_letter_is_an_error() {
-    let code = "namespace App.Tenant;\n\npublic class Box<Item, T, TKey, Tkey, T1, TK>\n{\n    public void run<Value>() { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Box<Item, T, TKey, Tkey, T1, TK>\n{\n    public void run<Value>() { }\n}\n\npublic struct Pair<Item, out TOther>\n{\n}\n";
     let refusal = "A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.";
 
     assert_eq!(
         issues(code),
-        [format!("3:18 {refusal}"), format!("3:33 {refusal}"), format!("3:39 {refusal}"), format!("5:21 {refusal}")]
+        [
+            format!("3:18 {refusal}"),
+            format!("3:33 {refusal}"),
+            format!("3:39 {refusal}"),
+            format!("5:21 {refusal}"),
+            format!("8:20 {refusal}"),
+        ]
     );
 }
 
@@ -5171,29 +5175,52 @@ fn in_or_out_is_an_error_only_on_a_method_type_parameter() {
     );
 }
 
-/// A bound is `Object`, a class or an interface, a generic class type, or several classes and interfaces joined with
-/// `&`, spec section 11. `Object` holds any object, as C#'s `where T : class` and TypeScript's `T extends object` do,
-/// and joins no other bound, as mago's own check of an intersection says. A union of classes names `&`, which joins
-/// several bounds.
+/// A bound is `Object`, a class or an interface, a generic class type, several classes and interfaces joined with
+/// `&`, or another type parameter, spec section 11. `Object` holds any object, as C#'s `where T : class` and
+/// TypeScript's `T extends object` do, and joins no other bound, as mago's own check of an intersection says. A type
+/// parameter stands alone too, as Java's `<U extends T>` does. A union of classes names `&`, which joins several
+/// bounds.
 #[test]
-fn a_bound_that_is_not_object_a_class_an_interface_or_a_generic_class_type_is_an_error() {
+fn a_bound_that_is_not_object_a_class_an_interface_a_generic_class_type_or_a_type_parameter_is_an_error() {
     let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable, TM : Object>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n    public void j<TN : object>() { }\n    public void k<TO : Object & Shareable>() { }\n    public void l<TP : Object?>() { }\n    public void m<TQ : Object>(TQ value) { }\n}\n";
 
     assert_eq!(
         issues(code),
         (5..=16)
+            .filter(|line| *line != 12)
             .map(|line| match line {
                 8 => "8:24 A bound can't be a union: join several bounds with `&`.".to_owned(),
+                13 => "13:24 A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."
+                    .to_owned(),
                 15 => "15:24 Type `Object` cannot be part of an intersection.".to_owned(),
                 line => format!(
-                    "{line}:24 A bound is `Object`, a class or an interface, as in `<TItem : DatabaseEntity>`."
+                    "{line}:24 A bound is `Object`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
                 ),
             })
             .collect::<Vec<_>>()
     );
     assert!(check("src/Report.sharp", code).iter().filter(|issue| issue.message.starts_with("A bound")).all(|issue| issue
         .notes
-        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+}
+
+/// A type parameter's bound never leads back to it, directly or through the bounds of the others in its list, as C#
+/// refuses a circular constraint (CS0454). Each type parameter on the cycle is reported. A chain that ends, and one that
+/// reaches a cycle it is not on, are bounds like any other.
+#[test]
+fn a_type_parameter_whose_bound_leads_back_to_it_is_an_error() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TA : TA>\n{\n    public void a<TB : TC, TC : TB>() { }\n    public void b<TD : TE, TE : TF, TF : Order>() { }\n    public void c<TG : TH, TH : TI, TI : TH>() { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:23 A type parameter can't bound itself: the bound of `TA` leads back to `TA`.",
+            "5:24 A type parameter can't bound itself: the bound of `TB` leads back to `TB`.",
+            "5:33 A type parameter can't bound itself: the bound of `TC` leads back to `TC`.",
+            "7:33 A type parameter can't bound itself: the bound of `TH` leads back to `TH`.",
+            "7:42 A type parameter can't bound itself: the bound of `TI` leads back to `TI`.",
+        ]
+    );
 }
 
 /// A bound's type arguments are a parameter's types, so a `void` among them is refused as one, alone or joined with
@@ -5360,11 +5387,55 @@ fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union()
     );
 }
 
+/// Spec section 31: every enum may declare a computed property, a backed enum and one whose cases carry data included,
+/// and no enum declares a stored or static one.
 #[test]
-fn a_property_in_an_enum_reports_only_the_php_error() {
-    let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    private int count = 0;\n}\n";
+fn an_enum_declares_a_computed_property_and_no_stored_one() {
+    let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    private int count = 0;\n\n    public string label => \"active\";\n}\n\nenum Plan : string\n{\n    case Pro = \"pro\";\n\n    public string label => \"Pro\";\n\n    public static int total { get; set; } = 0;\n}\n\nenum Payment\n{\n    case Declined(string reason);\n\n    public string message => \"declined\";\n\n    public string code { get; set; } = \"x\";\n\n    public static string kind => \"payment\";\n\n    public string name => \"payment\";\n}\n\nenum Tier : string\n{\n    case Gold = \"gold\";\n\n    public static string first => \"gold\";\n\n    public string name => \"tier\";\n\n    public string value => \"tier\";\n}\n\nenum Level\n{\n    case High;\n\n    public string value => \"high\";\n}\n";
 
-    assert_eq!(issues(code), ["7:5 Enum `Status` cannot have properties."]);
+    assert_eq!(
+        issues(code),
+        [
+            "7:5 Enum `Status` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+            "18:5 Enum `Plan` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+            "27:5 Enum `Payment` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+            "31:19 Enum `Payment` already has the property `name`, which every enum has.",
+            "40:19 Enum `Tier` already has the property `name`, which every enum has.",
+            "42:19 Enum `Tier` already has the property `value`, which a backed enum has.",
+        ]
+    );
+}
+
+/// Spec section 31: an enum without a backing type declares type parameters as a class does, with bounds and without
+/// `in` or `out`. A backed enum runs as a PHP enum, which holds none.
+#[test]
+fn an_enum_declares_type_parameters_without_a_backing_type() {
+    let code = "namespace App.Tenant;\n\nenum Outcome<T, TFailure : Failure>\n{\n    case Done(T value);\n    case Failed(TFailure failure);\n    case Waiting;\n}\n\nenum Covariant<out T>\n{\n    case Some(T value);\n}\n\nenum Backed<T> : string\n{\n    case Pro = \"pro\";\n}\n\ninterface Failure\n{\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "10:16 An enum's type parameter takes no `out`: only a class or an interface declares variance, so remove it.",
+            "15:12 A backed enum takes no type parameters: it runs as a PHP enum, which holds none.",
+        ]
+    );
+}
+
+/// Spec section 31: `Error` is PHP#'s interface of every failure, so no import names it, nor gives a name `Error`. An
+/// import renames another library's `Error`.
+#[test]
+fn no_import_names_error() {
+    let refused = ["3:8 `Error` is PHP#'s interface of every failure, so no import names it."];
+    for (import, expected) in [
+        ("import Error;", refused.as_slice()),
+        ("import Vendor.Payments.Error;", refused.as_slice()),
+        ("import Vendor.Payments.Failure as Error;", refused.as_slice()),
+        ("import Vendor.Payments.Error as VendorError;", [].as_slice()),
+    ] {
+        let code: &'static str = format!("namespace App.Tenant;\n\n{import}\n\nclass Report\n{{\n}}\n").leak();
+
+        assert_eq!(issues(code), expected, "{import}");
+    }
 }
 
 #[test]
@@ -5390,8 +5461,8 @@ fn enum_shapes_are_backed_or_not() {
             "13:17 A `Set` field of a case is not supported yet in PHP#.",
             "14:29 A case's field takes no accessors: it is a get-only property of the case.",
             "23:16 The method `later` shares its name with the case `Later`, which `Timing.Later(…)` creates.",
-            "20:10 A case of an enum whose cases carry data is a class, so it can't be named `Never`.",
-            "21:10 A case of an enum whose cases carry data is a class, so it can't be named `Void`.",
+            "20:10 A case of an enum whose cases carry data or type arguments is a class, so it can't be named `Never`.",
+            "21:10 A case of an enum whose cases carry data or type arguments is a class, so it can't be named `Void`.",
         ]
     );
     assert_eq!(issues(fixed), Vec::<String>::new());
@@ -6008,7 +6079,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         ),
         (
             body,
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`.",
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `try` before a `Result`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`.",
         ),
     ] {
         assert_eq!(

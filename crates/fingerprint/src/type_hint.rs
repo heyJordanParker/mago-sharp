@@ -166,6 +166,7 @@ impl Fingerprintable for GenericHint<'_> {
         for argument in &self.type_arguments.arguments {
             argument.fingerprint_with_hasher(hasher, resolved_names, options);
         }
+        self.case.as_ref().map(|case| case.value).hash(hasher);
     }
 }
 

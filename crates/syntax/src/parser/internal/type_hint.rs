@@ -383,9 +383,25 @@ where
             && self.stream.peek_kind(1)? == Some(T!["<"]))
     }
 
-    /// Parses a PHP# type with type arguments, as in `Map<string, List<Line>>`.
+    /// Parses a PHP# type with type arguments, as in `Map<string, List<Line>>`, and the case of a generic enum it may
+    /// name after them, as in `Result<Order, PaymentError>.Ok`.
     fn parse_generic_hint(&mut self) -> Result<GenericHint<'arena>, ParseError> {
-        Ok(GenericHint { name: self.parse_local_identifier()?, type_arguments: self.parse_type_argument_list()? })
+        let name = self.parse_local_identifier()?;
+        let type_arguments = self.parse_type_argument_list()?;
+        // The `.` follows this list's own `>`, which a `>>` that closes an outer list too does not end with.
+        let case =
+            if self.stream.lookahead(0)?.is_some_and(|token| {
+                token.kind == T!["."] && token.start.offset == type_arguments.greater_than.end.offset
+            }) && self.stream.peek_kind(1)?.is_some_and(|kind| kind.is_identifier_maybe_reserved())
+            {
+                self.stream.consume()?;
+
+                Some(self.parse_local_identifier()?)
+            } else {
+                None
+            };
+
+        Ok(GenericHint { name, type_arguments, case })
     }
 
     /// Parses PHP# type arguments, as a type, a `new` and a call write them: `<string, List<Line>>`.

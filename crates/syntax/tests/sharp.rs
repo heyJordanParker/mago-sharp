@@ -689,12 +689,96 @@ fn a_case_type_is_written_through_its_enum() {
     assert_eq!(hints, [b"PaymentResult.Paid".as_slice(), b"PaymentResult.Paid"]);
 }
 
-/// A generic struct waits for generics, spec section 10's question 4, so its type parameters are one error, nested
-/// ones included, and the struct parses on. It is refused whole, so it keeps no members, whose types name its
-/// parameters, and the file has that one error.
+/// Spec section 31: an enum declares type parameters after its name, with bounds, before its header.
 #[test]
-fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
-    for parameters in ["<T>", "<TKey, TValue>", "<T : Box<int>>", "<T : Map<string, List<int>>>"] {
+fn an_enum_declares_type_parameters_after_its_name() {
+    const CODE: &str =
+        "public enum Result<T, TError : Error> : HasLabel\n{\n    case Ok(T value);\n    case Err(TError error);\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Result.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Enum(result)) = program.statements.first() else {
+        panic!("expected an enum, got {:#?}", program.statements);
+    };
+    let Some(parameters) = &result.type_parameters else {
+        panic!("expected type parameters, got {result:#?}");
+    };
+    let written: Vec<&str> = parameters.parameters.iter().map(|parameter| source(CODE, parameter)).collect();
+    assert_eq!(written, ["T", "TError : Error"]);
+    assert!(result.inheritance.is_some(), "the header after the type parameters parses");
+    assert!(result.runs_as_classes());
+}
+
+/// Spec section 31: `try` before a value is a prefix operator at `!`'s precedence, so a member read or a call binds
+/// tighter and `+` looser, and parentheses read a member of the `Ok` value. `try {` stays the statement.
+#[test]
+fn try_before_a_value_is_a_prefix_operator_and_try_before_a_brace_is_the_statement() {
+    let arena = LocalArena::new();
+    for (statement, propagated, around) in [
+        ("try gateway.charge(cart);", "gateway.charge(cart)", "try gateway.charge(cart)"),
+        ("(try gateway.charge(cart)).total;", "gateway.charge(cart)", "(try gateway.charge(cart)).total"),
+        ("try a.b.c;", "a.b.c", "try a.b.c"),
+        ("try result + 1;", "result", "try result + 1"),
+        ("!try result;", "result", "!try result"),
+        ("[try result];", "result", "[try result]"),
+    ] {
+        let code: &'static str = Box::leak(
+            format!("class Shop\n{{\n    void run()\n    {{\n        {statement}\n    }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Shop.sharp", code);
+        assert!(program.errors.is_empty(), "{statement}: {:#?}", program.errors);
+
+        let [written] = method_body(program) else {
+            panic!("expected one statement for `{statement}`, got {:#?}", method_body(program));
+        };
+        assert_eq!(source(code, expression(written)), around, "{statement}");
+        let values: Vec<&str> = Node::Statement(written).filter_map(|node| match node {
+            Node::Propagate(propagate) => Some(source(code, propagate.value)),
+            _ => None,
+        });
+        assert_eq!(values, [propagated], "{statement}");
+    }
+
+    let code = "class Shop\n{\n    void run()\n    {\n        try { } catch (Throwable error) { }\n    }\n}\n";
+    let program = parse(&arena, "src/Shop.sharp", code);
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    assert!(matches!(method_body(program), [Statement::Try(_)]), "{:#?}", method_body(program));
+}
+
+/// Spec section 31: a case of a generic enum is a type written with the enum's type arguments before the case, as
+/// `Result<Order, PaymentError>.Ok`. A `.` that follows a nested list's `>` is no case of it, so a static read through
+/// a generic type still parses.
+#[test]
+fn a_case_type_of_a_generic_enum_writes_the_type_arguments_before_the_case() {
+    const CODE: &str = "class Shop\n{\n    public Order paid(Result<Order, PaymentError>.Ok ok, Result<List<Order>, PaymentError> all) => ok.value;\n\n    public int count() => Counter<List<Order>>.items;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Shop.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let cases: Vec<(&str, Option<&[u8]>)> = Node::Program(program).filter_map(|node| match node {
+        Node::GenericHint(hint) if hint.name.value == b"Result" => {
+            Some((source(CODE, hint), hint.case.as_ref().map(|case| case.value)))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        cases,
+        [("Result<Order, PaymentError>.Ok", Some(b"Ok".as_slice())), ("Result<List<Order>, PaymentError>", None)]
+    );
+}
+
+/// A struct can be generic, spec section 10, with section 11's type parameters: one, several, a bounded one, a nested
+/// bound, and a variance marker, each before the header and the members.
+#[test]
+fn a_generic_struct_takes_type_parameters() {
+    for (parameters, names) in [
+        ("<T>", &[&b"T"[..]][..]),
+        ("<TKey, TValue>", &[b"TKey", b"TValue"]),
+        ("<T : Box<int>>", &[b"T"]),
+        ("<T : Map<string, List<int>>>", &[b"T"]),
+        ("<out T>", &[b"T"]),
+    ] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
             format!("struct Pair{parameters} : HasLabel\n{{\n    public int run() {{ return 1; }}\n}}\n\nstruct Next {{ }}\n")
@@ -702,16 +786,17 @@ fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
         );
         let program = parse(&arena, "src/Pair.sharp", code);
 
-        let [error] = program.errors else {
-            panic!("expected one error for `{parameters}`, got {:#?}", program.errors);
-        };
-        assert_eq!(error.to_string(), "A generic struct is not supported yet in PHP#.");
-        assert_eq!(source(code, error), parameters);
+        assert!(program.errors.is_empty(), "`{parameters}` parses, got {:#?}", program.errors);
         let Some(Statement::Struct(pair)) = program.statements.first() else {
             panic!("expected a struct for `{parameters}`, got {:#?}", program.statements);
         };
+        let Some(written) = &pair.type_parameters else {
+            panic!("the struct keeps `{parameters}`");
+        };
+        let declared: Vec<&[u8]> = written.parameters.iter().map(|parameter| parameter.name.value).collect();
+        assert_eq!(declared, names, "the type parameters of `{parameters}`");
         assert!(pair.inheritance.is_some(), "the header after `{parameters}` parses");
-        assert!(pair.members.is_empty(), "the struct keeps no members after `{parameters}`");
+        assert_eq!(pair.members.len(), 1, "the struct keeps its member after `{parameters}`");
         assert!(
             matches!(program.statements.get(1), Some(Statement::Struct(_))),
             "the struct after `{parameters}` parses"
