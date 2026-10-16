@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use mago_codex::context::ScopeContext;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -51,6 +52,7 @@ use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::add_properties_to_context;
+use crate::statement::function_like::expect_type;
 use crate::statement::function_like::get_this_type;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_missing_return;
@@ -694,6 +696,12 @@ fn analyze_hook_expression<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    // A `get` accessor returns its property's value, so its expression goes into the property's type, as a method's
+    // goes into its result type.
+    if hook_name == b"get" {
+        let declared = accessor_property_type(hook_block_context).map(|r#type| r#type.type_union.clone());
+        expect_type(context, artifacts, expr_body.expression, declared.as_ref());
+    }
     expr_body.expression.analyze(context, hook_block_context, artifacts)?;
 
     if hook_name == b"get" {
@@ -711,6 +719,13 @@ where
     }
 
     Ok(())
+}
+
+/// The declared type of the property whose accessor `block_context` runs, which its `get` accessor returns.
+pub(crate) fn accessor_property_type<'ctx>(block_context: &BlockContext<'ctx>) -> Option<&'ctx TypeMetadata> {
+    let (property, _) = block_context.scope.get_property_hook()?;
+
+    block_context.scope.get_class_like()?.properties.get(&property)?.type_metadata.as_ref()
 }
 
 fn get_value_type_for_set_hook(

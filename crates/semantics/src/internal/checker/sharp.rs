@@ -654,6 +654,17 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(place)
         }
         (Node::Extern(r#extern), File) if r#extern.event.is_some() => check_extern_event(r#extern, context),
+        (Node::UseItem(item), File) if imports_error(item) => {
+            context.report(
+                Issue::error("`Error` is PHP#'s interface of every failure, so no import names it.")
+                    .with_annotation(Annotation::primary(item.span()).with_message("Imported here."))
+                    .with_note(
+                        "A bare `Error` always names the standard library's interface. Catch a bug as `Throwable`, and rename another library's `Error` with `as`.",
+                    ),
+            );
+
+            Some(File)
+        }
 
         (
             Node::Program(_)
@@ -713,6 +724,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(r#enum), File) => {
             check_case_class_names(r#enum, context);
+            // Spec section 20: a backed enum runs as a PHP enum, which carries no type arguments.
+            if let (Some(list), Some(backing)) = (&r#enum.type_parameters, &r#enum.backing_type_hint) {
+                context.report(
+                    Issue::error("A backed enum takes no type parameters: it runs as a PHP enum, which holds none.")
+                        .with_annotation(Annotation::primary(list.span()).with_message("Declared here."))
+                        .with_annotation(Annotation::secondary(backing.span()).with_message("Backed here."))
+                        .with_note("Remove the backing type to give the enum type parameters, as in `enum Option<T>`."),
+                );
+            }
 
             Some(Enum)
         }
@@ -793,6 +813,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(Parameter)
         }
         (Node::TypeParameterList(list), Class | Interface | Method | Signature | Place::Struct) => {
+            check_type_parameters(list, place, context);
+
+            Some(Place::TypeParameter)
+        }
+        (Node::TypeParameterList(list), Enum) => {
             check_type_parameters(list, place, context);
 
             Some(Place::TypeParameter)
@@ -1019,7 +1044,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(Method)
         }
         (Node::BinaryOperator(_), Method) => Some(Method),
-        // `check_enum` reports a property in an enum, and a backing type other than `int` or `string`.
+        // Spec section 22: an enum's computed property is checked as a class's. `check_enum` reports any other property
+        // in an enum, and a backing type other than `int` or `string`.
+        (Node::ClassLikeMember(ClassLikeMember::Property(property @ Property::Computed(_))), Enum)
+            if !property.modifiers().contains_static() =>
+        {
+            enter(node, Class, context)
+        }
         (Node::ClassLikeMember(ClassLikeMember::Property(_)) | Node::EnumBackingTypeHint(_), Enum) => None,
         (Node::EnumCase(case), Enum) if case.item.name().value.eq_ignore_ascii_case(b"class") => {
             context.report(
@@ -1974,11 +2005,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Expression::Access(Access::Property(_) | Access::NullSafeProperty(_))
                 | Expression::Throw(_)
                 | Expression::Leave(_)
+                | Expression::Propagate(_)
                 // The parser reads a template, and only a template, into an interpolated string.
                 | Expression::CompositeString(CompositeString::Interpolated(_)),
             )
             | Node::Throw(_)
             | Node::Leave(_)
+            | Node::Propagate(_)
             | Node::CompositeString(CompositeString::Interpolated(_))
             | Node::InterpolatedString(_)
             | Node::StringPart(StringPart::Literal(_) | StringPart::BracedExpression(_))
@@ -2678,6 +2711,16 @@ fn check_extern(method: &Method, context: &mut Context<'_, '_, '_>) -> Option<Pl
         Place::Method,
         context,
     )
+}
+
+/// Whether an import names PHP's engine class `Error`, or gives the file the name `Error`, which a `.sharp` file keeps
+/// for the standard library's interface, spec section 31.
+fn imports_error(item: &UseItem) -> bool {
+    let name = item.name.value();
+    let last = name.rsplit(|byte| matches!(byte, b'.' | b'\\')).next().unwrap_or(name);
+    let given = item.alias.as_ref().map_or(last, |alias| alias.identifier.value);
+
+    given == b"Error" || name.strip_prefix(b"\\").unwrap_or(name) == b"Error"
 }
 
 /// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose
@@ -4196,8 +4239,8 @@ fn report_static_member_use(span: Span, refusal: String, context: &mut Context<'
 
 /// Reports each type parameter of a list whose name is not `T`, or `T` and an uppercase letter, as C# names them, a
 /// name the list declares twice, a bound that leads back to its type parameter, as C# refuses a circular constraint
-/// (CS0454), and `in` or `out` on a method's, because only a class or an interface declares variance, spec section
-/// 11.1.
+/// (CS0454), and `in` or `out` on a method's or an enum's, because only a class or an interface declares variance,
+/// spec section 11.1.
 fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut Context<'_, '_, '_>) {
     for (index, parameter) in list.parameters.iter().enumerate() {
         let name = parameter.name.value;
@@ -4227,10 +4270,14 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
             );
         }
 
-        if matches!(place, Place::Method | Place::Signature | Place::Extension)
+        if matches!(place, Place::Method | Place::Signature | Place::Extension | Place::Enum)
             && let Some(variance) = parameter.variance
         {
-            let owner = if place == Place::Extension { "An extension block's" } else { "A method's" };
+            let owner = match place {
+                Place::Extension => "An extension block's",
+                Place::Enum => "An enum's",
+                _ => "A method's",
+            };
             context.report(
                 Issue::error(format!(
                     "{owner} type parameter takes no `{}`: only a class or an interface declares variance, so remove it.",
@@ -5238,7 +5285,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body or a default body."
         }
         Place::Enum => {
-            "A PHP# enum has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."
+            "A PHP# enum has attributes, an optional `public`, a name, optional type parameters as in `<T, TError : Error>` when it has no backing type, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, computed properties, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."
         }
         Place::Case => unreachable!("`enter` takes a case's name, its field list and each of its fields"),
         Place::Header => {
@@ -5275,7 +5322,7 @@ fn supported(place: Place) -> &'static str {
         | Place::SuperCall
         | Place::SelfCall
         | Place::RefusedPart(_) => {
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`."
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `try` before a `Result`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`."
         }
         Place::Attribute => {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
@@ -5957,11 +6004,11 @@ fn check_local_name(name: &[u8], span: Span, kind: &str, context: &mut Context<'
     }
 }
 
-/// Refuses, in an enum with a case that carries data, spec section 20, a case named as a type PHP# reserves, since each
+/// Refuses, in an enum that runs as classes, spec sections 20 and 31, a case named as a type PHP# reserves, since each
 /// case runs as a class of its name, and a method named as a case that carries data, ignoring case as PHP does, since
 /// `PaymentResult.Paid(…)` creates that case.
 fn check_case_class_names(r#enum: &mago_syntax::cst::Enum, context: &mut Context<'_, '_, '_>) {
-    if !r#enum.has_data_case() {
+    if !r#enum.runs_as_classes() {
         return;
     }
 
@@ -5973,7 +6020,7 @@ fn check_case_class_names(r#enum: &mago_syntax::cst::Enum, context: &mut Context
         if is_reserved_class_name(name.value) {
             context.report(
                 Issue::error(format!(
-                    "A case of an enum whose cases carry data is a class, so it can't be named `{}`.",
+                    "A case of an enum whose cases carry data or type arguments is a class, so it can't be named `{}`.",
                     BytesDisplay(name.value)
                 ))
                 .with_annotation(Annotation::primary(name.span).with_message("Case declared here."))

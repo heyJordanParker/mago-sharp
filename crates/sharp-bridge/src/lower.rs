@@ -104,6 +104,7 @@ use mago_syntax::cst::Operator;
 use mago_syntax::cst::PartialArgument;
 use mago_syntax::cst::PartialArgumentList;
 use mago_syntax::cst::PositionalArgument;
+use mago_syntax::cst::Propagate;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::PropertyBehaviorList;
@@ -681,7 +682,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 statements.push(self.interface(interface));
                 statements.extend(self.defaults(interface));
             }
-            Statement::Enum(r#enum) if r#enum.has_data_case() => self.data_enum(r#enum, statements),
+            Statement::Enum(r#enum) if r#enum.runs_as_classes() => self.data_enum(r#enum, statements),
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
             Statement::Event(event) => statements.push(self.event(event)),
             Statement::Struct(r#struct) => statements.push(self.r#struct(r#struct)),
@@ -856,7 +857,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.extend(self.test_hooks(class));
         }
         members.extend(self.generic_statics(&class.name, &class.members));
-        members.extend(self.class_metadata(self.line(class.name)));
+        members.extend(self.class_metadata(self.class, self.line(class.name)));
         members.splice(0..0, self.trait_members(class.inheritance.as_ref(), class.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
         let attributes = self.attributes(&class.attribute_lists, None, None);
@@ -894,7 +895,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
         members.extend(self.generic_statics(&r#struct.name, &r#struct.members));
-        members.extend(self.class_metadata(self.line(r#struct.name.span)));
+        members.extend(self.class_metadata(self.class, self.line(r#struct.name.span)));
         members.splice(0..0, self.trait_members(r#struct.inheritance.as_ref(), r#struct.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
         let attributes = self.attributes(&r#struct.attribute_lists, None, None);
@@ -1795,7 +1796,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return None;
         }
 
-        let defaults = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &fields);
+        Some(self.statics_property(line, &fields))
+    }
+
+    /// The hidden static of [`Self::statics_store`], with `fields`, each an array element of a field's initial value
+    /// under its name, as its defaults.
+    fn statics_property(&mut self, line: u32, fields: &[u32]) -> u32 {
+        let defaults = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, fields);
         let empty = self.string(0, line, b"");
         let defaults = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[defaults, empty]);
         let store = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[defaults]);
@@ -1803,12 +1810,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, store, NULL, NULL]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
 
-        Some(self.node(
+        self.node(
             SHARP_AST_PROP_GROUP,
             ZEND_ACC_PUBLIC | ZEND_ACC_STATIC | ZEND_ACC_SHARP_HIDDEN,
             line,
             &[NULL, declaration, NULL],
-        ))
+        )
     }
 
     /// The hidden static method of a generic PHP# class or struct named `name` with `members` that runs each initial
@@ -1911,21 +1918,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_SHARP_TYPE_OF, ZEND_SHARP_TYPE_OF_LIST, line, &[text])
     }
 
-    /// The metadata of the PHP# class-like being lowered, which the engine keeps with the class: the type arguments its
+    /// The metadata of the PHP# class-like `class`, which the engine keeps with the class: the type arguments its
     /// header gives each generic parent and interface, the bounds of its type parameters, and their variance, each a
     /// text or null when it has none. None when it has neither a header nor bounds. A generic class also declares from
     /// it the hidden slot that holds each object's type arguments, which start as its bounds.
-    fn class_metadata(&mut self, line: u32) -> Option<u32> {
-        let header = self.types.header(self.class);
-        let bounds = self.types.bounds(self.class);
+    fn class_metadata(&mut self, class: &[u8], line: u32) -> Option<u32> {
+        let header = self.types.header(class);
+        let bounds = self.types.bounds(class);
         if header.is_none() && bounds.is_none() {
             return None;
         }
 
         let header = header.map_or(NULL, |header| self.string(0, line, header.as_bytes()));
         let bounds = bounds.map_or(NULL, |bounds| self.string(0, line, bounds.as_bytes()));
-        let variance =
-            self.types.variance(self.class).map_or(NULL, |variance| self.string(0, line, variance.as_bytes()));
+        let variance = self.types.variance(class).map_or(NULL, |variance| self.string(0, line, variance.as_bytes()));
 
         Some(self.node(SHARP_AST_SHARP_CLASS_METADATA, 0, line, &[header, bounds, variance]))
     }
@@ -1989,7 +1995,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.push(self.signature(method));
         }
 
-        members.extend(self.class_metadata(self.line(interface.name)));
+        members.extend(self.class_metadata(self.class, self.line(interface.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);
         let header = interface.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
 
@@ -2135,10 +2141,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// and in a class that gets the body, `body`, `public mixed $designKey { get => $this->{'designKey@App\HasDesign'}(); }`,
     /// which runs the trait's method that holds it. Its PHP type is `mixed`, since the class's file has no type to
     /// write, so an override, or a plain PHP class, writes the property with its own type, as a `get` hook narrows it,
-    /// and the trait's method checks the value the body gives.
+    /// and the trait's method checks the value the body gives. Its type text, [`Lowering::property_hint`], tells the
+    /// engine that an enum may hold it, spec section 31.
     fn defaulted_property(&mut self, name: &[u8], span: Span, body: u32) -> u32 {
         let line = self.line(span);
-        let hint = self.php_type(&PhpType::Mixed, line);
+        let mixed = self.php_type(&PhpType::Mixed, line);
+        let hint = self.property_hint(mixed, name, line);
         let name = self.string(0, line, name);
         let hook = self.hook(b"get", span, span, NULL, body);
         let hooks = self.node(SHARP_AST_STMT_LIST, 0, line, &[hook]);
@@ -2157,7 +2165,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(&event.parameter_list);
         let mut members = self.trait_members(event.inheritance.as_ref(), event.parameter_list.span());
         members.push(self.promoted_constructor(event.name.span, &event.parameter_list));
-        members.extend(self.class_metadata(self.line(event.name)));
+        members.extend(self.class_metadata(self.class, self.line(event.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
         let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
 
@@ -2219,10 +2227,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.method(method, modifier_flags_or_private(&method.modifiers), &[])
                 }
                 ClassLikeMember::Constant(constant) => self.constant(constant),
+                ClassLikeMember::Property(property) if runs_static_accessors(property) => {
+                    members.extend(self.static_accessors(property, None));
+
+                    continue;
+                }
+                ClassLikeMember::Property(property @ Property::Computed(_)) => self.property(property, None),
                 ClassLikeMember::EnumCase(_) | ClassLikeMember::Law(_) => continue,
                 _ => unreachable!("check_slice refuses the enum member `{member}`"),
             });
         }
+        members.extend(self.class_metadata(self.class, self.line(r#enum.name)));
         let cases: Vec<Vec<u8>> = r#enum
             .members
             .iter()
@@ -2253,10 +2268,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             };
             let name = case.item.name();
             let line = self.line(name.span);
-            let members = match &case.item {
+            let case_class = [enum_name, b"\\", name.value].concat();
+            let mut members = match &case.item {
                 EnumCaseItem::Data(item) => vec![self.promoted_constructor(name.span, &item.parameter_list)],
-                EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => self.case_object(name.span),
+                EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => self.case_object(&case_class, name.span),
             };
+            // A case of a generic enum passes its type arguments to the enum, as `Ok<T, TError>` to `Result<T, TError>`.
+            members.extend(self.class_metadata(&case_class, line));
             let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
             let marker = self.string(ZEND_NAME_FQ, line, b"Sharp\\Struct");
             let header = self.node(SHARP_AST_NAME_LIST, 0, line, &[marker]);
@@ -2275,17 +2293,53 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
     }
 
-    /// The members of the class of a plain case of an enum with a case that carries data, at `name`: the private
-    /// static property `instance`, a private constructor, and the public static `instance()`, which makes the case's
-    /// one object on the first call and gives it.
-    fn case_object(&mut self, name: Span) -> Vec<u32> {
+    /// The members of the class `class` of a plain case of an enum that runs as classes, at `name`: the private static
+    /// property `instance`, a private constructor, and the public static `instance()`, which makes the case's one
+    /// object on the first call and gives it. A case of a generic enum has one object for each list of type arguments,
+    /// spec section 31, which it keeps as a static field of its own, spec section 11: `instance()` takes them as its
+    /// leading own type arguments, as any static method of a generic class does, and makes the object with them,
+    /// `\Sharp\Internal\statics(Case::class, '#0')['instance'] ??= new self<#0>()`.
+    fn case_object(&mut self, class: &[u8], name: Span) -> Vec<u32> {
         self.enter(b"instance");
         let line = self.line(name);
-        let property_name = self.string(0, line, b"instance");
-        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[property_name, NULL, NULL, NULL]);
-        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
-        let property =
-            self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PRIVATE | ZEND_ACC_STATIC, line, &[NULL, declaration, NULL]);
+        let type_arguments = self
+            .types
+            .static_type_parameters(class)
+            .map(|count| (0..count).map(|index| format!("#{index}")).collect::<Vec<_>>().join(", "));
+        let (property, instance) = match &type_arguments {
+            Some(type_arguments) => {
+                let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+                let property_name = self.string(0, line, b"instance");
+                let field = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[null, property_name]);
+                let property = self.statics_property(line, &[field]);
+
+                let declaring = self.string(ZEND_NAME_FQ, line, class);
+                let declaring = self.node(SHARP_AST_CLASS_NAME, 0, line, &[declaring]);
+                let text = self.type_text(line, type_arguments);
+                let key = self.node(SHARP_AST_SHARP_TYPE_OF, ZEND_SHARP_TYPE_OF_LIST, line, &[text]);
+                let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\statics");
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[declaring, key]);
+                let entry = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+                let property_name = self.string(0, line, b"instance");
+
+                (property, self.node(SHARP_AST_DIM, 0, line, &[entry, property_name]))
+            }
+            None => {
+                let property_name = self.string(0, line, b"instance");
+                let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[property_name, NULL, NULL, NULL]);
+                let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+                let property = self.node(
+                    SHARP_AST_PROP_GROUP,
+                    ZEND_ACC_PRIVATE | ZEND_ACC_STATIC,
+                    line,
+                    &[NULL, declaration, NULL],
+                );
+                let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+                let property_name = self.string(0, line, b"instance");
+
+                (property, self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, property_name]))
+            }
+        };
 
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
@@ -2298,16 +2352,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             &[parameters, NULL, body, NULL, NULL],
         );
 
-        let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
-        let property_name = self.string(0, line, b"instance");
-        let instance = self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, property_name]);
+        let metadata = self.types.method_metadata(class, b"instance");
         let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
         let object = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+        let object = self.with_type_arguments(line, object, type_arguments);
         let made = self.node(SHARP_AST_ASSIGN_COALESCE, 0, line, &[instance, object]);
         let returned = self.node(SHARP_AST_RETURN, 0, line, &[made]);
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[returned]);
-        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        // A generic case's `instance()` receives its class's type arguments, as any static method of a generic class.
+        let metadata: Vec<u32> = self.parameter_metadata(metadata, line).into_iter().collect();
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &metadata);
         let return_type = self.string(ZEND_NAME_NOT_FQ, line, b"self");
         let instance = self.declaration(
             SHARP_AST_METHOD,
@@ -2335,11 +2390,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 ClassLikeMember::EnumCase(case) => self.enum_case(case),
                 ClassLikeMember::Constant(constant) => self.constant(constant),
+                ClassLikeMember::Property(property) if runs_static_accessors(property) => {
+                    members.extend(self.static_accessors(property, None));
+
+                    continue;
+                }
+                // Spec section 31: a computed property has no storage, which a PHP# enum's property may lack.
+                ClassLikeMember::Property(property @ Property::Computed(_)) => self.property(property, None),
                 _ => unreachable!("check_slice refuses the enum member `{member}`"),
             });
         }
 
-        members.extend(self.class_metadata(self.line(r#enum.name)));
+        members.extend(self.class_metadata(self.class, self.line(r#enum.name)));
         members.splice(0..0, self.trait_members(r#enum.inheritance.as_ref(), r#enum.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
         let attributes = self.attributes(&r#enum.attribute_lists, None, None);
@@ -4952,6 +5014,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // Spec section 14.4: the engine compiles the statement of `a ?? return`, `continue` or `break` in the
             // middle of the expression, after the ZEND_SHARP_LEAVE that frees what the expression holds.
             Expression::Leave(Leave::Return(r#return)) => self.r#return(r#return),
+            Expression::Propagate(propagate) => self.propagate(expression, propagate),
             Expression::Leave(Leave::Continue(_)) => self.node(SHARP_AST_CONTINUE, 0, line, &[NULL]),
             Expression::Leave(Leave::Break(_)) => self.node(SHARP_AST_BREAK, 0, line, &[NULL]),
             Expression::CompositeString(CompositeString::Interpolated(template)) => self.template(template),
@@ -4989,7 +5052,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let case = self.types.member_declaration(classes[0], name.value);
             let case_class = self.string(ZEND_NAME_FQ, line, case.class.as_bytes());
             let instance = self.string(0, line, case.name.as_bytes());
-            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+            // A plain case of a generic enum is the object of the type arguments the read gives it, spec section 31.
+            let type_arguments = self.types.statics_type_arguments(read);
+            let type_arguments: Vec<u32> =
+                type_arguments.iter().map(|text| self.type_arguments_argument(line, text)).collect();
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &type_arguments);
 
             return self.node(SHARP_AST_STATIC_CALL, 0, line, &[case_class, instance, arguments]);
         }
@@ -5207,17 +5274,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `lhs == rhs`, or `lhs != rhs` when `negated`, as spec section 19 compares a value of `lhs`'s type with one of
-    /// `rhs`'s: an unchecked `Any?` with a value [`compares_unchecked`] names, spec section 24, and two class values by
-    /// their whole type, as C# compares two `Type`s, through `\Sharp\Internal\equals`, the `op_Equality` the class of an
-    /// instance side declares, which lifts a null side itself, an int and a float as two floats, and `===` otherwise.
-    /// `== null` tests for null and runs no operator. A collection search compares each element with its value through
-    /// it, so a search never compares differently from `==`.
+    /// `rhs`'s: an unchecked `Any?` with a value [`compares_unchecked`] names, spec section 24, two class values by
+    /// their whole type, as C# compares two `Type`s, and a value of a type parameter by its type argument's `==`, spec
+    /// section 31, through `\Sharp\Internal\equals`, the `op_Equality` the class of an instance side declares, which
+    /// lifts a null side itself, an int and a float as two floats, and `===` otherwise. `== null` tests for null and runs
+    /// no operator. A collection search compares each element with its value through it, so a search never compares
+    /// differently from `==`.
     fn equality(&mut self, line: u32, lhs: Side, rhs: Side, negated: bool) -> u32 {
         let (lhs_type, rhs_type) = (self.side_type(&lhs), self.side_type(&rhs));
         if compares_unchecked(lhs_type, rhs_type)
             || compares_unchecked(rhs_type, lhs_type)
-            || holds_class_value(lhs_type)
-            || holds_class_value(rhs_type)
+            || [lhs_type, rhs_type].into_iter().any(|r#type| holds_class_value(r#type) || holds_type_parameter(r#type))
         {
             let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\equals");
             let lhs = self.side(&lhs);
@@ -5826,6 +5893,40 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 _ => return None,
             };
         }
+    }
+
+    /// `try result`, spec section 31, as `($try#N = result) instanceof \Sharp\Result\Err ? return new
+    /// \Sharp\Result\Err($try#N->error) : $try#N->value`. The returned `Err` holds the same error with the type arguments
+    /// of the function's `Result`, which the checker recorded at `expression`, and the engine compiles the `return` in
+    /// the conditional as a leave, which frees what the expression holds.
+    fn propagate(&mut self, expression: &Expression, propagate: &Propagate) -> u32 {
+        const ERR: &[u8] = b"Sharp\\Result\\Err";
+
+        let line = self.line(expression);
+        self.temporaries += 1;
+        let name = format!("try#{}", self.temporaries).into_bytes();
+        let variable = self.variable(propagate.value.span(), &name);
+        let value = self.expression(propagate.value);
+        let held = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, value]);
+        let class = self.string(ZEND_NAME_FQ, line, ERR);
+        let failed = self.node(SHARP_AST_INSTANCEOF, 0, line, &[held, class]);
+
+        let variable = self.variable(propagate.value.span(), &name);
+        let property = self.string(0, line, b"error");
+        let error = self.node(SHARP_AST_PROP, 0, line, &[variable, property]);
+        let class = self.string(ZEND_NAME_FQ, line, ERR);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[error]);
+        let new = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+        let type_arguments = self.types.type_arguments(ERR, expression.span());
+        let new = self.with_type_arguments(line, new, type_arguments);
+        let returned = self.node(SHARP_AST_RETURN, 0, line, &[new]);
+
+        let variable = self.variable(propagate.value.span(), &name);
+        let property = self.string(0, line, b"value");
+        let value = self.node(SHARP_AST_PROP, 0, line, &[variable, property]);
+        self.temporaries -= 1;
+
+        self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[failed, returned, value])
     }
 
     /// A chain whose `untested` null-safe link PHP's `?->` cannot write, as
@@ -6914,15 +7015,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if let Some(inlined) = self.inlined_call(expression, call) {
             return inlined;
         }
-        // Spec section 20: `PaymentResult.Paid(…)` creates the case, an object of its class.
+        // Spec section 20: `PaymentResult.Paid(…)` creates the case, an object of its class, and a case of a generic
+        // enum gets the type arguments the call fixed, spec section 31.
         if let Some(class) = self.names.static_call_class(call)
             && let ClassLikeMemberSelector::Identifier(method) = &call.method
             && let Some(case) = self.types.enum_case_class(self.names.get(&class.name), method.value)
         {
             let name = self.string(ZEND_NAME_FQ, self.line(method), case.as_bytes());
             let arguments = self.arguments(&call.argument_list);
+            let new = self.node(SHARP_AST_NEW, 0, self.line(call), &[name, arguments]);
+            let type_arguments = self.types.call_type_arguments(expression);
 
-            return self.node(SHARP_AST_NEW, 0, self.line(call), &[name, arguments]);
+            return self.with_type_arguments(self.line(call), new, type_arguments);
         }
 
         let line = self.line(call);
@@ -7923,6 +8027,11 @@ fn mixes_numbers(lhs: &TUnion, rhs: &TUnion) -> bool {
 /// Whether a value of `union` may be a class value, which `==` compares by its whole type, type arguments included.
 fn holds_class_value(union: &TUnion) -> bool {
     union.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
+}
+
+/// Whether a value of `union` may be a value of a type parameter, whose own `==` only the running code knows.
+fn holds_type_parameter(union: &TUnion) -> bool {
+    union.types.iter().any(|atomic| matches!(atomic, TAtomic::GenericParameter(_)))
 }
 
 /// Whether `==` on an unchecked `Any?` of `any` and a value of `other` needs the engine's `==`, spec section 24: a

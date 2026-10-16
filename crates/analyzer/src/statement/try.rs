@@ -613,6 +613,22 @@ where
             continue;
         }
 
+        // Spec section 31: in PHP# `Error` names the interface of the failures a method returns, which nothing throws.
+        if context.dialect.is_sharp() && caught_type.as_bytes().eq_ignore_ascii_case(b"Sharp\\Error") {
+            context.collector.report_with_code(
+                IssueCode::InvalidCatchType,
+                Issue::error("`Error` is PHP#'s interface of the failures a method returns, and no exception is one.")
+                    .with_annotation(Annotation::primary(caught_span).with_message("Caught here."))
+                    .with_help(
+                        "Catch a bug as `Throwable`, and read an expected failure from the `Result` it returns.",
+                    ),
+            );
+            // Its error is the clause's, so the clause's flow reads it as `Throwable`.
+            caught_classes.insert(throwable);
+
+            continue;
+        }
+
         let Some(class_like_metadata) = context.codebase.get_class_like(caught_type.as_bytes()) else {
             context.collector.report_with_code(
                 IssueCode::NonExistentCatchType,

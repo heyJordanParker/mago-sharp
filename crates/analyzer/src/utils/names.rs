@@ -561,7 +561,25 @@ where
                 Some(parameters) if !parameters.is_empty() => {
                     let parameters: Vec<String> =
                         parameters.iter().map(|parameter| display_sharp_type(context, parameter)).collect();
-                    format!("{readonly}{name}<{}>", parameters.join(", "))
+                    // Spec section 31: a case of a generic enum writes the enum's type arguments, as in
+                    // `Result<Order, PaymentError>.Ok`.
+                    let case_of = object
+                        .get_name()
+                        .and_then(|name| context.codebase.get_class_like(name.as_bytes()))
+                        .and_then(|class| class.direct_parent_class.filter(|_| class.flags.is_enum_case_class()));
+                    match case_of {
+                        Some(r#enum) => format!(
+                            "{readonly}{}<{}>.{name}",
+                            sharp_class_like_name(
+                                context.codebase,
+                                &context.imported_names,
+                                &context.short_name_counts,
+                                r#enum
+                            ),
+                            parameters.join(", ")
+                        ),
+                        None => format!("{readonly}{name}<{}>", parameters.join(", ")),
+                    }
                 }
                 _ => format!("{readonly}{name}"),
             }

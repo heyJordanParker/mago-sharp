@@ -475,9 +475,14 @@ where
                             Some(comma) => comma.span_for(fields.left_parenthesis.file_id),
                             None => fields.left_parenthesis,
                         };
-                        let name =
-                            LocalIdentifier { span: start_of(field.span()), value: self.arena.alloc_slice_copy(name) };
-                        let field_test = self.member_test(target, name, field, follows)?;
+                        // A field is named at no token of its own, so its name is the `,` or `)` that ends it. Its read
+                        // spans the field and that token, which no read of the object or test inside the field spans.
+                        let ends = match fields.fields.tokens.get(index) {
+                            Some(comma) => comma.span_for(fields.left_parenthesis.file_id),
+                            None => fields.right_parenthesis,
+                        };
+                        let name = LocalIdentifier { span: ends, value: self.arena.alloc_slice_copy(name) };
+                        let field_test = self.member_test(target, field.span(), name, field, follows)?;
 
                         test = self.binary(test, BinaryOperator::And(start_of(field.span())), field_test);
                     }
@@ -650,7 +655,8 @@ where
         subject: &mut Subject<'arena>,
     ) -> Option<&'arena Expression<'arena>> {
         for property in properties.properties.iter() {
-            let property_test = self.member_test(subject, property.name, property.pattern, property.colon)?;
+            let property_test =
+                self.member_test(subject, property.name.span, property.name, property.pattern, property.colon)?;
 
             test = self.binary(test, BinaryOperator::And(start_of(property.name.span)), property_test);
         }
@@ -659,15 +665,18 @@ where
     }
 
     /// The test of the property `name` of the object `subject` holds against `pattern`, which follows the token at
-    /// `follows`, reading the property once.
+    /// `follows`, reading the property once. The object is read at the start of `at`, which comes before the end of
+    /// `name`, so the read of the property spans more than the read of the object: the analyzer keeps one type per
+    /// span, and the object keeps its own.
     fn member_test(
         &mut self,
         subject: &mut Subject<'arena>,
+        at: Span,
         name: LocalIdentifier<'arena>,
         pattern: &'arena Pattern<'arena>,
         follows: Span,
     ) -> Option<&'arena Expression<'arena>> {
-        let object = self.read(subject, name.span);
+        let object = self.read(subject, at);
         let value = self.alloc(Expression::Access(Access::Property(PropertyAccess {
             object,
             arrow: start_of(name.span),

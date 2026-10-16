@@ -417,6 +417,7 @@ where
         Expression::Leave(Leave::Return(r#return)) => {
             r#return.value.map(|value| find_method_references_in_expression(value, predicate)).unwrap_or_default()
         }
+        Expression::Propagate(propagate) => find_method_references_in_expression(propagate.value, predicate),
         Expression::Clone(clone) => find_method_references_in_expression(clone.object, predicate),
         Expression::Call(call) => match call {
             Call::Function(FunctionCall { function, argument_list })
