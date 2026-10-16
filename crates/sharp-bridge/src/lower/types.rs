@@ -721,27 +721,25 @@ impl<'analysis> Types<'analysis> {
     /// `App\Source::read`, and the engine's collection method given a function value, which stores what the function
     /// returns, as `map` of `numbers.map(f)`.
     fn unchecked_result_call(&self, call: &Expression) -> Option<String> {
+        let Expression::Call(invocation) = call else {
+            return None;
+        };
         if let Some(function) = self.function_value_name(call) {
             return Some(function);
         }
-        let callee = self.artifacts.get_callees(call).find_map(|target| match target {
-            CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(..), .. } => Some(callee),
+        let (callee, class) = self.artifacts.get_callees(call).find_map(|target| match target {
+            CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, _), .. } => {
+                Some((callee, class))
+            }
             _ => None,
         })?;
-        let FunctionLikeIdentifier::Method(class, _) = callee else {
-            return None;
-        };
         let class = self.codebase.get_class_like(class.as_bytes())?;
         let method = self.codebase.get_function_like(callee)?;
         if class.flags.is_sharp() && class.kind.is_interface() {
             return Some(format!("{}::{}", class.original_name, method.original_name));
         }
         let takes_function_value = || {
-            let Expression::Call(collection_call) = call else {
-                return false;
-            };
-
-            collection_call.get_argument_list().arguments.iter().any(|argument| {
+            invocation.get_argument_list().arguments.iter().any(|argument| {
                 !matches!(argument.value(), Expression::ArrowFunction(_) | Expression::Closure(_))
                     && self
                         .artifacts
