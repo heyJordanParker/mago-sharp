@@ -107,6 +107,10 @@ pub trait PatternNames {
     /// `span` names, in the order the case declares them, none for a plain case. None when the name is no such case.
     /// The binder resolves a case pattern's type at its start, and a value pattern `Enum.Case` at `Case`.
     fn case_fields(&self, span: Span) -> Option<std::vec::Vec<std::vec::Vec<u8>>>;
+
+    /// Whether the tested index `access` reads a missing key as null, as a `Map` index does (spec section 12). A
+    /// `List` index is read bare, and throws on a missing index.
+    fn reads_quietly(&self, access: &ArrayAccess<'_>) -> bool;
 }
 
 /// Builds, in `arena`, the PHP a PHP# `is`, `as` or `match` runs as.
@@ -744,9 +748,10 @@ where
         Subject { first: Some(assignment), variable: Some(name) }
     }
 
-    /// The PHP that reads a tested value: `x[k] ?? null` for an index, and the value itself otherwise.
+    /// The PHP that reads a tested value: `x[k] ?? null` for an index that reads a missing key as null, and the value
+    /// itself otherwise.
     fn tested(&self, value: &'arena Expression<'arena>) -> &'arena Expression<'arena> {
-        if !matches!(value.unparenthesized(), Expression::ArrayAccess(_)) {
+        if !matches!(value.unparenthesized(), Expression::ArrayAccess(access) if self.names.reads_quietly(access)) {
             return value;
         }
 

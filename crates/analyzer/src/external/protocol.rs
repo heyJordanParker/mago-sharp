@@ -2763,7 +2763,7 @@ fn decode_complete_atomic(reader: &mut PayloadReader<'_>, depth: usize) -> Resul
             let key_type = Arc::new(decode_complete_union(reader, depth + 1)?);
             let value_type = Arc::new(decode_complete_union(reader, depth + 1)?);
             let intersection_types = decode_optional_complete_atomics(reader, depth + 1)?;
-            TAtomic::Iterable(TIterable { key_type, value_type, intersection_types })
+            TAtomic::Iterable(TIterable { key_type, value_type, intersection_types, holds_map_entries: false })
         }
         SNAPSHOT_RESOURCE => TAtomic::Resource(TResource::new(match reader.read_u8("resource state")? {
             0 => None,
@@ -3073,7 +3073,7 @@ fn decode_complete_array(reader: &mut PayloadReader<'_>, depth: usize) -> Result
             };
 
             let non_empty = reader.read_bool("list non-empty flag")?;
-            TArray::List(TList { element_type, known_elements, known_count, non_empty })
+            TArray::List(TList { element_type, known_elements, known_count, non_empty, tuple_names: None })
         }
         2 => {
             let known_items = if reader.read_bool("known array items presence")? {
@@ -3532,6 +3532,38 @@ pub(super) mod testing {
 
         assert_eq!(types.len(), 73);
         assert!(!writer.finish().is_empty(), "expected an encoded payload");
+    }
+
+    /// An external analyzer speaks PHP's types, so an iterable it sends back is PHP's `iterable`, which reads a keyed
+    /// array by its values, and never PHP#'s `Iterable<T>`, which holds a `Map` by its entries.
+    #[test]
+    fn an_iterable_comes_back_as_phps_iterable() {
+        let mut writer = PayloadWriter::new();
+        writer.write_u16(0);
+        writer.write_u32(1);
+        writer.write_u8(SNAPSHOT_ITERABLE);
+        for part in [SNAPSHOT_MIXED, SNAPSHOT_SCALAR] {
+            writer.write_u16(0);
+            writer.write_u32(1);
+            writer.write_u8(part);
+            // A mixed of no flags and no truthiness, and the generic scalar.
+            if part == SNAPSHOT_MIXED {
+                writer.write_u8(0);
+                writer.write_u8(0);
+            } else {
+                writer.write_u8(1);
+            }
+        }
+        writer.write_bool(false);
+        let payload = writer.finish();
+
+        let union = decode_complete_union(&mut PayloadReader::new(&payload), 0).unwrap();
+
+        assert!(
+            matches!(union.types.as_ref(), [TAtomic::Iterable(TIterable { holds_map_entries: false, .. })]),
+            "{union:?}"
+        );
+        assert_eq!(union.get_id().to_string(), "iterable<mixed, scalar>");
     }
 
     /// A class-like string of one type goes as that type and comes back so. The SDK's class-like string holds one

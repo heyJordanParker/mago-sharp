@@ -208,8 +208,8 @@ enum NodeKind: string
     case ForBody = 'ForBody';
     case ForColonDelimitedBody = 'ForColonDelimitedBody';
     case ForOf = 'ForOf';
-    case ForOfKeyValueTarget = 'ForOfKeyValueTarget';
     case ForOfTarget = 'ForOfTarget';
+    case ForOfUnpackTarget = 'ForOfUnpackTarget';
     case ForOfVariable = 'ForOfVariable';
     case While = 'While';
     case WhileBody = 'WhileBody';
@@ -247,6 +247,7 @@ enum NodeKind: string
     case Yield = 'Yield';
     case YieldFrom = 'YieldFrom';
     case YieldPair = 'YieldPair';
+    case YieldSpread = 'YieldSpread';
     case YieldValue = 'YieldValue';
     case Statement = 'Statement';
     case ExpressionStatement = 'ExpressionStatement';
@@ -269,6 +270,8 @@ enum NodeKind: string
     case NullableHint = 'NullableHint';
     case GenericHint = 'GenericHint';
     case FunctionHint = 'FunctionHint';
+    case TupleHint = 'TupleHint';
+    case TupleElementHint = 'TupleElementHint';
     case ReadonlyHint = 'ReadonlyHint';
     case TypeArgumentList = 'TypeArgumentList';
     case TypeParameterList = 'TypeParameterList';
@@ -278,6 +281,8 @@ enum NodeKind: string
     case UnionHint = 'UnionHint';
     case Unset = 'Unset';
     case LocalDeclaration = 'LocalDeclaration';
+    case LocalTarget = 'LocalTarget';
+    case LocalUnpack = 'LocalUnpack';
     case Is = 'Is';
     case As = 'As';
     case Pattern = 'Pattern';

@@ -15,6 +15,7 @@ use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
@@ -45,6 +46,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Variable;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
@@ -250,6 +252,23 @@ where
             TAtomic::Callable(callable) if callable.is_closure() => {
                 closure_object = TObject::new_named(word("Closure"));
                 &closure_object
+            }
+            TAtomic::Array(TArray::List(list))
+                if let Some(elements) = list.tuple_elements()
+                    && let ClassLikeMemberSelector::Identifier(name) = property_selector =>
+            {
+                // A refused read gives no type, so its later uses report nothing again.
+                let element = resolve_tuple_element(context, object_atomic, &elements, name, for_assignment);
+                result.properties.push(ResolvedProperty {
+                    property_span: None,
+                    property_name: concat_word!("$", name.value),
+                    declaring_class_id: None,
+                    property_type: element.cloned().unwrap_or_else(|| wrap_atomic(TAtomic::Error)),
+                    is_magic: false,
+                    read_type: None,
+                });
+
+                continue;
             }
             _ => {
                 result.has_invalid_path = true;
@@ -1925,6 +1944,50 @@ fn report_access_on_non_object<A>(
                 Annotation::secondary(object_span).with_message(format!("This expression has type `{type_str}`")),
             ),
     );
+}
+
+/// The type of the element of the tuple `tuple`, whose `elements` it has, that `name` names, spec section 30, which reads
+/// a named element as C# does. A name the tuple does not write, and a write, which a tuple never takes, are errors, and
+/// give `None`.
+fn resolve_tuple_element<'tuple, A>(
+    context: &mut Context<'_, '_, A>,
+    tuple: &TAtomic,
+    elements: &[(&'tuple TUnion, Option<Word>)],
+    name: &LocalIdentifier,
+    for_assignment: bool,
+) -> Option<&'tuple TUnion>
+where
+    A: Arena,
+{
+    let written = display_atomic(context, tuple);
+    let named = elements.iter().find(|(_, element)| element.is_some_and(|element| element.as_bytes() == name.value));
+    let issue = match named {
+        Some(_) if for_assignment => Issue::error(format!(
+            "`{written}` never changes: build a new tuple instead of writing `{}`.",
+            String::from_utf8_lossy(name.value)
+        ))
+        .with_annotation(Annotation::primary(name.span).with_message("Written here.")),
+        Some((element, _)) => return Some(element),
+        None => {
+            let written_names: Vec<String> =
+                elements.iter().filter_map(|(_, name)| name.map(|name| format!("`{name}`"))).collect();
+            let elements = match written_names.as_slice() {
+                [] => "its elements have no names, so unpack it, as in `const [first, second] = …;`".to_owned(),
+                [only] => format!("its one named element is {only}"),
+                [first @ .., last] => format!("its elements are {} and {last}", first.join(", ")),
+            };
+
+            Issue::error(format!(
+                "`{written}` has no element named `{}`: {elements}.",
+                String::from_utf8_lossy(name.value)
+            ))
+            .with_annotation(Annotation::primary(name.span).with_message("Read here."))
+        }
+    };
+    let code = if for_assignment { IssueCode::InvalidPropertyWrite } else { IssueCode::NonExistentProperty };
+    context.collector.report_with_code(code, issue);
+
+    None
 }
 
 fn report_ambiguous_access<A>(

@@ -55,6 +55,7 @@ use crate::utils::names::display_atomic;
 use crate::utils::names::display_bool;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
+use crate::utils::quoted_source;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ArrayTarget<'ast, 'arena> {
@@ -437,6 +438,22 @@ where
                 );
 
                 value_type = Some(add_optional_union_type(new_type, value_type.as_ref(), context.codebase));
+            }
+            // Spec section 12: "an `Iterable` has no index". Reading one by index would read its source up to it.
+            TAtomic::Iterable(_) if context.dialect.is_sharp() => {
+                let iterable = quoted_source(context, access_array_span);
+                let type_id = display_atomic(context, atomic_var_type);
+                context.collector.report_with_code(
+                    IssueCode::InvalidArrayAccess,
+                    Issue::error(format!(
+                        "An `Iterable` has no index: loop over `{iterable}`, or read `{iterable}.toList()`."
+                    ))
+                    .with_annotation(
+                        Annotation::primary(access_array_span).with_message(format!("This is an `{type_id}`.")),
+                    ),
+                );
+
+                has_valid_expected_index = true;
             }
             _ => {
                 // String with int index assignment is valid (character replacement),

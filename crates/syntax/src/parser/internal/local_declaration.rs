@@ -4,7 +4,9 @@ use crate::T;
 use crate::cst::cst::Hint;
 use crate::cst::cst::Keyword;
 use crate::cst::cst::LocalDeclaration;
-use crate::cst::cst::LocalIdentifier;
+
+use crate::cst::cst::LocalTarget;
+use crate::cst::cst::LocalUnpack;
 use crate::error::ParseError;
 use crate::parser::Parser;
 use crate::token::Token;
@@ -22,10 +24,14 @@ where
 
         match self.stream.lookahead(0)? {
             Some(token) if token.kind == T!["const"] => Ok(true),
+            // `let [` unpacks a tuple, spec section 30, as in TypeScript.
             Some(token)
                 if token.kind == T![Identifier]
                     && token.value == b"let"
-                    && self.stream.peek_kind(1)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) =>
+                    && self
+                        .stream
+                        .peek_kind(1)?
+                        .is_some_and(|kind| kind.is_identifier_maybe_reserved() || kind == T!["["]) =>
             {
                 Ok(true)
             }
@@ -34,7 +40,8 @@ where
     }
 
     /// Parses a PHP# local: `let` or `const`, then its type when it is written, its name, `=` and its value. A local
-    /// with its type written has no `let`, as in `Money? total = null;`.
+    /// with its type written has no `let`, as in `Money? total = null;`. `let` or `const` before brackets of names
+    /// unpacks a tuple, spec section 30, as in `const [total, count] = summary;`.
     pub(crate) fn parse_local_declaration(&mut self) -> Result<LocalDeclaration<'arena>, ParseError> {
         let keyword = match self.stream.lookahead(0)? {
             Some(token) if token.kind == T!["const"] || token.value == b"let" => Some(self.expect_any_keyword()?),
@@ -43,22 +50,33 @@ where
         let is_let = keyword.as_ref().is_some_and(|keyword| keyword.value == b"let");
         let hint =
             if !is_let && self.is_at_typed_local()? { Some(&*self.arena.alloc(self.parse_type_hint()?)) } else { None };
-        let name = self.parse_local_identifier()?;
+        let target = if keyword.is_some() && hint.is_none() && self.stream.is_at(T!["["])? {
+            LocalTarget::Unpack(self.parse_local_unpack()?)
+        } else {
+            LocalTarget::Name(self.parse_local_identifier()?)
+        };
 
-        self.parse_local_declaration_value(keyword, hint, name)
+        self.parse_local_declaration_value(keyword, hint, target)
     }
 
-    /// Parses what follows a PHP# local's name: `=`, its value and the terminator.
+    /// Parses the names a PHP# local declaration unpacks a tuple into, as in `[total, count]`.
+    fn parse_local_unpack(&mut self) -> Result<LocalUnpack<'arena>, ParseError> {
+        let result = self.parse_comma_separated_sequence(T!["["], T!["]"], Self::parse_local_identifier)?;
+
+        Ok(LocalUnpack { left_bracket: result.open, names: result.sequence, right_bracket: result.close })
+    }
+
+    /// Parses what follows what a PHP# local declares: `=`, its value and the terminator.
     pub(crate) fn parse_local_declaration_value(
         &mut self,
         keyword: Option<Keyword<'arena>>,
         hint: Option<&'arena Hint<'arena>>,
-        name: LocalIdentifier<'arena>,
+        target: LocalTarget<'arena>,
     ) -> Result<LocalDeclaration<'arena>, ParseError> {
         Ok(LocalDeclaration {
             keyword,
             hint,
-            name,
+            target,
             equals: self.stream.eat_span(T!["="])?,
             value: self.parse_expression()?,
             terminator: self.parse_terminator()?,
@@ -77,6 +95,10 @@ where
     fn is_at_typed_local(&mut self) -> Result<bool, ParseError> {
         // Spec section 13: no statement starts with `readonly` and a type but a readonly local, `readonly Order o = …;`.
         if self.is_at_readonly_hint()? {
+            return Ok(true);
+        }
+        // Spec section 30: a tuple type, as in `[Money, int] pair = …;`.
+        if self.is_at_tuple_hint()? {
             return Ok(true);
         }
 

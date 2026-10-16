@@ -40,15 +40,14 @@ impl Visibility {
         matches!(self, Visibility::Private)
     }
 
-    /// The visibility a member's `modifiers` give it: its first `public`, `protected` or `private`. With none, a PHP#
-    /// member of a class, an enum or a struct, `in_sharp_class`, is `private`, spec section 5, unless it is `internal`,
-    /// which runs as PHP's `public`. Any other member with none is `public`, as PHP's is and as a PHP# interface's is.
+    /// The visibility a member's `modifiers` give it: its first `public`, `protected` or `private`, or with none,
+    /// `default`, unless it is `internal`, which runs as PHP's `public`.
     #[must_use]
-    pub(crate) fn of_member(modifiers: &Sequence<'_, Modifier<'_>>, in_sharp_class: bool) -> Self {
+    pub(crate) fn from_modifiers(modifiers: &Sequence<'_, Modifier<'_>>, default: Visibility) -> Self {
         match modifiers.get_first_read_visibility() {
             Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
-            None if in_sharp_class && !modifiers.contains_internal() => Visibility::Private,
-            None => Visibility::Public,
+            None if modifiers.contains_internal() => Visibility::Public,
+            None => default,
         }
     }
 

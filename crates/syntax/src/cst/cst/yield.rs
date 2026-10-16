@@ -26,6 +26,7 @@ pub enum Yield<'arena> {
     Value(YieldValue<'arena>),
     Pair(YieldPair<'arena>),
     From(YieldFrom<'arena>),
+    Spread(YieldSpread<'arena>),
 }
 
 /// Represents a PHP `yield` expression with a value.
@@ -85,12 +86,32 @@ pub struct YieldFrom<'arena> {
     pub iterator: &'arena Expression<'arena>,
 }
 
+/// Represents a PHP# `yield ...` statement, which produces every element of another `Iterable<T>`, as PHP's
+/// `yield from` does.
+///
+/// # Examples
+///
+/// ```text
+/// public Iterable<Order> all()
+/// {
+///     yield ...this.pending;
+/// }
+/// ```
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct YieldSpread<'arena> {
+    pub r#yield: Keyword<'arena>,
+    pub ellipsis: Span,
+    pub iterator: &'arena Expression<'arena>,
+}
+
 impl HasSpan for Yield<'_> {
     fn span(&self) -> Span {
         match self {
             Yield::Value(y) => y.span(),
             Yield::Pair(y) => y.span(),
             Yield::From(y) => y.span(),
+            Yield::Spread(y) => y.span(),
         }
     }
 }
@@ -108,6 +129,12 @@ impl HasSpan for YieldPair<'_> {
 }
 
 impl HasSpan for YieldFrom<'_> {
+    fn span(&self) -> Span {
+        self.r#yield.span().join(self.iterator.span())
+    }
+}
+
+impl HasSpan for YieldSpread<'_> {
     fn span(&self) -> Span {
         self.r#yield.span().join(self.iterator.span())
     }

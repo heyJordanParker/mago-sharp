@@ -148,7 +148,7 @@ where
                     span,
                 ));
             }
-            TAtomic::Iterable(TIterable { key_type, value_type, intersection_types: None })
+            TAtomic::Iterable(TIterable { key_type, value_type, intersection_types: None, .. })
                 if (key_type.is_mixed() || key_type.is_array_key()) && value_type.is_mixed() =>
             {
                 return Some(intersect_iterable(
@@ -1522,7 +1522,13 @@ where
 
     for atomic in new_var_type.types.to_mut().drain(..) {
         match atomic {
-            TAtomic::Array(TArray::List(TList { non_empty, element_type, known_elements, known_count })) => {
+            TAtomic::Array(TArray::List(TList {
+                non_empty,
+                element_type,
+                known_elements,
+                known_count,
+                tuple_names,
+            })) => {
                 if !non_empty {
                     did_remove_type = true;
                 }
@@ -1532,6 +1538,7 @@ where
                     element_type,
                     known_elements,
                     known_count,
+                    tuple_names,
                 })));
             }
             TAtomic::Array(TArray::Keyed(TKeyedArray { non_empty, parameters, known_items, known_non_list })) => {
@@ -1598,7 +1605,14 @@ where
     let mut existing_var_type = existing_var_type.clone();
 
     for atomic in existing_var_types {
-        if let TAtomic::Array(TArray::List(TList { non_empty, known_count, element_type, known_elements })) = atomic {
+        if let TAtomic::Array(TArray::List(TList {
+            non_empty,
+            known_count,
+            element_type,
+            known_elements,
+            tuple_names,
+        })) = atomic
+        {
             let needs_replacement = match known_count {
                 Some(existing_count) => !*non_empty || *existing_count < count,
                 None if exact => true,
@@ -1615,6 +1629,7 @@ where
                         known_elements: known_elements.clone(),
                         known_count: new_known_count,
                         non_empty: true,
+                        tuple_names: tuple_names.clone(),
                     })));
                 }
 

@@ -1215,6 +1215,26 @@ fn a_method_is_a_public_function_with_its_return_type_after_its_parameters() {
 }
 
 /// ```php
+/// private function reserve(): int { return 1; }
+/// private static function make(): int { return 2; }
+/// ```
+///
+/// Spec section 5: a method with no access modifier is `private`, `[4]`, and a static one `[20]`, while PHP makes it
+/// `public`.
+#[test]
+fn a_method_without_an_access_modifier_is_a_private_function() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\npublic class Report\n{\n    int reserve() => 1;\n    static int make() => 2;\n}\n",
+    );
+    let members = lowered.child(lowered.child(lowered.root(), 2), 2);
+
+    assert_eq!(
+        lowered.render(members).lines().filter(|line| line.trim_start().starts_with("METHOD")).collect::<Vec<_>>(),
+        ["  METHOD [4] \"reserve\" @5-5", "  METHOD [20] \"make\" @6-6"]
+    );
+}
+
+/// ```php
 /// private int $count = 0;
 /// protected \Lib\Calc $calc;
 /// public function __construct(\Lib\Calc $calc) { $this->calc = $calc; }
@@ -5573,7 +5593,7 @@ fn a_list_counts_with_php_count_and_a_map_with_its_method() {
 fn every_inlined_collection_method_lowers_to_php_on_the_array() {
     for (collection, method) in INLINED_COLLECTION_METHODS {
         let argument = match method {
-            "remove" | "contains" | "indexOf" => "1",
+            "remove" | "contains" | "indexOf" | "getOrNull" => "1",
             _ => "",
         };
         let body = Lowered::new(&format!(
@@ -5588,6 +5608,45 @@ fn every_inlined_collection_method_lowers_to_php_on_the_array() {
 
         assert_ne!(root, "METHOD_CALL", "{collection}.{method}:\n{body}");
     }
+}
+
+/// ```php
+/// $found = $sizes[$extra] ?? null;
+/// $unique = new \Sharp\Set($sizes);
+/// ```
+///
+/// Spec section 12: `getOrNull(i)` is the safe read, which gives null past either end, and `toSet()` is the `Set` a
+/// literal of the elements makes, each element once.
+#[test]
+fn get_or_null_and_to_set_lower_to_php_on_the_array() {
+    assert_eq!(
+        body_in(
+            "void run(List<int> sizes, int extra)",
+            "        let found = sizes.getOrNull(extra);\n        let unique = sizes.toSet();\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "found"
+                COALESCE
+                  DIM
+                    VAR
+                      ZVAL "sizes"
+                    VAR
+                      ZVAL "extra"
+                  ZVAL null
+              ASSIGN
+                VAR
+                  ZVAL "unique"
+                NEW
+                  ZVAL "Sharp\\Set"
+                  ARG_LIST
+                    VAR
+                      ZVAL "sizes"
+        "#}
+    );
 }
 
 /// ```php
@@ -6776,7 +6835,7 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
 }
 
 /// ```php
-/// $rows[0]?->add(5); // every index before ?-> carries ZEND_DIM_IS
+/// $rows[0]?->add(5);
 /// $maybe[1]?->insert(0, 6);
 /// $this->held[0]?->add(7);
 /// $maybe[0]?->entries();
@@ -6785,22 +6844,21 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
 /// ```
 ///
 /// Spec section 12 makes a `List` index a place, so a change after `?.` on one runs on the index itself, as a change
-/// without `?.` does, and reaches the element the list stores, here a local's, a nullable element's and a hooked
-/// property's. A `List` index read with `?.` is handled where it is read, as a `Map` read is, so `?.` skips a missing
-/// index as it skips a null element. The index carries `ZEND_DIM_IS` on every path, so a missing index reads as null:
-/// a change, a method that changes nothing, and the test an inlined method runs first.
+/// without `?.` does, and reaches the element the list stores, here a local's, a parameter's and a hooked property's.
+/// The index is a bare read on every path, which throws on a missing index, so `?.` skips only a null element: a
+/// change, a method that changes nothing, and the test an inlined method runs first.
 #[test]
 fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
     assert_eq!(
         child_body(
-            "bool? run(List<List<int>> rows, List<List<int>?> maybe)",
+            "bool? run(List<List<int>?> rows, List<List<int>?> maybe)",
             "        rows[0]?.add(5);\n        maybe[1]?.insert(0, 6);\n        this.held[0]?.add(7);\n        maybe[0]?.entries();\n        maybe[2]?.clear();\n        return maybe[3]?.contains(4);\n",
-            "<?php namespace App\\Tenant; class Base { /** @var list<list<int>> */ public array $held = [[1]] { set { $this->held = $value; } } }"
+            "<?php namespace App\\Tenant; class Base { /** @var list<list<int>|null> */ public array $held = [[1]] { set { $this->held = $value; } } }"
         ),
         indoc! {r#"
             STMT_LIST
               NULLSAFE_METHOD_CALL
-                DIM [1]
+                DIM
                   VAR
                     ZVAL "rows"
                   ZVAL 0
@@ -6808,7 +6866,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                 ARG_LIST
                   ZVAL 5
               NULLSAFE_METHOD_CALL
-                DIM [1]
+                DIM
                   VAR
                     ZVAL "maybe"
                   ZVAL 1
@@ -6817,7 +6875,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                   ZVAL 0
                   ZVAL 6
               NULLSAFE_METHOD_CALL
-                DIM [1]
+                DIM
                   PROP
                     VAR
                       ZVAL "this"
@@ -6827,7 +6885,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                 ARG_LIST
                   ZVAL 7
               NULLSAFE_METHOD_CALL
-                DIM [1]
+                DIM
                   VAR
                     ZVAL "maybe"
                   ZVAL 0
@@ -6835,7 +6893,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                 ARG_LIST
               CONDITIONAL [1]
                 BINARY_OP [16]
-                  DIM [1]
+                  DIM
                     VAR
                       ZVAL "maybe"
                     ZVAL 2
@@ -6851,7 +6909,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
               RETURN
                 CONDITIONAL [1]
                   BINARY_OP [16]
-                    DIM [1]
+                    DIM
                       VAR
                         ZVAL "maybe"
                       ZVAL 3
@@ -6866,154 +6924,6 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                           ZVAL "maybe"
                         ZVAL 3
                       ZVAL true
-        "#}
-    );
-}
-
-/// ```php
-/// $cube[9][0]?->add(1); // only [0] carries ZEND_DIM_IS
-/// ($cube[9][0] === null) ? null : $cube[9][0]->clear();
-/// …
-/// ```
-///
-/// Only the index directly before `?.` reads a missing key as null (spec section 12). The indexes before it stay bare
-/// reads, so `cube[9][0]?.add(1)` throws on `cube[9]`, as a bare `cube[9]` does, on every path a method takes.
-#[test]
-fn a_null_safe_call_through_nested_list_indexes_marks_only_the_last() {
-    assert_eq!(
-        body_in(
-            "List<Any?> run(List<List<List<int>>> cube)",
-            "        cube[9][0]?.add(1);\n        cube[9][0]?.clear();\n        cube[9][0]?.remove(1);\n        return [cube[9][0]?.count(), cube[9][0]?.contains(1), cube[9][0]?.entries()];\n",
-            &[]
-        ),
-        indoc! {r#"
-            STMT_LIST
-              NULLSAFE_METHOD_CALL
-                DIM [1]
-                  DIM
-                    VAR
-                      ZVAL "cube"
-                    ZVAL 9
-                  ZVAL 0
-                ZVAL "add"
-                ARG_LIST
-                  ZVAL 1
-              CONDITIONAL [1]
-                BINARY_OP [16]
-                  DIM [1]
-                    DIM
-                      VAR
-                        ZVAL "cube"
-                      ZVAL 9
-                    ZVAL 0
-                  ZVAL null
-                ZVAL null
-                METHOD_CALL
-                  DIM
-                    DIM
-                      VAR
-                        ZVAL "cube"
-                      ZVAL 9
-                    ZVAL 0
-                  ZVAL "clear"
-                  ARG_LIST
-              CONDITIONAL [1]
-                BINARY_OP [16]
-                  DIM [1]
-                    DIM
-                      VAR
-                        ZVAL "cube"
-                      ZVAL 9
-                    ZVAL 0
-                  ZVAL null
-                ZVAL null
-                AND
-                  BINARY_OP [17]
-                    ASSIGN
-                      VAR
-                        ZVAL "index#1"
-                      CALL
-                        ZVAL "array_search"
-                        ARG_LIST
-                          ZVAL 1
-                          DIM
-                            DIM
-                              VAR
-                                ZVAL "cube"
-                              ZVAL 9
-                            ZVAL 0
-                          ZVAL true
-                    ZVAL false
-                  BINARY_OP [16]
-                    METHOD_CALL
-                      DIM
-                        DIM
-                          VAR
-                            ZVAL "cube"
-                          ZVAL 9
-                        ZVAL 0
-                      ZVAL "removeAt"
-                      ARG_LIST
-                        VAR
-                          ZVAL "index#1"
-                    ZVAL null
-              RETURN
-                ARRAY [3]
-                  ARRAY_ELEM
-                    CONDITIONAL [1]
-                      BINARY_OP [16]
-                        DIM [1]
-                          DIM
-                            VAR
-                              ZVAL "cube"
-                            ZVAL 9
-                          ZVAL 0
-                        ZVAL null
-                      ZVAL null
-                      CALL
-                        ZVAL "count"
-                        ARG_LIST
-                          DIM
-                            DIM
-                              VAR
-                                ZVAL "cube"
-                              ZVAL 9
-                            ZVAL 0
-                    null
-                  ARRAY_ELEM
-                    CONDITIONAL [1]
-                      BINARY_OP [16]
-                        DIM [1]
-                          DIM
-                            VAR
-                              ZVAL "cube"
-                            ZVAL 9
-                          ZVAL 0
-                        ZVAL null
-                      ZVAL null
-                      CALL
-                        ZVAL "in_array"
-                        ARG_LIST
-                          ZVAL 1
-                          DIM
-                            DIM
-                              VAR
-                                ZVAL "cube"
-                              ZVAL 9
-                            ZVAL 0
-                          ZVAL true
-                    null
-                  ARRAY_ELEM
-                    NULLSAFE_METHOD_CALL
-                      DIM [1]
-                        DIM
-                          VAR
-                            ZVAL "cube"
-                          ZVAL 9
-                        ZVAL 0
-                      ZVAL "entries"
-                      ARG_LIST
-                    null
         "#}
     );
 }
@@ -7087,6 +6997,191 @@ fn a_write_into_a_map_a_hooked_property_holds_puts_it_through_the_property() {
                   ARG_LIST
                     ZVAL "c"
                     ZVAL 3
+        "#}
+    );
+}
+
+/// ```php
+/// $sizes->set(0, $extra);
+/// $grid[$extra]->set(1, 2);
+/// ```
+///
+/// Spec section 12: `x[i] = v` on a `List` replaces the element at `i`, and throws `OutOfRangeException` past the end,
+/// where PHP's write would append or leave a gap. So it is the engine's `set` on the list, a local or an element of
+/// another `List`.
+#[test]
+fn a_list_index_write_replaces_the_element_through_set() {
+    assert_eq!(
+        body_in(
+            "void run(List<int> sizes, List<List<int>> grid, int extra)",
+            "        sizes[0] = extra;\n        grid[extra][1] = 2;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                VAR
+                  ZVAL "sizes"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 0
+                  VAR
+                    ZVAL "extra"
+              METHOD_CALL
+                DIM
+                  VAR
+                    ZVAL "grid"
+                  VAR
+                    ZVAL "extra"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 1
+                  ZVAL 2
+        "#}
+    );
+}
+
+/// ```php
+/// $sizes->set(${'index#1'} = $this->at(), $sizes[${'index#1'}] + $extra);
+/// $sizes->set(0, $sizes[0] + 1);
+/// $names->set(0, $names[0] . "s");
+/// return ($sizes->set(1, (${'old#1'} = $sizes[1]) - 1)) ? ${'old#1'} : ${'old#1'};
+/// ```
+///
+/// `list[i] op= v`, `++list[i]` and `--list[i]` write what the operator gives on the element, through `set`, which
+/// gives the value it stores, and `+=` on a `List<string>` element joins the strings, spec section 24. An index that
+/// runs something runs once, in a hidden variable. `list[i]++` and `list[i]--` give the element before the write,
+/// which a hidden variable holds, as PHP has no expression that runs one and gives another.
+#[test]
+fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
+    assert_eq!(
+        body_in(
+            "int run(List<int> sizes, int extra, List<string> names)",
+            "        sizes[this.at()] += extra;\n        ++sizes[0];\n        names[0] += \"s\";\n        return sizes[1]--;\n    }\n\n    private int at()\n    {\n        return 0;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                VAR
+                  ZVAL "sizes"
+                ZVAL "set"
+                ARG_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "index#1"
+                    METHOD_CALL
+                      VAR
+                        ZVAL "this"
+                      ZVAL "at"
+                      ARG_LIST
+                  BINARY_OP [1]
+                    DIM
+                      VAR
+                        ZVAL "sizes"
+                      VAR
+                        ZVAL "index#1"
+                    VAR
+                      ZVAL "extra"
+              METHOD_CALL
+                VAR
+                  ZVAL "sizes"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 0
+                  BINARY_OP [1]
+                    DIM
+                      VAR
+                        ZVAL "sizes"
+                      ZVAL 0
+                    ZVAL 1
+              METHOD_CALL
+                VAR
+                  ZVAL "names"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 0
+                  BINARY_OP [8]
+                    DIM
+                      VAR
+                        ZVAL "names"
+                      ZVAL 0
+                    ZVAL "s"
+              RETURN
+                CONDITIONAL [1]
+                  METHOD_CALL
+                    VAR
+                      ZVAL "sizes"
+                    ZVAL "set"
+                    ARG_LIST
+                      ZVAL 1
+                      BINARY_OP [2]
+                        ASSIGN
+                          VAR
+                            ZVAL "old#1"
+                          DIM
+                            VAR
+                              ZVAL "sizes"
+                            ZVAL 1
+                        ZVAL 1
+                  VAR
+                    ZVAL "old#1"
+                  VAR
+                    ZVAL "old#1"
+        "#}
+    );
+}
+
+/// ```php
+/// $this->held->set(0, $extra);
+/// (${'receiver#1'} = $this->me())->held->set(0, ${'receiver#1'}->held[0] * 2);
+/// ```
+///
+/// PHP gives no reference to a hooked property, so a write into the `List` one holds reaches it, and its `set` hook,
+/// only through the engine's collection of the property, as a write into a `Map` there does. An object that runs
+/// something runs once, in a hidden variable.
+#[test]
+fn a_write_into_a_list_a_hooked_property_holds_sets_it_through_the_property() {
+    assert_eq!(
+        child_body(
+            "void run(int extra)",
+            "        this.held[0] = extra;\n        this.me().held[0] *= 2;\n    }\n\n    private Report me()\n    {\n        return this;\n",
+            "<?php namespace App\\Tenant; class Base { /** @var list<int> */ public array $held = [0] { set { $this->held = $value; } } }"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "held"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 0
+                  VAR
+                    ZVAL "extra"
+              METHOD_CALL
+                PROP
+                  ASSIGN
+                    VAR
+                      ZVAL "receiver#1"
+                    METHOD_CALL
+                      VAR
+                        ZVAL "this"
+                      ZVAL "me"
+                      ARG_LIST
+                  ZVAL "held"
+                ZVAL "set"
+                ARG_LIST
+                  ZVAL 0
+                  BINARY_OP [3]
+                    DIM
+                      PROP
+                        VAR
+                          ZVAL "receiver#1"
+                        ZVAL "held"
+                      ZVAL 0
+                    ZVAL 2
         "#}
     );
 }
@@ -7431,18 +7526,18 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
 /// $prefix = "v";
 /// $check = function (\Sharp\Set|array $tags) use ($prefix) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->contains($prefix); };
 /// $size = function (\Sharp\Set|array $tags) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->count(); };
-/// return $check($extra) ? $size($extra) : 0;
+/// return $check(['a']) ? $size(['b']) : 0;
 /// ```
 ///
-/// A call of a lambda that declares a parameter `Set` passes it a list too, so a lambda makes each `Set` parameter a
+/// A call of a lambda that declares a parameter `Set` passes it a list literal too, so a lambda makes each `Set` parameter a
 /// `Set` object first, as a method does. PHP's `fn` has no statements before its expression, so a lambda with an
 /// expression body and a `Set` parameter is a `CLOSURE` whose `use` list captures what the binder says it captures.
 #[test]
 fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
     assert_eq!(
         body_in(
-            "int run(List<string> extra)",
-            "        const prefix = \"v\";\n        const check = (Set<string> tags) => tags.contains(prefix);\n        const size = (Set<string> tags) => {\n            return tags.count();\n        };\n        return check(extra) ? size(extra) : 0;\n",
+            "int run()",
+            "        const prefix = \"v\";\n        const check = (Set<string> tags) => tags.contains(prefix);\n        const size = (Set<string> tags) => {\n            return tags.count();\n        };\n        return check([\"a\"]) ? size([\"b\"]) : 0;\n",
             &[],
         ),
         indoc! {r#"
@@ -7550,15 +7645,235 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
                     VAR
                       ZVAL "check"
                     ARG_LIST
-                      VAR
-                        ZVAL "extra"
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "a"
+                          null
                   CALL
                     VAR
                       ZVAL "size"
                     ARG_LIST
-                      VAR
-                        ZVAL "extra"
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "b"
+                          null
                   ZVAL 0
+        "#}
+    );
+}
+
+/// `App\Tenant\Order`, a plain PHP class whose rows a lazy chain reads.
+const ORDER: (&str, &str) = (
+    "src/App/Tenant/Order.php",
+    "<?php\n\nnamespace App\\Tenant;\n\nfinal class Order\n{\n    public function __construct(public bool $paid, public string $number)\n    {\n    }\n}\n",
+);
+
+/// ```php
+/// return \Sharp\Sequence::from($orders)->filter(fn ($o) => $o->paid)->map(fn ($o) => $o->number)->take(100)->toList();
+/// ```
+///
+/// A call of a lazy operation of `Iterable<T>`, spec section 12, runs the method `Sharp\IterableMethods` declares on
+/// the engine's `Sharp\Sequence`. A chain reads its receiver through one `\Sharp\Sequence::from`, and each later
+/// operation calls the `Sequence` the one before it gave.
+#[test]
+fn a_lazy_chain_is_one_sequence_from_its_receiver_and_each_operation_on_it() {
+    assert_eq!(
+        body_in(
+            "List<string> run(Iterable<Order> orders)",
+            "        return orders.filter(o => o.paid).map(o => o.number).take(100).toList();\n",
+            &[ORDER]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                METHOD_CALL
+                  METHOD_CALL
+                    METHOD_CALL
+                      METHOD_CALL
+                        STATIC_CALL
+                          ZVAL "Sharp\\Sequence"
+                          ZVAL "from"
+                          ARG_LIST
+                            VAR
+                              ZVAL "orders"
+                        ZVAL "filter"
+                        ARG_LIST
+                          ARROW_FUNC "" @9-9
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "o"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            PROP
+                              VAR
+                                ZVAL "o"
+                              ZVAL "paid"
+                            SHARP_TYPE_ARGS
+                              null
+                              ZVAL "Function<bool(App.Tenant.Order)>"
+                            null
+                      ZVAL "map"
+                      ARG_LIST
+                        ARROW_FUNC "" @9-9
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "o"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          PROP
+                            VAR
+                              ZVAL "o"
+                            ZVAL "number"
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<string(App.Tenant.Order)>"
+                          null
+                    ZVAL "take"
+                    ARG_LIST
+                      ZVAL 100
+                  ZVAL "toList"
+                  ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
+/// $held = $sizes;
+/// $held = $sizes;
+/// $small = \Sharp\Sequence::from($held)->filter(fn ($n) => $n < 10);
+/// return \Sharp\Sequence::from($small)->take(2)->toList();
+/// ```
+///
+/// A `List` held as an `Iterable<T>` has the lazy operations, whatever was assigned to its place last, so its call
+/// reads it through `from` too. A local that holds a chain's `Sequence` is read through `from` again, which gives that
+/// `Sequence` back.
+#[test]
+fn a_list_held_as_an_iterable_and_a_local_holding_a_chain_are_read_through_from() {
+    assert_eq!(
+        body_in(
+            "List<int> run(List<int> sizes)",
+            "        Iterable<int> held = sizes;\n        held = sizes;\n        Iterable<int> small = held.filter(n => n < 10);\n        return small.take(2).toList();\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "held"
+                VAR
+                  ZVAL "sizes"
+              ASSIGN
+                VAR
+                  ZVAL "held"
+                VAR
+                  ZVAL "sizes"
+              ASSIGN
+                VAR
+                  ZVAL "small"
+                METHOD_CALL
+                  STATIC_CALL
+                    ZVAL "Sharp\\Sequence"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "held"
+                  ZVAL "filter"
+                  ARG_LIST
+                    ARROW_FUNC "" @11-11
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "n"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      BINARY_OP [20]
+                        VAR
+                          ZVAL "n"
+                        ZVAL 10
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<bool(int)>"
+                      null
+              RETURN
+                METHOD_CALL
+                  METHOD_CALL
+                    STATIC_CALL
+                      ZVAL "Sharp\\Sequence"
+                      ZVAL "from"
+                      ARG_LIST
+                        VAR
+                          ZVAL "small"
+                    ZVAL "take"
+                    ARG_LIST
+                      ZVAL 2
+                  ZVAL "toList"
+                  ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
+/// return ($maybe === null ? null : \Sharp\Sequence::from($maybe)->filter(fn ($o) => $o->paid));
+/// ```
+///
+/// PHP's `?->` cannot read a receiver through `from`, so a null-safe lazy operation is the conditional a null-safe
+/// property call is, over the `Sequence` call. php-src writes each `null` as a `CONST`, which compiles to the same
+/// value as the `ZVAL` the bridge writes.
+#[test]
+fn a_null_safe_lazy_operation_is_a_conditional_over_the_sequence_call() {
+    assert_eq!(
+        body_in(
+            "Iterable<Order>? run(Iterable<Order>? maybe)",
+            "        return maybe?.filter(o => o.paid);\n",
+            &[ORDER]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "maybe"
+                    ZVAL null
+                  ZVAL null
+                  METHOD_CALL
+                    STATIC_CALL
+                      ZVAL "Sharp\\Sequence"
+                      ZVAL "from"
+                      ARG_LIST
+                        VAR
+                          ZVAL "maybe"
+                    ZVAL "filter"
+                    ARG_LIST
+                      ARROW_FUNC "" @9-9
+                        PARAM_LIST
+                          PARAM
+                            null
+                            ZVAL "o"
+                            null
+                            null
+                            null
+                            null
+                        null
+                        PROP
+                          VAR
+                            ZVAL "o"
+                          ZVAL "paid"
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "Function<bool(App.Tenant.Order)>"
+                        null
         "#}
     );
 }
@@ -8392,7 +8707,9 @@ fn a_generic_class_type_is_its_class_and_a_class_value_type_is_string() {
                 null
                 null
                 null
-            ZVAL [256] "Lib\\PaginatedList"
+            SHARP_TYPE_ARGS
+              ZVAL [256] "Lib\\PaginatedList"
+              ZVAL "Lib.PaginatedList<Lib.Order>?"
         "#}
     );
 }
@@ -8876,7 +9193,9 @@ fn a_lambda_takes_union_and_variadic_parameters_and_a_spread_call() {
                     ARG_LIST
                       VAR
                         ZVAL "rest"
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "int"
                   null
               RETURN
                 CALL
@@ -10307,7 +10626,9 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                     PARAM_LIST
                     null
                     null
-                    ZVAL [1] "float"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "float"
+                      ZVAL "float"
                     null
                 null
                 null
@@ -10332,7 +10653,9 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                         null
                     null
                     null
-                    ZVAL [1] "string"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "string"
                     null
                 null
                 null
@@ -10392,7 +10715,9 @@ fn a_static_class_is_a_final_class_whose_extern_method_calls_its_native_function
                           ARG_LIST
                             VAR
                               ZVAL "title"
-                    ZVAL [1] "string"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "string"
                     null
                 null
                 null
@@ -10612,7 +10937,9 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
                       ZVAL "owner"
                     ZVAL "label"
                     ARG_LIST
-              ZVAL [1] "string"
+              SHARP_TYPE_ARGS
+                ZVAL [1] "string"
+                ZVAL "string"
               null
             METHOD [1] "both" @14-14
               PARAM_LIST
@@ -10640,7 +10967,9 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
                         ZVAL "owner"
                       ZVAL "label"
                       ARG_LIST
-              ZVAL [1] "string"
+              SHARP_TYPE_ARGS
+                ZVAL [1] "string"
+                ZVAL "string"
               null
         "#}
     );
@@ -10802,7 +11131,9 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     PARAM_LIST
                     null
                     null
-                    ZVAL [1] "string"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "string"
                     null
                 null
                 null
@@ -12302,9 +12633,11 @@ fn a_subclass_method_with_a_union_variadic_spreads_it_into_the_parent_method() {
                             UNPACK
                               VAR
                                 ZVAL "amounts"
-                    TYPE_UNION
-                      ZVAL [1] "int"
-                      ZVAL [1] "float"
+                    SHARP_TYPE_ARGS
+                      TYPE_UNION
+                        ZVAL [1] "int"
+                        ZVAL [1] "float"
+                      ZVAL "float|int"
                     ATTRIBUTE_LIST
                       ATTRIBUTE_GROUP
                         ATTRIBUTE
@@ -16102,14 +16435,60 @@ fn null_safe_calls_and_reads_are_nullsafe_kinds() {
 }
 
 /// ```php
-/// return $extra[0]?->value ?? $extra[1]?->total() ?? ($named['a'] ?? null)?->value; // the List indexes carry ZEND_DIM_IS
+/// return \is_int(${'match#1'} = $sizes[0]) && \is_int(${'match#1'} = $counts['a'] ?? null);
 /// ```
 ///
-/// `?.` reads a missing key of the index directly before it as null, as `??` does (spec section 12). A `List` index is
-/// the index itself, marked with `ZEND_DIM_IS`, so the engine reads only that index quietly. A `Map` index is the left
-/// side of a `COALESCE`.
+/// Spec section 12: a `List` index a pattern tests is a bare read, which throws on a missing index, and a `Map` index
+/// reads a missing key as null, as `??` does.
 #[test]
-fn null_safe_access_reads_a_missing_index_as_null() {
+fn a_tested_list_index_is_read_bare_and_a_tested_map_key_quietly() {
+    assert_eq!(
+        body_in(
+            "bool run(List<int?> sizes, Map<string, int> counts)",
+            "        return sizes[0] is int && counts[\"a\"] is int;\n",
+            &[]
+        )
+        .lines()
+        .skip_while(|line| line.trim() != "RETURN")
+        .map(str::trim_start)
+        .collect::<Vec<_>>(),
+        [
+            "RETURN",
+            "AND",
+            "CALL",
+            "ZVAL \"is_int\"",
+            "ARG_LIST",
+            "ASSIGN",
+            "VAR",
+            "ZVAL \"match#1\"",
+            "DIM",
+            "VAR",
+            "ZVAL \"sizes\"",
+            "ZVAL 0",
+            "CALL",
+            "ZVAL \"is_int\"",
+            "ARG_LIST",
+            "ASSIGN",
+            "VAR",
+            "ZVAL \"match#1\"",
+            "COALESCE",
+            "DIM",
+            "VAR",
+            "ZVAL \"counts\"",
+            "ZVAL \"a\"",
+            "ZVAL null",
+        ]
+    );
+}
+
+/// ```php
+/// return $extra[0]?->value ?? $extra[1]?->total() ?? ($named['a'] ?? null)?->value;
+/// ```
+///
+/// `?.` reads a missing key of the `Map` index directly before it as null, as `??` does (spec section 12), so that
+/// index is the left side of a `COALESCE`. A `List` index is the bare index itself, which throws on a missing index.
+#[test]
+fn null_safe_access_reads_a_missing_map_key_as_null_and_a_list_index_bare() {
     assert_eq!(
         body_in(
             "int? run(List<Calc?> extra, Map<string, Calc?> named)",
@@ -16182,14 +16561,14 @@ fn null_safe_access_reads_a_missing_index_as_null() {
               RETURN
                 COALESCE
                   NULLSAFE_PROP
-                    DIM [1]
+                    DIM
                       VAR
                         ZVAL "extra"
                       ZVAL 0
                     ZVAL "value"
                   COALESCE
                     NULLSAFE_METHOD_CALL
-                      DIM [1]
+                      DIM
                         VAR
                           ZVAL "extra"
                         ZVAL 1
@@ -16482,21 +16861,22 @@ fn a_typed_for_counter_is_the_assignment_of_its_value() {
 }
 
 /// ```php
-/// foreach (<check Map<int, int>>(\Lib\Calc::make(2)) as $value) {
-///     $extra += $value;
+/// foreach (<check Map<int, int>>(\Lib\Calc::make(2)) as $key#1 => $value#2) {
+///     $entry = [$key#1, $value#2];
+///     $extra += $entry[1];
 /// }
 /// foreach (<check Map<int, int>>(\Lib\Calc::make(3)) as $key => $value) {
 /// }
 /// ```
 ///
 /// `FOREACH` takes the collection, the value variable, the key variable or null, and the body. The map a plain PHP
-/// docblock claims is checked entry by entry first.
+/// docblock claims is checked entry by entry first, and one loop variable over it is each entry.
 #[test]
 fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
     assert_eq!(
         body_in(
             RUN,
-            "        for (const value of Calc.make(2)) {\n            extra += value;\n        }\n        for (let [key, value] of Calc.make(3)) {\n        }\n        return extra;\n",
+            "        for (const entry of Calc.make(2)) {\n            extra += entry[1];\n        }\n        for (let [key, value] of Calc.make(3)) {\n        }\n        return extra;\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; final class Calc { /** @return array<int, int> */ public static function make(int $n): array { return [$n => $n]; } }",
@@ -16514,14 +16894,30 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
                   ZVAL "Map<int, int>"
                   ZVAL "Lib\\Calc::make()"
                 VAR
-                  ZVAL "value"
-                null
+                  ZVAL "value#2"
+                VAR
+                  ZVAL "key#1"
                 STMT_LIST
-                  ASSIGN_OP [1]
+                  ASSIGN
                     VAR
-                      ZVAL "extra"
-                    VAR
-                      ZVAL "value"
+                      ZVAL "entry"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        VAR
+                          ZVAL "key#1"
+                        null
+                      ARRAY_ELEM
+                        VAR
+                          ZVAL "value#2"
+                        null
+                  STMT_LIST
+                    ASSIGN_OP [1]
+                      VAR
+                        ZVAL "extra"
+                      DIM
+                        VAR
+                          ZVAL "entry"
+                        ZVAL 1
               FOREACH
                 VERIFY_TYPE_ARGS
                   STATIC_CALL
@@ -16541,6 +16937,530 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
                   ZVAL "extra"
         "#}
     );
+}
+
+/// ```php
+/// return (\is_array($crossing#1 = \Lib\Calc::prices()) ? \Sharp\Map::from($crossing#1) : $crossing#1)->has(5)
+///     && (\is_array($crossing#1 = \Lib\Calc::maybe()) ? … : $crossing#1)?->has(5) == true;
+/// ```
+///
+/// Spec section 12: a plain PHP array a `Map` method reads becomes the `\Sharp\Map` first, as it does where a typed
+/// local holds it, null-safe or not, so the method runs on the `Map` and a key keeps its type.
+#[test]
+fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
+    assert_eq!(
+        body_in(
+            "bool run()",
+            "        return Calc.prices().has(5) && Calc.maybe()?.has(5) == true;\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib;\nfinal class Calc { /** @return array<array-key, int> */ public static function prices(): array { return []; } /** @return array<array-key, int>|null */ public static function maybe(): ?array { return null; } }",
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                AND
+                  METHOD_CALL
+                    CONDITIONAL
+                      CALL
+                        ZVAL "is_array"
+                        ARG_LIST
+                          ASSIGN
+                            VAR
+                              ZVAL "crossing#1"
+                            STATIC_CALL
+                              ZVAL "Lib\\Calc"
+                              ZVAL "prices"
+                              ARG_LIST
+                      STATIC_CALL
+                        ZVAL "Sharp\\Map"
+                        ZVAL "from"
+                        ARG_LIST
+                          VAR
+                            ZVAL "crossing#1"
+                      VAR
+                        ZVAL "crossing#1"
+                    ZVAL "has"
+                    ARG_LIST
+                      ZVAL 5
+                  BINARY_OP [16]
+                    NULLSAFE_METHOD_CALL
+                      CONDITIONAL
+                        CALL
+                          ZVAL "is_array"
+                          ARG_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "crossing#1"
+                              STATIC_CALL
+                                ZVAL "Lib\\Calc"
+                                ZVAL "maybe"
+                                ARG_LIST
+                        STATIC_CALL
+                          ZVAL "Sharp\\Map"
+                          ZVAL "from"
+                          ARG_LIST
+                            VAR
+                              ZVAL "crossing#1"
+                        VAR
+                          ZVAL "crossing#1"
+                      ZVAL "has"
+                      ARG_LIST
+                        ZVAL 5
+                    ZVAL true
+        "#}
+    );
+}
+
+/// ```php
+/// foreach (\is_array($crossing#1 = \Lib\Calc::prices()) ? new \Sharp\Map(…(string) $key#2…) : $crossing#1
+///     as $sku => $count) {}
+/// foreach (\Lib\Calc::counts() as $id => $count) {}
+/// ```
+///
+/// Spec section 12: PHP holds an all-digit `string` key as an `int`, so a loop over a plain PHP array keyed by `string`
+/// runs over the `\Sharp\Map` that takes each key back as its `string`. One keyed by `int|string` keeps its keys.
+#[test]
+fn a_loop_over_a_plain_php_array_keyed_by_string_takes_its_keys_back() {
+    assert_eq!(
+        body_in(
+            "void run()",
+            "        for (const [sku, count] of Calc.prices()) {\n        }\n        for (const [id, count] of Calc.counts()) {\n        }\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib;\nfinal class Calc { /** @return array<string, int> */ public static function prices(): array { return []; } /** @return array<array-key, int> */ public static function counts(): array { return []; } }",
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              FOREACH
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "crossing#1"
+                        VERIFY_TYPE_ARGS
+                          STATIC_CALL
+                            ZVAL "Lib\\Calc"
+                            ZVAL "prices"
+                            ARG_LIST
+                          ZVAL "Map<string, int>"
+                          ZVAL "Lib\\Calc::prices()"
+                  NEW
+                    ZVAL "Sharp\\Map"
+                    ARG_LIST
+                      CALL
+                        ZVAL "array_merge"
+                        ARG_LIST
+                          ARRAY [3]
+                          UNPACK
+                            CALL
+                              ZVAL "array_map"
+                              ARG_LIST
+                                ARROW_FUNC "" @9-9
+                                  PARAM_LIST
+                                    PARAM
+                                      null
+                                      ZVAL "key#2"
+                                      null
+                                      null
+                                      null
+                                      null
+                                    PARAM
+                                      null
+                                      ZVAL "value#3"
+                                      null
+                                      null
+                                      null
+                                      null
+                                  null
+                                  ARRAY [3]
+                                    ARRAY_ELEM
+                                      CAST [6]
+                                        VAR
+                                          ZVAL "key#2"
+                                      null
+                                    ARRAY_ELEM
+                                      VAR
+                                        ZVAL "value#3"
+                                      null
+                                  null
+                                  null
+                                CALL
+                                  ZVAL "array_keys"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "crossing#1"
+                                VAR
+                                  ZVAL "crossing#1"
+                  VAR
+                    ZVAL "crossing#1"
+                VAR
+                  ZVAL "count"
+                VAR
+                  ZVAL "sku"
+                STMT_LIST
+              FOREACH
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "counts"
+                  ARG_LIST
+                VAR
+                  ZVAL "count"
+                VAR
+                  ZVAL "id"
+                STMT_LIST
+        "#}
+    );
+}
+
+/// ```php
+/// $names = \VERIFY_TYPE_ARGS(\Lib\Calc::lazy(), 'Iterable<string>', 'Lib\Calc::lazy()');
+/// return Report::tally(\VERIFY_TYPE_ARGS(\Lib\Calc::lazy(), …)) + \Lib\Calc::lazy()->count();
+/// ```
+///
+/// Spec section 12: a lazy plain PHP source is checked element by element as it is read. A call that gives an object
+/// of a plain PHP class that is a `Traversable`, as a generator or Laravel's `LazyCollection`, is checked in a
+/// `VERIFY_TYPE_ARGS` of the place's type where an `Iterable<T>` holds it, a local or a PHP# parameter, which puts a
+/// checking `Sequence` in its place. The engine checks the arguments of a call from plain PHP only, so a call from
+/// PHP# checks the one it passes. Until then the value keeps its own class, so a call of its own `count` takes no check.
+#[test]
+fn a_lazy_plain_php_source_is_checked_where_an_iterable_holds_it() {
+    assert_eq!(
+        body_in(
+            "int run()",
+            "        Iterable<string> names = Calc.lazy();\n        return Report.tally(Calc.lazy()) + Calc.lazy().count();\n    }\n\n    private static int tally(Iterable<string> names)\n    {\n        return 0;\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib;\n/**\n * @template TKey of array-key\n * @template TValue\n * @implements \\IteratorAggregate<TKey, TValue>\n */\nfinal class Lazy implements \\IteratorAggregate { public function getIterator(): \\Generator { yield 'a'; } public function count(): int { return 1; } }\nfinal class Calc { /** @return Lazy<int, string> */ public static function lazy(): Lazy { return new Lazy(); } }",
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "names"
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "Lib\\Calc"
+                    ZVAL "lazy"
+                    ARG_LIST
+                  ZVAL "Iterable<string>"
+                  ZVAL "Lib\\Calc::lazy()"
+              RETURN
+                BINARY_OP [1]
+                  STATIC_CALL
+                    ZVAL "App\\Tenant\\Report"
+                    ZVAL "tally"
+                    ARG_LIST
+                      VERIFY_TYPE_ARGS
+                        STATIC_CALL
+                          ZVAL "Lib\\Calc"
+                          ZVAL "lazy"
+                          ARG_LIST
+                        ZVAL "Iterable<string>"
+                        ZVAL "Lib\\Calc::lazy()"
+                  METHOD_CALL
+                    STATIC_CALL
+                      ZVAL "Lib\\Calc"
+                      ZVAL "lazy"
+                      ARG_LIST
+                    ZVAL "count"
+                    ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
+/// $pair = [1, 'a']; [$count, $label] = $pair;
+/// ```
+///
+/// Spec section 30: a tuple is a PHP list while the code runs, so a tuple literal is a list literal, and unpacking one
+/// is PHP's list assignment, an `ASSIGN` of an `ARRAY` of `ARRAY_ELEM`s, as php-src's grammar builds `[$a, $b] = $c`.
+#[test]
+fn an_unpacked_tuple_is_a_list_assignment() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void run()\n    {\n        [int, string] pair = [1, \"a\"];\n        const [count, label] = pair;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "pair"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL 1
+                    null
+                  ARRAY_ELEM
+                    ZVAL "a"
+                    null
+              ASSIGN
+                ARRAY [3]
+                  ARRAY_ELEM
+                    VAR
+                      ZVAL "count"
+                    null
+                  ARRAY_ELEM
+                    VAR
+                      ZVAL "label"
+                    null
+                VAR
+                  ZVAL "pair"
+        "#}
+    );
+}
+
+/// ```php
+/// foreach ($plans as $key#1 => $value#2) { $entry = [$key#1, $value#2]; }
+/// foreach ($rows as [$name, $count]) { }
+/// foreach ($plans as $name => $plan) { }
+/// ```
+///
+/// Spec sections 17 and 30: a loop variable is each element, and a `Map`'s element is its entry, so one variable over a
+/// `Map` is the tuple of each key and value, which a `Sharp\Map` and a PHP array both give a `foreach` of both. `[a, b]`
+/// unpacks each two-element tuple of any other collection, as PHP's `foreach ($rows as [$a, $b])` does, and reads a
+/// `Map`'s key and value.
+#[test]
+fn a_loop_over_a_map_reads_each_entry_and_a_loop_unpacks_each_tuple() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Map<string, int> plans, List<[string, int]> rows)\n    {\n        for (const entry of plans) {\n        }\n        for (const [name, count] of rows) {\n        }\n        for (const [name, plan] of plans) {\n        }\n    }\n}\n",
+    );
+
+    // The class's generated `parse` loops over the fields after them.
+    let loops: Vec<String> = lowered
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_FOREACH)
+        .map(|(index, _)| lowered.render(index as u32))
+        .take(3)
+        .collect();
+
+    assert_eq!(
+        loops,
+        [
+            indoc! {r#"
+                FOREACH
+                  VAR
+                    ZVAL "plans"
+                  VAR
+                    ZVAL "value#2"
+                  VAR
+                    ZVAL "key#1"
+                  STMT_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "entry"
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          VAR
+                            ZVAL "key#1"
+                          null
+                        ARRAY_ELEM
+                          VAR
+                            ZVAL "value#2"
+                          null
+                    STMT_LIST
+            "#},
+            indoc! {r#"
+                FOREACH
+                  VAR
+                    ZVAL "rows"
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      VAR
+                        ZVAL "name"
+                      null
+                    ARRAY_ELEM
+                      VAR
+                        ZVAL "count"
+                      null
+                  null
+                  STMT_LIST
+            "#},
+            indoc! {r#"
+                FOREACH
+                  VAR
+                    ZVAL "plans"
+                  VAR
+                    ZVAL "plan"
+                  VAR
+                    ZVAL "name"
+                  STMT_LIST
+            "#},
+        ]
+    );
+}
+
+/// ```php
+/// $entries = $entries instanceof \Sharp\Map ? \Sharp\Sequence::from($entries) : $entries;
+/// yield from \Sharp\Sequence::from($plans);
+/// return \Sharp\Sequence::from($plans);
+/// $kept = \Sharp\Sequence::from($plans);
+/// ```
+///
+/// Spec section 12: a `Map<TKey, TValue>` is an `Iterable<[TKey, TValue]>` of its entries, so a `Map` that lands in an
+/// `Iterable` place, a local, a return or `yield ...`, is the `Sequence` that reads its entries. A parameter takes any
+/// caller's `Map` the same way before the body runs.
+#[test]
+fn a_map_that_lands_in_an_iterable_gives_its_entries() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public int count(Iterable<[string, int]> entries) { return 1; }\n\n    public Iterable<[string, int]> all(Map<string, int> plans) { yield ...plans; }\n\n    public Iterable<[string, int]> some(Map<string, int> plans) { return plans; }\n\n    public void run(Map<string, int> plans)\n    {\n        Iterable<[string, int]> kept = plans;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body_of("count"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "entries"
+                CONDITIONAL
+                  INSTANCEOF
+                    VAR
+                      ZVAL "entries"
+                    ZVAL "Sharp\\Map"
+                  STATIC_CALL
+                    ZVAL "Sharp\\Sequence"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "entries"
+                  VAR
+                    ZVAL "entries"
+              RETURN
+                ZVAL 1
+        "#}
+    );
+    // Each body first makes the object of a PHP array plain PHP passes as `plans`, and then a statement takes the
+    // entries as its first child: the loop `yield ...` runs as, the `return` and the assignment.
+    let entries = concat!(
+        "    STATIC_CALL\n",
+        "      ZVAL \"Sharp\\\\Sequence\"\n",
+        "      ZVAL \"from\"\n",
+        "      ARG_LIST\n",
+        "        VAR\n",
+        "          ZVAL \"plans\"\n",
+    );
+    for (method, statement) in
+        [("all", "  FOREACH\n"), ("some", "  RETURN\n"), ("run", "  ASSIGN\n    VAR\n      ZVAL \"kept\"\n")]
+    {
+        let body = lowered.body_of(method);
+
+        assert!(body.contains(&format!("{statement}{entries}")), "{method}:\n{body}");
+    }
+}
+
+/// ```php
+/// return $summary[1] . $pair[0];
+/// ```
+///
+/// Spec section 30: a named element of a tuple, which runs as a PHP list, is the index read of its position, and an
+/// index read of a tuple is one already.
+#[test]
+fn a_named_tuple_element_is_an_index_read_of_its_position() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public string run([int total, string label] summary, [string, int] pair)\n    {\n        return summary.label + pair[0];\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [8]
+                  DIM
+                    VAR
+                      ZVAL "summary"
+                    ZVAL 1
+                  DIM
+                    VAR
+                      ZVAL "pair"
+                    ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
+/// foreach ($pending as $element#1) { yield $element#1; } yield $latest; yield fn($x) => $x; return;
+/// ```
+///
+/// `yield value;` is a `YIELD` of its value and a null key, alone as a statement, as php-src's grammar builds
+/// `yield $value;`. `yield ...other;` is a loop that yields each element of `other`, so each takes the generator's
+/// next automatic key, where PHP's `yield from` would give the keys of `other`. `yield x => x;` yields a lambda,
+/// because `=>` is the lambda arrow in PHP#.
+#[test]
+fn yield_is_a_yield_statement_and_yield_spread_is_a_loop_that_yields_each_element() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<Any> run(List<int> pending, int latest)\n    {\n        yield ...pending;\n        yield latest;\n        yield x => x;\n        return;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              FOREACH
+                VAR
+                  ZVAL "pending"
+                VAR
+                  ZVAL "element#1"
+                null
+                STMT_LIST
+                  YIELD
+                    VAR
+                      ZVAL "element#1"
+                    null
+              YIELD
+                VAR
+                  ZVAL "latest"
+                null
+              YIELD
+                ARROW_FUNC "" @9-9
+                  PARAM_LIST
+                    PARAM
+                      null
+                      ZVAL "x"
+                      null
+                      null
+                      null
+                      null
+                  null
+                  VAR
+                    ZVAL "x"
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<Any?(Any?)>"
+                  null
+                null
+              RETURN
+                null
+        "#}
+    );
+}
+
+/// A method that yields is a generator: `[16777217]` is `ZEND_ACC_PUBLIC | ZEND_ACC_GENERATOR`, which php-src's grammar
+/// puts on a function whose body holds a `yield`, so the engine compiles it to start with `GENERATOR_CREATE`. A yield
+/// nested in a loop or an `if` counts, and a method that returns an `Iterable<T>` without a yield stays `[1]`.
+#[test]
+fn a_method_that_yields_is_a_generator() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<int> lines(List<int> rows)\n    {\n        for (const row of rows) {\n            if (row > 0) {\n                yield row;\n            }\n        }\n    }\n\n    public Iterable<int> all(List<int> rows)\n    {\n        yield ...rows;\n    }\n\n    public Iterable<int> kept(List<int> rows)\n    {\n        return rows;\n    }\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    let methods: Vec<String> = lowered
+        .nodes()
+        .iter()
+        .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD)
+        .map(|node| format!("{} [{}]", lowered.text(node.text), node.attr))
+        .collect();
+    assert_eq!(methods, ["lines [16777217]", "all [16777217]", "kept [1]", "parse [17]", "tryParse [17]"]);
 }
 
 /// ```php
@@ -18283,12 +19203,13 @@ fn is_and_as_of_any_or_a_union_are_the_engine_test_of_its_type() {
 
 /// ```php
 /// $numbers = <is List<int>>($extra);
-/// $kept = <is Map<string, int>>($extra) ? $extra : null;
+/// $kept = \is_array($crossing#1 = <is Map<string, int>>($extra) ? $extra : null) ? new \Sharp\Map(…) : $crossing#1;
 /// $tags = <is Set<string>>($extra);
 /// ```
 ///
 /// `is` and `as` of a `List`, a `Map` or a `Set` are the engine's test of the type, as a generic class's are, which
-/// walks every element.
+/// walks every element. The test passes a PHP array whose elements fit, so the local `as` gives it to becomes the `Map`
+/// first, as a typed local does.
 #[test]
 fn is_and_as_of_a_collection_are_the_engine_test_of_its_type() {
     assert_eq!(
@@ -18310,13 +19231,69 @@ fn is_and_as_of_a_collection_are_the_engine_test_of_its_type() {
                 VAR
                   ZVAL "kept"
                 CONDITIONAL
-                  SHARP_IS_TYPE
-                    VAR
-                      ZVAL "extra"
-                    ZVAL "Map<string, int>"
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "crossing#1"
+                        CONDITIONAL
+                          SHARP_IS_TYPE
+                            VAR
+                              ZVAL "extra"
+                            ZVAL "Map<string, int>"
+                          VAR
+                            ZVAL "extra"
+                          ZVAL null
+                  NEW
+                    ZVAL "Sharp\\Map"
+                    ARG_LIST
+                      CALL
+                        ZVAL "array_merge"
+                        ARG_LIST
+                          ARRAY [3]
+                          UNPACK
+                            CALL
+                              ZVAL "array_map"
+                              ARG_LIST
+                                ARROW_FUNC "" @10-10
+                                  PARAM_LIST
+                                    PARAM
+                                      null
+                                      ZVAL "key#2"
+                                      null
+                                      null
+                                      null
+                                      null
+                                    PARAM
+                                      null
+                                      ZVAL "value#3"
+                                      null
+                                      null
+                                      null
+                                      null
+                                  null
+                                  ARRAY [3]
+                                    ARRAY_ELEM
+                                      CAST [6]
+                                        VAR
+                                          ZVAL "key#2"
+                                      null
+                                    ARRAY_ELEM
+                                      VAR
+                                        ZVAL "value#3"
+                                      null
+                                  null
+                                  null
+                                CALL
+                                  ZVAL "array_keys"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "crossing#1"
+                                VAR
+                                  ZVAL "crossing#1"
                   VAR
-                    ZVAL "extra"
-                  ZVAL null
+                    ZVAL "crossing#1"
               ASSIGN
                 VAR
                   ZVAL "tags"
@@ -18552,12 +19529,29 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
 fn a_leave_after_null_coalesce_is_its_statement_inside_the_expression() {
     assert_eq!(
         body_in(
-            "int run(List<int?> values)",
+            "int run(Map<int, int> values)",
             "        const a = values[0] ?? return -1;\n        for (int i = 0; i < 2; i++) {\n            const b = values[i] ?? continue;\n            const c = values[i + 1] ?? break;\n        }\n        return a;\n",
             &[]
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "values"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "values"
+                  STATIC_CALL
+                    ZVAL "Sharp\\Map"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "values"
+                  VAR
+                    ZVAL "values"
               ASSIGN
                 VAR
                   ZVAL "a"
@@ -19203,7 +20197,9 @@ fn a_pure_enum_is_a_final_enum_class_of_unit_cases_without_a_backing_type() {
                               ZVAL "Suit"
                               ZVAL "cases"
                               ARG_LIST
-                    ZVAL [1] "int"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "int"
+                      ZVAL "int"
                     null
                 null
                 null
@@ -20914,7 +21910,8 @@ fn equality_of_two_collections_compares_each_element_with_its_own_equality() {
 /// ```
 ///
 /// Spec section 26: an extension's method is the public static method of its static class that takes the receiver
-/// first, and a computed property is the one that takes only the receiver and returns its expression.
+/// first, and a computed property is the one that takes only the receiver and returns its expression. The method
+/// carries its result type, which a generator's elements are read from, spec section 12.
 #[test]
 fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
     let lowered = Lowered::new(
@@ -20949,7 +21946,9 @@ fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
                           ZVAL "value"
                         VAR
                           ZVAL "separator"
-                  ZVAL [1] "string"
+                  SHARP_TYPE_ARGS
+                    ZVAL [1] "string"
+                    ZVAL "string"
                   null
             "#}
             .to_owned(),
@@ -21057,7 +22056,9 @@ fn a_generic_extension_member_takes_the_type_arguments_of_its_block_and_its_own(
               STMT_LIST
                 RETURN
                   ARRAY [3]
-              TYPE [7]
+              SHARP_TYPE_ARGS
+                TYPE [7]
+                ZVAL "List<#1>"
               null
         "#}
     );

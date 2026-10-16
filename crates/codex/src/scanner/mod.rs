@@ -42,6 +42,7 @@ use mago_syntax::cst::Operator;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Return;
+use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::Trivia;
@@ -102,6 +103,7 @@ use crate::ttype::template::TemplateResult;
 use crate::ttype::template::inferred_type_replacer;
 use crate::ttype::union::TUnion;
 use crate::ttype::wrap_atomic;
+use crate::visibility::Visibility;
 
 mod assertion_inference;
 mod attribute;
@@ -188,6 +190,23 @@ where
 
     pub fn get_docblock(&self, node: impl HasSpan) -> Option<&'arena Trivia<'arena>> {
         self.get_docblock_before(node.span().start.offset)
+    }
+
+    /// The visibility `modifiers` give a member of `class_like`. With no access modifier, a PHP# member of a class, an
+    /// enum or a struct is `private`, spec section 5, and any other is `public`, as PHP's is and as a PHP# interface's
+    /// is. Every member scanner reads it here, so each kind of member gets the one default.
+    pub fn member_visibility(
+        &self,
+        modifiers: &Sequence<'_, Modifier<'_>>,
+        class_like: &ClassLikeMetadata,
+    ) -> Visibility {
+        let default = if self.program.dialect.is_sharp() && !class_like.kind.is_interface() {
+            Visibility::Private
+        } else {
+            Visibility::Public
+        };
+
+        Visibility::from_modifiers(modifiers, default)
     }
 
     pub fn get_docblock_before(&self, start_offset: u32) -> Option<&'arena Trivia<'arena>> {

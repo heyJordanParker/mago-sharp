@@ -97,6 +97,7 @@ impl FunctionReturnTypeProvider for ShapeProvider {
                         },
                         known_count: Some(known_elements.len()),
                         non_empty: !known_elements.is_empty(),
+                        tuple_names: None,
                         known_elements: Some(known_elements),
                     })))]),
                 )))))

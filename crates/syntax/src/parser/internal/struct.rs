@@ -59,7 +59,7 @@ where
         }
         let inheritance = self.parse_struct_header()?;
         let left_brace = self.stream.eat_span(T!["{"])?;
-        let members = self.parse_class_like_members("A struct", None)?;
+        let members = self.parse_class_like_members("A struct", Some(&name), None)?;
 
         Ok(Struct {
             attribute_lists: attributes,

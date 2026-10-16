@@ -627,6 +627,7 @@ where
                     None => get_never(),
                 }),
                 non_empty: true,
+                tuple_names: None,
             }))])
         } else {
             TUnion::from_vec(vec![TAtomic::Array(TArray::Keyed(TKeyedArray {
@@ -655,6 +656,7 @@ where
             element_type: Arc::new(item_value_type.unwrap_or_else(get_mixed)),
             known_count: None,
             non_empty: !array_creation_info.can_be_empty,
+            tuple_names: None,
         }))])
     } else {
         TUnion::from_vec(vec![TAtomic::Array(TArray::Keyed(TKeyedArray {

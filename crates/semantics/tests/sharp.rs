@@ -2545,8 +2545,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             format!("23:35 PHP# has no `__LINE__`: {line}"),
             "23:45 A by-reference parameter is not supported yet in PHP#.".to_owned(),
             format!("23:54 PHP# has no `__LINE__`: {line}"),
-            "27:9 A method without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
-            "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.".to_owned(),
+            "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.".to_owned(),
             "29:18 PHP# has no `callable`: write `Function<R(P)>`.".to_owned(),
             "30:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
         ]
@@ -2632,7 +2631,7 @@ fn a_map_key_is_refused_once() {
     let code = leak(method(
         "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        return 1;\n",
     ));
-    let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.";
+    let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.";
 
     assert_eq!(
         issues(code),
@@ -2815,17 +2814,24 @@ fn a_method_name_starting_with_two_underscores_is_not_supported_yet() {
     );
 }
 
+/// Spec section 5: a member without an access modifier is `private`, as `void reserve(string sku, int count)` in
+/// section 12's `map-string-keys` is.
 #[test]
-fn a_method_without_an_access_modifier_is_not_supported_yet() {
+fn a_method_without_an_access_modifier_compiles() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    int run() { return 1; }\n    static int make() { return 1; }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:9 A method without `public`, `protected` or `private` is not supported yet in PHP#.",
-            "6:16 A method without `public`, `protected` or `private` is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A subclass implements an abstract method, so it is `public` or `protected`, as C# refuses a `private` one, where a
+/// method with no access modifier is `private`.
+#[test]
+fn an_abstract_method_states_public_or_protected() {
+    let code = "namespace App.Tenant;\n\npublic abstract class Report\n{\n    abstract int size();\n    private abstract int count();\n    protected abstract int total();\n    public abstract int sum();\n    internal abstract int mean();\n}\n";
+    let message =
+        "A subclass implements an abstract method, so it is `public` or `protected`: write `protected abstract`.";
+
+    assert_eq!(issues(code), [format!("5:18 {message}"), format!("6:26 {message}")]);
 }
 
 #[test]
@@ -4409,7 +4415,7 @@ fn an_interface_method_takes_and_returns_list_and_map_types() {
     assert_eq!(
         issues(code),
         [
-            "5:9 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
+            "5:9 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`."
         ]
     );
 }
@@ -4468,48 +4474,169 @@ fn a_list_map_set_or_class_with_the_wrong_count_of_type_arguments_names_the_coun
     );
 }
 
-/// A `Set`'s element takes exactly what a `Map`'s key takes. A named type may be an enum, a struct or a class that
-/// declares `operator ==`, which only the analyzer knows, so it passes here.
+/// A `Set`'s element takes exactly what a `Map`'s key takes, a collection of such elements too (spec section 12). A
+/// named type may be an enum, a struct or a class that declares `operator ==`, which only the analyzer knows, so it
+/// passes here.
 #[test]
 fn a_set_element_takes_what_a_map_key_takes() {
-    let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e)\n    {\n        return [];\n    }\n}\n";
+    let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e, Set<Any> f, Set<List<Any>> g)\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:86 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
+            "3:104 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "3:116 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
         ]
     );
 }
 
-/// A key of a built-in type with `==` and `hash()`, nullable or not, keys a `Map`. A named key type may be an enum, a
-/// struct or a class that declares `operator ==`, which only the analyzer knows, so it passes here.
+/// A key of a built-in type with `==` and `hash()`, nullable or not, keys a `Map`, and so does a `List`, a `Set` or a
+/// `Map` whose every type argument does (spec section 12). A named key type may be an enum, a struct or a class that
+/// declares `operator ==`, which only the analyzer knows, so it passes here.
 #[test]
 fn a_map_key_without_equality_by_its_kind_is_an_error() {
-    let code = "class Report\n{\n    public Map<float, int> run(Map<Line, int> a, Map<int?, int> b, Map<string, Map<bool, int>> c, Map<List<int>, int> d)\n    {\n        return [:];\n    }\n}\n";
+    let code = "class Report\n{\n    public Map<float, int> run(Map<Line, int> a, Map<int?, int> b, Map<string, Map<bool, int>> c, Map<List<int>, int> d, Map<Set<string>, int> e, Map<Map<string, List<int>>, int> f, Map<List<Any>, int> g, Map<Any, int> h)\n    {\n        return [:];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:103 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`."
+            "3:187 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "3:210 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
         ]
     );
+}
+
+/// Spec section 12: a method that returns `Iterable<T>` produces its values with `yield value;` and every element of
+/// another `Iterable<T>` with `yield ...other;`, and a bare `return;` ends it. In PHP#, `=>` is the lambda arrow, so
+/// `yield x => x;` yields a lambda.
+#[test]
+fn yield_and_yield_spread_are_statements_of_a_method_that_returns_an_iterable() {
+    let code = "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield ...pending;\n        yield latest;\n        if (count(pending) > 1) {\n            return;\n        }\n    }\n\n    public Iterable<Function<int(int)>> lambdas()\n    {\n        yield x => x;\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A constructor, a method that returns another type, `Iterable<T>?` among them, and a lambda produce no
+/// `Iterable<T>`, so `yield` in them is an error, spec section 12: a method that yields gives an `Iterable<T>`, which
+/// is never null.
+#[test]
+fn yield_outside_a_method_that_returns_an_iterable_is_an_error() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(Order latest)\n    {\n        yield latest;\n    }\n\n    public List<Order> recent(Order latest)\n    {\n        yield latest;\n    }\n\n    public Iterable<Order> lazy(Order latest)\n    {\n        const read = () => { yield latest; };\n        const arrow = () => yield latest;\n        yield latest;\n    }\n\n    public Iterable<Order>? maybe(Order latest)\n    {\n        yield latest;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:9 `yield` needs a method that returns `Iterable<T>`.",
+            "12:9 `yield` needs a method that returns `Iterable<T>`.",
+            "17:30 `yield` needs a method that returns `Iterable<T>`.",
+            "18:29 `yield` needs a method that returns `Iterable<T>`.",
+            "24:9 `yield` needs a method that returns `Iterable<T>`.",
+        ]
+    );
+}
+
+/// An extension method that returns `Iterable<T>` yields as a method of its class does, spec sections 12 and 26, and
+/// one that yields returns no value.
+#[test]
+fn an_extension_method_that_returns_an_iterable_yields() {
+    let code = "namespace App.Tenant;\n\npublic static class Words\n{\n    extension(string text)\n    {\n        public Iterable<string> letters()\n        {\n            yield text;\n        }\n\n        public List<string> listed()\n        {\n            yield text;\n        }\n\n        public Iterable<string> ended()\n        {\n            yield text;\n            return [text];\n        }\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "14:13 `yield` needs a method that returns `Iterable<T>`.",
+            "20:13 A method that yields cannot return a value: write `return;` to end it.",
+        ]
+    );
+}
+
+/// PHP's `send()` and two-way generators are not part of PHP#, spec section 12, so `yield` is a statement with a value.
+#[test]
+fn yield_as_a_value_or_without_a_value_is_an_error() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Iterable<Order> all(Order latest)\n    {\n        const kept = yield latest;\n        Store.keep(yield latest);\n        yield;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:22 `yield` gives no value back: write it as a statement, as in `yield value;`.",
+            "8:20 `yield` gives no value back: write it as a statement, as in `yield value;`.",
+            "9:9 PHP# has no `yield;`: write `yield value;`.",
+        ]
+    );
+}
+
+#[test]
+fn php_yield_from_and_a_yielded_key_are_errors_that_name_the_php_sharp_form() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield from pending;\n        yield 1 => latest;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:9 PHP# has no `yield from`: write `yield ...other;`.",
+            "8:9 PHP# has no `yield key => value`: write `yield value;`.",
+        ]
+    );
+}
+
+/// A method that yields produces only the values it yields, as C#'s CS1622 "Cannot return a value from an iterator"
+/// says, so `return value;` there is an error and a bare `return;` ends it. A method that returns `Iterable<T>` without
+/// yielding returns its value, and a lambda in a method that yields returns its own.
+#[test]
+fn a_return_with_a_value_in_a_method_that_yields_is_an_error() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield latest;\n        const read = () => { return latest; };\n        if (count(pending) > 0) {\n            return;\n        }\n        return pending;\n    }\n\n    public Iterable<Order> copy(List<Order> pending)\n    {\n        return pending;\n    }\n}\n";
+
+    assert_eq!(issues(code), ["12:9 A method that yields cannot return a value: write `return;` to end it."]);
+}
+
+/// Spec section 30: a tuple type, with or without element names, goes wherever a type goes, its element types are the
+/// slice's types, and `const` or `let` unpacks a tuple into a local per element.
+#[test]
+fn a_tuple_type_and_an_unpacked_tuple_are_in_the_slice() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private [Money, int] pair;\n\n    public [Money total, int count, Date since] summarize([string, List<Plan>] entry, [int, int]? range, Map<string, [int, Order?]> rows)\n    {\n        [Money, int] kept = this.pair;\n        const [total, count] = kept;\n        let [money, items] = kept;\n        return [total, count, new Date()];\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Spec section 30: "The checker suggests a struct past four" elements, which reads each by its name. A tuple's element
+/// is a value, so it is never `void`.
+#[test]
+fn a_tuple_past_four_elements_suggests_a_struct_and_holds_no_void() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public [int, int, int, int] four() { return [1, 2, 3, 4]; }\n\n    public [int a, int b, int c, int d, int e] five() { return [1, 2, 3, 4, 5]; }\n\n    public void run([int, void] pair) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:12 A tuple of 5 elements is hard to read: declare a struct, whose fields have names.",
+            "9:27 A tuple's element cannot be `void`: `void` is only a return type.",
+        ]
+    );
+}
+
+#[test]
+fn php_keeps_every_form_of_yield() {
+    let code = "<?php\n\nfunction rows(): iterable\n{\n    $sent = yield 1;\n    yield 2 => $sent;\n    yield from [3];\n    yield;\n    return 4;\n}\n";
+
+    assert_eq!(issues_in("src/rows.php", code), Vec::<String>::new());
 }
 
 #[test]
 fn a_literal_element_outside_the_slice_is_not_supported_yet() {
-    let code = leak(method(
-        "        const reference = [&extra];\n        const missing = [, extra];\n        let list = [1];\n        list[] = 2;\n        return 1;\n",
-    ));
+    let code =
+        leak(method("        const reference = [&extra];\n        const missing = [, extra];\n        return 1;\n"));
 
     assert_eq!(
         issues(code),
-        [
-            "7:28 This operator is not supported yet in PHP#.",
-            "8:26 This construct is not supported yet in PHP#.",
-            "10:9 This write target is not supported yet in PHP#.",
-        ]
+        ["7:28 This operator is not supported yet in PHP#.", "8:26 This construct is not supported yet in PHP#."]
     );
+}
+
+/// PHP's `x[] = v` is the analyzer's to refuse, by the collection it writes: a `List` grows with `add`.
+#[test]
+fn an_append_is_left_to_the_analyzer() {
+    let code =
+        leak(method("        let list = [1];\n        list[] = 2;\n        this.rows[] = 3;\n        return 1;\n"));
+
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// The analyzer decides whether a spread is a `List`'s or a `Map`'s, since the spread value's type does.
@@ -5059,12 +5186,12 @@ fn a_type_argument_of_a_bound_is_never_void() {
 /// and bounds, and refuses a class value as a `Map` key as it refuses one in a `Map` literal.
 #[test]
 fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_takes() {
-    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<List<int>, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<Any, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "6:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
+            "6:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
             "9:27 A type argument cannot be `void`: `void` is only a return type.",
             "18:43 A type argument cannot be `void`: `void` is only a return type.",
             "19:28 A type parameter takes no type arguments: write `TItem`.",
@@ -5182,15 +5309,15 @@ fn a_static_member_of_a_generic_class_returns_self() {
 /// follows the same type written alone.
 #[test]
 fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union() {
-    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<List<int>, int> c = [:];\n    private Map<List<int>, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<List<void>> g;\n    private Class<List<void>>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store<TItem>\n{\n    private TItem<Order> a;\n    private TItem<Order>|int b;\n    private Map<Any, int> c = [:];\n    private Map<Any, int>|string d = [:];\n    private List<List<void>> e;\n    private List<List<void>>|int f;\n    private Class<List<void>> g;\n    private Class<List<void>>|string h;\n    private Function<List<void>(int)> i;\n    private Function<List<void>(int)>|int j;\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "5:13 A type parameter takes no type arguments: write `TItem`.",
             "6:13 A type parameter takes no type arguments: write `TItem`.",
-            "7:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
-            "8:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`.",
+            "7:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "8:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
             "9:23 A type argument cannot be `void`: `void` is only a return type.",
             "10:23 A type argument cannot be `void`: `void` is only a return type.",
             "11:24 A type argument cannot be `void`: `void` is only a return type.",
@@ -5849,7 +5976,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         ),
         (
             body,
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`.",
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`.",
         ),
     ] {
         assert_eq!(

@@ -17,6 +17,7 @@ use crate::cst::Leave;
 use crate::cst::MatchArm;
 use crate::cst::NullSafeFunctionCall;
 use crate::cst::PartialApplication;
+use crate::cst::PatternMatchArmBody;
 use crate::cst::Return;
 use crate::cst::Statement;
 use crate::cst::SwitchBody;
@@ -159,6 +160,11 @@ pub fn statement_has_yield(statement: &Statement) -> bool {
             }
         },
         Statement::DoWhile(do_while) => statement_has_yield(do_while.statement),
+        Statement::ForOf(for_of) => statement_has_yield(for_of.body),
+        Statement::PatternMatch(pattern_match) => pattern_match.arms.iter().any(|arm| match arm.body() {
+            PatternMatchArmBody::Block(block) => block_has_yield(block),
+            PatternMatchArmBody::Expression(expression) => expression_has_yield(expression),
+        }),
         Statement::Switch(switch) => {
             let cases = match &switch.body {
                 SwitchBody::BraceDelimited(switch_brace_delimited_body) => &switch_brace_delimited_body.cases,

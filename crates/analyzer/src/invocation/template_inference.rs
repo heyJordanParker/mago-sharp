@@ -39,6 +39,7 @@ use mago_codex::ttype::get_array_value_parameter;
 use mago_codex::ttype::get_iterable_parameters;
 use mago_codex::ttype::get_non_negative_int;
 use mago_codex::ttype::get_specialized_template_type;
+use mago_codex::ttype::sharp_iterable_value;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::definition_type_replacer::DefinitionReplacementOptions;
 use mago_codex::ttype::template::definition_type_replacer::insert_bound_type;
@@ -608,9 +609,13 @@ fn infer_templates_from_input_and_container_types<A>(
             }
             TAtomic::Iterable(container_iterable) => {
                 for input_atomic in residual_input_type.types.as_ref() {
-                    let Some(input_params) = get_iterable_parameters(input_atomic, context.codebase) else {
+                    let Some(mut input_params) = get_iterable_parameters(input_atomic, context.codebase) else {
                         return;
                     };
+                    if context.dialect.is_sharp() {
+                        input_params.1 =
+                            sharp_iterable_value(input_atomic, container_atomic_part, &input_params.0, input_params.1);
+                    }
 
                     infer_templates_from_input_and_container_types(
                         context,

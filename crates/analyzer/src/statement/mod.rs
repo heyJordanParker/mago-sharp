@@ -2,6 +2,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use mago_allocator::Arena;
+use mago_allocator::vec_in;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
@@ -19,6 +20,7 @@ use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::union::populate_union_type;
 use mago_codex::ttype::wrap_atomic;
@@ -30,6 +32,8 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Array;
+use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::DeclareBody;
@@ -48,9 +52,13 @@ use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::LocalDeclaration;
+use mago_syntax::cst::LocalIdentifier;
+use mago_syntax::cst::LocalTarget;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UseItems;
+use mago_syntax::cst::ValueArrayElement;
+use mago_syntax::cst::sequence::TokenSeparatedSequence;
 use mago_syntax::error::ParseError;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
@@ -71,6 +79,7 @@ use crate::expression::match_arm_hints;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::NamedCall;
+use crate::resolver::method::get_declared_collection;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_types;
@@ -83,6 +92,8 @@ use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_function_like_identifier;
 use crate::utils::names::display_sharp_type;
+use crate::utils::names::display_type;
+use crate::utils::quoted_source;
 use crate::visibility::check_internal_reach;
 
 pub mod attributes;
@@ -361,48 +372,139 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LocalDeclaration<'arena> {
     where
         A: Arena,
     {
+        let names = self.target.names();
+        let variable_ids: Vec<Word> = names.iter().map(|name| php_variable_name(name.value)).collect();
         // A written type binds every value the local takes, and is its type after the declaration, as a `@var` tag
-        // on the PHP assignment would make it.
-        let variable_id = php_variable_name(self.name.value);
-        let local_type = declare_local_type(context, block_context, artifacts, variable_id, self.hint);
+        // on the PHP assignment would make it. An unpack has none, and its locals start unbound.
+        let local_type = match self.target {
+            LocalTarget::Name(_) => declare_local_type(context, block_context, artifacts, variable_ids[0], self.hint),
+            LocalTarget::Unpack(_) => {
+                for variable_id in &variable_ids {
+                    block_context.local_types.remove(variable_id);
+                }
 
-        // A PHP# local declaration runs as the PHP assignment of its value to the variable it declares.
-        let name =
-            context.arena.alloc(Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(self.name) }));
+                None
+            }
+        };
+
+        // A PHP# local declaration runs as the PHP assignment of its value to the variable it declares, and an unpack
+        // as PHP's destructuring assignment of a tuple's elements, `[$total, $count] = $summary;`, spec section 30.
+        let local = |name: &LocalIdentifier<'arena>| {
+            &*context.arena.alloc(Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(*name) }))
+        };
+        let target = match &self.target {
+            LocalTarget::Name(name) => local(name),
+            LocalTarget::Unpack(unpack) => {
+                let mut elements = vec_in![context.arena];
+                for name in unpack.names.iter() {
+                    elements.push(ArrayElement::Value(ValueArrayElement { value: local(name) }));
+                }
+
+                &*context.arena.alloc(Expression::Array(Array {
+                    left_bracket: unpack.left_bracket,
+                    elements: TokenSeparatedSequence::new(elements, vec_in![context.arena]),
+                    colon: None,
+                    right_bracket: unpack.right_bracket,
+                }))
+            }
+        };
+
+        // Spec section 30 unpacks a tuple, whose type gives its length, so an unpack of any other value is refused once,
+        // before PHP's destructuring reads it, and its locals take no type, so their later uses report nothing again.
+        let unpacked_type = match self.target {
+            LocalTarget::Unpack(_) => {
+                let was_inside_general_use = block_context.flags.inside_general_use();
+                block_context.flags.set_inside_general_use(true);
+                self.value.analyze(context, block_context, artifacts)?;
+                block_context.flags.set_inside_general_use(was_inside_general_use);
+
+                let value_type = artifacts.get_expression_type(self.value).cloned().unwrap_or_else(get_mixed);
+                if !is_unpackable(&value_type) {
+                    report_unpacked_non_tuple(context, block_context, artifacts, self.value, &value_type);
+                    for variable_id in variable_ids {
+                        block_context.locals.insert(variable_id, Rc::new(wrap_atomic(TAtomic::Error)));
+                    }
+
+                    return Ok(());
+                }
+
+                Some(value_type)
+            }
+            LocalTarget::Name(_) => None,
+        };
 
         analyze_assignment(
             context,
             block_context,
             artifacts,
-            Some(self.name.span.join(self.value.span())),
-            name,
+            Some(self.target.span().join(self.value.span())),
+            target,
             None,
-            Some(self.value),
-            None,
+            unpacked_type.is_none().then_some(self.value),
+            unpacked_type,
         )?;
 
-        match local_type {
-            Some((local_type, _)) => {
-                block_context.locals.insert(variable_id, local_type);
-            }
-            // A local without a written type takes its first value's general type, as C#'s `var` and TypeScript's
-            // `let` do. `null` and an empty literal have none, and the semantic checks refuse them.
-            None => {
-                if let Some(first_value) = block_context.locals.get(&variable_id)
-                    && !first_value.is_null()
-                    && !first_value
-                        .types
-                        .iter()
-                        .any(|atomic| matches!(atomic, TAtomic::Array(array) if array.is_empty()))
-                {
-                    let general_type = get_general_type(first_value, context.codebase);
-                    block_context.local_types.insert(variable_id, (Rc::new(general_type), self.value.span()));
-                }
+        if let Some((local_type, _)) = local_type {
+            block_context.locals.insert(variable_ids[0], local_type);
+
+            return Ok(());
+        }
+
+        // A local without a written type takes its first value's general type, as C#'s `var` and TypeScript's `let`
+        // do, and each unpacked local its element's. `null` and an empty literal have none, and the semantic checks
+        // refuse them.
+        for variable_id in variable_ids {
+            if let Some(first_value) = block_context.locals.get(&variable_id)
+                && !first_value.is_null()
+                && !first_value.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(array) if array.is_empty()))
+            {
+                let general_type = get_general_type(first_value, context.codebase);
+                block_context.local_types.insert(variable_id, (Rc::new(general_type), self.value.span()));
             }
         }
 
         Ok(())
     }
+}
+
+/// Whether `const [a, b] = value` may unpack a value of the type `value_type`: a tuple, or a value whose refusal was
+/// already reported.
+fn is_unpackable(value_type: &TUnion) -> bool {
+    value_type.types.iter().all(|atomic| match atomic {
+        TAtomic::Array(TArray::List(list)) => list.tuple_names.is_some(),
+        atomic => matches!(atomic, TAtomic::Error),
+    })
+}
+
+/// Reports `const [a, b] = value` where `value`, of the type `value_type`, is no tuple, naming the collection its place
+/// is declared as. A `List` is read by index instead, since it may hold fewer elements than the unpack names.
+fn report_unpacked_non_tuple<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+    value: &Expression<'_>,
+    value_type: &TUnion,
+) where
+    A: Arena,
+{
+    let shown = match get_declared_collection(context, block_context, artifacts, value) {
+        Some(declared) if value_type.has_null() => declared.as_nullable(),
+        Some(declared) => declared,
+        None => value_type.clone(),
+    };
+    let quoted = quoted_source(context, value.span());
+    let mut issue =
+        Issue::error(format!("Only a tuple unpacks, and `{quoted}` is a `{}`.", display_type(context, &shown)))
+            .with_annotation(Annotation::primary(value.span()).with_message("Unpacked here."));
+    if shown
+        .types
+        .iter()
+        .all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none()))
+    {
+        issue = issue.with_help(format!("A `List` may hold fewer elements: read them by index, as in `{quoted}[0]`."));
+    }
+
+    context.collector.report_with_code(IssueCode::InvalidDestructuringSource, issue);
 }
 
 /// Binds the local `variable_id` to its written type, or unbinds it when none is written, and returns the written type
@@ -575,10 +677,10 @@ where
     };
     let target = match &for_of.target {
         ForOfTarget::Value(value) => ForeachTarget::Value(ForeachValueTarget { value: variable(value) }),
-        ForOfTarget::KeyValue(pair) => ForeachTarget::KeyValue(ForeachKeyValueTarget {
-            key: variable(&pair.key),
-            double_arrow: pair.comma,
-            value: variable(&pair.value),
+        ForOfTarget::Unpack(unpack) => ForeachTarget::KeyValue(ForeachKeyValueTarget {
+            key: variable(&unpack.first),
+            double_arrow: unpack.comma,
+            value: variable(&unpack.second),
         }),
     };
     let foreach = context.arena.alloc(Foreach {

@@ -1,11 +1,14 @@
 use mago_allocator::Arena;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_iterable_parameters;
+use mago_codex::ttype::get_map_entry;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_non_negative_int;
 use mago_codex::ttype::get_null;
@@ -14,6 +17,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::Yield;
 use mago_syntax::cst::YieldFrom;
 use mago_syntax::cst::YieldPair;
@@ -26,6 +30,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::utils::get_type_diff;
+use crate::utils::names::display_type;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Yield<'arena> {
     fn analyze<'ctx, A>(
@@ -41,6 +46,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Yield<'arena> {
             Yield::Value(yield_value) => yield_value.analyze(context, block_context, artifacts),
             Yield::Pair(yield_pair) => yield_pair.analyze(context, block_context, artifacts),
             Yield::From(yield_from) => yield_from.analyze(context, block_context, artifacts),
+            Yield::Spread(yield_spread) => {
+                analyze_yield_from(yield_spread, yield_spread.iterator, context, block_context, artifacts)
+            }
         }
     }
 }
@@ -83,15 +91,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for YieldValue<'arena> {
             false,
             &mut ComparisonResult::new(),
         ) {
-            let mut issue = Issue::error(format!(
-                "Invalid value type yielded; expected `{}`, but found `{}`.",
-                v.get_id(),
-                value_type.get_id()
-            ))
-            .with_annotation(
-                Annotation::primary(self.value.as_ref().map_or_else(|| self.span(), mago_span::HasSpan::span))
-                    .with_message(format!("This expression yields type `{}`", value_type.get_id())),
-            )
+            let (expected, found) = (display_type(context, &v), display_type(context, &value_type));
+            let mut issue = Issue::error(format!("Invalid value type yielded; expected `{expected}`, but found `{found}`."))
+                .with_annotation(
+                    Annotation::primary(self.value.as_ref().map_or_else(|| self.span(), mago_span::HasSpan::span))
+                        .with_message(format!("This expression yields type `{found}`")),
+                )
             .with_note("The type of the value yielded must be assignable to the value type declared in the Generator's return type hint.")
             .with_help("Ensure the yielded value matches the expected type, or adjust the Generator's return type hint.");
 
@@ -249,152 +254,170 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for YieldFrom<'arena> {
     where
         A: Arena,
     {
-        let was_inside_call = block_context.flags.inside_call();
-        block_context.flags.set_inside_call(true);
-        self.iterator.analyze(context, block_context, artifacts)?;
-        block_context.flags.set_inside_call(was_inside_call);
+        analyze_yield_from(self, self.iterator, context, block_context, artifacts)
+    }
+}
 
-        let Some((k, v, s, _)) = get_current_generator_parameters(context, block_context, self.span()) else {
-            return Ok(());
-        };
+/// Analyzes PHP's `yield from iterator`, and PHP#'s `yield ...iterator`, which runs as it.
+fn analyze_yield_from<'ctx, 'arena, A>(
+    r#yield: &impl HasSpan,
+    iterator: &Expression<'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let form = if context.dialect.is_sharp() { "yield ..." } else { "yield from" };
 
-        let Some(iterator_type) = artifacts.get_rc_expression_type(&self.iterator).cloned() else {
-            context.collector.report_with_code(
+    let was_inside_call = block_context.flags.inside_call();
+    block_context.flags.set_inside_call(true);
+    iterator.analyze(context, block_context, artifacts)?;
+    block_context.flags.set_inside_call(was_inside_call);
+
+    let Some((k, v, s, _)) = get_current_generator_parameters(context, block_context, r#yield.span()) else {
+        return Ok(());
+    };
+
+    let Some(iterator_type) = artifacts.get_rc_expression_type(iterator).cloned() else {
+        context.collector.report_with_code(
                 IssueCode::UnknownYieldFromIteratorType,
-                Issue::error("Cannot determine the type of the expression in `yield from`.")
+                Issue::error(format!("Cannot determine the type of the expression in `{form}`."))
                     .with_annotation(
-                        Annotation::primary(self.iterator.span())
+                        Annotation::primary(iterator.span())
                             .with_message("The type of this iterator is unknown"),
                     )
-                    .with_note(
-                        "`yield from` requires an iterable (array or `Traversable`). Its key, value, send, and return types must be compatible with the current generator."
-                    )
+                    .with_note(format!(
+                        "`{form}` requires an iterable (array or `Traversable`). Its key, value, send, and return types must be compatible with the current generator."
+                    ))
                     .with_help(
                         "Ensure the expression has a known iterable type. Check for undefined variables or unresolvable function calls.",
                     ),
             );
 
-            artifacts.set_expression_type(self, get_null());
+        artifacts.set_expression_type(r#yield, get_null());
 
-            return Ok(());
-        };
+        return Ok(());
+    };
 
-        for atomic in iterator_type.types.iter() {
-            let (key, value) = if let Some(generator) = atomic.get_generator_parameters() {
-                // the iterator is a generator! not only does it have to match key and value,
-                // but also `send` type must be compatible with the current generator's `send` type
-                if !union_comparator::is_contained_by(
-                    context.codebase,
-                    &s,
-                    &generator.2,
-                    false,
-                    false,
-                    false,
-                    &mut ComparisonResult::new(),
-                ) {
-                    context.collector.report_with_code(
-                        IssueCode::YieldFromInvalidSendType,
-                        Issue::error(format!(
-                            "Incompatible `send` type for `yield from`: current generator expects to be sent `{}`, but yielded generator expects `{}`.",
-                            s.get_id(),
-                            generator.2.get_id()
-                        ))
-                        .with_annotation(
-                            Annotation::primary(self.iterator.span())
-                                .with_message(format!("This generator expects to be sent `{}`", generator.2.get_id())),
-                        )
-                        .with_note("When using `yield from` with another Generator, the `send` type of the inner generator (Ts') must be a supertype of (or equal to) the `send` type of the outer generator (Ts). This means `Ts <: Ts'`.")
-                        .with_help("Ensure the send types are compatible, or adjust the Generator type hints."),
-                    );
-                }
-
-                (generator.0, generator.1)
-            } else if let Some(parameters) = get_iterable_parameters(atomic, context.codebase) {
-                parameters
-            } else {
-                context.collector.report_with_code(
-                    IssueCode::YieldFromNonIterable,
-                    Issue::error(format!(
-                        "Cannot `yield from` non-iterable type `{}`.",
-                        atomic.get_id()
-                    ))
-                    .with_annotation(Annotation::primary(self.iterator.span()).with_message(format!(
-                        "Expression cannot be yielded from; it is of type `{}`",
-                        atomic.get_id()
-                    )))
-                    .with_note(
-                        "`yield from` requires an `iterable` (e.g., `array` or an object implementing `Traversable`).",
-                    )
-                    .with_help("Ensure the expression used with `yield from` always evaluates to an iterable type."),
-                );
-
-                continue;
-            };
-
+    for atomic in iterator_type.types.iter() {
+        let (key, value) = if let Some(generator) = atomic.get_generator_parameters() {
+            // the iterator is a generator! not only does it have to match key and value,
+            // but also `send` type must be compatible with the current generator's `send` type
             if !union_comparator::is_contained_by(
                 context.codebase,
-                &value,
-                &v,
+                &s,
+                &generator.2,
                 false,
                 false,
                 false,
                 &mut ComparisonResult::new(),
             ) {
-                let mut issue = Issue::error(format!(
-                    "Invalid value type from `yield from`: current generator expects to yield `{}`, but the inner iterable yields `{}`.",
-                    v.get_id(),
-                    value.get_id()
+                let (sent, expected) = (display_type(context, &s), display_type(context, &generator.2));
+                context.collector.report_with_code(
+                        IssueCode::YieldFromInvalidSendType,
+                        Issue::error(format!(
+                            "Incompatible `send` type for `{form}`: current generator expects to be sent `{sent}`, but yielded generator expects `{expected}`."
+                        ))
+                        .with_annotation(
+                            Annotation::primary(iterator.span())
+                                .with_message(format!("This generator expects to be sent `{expected}`")),
+                        )
+                        .with_note(format!("When using `{form}` with another Generator, the `send` type of the inner generator (Ts') must be a supertype of (or equal to) the `send` type of the outer generator (Ts). This means `Ts <: Ts'`."))
+                        .with_help("Ensure the send types are compatible, or adjust the Generator type hints."),
+                    );
+            }
+
+            (generator.0, generator.1)
+        } else if let Some((key, value)) = get_iterable_parameters(atomic, context.codebase) {
+            // Spec section 12: `yield ...plans` gives a `Map`'s entries, as every PHP# `Iterable<T>` holds a `Map`.
+            if context.dialect.is_sharp() && matches!(atomic, TAtomic::Array(TArray::Keyed(_))) {
+                (key.clone(), get_map_entry(key, value))
+            } else {
+                (key, value)
+            }
+        } else {
+            context.collector.report_with_code(
+                IssueCode::YieldFromNonIterable,
+                Issue::error(format!("Cannot `{form}` non-iterable type `{}`.", atomic.get_id()))
+                    .with_annotation(Annotation::primary(iterator.span()).with_message(format!(
+                        "Expression cannot be yielded from; it is of type `{}`",
+                        atomic.get_id()
+                    )))
+                    .with_note(format!(
+                        "`{form}` requires an `iterable` (e.g., `array` or an object implementing `Traversable`).",
+                    ))
+                    .with_help(format!(
+                        "Ensure the expression used with `{form}` always evaluates to an iterable type."
+                    )),
+            );
+
+            continue;
+        };
+
+        if !union_comparator::is_contained_by(
+            context.codebase,
+            &value,
+            &v,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::new(),
+        ) {
+            let (expected, found) = (display_type(context, &v), display_type(context, &value));
+            let mut issue = Issue::error(format!(
+                    "Invalid value type from `{form}`: current generator expects to yield `{expected}`, but the inner iterable yields `{found}`."
                 ))
                 .with_annotation(
-                    Annotation::primary(self.iterator.span())
-                        .with_message(format!("This iterable yields values of type `{}`", value.get_id())),
+                    Annotation::primary(iterator.span())
+                        .with_message(format!("This iterable yields values of type `{found}`")),
                 )
                 .with_note("The value type yielded by the inner iterable (Tv') must be assignable to the value type of the current generator (Tv). This means `Tv' <: Tv`.")
                 .with_help("Ensure the inner iterable yields compatible value types, or adjust the current Generator's type hint.");
 
-                if let Some(type_diff) = get_type_diff(context, &v, &value) {
-                    issue = issue.with_note(type_diff);
-                }
-
-                context.collector.report_with_code(IssueCode::YieldFromInvalidValueType, issue);
+            if let Some(type_diff) = get_type_diff(context, &v, &value) {
+                issue = issue.with_note(type_diff);
             }
 
-            if !union_comparator::is_contained_by(
-                context.codebase,
-                &key,
-                &k,
-                false,
-                false,
-                false,
-                &mut ComparisonResult::new(),
-            ) {
-                let mut issue = Issue::error(format!(
-                    "Invalid key type from `yield from`: current generator expects to yield keys of type `{}`, but the inner iterable yields keys of type `{}`.",
+            context.collector.report_with_code(IssueCode::YieldFromInvalidValueType, issue);
+        }
+
+        if !union_comparator::is_contained_by(
+            context.codebase,
+            &key,
+            &k,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::new(),
+        ) {
+            let mut issue = Issue::error(format!(
+                    "Invalid key type from `{form}`: current generator expects to yield keys of type `{}`, but the inner iterable yields keys of type `{}`.",
                     k.get_id(),
                     key.get_id()
                 ))
                 .with_annotation(
-                    Annotation::primary(self.iterator.span())
+                    Annotation::primary(iterator.span())
                         .with_message(format!("This iterable yields keys of type `{}`", key.get_id())),
                 )
                 .with_note("The key type yielded by the inner iterable (Tk') must be assignable to the key type of the current generator (Tk). This means `Tk' <: Tk`.")
                 .with_help("Ensure the inner iterable yields compatible key types, or adjust the current Generator's type hint.");
 
-                if let Some(type_diff) = get_type_diff(context, &k, &key) {
-                    issue = issue.with_note(type_diff);
-                }
-
-                context.collector.report_with_code(IssueCode::YieldFromInvalidKeyType, issue);
+            if let Some(type_diff) = get_type_diff(context, &k, &key) {
+                issue = issue.with_note(type_diff);
             }
 
-            artifacts.inferred_yield_key_types.push(key);
-            artifacts.inferred_yield_value_types.push(value);
+            context.collector.report_with_code(IssueCode::YieldFromInvalidKeyType, issue);
         }
 
-        artifacts.set_expression_type(self, get_null());
-
-        Ok(())
+        artifacts.inferred_yield_key_types.push(key);
+        artifacts.inferred_yield_value_types.push(value);
     }
+
+    artifacts.set_expression_type(r#yield, get_null());
+
+    Ok(())
 }
 
 fn get_current_generator_parameters<'ctx, A>(
@@ -452,6 +475,11 @@ where
                     sent = Some(get_mixed());
                     r#return = Some(get_mixed());
                 } else {
+                    // `check_slice` decides which PHP# methods yield, and refuses this one.
+                    if context.dialect.is_sharp() {
+                        return None;
+                    }
+
                     context.collector.report_with_code(
                     IssueCode::InvalidGeneratorReturnType,
                     Issue::error(format!(

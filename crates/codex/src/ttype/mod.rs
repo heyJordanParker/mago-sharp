@@ -16,6 +16,7 @@ use crate::ttype::atomic::array::list::TList;
 use crate::ttype::atomic::callable::TCallable;
 use crate::ttype::atomic::callable::TCallableSignature;
 use crate::ttype::atomic::generic::TGenericParameter;
+use crate::ttype::atomic::iterable::TIterable;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
 use crate::ttype::atomic::scalar::TScalar;
@@ -1456,8 +1457,8 @@ pub fn get_backing_key_type<'key>(
 /// Whether every value of `key_type` keys a PHP# `Map` and joins a `Set`.
 ///
 /// Spec section 12 keys a `Map` by anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`
-/// and an enum case, which section 19 gives `==` with no code, a struct, and a class that declares or inherits
-/// `operator ==`, which the checker requires `hash()` beside. An intersection keys one when any of its members does,
+/// and an enum case, which section 19 gives `==` with no code, a struct, a `List`, `Set` or `Map` of them, and a class
+/// that declares or inherits `operator ==`, which the checker requires `hash()` beside. An intersection keys one when any of its members does,
 /// since each of its values is a value of every member. A class value keys none: it compares by its whole type, type
 /// arguments included, and runs as its plain class name, which `Class<Box<Order>>` and `Class<Box<Invoice>>` share.
 #[must_use]
@@ -1490,6 +1491,14 @@ pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
             std::iter::once(atomic).chain(atomic.get_intersection_types().unwrap_or_default()).any(is_key_object)
         }
         TAtomic::GenericParameter(parameter) => is_key_type(&parameter.constraint, codebase),
+        // Section 19 compares two collections by their elements, and the engine hashes a collection by them, so a
+        // collection of key types keys a `Map` too.
+        TAtomic::Array(TArray::Set(element_type)) => is_key_type(element_type, codebase),
+        TAtomic::Array(collection) => {
+            let (key_type, value_type) = get_array_parameters(collection, codebase);
+
+            is_key_type(&key_type, codebase) && is_key_type(&value_type, codebase)
+        }
         _ => false,
     })
 }
@@ -1634,6 +1643,28 @@ pub fn get_backed_enum<'codebase>(
     })
 }
 
+/// The value of `input`, whose key is `key` and whose value is `value`, as the iterable `container` reads it.
+///
+/// PHP#'s `Iterable<T>` holds a `Map<TKey, TValue>`, a keyed array, by its entries, as an `Iterable<[TKey, TValue]>`,
+/// spec section 12, and every other input by its values. A plain PHP `iterable` reads every array's values.
+#[must_use]
+pub fn sharp_iterable_value(input: &TAtomic, container: &TAtomic, key: &TUnion, value: TUnion) -> TUnion {
+    if !matches!(
+        (input, container),
+        (TAtomic::Array(TArray::Keyed(_)), TAtomic::Iterable(TIterable { holds_map_entries: true, .. }))
+    ) {
+        return value;
+    }
+
+    get_map_entry(key.clone(), value)
+}
+
+/// The tuple `[TKey, TValue]` a PHP# `Map`'s entry is, spec sections 12 and 30.
+#[must_use]
+pub fn get_map_entry(key: TUnion, value: TUnion) -> TUnion {
+    wrap_atomic(TAtomic::Array(TArray::List(TList::tuple(vec![(key, None), (value, None)]))))
+}
+
 /// A type PHP# can write, by the form its spelling takes. A PHP docblock refinement of one, such as `positive-int`,
 /// `non-empty-string` or `list<int>`, is that type.
 #[derive(Debug, Clone, Copy)]
@@ -1652,6 +1683,8 @@ pub enum SharpType<'atomic> {
     Set(&'atomic TUnion),
     Map(&'atomic TUnion, &'atomic TUnion),
     Iterable(&'atomic TUnion),
+    /// A tuple, spec section 30, whose elements `TList::tuple_elements` gives.
+    Tuple(&'atomic TList),
     Parameter(&'atomic TGenericParameter),
     ClassValue(&'atomic TClassLikeString),
     Function(&'atomic TCallableSignature),
@@ -1673,6 +1706,7 @@ pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
         TAtomic::Object(TObject::Named(object)) => {
             SharpType::Class(object.name, object.get_type_parameters().unwrap_or_default())
         }
+        TAtomic::Array(TArray::List(list)) if list.tuple_names.is_some() => SharpType::Tuple(list),
         TAtomic::Array(TArray::List(list)) => SharpType::List(&list.element_type),
         TAtomic::Array(TArray::Set(element_type)) => SharpType::Set(element_type),
         TAtomic::Array(TArray::Keyed(TKeyedArray { parameters: Some((key, value)), .. })) => SharpType::Map(key, value),
@@ -1698,6 +1732,9 @@ pub fn is_written_in_sharp(union: &TUnion) -> bool {
                         is_written_in_sharp(inner)
                     }
                     Some(SharpType::Map(key, value)) => is_written_in_sharp(key) && is_written_in_sharp(value),
+                    Some(SharpType::Tuple(tuple)) => {
+                        tuple.tuple_elements().into_iter().flatten().all(|(element, _)| is_written_in_sharp(element))
+                    }
                     Some(SharpType::Function(signature)) => {
                         signature.get_return_type().is_none_or(is_written_in_sharp)
                             && signature

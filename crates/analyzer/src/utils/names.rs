@@ -363,8 +363,8 @@ where
 }
 
 /// Returns the PHP# collection type, as in `Map<string, int>`, that `object` stands for when it is `Sharp\ListMethods`,
-/// `Sharp\MapMethods` or `Sharp\SetMethods`. The analyzer checks a method call on a `List`, `Map` or `Set` against
-/// those classes, and a message names the type the code wrote instead.
+/// `Sharp\MapMethods`, `Sharp\SetMethods` or `Sharp\IterableMethods`. The analyzer checks a method call on a `List`,
+/// `Map`, `Set` or `Iterable` against those classes, and a message names the type the code wrote instead.
 #[must_use]
 pub(crate) fn display_sharp_collection<A>(context: &Context<'_, '_, A>, object: &TObject) -> Option<String>
 where
@@ -476,8 +476,9 @@ where
     display_sharp_type(context, &TUnion::from_vec(general))
 }
 
-/// Returns `union` as PHP# writes the type: `List<int>`, `Map<string, int>`, `int?`, `(int|string)?`, `Any?`, a class
-/// as [`sharp_class_like_name`] names it, a type parameter by its name, an intersection as `A & B`, a function type as
+/// Returns `union` as PHP# writes the type: `List<int>`, `Map<string, int>`, a tuple as `[Money total, int]`, `int?`,
+/// `(int|string)?`, `Any?`, a class as [`sharp_class_like_name`] names it, a type parameter by its name, an
+/// intersection as `A & B`, a function type as
 /// `Function<void(int)>` or `Function<Charge(Cart) uses Http>` with each effect named as a class is, `Class<Order>`,
 /// `Object`, `Iterable<int>`, and a literal as `1` or `"text"`. A refinement that
 /// PHP# cannot write is the type that holds it, such as `int` for a `positive-int` and `int|string` for an
@@ -518,6 +519,18 @@ where
     A: Arena,
 {
     let written = match atomic {
+        // Spec section 30: a tuple as it is written, each element's type and its name when it has one.
+        TAtomic::Array(TArray::List(list)) if let Some(elements) = list.tuple_elements() => {
+            let elements: Vec<String> = elements
+                .into_iter()
+                .map(|(element, name)| match name {
+                    Some(name) => format!("{} {name}", display_sharp_type(context, element)),
+                    None => display_sharp_type(context, element),
+                })
+                .collect();
+
+            format!("[{}]", elements.join(", "))
+        }
         TAtomic::Array(array) => {
             let (key, value) = get_array_parameters(array, context.codebase);
             match array {
@@ -773,7 +786,8 @@ pub(crate) fn sharp_code_class_name(
     sharp_import_alias(codebase, imported_names, scope, name).unwrap_or_else(|| short_name(name))
 }
 
-/// Returns `List`, `Map` or `Set` when `object` is `Sharp\ListMethods`, `Sharp\MapMethods` or `Sharp\SetMethods`.
+/// Returns `List`, `Map`, `Set` or `Iterable` when `object` is `Sharp\ListMethods`, `Sharp\MapMethods`,
+/// `Sharp\SetMethods` or `Sharp\IterableMethods`.
 #[must_use]
 pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
     let name = object.get_name()?;
@@ -784,6 +798,8 @@ pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
         Some("Map")
     } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\SetMethods") {
         Some("Set")
+    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\IterableMethods") {
+        Some("Iterable")
     } else {
         None
     }
