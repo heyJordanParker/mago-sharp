@@ -137,7 +137,7 @@ where
                 Pattern::Value(self.parse_expression_with_precedence(Precedence::SharpComparison)?)
             }
             T![Identifier] if self.stream.peek_kind(1)? == Some(T!["."]) => {
-                if self.is_at_case_with_data()? {
+                if self.is_at_dotted_type_pattern()? {
                     Pattern::Type(self.parse_case_pattern()?)
                 } else {
                     // A case without fields or a name, as in `Status.Open`, is the value `Class.y` reads.
@@ -218,13 +218,17 @@ where
     }
 
     /// Whether `Case.Name` is followed by its fields in parentheses, its properties or a name, as a case of an enum with
-    /// data is matched.
-    fn is_at_case_with_data(&mut self) -> Result<bool, ParseError> {
-        Ok(match self.stream.lookahead(3)? {
-            Some(token) if matches!(token.kind, T!["(" | "{"]) => true,
-            Some(token) => token.kind == T![Identifier] && !matches!(token.value, b"when" | b"is" | b"and" | b"or"),
-            None => false,
-        })
+    /// data is matched. A name of three parts or more is a type too, as `App.Shop.Order`, since no constant has one:
+    /// the analyzer refuses it as a full name, spec section 23.
+    fn is_at_dotted_type_pattern(&self) -> Result<bool, ParseError> {
+        let (parts, after) = self.peek_dotted_name()?;
+
+        Ok(parts > 2
+            || match after {
+                Some(token) if matches!(token.kind, T!["(" | "{"]) => true,
+                Some(token) => token.kind == T![Identifier] && !matches!(token.value, b"when" | b"is" | b"and" | b"or"),
+                None => false,
+            })
     }
 
     /// Parses an enum case pattern, spec section 21: the case's type, `Case.Name`, then its fields in parentheses by

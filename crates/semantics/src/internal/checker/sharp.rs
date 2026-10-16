@@ -4264,6 +4264,9 @@ fn is_slice_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
     match hint {
         Hint::Object(object) => object.value == OBJECT,
         Hint::Identifier(name @ Identifier::Local(_)) => !context.names.is_type_parameter(name),
+        // A dotted name is a case type or a full name, which the analyzer refuses with the import to add, spec section
+        // 23.
+        Hint::Identifier(Identifier::Dotted(_)) => true,
         Hint::Generic(generic) => {
             built_in_generic_arity(generic.name.value).is_none() && !context.names.is_type_parameter(&generic.name)
         }
@@ -4598,6 +4601,12 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
     }
 
     if instantiation.argument_list.is_none() && instantiation.initializer.is_none() {
+        // `new App.Shop.Order()` reads as the named constructor `Shop` of `App` and a call of `Order` on it. Only the
+        // codebase tells a full name from a member, so the analyzer refuses the chain, spec section 23.
+        if instantiation.constructor.is_some() && is_member_chain_object(instantiation, context) {
+            return Some(Place::Instantiation);
+        }
+
         report_not_supported(
             instantiation.span(),
             "`new` without arguments",
@@ -4662,6 +4671,19 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
     }
 
     Some(Place::Instantiation)
+}
+
+/// Whether `instantiation` is the object a member read or a method call reads through, as the `new App.Shop` of
+/// `new App.Shop.Order()` is.
+fn is_member_chain_object(instantiation: &Instantiation, context: &Context<'_, '_, '_>) -> bool {
+    // The check of an expression runs before the walk enters it, so the last ancestor is its parent.
+    let object = match context.ancestors.last() {
+        Some(Node::Expression(Expression::Call(Call::Method(call)))) => call.object,
+        Some(Node::Expression(Expression::Access(Access::Property(access)))) => access.object,
+        _ => return false,
+    };
+
+    object.span() == instantiation.span()
 }
 
 /// Whether a class's constructor is marked `required`.

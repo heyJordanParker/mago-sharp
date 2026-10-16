@@ -254,6 +254,15 @@ pub(crate) fn imports_by_default(scope: &NamespaceScope, name: Word) -> bool {
         && name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(b"Sharp"))
 }
 
+/// Whether the full name `name` is `Sharp\Internal`, the namespace of the engine's functions that only the standard
+/// library imports (spec section 15), or a name under it, compared ignoring case.
+pub(crate) fn is_sharp_internal(name: &[u8]) -> bool {
+    let internal = b"Sharp\\Internal";
+
+    name.get(..internal.len()).is_some_and(|root| root.eq_ignore_ascii_case(internal))
+        && matches!(name.get(internal.len()), None | Some(b'\\'))
+}
+
 /// Returns the property `name`, which the codebase keys with its `$`, as the analyzed file names it in prose: `total`
 /// in a `.sharp` file, and `$total` in PHP.
 #[inline]

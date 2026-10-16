@@ -1425,9 +1425,9 @@ where
 
     fn walk_in_on(&mut self, on: &'ast On<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         for event in &on.events {
-            let (event_classlike, imported) = self.resolve_class(context, event.value);
+            let (event_classlike, imported) = self.resolve_class(context, arena_name(context, event));
 
-            self.resolved_names.insert_at(event.span, event_classlike, imported);
+            self.resolved_names.insert_at(event.span(), event_classlike, imported);
         }
     }
 

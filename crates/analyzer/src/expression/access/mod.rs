@@ -61,10 +61,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
         A: Arena,
     {
         match self {
-            // As after an invalid call target, the read gets no type, so nothing reports again on what it reads.
+            // As after an invalid call target, the read is an error, so nothing reports again on what it reads.
             Access::Property(PropertyAccess {
                 object, property: ClassLikeMemberSelector::Identifier(name), ..
-            }) if report_full_name(context, object, Some(name)) => Ok(()),
+            }) if report_full_name(context, object, Some(name)) => {
+                artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+                Ok(())
+            }
             // `TItem.y` reads `y` on the class of the type argument the code runs with, any class `TItem`'s bound holds,
             // as a class value's member is read. The resolution reports a bound that holds a type that is no class.
             Access::Property(
@@ -256,33 +260,86 @@ where
 
     // `new App.Shared.Money()` reads as the named constructor `Shared` of `App`, as `new Order.fromJson(json)` does,
     // and the rest after it.
-    let root = match object {
+    let (root, new) = match object {
         Expression::ConstantAccess(root) if context.resolved_names.binding(&root.name) == Some(Binding::Class) => {
-            &root.name
+            (&root.name, None)
         }
         // A `new`'s class is a class name with no binding.
-        Expression::Identifier(root) => root,
-        Expression::Instantiation(Instantiation {
-            class: Expression::Identifier(root),
-            type_arguments: None,
-            constructor: Some(constructor),
-            argument_list: None,
-            initializer: None,
-            ..
-        }) => {
+        Expression::Identifier(root) => (root, None),
+        Expression::Instantiation(
+            new @ Instantiation {
+                class: Expression::Identifier(root),
+                type_arguments: None,
+                constructor: Some(constructor),
+                argument_list: None,
+                initializer: None,
+                ..
+            },
+        ) => {
             names.push(&constructor.name);
-            root
+            (root, Some(new))
         }
         _ => return false,
     };
 
     let resolved = context.resolved_names.get(root);
-    if context.codebase.class_like_exists(resolved) {
-        return false;
+    let reported = !context.codebase.class_like_exists(resolved) && report_full_name_in(context, root, &names);
+    // The semantic checks leave a `new` without arguments a chain reads through to this refusal, as
+    // `new Order.of.total`, when it is no full name.
+    if let Some(new) = new
+        && !reported
+    {
+        context.collector.report_with_code(
+            IssueCode::NotSupportedYet,
+            Issue::error("This `new` without arguments is not supported yet in PHP#.")
+                .with_annotation(Annotation::primary(new.span()).with_message("Not supported yet."))
+                .with_note("PHP# creates an object with `new Class(arguments)`, parentheses included, or with an object initializer, as in `new Class { name: value }`."),
+        );
+
+        return true;
     }
 
-    let imported = context.resolved_names.is_imported(root);
-    let mut full_name = if imported { resolved.to_vec() } else { root.value().to_vec() };
+    reported
+}
+
+/// Reports the chain `root` and the member `names` after it, innermost last, as [`report_full_name`] describes, when
+/// `root` names no class. Returns whether it reported.
+fn report_full_name_in<A>(
+    context: &mut Context<'_, '_, A>,
+    root: &Identifier<'_>,
+    names: &[&LocalIdentifier<'_>],
+) -> bool
+where
+    A: Arena,
+{
+    let resolved = context.resolved_names.get(root);
+
+    // A root the file doesn't import starts a full name, or a name relative to the file's namespace, as `Shop.Order`
+    // in `App` names `App.Shop.Order`.
+    let starts: Vec<Vec<u8>> = if context.resolved_names.is_imported(root) {
+        vec![resolved.to_vec()]
+    } else {
+        std::iter::once(root.value().to_vec())
+            .chain(context.scope.namespace_name().map(|namespace| [namespace, b"\\", root.value()].concat()))
+            .collect()
+    };
+
+    starts.into_iter().any(|start| report_full_name_from(context, root, start, names))
+}
+
+/// Reports the chain that `root` starts, read as one name from `start`, the full name `root` stands for, and the
+/// member `names` after it, innermost last, when it names a class-like or a member of a namespace written in two parts
+/// or more. Returns whether it reported.
+fn report_full_name_from<A>(
+    context: &mut Context<'_, '_, A>,
+    root: &Identifier<'_>,
+    start: Vec<u8>,
+    names: &[&LocalIdentifier<'_>],
+) -> bool
+where
+    A: Arena,
+{
+    let mut full_name = start;
     // `written_parts` counts the parts of `full_name` the code writes: one in `Pdf.render` after `import Vendor.Pdf;`.
     for (written_parts, (index, name)) in (1..).zip(names.iter().enumerate().rev()) {
         let member = [full_name.as_slice(), b"\\", name.value].concat();

@@ -6,6 +6,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_null;
@@ -130,7 +131,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                 ),
                 None => call.analyze(context, block_context, artifacts),
             },
-            // As a call with an invalid target, it gets no type, and only its arguments are analyzed.
+            // As a call with an invalid target, it is an error, and only its arguments are analyzed.
             Call::Method(call)
                 if report_full_name(
                     context,
@@ -141,7 +142,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                     },
                 ) =>
             {
-                call.argument_list.analyze(context, block_context, artifacts)
+                call.argument_list.analyze(context, block_context, artifacts)?;
+                artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+                Ok(())
             }
             // PHP# calls a plain PHP function through its namespace, `Pdf.render(html)` or `global.now()`.
             Call::Method(call)

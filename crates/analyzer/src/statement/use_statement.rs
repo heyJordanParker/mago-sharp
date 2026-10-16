@@ -18,6 +18,8 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::utils::names::imports_by_default;
+use crate::utils::names::is_sharp_internal;
 use mago_bytes::BytesDisplay;
 use mago_bytes::trim_start_byte;
 
@@ -124,19 +126,25 @@ where
         };
 
         (
-            IssueCode::FunctionImport,
+            IssueCode::ConstantImport,
             Issue::error(format!("An import names a class or a namespace, not a constant: {message}."))
                 .with_annotation(Annotation::primary(name.span()).with_message("Imports one constant.")),
         )
-    } else if let Some(classes) = classes_of_namespace(context, &fqn) {
+    } else if let Some(imports) = imports_of_namespace(context, &fqn) {
         let written = String::from_utf8_lossy(&fqn).replace('\\', ".");
+        let message = if imports.is_empty() {
+            format!("`{written}` holds only default names, which every file names with no import: remove the import.")
+        } else {
+            format!(
+                "`{written}` holds classes only, and an import names a class or a namespace of functions: import the class, as in {}.",
+                imports.join(" or ")
+            )
+        };
 
         (
-            IssueCode::NonExistentUseImport,
-            Issue::error(format!(
-                "`{written}` holds classes only, and an import names a class or a namespace of functions: import the class, as in {classes}."
-            ))
-            .with_annotation(Annotation::primary(name.span()).with_message("Imports a namespace of classes.")),
+            IssueCode::ClassNamespaceImport,
+            Issue::error(message)
+                .with_annotation(Annotation::primary(name.span()).with_message("Imports a namespace of classes.")),
         )
     } else {
         report_non_existent_import(context, name.span(), &fqn, "class, interface, trait, or enum");
@@ -160,28 +168,35 @@ fn holds_function_or_constant(codebase: &CodebaseMetadata, namespace: &[u8]) -> 
         || codebase.constants.keys().any(|constant| in_namespace(constant.as_bytes()))
 }
 
-/// The imports of the class-likes directly in the namespace `namespace`, as `` `import Sharp.Json.Json;` ``, joined
-/// with `or` in the order of their names, or `None` when it holds none.
-fn classes_of_namespace<A>(context: &Context<'_, '_, A>, namespace: &[u8]) -> Option<String>
+/// The imports of the class-likes directly in the namespace `namespace` that a file imports to name, as
+/// `` `import Sharp.Json.Json;` ``, in the order of their names, or `None` when it holds no class-like. A module, which
+/// no code names, and a default name, which needs no import, are left out.
+fn imports_of_namespace<A>(context: &Context<'_, '_, A>, namespace: &[u8]) -> Option<Vec<String>>
 where
     A: Arena,
 {
-    let mut imports: Vec<String> = context
+    let classes: Vec<_> = context
         .codebase
         .class_likes
         .values()
-        .map(|class| class.original_name.as_bytes())
         .filter(|class| {
-            class
-                .iter()
-                .rposition(|byte| *byte == b'\\')
-                .is_some_and(|end| class[..end].eq_ignore_ascii_case(namespace))
+            let name = class.original_name.as_bytes();
+
+            name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(namespace))
         })
-        .map(|class| format!("`import {};`", String::from_utf8_lossy(class).replace('\\', ".")))
+        .collect();
+    if classes.is_empty() {
+        return None;
+    }
+
+    let mut imports: Vec<String> = classes
+        .into_iter()
+        .filter(|class| !class.flags.is_module() && !imports_by_default(&context.scope, class.original_name))
+        .map(|class| format!("`import {};`", class.original_name.to_string().replace('\\', ".")))
         .collect();
     imports.sort_unstable();
 
-    (!imports.is_empty()).then(|| imports.join(" or "))
+    Some(imports)
 }
 
 /// Spec section 15: PHP# code listens with `Events.on` and raises events with `emit`, so only the standard library
@@ -190,12 +205,7 @@ pub(crate) fn check_internal_import<A>(context: &mut Context<'_, '_, A>, name: &
 where
     A: Arena,
 {
-    let fqn = php_name(name);
-    let internal = b"Sharp\\Internal";
-    if context.source_file.is_standard_library
-        || !fqn.get(..internal.len()).is_some_and(|root| root.eq_ignore_ascii_case(internal))
-        || !matches!(fqn.get(internal.len()), None | Some(b'\\'))
-    {
+    if context.source_file.is_standard_library || !is_sharp_internal(&php_name(name)) {
         return;
     }
 

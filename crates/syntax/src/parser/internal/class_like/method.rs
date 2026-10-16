@@ -235,7 +235,8 @@ where
         }
     }
 
-    /// Parses an `on` clause when one starts here: `on`, which stays a name everywhere else, and the events it lists.
+    /// Parses an `on` clause when one starts here: `on`, which stays a name everywhere else, and the events it lists,
+    /// each a name, which the analyzer refuses as a full name when it is dotted.
     fn parse_optional_on(&mut self) -> Result<Option<On<'arena>>, ParseError> {
         if !self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"on") {
             return Ok(None);
@@ -245,7 +246,7 @@ where
         let mut events = self.new_vec();
         let mut commas = self.new_vec();
         loop {
-            events.push(self.parse_local_identifier()?);
+            events.push(self.parse_dotted_identifier()?);
 
             if let Some(T![","]) = self.stream.peek_kind(0)? {
                 commas.push(self.stream.consume()?);

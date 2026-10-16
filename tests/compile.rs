@@ -1465,6 +1465,18 @@ fn compile_refuses_each_file_that_breaks_a_structure_rule_on_the_code_that_break
     }
 }
 
+/// The standard library's package with its `Sharp.Json.Json`, which an import names only where the project installs it.
+const JSON_LIBRARY: [(&str, &str); 2] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/composer.json",
+        "{\"name\": \"heyjordanparker/php-sharp-composer\", \"autoload\": {\"psr-4\": {\"Sharp\\\\\": \"library/Sharp/\"}}}\n",
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Json/Json.sharp",
+        "namespace Sharp.Json;\n\npublic static class Json\n{\n    public static int one() => 1;\n}\n",
+    ),
+];
+
 /// What a rule allows compiles. `Rule.importsOnly` allows the rule's own namespace and the standard library, and a
 /// namespace holds only the names under it: `App.TenantDirectory` is not inside `App.Tenant`. Each row is an import
 /// section 28.1's rules allow, and the project compiles.
@@ -1477,7 +1489,11 @@ fn a_structure_rule_accepts_every_import_it_allows() {
     let library = service("Sharp.Json.Json");
     for files in [
         vec![("app/Shared/Module.lean", fine.as_str()), ("app/Tenant/Store/StoreService.sharp", own.as_str())],
-        vec![("app/Shared/Module.lean", fine.as_str()), ("app/Tenant/Store/StoreService.sharp", library.as_str())],
+        [
+            vec![("app/Shared/Module.lean", fine.as_str()), ("app/Tenant/Store/StoreService.sharp", library.as_str())],
+            JSON_LIBRARY.to_vec(),
+        ]
+        .concat(),
         vec![
             (
                 "app/Shared/Ledger.sharp",
@@ -1612,14 +1628,8 @@ fn a_structure_rule_names_a_namespace_by_its_full_name_and_a_misspelled_one_is_a
             ("vendor/illuminate/support/Facades/DB.php", "<?php\n\nnamespace Illuminate\\Support\\Facades;\n\nclass DB {}\n"),
             // A namespace Lean already names, as `List`, is declared by none, so the rest of `Code` still builds.
             ("vendor/acme/list/Item.php", "<?php\n\nnamespace List;\n\nclass Item {}\n"),
-            (
-                "vendor/heyjordanparker/php-sharp-composer/composer.json",
-                "{\"name\": \"heyjordanparker/php-sharp-composer\", \"autoload\": {\"psr-4\": {\"Sharp\\\\\": \"library/Sharp/\"}}}\n",
-            ),
-            (
-                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Json/Json.sharp",
-                "namespace Sharp.Json;\n\npublic static class Json\n{\n    public static int one() => 1;\n}\n",
-            ),
+            JSON_LIBRARY[0],
+            JSON_LIBRARY[1],
         ]);
         let root = directory.path();
 
@@ -2270,9 +2280,12 @@ fn a_second_compile_of_a_project_with_structure_rules_starts_no_lean_process() {
 #[test]
 fn compile_checks_a_structure_rule_over_thousands_of_imports() {
     let imports: String = (0..4072).map(|index| format!("import Vendor.Package.Class{index};\n")).collect();
+    let classes: String = (0..4072).map(|index| format!("class Class{index} {{}}\n")).collect();
+    let package = format!("<?php\n\nnamespace Vendor\\Package;\n\n{classes}");
     let ledger =
         LEDGER.replace("import App.Tenant.Store.Receipts;\n", &format!("{imports}import App.Tenant.Store.Receipts;\n"));
-    let directory = structured(&[("app/Shared/Ledger.sharp", ledger.as_str())]);
+    let directory =
+        structured(&[("app/Shared/Ledger.sharp", ledger.as_str()), ("vendor/vendor/package/Classes.php", &package)]);
     let root = directory.path();
 
     let output = compile_lines(root);

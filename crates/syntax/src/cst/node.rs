@@ -1617,7 +1617,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::On(node) => {
                 f(Node::Keyword(&node.on));
                 for item in node.events.iter() {
-                    f(Node::LocalIdentifier(item));
+                    f(Node::Identifier(item));
                 }
             }
             Node::ConstructorInitializer(node) => {

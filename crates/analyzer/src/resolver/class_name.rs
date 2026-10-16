@@ -43,6 +43,7 @@ use crate::statement::get_type_from_hint;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
+use crate::utils::names::is_sharp_internal;
 use crate::utils::names::sharp_missing_imports;
 
 /// Describes the origin and nature of a class name resolution.
@@ -897,7 +898,19 @@ where
         return context.codebase.class_like_exists(written) && report_full_class_name(context, written, span);
     }
 
-    report_keyword_in_another_case(context, written, span) || report_not_imported(context, written, span)
+    // A capitalized keyword is a name, spec section 2, so a class of that name is what the code meant.
+    let classes: Vec<Word> = context
+        .codebase
+        .class_likes
+        .values()
+        .filter(|class| short_name(class.original_name).as_bytes().eq_ignore_ascii_case(written))
+        .map(|class| class.original_name)
+        .collect();
+    match classes.as_slice() {
+        [] => report_keyword_in_another_case(context, written, span),
+        [class] => report_not_imported(context, written, *class, span),
+        _ => false,
+    }
 }
 
 /// Reports `name`, written at `span` in a PHP# file where it names nothing, as the PHP# keyword it spells in another
@@ -942,26 +955,20 @@ where
     true
 }
 
-/// Reports `name`, a short name written at `span` in a PHP# file that binds it to nothing, when exactly one class-like
-/// of the codebase has it, as `Math` names `Sharp.Math.Math` (spec section 23), with the import to add. Returns whether
-/// it reported.
-fn report_not_imported<A>(context: &mut Context<'_, '_, A>, name: &[u8], span: Span) -> bool
+/// Reports `name`, a short name written at `span` in a PHP# file that binds it to nothing, as the one class-like
+/// `class` of the codebase that has it, as `Math` names `Sharp.Math.Math` (spec section 23), with the import to add.
+/// Returns whether it reported. A class of `Sharp.Internal`, which only the standard library imports (spec section
+/// 15), gets no import.
+fn report_not_imported<A>(context: &mut Context<'_, '_, A>, name: &[u8], class: Word, span: Span) -> bool
 where
     A: Arena,
 {
-    if context.scope.resolve(NameKind::Default, name).1 {
+    if context.scope.resolve(NameKind::Default, name).1
+        || (!context.source_file.is_standard_library && is_sharp_internal(class.as_bytes()))
+    {
         return false;
     }
 
-    let mut classes = context
-        .codebase
-        .class_likes
-        .values()
-        .filter(|class| short_name(class.original_name).as_bytes().eq_ignore_ascii_case(name))
-        .map(|class| class.original_name);
-    let (Some(class), None) = (classes.next(), classes.next()) else {
-        return false;
-    };
     let Some(import) = sharp_missing_imports(context.codebase, &context.imported_names, &context.scope, [class]) else {
         return false;
     };

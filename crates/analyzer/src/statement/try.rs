@@ -609,7 +609,9 @@ where
         }
 
         let Some(class_like_metadata) = context.codebase.get_class_like(caught_type.as_bytes()) else {
+            // The error names the class the code meant, so the block catches what any class does, with no second error.
             if report_unknown_sharp_class(context, caught_type.as_bytes(), caught_span) {
+                caught_classes.insert(throwable);
                 continue;
             }
 

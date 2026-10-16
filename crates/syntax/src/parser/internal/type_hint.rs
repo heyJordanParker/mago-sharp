@@ -24,7 +24,6 @@ use crate::cst::sequence::TokenSeparatedSequence;
 use crate::error::ParseError;
 use crate::parser::Parser;
 use crate::token::Token;
-use crate::token::TokenKind;
 use mago_allocator::prelude::*;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
@@ -131,7 +130,7 @@ where
                 // name followed by `(` or `<` is a named constructor's, as in `public Money.of(int cents)`.
                 _ if self.dialect.is_sharp()
                     && self.stream.peek_kind(1)? == Some(T!["."])
-                    && !matches!(self.kind_after_dotted_name()?, Some(T!["(" | "<"])) =>
+                    && !self.peek_dotted_name()?.1.is_some_and(|after| matches!(after.kind, T!["(" | "<"])) =>
                 {
                     Hint::Identifier(self.parse_dotted_identifier()?)
                 }
@@ -287,18 +286,18 @@ where
             .is_some_and(|(_, after)| after.kind == T![Identifier] && matches!(after.value, b"of" | b"in")))
     }
 
-    /// The kind of the token after the names joined by `.` that start here, as `(` after `Money.of`, or `None` at the
-    /// end of the file.
-    fn kind_after_dotted_name(&self) -> Result<Option<TokenKind>, ParseError> {
+    /// The number of names joined by `.` that start here, and the token after them, as `2` and `(` for `Money.of(`, or
+    /// `None` at the end of the file. A `.` that no name follows is the token after them.
+    pub(crate) fn peek_dotted_name(&self) -> Result<(usize, Option<Token<'_>>), ParseError> {
         let mut tokens = self.stream.peek_tokens().skip(1);
+        let mut parts = 1;
         loop {
             match tokens.next().transpose()? {
-                Some(dot) if dot.kind == T!["."] => {
-                    if !tokens.next().transpose()?.is_some_and(|name| name.kind.is_identifier_maybe_reserved()) {
-                        return Ok(Some(T!["."]));
-                    }
-                }
-                after => return Ok(after.map(|after| after.kind)),
+                Some(dot) if dot.kind == T!["."] => match tokens.next().transpose()? {
+                    Some(name) if name.kind.is_identifier_maybe_reserved() => parts += 1,
+                    _ => return Ok((parts, Some(dot))),
+                },
+                after => return Ok((parts, after)),
             }
         }
     }

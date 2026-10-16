@@ -104,11 +104,11 @@ fn check_listed_events<'arena, A>(
                 Some(message) => message,
                 None => continue,
             },
-            None if BUILT_IN_TYPES.iter().any(|built_in| built_in.eq_ignore_ascii_case(event.value)) => {
-                format!("`{}` is not an event.", BytesDisplay(event.value))
+            None if BUILT_IN_TYPES.iter().any(|built_in| built_in.eq_ignore_ascii_case(event.value())) => {
+                format!("`{}` is not an event.", BytesDisplay(event.value()))
             }
             None => {
-                report_undefined_type(context, *listed, event.span);
+                report_undefined_type(context, *listed, event.span());
 
                 continue;
             }
@@ -117,7 +117,7 @@ fn check_listed_events<'arena, A>(
         context.collector.report_with_code(
             IssueCode::InvalidEvent,
             Issue::error(message)
-                .with_annotation(Annotation::primary(event.span).with_message("Listed here."))
+                .with_annotation(Annotation::primary(event.span()).with_message("Listed here."))
                 .with_note(
                     "An `on` clause lists events, which `event` or `extern event` declares, or interfaces an event implements.",
                 ),
@@ -294,7 +294,7 @@ where
                 BytesDisplay(method.name.value),
                 display_class_like_name(context, class_like.original_name),
             ))
-            .with_annotation(Annotation::primary(event.span).with_message("Listed here."))
+            .with_annotation(Annotation::primary(event.span()).with_message("Listed here."))
             .with_annotation(Annotation::secondary(parameter).with_message("The event it takes."))
             .with_help(help.clone())
         })
