@@ -955,25 +955,12 @@ where
     Ok(wrap_atomic(result_atomic))
 }
 
-/// Reports `class` written at `span` in a PHP# file without type arguments, as a type, after `new` or before a static
-/// member, when it is a generic PHP# class, which spec section 11 refuses, as C# does (CS0305). Each type argument has
-/// its own static members, so a bare `Counter.count` names none of them. Returns whether it refused it, so the caller
-/// gives the refused type no type the next check would report again.
-pub(crate) fn report_missing_type_arguments<A>(
-    context: &mut Context<'_, '_, A>,
-    class: &ClassLikeMetadata,
-    span: Span,
-) -> bool
-where
-    A: Arena,
-{
-    class.flags.is_sharp() && report_unnamed_type_arguments(context, class, span)
-}
-
 /// Reports `class`, a generic class of PHP# or of plain PHP's `@template`, written at `span` in a PHP# file without the
-/// type arguments of its type parameters that have no default, spec section 11, with the type parameters to write.
-/// Returns whether it refused it.
-pub(crate) fn report_unnamed_type_arguments<A>(
+/// type arguments of its type parameters that have no default, as a type, after `new` or before a static member of a
+/// PHP# class, which spec section 11 refuses, as C# does (CS0305), with the type parameters to write. Each type
+/// argument of a PHP# class has its own static members, so a bare `Counter.count` names none of them. Returns whether
+/// it refused it, so the caller gives the refused type no type the next check would report again.
+pub(crate) fn report_missing_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     class: &ClassLikeMetadata,
     span: Span,

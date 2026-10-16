@@ -9830,7 +9830,7 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
 
             public void keep(Holder<Order> holder) { }
 
-            public List<Any?> unbound() => Repository.repeat(new Holder().get(), 4);
+            public List<Any?> unbound() => Repository.repeat(new Holder<Any?>().get(), 4);
 
             public void kinds(Class<PaginatedList<Order>> pages, Class<PaginatedList> any, Class<Order> order, Class<Holder<Order>> holders) { }
 

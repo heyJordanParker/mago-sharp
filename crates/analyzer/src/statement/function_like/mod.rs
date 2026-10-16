@@ -82,7 +82,6 @@ use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::instantiation::report_missing_type_arguments;
-use crate::expression::instantiation::report_unnamed_type_arguments;
 use crate::resolver::property::localize_property_type;
 use crate::resolver::property::resolve_declared_property;
 use crate::statement::analyze_statements;
@@ -395,7 +394,7 @@ where
 
     if let Some(return_type) = &function_like_metadata.return_type_metadata {
         report_undefined_type_references(context, return_type);
-        report_invalid_template_arguments(context, return_type, false);
+        report_invalid_template_arguments(context, return_type, HintPlace::Declaration);
 
         // Only check native declaration if effective type is from docblock (to avoid duplicates)
         if return_type.from_docblock
@@ -609,7 +608,7 @@ where
 
         if let Some(parameter_type) = parameter_metadata.get_type_metadata() {
             report_undefined_type_references(context, parameter_type);
-            report_invalid_template_arguments(context, parameter_type, false);
+            report_invalid_template_arguments(context, parameter_type, HintPlace::Declaration);
 
             // Only check native declaration if effective type is from docblock (to avoid duplicates)
             if parameter_type.from_docblock
@@ -1952,12 +1951,20 @@ pub(crate) fn known_type_or_error(declared: TUnion) -> TUnion {
     if names_unknown_type { TUnion::from_atomic(TAtomic::Error) } else { declared }
 }
 
+/// Where a type is written, which decides whether a plain PHP class in it names its type arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintPlace {
+    /// A type test, `is` or `catch`, which reads no type arguments of a plain PHP class, so it tests the class alone.
+    TypeTest,
+    /// Any other type: a declaration, a local's type or a call's type argument.
+    Declaration,
+}
+
 /// Reports generic classes a declared type applies with the wrong number of arguments, or with an
 /// argument outside its type parameter's bound, and a generic class a `.sharp` type writes without
-/// type arguments, of PHP# or of plain PHP's `@template`. `Self` names its class's own type
-/// parameters, so it needs none, and a PHP# class type names the class itself, as
-/// `Class<PaginatedList>` does, so its class needs none. A type test, `tested`, reads no type
-/// arguments of a plain PHP class, so it tests the class alone.
+/// type arguments, of PHP# or of plain PHP's `@template`, except a plain PHP class in a
+/// [`HintPlace::TypeTest`]. `Self` names its class's own type parameters, so it needs none, and a
+/// PHP# class type names the class itself, as `Class<PaginatedList>` does, so its class needs none.
 ///
 /// A declaration is checked where it is written, so the mistake is reported at the declaration
 /// rather than at whichever call first happens to reach it. Returns whether a class in it has the
@@ -1966,7 +1973,7 @@ pub(crate) fn known_type_or_error(declared: TUnion) -> TUnion {
 pub fn report_invalid_template_arguments<A>(
     context: &mut Context<'_, '_, A>,
     type_metadata: &TypeMetadata,
-    tested: bool,
+    place: HintPlace,
 ) -> bool
 where
     A: Arena,
@@ -2004,9 +2011,8 @@ where
                 type_metadata.span,
                 &TemplateResult::default(),
             ),
-            None if named.is_static => false,
-            None if tested => report_missing_type_arguments(context, class, type_metadata.span),
-            None => report_unnamed_type_arguments(context, class, type_metadata.span),
+            None if named.is_static || (place == HintPlace::TypeTest && !class.flags.is_sharp()) => false,
+            None => report_missing_type_arguments(context, class, type_metadata.span),
         };
     }
 

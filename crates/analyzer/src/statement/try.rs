@@ -34,6 +34,7 @@ use crate::context::scope::finally_scope::FinallyScope;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
 use crate::statement::analyze_statements;
+use crate::statement::function_like::HintPlace;
 use crate::statement::get_type_from_hint;
 use crate::statement::report_erased_type_test;
 use crate::statement::report_hint_type_arguments;
@@ -203,7 +204,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
             let (caught_classes, caught_types) =
                 get_caught_classes(context, &catch_block_context, artifacts, &catch_clause.hint);
             if context.dialect.is_sharp() {
-                report_hint_type_arguments(context, &catch_block_context, artifacts, &catch_clause.hint, true);
+                report_hint_type_arguments(
+                    context,
+                    &catch_block_context,
+                    artifacts,
+                    &catch_clause.hint,
+                    HintPlace::TypeTest,
+                );
                 report_erased_type_test(context, &catch_clause.hint);
             }
 

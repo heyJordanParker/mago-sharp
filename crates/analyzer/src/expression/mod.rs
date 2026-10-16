@@ -87,6 +87,7 @@ use crate::reconciler::reconcile_keyed_types;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::override_attribute;
+use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::expect_type;
 use crate::statement::get_type_from_hint;
 use crate::statement::report_erased_type_test;
@@ -438,7 +439,7 @@ where
     let tests_function_type = hints.iter().any(|hint| names_function_type(hint));
     let mut is_refused = false;
     for hint in hints {
-        is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint, true);
+        is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint, HintPlace::TypeTest);
         is_refused |= report_erased_type_test(context, hint);
 
         // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any`, of a
