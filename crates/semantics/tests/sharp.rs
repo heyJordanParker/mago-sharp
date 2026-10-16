@@ -1244,10 +1244,7 @@ fn a_named_constructor_shares_no_name_with_a_method() {
     assert_eq!(issues(after), ["8:16 `Order.copy` cannot share its name with `Order`'s named constructor `copy`."]);
     assert_eq!(
         issues(before),
-        [
-            "8:18 The named constructor `Order.copy` cannot share its name with the method `Order.Copy`.",
-            "7:16 Method name `Copy` should be in camel case.",
-        ]
+        ["8:18 The named constructor `Order.copy` cannot share its name with the method `Order.Copy`.",]
     );
     assert_eq!(
         issues(law),
@@ -1856,19 +1853,19 @@ fn a_type_takes_any_capitalized_word_but_a_reserved_type_name() {
     for word in PHP_ONLY.iter().chain(&SHARP_KEYWORDS) {
         let name = format!("{}{}", word[..1].to_uppercase(), &word[1..]);
         let declarations = [
-            (format!("class {name}\n{{\n}}\n"), "3:7"),
-            (format!("interface {name}\n{{\n}}\n"), "3:11"),
-            (format!("enum {name}\n{{\n    case One;\n}}\n"), "3:6"),
-            (format!("event {name}(int id);\n"), "3:7"),
+            (format!("class {name}\n{{\n}}\n"), "3:7", "Type"),
+            (format!("interface {name}\n{{\n}}\n"), "3:11", "Type"),
+            (format!("enum {name}\n{{\n    case One;\n}}\n"), "3:6", "Type"),
+            (format!("event {name}(int id);\n"), "3:7", "Event"),
         ];
 
-        for (declaration, at) in declarations {
+        for (declaration, at, kind) in declarations {
             let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
             let expected = if RESERVED.contains(&name.as_str()) {
                 vec![format!("{at} Cannot use `{name}` as a class name: it is reserved.")]
             } else if name.contains('_') {
                 // Spec section 24 names a type in Pascal case, so `Include_once` compiles with a warning.
-                vec![format!("{at} Type name `{name}` should be in Pascal case.")]
+                vec![format!("{at} {kind} name `{name}` should be in Pascal case.")]
             } else {
                 vec![]
             };
@@ -1978,7 +1975,6 @@ fn a_class_has_one_method_per_name_and_no_overloading() {
         [
             "7:17 `Access.grant` is declared twice: a class has one method per name, with no overloading by argument types.",
             "9:17 `Access.Grant` is declared twice: a class has one method per name, with no overloading by argument types.",
-            "9:17 Method name `Grant` should be in camel case.",
         ]
     );
     assert_eq!(
@@ -1997,7 +1993,6 @@ fn methods_whose_names_differ_only_in_case_are_an_error() {
         issues(code),
         [
             "5:16 `Report.Run` is declared twice: a class has one method per name, with no overloading by argument types.",
-            "5:16 Method name `Run` should be in camel case.",
         ]
     );
 
@@ -2166,10 +2161,6 @@ fn a_name_that_breaks_its_case_is_a_warning() {
             "5:22 Constant name `maxLines` should be in upper snake case.",
         ),
         (
-            "namespace App.Tenant;\n\nclass Box\n{\n    public int TotalIn() => 1;\n}\n",
-            "5:16 Method name `TotalIn` should be in camel case.",
-        ),
-        (
             "namespace App.Tenant;\n\nclass Box\n{\n    public int run(int Count) => Count;\n}\n",
             "5:24 Parameter name `Count` should be in camel case.",
         ),
@@ -2178,8 +2169,16 @@ fn a_name_that_breaks_its_case_is_a_warning() {
             "7:15 Local name `line_count` should be in camel case.",
         ),
         (
-            "namespace App.Tenant;\n\ninterface Priced\n{\n    int Price();\n}\n",
-            "5:9 Method name `Price` should be in camel case.",
+            "namespace App.Tenant;\n\ninterface Priced\n{\n    int Total_Price { get; }\n}\n",
+            "5:9 Property name `Total_Price` should be in camel case.",
+        ),
+        (
+            "namespace App.Tenant;\n\npublic event Invoice_Paid(int invoiceId);\n",
+            "3:14 Event name `Invoice_Paid` should be in Pascal case.",
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Box\n{\n    public Box(public int Total { get; }) { }\n}\n",
+            "5:27 Property name `Total` should be in camel case.",
         ),
     ];
 
@@ -2193,10 +2192,9 @@ fn a_name_that_breaks_its_case_is_a_warning() {
     let overridden = "namespace App.Tenant;\n\nclass Box : Base\n{\n    public override int Total() => 1;\n    public override int Count { get; } = 0;\n}\n";
     assert_eq!(issues(overridden), Vec::<String>::new());
 
-    let helped =
-        check("src/Report.sharp", "namespace App.Tenant;\n\nclass Box\n{\n    public int TotalIn() => 1;\n}\n");
+    let helped = check("src/Report.sharp", "namespace App.Tenant;\n\nclass Box\n{\n    private int Total = 0;\n}\n");
     assert_eq!(helped[0].level, mago_reporting::Level::Warning);
-    assert_eq!(helped[0].help.as_deref(), Some("Rename it `totalIn`."));
+    assert_eq!(helped[0].help.as_deref(), Some("Rename it `total`."));
 }
 
 /// A name that starts with `_` is not capitalized. A `__Something__` name keeps its own error.

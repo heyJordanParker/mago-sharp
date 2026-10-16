@@ -836,9 +836,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(FieldOrProperty)
         }
         // An interface states a property its classes give, as `OrderEvent` states `orderId`, spec section 15.
-        (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
+        (Node::ClassLikeMember(ClassLikeMember::Property(hooked @ Property::Hooked(property))), Interface)
             if is_interface_property(property) =>
         {
+            let variable = hooked.first_variable();
+            check_member_name(hooked.modifiers(), variable.name, variable.span, "Property", context);
+
             Some(FieldOrProperty)
         }
         // Spec section 22: every field is declared in the class that owns it.
@@ -880,7 +883,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::Method(method), Interface) => match is_slice_signature(method) {
             Ok(()) => {
-                check_member_name(&method.modifiers, method.name.value, method.name.span, "Method", context);
+                check_method_name(method, context);
 
                 Some(Signature)
             }
@@ -1235,12 +1238,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::Method(method), Class | Enum) => match is_slice_method(method, context.program) {
             Ok(()) => {
-                // The constructor, the one method without a return type, carries its class's name, which
-                // `check_class_name` reports.
-                if method.return_type_hint.is_some() {
-                    check_member_name(&method.modifiers, method.name.value, method.name.span, "Method", context);
-                }
-
+                check_method_name(method, context);
                 check_method_uses(method, context);
                 check_method_modifiers(method, context);
                 check_extern(method, context)
@@ -4973,8 +4971,17 @@ fn is_magic_name(name: &[u8]) -> bool {
     name.len() > 4 && name.starts_with(b"__") && name.ends_with(b"__")
 }
 
-/// Checks the name of a method, a field or a property, the `kind`, in camel case. A member written `override` keeps its
-/// parent's name, so its case is its parent's choice.
+/// Reports a method named `__Something__`, which spec section 27 removes. The constructor, the one method without a
+/// return type, carries its class's name, which `check_class_name` reports. The analyzer warns on a method name out of
+/// camel case, since only it knows whether a parent, a plain PHP one included, gives the method its name.
+fn check_method_name(method: &Method, context: &mut Context<'_, '_, '_>) {
+    if method.return_type_hint.is_some() && is_magic_name(method.name.value) {
+        report_magic_constant(method.name.value, method.name.span, None, context);
+    }
+}
+
+/// Checks the name of a field or a property, the `kind`, in camel case. A member written `override` keeps its parent's
+/// name, so its case is its parent's choice.
 fn check_member_name(
     modifiers: &Sequence<Modifier>,
     name: &[u8],
@@ -5302,7 +5309,9 @@ pub fn check_parameter(parameter: &FunctionLikeParameter, context: &mut Context<
     if parameter.variable.name.starts_with(b"$") {
         report_dollar_variable(parameter.variable.name, parameter.variable.span, context);
     } else {
-        check_local_name(parameter.variable.name, parameter.variable.span, "parameter", context);
+        // A parameter with an access level or accessors also declares the property of its name.
+        let kind = if parameter.is_promoted_property() { "property" } else { "parameter" };
+        check_local_name(parameter.variable.name, parameter.variable.span, kind, context);
     }
 }
 
@@ -5363,9 +5372,10 @@ pub fn check_binding_errors(context: &mut Context<'_, '_, '_>) {
 /// of these errors only. Any other word names a type, a PHP keyword PHP# doesn't use included, and so does a
 /// capitalized PHP# keyword, since PHP#'s keywords are lowercase but `Self`, which the engine reserves. The standard
 /// library's `Sharp.Int`, `Sharp.Float` and `Sharp.Bool` are the engine's one exception, and the analyzer refuses
-/// them in any file that is not the standard library's.
+/// them in any file that is not the standard library's. A naming warning names the declaration as `kind`, `Type` or
+/// `Event`.
 #[inline]
-pub fn check_class_name(class_name: &LocalIdentifier, context: &mut Context<'_, '_, '_>) {
+pub fn check_class_name(class_name: &LocalIdentifier, kind: &str, context: &mut Context<'_, '_, '_>) {
     if is_reserved_class_name(class_name.value) && !is_sharp_type_class(context.get_name(class_name.span.start)) {
         let name = BytesDisplay(class_name.value);
 
@@ -5375,7 +5385,7 @@ pub fn check_class_name(class_name: &LocalIdentifier, context: &mut Context<'_, 
                 .with_note("PHP# reserves this name for a type."),
         );
     } else if is_magic_name(class_name.value) || class_name.value.first().is_some_and(u8::is_ascii_uppercase) {
-        check_declared_name(class_name.value, class_name.span, "Type", NameCase::Pascal, context);
+        check_declared_name(class_name.value, class_name.span, kind, NameCase::Pascal, context);
     } else {
         check_capitalized(class_name.value, class_name.span, context);
     }

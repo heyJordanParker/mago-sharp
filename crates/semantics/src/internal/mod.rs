@@ -162,7 +162,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
         checker::class_like::check_class(class, context);
 
         if context.program.dialect.is_sharp() {
-            checker::sharp::check_class_name(&class.name, context);
+            checker::sharp::check_class_name(&class.name, "Type", context);
         }
     }
 
@@ -171,19 +171,19 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
         checker::class_like::check_interface(interface, context);
 
         if context.program.dialect.is_sharp() {
-            checker::sharp::check_class_name(&interface.name, context);
+            checker::sharp::check_class_name(&interface.name, "Type", context);
         }
     }
 
     #[inline]
     fn walk_in_event(&self, event: &'ast Event<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
-        checker::sharp::check_class_name(&event.name, context);
+        checker::sharp::check_class_name(&event.name, "Event", context);
     }
 
     #[inline]
     fn walk_in_struct(&self, r#struct: &'ast Struct<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
         checker::class_like::check_struct(r#struct, context);
-        checker::sharp::check_class_name(&r#struct.name, context);
+        checker::sharp::check_class_name(&r#struct.name, "Type", context);
     }
 
     #[inline]
@@ -210,7 +210,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
         checker::class_like::check_enum(r#enum, context);
 
         if context.program.dialect.is_sharp() {
-            checker::sharp::check_class_name(&r#enum.name, context);
+            checker::sharp::check_class_name(&r#enum.name, "Type", context);
         }
     }
 

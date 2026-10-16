@@ -12812,10 +12812,13 @@ fn a_static_named_like_a_member_of_class_is_an_error() {
         "namespace Demo;\n\npublic class Report\n{\n    public static string Attributes() => \"\";\n}\n",
     );
 
-    assert_eq!(issues(capitalized, &[CLASS_MEMBERS]), ["5:26 name-already-in-use"]);
+    assert_eq!(issues(capitalized, &[CLASS_MEMBERS]), ["5:26 method-name-case", "5:26 name-already-in-use"]);
     assert_eq!(
         messages(capitalized, &[CLASS_MEMBERS]),
-        ["`type.Attributes` on a class value reaches `Class`'s member `attributes`, never this static. Rename it."]
+        [
+            "Method name `Attributes` should be in camel case.",
+            "`type.Attributes` on a class value reaches `Class`'s member `attributes`, never this static. Rename it."
+        ]
     );
     for (member, column) in [
         ("public static string attributes() => \"\";", 26),
@@ -18648,8 +18651,8 @@ fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
     assert_eq!(
         refusals(report, &[JSON, shapes]),
         [
-            "13:33 json-key-without-text `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.",
-            "14:33 json-key-without-text `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.",
+            "13:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.",
+            "14:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.",
         ]
     );
     assert_eq!(
@@ -19557,6 +19560,23 @@ fn a_pattern_reads_no_local_and_names_the_when_that_compares_it() {
             "18:45 replaced-by-syntax `code` is a parameter: compare its value in `when`, as in `string n when n == code`. | ",
             "19:53 replaced-by-syntax `code` is a parameter: compare its value in `when`, as in `string n when n == code`. | ",
             "21:13 replaced-by-syntax `extra` is a parameter: compare its value in `when`, as in `int n when n == extra`. | ",
+        ]
+    );
+}
+
+/// Spec section 24: a method is named in camel case, and a name that breaks it is a warning, unless the method keeps a
+/// parent's name: one that implements a plain PHP interface's method, overrides a plain PHP class's, or implements a
+/// PHP# interface's, which takes no `override` (section 22). The constructor carries its class's name.
+#[test]
+fn a_method_name_out_of_camel_case_is_a_warning_unless_a_parent_names_it() {
+    let sharp = "namespace Demo;\n\nimport Legacy.HasCount;\nimport Legacy.Model;\n\npublic interface Totals\n{\n    int Grand_Total();\n}\n\npublic class Counted : Model, HasCount, Totals\n{\n    public Counted() { }\n\n    public int get_count() => 1;\n\n    public override string save_all() => \"child\";\n\n    public int Grand_Total() => 2;\n\n    public int Total_In() => 3;\n}\n";
+    let legacy = "<?php\n\nnamespace Legacy;\n\ninterface HasCount\n{\n    public function get_count(): int;\n}\n\nclass Model\n{\n    public function save_all(): string { return 'parent'; }\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Counted.sharp", sharp), &[("src/Legacy/Legacy.php", legacy)]),
+        [
+            "8:9 method-name-case Method name `Grand_Total` should be in camel case. | Named here. | Rename it `grandTotal`.",
+            "21:16 method-name-case Method name `Total_In` should be in camel case. | Named here. | Rename it `totalIn`.",
         ]
     );
 }

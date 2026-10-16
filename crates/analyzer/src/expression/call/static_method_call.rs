@@ -318,7 +318,7 @@ where
     {
         let key = display_class_like_name(context, key);
         context.collector.report_with_code(
-            IssueCode::JsonKeyWithoutText,
+            IssueCode::InvalidJsonKey,
             Issue::error(format!("`Json.encode` writes each `Map` key as JSON text, and `{key}` has no `toString()`."))
                 .with_annotation(Annotation::primary(argument.span()).with_message("Encoded here."))
                 .with_help(format!("Declare `public string toString()` on `{key}`, or encode a `Map` keyed by text.")),
