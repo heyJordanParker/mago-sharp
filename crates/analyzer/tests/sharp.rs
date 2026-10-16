@@ -18210,6 +18210,45 @@ fn a_foreign_object_is_an_ordinary_parameter_and_return_type() {
     );
 }
 
+/// Spec section 29: pure limits only what a method reaches outside the program, so a pure method may change its own
+/// object and its arguments. `readonly` after the parameters promises it changes nothing, and holds every
+/// implementation to it (section 13). A law reasons about values and sees no object two names share, so a law that
+/// reaches a change is refused naming the method.
+#[test]
+fn a_pure_method_may_change_its_object_and_its_arguments() {
+    let tally = (
+        "app/Shop/Tally.sharp",
+        "namespace App.Shop;\n\npublic class Tally\n{\n    public int count { get; set; } = 0;\n}\n",
+    );
+    let counter = ("app/Shop/Counter.sharp", "namespace App.Shop;\n\npublic interface Counter\n{\n    int next();\n\n    void bump(Tally tally);\n}\n");
+    let ticker = (
+        "app/Shop/Ticker.sharp",
+        "namespace App.Shop;\n\npublic class Ticker : Counter\n{\n    private int count = 0;\n\n    public int next()\n    {\n        this.count += 1;\n        return this.count;\n    }\n\n    public void bump(Tally tally)\n    {\n        tally.count += 1;\n    }\n}\n",
+    );
+
+    assert_eq!(issues(ticker, &[counter, tally]), Vec::<String>::new(), "a pure implementation changes `this`");
+    assert_eq!(effect_issues(&[ticker, counter, tally]), Vec::<String>::new(), "and its argument");
+
+    let peek = ("app/Shop/Peek.sharp", "namespace App.Shop;\n\npublic interface Peek\n{\n    int peek() readonly;\n}\n");
+    let peeker = (
+        "app/Shop/Peeker.sharp",
+        "namespace App.Shop;\n\npublic class Peeker : Peek\n{\n    private int count = 0;\n\n    public int peek() readonly\n    {\n        this.count += 1;\n        return this.count;\n    }\n}\n",
+    );
+    assert!(!issues(peeker, &[peek]).is_empty(), "a readonly implementation changes `this`");
+
+    let counted = (
+        "app/Shop/Counted.sharp",
+        "namespace App.Shop;\n\npublic class Counted\n{\n    public static int bumped(Tally tally)\n    {\n        tally.count += 1;\n        return tally.count;\n    }\n\n    law grows(Tally tally) => Counted.bumped(tally) > 0;\n}\n",
+    );
+    assert_eq!(
+        effect_issues(&[counted, tally]),
+        [
+            "app/Shop/Counted.sharp:11:31 impure-law: Law `grows` reaches `Counted.bumped`, which changes `tally.count`. Laws hold only over pure code."
+        ],
+        "a law"
+    );
+}
+
 /// Spec section 29: no static holds a `foreign` object, so a write of one into a static whose declared type is wider,
 /// such as `Any?`, a `List<Any>` or an interface the class implements, is refused at the value, as a changing
 /// collection method on a static is.
