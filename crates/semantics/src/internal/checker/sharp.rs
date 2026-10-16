@@ -69,6 +69,7 @@ use mago_syntax::cst::Keyword;
 use mago_syntax::cst::Leave;
 use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
+use mago_syntax::cst::LiteralString;
 use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::LocalTarget;
@@ -1753,12 +1754,21 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         // Spec sections 27 and 29 remove PHP's superglobals and its `__Something__` names, written bare as well. A
         // method body walks an index of a superglobal and reports the superglobal at its name. A constant expression
-        // has no index, so it reports the superglobal over the whole index.
+        // has no index, so it reports the superglobal over the whole index. A body reports a read of the command-line
+        // arguments at its index, whose literal decides the message, and the index has nothing else to check.
         (Node::Expression(expression @ (Expression::ConstantAccess(_) | Expression::Variable(_))), Body | Constant)
         | (Node::Expression(expression @ Expression::ArrayAccess(_)), Constant)
             if let Some(span) = superglobal_span(expression, context) =>
         {
-            report_superglobal(span, context);
+            report_superglobal(span, reads_the_environment(expression), context);
+
+            None
+        }
+        (Node::Expression(expression @ Expression::ArrayAccess(_)), Body)
+            if reads_the_environment(expression)
+                && let Some(span) = superglobal_span(expression, context) =>
+        {
+            report_superglobal(span, true, context);
 
             None
         }
@@ -5101,12 +5111,42 @@ fn check_declared_name(name: &[u8], span: Span, kind: &str, case: NameCase, cont
     );
 }
 
-/// Reports a PHP superglobal, written with `$` or bare, which spec section 29 removes.
-fn report_superglobal(span: Span, context: &mut Context<'_, '_, '_>) {
+/// Whether a superglobal read reads the process environment or the command-line arguments, which spec section 29 gives
+/// `Environment`: `_ENV` through any index, and `_SERVER`'s `"argv"` or `"argc"`.
+fn reads_the_environment(expression: &Expression) -> bool {
+    let names = |expression: &Expression, superglobal: &[u8]| match expression {
+        Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(local) }) => local.value == superglobal,
+        Expression::Variable(Variable::Direct(direct)) => direct.name.strip_prefix(b"$") == Some(superglobal),
+        _ => false,
+    };
+
+    match expression {
+        Expression::ArrayAccess(access) => {
+            let argument = matches!(
+                access.index,
+                Expression::Literal(Literal::String(LiteralString { value: Some(b"argv" | b"argc"), .. }))
+            );
+
+            (argument && names(access.array, b"_SERVER")) || reads_the_environment(access.array)
+        }
+        expression => names(expression, b"_ENV"),
+    }
+}
+
+/// Reports a PHP superglobal, written with `$` or bare, which spec section 29 removes, naming `Environment` for a read
+/// of the environment or the arguments and a request for anything else.
+fn report_superglobal(span: Span, environment_read: bool, context: &mut Context<'_, '_, '_>) {
     let (environment, after) = standard_class("Environment", context);
+    let replacement = if environment_read {
+        let article = if environment.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" };
+
+        format!("{article} {environment}{after}")
+    } else {
+        "a Request".to_owned()
+    };
 
     context.report(
-        Issue::error("PHP# has no superglobals; take a Request")
+        Issue::error(format!("PHP# has no superglobals; take {replacement}"))
             .with_annotation(Annotation::primary(span).with_message("Written here."))
             .with_note(format!(
                 "Request data arrives as an object, such as a framework's `Request`, and the process environment as `{environment}`{after}."

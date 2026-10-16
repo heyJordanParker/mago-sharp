@@ -2309,7 +2309,8 @@ fn a_local_or_parameter_named_after_a_superglobal_is_an_error() {
     );
 }
 
-/// Spec section 29 removes every superglobal, written with `$` or bare as in `_SERVER["HTTP_HOST"]`.
+/// Spec section 29 removes every superglobal, written with `$` or bare as in `_SERVER["HTTP_HOST"]`. Only `_ENV` names
+/// `Environment`.
 #[test]
 fn a_superglobal_with_or_without_dollar_is_an_error_that_names_a_request() {
     let code = leak(method(
@@ -2336,8 +2337,42 @@ fn a_superglobal_with_or_without_dollar_is_an_error_that_names_a_request() {
             format!("13:35 {message}"),
             format!("14:20 {message}"),
             format!("14:35 {message}"),
-            format!("15:20 {message}"),
-            format!("15:31 {message}"),
+            "15:20 PHP# has no superglobals; take an Environment".to_owned(),
+            "15:31 PHP# has no superglobals; take an Environment".to_owned(),
+        ]
+    );
+}
+
+/// Spec section 29: for the environment and the command-line arguments the error names `Environment`, so `_ENV` and a
+/// read of `_SERVER`'s `"argv"` or `"argc"` do, with or without `$`, and every other read of `_SERVER` names a request.
+#[test]
+fn an_environment_superglobal_is_an_error_that_names_environment() {
+    let code = leak(method(
+        "        Store.keep(_ENV[\"HOME\"], $_ENV);\n        Store.keep(_SERVER[\"argv\"], $_SERVER[\"argc\"]);\n        Store.keep(_SERVER[\"HTTP_HOST\"], _SERVER[extra]);\n        return extra;\n",
+    ));
+    let environment = "PHP# has no superglobals; take an Environment";
+    let request = "PHP# has no superglobals; take a Request";
+
+    assert_eq!(
+        issues(code),
+        [
+            format!("7:20 {environment}"),
+            format!("7:34 {environment}"),
+            format!("8:20 {environment}"),
+            format!("8:37 {environment}"),
+            format!("9:20 {request}"),
+            format!("9:42 {request}"),
+        ]
+    );
+    // A file whose import takes the short name `Environment` is told the aliased import to write.
+    let shadowed = leak(method("        Store.keep(_ENV);\n        return extra;\n").replace(
+        "namespace App.Tenant;\n",
+        "namespace App.Tenant;\n\nimport App.Shared.Environment;\n",
+    ));
+    assert_eq!(
+        issues(shadowed),
+        [
+            "9:20 PHP# has no superglobals; take a SharpEnvironment after `import Sharp.Environment as SharpEnvironment;`"
         ]
     );
 }
