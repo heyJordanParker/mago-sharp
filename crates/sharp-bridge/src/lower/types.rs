@@ -38,8 +38,11 @@ use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Inheritance;
+use mago_syntax::cst::NullSafeFunctionCall;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
 use mago_word::word;
@@ -617,7 +620,17 @@ impl<'analysis> Types<'analysis> {
     /// PHP return type that names a PHP# generic class from a docblock it can't prove, so the engine tests the value
     /// spec section 12 lets in, wherever it goes next. A collection's elements are tested only in the result of the
     /// project's own plain PHP: PHP's internal functions and the prelude's stubs have types the engine guarantees.
+    ///
+    /// A call whose result no PHP# code checked, as [`Self::unchecked_result_call`] finds it, checks its result when the
+    /// result holds a `float`, an `Any` or an `Object`, spec section 24: plain PHP's `int` becomes the `float`, and its
+    /// null or non-object is refused where it enters.
     pub(crate) fn call_check(&self, call: &Expression) -> Option<(String, String)> {
+        if let Some(name) = self.unchecked_result_call(call) {
+            let r#type = self.artifacts.get_expression_type(call)?;
+
+            return needs_result_check(r#type)
+                .then(|| (text(r#type, self.codebase, Parameter::Index), format!("{name}()")));
+        }
         let (name, metadata) = self.plain_php_call(call)?;
         let text = self.checked_text(self.artifacts.get_expression_type(call)?, metadata.flags.is_user_defined())?;
 
@@ -704,6 +717,68 @@ impl<'analysis> Types<'analysis> {
         Some((format!("{name}()"), metadata))
     }
 
+    /// The name of the call `call` when plain PHP may give its result, which no PHP# code checked: a function value's
+    /// call, which may run a plain PHP closure, a PHP# interface method's, which a plain PHP class may implement, as
+    /// `App\Source::read`, and a method with no PHP# body given a function value, as `map` of `numbers.map(f)`: the
+    /// engine runs the function and keeps what it returns, which no PHP# return check tested.
+    fn unchecked_result_call(&self, call: &Expression) -> Option<String> {
+        let Expression::Call(invocation) = call else {
+            return None;
+        };
+        if let Some(function) = self.function_value_name(call) {
+            return Some(function);
+        }
+        let (callee, class) = self.artifacts.get_callees(call).find_map(|target| match target {
+            CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, _), .. } => {
+                Some((callee, class))
+            }
+            _ => None,
+        })?;
+        let class = self.codebase.get_class_like(class.as_bytes())?;
+        let method = self.codebase.get_function_like(callee)?;
+        if class.flags.is_sharp() && class.kind.is_interface() {
+            return Some(format!("{}::{}", class.original_name, method.original_name));
+        }
+        let takes_function_value = invocation.get_argument_list().arguments.iter().any(|argument| {
+            !matches!(argument.value(), Expression::ArrowFunction(_) | Expression::Closure(_))
+                && self
+                    .artifacts
+                    .get_expression_type(argument.value())
+                    .is_some_and(|r#type| r#type.types.iter().all(|atomic| matches!(atomic, TAtomic::Callable(_))))
+        });
+
+        (!method.flags.is_user_defined() && takes_function_value).then(|| method.original_name.to_string())
+    }
+
+    /// The name of the function value the call `call` runs: the local of `f(2)` and `f?.(2)`, or the property of
+    /// `holder.onTotal(2)`. None for a call of a function or a method.
+    fn function_value_name(&self, call: &Expression) -> Option<String> {
+        match call {
+            // The parser reads the name before `?.(` as a constant, which a local of that name is.
+            Expression::Call(
+                Call::Function(FunctionCall { function: function @ Expression::Identifier(local), .. })
+                | Call::NullSafeFunction(NullSafeFunctionCall {
+                    function: function @ Expression::ConstantAccess(ConstantAccess { name: local }),
+                    ..
+                }),
+            ) => self
+                .artifacts
+                .get_expression_type(function)
+                .is_some_and(|r#type| {
+                    r#type.types.iter().all(|atomic| matches!(atomic, TAtomic::Callable(_) | TAtomic::Null))
+                })
+                .then(|| String::from_utf8_lossy(local.value()).into_owned()),
+            _ => self.artifacts.get_callees(call).find_map(|target| match target {
+                CallTarget::Property { property, .. } => {
+                    let property = property.as_bytes();
+
+                    Some(String::from_utf8_lossy(property.strip_prefix(b"$").unwrap_or(property)).into_owned())
+                }
+                _ => None,
+            }),
+        }
+    }
+
     /// The type text the property `property` of the fully qualified class name `class` checks a value from plain PHP
     /// against, as a parameter checks an argument: [`Self::checked_text`] of its type, a collection's elements included.
     /// PHP's typed property check tests it on every write plain PHP makes, through reflection too, whatever the
@@ -719,9 +794,9 @@ impl<'analysis> Types<'analysis> {
         self.checked_text(r#type, true).or_else(|| is_enum.then(|| type_text(r#type, self.codebase)))
     }
 
-    /// `r#type` as the type text an entry check tests a value from plain PHP against, when part of it is a PHP# class
-    /// with a type argument the check can test, a plain PHP trait, whose PHP type is `object`, or a class value of a
-    /// generic class, since PHP's own `string` type checks no class
+    /// `r#type` as the type text an entry check tests a value from plain PHP against, when part of it is an `Any`, which
+    /// refuses the null PHP's `mixed` takes, a PHP# class with a type argument the check can test, a plain PHP trait,
+    /// whose PHP type is `object`, a class value of a generic class, since PHP's own `string` type checks no class
     /// value, a type parameter of the class, or, with `collections`, a collection whose elements the check can test,
     /// since PHP's own `array` type checks none. None for a type only a plain PHP docblock writes, such as
     /// `array<array-key, int>`, since the engine reads the check as PHP#. None otherwise: plain PHP's generics are
@@ -771,7 +846,8 @@ impl<'analysis> Types<'analysis> {
         } else {
             r#type
         };
-        let constrains = |r#type: &TUnion| !r#type.is_mixed() && !is_method_parameter(r#type);
+        // An `Any` refuses null, which PHP's `mixed` takes, spec section 24, so only an `Any?` constrains nothing.
+        let constrains = |r#type: &TUnion| !(is_method_parameter(r#type) || r#type.is_mixed() && r#type.can_be_null());
         let is_sharp_generic = |object: &TNamedObject| {
             object
                 .get_type_parameters()
@@ -789,6 +865,7 @@ impl<'analysis> Types<'analysis> {
                 _ => false,
             })
             || r#type.types.iter().any(|atomic| match atomic {
+                TAtomic::Mixed(mixed) => mixed.is_non_null(),
                 TAtomic::Object(TObject::Named(object)) => is_sharp_generic(object) || names_trait(atomic),
                 // A `Class<PaginatedList>` names no type arguments, so PHP's `string` type is the whole of its check. A
                 // `Class<int>` or a `Class<int|string>` takes only the text `typeof` gives its type, which PHP's `string`
@@ -1489,6 +1566,20 @@ enum Parameter {
 /// text, and a space comes only after a comma and around `&`.
 pub(crate) fn type_text(r#type: &TUnion, codebase: &CodebaseMetadata) -> String {
     text(r#type, codebase, Parameter::Any)
+}
+
+/// Whether `r#type` holds, itself or as a collection's element, key or value, a part an entry check acts on for a
+/// value plain PHP gives: a `float`, which an `int` becomes, an `Any`, which refuses null, or an `Object`, which
+/// refuses a value that is no object.
+fn needs_result_check(r#type: &TUnion) -> bool {
+    r#type.types.iter().any(|atomic| match get_sharp_type(atomic) {
+        Some(SharpType::List(element) | SharpType::Set(element) | SharpType::Iterable(element)) => {
+            needs_result_check(element)
+        }
+        Some(SharpType::Map(key, value)) => needs_result_check(key) || needs_result_check(value),
+        Some(SharpType::Float | SharpType::Object) => true,
+        _ => matches!(atomic, TAtomic::Mixed(mixed) if mixed.is_non_null()),
+    })
 }
 
 /// [`type_text`], with each type parameter of a class written as `parameter` says.

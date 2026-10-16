@@ -650,7 +650,7 @@ fn check_comparison_operand<A>(
         let issue = if context.dialect.is_sharp() {
             let (reason, note) = if operator.is_equality() {
                 (
-                    "compares by value only with a string, a number or an enum case",
+                    "compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection",
                     "An `Any` may hold any value, so `==` cannot compare it strictly until it is checked.",
                 )
             } else {
@@ -699,14 +699,20 @@ fn check_comparison_operand<A>(
     }
 }
 
-/// Whether a PHP# `Any?` compares with a value of `other_type` by value, as spec section 19 decides for a string, a
-/// number, an enum and a struct, and for `null`, which equals only `null`. Any other value must be checked with `is`,
-/// `as` or `match` first.
+/// Whether a PHP# `Any?` compares with a value of `other_type` by value, as spec sections 19 and 24 decide for a string,
+/// a number, a `bool`, an enum, a struct and a collection, and for `null`, which equals only `null`. Any other value
+/// must be checked with `is`, `as` or `match` first.
 fn compares_by_value(other_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
     comparands(other_type, codebase).iter().all(|comparand| {
         matches!(
             comparand,
-            Comparand::String | Comparand::Int | Comparand::Float | Comparand::Enum(_) | Comparand::Struct(_)
+            Comparand::String
+                | Comparand::Int
+                | Comparand::Float
+                | Comparand::Bool
+                | Comparand::Enum(_)
+                | Comparand::Struct(_)
+                | Comparand::Collection
         )
     })
 }
@@ -861,6 +867,8 @@ pub(crate) enum Refusal {
     /// `==` or `!=` on an instance of a class that declares no `operator ==`, or `<=>` or an ordering on one whose class
     /// declares no `operator <=>`.
     Instance,
+    /// `==` or `!=` on an unchecked `Any?` and an instance, which can't tell the same object from an equal value.
+    UncheckedObject,
     /// `<=>` or an ordering with a side that may be `null`, an instance or any other value, which only `==` and `!=`
     /// lift.
     NullableOperand,
@@ -920,8 +928,9 @@ fn refusal(
             if lhs.iter().chain(&rhs).any(|comparand| matches!(comparand, Comparand::Struct(_))) {
                 return Some(Refusal::StructIdentity);
             }
-            let instances = !(lhs.is_empty() && rhs.is_empty())
-                && lhs.iter().chain(&rhs).all(|comparand| *comparand == Comparand::Instance);
+            // An unchecked `Any?` beside an instance is the same object or not, spec section 24.
+            let instances = lhs.iter().chain(&rhs).any(|comparand| *comparand == Comparand::Instance)
+                && lhs.iter().chain(&rhs).all(|comparand| matches!(comparand, Comparand::Instance | Comparand::Any));
 
             (!instances).then_some(Refusal::Identity)
         }
@@ -936,7 +945,24 @@ fn refusal(
                     _ => None,
                 })
                 .collect();
-            if has(Comparand::Collection) {
+            // An unchecked `Any?` can't tell an instance's identity from its value, spec section 24, and compares with
+            // a collection by value, element by element, as two collections of the other side's type compare.
+            let unchecked = if lhs.iter().all(|comparand| *comparand == Comparand::Any) {
+                Some(rhs_type)
+            } else if rhs.iter().all(|comparand| *comparand == Comparand::Any) {
+                Some(lhs_type)
+            } else {
+                None
+            };
+            if unchecked.is_some() && has(Comparand::Instance) {
+                Some(Refusal::UncheckedObject)
+            } else if let Some(collection) = unchecked
+                && has(Comparand::Collection)
+            {
+                // A `Set`'s elements have `==` and `hash()` already, so only a `List`'s or a `Map`'s are checked.
+                collection_parts(collection, codebase)
+                    .and_then(|_| collection_refusal(operator, collection, collection, codebase, visiting))
+            } else if has(Comparand::Collection) {
                 collection_refusal(operator, lhs_type, rhs_type, codebase, visiting)
             } else if let Some(&name) = structs.first()
                 && !declares_equality(codebase, name)
@@ -1111,16 +1137,26 @@ pub(crate) fn report_sharp_refusal<A>(
             )
         }
         Refusal::StructProperty => (IssueCode::InvalidOperand, struct_property_issue(context, lhs_type, rhs_type)),
-        Refusal::CollectionElement => (
-            IssueCode::InvalidOperand,
-            Issue::error(format!(
-                "`{op}` compares `{lhs_name}` with `{rhs_name}` element by element, and {}.",
-                element_reason(context, operator, lhs_type, rhs_type)
-            ))
-            .with_note(
-                "Two lists are equal when their elements are, in order, and two maps when they hold equal values under the same keys.",
-            ),
-        ),
+        Refusal::CollectionElement => {
+            // An unchecked `Any?` compares as a collection of the other side's type.
+            let (lhs_type, rhs_type) = match (lhs_type.is_mixed(), rhs_type.is_mixed()) {
+                (true, _) => (rhs_type, rhs_type),
+                (_, true) => (lhs_type, lhs_type),
+                _ => (lhs_type, rhs_type),
+            };
+            let (lhs_name, rhs_name) = (display_operand(context, lhs_type), display_operand(context, rhs_type));
+
+            (
+                IssueCode::InvalidOperand,
+                Issue::error(format!(
+                    "`{op}` compares `{lhs_name}` with `{rhs_name}` element by element, and {}.",
+                    element_reason(context, operator, lhs_type, rhs_type)
+                ))
+                .with_note(
+                    "Two lists are equal when their elements are, in order, and two maps when they hold equal values under the same keys.",
+                ),
+            )
+        }
         Refusal::Collection => (
             IssueCode::NotSupportedYet,
             Issue::error(format!(
@@ -1147,6 +1183,20 @@ pub(crate) fn report_sharp_refusal<A>(
             };
 
             (IssueCode::InvalidOperand, issue)
+        }
+        Refusal::UncheckedObject => {
+            let (unchecked, object) =
+                if lhs_type.is_mixed() { (binary.lhs, binary.rhs) } else { (binary.rhs, binary.lhs) };
+            let (unchecked, object) = (quoted_source(context, unchecked.span()), quoted_source(context, object.span()));
+            let identity = if operator.is_negated_equality() { "!==" } else { "===" };
+
+            (
+                IssueCode::InvalidOperand,
+                Issue::error(format!(
+                    "`{unchecked}` is unchecked: is it the same object as `{object}`, or an equal value? Check it with `is` first."
+                ))
+                .with_help(format!("Write `{unchecked} {identity} {object}` to test for the same object.")),
+            )
         }
         Refusal::NullableOperand => (
             IssueCode::InvalidOperand,
@@ -1203,6 +1253,7 @@ where
             | Refusal::StructProperty
             | Refusal::CollectionElement
             | Refusal::Collection
+            | Refusal::UncheckedObject
             | Refusal::NullableOperand,
         ) => {
             unreachable!("an ordering of a key that is not `null` is refused only for its order or its types")
@@ -1275,6 +1326,19 @@ pub(crate) fn check_element_equality<A>(
                     "Declare `operator ==` and `hash()` in `{class}`, or test for the same object with \
                          `{receiver}{access}any({element} => {element} === {value})`."
                 )),
+            )
+        }
+        Some(Refusal::UncheckedObject) => {
+            let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
+            let access = if null_safe { "?." } else { "." };
+            let element = display_operand(context, element_type);
+
+            (
+                IssueCode::InvalidArgument,
+                Issue::error(format!(
+                    "`{method}` compares elements with `==`, and an unchecked `{element}` element can't tell the same object as `{value}` from an equal value."
+                ))
+                .with_help(format!("Test for the same object with `{receiver}{access}any(element => element === {value})`.")),
             )
         }
         Some(Refusal::StructProperty) => {
@@ -1363,7 +1427,7 @@ fn struct_property_refusal<'codebase>(
     let refused = properties.into_iter().find_map(|property| {
         let declared = &property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?.type_union;
         let r#type = &with_type_arguments(declared, class.name, type_arguments, codebase);
-        // `==` on two `Any` values compiles, and compares by value only a string, a number or an enum case.
+        // `==` on two `Any` values is refused: an `Any` compares by value only with a value of a known type.
         if comparands(r#type, codebase).contains(&Comparand::Any) {
             return Some((property, None));
         }
@@ -1466,7 +1530,9 @@ where
         Some(Refusal::CollectionElement) => "whose elements `==` cannot compare",
         Some(Refusal::StructProperty) => "which can't compare by value",
         Some(_) => "which `==` cannot compare with another of its type",
-        None => "which compares by value only with a string, a number or an enum case",
+        None => {
+            "which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection"
+        }
     };
 
     Issue::error(format!(

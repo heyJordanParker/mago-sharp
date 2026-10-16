@@ -71,10 +71,39 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
         A: Arena,
     {
         let method = MethodParts::of_method(self);
+        check_method_name(self, context, block_context);
 
         analyze_method(&method, self.initializer.as_ref(), word(self.name.value), context, block_context, artifacts)
             .map(|_| ())
     }
+}
+
+/// Warns on a PHP# method named out of camel case, spec section 24, unless it keeps a parent's name: a plain PHP class's
+/// or interface's, or a PHP# interface's, which takes no `override`. The constructor, the one method without a return
+/// type, carries its class's name, and semantics reports a `__Something__` name.
+fn check_method_name<A>(method: &Method<'_>, context: &mut Context<'_, '_, A>, block_context: &BlockContext<'_>)
+where
+    A: Arena,
+{
+    let name = method.name.value;
+    if !context.dialect.is_sharp()
+        || method.return_type_hint.is_none()
+        || name.starts_with(b"__")
+        || mago_casing::is_camel_case(name)
+        || block_context
+            .scope
+            .get_class_like()
+            .is_some_and(|class| context.codebase.method_is_overriding(class.name.as_bytes(), name))
+    {
+        return;
+    }
+
+    context.collector.report_with_code(
+        IssueCode::MethodNameCase,
+        Issue::warning(format!("Method name `{}` should be in camel case.", mago_bytes::BytesDisplay(name)))
+            .with_annotation(Annotation::primary(method.name.span).with_message("Named here."))
+            .with_help(format!("Rename it `{}`.", mago_bytes::BytesDisplay(&mago_casing::to_camel_case(name)))),
+    );
 }
 
 /// A PHP# operator analyzes as the static method it runs as, such as `op_Equality`. A class that declares `==` needs a

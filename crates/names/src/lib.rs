@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use foldhash::HashMap;
 use mago_span::Span;
 
@@ -124,10 +122,6 @@ pub fn display_sharp_member(class_name: impl AsRef<[u8]>, member_name: impl std:
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ResolvedNames<'arena> {
     /// Internal map: start offset -> (end offset, (resolved FQN, imported flag)).
-    ///
-    /// The inner pair is kept as a nested tuple (not flattened) so that [`all`](Self::all)
-    /// can return `&(&'arena [u8], bool)` references — preserving the original signature
-    /// for backward compatibility.
     names: HashMap<u32, (u32, (&'arena [u8], bool))>,
 
     /// Start offset of every bare PHP# name, and of every PHP# type name that names a type parameter -> what it refers
@@ -395,15 +389,6 @@ impl<'arena> ResolvedNames<'arena> {
     /// and other range-based lookups work without re-scanning the source.
     pub(crate) fn insert_at(&mut self, span: Span, name: &'arena [u8], imported: bool) {
         self.names.insert(span.start.offset, (span.end.offset, (name, imported)));
-    }
-
-    /// Returns a `HashSet` containing every resolution result as `(&start, (fqn, imported))`.
-    #[deprecated(
-        note = "Allocates a HashSet for no good reason. Prefer `iter()` for allocation-free iteration, or `at_offset()` for cursor lookups."
-    )]
-    #[must_use]
-    pub fn all(&self) -> HashSet<(&u32, &(&'arena [u8], bool))> {
-        self.names.iter().map(|(k, (_, inner))| (k, inner)).collect()
     }
 }
 

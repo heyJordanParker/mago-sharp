@@ -4689,6 +4689,26 @@ fn a_capitalized_type_in_parentheses_is_a_class_name_and_not_a_cast() {
     );
 }
 
+/// Spec section 24: a class or an interface narrows only with `as`, so a class name in parentheses before a value is a
+/// class cast PHP# does not have, and its error names the `as` that replaces it, once, at the whole cast. A value
+/// longer than a dotted name is named by its place. A class name in parentheses before `is` or `with` is no cast.
+#[test]
+fn a_class_cast_names_as() {
+    for (code, messages) in [
+        ("const admin = (Admin) user;", &["PHP# has no class casts: write `user as Admin`."][..]),
+        ("const admin = (Admin) this.user;", &["PHP# has no class casts: write `this.user as Admin`."]),
+        ("const admin = (Admin) users.first();", &["PHP# has no class casts: write the value, then `as Admin`."]),
+        ("const plan = (Plan) is Plan;", &[]),
+    ] {
+        let source = format!("class Report\n{{\n    void run()\n    {{\n        {code}\n    }}\n}}\n");
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", Box::leak(source.into_boxed_str()));
+
+        let found: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
+        assert_eq!(found, messages, "{code}");
+    }
+}
+
 /// PHP# writes a scalar type in lowercase only, spec section 24, so a capitalized one is the standard library's class
 /// of that name, and PHP keeps reading a scalar type ignoring case.
 #[test]

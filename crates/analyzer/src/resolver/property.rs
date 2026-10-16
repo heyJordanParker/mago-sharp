@@ -72,6 +72,7 @@ use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::method::check_call_through_readonly;
+use crate::resolver::method::object_member_issue;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
 use crate::statement::function_like::closure_parameter_types;
@@ -293,7 +294,13 @@ where
             TObject::Any => {
                 result.has_ambiguous_path = true;
 
-                if !block_context.flags.inside_isset() {
+                // A PHP# `Object` has no members until `is` narrows it, as an `Any` has none, spec section 24.
+                if context.dialect.is_sharp() {
+                    context.collector.report_with_code(
+                        IssueCode::AmbiguousObjectPropertyAccess,
+                        object_member_issue(object_expression.span(), property_selector.span()),
+                    );
+                } else if !block_context.flags.inside_isset() {
                     let object_type = display_atomic(context, object_atomic);
                     report_ambiguous_access(context, property_selector, object_expression.span(), &object_type);
                 }

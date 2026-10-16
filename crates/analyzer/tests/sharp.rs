@@ -592,6 +592,31 @@ fn a_static_method_named_through_its_class_without_a_call_is_a_closure_of_its_si
     assert_eq!(&sharp_issues[..2], ["11:48 invalid-argument", "11:60 non-existent-property"]);
 }
 
+/// Spec section 5: a member without an access modifier is `private`, so a property, a computed property, a constant
+/// and a named constructor written bare are reported where their `private` twins are, and an `internal` one is not.
+#[test]
+fn a_member_without_an_access_modifier_is_private() {
+    let bare = "namespace Demo;\n\npublic class Order\n{\n    int views { get; set; } = 0;\n    int size => 2;\n    const int MAX = 3;\n    internal int shared { get; } = 1;\n\n    public Order(int start) { }\n\n    Order.empty() : this(0) { }\n}\n";
+    let private = "namespace Demo;\n\npublic class Order\n{\n    private int views { get; set; } = 0;\n    private int size => 2;\n    private const int MAX = 3;\n    internal int shared { get; } = 1;\n\n    public Order(int start) { }\n\n    private Order.empty() : this(0) { }\n}\n";
+    let report = "namespace Demo;\n\npublic class Report\n{\n    public static void run(Order order)\n    {\n        Report.keep(new Order.empty());\n        Report.keep(order.views);\n        Report.keep(order.size);\n        Report.keep(Order.MAX);\n        Report.keep(order.shared);\n    }\n\n    public static void keep(Any? value)\n    {\n    }\n}\n";
+
+    let from_bare = issues(("src/Demo/Report.sharp", report), &[("src/Demo/Order.sharp", bare)]);
+
+    assert_eq!(from_bare, issues(("src/Demo/Report.sharp", report), &[("src/Demo/Order.sharp", private)]));
+    // The analyzer checks no constant's access, `private const` included, and the engine refuses line 10 as it runs.
+    assert_eq!(
+        from_bare,
+        [
+            "7:21 invalid-method-access",
+            "7:21 no-value",
+            "8:27 invalid-property-read",
+            "8:21 no-value",
+            "9:27 invalid-property-read",
+            "9:21 no-value",
+        ]
+    );
+}
+
 /// A method read as a value obeys the method's visibility, as `$order->secret(...)` does in PHP.
 #[test]
 fn a_private_method_read_as_a_value_from_outside_its_class_is_an_error() {
@@ -4170,9 +4195,9 @@ fn equality_of_a_class_instance_is_refused_until_the_class_declares_operator_equ
 }
 
 /// Spec section 19: two lists compare element by element and two maps entry by entry, each element with its own `==`,
-/// so a list of a class compares only where the class declares `operator ==`, a list never equals a map, and `Any?`
-/// against a collection is not supported yet. The refusal names why the elements can't compare, through nested lists:
-/// a class with no `operator ==`, a `Set`, or element types that never match.
+/// so a list of a class compares only where the class declares `operator ==`, and a list never equals a map. `Any?`
+/// against a collection compares by value, spec section 24. The refusal names why the elements can't compare, through
+/// nested lists: a class with no `operator ==`, a `Set`, or element types that never match.
 #[test]
 fn collections_compare_by_value() {
     let sharp = "namespace Demo;\n\nimport App.Money;\n\nclass Report\n{\n    public static bool a(List<int> items, List<int> others) => items == others;\n\n    public static bool b(Any? value, List<int> items) => value != items;\n\n    public static bool c(Map<string, int> a, Map<string, int> b, List<Money> m, List<Money> n, List<List<int>> d, List<List<int>> e) => a == b && m != n && d == e && d.contains(Report.items(1));\n\n    public static bool f(List<Cart> carts, List<Cart> others, List<int> items, Map<string, int> counts) => carts == others || items == counts;\n\n    public static bool g(List<List<Cart>> nested, List<List<Cart>> again, List<Set<int>> sets, List<Set<int>> others, List<int> numbers, List<string> words) => nested == again || sets == others || numbers == words;\n\n    public static List<int> items(int count) => [count];\n}\n";
@@ -4182,7 +4207,6 @@ fn collections_compare_by_value() {
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[("src/Demo/Cart.php", CART), MONEY_OPERATORS]),
         [
-            "9:58 not-supported-yet `!=` on a collection is not supported yet, so it cannot compare `Any?` with `List<int>`. | Compare the elements one by one.",
             "13:108 invalid-operand `==` compares `List<Cart>` with `List<Cart>` element by element, and `Cart` declares no `operator ==`. | ",
             "13:127 invalid-operand `==` cannot compare `List<int>` with `Map<string, int>`. | Convert one side so both sides have the same type.",
             "15:161 invalid-operand `==` compares `List<List<Cart>>` with `List<List<Cart>>` element by element, and `Cart` declares no `operator ==`. | ",
@@ -7627,11 +7651,30 @@ fn a_php_non_null_mixed_keeps_accepting_a_value_that_may_be_null() {
     assert_eq!(issues(("src/Demo/Inbox.php", php), &[]), Vec::<String>::new());
 }
 
-/// An `Any?` compares by value with a string or a number. Against another `Any?` each side is reported, naming `Any?` as
-/// PHP# writes it. PHP keeps its report on `mixed`.
+/// Spec section 24: an `Any?` compares by value with a string, a number, a `bool`, an enum case, a struct or a
+/// collection. Against another `Any?` each side is reported, naming `Any?` as PHP# writes it, and against an object
+/// `==` is refused, since it can't tell the same object from an equal value, while `===` asks only for the same object.
+/// PHP keeps its report on `mixed`.
 #[test]
 fn an_unchecked_any_compares_with_a_string_or_a_number_but_not_with_another_value() {
     let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public bool same(Any? value, Any? other, Inbox inbox)\n    {\n        const a = value == \"1\";\n        const b = value != 2;\n        const c = 1.5 == value;\n        const d = value == other;\n        const e = value == inbox;\n        return a && b && c && d && e;\n    }\n}\n";
+    let values = "namespace Demo;\n\nclass Values\n{\n    public List<bool> same(Any? value, List<int> numbers, Map<string, int> counts, Set<int> seen, Suit suit, Point point, Inbox inbox)\n    {\n        return [value == true, value == numbers, counts != value, value == seen, value == suit, value == point, value === inbox, inbox !== value];\n    }\n}\n\nenum Suit\n{\n    case Hearts;\n}\n\nstruct Point\n{\n    public Point(public int x { get; }) { }\n}\n\nclass Inbox\n{\n}\n";
+    assert_eq!(issues(("src/Demo/Values.sharp", values), &[]), Vec::<String>::new());
+    // A collection's elements compare by their own `==`, so a list of a class without one is refused as two such lists are.
+    let passes = "namespace Demo;\n\nclass Passes\n{\n    public List<bool> same(Any? value, List<Pass> list, Map<string, Pass> map, List<Pass> other)\n    {\n        return [value == list, map != value, list == other];\n    }\n}\n\nclass Pass\n{\n}\n";
+    let refused = "invalid-operand `==` compares `List<Pass>` with `List<Pass>` element by element, and `Pass` declares no `operator ==`. | ";
+    assert_eq!(
+        refusals(("src/Demo/Passes.sharp", passes), &[]),
+        [
+            format!("7:17 {refused}"),
+            "7:32 invalid-operand `!=` compares `Map<string, Pass>` with `Map<string, Pass>` element by element, and `Pass` declares no `operator ==`. | ".to_owned(),
+            format!("7:46 {refused}"),
+        ]
+    );
+    assert_eq!(
+        refusals(("src/Demo/Inbox.sharp", sharp), &[])[2],
+        "11:19 invalid-operand `value` is unchecked: is it the same object as `inbox`, or an equal value? Check it with `is` first. | Write `value === inbox` to test for the same object."
+    );
     let php = "<?php\n\nnamespace Demo;\n\nclass Inbox\n{\n    public function same(mixed $value, mixed $other): bool { return $value == $other; }\n}\n";
     let mixed = |at: &str, side: &str| {
         format!(
@@ -7640,7 +7683,7 @@ fn an_unchecked_any_compares_with_a_string_or_a_number_but_not_with_another_valu
     };
     let any = |at: &str, side: &str| {
         format!(
-            "{at} mixed-operand {side} operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | An `Any` may hold any value, so `==` cannot compare it strictly until it is checked. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`."
+            "{at} mixed-operand {side} operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | An `Any` may hold any value, so `==` cannot compare it strictly until it is checked. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`."
         )
     };
 
@@ -7847,6 +7890,84 @@ fn a_bare_map_read_with_a_key_outside_its_key_type_is_an_error() {
         ]
     );
     assert_eq!(sharp_issues[2].message, "`Map<string, int>` is keyed by `string`, but this key is `int`.");
+}
+
+/// An `Object` has no members until `is` narrows it, as an `Any` has none, spec section 24, so a member read or call on
+/// it is an error where PHP warns that a member of `object` is ambiguous.
+#[test]
+fn a_member_of_an_object_is_an_error_where_php_warns_it_is_ambiguous() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static Any? read(Object source)\n    {\n        source.run();\n        return source.id;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function read(object $source): mixed\n    {\n        $source->run();\n        return $source->id;\n    }\n}\n";
+    let levelled = |(name, code): (&'static str, &'static str)| {
+        analyze(&PLUGIN_REGISTRY, settings(), (name, code), &[])
+            .iter()
+            .map(|issue| (issue.level, located(code, issue)))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        levelled(("src/Demo/Report.sharp", sharp)),
+        [
+            (Level::Error, "7:16 ambiguous-object-method-access".to_owned()),
+            (Level::Error, "8:23 ambiguous-object-property-access".to_owned()),
+        ]
+    );
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "7:16 ambiguous-object-method-access An `Object` has no members: check its type with `is` first. | Write `if (value is Order order)`, and call `order`'s members.",
+            "8:23 ambiguous-object-property-access An `Object` has no members: check its type with `is` first. | Write `if (value is Order order)`, and call `order`'s members.",
+        ]
+    );
+    assert_eq!(
+        levelled(("src/Demo/Report.php", php)),
+        [
+            (Level::Warning, "9:18 ambiguous-object-method-access".to_owned()),
+            (Level::Warning, "10:25 ambiguous-object-property-access".to_owned()),
+        ]
+    );
+}
+
+/// `is` narrows an `Object` to a class, whose members it then has, spec sections 21 and 24.
+#[test]
+fn is_narrows_an_object_to_a_class_whose_members_it_has() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int sync(Object source)\n    {\n        if (source is Order order) {\n            return order.total();\n        }\n        return 0;\n    }\n}\n\nclass Order\n{\n    public int total()\n    {\n        return 1;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// A plain PHP value typed `object` arrives as an `Object`, spec section 24: it passes to an `Object` and has no members.
+#[test]
+fn a_plain_php_object_arrives_as_an_object() {
+    let source = "<?php\n\nnamespace Lib;\n\nfinal class Source\n{\n    public static function make(): object\n    {\n        return new \\stdClass();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Source;\n\nclass Report\n{\n    public static Any? run()\n    {\n        const made = Source.make();\n        Report.keep(made);\n        return made.id;\n    }\n\n    public static void keep(Object source)\n    {\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Source.php", source)]),
+        ["11:21 ambiguous-object-property-access"]
+    );
+}
+
+/// An `Object` passes where an `Any` is expected, spec section 24, as PHP's `object` passes to `mixed`.
+#[test]
+fn an_object_passes_where_an_any_is_expected() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static Any run(Object source, Object? maybe)\n    {\n        Report.keep(source);\n        Report.hold(maybe);\n        return source;\n    }\n\n    public static void keep(Any value)\n    {\n    }\n\n    public static void hold(Any? value)\n    {\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// `Object` holds any object and nothing else, spec section 24, so `5` passed to an `Object` is the invalid argument
+/// PHP reports for `5` passed to `object`.
+#[test]
+fn a_value_that_is_not_an_object_passed_to_an_object_is_an_invalid_argument() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void run()\n    {\n        Report.keep(5);\n    }\n\n    public static void keep(Object source)\n    {\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function run(): void\n    {\n        Report::keep(5);\n    }\n\n    public static function keep(object $source): void\n    {\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:21 invalid-argument"]);
+    assert_eq!(
+        codes(&issues(("src/Demo/Report.sharp", sharp), &[])),
+        codes(&issues(("src/Demo/Report.php", php), &[]))
+    );
 }
 
 /// `for (const [k, v] of x)` reads the keys of a `Map`. A `List`'s indexes come from `entries()`, as spec section 12
@@ -9094,15 +9215,15 @@ fn a_search_needs_equality_on_the_element_type() {
             "8:33 invalid-argument `indexOf` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
             "13:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Coin` and `Coin`.",
             "14:34 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `ls.any(element => element === l)`.",
-            "15:35 mixed-operand Each element of `List<Any?>` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
-            "15:60 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
-            "15:65 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "15:35 mixed-operand Each element of `List<Any?>` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "15:60 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "15:65 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
             "16:37 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(l => l === line)`.",
             "18:37 invalid-argument `remove` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
             "20:37 invalid-operand `==` cannot compare `Line` with `Line`: `Line` declares no `operator ==`. | Use `===` to test whether both sides are the same object.",
             "21:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Money` does not take `Line|Money` and `Money`. | Make the `operator ==` of `Money` take `Line|Money` and `Money`.",
             "21:63 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Money.op_Equality`: expected `Money`, but possibly received `Line|Money`. | Ensure the argument always has the expected type using checks or assertions.",
-            "22:36 mixed-operand Each element of `List<Any?>` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "22:36 invalid-argument `contains` compares elements with `==`, and an unchecked `Any?` element can't tell the same object as `price` from an equal value. | Test for the same object with `loose.any(element => element === price)`.",
             "23:40 invalid-argument `indexOf` compares elements with `==`, and the `operator ==` of `Money` does not take `int|Money` and `Money`. | Make the `operator ==` of `Money` take `int|Money` and `Money`.",
             "24:37 invalid-argument `remove` compares elements with `==`, and the `operator ==` of `Money` does not take `Ticket|Money` and `Money`. | Make the `operator ==` of `Money` take `Ticket|Money` and `Money`.",
             "25:41 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Line|Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Line|Coin` and `Coin`.",
@@ -9595,7 +9716,7 @@ fn a_struct_compares_by_value() {
             "77:43 invalid-operand `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
             "79:42 invalid-operand `==` cannot compare `Spot` with `int`.",
             "81:56 invalid-operand `==` compares `List<Order>` with `List<Order>` element by element, and `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
-            "85:39 invalid-operand `Bag` can't compare by value: `data` is an `Any`, which compares by value only with a string, a number or an enum case.",
+            "85:39 invalid-operand `Bag` can't compare by value: `data` is an `Any`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection.",
             "87:42 invalid-operand `Pair` can't compare by value: `order` is an `Order`, which can't compare by value.",
             "89:47 invalid-operand `Tagged` can't compare by value: `tags` is a `Set<int>`, and `==` on a collection is not supported yet.",
             "91:48 invalid-operand `Basket` can't compare by value: `plans` is a `List<Plan>`, whose elements `==` cannot compare.",
@@ -13122,10 +13243,13 @@ fn a_static_named_like_a_member_of_class_is_an_error() {
         "namespace Demo;\n\npublic class Report\n{\n    public static string Attributes() => \"\";\n}\n",
     );
 
-    assert_eq!(issues(capitalized, &[CLASS_MEMBERS]), ["5:26 name-already-in-use"]);
+    assert_eq!(issues(capitalized, &[CLASS_MEMBERS]), ["5:26 method-name-case", "5:26 name-already-in-use"]);
     assert_eq!(
         messages(capitalized, &[CLASS_MEMBERS]),
-        ["`type.Attributes` on a class value reaches `Class`'s member `attributes`, never this static. Rename it."]
+        [
+            "Method name `Attributes` should be in camel case.",
+            "`type.Attributes` on a class value reaches `Class`'s member `attributes`, never this static. Rename it."
+        ]
     );
     for (member, column) in [
         ("public static string attributes() => \"\";", 26),
@@ -18930,6 +19054,49 @@ fn code_without_a_body_allows_emit_with_uses_events() {
     }
 }
 
+/// The standard library's `Json`, as `sharp/composer/` ships it.
+const JSON: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Json/Json.sharp",
+    include_str!("../../../../composer/library/Sharp/Json/Json.sharp"),
+);
+
+/// Spec sections 10 and 24: `Json.encode` takes any value, and a JSON object's key is text, so a `Map` keyed by an
+/// object without `toString()`, wherever the value holds it, is an error. A struct with `toString()`, a backed enum,
+/// an `int` and a `string` key a JSON object. A plain PHP twin's `json_encode` call names `Json.encode`.
+#[test]
+fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
+    let shapes = (
+        "app/Shop/Shapes.sharp",
+        "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n\npublic struct Tag\n{\n    public Tag(public string name { get; }) { }\n\n    public string toString() => this.name;\n}\n\npublic struct Board\n{\n    public Board(public Map<Point, int> counts { get; }) { }\n}\n\npublic enum Plain\n{\n    case Low;\n}\n\npublic enum Coded : string\n{\n    case Low = \"low\";\n}\n",
+    );
+    let report = (
+        "app/Shop/Report.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Json.Json;\n\npublic class Report\n{\n    public static void run(Map<Point, int> points, Map<Tag, int> tags, List<Map<Point, int>> nested, Map<string, Point> values, Map<int, string> numbered, Any? raw, Board board, Map<float, int> floats, Map<Plain, int> plains, Map<bool, int> flags, Map<Coded, int> coded)\n    {\n        Report.keep(Json.encode(tags));\n        Report.keep(Json.encode(values));\n        Report.keep(Json.encode(numbered));\n        Report.keep(Json.encode(raw));\n        Report.keep(Json.encode(points));\n        Report.keep(Json.encode(nested));\n        Report.keep(Json.encode(board));\n        Report.keep(Json.encode(floats));\n        Report.keep(Json.encode(plains));\n        Report.keep(Json.encode(flags));\n        Report.keep(Json.encode(coded));\n    }\n\n    public static void keep(string json)\n    {\n    }\n}\n",
+    );
+    let point = "invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.";
+    let bare = (
+        "app/Shop/Bare.sharp",
+        "namespace App.Shop;\n\npublic class Bare\n{\n    public static string run(Any? value) => json_encode(value);\n}\n",
+    );
+
+    assert_eq!(worded(JSON, &[]), Vec::<String>::new());
+    assert_eq!(
+        refusals(report, &[JSON, shapes]),
+        [
+            format!("13:33 {point}"),
+            format!("14:33 {point}"),
+            format!("15:33 {point}"),
+            "16:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and a `float` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
+            "17:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Plain` has no `toString()`. | Declare `public string toString()` on `Plain`, or encode a `Map` keyed by text.".to_owned(),
+            "18:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and a `bool` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
+        ]
+    );
+    assert_eq!(
+        messages(bare, &[JSON])[0],
+        "`json_encode` is wrapped by the standard library: write `Json.encode(…)`. Add `import Sharp.Json.Json;` to the file."
+    );
+}
+
 /// The standard library's `Events`, as `sharp/composer/` ships it.
 const EVENTS: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Events.sharp",
@@ -20029,5 +20196,22 @@ fn error_names_the_standard_library_interface() {
     assert_eq!(
         messages(("src/App/Errors.sharp", code), &files),
         ["`Error` is PHP#'s interface of the failures a method returns, and no exception is one."]
+    );
+}
+
+/// Spec section 24: a method is named in camel case, and a name that breaks it is a warning, unless the method keeps a
+/// parent's name: one that implements a plain PHP interface's method, overrides a plain PHP class's, or implements a
+/// PHP# interface's, which takes no `override` (section 22). The constructor carries its class's name.
+#[test]
+fn a_method_name_out_of_camel_case_is_a_warning_unless_a_parent_names_it() {
+    let sharp = "namespace Demo;\n\nimport Legacy.HasCount;\nimport Legacy.Model;\n\npublic interface Totals\n{\n    int Grand_Total();\n}\n\npublic class Counted : Model, HasCount, Totals\n{\n    public Counted() { }\n\n    public int get_count() => 1;\n\n    public override string save_all() => \"child\";\n\n    public int Grand_Total() => 2;\n\n    public int Total_In() => 3;\n}\n";
+    let legacy = "<?php\n\nnamespace Legacy;\n\ninterface HasCount\n{\n    public function get_count(): int;\n}\n\nclass Model\n{\n    public function save_all(): string { return 'parent'; }\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Counted.sharp", sharp), &[("src/Legacy/Legacy.php", legacy)]),
+        [
+            "8:9 method-name-case Method name `Grand_Total` should be in camel case. | Named here. | Rename it `grandTotal`.",
+            "21:16 method-name-case Method name `Total_In` should be in camel case. | Named here. | Rename it `totalIn`.",
+        ]
     );
 }
