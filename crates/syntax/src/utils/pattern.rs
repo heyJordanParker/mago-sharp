@@ -107,6 +107,10 @@ pub trait PatternNames {
     /// `span` names, in the order the case declares them, none for a plain case. None when the name is no such case.
     /// The binder resolves a case pattern's type at its start, and a value pattern `Enum.Case` at `Case`.
     fn case_fields(&self, span: Span) -> Option<std::vec::Vec<std::vec::Vec<u8>>>;
+
+    /// Whether the tested index `access` reads a missing key as null, as a `Map` index does (spec section 12). A
+    /// `List` index is read bare, and throws on a missing index.
+    fn reads_quietly(&self, access: &ArrayAccess<'_>) -> bool;
 }
 
 /// Builds, in `arena`, the PHP a PHP# `is`, `as` or `match` runs as.
@@ -471,9 +475,14 @@ where
                             Some(comma) => comma.span_for(fields.left_parenthesis.file_id),
                             None => fields.left_parenthesis,
                         };
-                        let name =
-                            LocalIdentifier { span: start_of(field.span()), value: self.arena.alloc_slice_copy(name) };
-                        let field_test = self.member_test(target, name, field, follows)?;
+                        // A field is named at no token of its own, so its name is the `,` or `)` that ends it. Its read
+                        // spans the field and that token, which no read of the object or test inside the field spans.
+                        let ends = match fields.fields.tokens.get(index) {
+                            Some(comma) => comma.span_for(fields.left_parenthesis.file_id),
+                            None => fields.right_parenthesis,
+                        };
+                        let name = LocalIdentifier { span: ends, value: self.arena.alloc_slice_copy(name) };
+                        let field_test = self.member_test(target, field.span(), name, field, follows)?;
 
                         test = self.binary(test, BinaryOperator::And(start_of(field.span())), field_test);
                     }
@@ -646,7 +655,8 @@ where
         subject: &mut Subject<'arena>,
     ) -> Option<&'arena Expression<'arena>> {
         for property in properties.properties.iter() {
-            let property_test = self.member_test(subject, property.name, property.pattern, property.colon)?;
+            let property_test =
+                self.member_test(subject, property.name.span, property.name, property.pattern, property.colon)?;
 
             test = self.binary(test, BinaryOperator::And(start_of(property.name.span)), property_test);
         }
@@ -655,15 +665,18 @@ where
     }
 
     /// The test of the property `name` of the object `subject` holds against `pattern`, which follows the token at
-    /// `follows`, reading the property once.
+    /// `follows`, reading the property once. The object is read at the start of `at`, which comes before the end of
+    /// `name`, so the read of the property spans more than the read of the object: the analyzer keeps one type per
+    /// span, and the object keeps its own.
     fn member_test(
         &mut self,
         subject: &mut Subject<'arena>,
+        at: Span,
         name: LocalIdentifier<'arena>,
         pattern: &'arena Pattern<'arena>,
         follows: Span,
     ) -> Option<&'arena Expression<'arena>> {
-        let object = self.read(subject, name.span);
+        let object = self.read(subject, at);
         let value = self.alloc(Expression::Access(Access::Property(PropertyAccess {
             object,
             arrow: start_of(name.span),
@@ -744,9 +757,10 @@ where
         Subject { first: Some(assignment), variable: Some(name) }
     }
 
-    /// The PHP that reads a tested value: `x[k] ?? null` for an index, and the value itself otherwise.
+    /// The PHP that reads a tested value: `x[k] ?? null` for an index that reads a missing key as null, and the value
+    /// itself otherwise.
     fn tested(&self, value: &'arena Expression<'arena>) -> &'arena Expression<'arena> {
-        if !matches!(value.unparenthesized(), Expression::ArrayAccess(_)) {
+        if !matches!(value.unparenthesized(), Expression::ArrayAccess(access) if self.names.reads_quietly(access)) {
             return value;
         }
 

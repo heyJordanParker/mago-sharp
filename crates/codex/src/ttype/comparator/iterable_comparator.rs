@@ -5,6 +5,7 @@ use crate::ttype::comparator::generic_comparator::update_failed_result_from_nest
 use crate::ttype::comparator::union_comparator;
 use crate::ttype::get_arraykey;
 use crate::ttype::get_iterable_parameters;
+use crate::ttype::sharp_iterable_value;
 
 pub fn is_contained_by(
     codebase: &CodebaseMetadata,
@@ -19,6 +20,11 @@ pub fn is_contained_by(
 
     let Some((mut input_k, input_v)) = get_iterable_parameters(input_type_part, codebase) else {
         return false;
+    };
+    let input_v = if atomic_comparison_result.sharp_rules {
+        sharp_iterable_value(input_type_part, container_type_part, &input_k, input_v)
+    } else {
+        input_v
     };
 
     // `iterable<V>` desugars to `iterable<mixed, V>` whose *array* arm is

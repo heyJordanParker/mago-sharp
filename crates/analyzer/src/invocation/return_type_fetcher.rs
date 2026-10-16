@@ -50,8 +50,11 @@ where
         return Ok(return_type);
     }
 
-    if context.dialect.is_sharp() && is_method(&invocation.target, b"Sharp\\SetMethods", b"filter") {
-        return Ok(fetch_set_filter_return_type(context, invocation, template_result, parameters));
+    if context.dialect.is_sharp()
+        && (is_method(&invocation.target, b"Sharp\\SetMethods", b"filter")
+            || is_method(&invocation.target, b"Sharp\\ListMethods", b"toSet"))
+    {
+        return Ok(fetch_set_return_type(context, invocation, template_result, parameters));
     }
 
     // `sortedBy` orders by the key its function returns, and `groupBy` and `associateBy` key the `Map` they return by it.
@@ -177,9 +180,10 @@ where
     Some(get_list(element_type))
 }
 
-/// Gives a PHP# `Set<T>`'s `filter` its type `Set<T>`. A docblock writes no `Set`, so `Sharp\SetMethods::filter`
-/// declares an array of the elements, and the call keeps them as a `Set`.
-fn fetch_set_filter_return_type<A>(
+/// Gives a PHP# `Set<T>`'s `filter` and a `List<T>`'s `toSet` their type `Set<T>`. A docblock writes no `Set`, so
+/// `Sharp\SetMethods::filter` and `Sharp\ListMethods::toSet` declare an array of the elements, and the call holds them
+/// as a `Set`.
+fn fetch_set_return_type<A>(
     context: &Context<'_, '_, A>,
     invocation: &Invocation<'_, '_, '_>,
     template_result: &TemplateResult,

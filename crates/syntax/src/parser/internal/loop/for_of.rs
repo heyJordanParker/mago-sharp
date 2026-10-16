@@ -4,10 +4,11 @@ use mago_span::Span;
 
 use crate::T;
 use crate::cst::cst::ForOf;
-use crate::cst::cst::ForOfKeyValueTarget;
 use crate::cst::cst::ForOfTarget;
+use crate::cst::cst::ForOfUnpackTarget;
 use crate::cst::cst::ForOfVariable;
 use crate::cst::cst::Keyword;
+use crate::cst::cst::Statement;
 use crate::error::ParseError;
 use crate::parser::Parser;
 
@@ -29,6 +30,27 @@ where
             }
             _ => false,
         })
+    }
+
+    /// Whether the `for` header after `(` is TypeScript's `for (x in y)`, which declares no loop variable.
+    pub(crate) fn is_at_for_in_without_keyword(&mut self) -> Result<bool, ParseError> {
+        if !self.dialect.is_sharp() || self.stream.peek_kind(0)?.is_none_or(|kind| kind != T![Identifier]) {
+            return Ok(false);
+        }
+
+        Ok(self.stream.lookahead(1)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"in"))
+    }
+
+    /// Reports TypeScript's `for (x in y)` with the `of` to write, as `parse_of_keyword` reports `in`. The loop
+    /// declares no variable, so it parses to its body alone, and the statements after it still parse.
+    pub(crate) fn parse_for_in_without_keyword(&mut self) -> Result<Statement<'arena>, ParseError> {
+        self.stream.consume()?;
+        let r#in = self.stream.consume()?;
+        self.errors.push(ParseError::ForInInSharp(r#in.span_for(self.stream.file_id())));
+        self.parse_expression()?;
+        self.stream.eat_span(T![")"])?;
+
+        self.parse_statement()
     }
 
     /// Whether `of`, or TypeScript's `in`, comes next.
@@ -59,15 +81,15 @@ where
         })
     }
 
-    pub(crate) fn parse_for_of_key_value_target(
+    pub(crate) fn parse_for_of_unpack_target(
         &mut self,
         is_const: bool,
-    ) -> Result<ForOfKeyValueTarget<'arena>, ParseError> {
-        Ok(ForOfKeyValueTarget {
+    ) -> Result<ForOfUnpackTarget<'arena>, ParseError> {
+        Ok(ForOfUnpackTarget {
             left_bracket: self.stream.eat_span(T!["["])?,
-            key: self.parse_for_of_variable(is_const)?,
+            first: self.parse_for_of_variable(is_const)?,
             comma: self.stream.eat_span(T![","])?,
-            value: self.parse_for_of_variable(is_const)?,
+            second: self.parse_for_of_variable(is_const)?,
             right_bracket: self.stream.eat_span(T!["]"])?,
         })
     }

@@ -470,7 +470,10 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                     );
                 }
 
-                if let MethodBody::Concrete(body) = &method.body {
+                // A PHP# interface method's body is its default body, which `check_slice` checks.
+                if let MethodBody::Concrete(body) = &method.body
+                    && !context.program.dialect.is_sharp()
+                {
                     context.report(
                         Issue::error(format!("Interface method `{method_display}` cannot have a body."))
                             .with_annotations([
@@ -519,6 +522,8 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
             }
             ClassLikeMember::Property(property) => {
                 match &property {
+                    // `check_slice` refuses a field in a PHP# interface in PHP#'s words.
+                    Property::Plain(_) if context.program.dialect.is_sharp() => {}
                     Property::Plain(plain_property) => {
                         context.report(
                                     Issue::error(format!(
@@ -686,6 +691,9 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                             }
                         }
                     }
+                    // A PHP# interface's computed property is its default body, as a method's body is, and `check_slice`
+                    // checks it.
+                    Property::Computed(_) if context.program.dialect.is_sharp() => {}
                     Property::Computed(computed_property) => {
                         let property_display =
                             context.display_member(interface_name_bytes, BytesDisplay(computed_property.variable.name));
@@ -1052,6 +1060,32 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
                     context,
                 );
             }
+            // Spec section 22: a PHP# enum declares no stored property, and a computed one holds nothing, so the engine
+            // gives it to every enum, beside the `name` every enum has and the `value` a backed enum has.
+            ClassLikeMember::Property(Property::Computed(computed)) if context.program.dialect.is_sharp() => {
+                let name = computed.variable.name.strip_prefix(b"$").unwrap_or(computed.variable.name);
+                let has_it = name == b"name" || (enum_is_backed && name == b"value");
+                if has_it {
+                    let property_name = BytesDisplay(name);
+                    let which = if name == b"name" { "every enum has" } else { "a backed enum has" };
+                    context.report(
+                        Issue::error(format!(
+                            "Enum `{enum_name}` already has the property `{property_name}`, which {which}."
+                        ))
+                        .with_annotation(Annotation::primary(computed.variable.span()).with_message("Declared here."))
+                        .with_help("Give the computed property another name."),
+                    );
+                }
+            }
+            ClassLikeMember::Property(property) if context.program.dialect.is_sharp() => {
+                context.report(
+                    Issue::error(format!(
+                        "Enum `{enum_name}` declares no stored property: a computed property, as in `public string label => …;`, is allowed."
+                    ))
+                    .with_annotation(Annotation::primary(property.span()).with_message("Declared here."))
+                    .with_note("Each case is one value, and a computed property reads it on each access."),
+                );
+            }
             ClassLikeMember::Property(property) => {
                 context.report(
                     Issue::error(format!("Enum `{enum_name}` cannot have properties."))
@@ -1392,6 +1426,18 @@ pub fn check_members<'ast, 'arena>(
                             .with_code("named-constructor-clash")
                             .with_annotation(Annotation::primary(name_span).with_message("Declared here."))
                             .with_annotation(Annotation::secondary(previous).with_message("Declared first here.")),
+                    );
+                } else if context.program.dialect.is_sharp() {
+                    // Spec section 22: a class has one method per name, so PHP# has no overloading by argument types.
+                    context.report(
+                        Issue::error(format!(
+                            "`{method_display}` is declared twice: a class has one method per name, with no overloading by argument types."
+                        ))
+                        .with_annotation(Annotation::primary(name_span).with_message("Declared again here."))
+                        .with_annotation(Annotation::secondary(previous).with_message("Declared first here."))
+                        .with_help(
+                            "Give each a name that says what it takes, as in `grantUserAccess` and `grantTenantAccess`.",
+                        ),
                     );
                 } else {
                     context.report(

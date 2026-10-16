@@ -1176,6 +1176,38 @@ mod tests {
         );
     }
 
+    /// Spec section 22: a class's `use` names its header's traits and the `Defaults` trait of each interface with a
+    /// default body, so the file of each is an input. A header trait that turns into an interface, or an interface
+    /// that gains or loses its last default body, leaves the compiled class stale.
+    #[test]
+    fn a_class_lists_the_files_of_its_header_traits_and_of_its_interfaces_default_bodies_as_inputs() {
+        let database = project(&[
+            ("app/Page.sharp", "namespace App;\n\npublic class Page : HasSlug, HasDesign\n{\n}\n"),
+            (
+                "app/HasSlug.php",
+                "<?php\n\nnamespace App;\n\ntrait HasSlug\n{\n    public function slug(): string\n    {\n        return 'slug';\n    }\n}\n",
+            ),
+            (
+                "app/HasDesign.sharp",
+                "namespace App;\n\npublic interface HasDesign\n{\n    string designKey() => \"design\";\n}\n",
+            ),
+        ]);
+
+        let compiled = compile(&mut analyzed(&database), empty_stamp);
+
+        assert_eq!(
+            input_paths(accepted(&compiled, "app/Page.sharp")),
+            [
+                "Module.lean",
+                "app/HasDesign.sharp",
+                "app/HasSlug.php",
+                "app/Module.lean",
+                "app/Page.sharp",
+                "composer.lock"
+            ]
+        );
+    }
+
     #[test]
     fn each_input_is_stamped_once_however_many_files_name_it() {
         let database = shop_project(&shop(MONEY, RATE));

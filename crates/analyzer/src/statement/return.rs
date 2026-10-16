@@ -61,6 +61,7 @@ use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
+use crate::utils::with_set_conversion_help;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
     fn analyze<'ctx, A>(
@@ -98,7 +99,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
 
         let inferred_return_type = if let Some(return_value) = self.value.as_ref() {
             let return_type = block_context.scope.get_function_like().and_then(body_return_type);
-            expect_type(context, artifacts, return_value, return_type.map(|return_type| &return_type.type_union));
+            let declared = return_type
+                .map(|return_type| return_type.type_union.clone())
+                .or_else(|| artifacts.lambda_result.clone());
+            expect_type(context, artifacts, return_value, declared.as_ref());
             if let Some(return_type) = return_type {
                 check_sharp_literal_kind(context, return_value, &return_type.type_union);
             }
@@ -631,6 +635,12 @@ pub fn handle_return_value<'ctx, A>(
         if let Some(type_diff) = get_type_diff(context, &expected_return_type, &inferred_return_type) {
             issue = issue.with_note(type_diff);
         }
+        let issue = with_set_conversion_help(
+            context,
+            Some(return_value),
+            (&expected_return_type, &inferred_return_type),
+            issue,
+        );
 
         let (code, issue) = explain_blocked_substitution(
             context,

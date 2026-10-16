@@ -123,6 +123,9 @@ pub enum ParseError {
     /// A PHP# keyword written in another case, as in `Return 5;`, with the keyword as PHP# writes it, at the keyword.
     /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are.
     MiscasedKeywordInSharp(&'static str, Span),
+    /// A class name in parentheses before a value, as in `(Admin) user`, with the class and the value when it is a
+    /// dotted name, at the whole cast. Spec section 24: a class or an interface narrows only with `as`.
+    ClassCastInSharp(Box<str>, Option<Box<str>>, Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -170,7 +173,8 @@ impl HasFileId for ParseError {
             | ParseError::NestedTypeInSharp(_, _, span)
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
-            | ParseError::MiscasedKeywordInSharp(_, span) => span.file_id,
+            | ParseError::MiscasedKeywordInSharp(_, span)
+            | ParseError::ClassCastInSharp(_, _, span) => span.file_id,
         }
     }
 }
@@ -222,7 +226,8 @@ impl HasSpan for ParseError {
             | ParseError::NestedTypeInSharp(_, _, span)
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
-            | ParseError::MiscasedKeywordInSharp(_, span) => *span,
+            | ParseError::MiscasedKeywordInSharp(_, span)
+            | ParseError::ClassCastInSharp(_, _, span) => *span,
         }
     }
 }
@@ -287,6 +292,7 @@ impl std::fmt::Display for ParseError {
                 T!["$variable"] => "A `$` variable is PHP syntax: PHP# names have no `$`".to_string(),
                 T!["use"] => "`use` is PHP syntax: PHP# imports a class with `import`".to_string(),
                 T!["foreach"] => "`foreach` is PHP syntax: PHP# loops over a collection with `for … of`".to_string(),
+                T!["=>"] => "PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow".to_string(),
                 T!["#["] => {
                     "`#[` is PHP syntax: PHP# writes attributes in square brackets, as in `[Searchable]`".to_string()
                 }
@@ -383,6 +389,12 @@ impl std::fmt::Display for ParseError {
                 "A named constructor takes its class's type arguments and declares none of its own.".to_string()
             }
             ParseError::MiscasedKeywordInSharp(keyword, _) => format!("Write the keyword `{keyword}` in lowercase."),
+            ParseError::ClassCastInSharp(class, Some(value), _) => {
+                format!("PHP# has no class casts: write `{value} as {class}`.")
+            }
+            ParseError::ClassCastInSharp(class, None, _) => {
+                format!("PHP# has no class casts: write the value, then `as {class}`.")
+            }
         };
 
         write!(f, "{message}")
@@ -445,7 +457,8 @@ impl From<&ParseError> for Issue {
             | ParseError::EventBodyInSharp(..)
             | ParseError::NestedTypeInSharp(..)
             | ParseError::StructHeaderTypeInSharp(..)
-            | ParseError::MiscasedKeywordInSharp(..) => Issue::error(error.to_string())
+            | ParseError::MiscasedKeywordInSharp(..)
+            | ParseError::ClassCastInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             // A generic class's static method takes the class's type arguments, so its help declares none of its own.

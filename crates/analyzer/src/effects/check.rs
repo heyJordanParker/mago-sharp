@@ -955,7 +955,10 @@ where
         local_declaration: &'ast LocalDeclaration<'arena>,
         escapes: &mut Escapes<'_, '_, 'arena, A>,
     ) {
-        escapes.join(local_declaration.name.span, local_declaration.value);
+        // A tuple a declaration unpacks, as in `const [a, b] = pair;`, is no function, so its locals hold none.
+        for name in local_declaration.target.names() {
+            escapes.join(name.span, local_declaration.value);
+        }
     }
 
     fn walk_in_array_element(

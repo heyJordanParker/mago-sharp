@@ -37,11 +37,13 @@ use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::Parenthesized;
 use crate::cst::cst::PartialApplication;
 use crate::cst::cst::Pipe;
+use crate::cst::cst::Propagate;
 use crate::cst::cst::PropertyAccess;
 use crate::cst::cst::Return;
 use crate::cst::cst::StaticMethodCall;
 use crate::cst::cst::StaticMethodPartialApplication;
 use crate::cst::cst::StaticPropertyAccess;
+use crate::cst::cst::SuperOf;
 use crate::cst::cst::Terminator;
 use crate::cst::cst::UnaryPostfix;
 use crate::cst::cst::UnaryPostfixOperator;
@@ -343,9 +345,20 @@ where
             return Ok(self.arena.alloc(Expression::NameOf(self.parse_name_of()?)));
         }
 
-        // `super.label()` calls the parent's method, spec section 22, as PHP's `parent::label()`.
-        if self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"super" && next == Some(T!["."]) {
-            return Ok(self.arena.alloc(Expression::Parent(self.expect_any_keyword()?)));
+        // `super.label()` calls the parent's method, spec section 22, as PHP's `parent::label()`, and
+        // `super<HasLabel>.label()` calls the interface `HasLabel`'s default body.
+        if self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"super" {
+            if next == Some(T!["."]) {
+                return Ok(self.arena.alloc(Expression::Parent(self.expect_any_keyword()?)));
+            }
+            if next == Some(T!["<"]) {
+                return Ok(self.arena.alloc(Expression::SuperOf(SuperOf {
+                    super_: self.expect_any_keyword()?,
+                    left_angle_bracket: self.stream.eat_span(T!["<"])?,
+                    interface: self.parse_identifier()?,
+                    right_angle_bracket: self.stream.eat_span(T![">"])?,
+                })));
+            }
         }
 
         Ok(self.arena.alloc(match (token.kind, next) {
@@ -359,13 +372,15 @@ where
             (T!["new"], Some(kind)) if kind.is_modifier() => Expression::AnonymousClass(self.parse_anonymous_class()?),
             (T!["new"], _) => Expression::Instantiation(self.parse_instantiation()?),
             (T!["throw"], _) => Expression::Throw(self.parse_throw()?),
+            // `try gateway.charge(cart)`, spec section 31: a prefix operator at `!`'s precedence, so a member access or
+            // a call after it belongs to its value.
+            (T!["try"], _) if self.dialect.is_sharp() => Expression::Propagate(Propagate {
+                r#try: self.expect_keyword(T!["try"])?,
+                value: self.parse_expression_with_precedence(Precedence::Unary)?,
+            }),
             (T!["yield"], _) => Expression::Yield(self.parse_yield()?),
             (T!["\""] | T!["<<<"] | T!["`"], ..) => Expression::CompositeString(self.parse_string()?),
-            (T!["("], _) => Expression::Parenthesized(Parenthesized {
-                left_parenthesis: self.stream.eat_span(T!["("])?,
-                expression: self.parse_expression_with_precedence(Precedence::Lowest)?,
-                right_parenthesis: self.stream.eat_span(T![")"])?,
-            }),
+            (T!["("], _) => self.parse_parenthesized()?,
             (T!["match"], Some(T!["("])) if self.dialect.is_sharp() => {
                 Expression::PatternMatch(self.parse_pattern_match()?)
             }
@@ -461,6 +476,60 @@ where
     /// In PHP#, `.` is member access, which PHP writes `->`, and `?` written right before `.` is null-safe member
     /// access, which PHP writes `?->`. A name that spells one of PHP's word operators, such as `xor`, stands for that
     /// operator after an operand, where no name can follow.
+    /// `(expression)`, or in PHP# a class name in parentheses before a value, as in `(Admin) user`. PHP# has no class
+    /// casts, spec section 24, so that is reported with the `as` that replaces it, and the value stands for the cast.
+    fn parse_parenthesized(&mut self) -> Result<Expression<'arena>, ParseError> {
+        let parenthesized = Parenthesized {
+            left_parenthesis: self.stream.eat_span(T!["("])?,
+            expression: self.parse_expression_with_precedence(Precedence::Lowest)?,
+            right_parenthesis: self.stream.eat_span(T![")"])?,
+        };
+        // A capitalized name is a type, spec section 24, and a value after it is what the cast converts. `is` and
+        // `with` after a value continue it.
+        let Expression::ConstantAccess(ConstantAccess { name: class }) = parenthesized.expression else {
+            return Ok(Expression::Parenthesized(parenthesized));
+        };
+        let Some(first) = self.stream.lookahead(0)? else {
+            return Ok(Expression::Parenthesized(parenthesized));
+        };
+        if !self.dialect.is_sharp()
+            || !class.value().first().is_some_and(u8::is_ascii_uppercase)
+            || self.operator_kind(first)? != T![Identifier]
+            || matches!(first.value, b"is" | b"with")
+        {
+            return Ok(Expression::Parenthesized(parenthesized));
+        }
+
+        let written = self.dotted_name_ahead()?;
+        let value = self.parse_expression_with_precedence(Precedence::ErrorControl)?;
+        self.errors.push(ParseError::ClassCastInSharp(
+            String::from_utf8_lossy(class.value()).into(),
+            written.map(|name| String::from_utf8_lossy(&name).into()),
+            parenthesized.left_parenthesis.join(value.span()),
+        ));
+
+        Ok(value.clone())
+    }
+
+    /// The dotted name the next tokens write, as `this.user`, when it is a whole value. None when a call, an index or
+    /// an operator after it makes the value longer, as in `users.first()`.
+    fn dotted_name_ahead(&self) -> Result<Option<std::vec::Vec<u8>>, ParseError> {
+        let mut tokens = self.stream.peek_tokens();
+        let mut name = std::vec::Vec::new();
+        while let Some(token) = tokens.next().transpose()?
+            && token.kind == T![Identifier]
+        {
+            name.extend_from_slice(token.value);
+            match tokens.next().transpose()?.map(|token| token.kind) {
+                Some(T!["."]) => name.push(b'.'),
+                Some(next) if next.is_postfix() || next == T!["?"] => return Ok(None),
+                _ => return Ok(Some(name)),
+            }
+        }
+
+        Ok(None)
+    }
+
     fn operator_kind(&mut self, token: Token<'_>) -> Result<TokenKind, ParseError> {
         Ok(match (self.dialect, token.kind) {
             (Dialect::Sharp, T!["."]) => T!["->"],

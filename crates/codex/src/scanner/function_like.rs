@@ -177,11 +177,7 @@ where
         is_abstract: method.modifiers.contains_abstract(),
         is_static: method.modifiers.contains_static(),
         is_constructor: method_name_str.eq_ignore_ascii_case(b"__construct"),
-        visibility: if let Some(v) = method.modifiers.get_first_visibility() {
-            Visibility::try_from(v).unwrap_or(Visibility::Public)
-        } else {
-            Visibility::Public
-        },
+        visibility: context.member_visibility(method.modifiers, class_like_metadata),
         where_constraints: WordMap::default(),
         assigned_properties: WordSet::default(),
     };
@@ -224,8 +220,10 @@ where
     }
 
     // A PHP# method is closed unless it is `virtual`, abstract or an `override`, spec section 22, so the analyzer
-    // reads it as final. The engine still runs it as an open PHP method.
+    // reads it as final. The engine still runs it as an open PHP method. An interface method is open, and its default
+    // body is a body each class may replace.
     if context.program.dialect.is_sharp()
+        && !class_like_metadata.kind.is_interface()
         && !method_metadata.is_abstract
         && !method_metadata.is_constructor
         && method_metadata.visibility != Visibility::Private
@@ -358,12 +356,13 @@ where
 
 /// Scans the constructor of the class a PHP# event, spec section 15, or a case that carries data, spec section 20, runs
 /// as, which spans `span` and is named at `name_span`: it takes `parameters`, and each sets the public get-only property
-/// of its name, which this adds to the class.
+/// of its name, which this adds to the class. A parameter's type reads the class's type parameters from `type_context`.
 #[inline]
 pub(crate) fn scan_promoted_constructor<'arena, A>(
     span: Span,
     name_span: Span,
     parameters: &'arena FunctionLikeParameterList<'arena>,
+    type_context: &TypeResolutionContext,
     class_like_metadata: &mut ClassLikeMetadata,
     context: &Context<'_, 'arena, A>,
     scope: &NamespaceScope,
@@ -380,12 +379,11 @@ where
         MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,
     );
     metadata.name_span = Some(name_span);
-    let type_context = TypeResolutionContext::default();
     metadata.parameters = parameters
         .parameters
         .iter()
         .filter_map(|p| {
-            scan_function_like_parameter(p, Some(class_like_metadata.original_name), &type_context, context, scope)
+            scan_function_like_parameter(p, Some(class_like_metadata.original_name), type_context, context, scope)
         })
         .collect();
     metadata.method_metadata =

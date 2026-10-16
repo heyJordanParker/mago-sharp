@@ -88,10 +88,7 @@ where
 
     let default_type_metadata = parameter_metadata.get_default_type().cloned();
 
-    let read_visibility = match parameter.modifiers.get_first_read_visibility() {
-        Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
-        None => Visibility::Public,
-    };
+    let read_visibility = context.member_visibility(&parameter.modifiers, class_like_metadata);
 
     let write_visibility = match (parameter.modifiers.get_first_write_visibility(), &parameter.hooks) {
         (Some(visibility), _) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
@@ -192,6 +189,7 @@ where
 
     let mut flags = MetadataFlags::origin_flags(context.file.file_type);
     let is_sharp = context.program.dialect.is_sharp();
+    flags.set(MetadataFlags::RUNTIME_INITIAL_VALUE, is_sharp && property.initial_value_runs_after_class());
 
     match property {
         Property::Plain(plain_property) => {
@@ -239,11 +237,7 @@ where
                         item_flags |= MetadataFlags::FINAL;
                     }
 
-                    let read_visibility = match plain_property.modifiers.get_first_read_visibility() {
-                        Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
-                        None if is_sharp => Visibility::Private,
-                        None => Visibility::Public,
-                    };
+                    let read_visibility = context.member_visibility(&plain_property.modifiers, class_like_metadata);
 
                     let write_visibility = match plain_property.modifiers.get_first_write_visibility() {
                         Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
@@ -313,10 +307,7 @@ where
                 flags |= MetadataFlags::REQUIRED;
             }
 
-            let read_visibility = match hooked_property.modifiers.get_first_read_visibility() {
-                Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
-                None => Visibility::Public,
-            };
+            let read_visibility = context.member_visibility(&hooked_property.modifiers, class_like_metadata);
 
             let write_visibility = match hooked_property.modifiers.get_first_write_visibility() {
                 Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
@@ -394,10 +385,7 @@ where
         }
         // A PHP# computed property runs as PHP's virtual property with one `get => expr;` hook.
         Property::Computed(computed_property) => {
-            let read_visibility = match computed_property.modifiers.get_first_read_visibility() {
-                Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
-                None => Visibility::Public,
-            };
+            let read_visibility = context.member_visibility(&computed_property.modifiers, class_like_metadata);
 
             if is_sharp && is_sharp_closed(&computed_property.modifiers, read_visibility, class_like_metadata) {
                 flags |= MetadataFlags::FINAL;

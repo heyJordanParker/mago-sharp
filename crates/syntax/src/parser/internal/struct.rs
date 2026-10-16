@@ -10,6 +10,7 @@ use crate::cst::cst::Struct;
 use crate::cst::sequence::Sequence;
 use crate::error::ParseError;
 use crate::parser::Parser;
+use crate::parser::internal::class_like::type_parameter_names;
 
 impl<'arena, A> Parser<'_, 'arena, A>
 where
@@ -30,7 +31,8 @@ where
             && matches!(self.stream.peek_kind(2)?, Some(T![":" | "{" | "<"])))
     }
 
-    /// Parses a PHP# struct, spec section 10: `struct`, its name, the header an enum uses and class members.
+    /// Parses a PHP# struct, spec section 10: `struct`, its name, the type parameters a class takes, the header an enum
+    /// uses and class members.
     pub(crate) fn parse_struct_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -38,37 +40,18 @@ where
     ) -> Result<Struct<'arena>, ParseError> {
         let r#struct = self.expect_any_keyword()?;
         let name = self.parse_local_identifier()?;
-        // Question 4: a generic struct waits for generics, whose `parse` reads `T` while the code runs, so its type
-        // parameters are skipped and it is refused whole: its members parse, and it keeps none, as their types name
-        // the skipped parameters.
-        let generic = self.stream.is_at(T!["<"])?;
-        if generic {
-            let open = self.stream.eat_span(T!["<"])?;
-            let mut close = open;
-            let mut depth = 1;
-            while depth > 0 && !self.stream.has_reached_eof()? {
-                depth += match self.stream.peek_kind(0)? {
-                    Some(T!["<"]) => 1,
-                    Some(T![">"]) => -1,
-                    Some(T![">>"]) => -2,
-                    _ => 0,
-                };
-                close = self.stream.consume_span()?;
-            }
-            self.errors.push(ParseError::NotSupportedYetInSharp("A generic struct", open.join(close)));
-        }
-        let inheritance = self.parse_struct_header()?;
-        let left_brace = self.stream.eat_span(T!["{"])?;
-        let members = self.parse_class_like_members("A struct", None)?;
+        let type_parameters = self.parse_optional_type_parameter_list()?;
+        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
 
         Ok(Struct {
             attribute_lists: attributes,
             modifiers,
             r#struct,
             name,
-            inheritance,
-            left_brace,
-            members: if generic { Sequence::empty() } else { members },
+            type_parameters,
+            inheritance: self.parse_struct_header()?,
+            left_brace: self.stream.eat_span(T!["{"])?,
+            members: self.parse_class_like_members("A struct", Some(&name), type_parameter_names)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }

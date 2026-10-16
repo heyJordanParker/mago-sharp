@@ -120,7 +120,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Unset<'arena> {
 
                     match array {
                         TArray::List(array) => {
-                            let TList { element_type, known_elements, known_count, non_empty } = array;
+                            let TList { element_type, known_elements, known_count, non_empty, tuple_names: _ } = array;
 
                             let Some(mut known_elements) = known_elements else {
                                 atomics.push(TAtomic::Array(TArray::Keyed(TKeyedArray {
@@ -157,6 +157,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Unset<'arena> {
                                         known_count,
                                         // Mark the list as potentially undefined.
                                         non_empty: true,
+                                        tuple_names: None,
                                     })));
                                 } else {
                                     // Keep everything as is, attempting to remove a string key from a list
@@ -167,6 +168,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Unset<'arena> {
                                         element_type,
                                         known_count,
                                         non_empty,
+                                        tuple_names: None,
                                     })));
                                 }
 
@@ -206,6 +208,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Unset<'arena> {
                                     element_type,
                                     known_count,
                                     non_empty,
+                                    tuple_names: None,
                                 })));
 
                                 continue;
@@ -226,6 +229,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Unset<'arena> {
                                     non_empty,
                                     known_elements,
                                     element_type,
+                                    tuple_names: None,
                                 })));
                             } else {
                                 // we removed an integer index from a list such as:

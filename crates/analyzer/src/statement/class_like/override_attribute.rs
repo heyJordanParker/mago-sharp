@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_codex::defaults_trait_name;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
@@ -13,6 +14,7 @@ use mago_span::HasSpan;
 use mago_syntax::cst::Attribute;
 use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Property;
 use mago_text_edit::TextEdit;
@@ -137,6 +139,59 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             continue;
         };
 
+        // Spec section 22: a sub-interface's body that replaces a parent interface's default body takes `override`, as
+        // a class's replacement does.
+        let replaces_default_body = |parent_method_id: &MethodIdentifier| {
+            metadata.kind.is_interface()
+                && !matches!(method.body, MethodBody::Abstract(_))
+                && context
+                    .codebase
+                    .get_interface(parent_method_id.get_class_name().as_bytes())
+                    .and_then(|parent| {
+                        context.codebase.get_trait(defaults_trait_name(parent.original_name.as_bytes()).as_bytes())
+                    })
+                    .is_some_and(|defaults| {
+                        defaults.declaring_method_ids.contains_key(&parent_method_id.get_method_name())
+                    })
+        };
+
+        // Spec section 22: implementing an abstract interface method replaces no body, so it takes no `override`.
+        if is_sharp
+            && let Some(override_span) = override_span
+            && !parent_class_names.values().any(replaces_default_body)
+            && let Some(interface_method) = parent_class_names.values().find(|parent_method_id| {
+                context
+                    .codebase
+                    .get_class_like(parent_method_id.get_class_name().as_bytes())
+                    .is_some_and(|parent| parent.kind.is_interface())
+            })
+            && parent_class_names.values().all(|parent_method_id| {
+                context
+                    .codebase
+                    .get_class_like(parent_method_id.get_class_name().as_bytes())
+                    .is_some_and(|parent| parent.kind.is_interface())
+            })
+        {
+            let method_display = display_member(context, class_name, mago_bytes::BytesDisplay(method.name.value));
+            let interface = context
+                .codebase
+                .get_class_like(interface_method.get_class_name().as_bytes())
+                .map_or(interface_method.get_class_name(), |interface| interface.original_name);
+            let interface_display = display_member(context, interface, mago_bytes::BytesDisplay(method.name.value));
+            context.collector.report(
+                Issue::error(format!(
+                    "`{method_display}` implements `{interface_display}`, which takes no `override`."
+                ))
+                .with_code(IssueCode::InvalidOverrideAttribute)
+                .with_annotation(Annotation::primary(override_span).with_message("Remove `override`."))
+                .with_note(
+                    "`override` marks a method that replaces a body: a base class's, or an interface's default body.",
+                ),
+            );
+
+            continue;
+        }
+
         if override_span.is_some() || metadata.kind.is_trait() {
             continue;
         }
@@ -147,7 +202,9 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             context
                 .codebase
                 .get_class_like(parent_method_id.get_class_name().as_bytes())
-                .filter(|parent_metadata| !is_sharp || !parent_metadata.kind.is_interface())
+                .filter(|parent_metadata| {
+                    !is_sharp || !parent_metadata.kind.is_interface() || replaces_default_body(parent_method_id)
+                })
                 .filter(|_| {
                     !context
                         .codebase
@@ -169,11 +226,27 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             continue;
         }
 
+        // A closed PHP# method's replacement already reports that no subclass replaces it, which `override` can't fix.
+        if is_sharp
+            && parent_class_names.values().any(|parent_method_id| {
+                overridden_class(parent_method_id).is_some()
+                    && context
+                        .codebase
+                        .get_method_by_id(parent_method_id)
+                        .and_then(|parent_method| parent_method.method_metadata.as_ref())
+                        .is_some_and(|parent_method| parent_method.is_final)
+            })
+        {
+            continue;
+        }
+
         let Some(parents_metadata) = parent_class_names.values().find_map(overridden_class) else {
             continue;
         };
 
-        let parent_classname = parents_metadata.original_name;
+        // An interface's trait of default bodies is named as its interface, which PHP# code writes.
+        let parent_classname =
+            context.codebase.get_defaults_interface(parents_metadata).unwrap_or(parents_metadata).original_name;
 
         let original_method_name = mago_bytes::BytesDisplay(method.name.value);
         let method_display = display_member(context, class_name, original_method_name);
@@ -232,7 +305,12 @@ fn check_override_modifier_on_properties<'ctx, 'arena, A>(
         let is_field = matches!(property, Property::Plain(_));
         let override_modifier = property.modifiers().iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
 
-        match (overridden_properties(metadata, name, context.codebase).next(), override_modifier) {
+        // Spec section 22: an interface's computed property is a default body, which a class replaces with `override`,
+        // as it replaces a base class's property.
+        let replaced = overridden_properties(metadata, name, context.codebase)
+            .next()
+            .or_else(|| defaulted_properties(metadata, name, context.codebase).next());
+        match (replaced, override_modifier) {
             (None, Some(override_modifier)) if !is_field && !metadata.has_incomplete_hierarchy() => {
                 context.collector.report(
                     Issue::error(format!("Invalid `override` modifier on `{property_display}`."))
@@ -281,6 +359,21 @@ pub(super) fn overridden_properties<'ctx>(
     std::iter::successors(parent_of(metadata), move |parent| parent_of(parent))
         .filter_map(move |parent| Some((parent, parent.properties.get(&name)?)))
         .take_while(|(_, property)| !property.read_visibility.is_private())
+}
+
+/// The interfaces `metadata` implements that give the property named `name` a default body, spec section 22, with
+/// their declarations: a computed property, whose `get` is not abstract.
+fn defaulted_properties<'ctx>(
+    metadata: &ClassLikeMetadata,
+    name: Word,
+    codebase: &'ctx CodebaseMetadata,
+) -> impl Iterator<Item = (&'ctx ClassLikeMetadata, &'ctx PropertyMetadata)> {
+    metadata
+        .all_parent_interfaces
+        .iter()
+        .filter_map(move |interface| codebase.get_interface(interface.as_bytes()))
+        .filter_map(move |interface| Some((interface, interface.properties.get(&name)?)))
+        .filter(|(_, property)| property.hooks.values().any(|accessor| !accessor.is_abstract))
 }
 
 /// Reports `issue` about a stray override marker, with the edit that deletes a PHP `#[Override]` attribute.

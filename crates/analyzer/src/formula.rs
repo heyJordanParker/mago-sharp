@@ -170,7 +170,7 @@ where
         // A PHP# `is` narrows as the PHP it runs as, whose `!`, `&&` and `||` the formula takes apart.
         if let Expression::Is(_) = expression
             && let Some(PhpShape { php: Node::Expression(php), .. }) =
-                assertion_context.php_shape(Node::Expression(expression))
+                assertion_context.php_shape(Node::Expression(expression), artifacts)
         {
             return get_base_formula(
                 conditional_object_id,

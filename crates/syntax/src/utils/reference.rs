@@ -411,11 +411,13 @@ where
                 references
             }
             Yield::From(yield_from) => find_method_references_in_expression(yield_from.iterator, predicate),
+            Yield::Spread(yield_spread) => find_method_references_in_expression(yield_spread.iterator, predicate),
         },
         Expression::Throw(throw) => find_method_references_in_expression(throw.exception, predicate),
         Expression::Leave(Leave::Return(r#return)) => {
             r#return.value.map(|value| find_method_references_in_expression(value, predicate)).unwrap_or_default()
         }
+        Expression::Propagate(propagate) => find_method_references_in_expression(propagate.value, predicate),
         Expression::Clone(clone) => find_method_references_in_expression(clone.object, predicate),
         Expression::Call(call) => match call {
             Call::Function(FunctionCall { function, argument_list })

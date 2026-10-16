@@ -34,6 +34,7 @@ use crate::invocation::Invocation;
 use crate::invocation::InvocationTarget;
 use crate::invocation::MethodTargetContext;
 use crate::invocation::template_inference::infer_templates_for_method_call;
+use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::check_template_arguments;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_undefined_types;
@@ -417,7 +418,7 @@ where
         .arguments
         .iter()
         .map(|argument| {
-            report_hint_type_arguments(context, block_context, artifacts, argument);
+            report_hint_type_arguments(context, block_context, artifacts, argument, HintPlace::Declaration);
             let argument_type = get_type_from_hint(context, block_context, artifacts, argument);
             report_undefined_types(context, &argument_type, argument.span());
 

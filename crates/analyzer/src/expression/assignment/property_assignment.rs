@@ -45,6 +45,7 @@ use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
+use crate::utils::with_set_conversion_help;
 
 #[inline]
 pub fn analyze<'ctx, 'arena, A>(
@@ -322,6 +323,12 @@ where
                 let issue = issue
                     .with_note(format!("The type `{assigned_type_str}` is not compatible with and cannot be assigned to `{property_type_str}`."))
                     .with_help("Change the assigned value to match the property's type, or update the property's type declaration.");
+                let issue = with_set_conversion_help(
+                    context,
+                    assigned_value,
+                    (&resolved_property.property_type, assigned_value_type),
+                    issue,
+                );
 
                 let (code, issue) = explain_blocked_substitution(
                     context,

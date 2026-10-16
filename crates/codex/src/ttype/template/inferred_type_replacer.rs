@@ -14,6 +14,7 @@ use crate::ttype::atomic::callable::TCallable;
 use crate::ttype::atomic::derived::TDerived;
 use crate::ttype::atomic::generic::TGenericParameter;
 use crate::ttype::atomic::object::TObject;
+use crate::ttype::atomic::reference::TReference;
 use crate::ttype::atomic::scalar::TScalar;
 use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use crate::ttype::combiner;
@@ -324,6 +325,21 @@ fn replace_atomic(
             }
 
             if let Some(intersection_types) = named_object.get_intersection_types_mut() {
+                let old_intersection_types = TUnion::from_vec(intersection_types.clone());
+
+                *intersection_types =
+                    replace_with_polarity(&old_intersection_types, template_result, codebase, polarity)
+                        .types
+                        .into_owned();
+            }
+        }
+        // A reference the populator has not yet resolved to its class, as `Query<T>` is while a file is scanned.
+        TAtomic::Reference(TReference::Symbol { parameters, intersection_types, .. }) => {
+            for parameter in parameters.iter_mut().flatten() {
+                *parameter = replace_with_polarity(parameter, template_result, codebase, polarity);
+            }
+
+            if let Some(intersection_types) = intersection_types {
                 let old_intersection_types = TUnion::from_vec(intersection_types.clone());
 
                 *intersection_types =

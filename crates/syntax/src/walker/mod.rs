@@ -86,8 +86,8 @@ use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
 use crate::cst::cst::ForColonDelimitedBody;
 use crate::cst::cst::ForOf;
-use crate::cst::cst::ForOfKeyValueTarget;
 use crate::cst::cst::ForOfTarget;
+use crate::cst::cst::ForOfUnpackTarget;
 use crate::cst::cst::ForOfVariable;
 use crate::cst::cst::Foreach;
 use crate::cst::cst::ForeachBody;
@@ -149,6 +149,8 @@ use crate::cst::cst::LiteralString;
 use crate::cst::cst::LiteralStringPart;
 use crate::cst::cst::LocalDeclaration;
 use crate::cst::cst::LocalIdentifier;
+use crate::cst::cst::LocalTarget;
+use crate::cst::cst::LocalUnpack;
 use crate::cst::cst::MagicConstant;
 use crate::cst::cst::Match;
 use crate::cst::cst::MatchArm;
@@ -203,6 +205,7 @@ use crate::cst::cst::PlaceholderArgument;
 use crate::cst::cst::PlainProperty;
 use crate::cst::cst::PositionalArgument;
 use crate::cst::cst::PrintConstruct;
+use crate::cst::cst::Propagate;
 use crate::cst::cst::PropertiesPattern;
 use crate::cst::cst::Property;
 use crate::cst::cst::PropertyAbstractItem;
@@ -234,6 +237,7 @@ use crate::cst::cst::StaticMethodPartialApplication;
 use crate::cst::cst::StaticPropertyAccess;
 use crate::cst::cst::StringPart;
 use crate::cst::cst::Struct;
+use crate::cst::cst::SuperOf;
 use crate::cst::cst::Switch;
 use crate::cst::cst::SwitchBody;
 use crate::cst::cst::SwitchBraceDelimitedBody;
@@ -257,6 +261,8 @@ use crate::cst::cst::TraitUseSpecification;
 use crate::cst::cst::Try;
 use crate::cst::cst::TryCatchClause;
 use crate::cst::cst::TryFinallyClause;
+use crate::cst::cst::TupleElementHint;
+use crate::cst::cst::TupleHint;
 use crate::cst::cst::TypeArgumentList;
 use crate::cst::cst::TypeOf;
 use crate::cst::cst::TypeParameter;
@@ -289,6 +295,7 @@ use crate::cst::cst::With;
 use crate::cst::cst::Yield;
 use crate::cst::cst::YieldFrom;
 use crate::cst::cst::YieldPair;
+use crate::cst::cst::YieldSpread;
 use crate::cst::cst::YieldValue;
 
 /// Helper macro to generate the core walk logic.
@@ -935,6 +942,9 @@ generate_ast_walker! {
 
         walker.walk_keyword(&r#enum.r#enum, context);
         walker.walk_local_identifier(&r#enum.name, context);
+        if let Some(type_parameters) = &r#enum.type_parameters {
+            walker.walk_type_parameter_list(type_parameters, context);
+        }
 
         if let Some(backing_type_hint) = &r#enum.backing_type_hint {
             walker.walk_enum_backing_type_hint(backing_type_hint, context);
@@ -964,6 +974,9 @@ generate_ast_walker! {
 
         walker.walk_keyword(&r#struct.r#struct, context);
         walker.walk_local_identifier(&r#struct.name, context);
+        if let Some(type_parameters) = &r#struct.type_parameters {
+            walker.walk_type_parameter_list(type_parameters, context);
+        }
 
         if let Some(inheritance) = &r#struct.inheritance {
             walker.walk_inheritance(inheritance, context);
@@ -1738,13 +1751,13 @@ generate_ast_walker! {
     'arena ForOfTarget as for_of_target => {
         match for_of_target {
             ForOfTarget::Value(value) => walker.walk_for_of_variable(value, context),
-            ForOfTarget::KeyValue(key_value) => walker.walk_for_of_key_value_target(key_value, context),
+            ForOfTarget::Unpack(unpack) => walker.walk_for_of_unpack_target(unpack, context),
         }
     }
 
-    'arena ForOfKeyValueTarget as for_of_key_value_target => {
-        walker.walk_for_of_variable(&for_of_key_value_target.key, context);
-        walker.walk_for_of_variable(&for_of_key_value_target.value, context);
+    'arena ForOfUnpackTarget as for_of_unpack_target => {
+        walker.walk_for_of_variable(&for_of_unpack_target.first, context);
+        walker.walk_for_of_variable(&for_of_unpack_target.second, context);
     }
 
     'arena ForOfVariable as for_of_variable => {
@@ -2048,9 +2061,22 @@ generate_ast_walker! {
             walker.walk_hint(hint, context);
         }
 
-        walker.walk_local_identifier(&local_declaration.name, context);
+        walker.walk_local_target(&local_declaration.target, context);
         walker.walk_expression(local_declaration.value, context);
         walker.walk_terminator(&local_declaration.terminator, context);
+    }
+
+    'arena LocalTarget as local_target => {
+        match local_target {
+            LocalTarget::Name(name) => walker.walk_local_identifier(name, context),
+            LocalTarget::Unpack(unpack) => walker.walk_local_unpack(unpack, context),
+        }
+    }
+
+    'arena LocalUnpack as local_unpack => {
+        for name in &local_unpack.names {
+            walker.walk_local_identifier(name, context);
+        }
     }
 
     'arena Expression as expression => {
@@ -2084,6 +2110,7 @@ generate_ast_walker! {
             Expression::Construct(construct) => walker.walk_construct(construct, context),
             Expression::Throw(throw) => walker.walk_throw(throw, context),
             Expression::Leave(leave) => walker.walk_leave(leave, context),
+            Expression::Propagate(propagate) => walker.walk_propagate(propagate, context),
             Expression::Clone(clone) => walker.walk_clone(clone, context),
             Expression::Call(call) => walker.walk_call(call, context),
             Expression::PartialApplication(partial_application) => walker.walk_partial_application(partial_application, context),
@@ -2102,6 +2129,7 @@ generate_ast_walker! {
             Expression::NameOf(name_of) => walker.walk_name_of(name_of, context),
             Expression::With(with) => walker.walk_with(with, context),
             Expression::GenericClass(generic_class) => walker.walk_generic_class(generic_class, context),
+            Expression::SuperOf(super_of) => walker.walk_super_of(super_of, context),
             Expression::Error(_) => {
                 // Nothing to walk for error expressions
             }
@@ -2633,6 +2661,9 @@ generate_ast_walker! {
             Yield::From(yield_from) => {
                 walker.walk_yield_from(yield_from, context);
             }
+            Yield::Spread(yield_spread) => {
+                walker.walk_yield_spread(yield_spread, context);
+            }
         }
     }
 
@@ -2654,6 +2685,11 @@ generate_ast_walker! {
         walker.walk_keyword(&yield_from.r#yield, context);
         walker.walk_keyword(&yield_from.from, context);
         walker.walk_expression(yield_from.iterator, context);
+    }
+
+    'arena YieldSpread as yield_spread => {
+        walker.walk_keyword(&yield_spread.r#yield, context);
+        walker.walk_expression(yield_spread.iterator, context);
     }
 
     'arena Construct as construct => {
@@ -2758,6 +2794,11 @@ generate_ast_walker! {
             Leave::Continue(r#continue) => walker.walk_continue(r#continue, context),
             Leave::Break(r#break) => walker.walk_break(r#break, context),
         }
+    }
+
+    'arena Propagate as propagate => {
+        walker.walk_keyword(&propagate.r#try, context);
+        walker.walk_expression(propagate.value, context);
     }
 
     'arena Clone as clone => {
@@ -2985,6 +3026,11 @@ generate_ast_walker! {
         walker.walk_type_argument_list(&generic_class.type_arguments, context);
     }
 
+    'arena SuperOf as super_of => {
+        walker.walk_keyword(&super_of.super_, context);
+        walker.walk_identifier(&super_of.interface, context);
+    }
+
     'arena NameOf as name_of => {
         walker.walk_keyword(&name_of.nameof, context);
         walker.walk_identifier(&name_of.class, context);
@@ -3052,15 +3098,34 @@ generate_ast_walker! {
             Hint::Function(function_hint) => {
                 walker.walk_function_hint(function_hint, context);
             }
+            Hint::Tuple(tuple_hint) => {
+                walker.walk_tuple_hint(tuple_hint, context);
+            }
             Hint::Readonly(readonly_hint) => {
                 walker.walk_readonly_hint(readonly_hint, context);
             }
         });
     }
 
+    'arena TupleHint as tuple_hint => {
+        for element in &tuple_hint.elements {
+            walker.walk_tuple_element_hint(element, context);
+        }
+    }
+
+    'arena TupleElementHint as tuple_element_hint => {
+        walker.walk_hint(&tuple_element_hint.hint, context);
+        if let Some(name) = &tuple_element_hint.name {
+            walker.walk_local_identifier(name, context);
+        }
+    }
+
     'arena GenericHint as generic_hint => {
         walker.walk_local_identifier(&generic_hint.name, context);
         walker.walk_type_argument_list(&generic_hint.type_arguments, context);
+        if let Some(case) = &generic_hint.case {
+            walker.walk_local_identifier(case, context);
+        }
     }
 
     'arena TypeArgumentList as type_argument_list => {

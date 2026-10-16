@@ -3,6 +3,7 @@ use mago_syntax::cst::Emit;
 use mago_syntax::cst::ExpressionStatement;
 use mago_syntax::cst::Extern;
 use mago_syntax::cst::LocalDeclaration;
+use mago_syntax::cst::LocalTarget;
 use mago_syntax::cst::Statement;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
@@ -122,7 +123,12 @@ impl Fingerprintable for LocalDeclaration<'_> {
             hasher.write(b"hint");
             hint.fingerprint_with_hasher(hasher, resolved_names, options);
         }
-        self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        if let LocalTarget::Unpack(_) = self.target {
+            hasher.write(b"unpack");
+        }
+        for name in self.target.names() {
+            name.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
         self.value.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }

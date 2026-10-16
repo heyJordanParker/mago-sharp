@@ -46,7 +46,33 @@ pub enum Hint<'arena> {
     Iterable(LocalIdentifier<'arena>),
     Generic(GenericHint<'arena>),
     Function(FunctionHint<'arena>),
+    Tuple(TupleHint<'arena>),
     Readonly(ReadonlyHint<'arena>),
+}
+
+/// Represents a PHP# tuple type, as spec section 30 writes it in TypeScript's brackets: a fixed number of element
+/// types, each with an optional name after it.
+///
+/// # Examples
+///
+/// ```csharp
+/// [Money total, int count]
+/// [string, Plan]
+/// ```
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TupleHint<'arena> {
+    pub left_bracket: Span,
+    pub elements: TokenSeparatedSequence<'arena, TupleElementHint<'arena>>,
+    pub right_bracket: Span,
+}
+
+/// Represents one element of a PHP# tuple type: its type, and its name when it is written, as in `Money total`.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TupleElementHint<'arena> {
+    pub hint: Hint<'arena>,
+    pub name: Option<LocalIdentifier<'arena>>,
 }
 
 /// Represents a PHP# readonly type, as spec section 13 writes `readonly` before a type: a value of it is only read.
@@ -66,24 +92,30 @@ pub struct ReadonlyHint<'arena> {
 /// Represents a PHP# type with type arguments, as spec sections 11 and 12 write `List<Line>` and
 /// `Map<string, Plan>`.
 ///
+/// A case of a generic enum writes the enum's type arguments before the case, as spec section 31 writes
+/// `Result<Order, PaymentError>.Ok`.
+///
 /// # Examples
 ///
 /// ```csharp
 /// Map<string, List<Line>>
+/// Result<Order, PaymentError>.Ok
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct GenericHint<'arena> {
     pub name: LocalIdentifier<'arena>,
     pub type_arguments: TypeArgumentList<'arena>,
+    /// The case after the type arguments, as `Ok` in `Result<Order, PaymentError>.Ok`.
+    pub case: Option<LocalIdentifier<'arena>>,
 }
 
-/// The number of type arguments a PHP# generic type takes when `name` is one of PHP#'s own `List`, `Map`, `Set` and
-/// `Class`, which name no class, or `None` for any other name.
+/// The number of type arguments a PHP# generic type takes when `name` is one of PHP#'s own `List`, `Map`, `Set`,
+/// `Iterable` and `Class`, which name no class, or `None` for any other name.
 #[must_use]
 pub fn built_in_generic_arity(name: &[u8]) -> Option<usize> {
     match name {
-        b"List" | b"Set" | b"Class" => Some(1),
+        b"List" | b"Set" | b"Iterable" | b"Class" => Some(1),
         b"Map" => Some(2),
         _ => None,
     }
@@ -406,8 +438,21 @@ impl HasSpan for Hint<'_> {
             | Hint::Iterable(identifier) => identifier.span(),
             Hint::Generic(generic) => generic.span(),
             Hint::Function(function) => function.span(),
+            Hint::Tuple(tuple) => tuple.span(),
             Hint::Readonly(readonly) => readonly.span(),
         }
+    }
+}
+
+impl HasSpan for TupleHint<'_> {
+    fn span(&self) -> Span {
+        self.left_bracket.join(self.right_bracket)
+    }
+}
+
+impl HasSpan for TupleElementHint<'_> {
+    fn span(&self) -> Span {
+        self.name.as_ref().map_or_else(|| self.hint.span(), |name| self.hint.span().join(name.span))
     }
 }
 
@@ -419,7 +464,7 @@ impl HasSpan for ReadonlyHint<'_> {
 
 impl HasSpan for GenericHint<'_> {
     fn span(&self) -> Span {
-        self.name.span().join(self.type_arguments.span())
+        self.name.span().join(self.case.as_ref().map_or_else(|| self.type_arguments.span(), HasSpan::span))
     }
 }
 

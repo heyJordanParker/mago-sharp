@@ -1,9 +1,10 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::ttype::SharpType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
-use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -12,6 +13,7 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::StaticMethodCall;
 use mago_syntax::cst::TypeArgumentList;
+use mago_word::Word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -24,6 +26,7 @@ use crate::expression::call::method_call::analyze_undocumented_method_return_typ
 use crate::expression::call::method_call::prepare_unresolved_method_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
+use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -34,11 +37,13 @@ use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::StaticCall;
 use crate::resolver::class_name::generic_class_type;
+use crate::resolver::class_name::statics_type_arguments;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
 use crate::statement::class_like::listener::check_events_on;
 use crate::statement::class_like::r#struct::check_struct_parse;
 use crate::utils::expression::expression_is_nullsafe;
+use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::quoted_source;
 
@@ -140,6 +145,8 @@ where
     // of `Counter<Order>` does, spec section 11, and so does a call through a `Class<Counter<Order>>`. `Orders.track(order)`
     // runs it with the type arguments `Orders`'s header gives `Counter`.
     let generic_class = generic_class_type(artifacts, call.class).cloned();
+    // `Holder.of(5)` fixes `Holder`'s type arguments as the method's own, ahead of them, spec section 11.
+    let fixes_class_type_arguments = generic_class.is_none() && bare_generic_class(context, call.class).is_some();
 
     let mut invocation_targets = vec![];
     let mut class_type_arguments = None;
@@ -147,12 +154,12 @@ where
         if let Some(generic_class) = &generic_class {
             resolved_method.static_class_type = StaticClassType::Object(TObject::Named(generic_class.clone()));
         }
-        if context.dialect.is_sharp() && resolved_method.is_static {
+        if context.dialect.is_sharp() && resolved_method.is_static && !fixes_class_type_arguments {
             class_type_arguments = static_member_type_arguments(
                 context,
                 resolved_method.classname,
                 resolved_method.method_identifier.get_class_name(),
-                generic_class.as_ref().and_then(TNamedObject::get_type_parameters),
+                statics_type_arguments(artifacts, call.class),
             );
         }
 
@@ -179,7 +186,13 @@ where
             && (method_name.as_bytes().eq_ignore_ascii_case(b"parse")
                 || method_name.as_bytes().eq_ignore_ascii_case(b"tryParse"))
         {
-            check_struct_parse(context, metadata, method_name.as_bytes().eq_ignore_ascii_case(b"parse"), call.span);
+            check_struct_parse(
+                context,
+                metadata,
+                class_type_arguments.as_deref().unwrap_or_default(),
+                method_name.as_bytes().eq_ignore_ascii_case(b"parse"),
+                call.span,
+            );
         }
 
         // Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`. PHP calls the static
@@ -236,6 +249,15 @@ where
                 target,
                 InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, method), .. }
                     if class.as_bytes().eq_ignore_ascii_case(b"sharp\\events") && method.as_bytes().eq_ignore_ascii_case(b"on")
+            )
+        });
+
+    let encodes_json = context.dialect.is_sharp()
+        && invocation_targets.iter().any(|target| {
+            matches!(
+                target,
+                InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, method), .. }
+                    if class.as_bytes().eq_ignore_ascii_case(b"sharp\\json\\json") && method.as_bytes().eq_ignore_ascii_case(b"encode")
             )
         });
 
@@ -299,6 +321,32 @@ where
         check_events_on(context, &listened.clone(), at);
     }
 
+    if encodes_json
+        && let Some(argument) = call.argument_list.arguments.first()
+        && let Some(value) = artifacts.get_expression_type(argument.value())
+        && let Some(key) = invalid_json_key(context, value, &mut Vec::new())
+    {
+        let (message, help) = match key {
+            InvalidJsonKey::Class(class) => {
+                let class = display_class_like_name(context, class);
+                (
+                    format!("`Json.encode` writes each `Map` key as JSON text, and `{class}` has no `toString()`."),
+                    format!("Declare `public string toString()` on `{class}`, or encode a `Map` keyed by text."),
+                )
+            }
+            InvalidJsonKey::Scalar(scalar) => (
+                format!("`Json.encode` writes each `Map` key as JSON text, and a `{scalar}` key has none."),
+                "Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
+            ),
+        };
+        context.collector.report_with_code(
+            IssueCode::InvalidJsonKey,
+            Issue::error(message)
+                .with_annotation(Annotation::primary(argument.span()).with_message("Encoded here."))
+                .with_help(help),
+        );
+    }
+
     if !method_resolution.undocumented_methods.is_empty() {
         analyze_undocumented_method_return_type(
             context,
@@ -322,6 +370,63 @@ where
     }
 
     Ok(())
+}
+
+/// A `Map` key `Json.encode` can't write as JSON text.
+enum InvalidJsonKey {
+    /// A class, a struct or a pure enum that declares no `toString()`.
+    Class(Word),
+    /// A `float` or a `bool`.
+    Scalar(&'static str),
+}
+
+/// The first `Map` key in `value` that has no JSON text, spec section 10, wherever `value` holds it: in a collection's
+/// elements, keys and values, and in the properties of a PHP# struct or class, `visiting` the classes it is inside. A
+/// key has text exactly where the engine's `sharp_table_json_key` gives it: an `int`, a `string`, a backed enum case,
+/// or an object with `toString()`. An `Any` is decided where it runs.
+fn invalid_json_key<A>(context: &Context<'_, '_, A>, value: &TUnion, visiting: &mut Vec<Word>) -> Option<InvalidJsonKey>
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    value.types.iter().find_map(|atomic| match get_sharp_type(atomic)? {
+        SharpType::List(element) | SharpType::Set(element) | SharpType::Iterable(element) => {
+            invalid_json_key(context, element, visiting)
+        }
+        SharpType::Map(key, value) => key
+            .types
+            .iter()
+            .find_map(|key| match get_sharp_type(key)? {
+                SharpType::Float => Some(InvalidJsonKey::Scalar("float")),
+                SharpType::Bool => Some(InvalidJsonKey::Scalar("bool")),
+                SharpType::Enum(name) | SharpType::Class(name, _) => {
+                    let class = codebase.get_class_like(name.as_bytes())?;
+                    let has_text = class.enum_type.is_some()
+                        || codebase.get_method(name.as_bytes(), b"tostring").is_some()
+                        || codebase.get_method(name.as_bytes(), b"__tostring").is_some();
+
+                    (!has_text).then_some(InvalidJsonKey::Class(class.name))
+                }
+                _ => None,
+            })
+            .or_else(|| invalid_json_key(context, key, visiting))
+            .or_else(|| invalid_json_key(context, value, visiting)),
+        SharpType::Class(name, _) if !visiting.contains(&name) => {
+            let class = codebase.get_class_like(name.as_bytes()).filter(|class| class.flags.is_sharp())?;
+            visiting.push(name);
+            let invalid = class.properties.values().filter(|property| property.read_visibility.is_public()).find_map(
+                |property| {
+                    let r#type = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?;
+
+                    invalid_json_key(context, &r#type.type_union, visiting)
+                },
+            );
+            visiting.pop();
+
+            invalid
+        }
+        _ => None,
+    })
 }
 
 #[cfg(test)]

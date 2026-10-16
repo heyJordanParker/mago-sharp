@@ -5,6 +5,7 @@ use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
 use crate::cst::cst::ForColonDelimitedBody;
 use crate::cst::cst::ForOfTarget;
+use crate::cst::cst::LocalTarget;
 use crate::cst::cst::Statement;
 use crate::cst::sequence::Sequence;
 use crate::cst::sequence::TokenSeparatedSequence;
@@ -20,11 +21,15 @@ where
     pub(crate) fn parse_for(&mut self) -> Result<Statement<'arena>, ParseError> {
         let r#for = self.expect_keyword(T!["for"])?;
         let left_parenthesis = self.stream.eat_span(T!["("])?;
+        if self.is_at_for_in_without_keyword()? {
+            return self.parse_for_in_without_keyword();
+        }
+
         let declaration = if self.is_at_loop_variable_keyword()? {
             let keyword = self.expect_any_keyword()?;
             let is_const = keyword.value.eq_ignore_ascii_case(b"const");
-            if matches!(self.stream.peek_kind(0)?, Some(T!["["])) {
-                let target = ForOfTarget::KeyValue(self.parse_for_of_key_value_target(is_const)?);
+            if matches!(self.stream.peek_kind(0)?, Some(T!["["])) && !(is_const && self.is_at_tuple_loop_variable()?) {
+                let target = ForOfTarget::Unpack(self.parse_for_of_unpack_target(is_const)?);
 
                 return Ok(Statement::ForOf(self.parse_for_of(r#for, left_parenthesis, keyword, target)?));
             }
@@ -36,7 +41,7 @@ where
                 return Ok(Statement::ForOf(self.parse_for_of(r#for, left_parenthesis, keyword, target)?));
             }
 
-            Some(self.parse_local_declaration_value(Some(keyword), variable.hint, variable.name)?)
+            Some(self.parse_local_declaration_value(Some(keyword), variable.hint, LocalTarget::Name(variable.name))?)
         } else if self.is_at_local_declaration()? {
             Some(self.parse_local_declaration()?)
         } else {

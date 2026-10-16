@@ -6,6 +6,7 @@ use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
+use mago_codex::defaults_trait_name;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
@@ -30,8 +31,6 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
-use crate::expression::instantiation::bare_generic_class;
-use crate::expression::instantiation::report_missing_type_arguments;
 use crate::resolver::class_name::ResolutionOrigin;
 use crate::resolver::class_name::ResolvedClassname;
 use crate::resolver::class_name::resolve_classnames_from_expression;
@@ -75,9 +74,6 @@ where
 
     let class_resolutions =
         resolve_classnames_from_expression(context, block_context, artifacts, class_expr, class_is_analyzed)?;
-    if let Some((class, _)) = bare_generic_class(context, class_expr) {
-        report_missing_type_arguments(context, class, class_expr.span());
-    }
     if let Some(class_type) = artifacts.get_expression_type(class_expr)
         && class_type.is_nullable()
     {
@@ -196,6 +192,16 @@ where
             {
                 report_non_static_access(context, &method.method_identifier, method_span);
                 return (true, None);
+            }
+            // PHP# runs `super.name()`, `super<HasLabel>.label()` and `Self.name()` on `this`, which a static method
+            // has none of. The call keeps the method's type.
+            if !method.is_static && context.dialect.is_sharp() && block_context.scope.is_static() {
+                report_instance_call_without_this(
+                    context,
+                    defining_class_metadata,
+                    &method.method_identifier,
+                    method_span,
+                );
             }
 
             if !from_instance
@@ -421,6 +427,18 @@ fn resolve_method_from_metadata<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    // Spec section 22: `super<HasLabel>.label()` runs the interface's default body, which the trait of its default
+    // bodies holds.
+    let defining_class_metadata = if classname.is_parent()
+        && defining_class_metadata.kind.is_interface()
+        && let Some(defaults) =
+            context.codebase.get_trait(defaults_trait_name(defining_class_metadata.original_name.as_bytes()).as_bytes())
+        && defaults.declaring_method_ids.contains_key(&ascii_lowercase_word(method_name.as_bytes()))
+    {
+        defaults
+    } else {
+        defining_class_metadata
+    };
     let method_id = MethodIdentifier::new(defining_class_metadata.original_name, method_name);
     let declaring_method_id = context.codebase.get_declaring_method_identifier(&method_id);
     let (declaring_method_id, function_like) = match context.codebase.get_method_by_id(&declaring_method_id) {
@@ -484,6 +502,28 @@ where
                 is_static,
             );
         }
+    }
+
+    // Spec section 22: `super.m()` runs the parent's body, and `super<HasLabel>.m()` the interface's default body. An
+    // abstract method has none, so PHP would throw `Error`.
+    if context.dialect.is_sharp()
+        && classname.is_parent()
+        && function_like.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
+    {
+        let declaring_class = context.codebase.get_class_like(declaring_method_id.get_class_name().as_bytes());
+        let declaring_name = declaring_class.map_or(declaring_method_id.get_class_name(), |class| class.original_name);
+        let method = display_member(context, declaring_name, function_like.original_name);
+        let name = function_like.original_name;
+        let message = if declaring_class.is_some_and(|class| class.kind.is_interface()) {
+            let interface = display_class_like_name(context, declaring_name);
+            format!("`{method}` has no default body, so `super<{interface}>.{name}()` has nothing to run.")
+        } else {
+            format!("`{method}` is abstract, so `super.{name}()` has no body to run.")
+        };
+        context.collector.report_with_code(
+            IssueCode::AbstractSuperCall,
+            Issue::error(message).with_annotation(Annotation::primary(access_span).with_message("Called here.")),
+        );
     }
 
     let static_class_type =
@@ -693,6 +733,32 @@ where
             .with_help(format!(
                 "To call this method, you must first create an instance of the class (e.g., `{instance_call}`)."
             )),
+    );
+}
+
+/// Spec section 22: a static method of a PHP# class calls an instance method of its own class or a parent, or an
+/// interface's default body, which runs on `this`.
+fn report_instance_call_without_this<A>(
+    context: &mut Context<'_, '_, A>,
+    defining_class: &ClassLikeMetadata,
+    method_id: &MethodIdentifier,
+    span: Span,
+) where
+    A: Arena,
+{
+    // A default body is a method of its interface's trait, which PHP# code never names.
+    let class = context.codebase.get_defaults_interface(defining_class).unwrap_or(defining_class);
+    let method = display_member(
+        context,
+        display_class_like_name(context, class.original_name),
+        display_method_name(context, method_id.get_class_name(), method_id.get_method_name()),
+    );
+
+    context.collector.report_with_code(
+        IssueCode::InvalidStaticMethodAccess,
+        Issue::error(format!("`{method}` runs on `this`, and a static method has no `this`."))
+            .with_annotation(Annotation::primary(span).with_message("Called here."))
+            .with_help("Make the calling method an instance method, or call the method on an object."),
     );
 }
 

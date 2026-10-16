@@ -288,6 +288,7 @@ where
                 element_type: Arc::clone(&existing_list.element_type),
                 non_empty: has_non_optional || existing_list.non_empty || *new_type_non_empty,
                 known_count: existing_list.known_count,
+                tuple_names: existing_list.tuple_names.clone(),
             })));
         }
 
@@ -579,6 +580,7 @@ where
                     element_type: Arc::new(element_type),
                     non_empty: true,
                     known_count: None,
+                    tuple_names: second_list.tuple_names.clone(),
                 })));
             }
 
@@ -597,6 +599,7 @@ where
                     element_type: Arc::new(element_type),
                     non_empty: false,
                     known_count: None,
+                    tuple_names: second_list.tuple_names.clone(),
                 })));
             }
 
@@ -615,6 +618,7 @@ where
                     element_type: Arc::new(element_type),
                     non_empty: false,
                     known_count: None,
+                    tuple_names: first_list.tuple_names.clone(),
                 })));
             }
 
@@ -627,6 +631,7 @@ where
                     element_type: Arc::new(element_type),
                     non_empty: true,
                     known_count: None,
+                    tuple_names: None,
                 })));
             }
 

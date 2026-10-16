@@ -13,6 +13,8 @@ use crate::cst::cst::LocalIdentifier;
 use crate::cst::cst::NullableHint;
 use crate::cst::cst::ParenthesizedHint;
 use crate::cst::cst::ReadonlyHint;
+use crate::cst::cst::TupleElementHint;
+use crate::cst::cst::TupleHint;
 use crate::cst::cst::TypeArgumentList;
 use crate::cst::cst::TypeParameter;
 use crate::cst::cst::TypeParameterBound;
@@ -31,6 +33,9 @@ where
 {
     pub(crate) fn is_at_type_hint(&mut self) -> Result<bool, ParseError> {
         if self.is_at_generic_hint()? || self.is_at_function_hint()? || self.is_at_readonly_hint()? {
+            return Ok(true);
+        }
+        if self.is_at_tuple_hint()? {
             return Ok(true);
         }
 
@@ -94,6 +99,7 @@ where
                 Hint::Nullable(nullable)
             }
             T!["("] => Hint::Parenthesized(self.parse_parenthesized_type_hint()?),
+            T!["["] if self.dialect.is_sharp() => Hint::Tuple(self.parse_tuple_hint()?),
             _ if self.is_at_php_keyword(T!["array"])? => Hint::Array(self.expect_any_keyword()?),
             _ if self.is_at_php_keyword(T!["callable"])? => Hint::Callable(self.expect_any_keyword()?),
             T!["null"] => Hint::Null(self.expect_any_keyword()?),
@@ -255,6 +261,105 @@ where
         })
     }
 
+    /// Whether a PHP# tuple type starts here, which PHP# writes in the brackets that also open an attribute list and a
+    /// list: a `[` whose closing `]`, and an optional `?` written right after it, are followed by a name and then by
+    /// `(`, `,`, `)`, `=`, `;` or `{`, as in `[Money, int] totals()` or `[Money, int] pair = …`. After an attribute list,
+    /// a type and a name follow, as in `[Searchable] string name`, or the class's own name and `(`, as in
+    /// `[Deprecated] Report(…)`, its constructor. After a list an operator or `.` follows.
+    pub(crate) fn is_at_tuple_hint(&self) -> Result<bool, ParseError> {
+        let Some((name, after)) = self.peek_after_tuple_hint()? else {
+            return Ok(false);
+        };
+        if after.kind == T!["("] && self.state.members_name.as_deref() == Some(name.value) {
+            return Ok(false);
+        }
+
+        Ok(matches!(after.kind, T!["(" | "," | ")" | "=" | ";" | "{"]))
+    }
+
+    /// Whether a PHP# loop variable with a tuple type starts here, as in `[string, int] entry of stock`: the name after
+    /// the type is followed by `of`, or TypeScript's `in`, which `parse_of_keyword` reports. In `[key, count] of stock`
+    /// no name follows the brackets, so they unpack each element.
+    pub(crate) fn is_at_tuple_loop_variable(&self) -> Result<bool, ParseError> {
+        Ok(self
+            .peek_after_tuple_hint()?
+            .is_some_and(|(_, after)| after.kind == T![Identifier] && matches!(after.value, b"of" | b"in")))
+    }
+
+    /// The name after the PHP# tuple type that may start here, and the token after that name: a `[` whose closing `]`,
+    /// and an optional `?` written right after it, are followed by a name.
+    fn peek_after_tuple_hint(&self) -> Result<Option<(Token<'_>, Token<'_>)>, ParseError> {
+        if !self.dialect.is_sharp() {
+            return Ok(None);
+        }
+
+        let mut tokens = self.stream.peek_tokens();
+        if !matches!(tokens.next().transpose()?, Some(token) if token.kind == T!["["]) {
+            return Ok(None);
+        }
+        let mut depth = 1usize;
+        let mut closing = None;
+        for token in tokens.by_ref() {
+            let token = token?;
+            match token.kind {
+                T!["["] => depth += 1,
+                T!["]"] => {
+                    depth -= 1;
+                    if depth == 0 {
+                        closing = Some(token);
+                        break;
+                    }
+                }
+                T![";" | "{" | "}"] => return Ok(None),
+                _ => {}
+            }
+        }
+        let Some(closing) = closing else {
+            return Ok(None);
+        };
+
+        let mut name = tokens.next().transpose()?;
+        if let Some(question_mark) = name
+            && question_mark.kind == T!["?"]
+            && question_mark.start.offset == closing.start.offset + 1
+        {
+            name = tokens.next().transpose()?;
+        }
+        let Some(name) = name.filter(|name| name.kind.is_identifier_maybe_reserved()) else {
+            return Ok(None);
+        };
+
+        Ok(tokens.next().transpose()?.map(|after| (name, after)))
+    }
+
+    /// Parses a PHP# tuple type, spec section 30: element types in brackets, each followed by its optional name, as in
+    /// `[Money total, int count]`.
+    fn parse_tuple_hint(&mut self) -> Result<TupleHint<'arena>, ParseError> {
+        let left_bracket = self.stream.eat_span(T!["["])?;
+        let mut elements = Vec::new_in(self.arena);
+        let mut commas = Vec::new_in(self.arena);
+        loop {
+            let hint = self.parse_type_hint()?;
+            let name = if self.stream.peek_kind(0)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) {
+                Some(self.parse_local_identifier()?)
+            } else {
+                None
+            };
+            elements.push(TupleElementHint { hint, name });
+            if !self.stream.is_at(T![","])? {
+                break;
+            }
+
+            commas.push(self.stream.consume()?);
+        }
+
+        Ok(TupleHint {
+            left_bracket,
+            elements: TokenSeparatedSequence::new(elements, commas),
+            right_bracket: self.stream.eat_span(T!["]"])?,
+        })
+    }
+
     /// Whether a PHP# type with type arguments starts here: a name, such as `List` or `Class`, followed by `<`.
     pub(crate) fn is_at_generic_hint(&mut self) -> Result<bool, ParseError> {
         Ok(self.dialect.is_sharp()
@@ -262,9 +367,25 @@ where
             && self.stream.peek_kind(1)? == Some(T!["<"]))
     }
 
-    /// Parses a PHP# type with type arguments, as in `Map<string, List<Line>>`.
+    /// Parses a PHP# type with type arguments, as in `Map<string, List<Line>>`, and the case of a generic enum it may
+    /// name after them, as in `Result<Order, PaymentError>.Ok`.
     fn parse_generic_hint(&mut self) -> Result<GenericHint<'arena>, ParseError> {
-        Ok(GenericHint { name: self.parse_local_identifier()?, type_arguments: self.parse_type_argument_list()? })
+        let name = self.parse_local_identifier()?;
+        let type_arguments = self.parse_type_argument_list()?;
+        // The `.` follows this list's own `>`, which a `>>` that closes an outer list too does not end with.
+        let case =
+            if self.stream.lookahead(0)?.is_some_and(|token| {
+                token.kind == T!["."] && token.start.offset == type_arguments.greater_than.end.offset
+            }) && self.stream.peek_kind(1)?.is_some_and(|kind| kind.is_identifier_maybe_reserved())
+            {
+                self.stream.consume()?;
+
+                Some(self.parse_local_identifier()?)
+            } else {
+                None
+            };
+
+        Ok(GenericHint { name, type_arguments, case })
     }
 
     /// Parses PHP# type arguments, as a type, a `new` and a call write them: `<string, List<Line>>`.

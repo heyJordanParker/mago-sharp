@@ -92,6 +92,7 @@ use mago_syntax::cst::VariadicPlaceholderArgument;
 use mago_syntax::cst::Yield;
 use mago_syntax::cst::YieldFrom;
 use mago_syntax::cst::YieldPair;
+use mago_syntax::cst::YieldSpread;
 use mago_syntax::cst::YieldValue;
 
 use crate::document::Align;
@@ -204,8 +205,14 @@ where
                 Expression::MagicConstant(c) => c.format(f),
                 Expression::Pipe(p) => p.format(f),
                 Expression::Error(_) => Document::empty(),
-                Expression::Is(_) | Expression::As(_) | Expression::PatternMatch(_) | Expression::Leave(_) => {
-                    unreachable!("`mago format` skips PHP# files, the only ones with patterns and `?? return`")
+                Expression::Is(_)
+                | Expression::As(_)
+                | Expression::PatternMatch(_)
+                | Expression::Leave(_)
+                | Expression::Propagate(_) => {
+                    unreachable!(
+                        "`mago format` skips PHP# files, the only ones with patterns, `?? return` and `try` values"
+                    )
                 }
                 #[allow(clippy::unreachable)]
                 Expression::Parenthesized(_) => unreachable!("Parenthesized expressions are handled separately"),
@@ -1779,6 +1786,7 @@ where
                 Yield::Value(y) => y.format(f),
                 Yield::Pair(y) => y.format(f),
                 Yield::From(y) => y.format(f),
+                Yield::Spread(y) => y.format(f),
             }
         })
     }
@@ -1841,6 +1849,22 @@ where
                 Document::space(),
                 self.from.format(f),
                 Document::space(),
+                self.iterator.format(f),
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for YieldSpread<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, YieldSpread, {
+            Document::Group(Group::new(vec_in![f.arena;
+                self.r#yield.format(f),
+                Document::space(),
+                Document::String(b"..."),
                 self.iterator.format(f),
             ]))
         })

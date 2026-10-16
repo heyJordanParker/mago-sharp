@@ -78,6 +78,7 @@ pub(crate) const fn expression_has_observable_side_effect(expression: &Expressio
         Expression::Assignment(_)
         | Expression::Throw(_)
         | Expression::Leave(_)
+        | Expression::Propagate(_)
         | Expression::Yield(_)
         | Expression::Clone(_) => true,
         Expression::UnaryPrefix(u) => {
@@ -128,10 +129,10 @@ pub(crate) const fn expression_is_nullsafe(expr: &'_ Expression<'_>) -> bool {
     }
 }
 
-/// Analyzes the object of `->` or `?->`. A PHP# `?.` reads a missing key of the index directly before it as null, as
-/// `??` does, so that index is analyzed as the left side of `??` is (spec section 12). A `Map` read is then `V?`, as
-/// `check_sharp_map_read` types it, and so is a `List` read, so `rows[9]?.count()` is `int?`. The indexes before it
-/// stay bare reads: `cube[9]` in `cube[9][0]?.x` is not nullable.
+/// Analyzes the object of `->` or `?->`. A PHP# `?.` reads a missing key of the `Map` index directly before it as
+/// null, as `??` does, so that index is analyzed as the left side of `??` is (spec section 12), and the read is `V?`,
+/// as `check_sharp_map_read` types it. A `List` index there stays a bare read, which throws on a missing index, so
+/// `rows[9]?.count()` skips only a null element.
 pub(crate) fn analyze_member_object<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -145,23 +146,23 @@ where
     let was_inside_general_use = block_context.flags.inside_general_use();
     let was_inside_isset = block_context.flags.inside_isset();
     block_context.flags.set_inside_general_use(true);
-    let index = match object.unparenthesized() {
-        Expression::ArrayAccess(access) if is_null_safe && context.dialect.is_sharp() => Some(access),
-        _ => None,
-    };
-    if index.is_some() {
+    if is_null_safe && context.dialect.is_sharp() && matches!(object.unparenthesized(), Expression::ArrayAccess(_)) {
         block_context.flags.set_inside_isset(true);
     }
 
     object.analyze(context, block_context, artifacts)?;
 
-    if let Some(access) = index
-        && artifacts
-            .get_expression_type(access.array)
-            .is_some_and(|indexed| indexed.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)))))
-        && let Some(element) = artifacts.get_expression_type(object).cloned()
+    // A `List` index there throws on a missing index, so its read is always there, and `?.` tests only its element.
+    if let Expression::ArrayAccess(access) = object.unparenthesized()
+        && is_null_safe
+        && context.dialect.is_sharp()
+        && artifacts.get_expression_type(access.array).is_some_and(|indexed| {
+            indexed.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)) | TAtomic::Null))
+        })
+        && let Some(mut element) = artifacts.get_expression_type(object).cloned()
     {
-        artifacts.set_expression_type(object, element.as_nullable());
+        element.set_possibly_undefined(false, Some(false));
+        artifacts.set_expression_type(object, element);
     }
 
     block_context.flags.set_inside_general_use(was_inside_general_use);

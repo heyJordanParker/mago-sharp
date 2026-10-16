@@ -89,6 +89,7 @@ pub fn get_assignment_from_expression<'expr, 'arena>(
             Yield::Pair(yield_pair) => get_assignment_from_expression(yield_pair.key)
                 .or_else(|| get_assignment_from_expression(yield_pair.value)),
             Yield::From(yield_from) => get_assignment_from_expression(yield_from.iterator),
+            Yield::Spread(yield_spread) => get_assignment_from_expression(yield_spread.iterator),
         },
         Expression::Construct(construct) => match construct {
             Construct::Isset(isset_construct) => {
@@ -124,6 +125,7 @@ pub fn get_assignment_from_expression<'expr, 'arena>(
         },
         Expression::Throw(throw) => get_assignment_from_expression(throw.exception),
         Expression::Leave(Leave::Return(r#return)) => r#return.value.and_then(get_assignment_from_expression),
+        Expression::Propagate(propagate) => get_assignment_from_expression(propagate.value),
         Expression::Clone(clone) => get_assignment_from_expression(clone.object),
         Expression::Call(call) => match &call {
             Call::Function(FunctionCall { function, argument_list })

@@ -689,12 +689,96 @@ fn a_case_type_is_written_through_its_enum() {
     assert_eq!(hints, [b"PaymentResult.Paid".as_slice(), b"PaymentResult.Paid"]);
 }
 
-/// A generic struct waits for generics, spec section 10's question 4, so its type parameters are one error, nested
-/// ones included, and the struct parses on. It is refused whole, so it keeps no members, whose types name its
-/// parameters, and the file has that one error.
+/// Spec section 31: an enum declares type parameters after its name, with bounds, before its header.
 #[test]
-fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
-    for parameters in ["<T>", "<TKey, TValue>", "<T : Box<int>>", "<T : Map<string, List<int>>>"] {
+fn an_enum_declares_type_parameters_after_its_name() {
+    const CODE: &str =
+        "public enum Result<T, TError : Error> : HasLabel\n{\n    case Ok(T value);\n    case Err(TError error);\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Result.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Enum(result)) = program.statements.first() else {
+        panic!("expected an enum, got {:#?}", program.statements);
+    };
+    let Some(parameters) = &result.type_parameters else {
+        panic!("expected type parameters, got {result:#?}");
+    };
+    let written: Vec<&str> = parameters.parameters.iter().map(|parameter| source(CODE, parameter)).collect();
+    assert_eq!(written, ["T", "TError : Error"]);
+    assert!(result.inheritance.is_some(), "the header after the type parameters parses");
+    assert!(result.runs_as_classes());
+}
+
+/// Spec section 31: `try` before a value is a prefix operator at `!`'s precedence, so a member read or a call binds
+/// tighter and `+` looser, and parentheses read a member of the `Ok` value. `try {` stays the statement.
+#[test]
+fn try_before_a_value_is_a_prefix_operator_and_try_before_a_brace_is_the_statement() {
+    let arena = LocalArena::new();
+    for (statement, propagated, around) in [
+        ("try gateway.charge(cart);", "gateway.charge(cart)", "try gateway.charge(cart)"),
+        ("(try gateway.charge(cart)).total;", "gateway.charge(cart)", "(try gateway.charge(cart)).total"),
+        ("try a.b.c;", "a.b.c", "try a.b.c"),
+        ("try result + 1;", "result", "try result + 1"),
+        ("!try result;", "result", "!try result"),
+        ("[try result];", "result", "[try result]"),
+    ] {
+        let code: &'static str = Box::leak(
+            format!("class Shop\n{{\n    void run()\n    {{\n        {statement}\n    }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Shop.sharp", code);
+        assert!(program.errors.is_empty(), "{statement}: {:#?}", program.errors);
+
+        let [written] = method_body(program) else {
+            panic!("expected one statement for `{statement}`, got {:#?}", method_body(program));
+        };
+        assert_eq!(source(code, expression(written)), around, "{statement}");
+        let values: Vec<&str> = Node::Statement(written).filter_map(|node| match node {
+            Node::Propagate(propagate) => Some(source(code, propagate.value)),
+            _ => None,
+        });
+        assert_eq!(values, [propagated], "{statement}");
+    }
+
+    let code = "class Shop\n{\n    void run()\n    {\n        try { } catch (Throwable error) { }\n    }\n}\n";
+    let program = parse(&arena, "src/Shop.sharp", code);
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    assert!(matches!(method_body(program), [Statement::Try(_)]), "{:#?}", method_body(program));
+}
+
+/// Spec section 31: a case of a generic enum is a type written with the enum's type arguments before the case, as
+/// `Result<Order, PaymentError>.Ok`. A `.` that follows a nested list's `>` is no case of it, so a static read through
+/// a generic type still parses.
+#[test]
+fn a_case_type_of_a_generic_enum_writes_the_type_arguments_before_the_case() {
+    const CODE: &str = "class Shop\n{\n    public Order paid(Result<Order, PaymentError>.Ok ok, Result<List<Order>, PaymentError> all) => ok.value;\n\n    public int count() => Counter<List<Order>>.items;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Shop.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let cases: Vec<(&str, Option<&[u8]>)> = Node::Program(program).filter_map(|node| match node {
+        Node::GenericHint(hint) if hint.name.value == b"Result" => {
+            Some((source(CODE, hint), hint.case.as_ref().map(|case| case.value)))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        cases,
+        [("Result<Order, PaymentError>.Ok", Some(b"Ok".as_slice())), ("Result<List<Order>, PaymentError>", None)]
+    );
+}
+
+/// A struct can be generic, spec section 10, with section 11's type parameters: one, several, a bounded one, a nested
+/// bound, and a variance marker, each before the header and the members.
+#[test]
+fn a_generic_struct_takes_type_parameters() {
+    for (parameters, names) in [
+        ("<T>", &[&b"T"[..]][..]),
+        ("<TKey, TValue>", &[b"TKey", b"TValue"]),
+        ("<T : Box<int>>", &[b"T"]),
+        ("<T : Map<string, List<int>>>", &[b"T"]),
+        ("<out T>", &[b"T"]),
+    ] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
             format!("struct Pair{parameters} : HasLabel\n{{\n    public int run() {{ return 1; }}\n}}\n\nstruct Next {{ }}\n")
@@ -702,16 +786,17 @@ fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
         );
         let program = parse(&arena, "src/Pair.sharp", code);
 
-        let [error] = program.errors else {
-            panic!("expected one error for `{parameters}`, got {:#?}", program.errors);
-        };
-        assert_eq!(error.to_string(), "A generic struct is not supported yet in PHP#.");
-        assert_eq!(source(code, error), parameters);
+        assert!(program.errors.is_empty(), "`{parameters}` parses, got {:#?}", program.errors);
         let Some(Statement::Struct(pair)) = program.statements.first() else {
             panic!("expected a struct for `{parameters}`, got {:#?}", program.statements);
         };
+        let Some(written) = &pair.type_parameters else {
+            panic!("the struct keeps `{parameters}`");
+        };
+        let declared: Vec<&[u8]> = written.parameters.iter().map(|parameter| parameter.name.value).collect();
+        assert_eq!(declared, names, "the type parameters of `{parameters}`");
         assert!(pair.inheritance.is_some(), "the header after `{parameters}` parses");
-        assert!(pair.members.is_empty(), "the struct keeps no members after `{parameters}`");
+        assert_eq!(pair.members.len(), 1, "the struct keeps its member after `{parameters}`");
         assert!(
             matches!(program.statements.get(1), Some(Statement::Struct(_))),
             "the struct after `{parameters}` parses"
@@ -1212,7 +1297,7 @@ fn uses_after_a_function_type_stays_a_name() {
         panic!("expected one local, got {:#?}", method_body(program));
     };
     assert_eq!(local.hint.map(|hint| source(LOCAL, hint)), Some("Function<int(int)>"));
-    assert_eq!(source(LOCAL, &local.name), "uses");
+    assert_eq!(source(LOCAL, &local.target), "uses");
 }
 
 /// A `.sharp` file has no `<?php` or `?>`, so a nullable last type argument ends the type, as in `Map<string, Any?>`.
@@ -1704,7 +1789,7 @@ fn a_local_and_a_field_can_have_a_collection_type_written() {
                 panic!("expected a local, got {statement:#?}");
             };
 
-            (source(CODE, local.hint.expect("a type")), source(CODE, &local.name))
+            (source(CODE, local.hint.expect("a type")), source(CODE, &local.target))
         })
         .collect();
     assert_eq!(locals, [("List<Line>", "lines"), ("Map<string, List<int>>?", "groups")]);
@@ -1793,7 +1878,7 @@ fn a_php_double_arrow_in_a_literal_is_a_php_syntax_error() {
     let program = parse(&arena, "src/Report.sharp", CODE);
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages.len(), 1, "{messages:#?}");
+    assert_eq!(messages, ["PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow"]);
     let Some(ParseError::PhpSyntaxInSharp(_, span)) = program.errors.first() else {
         panic!("expected a PHP-syntax error, got {:#?}", program.errors);
     };
@@ -1948,12 +2033,12 @@ fn let_and_const_declare_locals_with_an_initializer() {
     assert_eq!(label.keyword.expect("a keyword").value, b"let");
     assert!(label.hint.is_none());
     assert!(!label.is_const());
-    assert_eq!(label.name.value, b"label");
+    assert_eq!(source(CODE, &label.target), "label");
     assert!(matches!(label.value, Expression::Literal(Literal::String(_))));
     assert_eq!(source(CODE, label), "let label = \"one\";");
     assert_eq!(base.keyword.expect("a keyword").value, b"const");
     assert!(base.is_const());
-    assert_eq!(base.name.value, b"base");
+    assert_eq!(source(CODE, &base.target), "base");
 }
 
 #[test]
@@ -1974,7 +2059,7 @@ fn a_local_can_be_declared_with_its_type_written() {
                 source(CODE, local),
                 source(CODE, local.hint.as_ref().expect("a type")),
                 local.is_const(),
-                source(CODE, &local.name),
+                source(CODE, &local.target),
             )
         })
         .collect();
@@ -2011,6 +2096,140 @@ fn a_local_can_be_declared_with_a_union_type_written() {
         .collect();
 
     assert_eq!(types, ["int|string", "Calc|int?|float", "int|bool"]);
+}
+
+/// Each element of a tuple type, as written: its type and its name, when it has one.
+fn tuple_type<'a>(code: &'a str, hint: &Hint) -> Vec<(&'a str, Option<&'a str>)> {
+    let Hint::Tuple(tuple) = hint else {
+        panic!("expected a tuple type, got {hint:#?}");
+    };
+
+    tuple
+        .elements
+        .iter()
+        .map(|element| (source(code, &element.hint), element.name.as_ref().map(|name| source(code, name))))
+        .collect()
+}
+
+/// Spec section 30: a tuple type writes its element types in TypeScript's brackets, each type first and its name
+/// optional, wherever a type goes.
+#[test]
+fn a_tuple_type_writes_its_element_types_in_brackets_each_with_an_optional_name() {
+    const CODE: &str = "class Report\n{\n    private [Money, int] pair;\n    public [Money total, int count, Date since] summarize([string, List<Plan>] entry, [int, int]? range) { return [total, count, since]; }\n    public void run()\n    {\n        [Money, int] pair = [total, 1];\n        const [string key, Plan plan]? none = null;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [
+        ClassLikeMember::Property(Property::Plain(field)),
+        ClassLikeMember::Method(summarize),
+        ClassLikeMember::Method(run),
+    ] = class_members(program).as_slice()
+    else {
+        panic!("expected a field and two methods, got {:#?}", class_members(program));
+    };
+    assert_eq!(tuple_type(CODE, field.hint.as_ref().expect("a type")), [("Money", None), ("int", None)]);
+    let return_type = &summarize.return_type_hint.as_ref().expect("a return type").hint;
+    assert_eq!(source(CODE, return_type), "[Money total, int count, Date since]");
+    assert_eq!(
+        tuple_type(CODE, return_type),
+        [("Money", Some("total")), ("int", Some("count")), ("Date", Some("since"))]
+    );
+    let [entry, range] = summarize.parameter_list.parameters.as_slice() else {
+        panic!("expected two parameters, got {:#?}", summarize.parameter_list.parameters);
+    };
+    assert_eq!(tuple_type(CODE, entry.hint.as_ref().expect("a type")), [("string", None), ("List<Plan>", None)]);
+    let Some(Hint::Nullable(range)) = &range.hint else {
+        panic!("expected a nullable type, got {:#?}", range.hint);
+    };
+    assert_eq!(tuple_type(CODE, range.hint), [("int", None), ("int", None)]);
+
+    let MethodBody::Concrete(body) = &run.body else {
+        panic!("expected a method body, got {:#?}", run.body);
+    };
+    let locals: Vec<(&str, &str)> = body
+        .statements
+        .iter()
+        .map(|statement| {
+            let Statement::LocalDeclaration(local) = statement else {
+                panic!("expected a local, got {statement:#?}");
+            };
+
+            (source(CODE, local.hint.expect("a type")), source(CODE, &local.target))
+        })
+        .collect();
+    assert_eq!(locals, [("[Money, int]", "pair"), ("[string key, Plan plan]?", "none")]);
+}
+
+/// An attribute list and a tuple type both open with `[`. Before the class's own name and `(`, the brackets are the
+/// attributes of its constructor, which a method never shares a name with, and before any other name and `(` they are
+/// a method's tuple return type.
+#[test]
+fn brackets_before_the_class_name_and_a_parenthesis_are_the_constructor_attributes() {
+    const CODE: &str = "class Report\n{\n    [Deprecated] Report(int count) { }\n    [Deprecated] private Report(string text) { }\n    [Money, int] Totals() { return [money, 1]; }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let forms: Vec<(&str, usize, Option<&str>)> = class_members(program)
+        .iter()
+        .map(|member| {
+            let ClassLikeMember::Method(method) = member else {
+                panic!("expected a method, got {member:#?}");
+            };
+            let returned = method.return_type_hint.as_ref().map(|returned| source(CODE, &returned.hint));
+
+            (source(CODE, &method.name), method.attribute_lists.len(), returned)
+        })
+        .collect();
+    assert_eq!(forms, [("Report", 1, None), ("Report", 1, None), ("Totals", 0, Some("[Money, int]"))]);
+}
+
+/// Spec section 30: `const [total, count] = summary;` unpacks a tuple into one local per element, with `let` or
+/// `const`, as TypeScript writes it.
+#[test]
+fn const_or_let_unpacks_a_tuple_into_a_local_per_element() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        const [total, count, since] = order.summarize();\n        let [money, items] = order.totals();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let unpacked: Vec<(&str, bool, Vec<&str>)> = method_body(program)
+        .iter()
+        .map(|statement| {
+            let Statement::LocalDeclaration(local) = statement else {
+                panic!("expected a local, got {statement:#?}");
+            };
+            let LocalTarget::Unpack(unpack) = &local.target else {
+                panic!("expected an unpack, got {:#?}", local.target);
+            };
+
+            (source(CODE, local), local.is_const(), unpack.names.iter().map(|name| source(CODE, name)).collect())
+        })
+        .collect();
+    assert_eq!(
+        unpacked,
+        [
+            ("const [total, count, since] = order.summarize();", true, vec!["total", "count", "since"]),
+            ("let [money, items] = order.totals();", false, vec!["money", "items"]),
+        ]
+    );
+}
+
+/// A statement that starts with a list literal stays an expression, as it is unless a name and `=` follow its `]`.
+#[test]
+fn a_list_literal_that_starts_a_statement_stays_an_expression() {
+    const CODE: &str =
+        "class Report\n{\n    void run()\n    {\n        [total, 1].count();\n        [total, 1];\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    assert!(
+        method_body(program).iter().all(|statement| matches!(statement, Statement::Expression(_))),
+        "{:#?}",
+        method_body(program)
+    );
 }
 
 #[test]
@@ -2171,7 +2390,7 @@ fn a_for_loop_declares_its_counter_with_let_or_const() {
     };
 
     let declaration = counted.declaration.as_ref().expect("a declaration");
-    assert_eq!(declaration.name.value, b"i");
+    assert_eq!(source(CODE, &declaration.target), "i");
     assert!(!declaration.is_const());
     assert_eq!(source(CODE, declaration), "let i = 0;");
     assert_eq!(source(CODE, &counted.initializations_semicolon), ";");
@@ -2228,10 +2447,10 @@ fn for_of_declares_its_loop_variable_or_key_and_value() {
     assert_eq!(source(CODE, values), "for (const line of lines) {\n        }");
 
     assert!(!entries.is_const());
-    let ForOfTarget::KeyValue(pair) = &entries.target else {
-        panic!("expected a key and a value, got {:#?}", entries.target);
+    let ForOfTarget::Unpack(unpack) = &entries.target else {
+        panic!("expected two unpacked parts, got {:#?}", entries.target);
     };
-    assert_eq!((pair.key.name.value, pair.value.name.value), (&b"key"[..], &b"plan"[..]));
+    assert_eq!((unpack.first.name.value, unpack.second.name.value), (&b"key"[..], &b"plan"[..]));
     assert_eq!(source(CODE, &entries.target), "[key, plan]");
     assert!(matches!(entries.expression, Expression::Call(Call::Method(_))));
 }
@@ -2254,20 +2473,20 @@ fn a_const_loop_variable_can_have_its_type_written() {
         panic!("expected four for … of loops and a for loop, got {:#?}", method_body(program));
     };
 
-    let ForOfTarget::KeyValue(pair) = &typed.target else {
-        panic!("expected a key and a value, got {:#?}", typed.target);
+    let ForOfTarget::Unpack(unpack) = &typed.target else {
+        panic!("expected two unpacked parts, got {:#?}", typed.target);
     };
-    assert_eq!(source(CODE, pair.key.hint.expect("a key type")), "Status");
-    assert_eq!(source(CODE, &pair.key), "Status status");
-    assert_eq!(source(CODE, pair.value.hint.expect("a value type")), "int");
-    assert_eq!(pair.value.name.value, b"n");
+    assert_eq!(source(CODE, unpack.first.hint.expect("the first part's type")), "Status");
+    assert_eq!(source(CODE, &unpack.first), "Status status");
+    assert_eq!(source(CODE, unpack.second.hint.expect("the second part's type")), "int");
+    assert_eq!(unpack.second.name.value, b"n");
     assert_eq!(source(CODE, &typed.target), "[Status status, int n]");
 
-    let ForOfTarget::KeyValue(pair) = &key_typed.target else {
-        panic!("expected a key and a value, got {:#?}", key_typed.target);
+    let ForOfTarget::Unpack(unpack) = &key_typed.target else {
+        panic!("expected two unpacked parts, got {:#?}", key_typed.target);
     };
-    assert_eq!(source(CODE, pair.key.hint.expect("a key type")), "Status");
-    assert!(pair.value.hint.is_none());
+    assert_eq!(source(CODE, unpack.first.hint.expect("the first part's type")), "Status");
+    assert!(unpack.second.hint.is_none());
 
     let ForOfTarget::Value(group) = &group.target else {
         panic!("expected one loop variable, got {:#?}", group.target);
@@ -2282,6 +2501,36 @@ fn a_const_loop_variable_can_have_its_type_written() {
 
     let declaration = counted.declaration.as_ref().expect("a declaration");
     assert_eq!(source(CODE, declaration.hint.expect("a type")), "List<int>");
+}
+
+/// Spec section 30: a loop variable takes a tuple type as any local does, as in
+/// `for (const [string, int] entry of stock)`, where `[key, count]` with no name after it unpacks each element. A
+/// lambda parameter takes one too.
+#[test]
+fn a_const_loop_variable_can_have_a_tuple_type_written() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        for (const [string, int] entry of stock) {\n        }\n        for (const [string key, int count]? maybe of entries) {\n        }\n        for (const [key, count] of stock) {\n        }\n        const keyOf = ([string, int] entry) => entry;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [Statement::ForOf(typed), Statement::ForOf(named), Statement::ForOf(unpacked), Statement::LocalDeclaration(_)] =
+        method_body(program)
+    else {
+        panic!("expected three for … of loops and a local, got {:#?}", method_body(program));
+    };
+
+    let ForOfTarget::Value(entry) = &typed.target else {
+        panic!("expected one loop variable, got {:#?}", typed.target);
+    };
+    assert_eq!(source(CODE, entry.hint.expect("a type")), "[string, int]");
+    assert_eq!(entry.name.value, b"entry");
+
+    let ForOfTarget::Value(maybe) = &named.target else {
+        panic!("expected one loop variable, got {:#?}", named.target);
+    };
+    assert_eq!(source(CODE, maybe.hint.expect("a type")), "[string key, int count]?");
+
+    assert!(matches!(unpacked.target, ForOfTarget::Unpack(_)), "{:#?}", unpacked.target);
 }
 
 /// A typed local never takes `let`, so neither does a typed loop variable.
@@ -2339,6 +2588,23 @@ fn for_in_is_a_parse_error_that_names_of() {
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
     assert_eq!(messages, ["PHP# loops over a collection with `of`, as in `for (const line of lines)`."]);
+}
+
+/// TypeScript's `for (x in y)` declares no loop variable, and it is the same one error that names `of`, while the
+/// statements after it still parse.
+#[test]
+fn for_in_without_const_is_the_parse_error_that_names_of() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        for (line in lines) {\n            const kept = 1;\n        }\n        const after = 2;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(
+        errors,
+        [("PHP# loops over a collection with `of`, as in `for (const line of lines)`.".to_owned(), "in")]
+    );
+    assert_eq!(method_body(program).len(), 2, "{:#?}", method_body(program));
 }
 
 #[test]
@@ -3316,6 +3582,34 @@ fn header_names<'arena>(inheritance: &Inheritance<'arena>) -> Vec<&'arena [u8]> 
     inheritance.names().map(|name| name.value()).collect()
 }
 
+/// Spec section 22: `super<HasLabel>.label()` calls one interface's default body, so `super<HasLabel>` is the object of
+/// the call, and `super.label()` keeps calling the parent's.
+#[test]
+fn super_of_an_interface_is_the_object_of_a_call_of_its_default_body() {
+    const CODE: &str = "class Both\n{\n    string label()\n    {\n        super<HasLabel>.label();\n        super.label();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Both.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [interface_call, parent_call] = method_body(program) else {
+        panic!("expected two statements, got {:#?}", method_body(program));
+    };
+    let Expression::Call(Call::Method(MethodCall { object: Expression::SuperOf(super_of), .. })) =
+        expression(interface_call)
+    else {
+        panic!("expected `super<HasLabel>.label()`, got {interface_call:#?}");
+    };
+    assert_eq!(super_of.interface.value(), b"HasLabel");
+    assert_eq!(source(CODE, super_of), "super<HasLabel>");
+    assert!(
+        matches!(
+            expression(parent_call),
+            Expression::Call(Call::Method(MethodCall { object: Expression::Parent(_), .. }))
+        ),
+        "{parent_call:#?}"
+    );
+}
+
 /// `nameof(Order.total)` names a class by its short name and one of its properties, spec section 6.3. In PHP it stays
 /// a function call.
 #[test]
@@ -3887,6 +4181,56 @@ fn extern_before_a_parenthesis_stays_a_call_in_php_sharp() {
     assert_eq!(source(CODE, call.function), "extern");
 }
 
+#[test]
+fn yield_spread_produces_every_element_of_another_iterable() {
+    const CODE: &str = "class OrderImport\n{\n    Iterable<Order> all()\n    {\n        yield ...this.pending;\n        yield this.latest;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/OrderImport.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [spread, value] = method_body(program) else {
+        panic!("expected two statements, got {:#?}", method_body(program));
+    };
+    let Expression::Yield(Yield::Spread(spread)) = expression(spread) else {
+        panic!("expected `yield ...this.pending`, got {spread:#?}");
+    };
+    assert_eq!(source(CODE, spread), "yield ...this.pending");
+    assert_eq!(source(CODE, &spread.ellipsis), "...");
+    assert_eq!(source(CODE, spread.iterator), "this.pending");
+    let Expression::Yield(Yield::Value(YieldValue { value: Some(value), .. })) = expression(value) else {
+        panic!("expected `yield this.latest`, got {value:#?}");
+    };
+    assert_eq!(source(CODE, *value), "this.latest");
+}
+
+#[test]
+fn a_name_before_an_arrow_after_yield_is_a_lambda() {
+    const CODE: &str = "class Report\n{\n    Iterable<Function<int(int)>> all()\n    {\n        yield x => x;\n        yield \"key\" => 1;\n        yield from rows;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [lambda, pair, from] = method_body(program) else {
+        panic!("expected three statements, got {:#?}", method_body(program));
+    };
+    let Expression::Yield(Yield::Value(YieldValue { value: Some(Expression::ArrowFunction(lambda)), .. })) =
+        expression(lambda)
+    else {
+        panic!("expected `yield` of a lambda, got {lambda:#?}");
+    };
+    assert_eq!(source(CODE, lambda), "x => x");
+    assert!(matches!(expression(pair), Expression::Yield(Yield::Pair(_))), "{pair:#?}");
+    assert!(matches!(expression(from), Expression::Yield(Yield::From(_))), "{from:#?}");
+}
+
+#[test]
+fn yield_spread_in_php_is_a_parse_error() {
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.php", "<?php function all() { yield ...$pending; }\n");
+
+    assert!(!program.errors.is_empty());
+}
+
 /// PHP has no `extern` declaration, so a `.php` statement that starts with `extern` stays a call or a constant.
 #[test]
 fn extern_starting_a_php_statement_stays_a_call_or_a_constant() {
@@ -4349,6 +4693,26 @@ fn a_capitalized_type_in_parentheses_is_a_class_name_and_not_a_cast() {
         ),
         "{cast:#?}"
     );
+}
+
+/// Spec section 24: a class or an interface narrows only with `as`, so a class name in parentheses before a value is a
+/// class cast PHP# does not have, and its error names the `as` that replaces it, once, at the whole cast. A value
+/// longer than a dotted name is named by its place. A class name in parentheses before `is` or `with` is no cast.
+#[test]
+fn a_class_cast_names_as() {
+    for (code, messages) in [
+        ("const admin = (Admin) user;", &["PHP# has no class casts: write `user as Admin`."][..]),
+        ("const admin = (Admin) this.user;", &["PHP# has no class casts: write `this.user as Admin`."]),
+        ("const admin = (Admin) users.first();", &["PHP# has no class casts: write the value, then `as Admin`."]),
+        ("const plan = (Plan) is Plan;", &[]),
+    ] {
+        let source = format!("class Report\n{{\n    void run()\n    {{\n        {code}\n    }}\n}}\n");
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", Box::leak(source.into_boxed_str()));
+
+        let found: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
+        assert_eq!(found, messages, "{code}");
+    }
 }
 
 /// PHP# writes a scalar type in lowercase only, spec section 24, so a capitalized one is the standard library's class

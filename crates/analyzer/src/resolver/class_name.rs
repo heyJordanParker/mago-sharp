@@ -26,6 +26,7 @@ use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
+use mago_syntax::cst::SuperOf;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -236,6 +237,91 @@ where
     )
 }
 
+/// The class in `class`'s chain that implements `interface` first, `class` itself or the farthest base class that does,
+/// which uses the trait of `interface`'s default bodies, spec section 22.
+fn defaults_user<'ctx>(
+    codebase: &'ctx CodebaseMetadata,
+    class: &'ctx ClassLikeMetadata,
+    interface: Word,
+) -> Option<&'ctx ClassLikeMetadata> {
+    std::iter::successors(Some(class), |class| {
+        class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+    })
+    .take_while(|class| class.all_parent_interfaces.contains(&interface))
+    .last()
+}
+
+/// Resolves PHP# `super<HasLabel>`, spec section 22, to the interface as a parent: a call through it runs the
+/// interface's default body, which [`resolve_method_from_metadata`](crate::resolver::static_method) finds in the trait
+/// of its default bodies. The class must implement the interface. The PHP# class that uses the trait keeps each body
+/// under a protected name its subclasses call too, which a plain PHP class that uses it gives none.
+fn resolve_super_of<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    super_of: &SuperOf<'_>,
+) -> ResolvedClassname
+where
+    A: Arena,
+{
+    let interface_name = word(context.resolved_names.get(&super_of.interface));
+    let interface = context.codebase.get_interface(interface_name.as_bytes());
+    let interface_display =
+        display_class_like_name(context, interface.map_or(interface_name, |interface| interface.original_name));
+    let span = super_of.span();
+
+    let class = block_context.scope.get_class_like().filter(|class| class.kind.is_class() || class.kind.is_enum());
+    let error = match (class, interface) {
+        (None, _) => Some((
+            IssueCode::ParentOutsideClassScope,
+            format!(
+                "`super<{interface_display}>` reuses a default body only in the methods of a class that implements `{interface_display}`."
+            ),
+        )),
+        (Some(class), interface)
+            if !interface.is_some_and(|interface| class.all_parent_interfaces.contains(&interface.name)) =>
+        {
+            let class_display = display_class_like_name(context, class.original_name);
+
+            Some((
+                IssueCode::InvalidParentType,
+                format!(
+                    "`{class_display}` does not implement `{interface_display}`, so `super<{interface_display}>` has no default body to reuse."
+                ),
+            ))
+        }
+        (Some(class), _)
+            if let Some(user) =
+                defaults_user(context.codebase, class, ascii_lowercase_word(interface_name.as_bytes()))
+                && !user.flags.is_sharp() =>
+        {
+            let user_display = display_class_like_name(context, user.original_name);
+
+            Some((
+                IssueCode::InvalidParentType,
+                format!(
+                    "`super<{interface_display}>` reuses a default body a PHP# class keeps, and `{user_display}`, which implements `{interface_display}`, is plain PHP."
+                ),
+            ))
+        }
+        _ => None,
+    };
+    if let Some((code, message)) = error {
+        context.collector.report_with_code(
+            code,
+            Issue::error(message).with_annotation(Annotation::primary(span).with_message("Used here.")),
+        );
+    }
+
+    // After an error the call still runs the interface's default body, so its type is known.
+    interface.map_or_else(ResolvedClassname::invalid, |interface| {
+        ResolvedClassname::new(
+            Some(interface.original_name),
+            ResolutionOrigin::Named { is_parent: true, is_self: false },
+            false,
+        )
+    })
+}
+
 /// Resolves a PHP# type parameter written as a class, in `new TItem(…)` or `TItem.make()`: the class of the type
 /// argument the code runs with, as `typeof(TItem)` gives it, which is any class its bound holds. `new` of it gives a
 /// `TItem`. A type parameter whose bound holds a type that is not a class can't be one.
@@ -353,6 +439,24 @@ pub(crate) fn generic_class_type<'artifacts>(
         (_, [TAtomic::Scalar(TScalar::ClassLikeString(class_value))]) => class_value_class(class_value),
         _ => None,
     }
+}
+
+/// The type arguments a static member read or called through `class_expression` takes its class's statics with:
+/// those of [`generic_class_type`], or for a type parameter those of its bound, as `Order` for `TCounter :
+/// Counter<Order>`, which the type argument the code runs with fits, as a class value takes those its type names, spec
+/// section 11.
+pub(crate) fn statics_type_arguments<'artifacts>(
+    artifacts: &'artifacts AnalysisArtifacts,
+    class_expression: &Expression<'_>,
+) -> Option<&'artifacts [TUnion]> {
+    // `resolve_type_parameter` records a type parameter written as a class as its tested type.
+    let tested = artifacts.get_tested_type(class_expression.unparenthesized());
+    let bound = match tested.map(|tested| tested.types.as_ref()) {
+        Some([TAtomic::GenericParameter(parameter)]) => parameter.constraint.get_single_named_object(),
+        _ => None,
+    };
+
+    bound.or_else(|| generic_class_type(artifacts, class_expression)).and_then(TNamedObject::get_type_parameters)
 }
 
 /// Resolves a CST `Expression` to one or more `ResolvedClassname` instances.
@@ -521,6 +625,9 @@ where
 
                 possible_types.push(ResolvedClassname::invalid());
             }
+        }
+        Expression::SuperOf(super_of) => {
+            possible_types.push(resolve_super_of(context, block_context, super_of));
         }
         expression => {
             // If the expression is not already analyzed, we analyze it now.

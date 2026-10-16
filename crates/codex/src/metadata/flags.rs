@@ -99,9 +99,12 @@ impl MetadataFlags {
     pub const INTERNAL_REACH: MetadataFlags = MetadataFlags(1 << 59);
     /// A PHP# field, spec section 6: storage that is never a property, as `ReflectionProperty::isField()` tells.
     pub const FIELD: MetadataFlags = MetadataFlags(1 << 60);
+    /// A PHP# static whose initial value runs as code, once, when its class's statics are first used, spec section 6,
+    /// as `Property::initial_value_runs_after_class` decides. A throw there leaves it unset.
+    pub const RUNTIME_INITIAL_VALUE: MetadataFlags = MetadataFlags(1 << 61);
     /// A PHP# function parameter whose type states no effects, spec section 29, as `f` in `map(Function<R(T)> f)`: each
     /// call of the method takes on the effects of the function it passes there, which the type does not limit.
-    pub const TAKES_ON_EFFECTS: MetadataFlags = MetadataFlags(1 << 61);
+    pub const TAKES_ON_EFFECTS: MetadataFlags = MetadataFlags(1 << 62);
 }
 
 impl MetadataFlags {
@@ -310,6 +313,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_field(self) -> bool {
         self.contains(Self::FIELD)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn has_runtime_initial_value(self) -> bool {
+        self.contains(Self::RUNTIME_INITIAL_VALUE)
     }
 
     #[inline]
@@ -619,6 +628,7 @@ mod tests {
             ("PROJECT", MetadataFlags::PROJECT),
             ("INTERNAL_REACH", MetadataFlags::INTERNAL_REACH),
             ("FIELD", MetadataFlags::FIELD),
+            ("RUNTIME_INITIAL_VALUE", MetadataFlags::RUNTIME_INITIAL_VALUE),
             ("TAKES_ON_EFFECTS", MetadataFlags::TAKES_ON_EFFECTS),
         ];
 

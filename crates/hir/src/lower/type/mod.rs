@@ -53,7 +53,8 @@ where
             cst::Hint::Null(_) => TypeKind::Null,
             cst::Hint::True(_) => TypeKind::Bool(Some(true)),
             cst::Hint::False(_) => TypeKind::Bool(Some(false)),
-            cst::Hint::Array(_) | cst::Hint::Generic(_) => TypeKind::Array,
+            // Spec section 30: a tuple runs as a PHP list.
+            cst::Hint::Array(_) | cst::Hint::Generic(_) | cst::Hint::Tuple(_) => TypeKind::Array,
             cst::Hint::Callable(_) => TypeKind::Callable,
             // Spec section 14.1: a PHP# function type runs as `\Closure`.
             cst::Hint::Function(function) => TypeKind::Named(Identifier {

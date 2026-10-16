@@ -231,12 +231,14 @@ impl<'ctx> InvocationTarget<'ctx> {
         }
 
         if let InvocationTarget::FunctionLike {
-            identifier: FunctionLikeIdentifier::Method(_, method_name),
+            identifier: FunctionLikeIdentifier::Method(class_name, method_name),
             method_context: Some(MethodTargetContext { class_type: StaticClassType::Object(receiver), .. }),
             ..
         } = self
             && let Some(collection) = crate::utils::names::display_sharp_collection(context, receiver)
         {
+            let method_name = crate::utils::names::display_method_name(context, *class_name, *method_name);
+
             return format!("{collection}.{method_name}");
         }
 

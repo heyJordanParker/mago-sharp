@@ -214,6 +214,18 @@ fn the_class_in_nameof_resolves_like_any_class_name() {
 }
 
 #[test]
+fn a_yielded_value_and_a_yielded_spread_bind_their_names_as_any_value_does() {
+    const CODE: &str = "namespace App.Tenant.Store;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield ...pending;\n        yield latest;\n        yield Store.first();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(binding(&names, CODE, "pending", 1), Some(local(CODE, "pending", 0, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "latest", 1), Some(local(CODE, "latest", 0, LocalKind::Parameter)));
+    assert_eq!(resolved(&names, CODE, "Store", 1), b"App\\Tenant\\Store\\Store");
+    assert!(names.binding_errors().is_empty(), "{:#?}", names.binding_errors());
+}
+
+#[test]
 fn a_typed_local_binds_like_let_or_const_and_its_type_resolves() {
     const CODE: &str = "namespace App.Tenant.Store;\n\nimport App.Shared.Money;\n\nclass Report\n{\n    public int total()\n    {\n        Money? found = null;\n        const int base = 2;\n        found = null;\n        return base;\n    }\n}\n";
     let arena = LocalArena::new();
@@ -845,6 +857,36 @@ fn a_file_records_each_default_class_its_short_name_no_longer_names() {
         recorded.sort_unstable();
         assert_eq!(recorded, shadowed, "{code}");
         assert_eq!(names.namespace_classes().count(), 0, "{code}");
+    }
+}
+
+/// Spec section 31: a bare `Error` in a `.sharp` file always names the standard library's interface, whatever the file
+/// declares or its namespace holds, while `Result` names the standard library's enum unless a class-like of the file's
+/// namespace wins over it, as the other default classes do. A case written through `Result` resolves under the enum.
+#[test]
+fn error_always_names_the_standard_interface_and_result_is_a_default_class() {
+    let namespace_classes = NamespaceClasses::new(["App\\Error", "Shop\\Result"]);
+
+    for (code, error, result) in [
+        (
+            "namespace App;\n\nclass Paths\n{\n    public Result<int, Error> run(Error e) => Result.Err(e);\n}\n",
+            "Sharp\\Error",
+            "Sharp\\Result",
+        ),
+        (
+            "namespace Shop;\n\nclass Paths\n{\n    public Result<int, Error> run(Error e) => Result.Err(e);\n}\n",
+            "Sharp\\Error",
+            "Shop\\Result",
+        ),
+    ] {
+        let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(code.as_bytes()));
+        let arena = LocalArena::new();
+        let names = NameResolver::new(&arena).resolve_in(parse_file(&arena, &file), &namespace_classes);
+
+        assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Error e", 0)), error, "{code}");
+        assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Error>", 0)), error, "{code}");
+        assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Result<", 0)), result, "{code}");
+        assert_eq!(names.shadows_default_class(b"Sharp\\Result"), result != "Sharp\\Result", "{code}");
     }
 }
 

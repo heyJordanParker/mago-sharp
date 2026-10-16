@@ -185,6 +185,7 @@ enum NodeKind: string
     case ObjectInitializer = 'ObjectInitializer';
     case NamedValue = 'NamedValue';
     case GenericClass = 'GenericClass';
+    case SuperOf = 'SuperOf';
     case LiteralFloat = 'LiteralFloat';
     case LiteralInteger = 'LiteralInteger';
     case LiteralString = 'LiteralString';
@@ -207,8 +208,8 @@ enum NodeKind: string
     case ForBody = 'ForBody';
     case ForColonDelimitedBody = 'ForColonDelimitedBody';
     case ForOf = 'ForOf';
-    case ForOfKeyValueTarget = 'ForOfKeyValueTarget';
     case ForOfTarget = 'ForOfTarget';
+    case ForOfUnpackTarget = 'ForOfUnpackTarget';
     case ForOfVariable = 'ForOfVariable';
     case While = 'While';
     case WhileBody = 'WhileBody';
@@ -246,6 +247,7 @@ enum NodeKind: string
     case Yield = 'Yield';
     case YieldFrom = 'YieldFrom';
     case YieldPair = 'YieldPair';
+    case YieldSpread = 'YieldSpread';
     case YieldValue = 'YieldValue';
     case Statement = 'Statement';
     case ExpressionStatement = 'ExpressionStatement';
@@ -263,11 +265,14 @@ enum NodeKind: string
     case Terminator = 'Terminator';
     case Throw = 'Throw';
     case Leave = 'Leave';
+    case Propagate = 'Propagate';
     case Hint = 'Hint';
     case IntersectionHint = 'IntersectionHint';
     case NullableHint = 'NullableHint';
     case GenericHint = 'GenericHint';
     case FunctionHint = 'FunctionHint';
+    case TupleHint = 'TupleHint';
+    case TupleElementHint = 'TupleElementHint';
     case ReadonlyHint = 'ReadonlyHint';
     case TypeArgumentList = 'TypeArgumentList';
     case TypeParameterList = 'TypeParameterList';
@@ -277,6 +282,8 @@ enum NodeKind: string
     case UnionHint = 'UnionHint';
     case Unset = 'Unset';
     case LocalDeclaration = 'LocalDeclaration';
+    case LocalTarget = 'LocalTarget';
+    case LocalUnpack = 'LocalUnpack';
     case Is = 'Is';
     case As = 'As';
     case Pattern = 'Pattern';

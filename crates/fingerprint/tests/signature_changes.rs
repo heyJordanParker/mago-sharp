@@ -681,3 +681,20 @@ fn a_sealed_interface_and_an_extern_change_the_fingerprint() {
     assert_ne!(open, sealed, "Sealing an interface should change the fingerprint");
     assert_ne!(clock, http, "Changing an `extern` declaration's effects should change the fingerprint");
 }
+
+/// A generic struct's type parameters change the fingerprint, as a generic class's do: their names, their count and
+/// their bounds.
+#[test]
+fn a_struct_type_parameter_changes_the_fingerprint() {
+    let pair = |code| fingerprint_of(b"src/Pair.sharp", code);
+    let one = pair(b"public struct Pair<TFirst>\n{\n}\n");
+
+    for (form, edited) in [
+        ("a type parameter's name", b"public struct Pair<TSecond>\n{\n}\n".as_slice()),
+        ("one more type parameter", b"public struct Pair<TFirst, TSecond>\n{\n}\n"),
+        ("a bound", b"public struct Pair<TFirst : Order>\n{\n}\n"),
+        ("no type parameter", b"public struct Pair\n{\n}\n"),
+    ] {
+        assert_ne!(one, pair(edited), "An edit to {form} should change the fingerprint");
+    }
+}

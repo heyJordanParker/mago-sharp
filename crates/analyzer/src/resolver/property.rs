@@ -15,6 +15,7 @@ use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
@@ -45,6 +46,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Variable;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
@@ -70,6 +72,7 @@ use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::method::check_call_through_readonly;
+use crate::resolver::method::object_member_issue;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
 use crate::statement::function_like::closure_parameter_types;
@@ -87,6 +90,7 @@ use crate::utils::names::readonly_writer;
 use crate::utils::quoted_source;
 use crate::utils::template::check_private_method_reach;
 use crate::utils::template::check_private_property_reach;
+use crate::utils::template::class_type_arguments;
 use crate::utils::template::get_template_types_for_class_member;
 use crate::visibility::check_method_visibility;
 use crate::visibility::check_resolved_property_read_visibility;
@@ -250,6 +254,23 @@ where
                 closure_object = TObject::new_named(word("Closure"));
                 &closure_object
             }
+            TAtomic::Array(TArray::List(list))
+                if let Some(elements) = list.tuple_elements()
+                    && let ClassLikeMemberSelector::Identifier(name) = property_selector =>
+            {
+                // A refused read gives no type, so its later uses report nothing again.
+                let element = resolve_tuple_element(context, object_atomic, &elements, name, for_assignment);
+                result.properties.push(ResolvedProperty {
+                    property_span: None,
+                    property_name: concat_word!("$", name.value),
+                    declaring_class_id: None,
+                    property_type: element.cloned().unwrap_or_else(|| wrap_atomic(TAtomic::Error)),
+                    is_magic: false,
+                    read_type: None,
+                });
+
+                continue;
+            }
             _ => {
                 result.has_invalid_path = true;
                 if object_type.is_mixed() {
@@ -274,7 +295,13 @@ where
             TObject::Any => {
                 result.has_ambiguous_path = true;
 
-                if !block_context.flags.inside_isset() {
+                // A PHP# `Object` has no members until `is` narrows it, as an `Any` has none, spec section 24.
+                if context.dialect.is_sharp() {
+                    context.collector.report_with_code(
+                        IssueCode::AmbiguousObjectPropertyAccess,
+                        object_member_issue(object_expression.span(), property_selector.span()),
+                    );
+                } else if !block_context.flags.inside_isset() {
                     let object_type = display_atomic(context, object_atomic);
                     report_ambiguous_access(context, property_selector, object_expression.span(), &object_type);
                 }
@@ -1531,6 +1558,10 @@ where
     if !declaring_class.flags.is_sharp() || declaring_class.template_types.is_empty() {
         return None;
     }
+    let type_arguments = type_arguments.unwrap_or_default();
+    // A header's type argument may hold `class`'s own type parameters, as `Sub<TX> : Base<Box<TX>>` does, which the
+    // access's type arguments then fix, so `Sub<Order>.count` reads `Base<Box<Order>>`'s.
+    let own = class_type_arguments(class, type_arguments);
 
     Some(
         declaring_class
@@ -1542,8 +1573,9 @@ where
                     Arc::new(template.constraint.clone()),
                     template.defining_entity,
                 )));
+                let localized = localize_property_type(context, &parameter, type_arguments, class, declaring_class);
 
-                localize_property_type(context, &parameter, type_arguments.unwrap_or_default(), class, declaring_class)
+                inferred_type_replacer::replace(&localized, &own, context.codebase)
             })
             .collect(),
     )
@@ -1918,6 +1950,50 @@ fn report_access_on_non_object<A>(
                 Annotation::secondary(object_span).with_message(format!("This expression has type `{type_str}`")),
             ),
     );
+}
+
+/// The type of the element of the tuple `tuple`, whose `elements` it has, that `name` names, spec section 30, which reads
+/// a named element as C# does. A name the tuple does not write, and a write, which a tuple never takes, are errors, and
+/// give `None`.
+fn resolve_tuple_element<'tuple, A>(
+    context: &mut Context<'_, '_, A>,
+    tuple: &TAtomic,
+    elements: &[(&'tuple TUnion, Option<Word>)],
+    name: &LocalIdentifier,
+    for_assignment: bool,
+) -> Option<&'tuple TUnion>
+where
+    A: Arena,
+{
+    let written = display_atomic(context, tuple);
+    let named = elements.iter().find(|(_, element)| element.is_some_and(|element| element.as_bytes() == name.value));
+    let issue = match named {
+        Some(_) if for_assignment => Issue::error(format!(
+            "`{written}` never changes: build a new tuple instead of writing `{}`.",
+            String::from_utf8_lossy(name.value)
+        ))
+        .with_annotation(Annotation::primary(name.span).with_message("Written here.")),
+        Some((element, _)) => return Some(element),
+        None => {
+            let written_names: Vec<String> =
+                elements.iter().filter_map(|(_, name)| name.map(|name| format!("`{name}`"))).collect();
+            let elements = match written_names.as_slice() {
+                [] => "its elements have no names, so unpack it, as in `const [first, second] = …;`".to_owned(),
+                [only] => format!("its one named element is {only}"),
+                [first @ .., last] => format!("its elements are {} and {last}", first.join(", ")),
+            };
+
+            Issue::error(format!(
+                "`{written}` has no element named `{}`: {elements}.",
+                String::from_utf8_lossy(name.value)
+            ))
+            .with_annotation(Annotation::primary(name.span).with_message("Read here."))
+        }
+    };
+    let code = if for_assignment { IssueCode::InvalidPropertyWrite } else { IssueCode::NonExistentProperty };
+    context.collector.report_with_code(code, issue);
+
+    None
 }
 
 fn report_ambiguous_access<A>(

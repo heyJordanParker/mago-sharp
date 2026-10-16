@@ -48,6 +48,7 @@ use crate::cst::cst::pipe::Pipe;
 use crate::cst::cst::r#return::Return;
 use crate::cst::cst::string::CompositeString;
 use crate::cst::cst::string::StringPart;
+use crate::cst::cst::super_of::SuperOf;
 use crate::cst::cst::throw::Throw;
 use crate::cst::cst::type_hint::Hint;
 use crate::cst::cst::type_of::TypeOf;
@@ -69,6 +70,17 @@ pub enum Leave<'arena> {
     Return(Return<'arena>),
     Continue(Continue<'arena>),
     Break(Break<'arena>),
+}
+
+/// Represents PHP#'s `try` before a value, spec section 31: the `Ok` value of the `Result` it reads, or, when that is
+/// `Err`, leaving the function with an `Err` holding the same error.
+///
+/// Example: `try gateway.charge(cart)`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct Propagate<'arena> {
+    pub r#try: Keyword<'arena>,
+    pub value: &'arena Expression<'arena>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
@@ -108,6 +120,7 @@ pub enum Expression<'arena> {
     Construct(Construct<'arena>),
     Throw(Throw<'arena>),
     Leave(Leave<'arena>),
+    Propagate(Propagate<'arena>),
     Clone(Clone<'arena>),
     Call(Call<'arena>),
     PartialApplication(PartialApplication<'arena>),
@@ -125,6 +138,7 @@ pub enum Expression<'arena> {
     NameOf(NameOf<'arena>),
     With(With<'arena>),
     GenericClass(GenericClass<'arena>),
+    SuperOf(SuperOf<'arena>),
     Error(Span),
 }
 
@@ -479,6 +493,7 @@ impl<'arena> Expression<'arena> {
             Expression::Construct(_) => NodeKind::Construct,
             Expression::Throw(_) => NodeKind::Throw,
             Expression::Leave(_) => NodeKind::Leave,
+            Expression::Propagate(_) => NodeKind::Propagate,
             Expression::Clone(_) => NodeKind::Clone,
             Expression::Call(_) => NodeKind::Call,
             Expression::PartialApplication(_) => NodeKind::PartialApplication,
@@ -496,6 +511,7 @@ impl<'arena> Expression<'arena> {
             Expression::NameOf(_) => NodeKind::NameOf,
             Expression::With(_) => NodeKind::With,
             Expression::GenericClass(_) => NodeKind::GenericClass,
+            Expression::SuperOf(_) => NodeKind::SuperOf,
             Expression::Error(_) => NodeKind::Error,
         }
     }
@@ -514,6 +530,12 @@ impl HasSpan for Leave<'_> {
             Leave::Continue(r#continue) => r#continue.span(),
             Leave::Break(r#break) => r#break.span(),
         }
+    }
+}
+
+impl HasSpan for Propagate<'_> {
+    fn span(&self) -> Span {
+        self.r#try.span().join(self.value.span())
     }
 }
 
@@ -544,6 +566,7 @@ impl HasSpan for Expression<'_> {
             Expression::Construct(expression) => expression.span(),
             Expression::Throw(expression) => expression.span(),
             Expression::Leave(expression) => expression.span(),
+            Expression::Propagate(expression) => expression.span(),
             Expression::Clone(expression) => expression.span(),
             Expression::Call(expression) => expression.span(),
             Expression::PartialApplication(expression) => expression.span(),
@@ -561,6 +584,7 @@ impl HasSpan for Expression<'_> {
             Expression::NameOf(expression) => expression.span(),
             Expression::With(expression) => expression.span(),
             Expression::GenericClass(expression) => expression.span(),
+            Expression::SuperOf(expression) => expression.span(),
             Expression::Error(span) => *span,
         })
     }

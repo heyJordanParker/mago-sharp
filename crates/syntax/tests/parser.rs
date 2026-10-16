@@ -133,6 +133,7 @@ mod runner {
                         format_expression(yield_pair.value)
                     ),
                     Yield::From(yield_from) => format!("(yield from {})", format_expression(yield_from.iterator)),
+                    Yield::Spread(yield_spread) => format!("(yield ...{})", format_expression(yield_spread.iterator)),
                 },
                 Expression::Instantiation(instantiation) => {
                     format!("(new {})", format_expression(instantiation.class))

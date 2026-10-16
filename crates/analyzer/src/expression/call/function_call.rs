@@ -557,6 +557,7 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
         Replacement::Members(&[("Sharp\\IO\\Path", "extension"), ("Sharp\\IO\\Path", "fileNameWithoutExtension")]),
     ),
     ("json_decode", Replacement::Members(&[("Sharp\\Json\\Json", "decode")])),
+    ("json_encode", Replacement::Members(&[("Sharp\\Json\\Json", "encode")])),
     ("ceil", Replacement::Members(&[("Sharp\\Math\\Math", "ceil")])),
     ("floor", Replacement::Members(&[("Sharp\\Math\\Math", "floor")])),
     ("sqrt", Replacement::Members(&[("Sharp\\Math\\Math", "sqrt")])),

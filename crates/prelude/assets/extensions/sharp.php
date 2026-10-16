@@ -218,20 +218,20 @@ final class ListMethods
     public function add(mixed $value): void {}
 
     /**
-     * Replaces the element at `$index`.
-     *
-     * @param T $value
-     *
-     * @throws \OutOfRangeException when `$index` is not an index of the list.
-     */
-    public function set(int $index, mixed $value): void {}
-
-    /**
      * @return T|null the element at `$index`, or null when `$index` is not an index of the list.
      *
      * @mutation-free
      */
-    public function get(int $index): mixed {}
+    public function getOrNull(int $index): mixed {}
+
+    /**
+     * The analyzer types the result `Set<T>`, which a docblock cannot write.
+     *
+     * @return list<T> the set of the elements, each once, in the order they first appear.
+     *
+     * @mutation-free
+     */
+    public function toSet(): array {}
 
     /**
      * @return array<int, T> each index with its element, for `for (const [i, x] of list.entries())`.
@@ -424,6 +424,13 @@ final class MapMethods
      * @mutation-free
      */
     public function keys(): array {}
+
+    /**
+     * @return list<V> the values, in the order of their keys.
+     *
+     * @mutation-free
+     */
+    public function values(): array {}
 
     /**
      * @return int how many entries the map holds.
@@ -634,6 +641,51 @@ final class SetMethods
      * @mutation-free
      */
     public function sortedBy(\Closure $selector): array {}
+}
+
+/**
+ * The lazy operations of a PHP# `Iterable<T>`. The analyzer checks a call on an iterable against them, and the engine
+ * runs them on `Sharp\Sequence`. `filter`, `map` and `take` read nothing until `toList()` or a loop reads the result.
+ *
+ * @template T
+ */
+final class IterableMethods
+{
+    /**
+     * @param \Closure(T): bool $predicate
+     *
+     * @return iterable<T> the elements `$predicate` keeps, in order.
+     *
+     * @mutation-free
+     */
+    public function filter(\Closure $predicate): iterable {}
+
+    /**
+     * @template R
+     *
+     * @param \Closure(T): R $transform
+     *
+     * @return iterable<R> what `$transform` gives for each element, in order.
+     *
+     * @mutation-free
+     */
+    public function map(\Closure $transform): iterable {}
+
+    /**
+     * A negative `$count` throws `ValueError`.
+     *
+     * @return iterable<T> the first `$count` elements, reading no element after them.
+     *
+     * @mutation-free
+     */
+    public function take(int $count): iterable {}
+
+    /**
+     * @return list<T> every element, read now and numbered from 0.
+     *
+     * @mutation-free
+     */
+    public function toList(): array {}
 }
 
 /**

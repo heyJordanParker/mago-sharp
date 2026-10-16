@@ -125,6 +125,7 @@ impl FunctionReturnTypeProvider for ArrayPadProvider {
             known_elements: Some(result_elements),
             known_count,
             non_empty: true,
+            tuple_names: None,
         }))))
     }
 }

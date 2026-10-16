@@ -31,8 +31,8 @@ use crate::error::AnalysisError;
 use crate::expression::instantiation::bare_generic_class;
 use crate::expression::instantiation::report_missing_type_arguments;
 use crate::expression::unary::cast_type_to_string;
-use crate::resolver::class_name::generic_class_type;
 use crate::resolver::class_name::resolve_classnames_from_expression;
+use crate::resolver::class_name::statics_type_arguments;
 use crate::resolver::property::PropertyResolutionResult;
 use crate::resolver::property::ResolvedProperty;
 use crate::resolver::property::localize_property_type;
@@ -136,8 +136,8 @@ where
     // `Counter<Order>.items` reads the statics of `Counter` with `Order` for its type parameter, spec section 11, and so
     // does `type.items` through a `Class<Counter<Order>>`. A bare `Counter.items` names none: once reported, it reads as
     // the bounds a plain PHP call of `Counter::reset()` runs with, so nothing reports again on what it reads.
-    let type_arguments: Option<Vec<TUnion>> = match generic_class_type(artifacts, class_expression) {
-        Some(class) => class.get_type_parameters().map(<[_]>::to_vec),
+    let type_arguments: Option<Vec<TUnion>> = match statics_type_arguments(artifacts, class_expression) {
+        Some(type_arguments) => Some(type_arguments.to_vec()),
         None => bare_generic_class(context, class_expression).map(|(class, bounds)| {
             report_missing_type_arguments(context, class, class_expression.span());
 

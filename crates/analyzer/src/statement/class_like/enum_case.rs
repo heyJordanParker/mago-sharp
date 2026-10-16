@@ -58,6 +58,37 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for EnumCase<'arena> {
     }
 }
 
+/// Refuses each name in a PHP# file that names the trait of an interface's default bodies, spec section 22, as
+/// `Greets.Defaults`: PHP# code reaches a default body through its interface, and only plain PHP uses the trait.
+pub(crate) fn report_defaults_trait_names<A>(program: &Program<'_>, context: &mut Context<'_, '_, A>)
+where
+    A: Arena,
+{
+    for identifier in Node::Program(program).filter_map(|node| match node {
+        Node::Identifier(identifier) => Some(*identifier),
+        _ => None,
+    }) {
+        // A declaration's or a member's name resolves to no class.
+        let Some(interface) = context
+            .resolved_names
+            .resolve(&identifier)
+            .and_then(|name| context.codebase.get_class_like(name))
+            .and_then(|defaults| context.codebase.get_defaults_interface(defaults))
+        else {
+            continue;
+        };
+        let interface = display_class_like_name(context, interface.original_name);
+
+        context.collector.report_with_code(
+            IssueCode::InvalidTraitUse,
+            Issue::error(format!(
+                "`{interface}.Defaults` holds the default bodies of `{interface}`, which PHP# code never names: implement `{interface}`."
+            ))
+            .with_annotation(Annotation::primary(identifier.span()).with_message("Named here.")),
+        );
+    }
+}
+
 /// Refuses a dotted type in a PHP# file that names no case of an enum whose cases carry data, spec section 20, as
 /// `Shop.Order` for the class `App.Shop.Order`: PHP# writes a class by its short name, and its full name only in an
 /// `import` line. A name that names no class at all has its own issue where the type is read.

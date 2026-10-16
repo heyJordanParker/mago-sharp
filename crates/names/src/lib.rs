@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use foldhash::HashMap;
 use mago_span::Span;
 
@@ -33,25 +31,27 @@ mod internal;
 /// Spec section 12 runs them on the collection a local holds, so a call of one on a local writes the local, as
 /// [`ResolvedNames::is_written`] reports. The binder knows no types, so a call of a method of these names on an object
 /// writes its local too, which captures it by reference, as harmless.
-pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "insert", "remove", "clear"];
+pub const CHANGING_COLLECTION_METHODS: [&str; 4] = ["add", "insert", "remove", "clear"];
 
 /// The methods of a PHP# `List` the bridge lowers from the checker's types, as `(collection, method)` pairs.
 ///
 /// Each lowers to PHP functions or operators on the array. A `List` is a PHP array, which has no methods, so the
 /// checker refuses one on a value that can also be an object, whose own method would not run. A `Map` and a `Set` are
 /// engine objects, whose every method runs on `Sharp\Collection`.
-pub const INLINED_COLLECTION_METHODS: [(&str, &str); 6] = [
+pub const INLINED_COLLECTION_METHODS: [(&str, &str); 8] = [
     ("List", "count"),
+    ("List", "getOrNull"),
     ("List", "contains"),
     ("List", "indexOf"),
     ("List", "last"),
     ("List", "remove"),
     ("List", "clear"),
+    ("List", "toSet"),
 ];
 
 /// The class-likes directly in `Sharp` that a bare name in a `.sharp` file names by default, spec section 23, and that
 /// a class-like of the file's namespace can win over: the standard library's ten effect classes and `Events`, the
-/// effect of `emit` (spec section 29), then `Position`.
+/// effect of `emit` (spec section 29), then `Position`, `Key` and `Result` (spec section 31).
 pub(crate) fn shadowable_default_classes() -> impl Iterator<Item = &'static str> {
     [
         "Sharp\\Database",
@@ -67,8 +67,16 @@ pub(crate) fn shadowable_default_classes() -> impl Iterator<Item = &'static str>
         "Sharp\\Events",
         "Sharp\\Position",
         "Sharp\\Key",
+        "Sharp\\Result",
     ]
     .into_iter()
+}
+
+/// The default class-like that a bare name in a `.sharp` file always names, whatever the file imports or declares or
+/// its namespace holds: `Error`, the standard library's interface of every failure, spec section 31. PHP's engine class
+/// `Error` is never named in PHP# code.
+pub(crate) fn fixed_default_class(name: &[u8]) -> Option<&'static [u8]> {
+    (name == b"Error").then_some(b"Sharp\\Error".as_slice())
 }
 
 /// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`. PHP
@@ -114,10 +122,6 @@ pub fn display_sharp_member(class_name: impl AsRef<[u8]>, member_name: impl std:
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ResolvedNames<'arena> {
     /// Internal map: start offset -> (end offset, (resolved FQN, imported flag)).
-    ///
-    /// The inner pair is kept as a nested tuple (not flattened) so that [`all`](Self::all)
-    /// can return `&(&'arena [u8], bool)` references — preserving the original signature
-    /// for backward compatibility.
     names: HashMap<u32, (u32, (&'arena [u8], bool))>,
 
     /// Start offset of every bare PHP# name, and of every PHP# type name that names a type parameter -> what it refers
@@ -385,15 +389,6 @@ impl<'arena> ResolvedNames<'arena> {
     /// and other range-based lookups work without re-scanning the source.
     pub(crate) fn insert_at(&mut self, span: Span, name: &'arena [u8], imported: bool) {
         self.names.insert(span.start.offset, (span.end.offset, (name, imported)));
-    }
-
-    /// Returns a `HashSet` containing every resolution result as `(&start, (fqn, imported))`.
-    #[deprecated(
-        note = "Allocates a HashSet for no good reason. Prefer `iter()` for allocation-free iteration, or `at_offset()` for cursor lookups."
-    )]
-    #[must_use]
-    pub fn all(&self) -> HashSet<(&u32, &(&'arena [u8], bool))> {
-        self.names.iter().map(|(k, (_, inner))| (k, inner)).collect()
     }
 }
 
