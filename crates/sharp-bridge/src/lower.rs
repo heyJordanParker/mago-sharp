@@ -7101,10 +7101,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 this.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             });
         }
-        if let Some(class) = self.names.static_call_class(call)
-            && is_current_position(self.names.get(&class.name), call)
-        {
-            return self.position(class.span());
+        if self.names.is_current_position(call) {
+            return self.position(call.object.span());
         }
         if self.types.is_lazy_operation(expression) {
             return self.lazy_operation(self.line(call), call.object, &call.method, &call.argument_list);
@@ -7908,14 +7906,6 @@ fn union_members<'hint, 'arena>(hint: &'hint Hint<'arena>) -> Vec<&'hint Hint<'a
         }
         _ => vec![hint],
     }
-}
-
-/// Whether `call`, a static call on `class`, is the standard library's `Position.current()`. PHP compares class and
-/// method names ignoring case.
-fn is_current_position(class: &[u8], call: &MethodCall) -> bool {
-    class.eq_ignore_ascii_case(b"Sharp\\Position")
-        && matches!(call.method, ClassLikeMemberSelector::Identifier(method) if method.value.eq_ignore_ascii_case(b"current"))
-        && call.argument_list.arguments.is_empty()
 }
 
 /// The name of the protected alias a class gives the default body of `method` that `interface` gives, spec section 22,

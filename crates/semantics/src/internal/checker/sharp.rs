@@ -1480,13 +1480,16 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Parameter,
         ) => Some(Parameter),
         // Spec section 27: as a default, `Position.current()` is the caller's position, which a PHP# call passes.
-        (Node::FunctionLikeParameterDefaultValue(default), Parameter) if is_current_position(default.value, context) => {
+        (Node::FunctionLikeParameterDefaultValue(default), Parameter)
+            if let Expression::Call(Call::Method(call)) = default.value
+                && context.names.is_current_position(call) =>
+        {
             None
         }
         (Node::FunctionLikeParameterDefaultValue(default), Parameter)
             if !Node::Expression(default.value)
                 .filter_map(|node| match node {
-                    Node::Expression(expression) if is_current_position(expression, context) => Some(()),
+                    Node::MethodCall(call) if context.names.is_current_position(call) => Some(()),
                     _ => None,
                 })
                 .is_empty() =>
@@ -4070,15 +4073,6 @@ fn is_key_hint(hint: &Hint) -> bool {
         Hint::Generic(generic) => built_in_generic_arity(generic.name.value).is_none(),
         _ => false,
     }
-}
-
-/// Whether `expression` is the standard library's `Position.current()`, spec section 27.
-fn is_current_position(expression: &Expression, context: &Context<'_, '_, '_>) -> bool {
-    matches!(expression, Expression::Call(Call::Method(call))
-        if context.names.static_call_class(call)
-            .is_some_and(|class| context.names.get(&class.name).eq_ignore_ascii_case(b"Sharp\\Position"))
-            && matches!(&call.method, ClassLikeMemberSelector::Identifier(method) if method.value.eq_ignore_ascii_case(b"current"))
-            && call.argument_list.arguments.is_empty())
 }
 
 /// Whether the slice has a type: the built-in types of spec section 24, or a class or a type parameter written by its
