@@ -6789,6 +6789,82 @@ fn last_is_the_last_element_and_throws_on_an_empty_list() {
 }
 
 /// ```php
+/// $stock = \is_array($stock) ? new \Sharp\Set($stock) : $stock;
+/// $held = $listed ? $names : $stock;
+/// return (\is_array($held) ? \in_array('tea', $held, true) : $held->contains('tea')) && \count($held) > 0;
+/// ```
+///
+/// A method a `List` shares with a `Map` or a `Set` runs on a value that may be either: the `List`'s PHP on the array
+/// when the value is one, and the collection's own method otherwise. `count` needs no test, as PHP's `\count` counts
+/// a `Map` and a `Set` too.
+#[test]
+fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_list() {
+    assert_eq!(
+        Lowered::new(
+            "namespace App.Tenant;\n\nclass Report\n{\n    public bool run(bool listed, List<string> names, Set<string> stock)\n    {\n        let held = listed ? names : stock;\n        return held.contains(\"tea\") && held.count() > 0;\n    }\n}\n"
+        )
+        .body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "stock"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+                  VAR
+                    ZVAL "stock"
+              ASSIGN
+                VAR
+                  ZVAL "held"
+                CONDITIONAL
+                  VAR
+                    ZVAL "listed"
+                  VAR
+                    ZVAL "names"
+                  VAR
+                    ZVAL "stock"
+              RETURN
+                AND
+                  CONDITIONAL [1]
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "held"
+                    CALL
+                      ZVAL "in_array"
+                      ARG_LIST
+                        ZVAL "tea"
+                        VAR
+                          ZVAL "held"
+                        ZVAL true
+                    METHOD_CALL
+                      VAR
+                        ZVAL "held"
+                      ZVAL "contains"
+                      ARG_LIST
+                        ZVAL "tea"
+                  GREATER
+                    CALL
+                      ZVAL "count"
+                      ARG_LIST
+                        VAR
+                          ZVAL "held"
+                    ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
 /// return (($sizes === []) ? throw new \OutOfRangeException('The list is empty.') : \max($sizes))
 ///     + (((${'receiver#1'} = $this->make()) === []) ? throw new \OutOfRangeException('The list is empty.') : \max(${'receiver#1'}));
 /// ```

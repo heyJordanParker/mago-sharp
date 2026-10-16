@@ -11,6 +11,7 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
@@ -385,13 +386,6 @@ where
         );
     }
 
-    let mut collections = method_resolution
-        .resolved_methods
-        .iter()
-        .map(|method| method.classname)
-        .filter(|classname| sharp_collection_name(&TObject::new_named(*classname)).is_some());
-    let first_collection = collections.next();
-    let on_several_collections = collections.any(|classname| Some(classname) != first_collection);
     let refused_on_object = context.dialect.is_sharp()
         && method_resolution.resolved_methods.iter().any(|method| {
             let collection = sharp_collection_name(&TObject::new_named(method.classname));
@@ -401,7 +395,7 @@ where
                 collection == Some(*inlined_collection) && inlined.as_bytes().eq_ignore_ascii_case(name.as_bytes())
             })
         })
-        && report_collection_method_on_object(context, artifacts, object, selector, on_several_collections);
+        && report_collection_method_on_object(context, artifacts, object, selector);
     let searches_list = context.dialect.is_sharp()
         && !refused_on_object
         && method_resolution.resolved_methods.iter().any(|method| {
@@ -564,14 +558,15 @@ where
     }
 
     // A search compares each element with the value as `==` does, so it runs once the value's type is known. A value
-    // that is no element is refused by its argument check.
+    // that is no element is refused by its argument check. On a value that may also be a `Map` or a `Set`, only the
+    // `List`'s elements are searched.
     if searches_list
         && let ClassLikeMemberSelector::Identifier(method) = selector
         && let Some(value) = argument_list.arguments.first().map(Argument::value)
         && let Some(value_type) = artifacts.get_expression_type(value)
         && let Some(element_type) = artifacts.get_expression_type(object).and_then(|list_type| {
             list_type.types.iter().fold(None, |element_type, atomic| match atomic {
-                TAtomic::Array(list) => Some(add_optional_union_type(
+                TAtomic::Array(list @ TArray::List(_)) => Some(add_optional_union_type(
                     get_array_parameters(list, context.codebase).1,
                     element_type.as_ref(),
                     context.codebase,
@@ -625,17 +620,14 @@ where
 }
 
 /// Reports one of the [`INLINED_COLLECTION_METHODS`] called on `object` when its value can also be an object, as
-/// `List<int>|Box`, or `on_several_collections`, when the call resolves on more than one collection, as `List|Set`.
-/// The bridge lowers such a call to PHP on the array from the checker's one collection method, so an object the value
-/// holds never reaches its own method of that name, and a value that may be another collection runs as a
-/// `Sharp\Collection` method that is not that collection's. `count` is the exception on several collections: a
-/// `List`'s is PHP's `\count`, which counts a `Map` and a `Set` too. Returns whether it reported the call.
+/// `List<int>|Box`, as a method call on a value that is no object is reported. The bridge lowers such a call to PHP
+/// on the array, so an object the value holds would never reach its own method of that name. Returns whether it
+/// reported the call.
 fn report_collection_method_on_object<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
     object: &Expression<'_>,
     selector: &ClassLikeMemberSelector<'_>,
-    on_several_collections: bool,
 ) -> bool
 where
     A: Arena,
@@ -646,23 +638,24 @@ where
         return false;
     };
     let holds = |kind: fn(&TAtomic) -> bool| object_type.types.iter().any(kind);
-    let on_object = holds(|atomic| matches!(atomic, TAtomic::Array(_)))
-        && holds(|atomic| matches!(atomic, TAtomic::Object(_) | TAtomic::Callable(_)));
-    if !on_object && (!on_several_collections || method.value.eq_ignore_ascii_case(b"count")) {
+    if !holds(|atomic| matches!(atomic, TAtomic::Array(_)))
+        || !holds(|atomic| matches!(atomic, TAtomic::Object(_) | TAtomic::Callable(_)))
+    {
         return false;
     }
 
     let method = String::from_utf8_lossy(method.value);
     let receiver = display_type(context, object_type);
     context.collector.report_with_code(
-        IssueCode::NotSupportedYet,
-        Issue::error(format!("Calling `{method}` on `{receiver}` is not supported by the engine yet."))
-            .with_annotation(Annotation::primary(selector.span()).with_message(if on_object {
-                "The value can be a collection or an object."
-            } else {
-                "The value can be more than one kind of collection."
-            }))
-            .with_help("Test which one the value is with `is` before the call."),
+        IssueCode::InvalidMethodAccess,
+        Issue::error(format!(
+            "`{receiver}` may be a collection or an object, and `{method}` runs a different method on each."
+        ))
+        .with_annotation(
+            Annotation::primary(selector.span()).with_message("The value can be a collection or an object."),
+        )
+        .with_annotation(Annotation::secondary(object.span()).with_message(format!("This is a `{receiver}`.")))
+        .with_help("Test which one the value is with `is` before the call."),
     );
 
     true

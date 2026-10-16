@@ -9663,22 +9663,38 @@ fn every_collection_counts_its_elements() {
     assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["24:23 too-many-arguments"]);
 }
 
-/// A `List` method the bridge lowers to PHP on the array, such as `count` or `contains`, cannot run on a value that can
-/// also be an object, whose own method the PHP would skip. Any other collection method, and every `Set` and `Map`
-/// method, is a method call the engine sends to the object or the collection the value holds when it runs. A `.php`
-/// file has no PHP# collection.
+/// A method a `List` shares with a `Map` or a `Set` runs on a value that may be either: `remove`, `contains`, `clear`
+/// and `count` on a `List|Map` or a `List|Set` local check clean, as `filter` does.
 #[test]
-fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_yet() {
+fn a_method_a_list_shares_with_another_collection_runs_on_a_value_that_may_be_either() {
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int run(bool listed, List<string> names, Map<string, int> stock, Set<string> tags)\n    {\n        let held = listed ? names : stock;\n        let kept = listed ? names : tags;\n        const removed = held.remove(\"tea\") && kept.remove(\"tea\");\n        const found = kept.contains(\"pie\");\n        kept.clear();\n        return held.count() + kept.count() + (removed || found ? 1 : 0);\n    }\n}\n";
+
+    assert_eq!(refusals(("src/Demo/Shelf.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// A `List` method the bridge lowers to PHP on the array, such as `count` or `contains`, is refused on a value that can
+/// also be an object, whose own method the PHP would skip, as a method on a value that is no object is. Any other
+/// collection method, and every `Set` and `Map` method, is a method call the engine sends to the object or the
+/// collection the value holds when it runs. A `.php` file has no PHP# collection.
+#[test]
+fn a_collection_method_on_a_value_that_can_also_be_an_object_is_refused() {
     let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public bool any(Function<bool(int)> predicate) => true;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1) || items.contains(1)) {\n            return items.any(i => i > 0) ? 1 : 0;\n        }\n        return items.count();\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int>|list<int> $sizes\n     */\n    public function run(ListMethods|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[]);
 
     assert_eq!(
         issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
-        ["16:39 not-supported-yet", "19:22 not-supported-yet"]
+        ["16:39 invalid-method-access", "19:22 invalid-method-access"]
     );
-    assert_eq!(issues[1].message, "Calling `count` on `List<int>|Box` is not supported by the engine yet.");
-    assert!(!codes(&self::issues(("src/Demo/Shelf.php", php), &[])).contains(&"not-supported-yet"));
+    assert_eq!(
+        issues[1].message,
+        "`List<int>|Box` may be a collection or an object, and `count` runs a different method on each."
+    );
+    assert!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.php", php), &[])
+            .iter()
+            .all(|issue| !issue.message.contains("may be a collection or an object"))
+    );
 }
 
 /// The analyzer checks a collection method against `Sharp\Internal\ListMethods` or `Sharp\Internal\MapMethods`, and
