@@ -9737,6 +9737,34 @@ fn a_struct_compares_by_value() {
     );
 }
 
+/// Spec section 10: a struct can be generic, and each of its type arguments decides what its property of that type
+/// parameter does. `==` compares `Pair<int, string>` and refuses `Pair<Plan, int>`, whose `first` is a class with no
+/// `operator ==`, a `Map` keys by `Pair<int, string>`, and `parse` gives the struct with the call's type arguments. It
+/// reads a field of a type parameter only as its input holds it, so it refuses a type argument it builds first: a
+/// struct, a `Map`, a `Set` or an enum case. A plain property names its type arguments, and its own `TFirst` reads
+/// as the type argument.
+#[test]
+fn a_generic_struct_takes_its_type_arguments_for_equality_keys_and_parse() {
+    let sharp = "namespace Demo;\n\nclass Plan\n{\n    public Plan() { }\n}\n\nenum Size : string\n{\n    case Big = \"big\";\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n\nstruct Pair<TFirst, TSecond>\n{\n    public Pair(public TFirst first { get; }, public TSecond second { get; }) { }\n\n    public TFirst left() => this.first;\n}\n\nclass Compare\n{\n    public bool numbers(Pair<int, string> a, Pair<int, string> b) => a == b;\n\n    public bool plans(Pair<Plan, int> a, Pair<Plan, int> b) => a == b;\n\n    public int keyed(Map<Pair<int, string>, int> counts) => counts.count();\n\n    public int parsed(Map<string, Any> input) => Pair<int, string>.parse(input).first;\n\n    public string? tried(Map<string, Any> input) => Pair<int, string>.tryParse(input)?.second;\n\n    public int left(Pair<int, string> pair) => pair.left();\n\n    public Any spots(Map<string, Any> input) => Pair<Spot, int>.parse(input);\n\n    public Any maps(Map<string, Any> input) => Pair<Map<string, int>, int>.parse(input);\n\n    public Any sets(Map<string, Any> input) => Pair<List<Set<int>>, int>.parse(input);\n\n    public Any sizes(Map<string, Any> input) => Pair<Size, int>.parse(input);\n\n    public Any lists(Map<string, Any> input) => Pair<List<int>, string?>.parse(input);\n}\n";
+
+    let built = |line_column: &str, argument: &str| {
+        format!(
+            "{line_column} invalid-struct `Pair.parse` can't read `first`: `{argument}` is a type argument `parse` builds, and it reads a field of a type parameter only as its input holds it. | Called here. | `parse` reads each field from a value, and that value names an enum case by its backing value."
+        )
+    };
+
+    assert_eq!(
+        worded(("src/Demo/Compare.sharp", sharp), &[]),
+        [
+            "29:64 invalid-operand `Pair` can't compare by value: `first` is a `Plan`, which declares no `operator ==`. | This is `Pair<Plan, int>`. | This is `Pair<Plan, int>`. | A struct compares by value, property by property, with each property's own `==`.".to_owned(),
+            built("39:49", "Spot"),
+            built("41:48", "Map<string, int>"),
+            built("43:48", "Set<int>"),
+            built("45:49", "Size"),
+        ]
+    );
+}
+
 /// Spec section 10: a struct may declare `operator ==` with `hash()`, as a class may, and the pair replaces the `==`
 /// that compares property by property: `==`, `!=`, `contains`, a `Set`, a `Map` key and `groupBy` run it, whatever the
 /// struct holds, also as a field of another struct key, and with the operand type the operator takes. The same struct

@@ -2625,11 +2625,12 @@ fn a_constructor_in_a_refused_namespace_is_a_constructor() {
 }
 
 /// A `Map` key whose type is outside the slice is refused once, as that type, and a key of a type the slice has but a
-/// key cannot take is refused as a key.
+/// key cannot take is refused as a key. A generic struct or class, as `Pair<int, string>`, keys one as its plain name
+/// does, also inside a `List`, and the analyzer checks its `==` and `hash()`.
 #[test]
 fn a_map_key_is_refused_once() {
     let code = leak(method(
-        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        return 1;\n",
+        "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        Map<Pair<int, string>, int> pairs = [:];\n        Map<List<Pair<int, string>>, int> paths = [:];\n        return 1;\n",
     ));
     let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.";
 
@@ -5067,15 +5068,21 @@ fn the_generics_examples_of_the_spec_are_in_the_slice() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11.
+/// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11, a struct's too.
 #[test]
 fn a_type_parameter_whose_name_does_not_start_with_t_and_an_uppercase_letter_is_an_error() {
-    let code = "namespace App.Tenant;\n\npublic class Box<Item, T, TKey, Tkey, T1, TK>\n{\n    public void run<Value>() { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Box<Item, T, TKey, Tkey, T1, TK>\n{\n    public void run<Value>() { }\n}\n\npublic struct Pair<Item, out TOther>\n{\n}\n";
     let refusal = "A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.";
 
     assert_eq!(
         issues(code),
-        [format!("3:18 {refusal}"), format!("3:33 {refusal}"), format!("3:39 {refusal}"), format!("5:21 {refusal}")]
+        [
+            format!("3:18 {refusal}"),
+            format!("3:33 {refusal}"),
+            format!("3:39 {refusal}"),
+            format!("5:21 {refusal}"),
+            format!("8:20 {refusal}"),
+        ]
     );
 }
 

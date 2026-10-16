@@ -455,6 +455,11 @@ fn check_unused_template_parameters<'ctx, A>(
             else {
                 continue;
             };
+            // The `parse`, `tryParse` and `op_Equality` the codex writes span the whole type and give its own type
+            // parameters back, which uses none of them.
+            if function_like.span == class_like_metadata.span {
+                continue;
+            }
 
             // Check parameters
             for param in &function_like.parameters {

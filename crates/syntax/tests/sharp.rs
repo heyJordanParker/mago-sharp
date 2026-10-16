@@ -689,12 +689,17 @@ fn a_case_type_is_written_through_its_enum() {
     assert_eq!(hints, [b"PaymentResult.Paid".as_slice(), b"PaymentResult.Paid"]);
 }
 
-/// A generic struct waits for generics, spec section 10's question 4, so its type parameters are one error, nested
-/// ones included, and the struct parses on. It is refused whole, so it keeps no members, whose types name its
-/// parameters, and the file has that one error.
+/// A struct can be generic, spec section 10, with section 11's type parameters: one, several, a bounded one, a nested
+/// bound, and a variance marker, each before the header and the members.
 #[test]
-fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
-    for parameters in ["<T>", "<TKey, TValue>", "<T : Box<int>>", "<T : Map<string, List<int>>>"] {
+fn a_generic_struct_takes_type_parameters() {
+    for (parameters, names) in [
+        ("<T>", &[&b"T"[..]][..]),
+        ("<TKey, TValue>", &[b"TKey", b"TValue"]),
+        ("<T : Box<int>>", &[b"T"]),
+        ("<T : Map<string, List<int>>>", &[b"T"]),
+        ("<out T>", &[b"T"]),
+    ] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
             format!("struct Pair{parameters} : HasLabel\n{{\n    public int run() {{ return 1; }}\n}}\n\nstruct Next {{ }}\n")
@@ -702,16 +707,17 @@ fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
         );
         let program = parse(&arena, "src/Pair.sharp", code);
 
-        let [error] = program.errors else {
-            panic!("expected one error for `{parameters}`, got {:#?}", program.errors);
-        };
-        assert_eq!(error.to_string(), "A generic struct is not supported yet in PHP#.");
-        assert_eq!(source(code, error), parameters);
+        assert!(program.errors.is_empty(), "`{parameters}` parses, got {:#?}", program.errors);
         let Some(Statement::Struct(pair)) = program.statements.first() else {
             panic!("expected a struct for `{parameters}`, got {:#?}", program.statements);
         };
+        let Some(written) = &pair.type_parameters else {
+            panic!("the struct keeps `{parameters}`");
+        };
+        let declared: Vec<&[u8]> = written.parameters.iter().map(|parameter| parameter.name.value).collect();
+        assert_eq!(declared, names, "the type parameters of `{parameters}`");
         assert!(pair.inheritance.is_some(), "the header after `{parameters}` parses");
-        assert!(pair.members.is_empty(), "the struct keeps no members after `{parameters}`");
+        assert_eq!(pair.members.len(), 1, "the struct keeps its member after `{parameters}`");
         assert!(
             matches!(program.statements.get(1), Some(Statement::Struct(_))),
             "the struct after `{parameters}` parses"

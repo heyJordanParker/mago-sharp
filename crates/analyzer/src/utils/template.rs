@@ -36,6 +36,7 @@ use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::template::GenericTemplate;
+use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
@@ -269,7 +270,7 @@ pub(crate) struct TemplateUse {
 /// parameter. A method's parameters take their types in and its return type hands its type out, a property hands its
 /// type out and takes it in when another class can write it, and the header hands its type arguments out, as C# and
 /// Kotlin check a base type's. Private members and the constructors, main and named, are exempt, as Kotlin exempts its
-/// primary and secondary constructors, and a private member that
+/// primary and secondary constructors, and so are the generated `parse` and `tryParse`, and a private member that
 /// breaks a marker is reachable only through `this`, which `check_private_method_reach` and
 /// `check_private_property_reach` check where it is reached. A header entry stands at its span in `header_spans`, by
 /// its parent's lowercase name, or at the class's name without one.
@@ -312,8 +313,10 @@ where
         let Some(method) = codebase.get_method(class.name.as_bytes(), method_name.as_bytes()) else {
             unreachable!("a class lists only the methods it declares");
         };
+        // The `parse` and `tryParse` the codex writes span the whole type and create it, as a constructor does.
         if method.method_metadata.as_ref().is_some_and(|metadata| metadata.is_constructor)
             || method.flags.is_named_constructor()
+            || method.span == class.span
             || is_private_method(method)
         {
             continue;
@@ -712,6 +715,17 @@ where
             if widens { "out" } else { "in" }
         )),
     }
+}
+
+/// The bounds that give the type parameters of `class` the `type_arguments` an object or an access of it writes, in
+/// declaration order, so `inferred_type_replacer::replace` reads `TFirst` of `Pair<int, string>` as `int`.
+pub(crate) fn class_type_arguments(class: &ClassLikeMetadata, type_arguments: &[TUnion]) -> TemplateResult {
+    let mut bounds = TemplateResult::default();
+    for ((name, template), type_argument) in class.template_types.iter().zip(type_arguments) {
+        bounds.add_lower_bound(*name, template.defining_entity, type_argument.clone());
+    }
+
+    bounds
 }
 
 /// The type argument PHP# takes from a value of type `union`, a type PHP# writes, as C#, Kotlin and Swift have no

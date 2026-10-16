@@ -448,7 +448,8 @@ impl<'analysis> Types<'analysis> {
         receiver_classes(self.artifacts.get_tested_type(name)?)
     }
 
-    fn argument_texts(&self, arguments: &[TUnion]) -> String {
+    /// The type texts of `arguments`, joined by `, `, as a `SHARP_TYPE_ARGS` spells them.
+    pub(crate) fn argument_texts(&self, arguments: &[TUnion]) -> String {
         arguments.iter().map(|argument| text(argument, self.codebase, Parameter::Index)).collect::<Vec<_>>().join(", ")
     }
 
@@ -1097,9 +1098,9 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// `r#type` as the type text generics R3c's walk reads, php-sharp's decision 72: a class by its full dotted name as
-    /// it is declared, `int`, `float`, `string`, `bool`, `Any`, `List<T>`, `Set<T>`, `Map<K, V>`, and `T?`,
-    /// `A|B` and `(A|B)?` with union members sorted by their text. These are the types a struct's `parse` reads, so a
-    /// type that holds a function, which no input holds, has none.
+    /// it is declared, `int`, `float`, `string`, `bool`, `Any`, `List<T>`, `Set<T>`, `Map<K, V>`, a class's type
+    /// parameter by its index, `$0`, and `T?`, `A|B` and `(A|B)?` with union members sorted by their text. These are
+    /// the types a struct's `parse` reads, so a type that holds a function, which no input holds, has none.
     pub(crate) fn type_text(&self, r#type: &TUnion) -> Option<String> {
         if let Some(TAtomic::Mixed(mixed)) = r#type.types.iter().find(|atomic| atomic.is_mixed()) {
             return Some(if mixed.is_non_null() { "Any" } else { "Any?" }.to_owned());
@@ -1139,6 +1140,8 @@ impl<'analysis> Types<'analysis> {
                     TArray::Keyed(_) => format!("Map<{}, {}>", self.type_text(&key)?, self.type_text(&element)?),
                 }
             }
+            // A generic type's field of its type parameter reads as the type argument `parse` runs with: `$0`.
+            TAtomic::GenericParameter(_) => text(&TUnion::from_atomic(atomic.clone()), self.codebase, Parameter::Index),
             _ => return None,
         })
     }

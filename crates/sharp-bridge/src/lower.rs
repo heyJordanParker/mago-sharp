@@ -15,6 +15,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::resolution::TypeResolutionContext;
@@ -846,12 +847,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if self.tested {
             members.extend(self.test_hooks(class));
         }
-        if self.types.bounds(self.class).is_some()
-            && let Some(store) = self.statics_store(class)
-        {
-            members.push(store);
-            members.push(self.statics_entry(class));
-        }
+        members.extend(self.generic_statics(&class.name, &class.members));
         members.extend(self.class_metadata(self.line(class.name)));
         members.splice(0..0, self.trait_members(class.inheritance.as_ref(), class.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
@@ -889,6 +885,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.push(self.value_equality(r#struct.name.span, &[self.class]));
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
+        members.extend(self.generic_statics(&r#struct.name, &r#struct.members));
         members.extend(self.class_metadata(self.line(r#struct.name.span)));
         members.splice(0..0, self.trait_members(r#struct.inheritance.as_ref(), r#struct.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
@@ -1014,6 +1011,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let fields = self.types.struct_parse_fields(self.class);
         let texts = fields.iter().map(|field| self.types.type_text(field.r#type)).collect::<Option<Vec<_>>>()?;
         self.enter(b"parse");
+        // A generic type's `parse` takes its type arguments as a static method does, spec section 11.
+        self.static_type_parameters = self.types.static_type_parameters(self.class);
         let line = self.line(span);
         let taken = self.temporaries;
         let [input, problems, arguments, properties, object, name, property] =
@@ -1069,7 +1068,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let spread = self.variable(span, &arguments);
         let spread = self.node(SHARP_AST_UNPACK, 0, line, &[spread]);
         let spread = self.node(SHARP_AST_ARG_LIST, 0, line, &[spread]);
-        let created = self.node(SHARP_AST_NEW, 0, line, &[class, spread]);
+        let mut created = self.node(SHARP_AST_NEW, 0, line, &[class, spread]);
+        if let Some(count) = self.static_type_parameters {
+            let own = self.type_text(line, &type_parameters_text(count));
+            created = self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[created, own]);
+        }
         statements.push(self.assign(span, &Place::variable(&object), created));
         let object_read = self.variable(span, &object);
         let property_name = self.variable(span, &name);
@@ -1084,6 +1087,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.temporaries = taken;
 
         let parameters = self.parse_parameters(span);
+        self.static_type_parameters = None;
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let return_type = self.string(ZEND_NAME_FQ, line, self.class);
 
@@ -1108,11 +1112,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// ```
     fn try_parse(&mut self, span: Span) -> u32 {
         self.enter(b"tryParse");
+        self.static_type_parameters = self.types.static_type_parameters(self.class);
         let line = self.line(span);
         let class = self.string(ZEND_NAME_FQ, line, self.class);
         let method = self.string(0, line, b"parse");
-        let value = self.variable(span, b"value");
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+        let mut arguments = vec![self.variable(span, b"value")];
+        if let Some(count) = self.static_type_parameters {
+            arguments.push(self.type_arguments_argument(line, &type_parameters_text(count)));
+        }
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
         let parsed = self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
         let parsed = self.node(SHARP_AST_RETURN, 0, line, &[parsed]);
         let parsed = self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed]);
@@ -1126,6 +1134,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let r#try = self.node(SHARP_AST_TRY, 0, line, &[parsed, catches, NULL]);
 
         let parameters = self.parse_parameters(span);
+        self.static_type_parameters = None;
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#try]);
         let return_type = self.string(ZEND_NAME_FQ, line, self.class);
         self.nodes[return_type as usize].attr |= ZEND_TYPE_NULLABLE;
@@ -1140,16 +1149,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// `(array|object $value)`, what `parse` and `tryParse` take: a `Map<string, Any?>` or an object.
+    /// `(array|object $value)`, what `parse` and `tryParse` take: a `Map<string, Any?>` or an object. A generic type's
+    /// ends with the bounds of its type parameters, as any static method of it does.
     fn parse_parameters(&mut self, span: Span) -> u32 {
         let line = self.line(span);
         let array = self.node(SHARP_AST_TYPE, IS_ARRAY, line, &[]);
         let object = self.string(ZEND_NAME_NOT_FQ, line, b"object");
         let hint = self.node(SHARP_AST_TYPE_UNION, 0, line, &[array, object]);
         let name = self.string(0, line, b"value");
-        let parameter = self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL]);
+        let mut parameters = vec![self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL])];
+        parameters.extend(self.parameter_metadata((self.types.bounds(self.class), None), line));
 
-        self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter])
+        self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters)
     }
 
     /// The read of a field present in the input, from `source` into `target`. Each nested struct is built from its
@@ -1200,7 +1211,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements.extend(built);
 
         let arguments = [
-            self.string(0, line, text.as_bytes()),
+            self.type_text(line, text),
             self.variable(span, &read),
             self.string(0, line, key),
             self.variable(span, fields),
@@ -1268,26 +1279,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let written = hint.map(written_members).unwrap_or_default();
         let mut statements = Vec::new();
 
-        let mut structs: Vec<&[u8]> = members
+        let mut structs: Vec<&TNamedObject> = members
             .iter()
             .filter_map(|atomic| match atomic {
-                TAtomic::Object(TObject::Named(object)) if self.types.parses(object.name.as_bytes()) => {
-                    Some(object.name.as_bytes())
-                }
+                TAtomic::Object(TObject::Named(object)) if self.types.parses(object.name.as_bytes()) => Some(object),
                 _ => None,
             })
             .collect();
         structs.sort_by_key(|class| {
-            written.iter().position(
-                |member| matches!(member, Hint::Identifier(name) if self.names.get(name).eq_ignore_ascii_case(class)),
-            )
+            written.iter().position(|member| {
+                matches!(member, Hint::Identifier(name) if self.names.get(name).eq_ignore_ascii_case(class.name.as_bytes()))
+            })
         });
         if !structs.is_empty() {
             let readable =
                 [self.global_call_of(span, b"is_array", &value), self.global_call_of(span, b"is_object", &value)];
             let mut condition = self.node(SHARP_AST_OR, 0, line, &readable);
             for class in &structs {
-                let is_struct = self.instance_of(span, &value, class);
+                let is_struct = self.instance_of(span, &value, class.name.as_bytes());
                 let is_not = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[is_struct]);
                 condition = self.node(SHARP_AST_AND, 0, line, &[is_not, condition]);
             }
@@ -1364,13 +1373,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements
     }
 
-    /// `try { $read#N = \App\Address::parse($read#N); }`, the struct `class` built from the value of `variable`.
-    fn nested_parse(&mut self, span: Span, class: &[u8], variable: &[u8]) -> u32 {
+    /// `try { $read#N = \App\Address::parse($read#N); }`, the struct `class` built from the value of `variable`, a
+    /// generic one with the type arguments the field gives it, as `\App\Pair::parse($read#N, <int, string>)`.
+    fn nested_parse(&mut self, span: Span, class: &TNamedObject, variable: &[u8]) -> u32 {
         let line = self.line(span);
-        let name = self.string(ZEND_NAME_FQ, line, class);
+        let name = self.string(ZEND_NAME_FQ, line, class.name.as_bytes());
         let method = self.string(0, line, b"parse");
-        let value = self.variable(span, variable);
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+        let mut arguments = vec![self.variable(span, variable)];
+        if let Some(type_arguments) = class.get_type_parameters() {
+            let text = self.types.argument_texts(type_arguments);
+            arguments.push(self.type_arguments_argument(line, &text));
+        }
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
         let parsed = self.node(SHARP_AST_STATIC_CALL, 0, line, &[name, method, arguments]);
         let parsed = self.assign(span, &Place::variable(variable), parsed);
 
@@ -1382,7 +1396,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn parse_nested(
         &mut self,
         span: Span,
-        class: &[u8],
+        class: &TNamedObject,
         variable: &[u8],
         path: &[PathPart],
         fields: &[u8],
@@ -1728,16 +1742,30 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         ))
     }
 
-    /// The hidden static a generic PHP# class keeps each type argument's own static fields in, spec section 11, as
+    /// The [`Self::statics_store`] and [`Self::statics_entry`] of a generic PHP# class or struct named `name` with
+    /// `members` that declares static fields, spec section 11, or none.
+    fn generic_statics(&mut self, name: &LocalIdentifier, members: &Sequence<ClassLikeMember>) -> Vec<u32> {
+        if self.types.bounds(self.class).is_none() {
+            return Vec::new();
+        }
+        let Some(store) = self.statics_store(name, members) else {
+            return Vec::new();
+        };
+
+        vec![store, self.statics_entry(name, members)]
+    }
+
+    /// The hidden static a generic PHP# class or struct, named `name` with `members`, keeps each type argument's own
+    /// static fields in, spec section 11, as
     /// `public static $"\0<sharp>\0statics" = ["" => ["count" => 0, "items" => []]];` with `ZEND_ACC_SHARP_HIDDEN`:
     /// under the key "" the defaults, each constant initial value, which `\Sharp\Internal\statics()` copies for each
     /// type argument text on its first use. An initial value that runs as code is set by the class's
     /// [`Self::statics_entry`]. None for a class without static fields.
-    fn statics_store(&mut self, class: &Class) -> Option<u32> {
-        let line = self.line(class.name);
+    fn statics_store(&mut self, name: &LocalIdentifier, members: &Sequence<ClassLikeMember>) -> Option<u32> {
+        let line = self.line(name);
         let mut stores = false;
         let mut fields = Vec::new();
-        for member in &class.members {
+        for member in members {
             let ClassLikeMember::Property(property) = member else {
                 continue;
             };
@@ -1775,8 +1803,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         ))
     }
 
-    /// The hidden static method of a generic PHP# class with static fields that every access of them calls, spec
-    /// section 11. It takes the class's type arguments as its own, as any static method of the class does, and returns
+    /// The hidden static method of a generic PHP# class or struct, named `name` with `members`, with static fields that
+    /// every access of them calls, spec section 11. It takes the class's type arguments as its own, as any static method
+    /// of the class does, and returns
     /// by reference their entry of [`Self::statics_store`]. The call that adds the entry runs each initial value that
     /// runs as code, in declaration order, as C# runs a closed type's static initializer on its first use:
     /// `public static function &'#entry'() { $entry#1 = &\Sharp\Internal\statics(\App\Counter::class,
@@ -1784,12 +1813,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// leaves the entry's other fields as they are and runs nothing again, as a class's `#statics` does. A class whose
     /// initial values are all constant returns the entry the call gives, `return \Sharp\Internal\statics(…);`. Its
     /// accesses are its only callers, so it declares no return type for PHP to check on each one.
-    fn statics_entry(&mut self, class: &Class) -> u32 {
-        let line = self.line(class.name);
-        let span = class.name.span;
+    fn statics_entry(&mut self, name: &LocalIdentifier, members: &Sequence<ClassLikeMember>) -> u32 {
+        let line = self.line(name);
+        let span = name.span;
         self.static_type_parameters = self.types.static_type_parameters(self.class);
-        let initial_values: Vec<&Property> = class
-            .members
+        let initial_values: Vec<&Property> = members
             .iter()
             .filter_map(|member| match member {
                 ClassLikeMember::Property(property) if property.initial_value_runs_after_class() => Some(property),

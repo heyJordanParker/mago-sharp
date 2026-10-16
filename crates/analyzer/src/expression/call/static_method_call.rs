@@ -183,7 +183,13 @@ where
             && (method_name.as_bytes().eq_ignore_ascii_case(b"parse")
                 || method_name.as_bytes().eq_ignore_ascii_case(b"tryParse"))
         {
-            check_struct_parse(context, metadata, method_name.as_bytes().eq_ignore_ascii_case(b"parse"), call.span);
+            check_struct_parse(
+                context,
+                metadata,
+                class_type_arguments.as_deref().unwrap_or_default(),
+                method_name.as_bytes().eq_ignore_ascii_case(b"parse"),
+                call.span,
+            );
         }
 
         // Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`. PHP calls the static

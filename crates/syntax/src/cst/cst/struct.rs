@@ -8,18 +8,20 @@ use crate::cst::cst::class_like::member::ClassLikeMember;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::modifier::Modifier;
+use crate::cst::cst::type_hint::TypeParameterList;
 use crate::cst::sequence::Sequence;
 
 /// Represents a PHP# struct, spec section 10: a value that never changes and compares by value.
 ///
-/// Its header lists the interfaces it implements, and nothing else: any struct keys a `Map` by its whole value.
+/// Its header lists the interfaces it implements, and nothing else: any struct keys a `Map` by its whole value. It may
+/// be generic, with section 11's type parameters.
 ///
 /// Example:
 ///
 /// ```csharp
-/// public struct Username : HasLabel
+/// public struct Pair<TFirst, TSecond> : HasLabel
 /// {
-///     public Username(public string name { get; }) { }
+///     public Pair(public TFirst first { get; }, public TSecond second { get; }) { }
 /// }
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
@@ -29,6 +31,8 @@ pub struct Struct<'arena> {
     pub modifiers: Sequence<'arena, Modifier<'arena>>,
     pub r#struct: Keyword<'arena>,
     pub name: LocalIdentifier<'arena>,
+    /// The type parameters, as in `public struct Pair<TFirst, TSecond> {}`.
+    pub type_parameters: Option<TypeParameterList<'arena>>,
     /// The interfaces in the `: Interface` header.
     pub inheritance: Option<Inheritance<'arena>>,
     pub left_brace: Span,

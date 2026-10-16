@@ -792,7 +792,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         {
             Some(Parameter)
         }
-        (Node::TypeParameterList(list), Class | Interface | Method | Signature) => {
+        (Node::TypeParameterList(list), Class | Interface | Method | Signature | Place::Struct) => {
             check_type_parameters(list, place, context);
 
             Some(Place::TypeParameter)
@@ -4016,6 +4016,8 @@ fn is_key_hint(hint: &Hint) -> bool {
         Hint::Generic(collection) if matches!(collection.name.value, b"List" | b"Set" | b"Map") => {
             collection.type_arguments.arguments.iter().all(is_key_hint)
         }
+        // A generic struct or class, as `Pair<int, string>`, is a named type, whose `==` and `hash()` the analyzer checks.
+        Hint::Generic(generic) => built_in_generic_arity(generic.name.value).is_none(),
         _ => false,
     }
 }
@@ -5874,7 +5876,7 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
         Self {
             name: &r#struct.name,
             span: r#struct.span(),
-            type_parameters: None,
+            type_parameters: r#struct.type_parameters.as_ref(),
             members: &r#struct.members,
             is_static: false,
             is_foreign: false,

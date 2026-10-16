@@ -90,6 +90,7 @@ use crate::utils::names::readonly_writer;
 use crate::utils::quoted_source;
 use crate::utils::template::check_private_method_reach;
 use crate::utils::template::check_private_property_reach;
+use crate::utils::template::class_type_arguments;
 use crate::utils::template::get_template_types_for_class_member;
 use crate::visibility::check_method_visibility;
 use crate::visibility::check_resolved_property_read_visibility;
@@ -1560,17 +1561,7 @@ where
     let type_arguments = type_arguments.unwrap_or_default();
     // A header's type argument may hold `class`'s own type parameters, as `Sub<TX> : Base<Box<TX>>` does, which the
     // access's type arguments then fix, so `Sub<Order>.count` reads `Base<Box<Order>>`'s.
-    let own = TemplateResult::new(
-        IndexMap::default(),
-        class
-            .template_types
-            .iter()
-            .zip(type_arguments)
-            .map(|((name, template), argument)| {
-                (*name, HashMap::from_iter([(template.defining_entity, argument.clone())]))
-            })
-            .collect(),
-    );
+    let own = class_type_arguments(class, type_arguments);
 
     Some(
         declaring_class
