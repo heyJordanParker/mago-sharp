@@ -4707,6 +4707,17 @@ fn new_outside_the_slice_is_not_supported_yet() {
     assert_eq!(issues(code), ["7:23 This expression is not supported yet in PHP#."]);
 }
 
+/// A named constructor without arguments is refused, but one a member chain reads through, as the `new App.Shop` of
+/// `new App.Shop.Order()`, is left to the analyzer, which alone tells a full name from a member, spec section 23.
+#[test]
+fn a_new_without_arguments_is_refused_unless_a_member_chain_reads_through_it() {
+    let code = leak(method(
+        "        const bare = new Report.of;\n        const chained = new App.Shop.Order();\n        const read = new App.Shop.total;\n        return 1;\n",
+    ));
+
+    assert_eq!(issues(code), ["7:22 This `new` without arguments is not supported yet in PHP#."]);
+}
+
 /// `new (type)(…)` creates an object from a class value, with or without type arguments, spec section 25. It calls
 /// the constructor, so it names no named constructor, and it takes its arguments as any `new` does. The analyzer
 /// decides what the value holds.
