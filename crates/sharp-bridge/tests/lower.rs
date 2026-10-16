@@ -6789,6 +6789,70 @@ fn last_is_the_last_element_and_throws_on_an_empty_list() {
 }
 
 /// ```php
+/// return (($sizes === []) ? throw new \OutOfRangeException('The list is empty.') : \max($sizes))
+///     + (((${'receiver#1'} = $this->make()) === []) ? throw new \OutOfRangeException('The list is empty.') : \max(${'receiver#1'}));
+/// ```
+///
+/// A `List<int>`'s `max()` and `min()` are its largest and smallest element, PHP's `\max` and `\min` on the array,
+/// and throw `OutOfRangeException` on an empty list, as `last()` does, where PHP's throw a `ValueError`.
+#[test]
+fn max_and_min_are_the_largest_and_smallest_element_and_throw_on_an_empty_list() {
+    for method in ["max", "min"] {
+        assert_eq!(
+            Lowered::new(&format!(
+                "namespace App.Tenant;\n\nclass Report\n{{\n    public List<int> make() => [1];\n\n    public int run(List<int> sizes) => sizes.{method}() + this.make().{method}();\n}}\n"
+            ))
+            .body(),
+            format!(
+                indoc! {r#"
+                    STMT_LIST
+                      RETURN
+                        BINARY_OP [1]
+                          CONDITIONAL [1]
+                            BINARY_OP [16]
+                              VAR
+                                ZVAL "sizes"
+                              ARRAY [3]
+                            THROW
+                              NEW
+                                ZVAL "OutOfRangeException"
+                                ARG_LIST
+                                  ZVAL "The list is empty."
+                            CALL
+                              ZVAL "{method}"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "sizes"
+                          CONDITIONAL [1]
+                            BINARY_OP [16]
+                              ASSIGN
+                                VAR
+                                  ZVAL "receiver#1"
+                                METHOD_CALL
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "make"
+                                  ARG_LIST
+                              ARRAY [3]
+                            THROW
+                              NEW
+                                ZVAL "OutOfRangeException"
+                                ARG_LIST
+                                  ZVAL "The list is empty."
+                            CALL
+                              ZVAL "{method}"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "receiver#1"
+                "#},
+                method = method
+            ),
+            "{method}"
+        );
+    }
+}
+
+/// ```php
 /// $tags->insert(0, 'a');
 /// $removed = ((${'index#1'} = \array_search('a', $tags, true)) !== false) && $tags->removeAt(${'index#1'}) === null;
 /// $tags = [];

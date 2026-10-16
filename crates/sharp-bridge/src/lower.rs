@@ -6549,7 +6549,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.element_search(call.span(), &mut collection, &element_type, element(), search)
             }
-            ("List", b"last") => {
+            // `last()`, `max()` and `min()` are `($list === [] ? throw new \OutOfRangeException(…) : \array_last($list))`,
+            // with `\max` or `\min` in place of `\array_last`.
+            ("List", b"last" | b"max" | b"min") => {
                 let list = self.read_collection(&mut collection, line, false);
                 let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
                 let is_empty = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[list, empty]);
@@ -6559,9 +6561,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let exception = self.node(SHARP_AST_NEW, 0, line, &[class, message]);
                 let throw = self.node(SHARP_AST_THROW, 0, line, &[exception]);
                 let list = self.read_collection(&mut collection, line, false);
-                let function = self.string(ZEND_NAME_FQ, line, b"array_last");
-                let list = self.node(SHARP_AST_ARG_LIST, 0, line, &[list]);
-                let element = self.node(SHARP_AST_CALL, 0, line, &[function, list]);
+                let function = if method == b"last" { b"array_last".as_slice() } else { method.as_slice() };
+                let element = self.global_call(line, function, &[list]);
 
                 self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_empty, throw, element])
             }
@@ -6754,7 +6755,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }) {
             return None;
         }
-        let reads_twice = matches!(method.as_slice(), b"remove" | b"last");
+        let reads_twice = matches!(method.as_slice(), b"remove" | b"last" | b"max" | b"min");
 
         Some((collection, method, reads_twice))
     }

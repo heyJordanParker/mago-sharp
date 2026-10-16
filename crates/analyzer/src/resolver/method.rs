@@ -24,6 +24,7 @@ use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
@@ -338,13 +339,19 @@ where
                     &closure_object
                 }
                 TAtomic::Array(array) if context.dialect.is_sharp() => {
-                    // An empty literal with no declared type is neither a List nor a Map, and the semantic checks
-                    // refuse its declaration.
-                    if array.is_empty() {
+                    // An empty value with no declared type, an empty literal the semantic checks refuse or an emptied
+                    // plain PHP array property, is neither a List nor a Map. Only `count` gives the same on each, 0,
+                    // and a `List`'s is PHP's `\count`, which counts a `Map` and a `Set` too.
+                    collection_methods = if !array.is_empty() {
+                        get_collection_methods(array, context.codebase)
+                    } else if method_names.iter().all(|name| name.as_bytes() == b"count") {
+                        TObject::Named(TNamedObject::new_with_type_parameters(
+                            word("Sharp\\Internal\\ListMethods"),
+                            Some(vec![get_never()]),
+                        ))
+                    } else {
                         continue;
-                    }
-
-                    collection_methods = get_collection_methods(array, context.codebase);
+                    };
                     &collection_methods
                 }
                 TAtomic::Iterable(iterable) if context.dialect.is_sharp() => {
@@ -1275,6 +1282,26 @@ where
 
         let required_constraint_str = display_type(context, &constraint.type_union);
         let actual_template_type_str = display_type(context, &actual_template_type);
+
+        // PHP# writes no `@where`: only a collection method of the prelude has one, as a `List<int>`'s `max()`. The call
+        // keeps the type its elements give it, so it is refused once.
+        if context.dialect.is_sharp()
+            && let Some(collection) = display_sharp_collection(context, object_type)
+            && let ClassLikeMemberSelector::Identifier(method) = selector
+        {
+            let method = String::from_utf8_lossy(method.value);
+            context.collector.report_with_code(
+                IssueCode::WhereConstraintViolation,
+                Issue::error(format!(
+                    "`{method}` needs elements of type `{required_constraint_str}`, and this is a `{collection}`."
+                ))
+                .with_annotation(Annotation::primary(selector.span()).with_message("A method of these elements only."))
+                .with_annotation(Annotation::secondary(object_span).with_message(format!("This is a `{collection}`.")))
+                .with_help(format!("Call it on a collection whose elements are `{required_constraint_str}`.")),
+            );
+
+            return true;
+        }
 
         context.collector.report_with_code(
             IssueCode::WhereConstraintViolation,

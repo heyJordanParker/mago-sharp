@@ -607,10 +607,18 @@ where
         )?;
     }
 
-    if let Some(object_type) = artifacts.get_rc_expression_type(object).cloned()
-        && is_refused_type(&object_type)
-    {
-        artifacts.set_rc_expression_type(&span, object_type);
+    // A call on a refused receiver, or on an `Any`, which `mixed-method-access` refuses, is refused once: its result is
+    // refused too, so nothing that uses it reports again.
+    if let Some(object_type) = artifacts.get_rc_expression_type(object).cloned() {
+        if is_refused_type(&object_type) {
+            artifacts.set_rc_expression_type(&span, object_type);
+        } else if context.dialect.is_sharp()
+            && !has_resolved_methods
+            && object_type.types.iter().any(TAtomic::is_mixed)
+            && object_type.types.iter().all(|atomic| atomic.is_mixed() || atomic.is_null())
+        {
+            artifacts.set_expression_type(&span, TUnion::from_atomic(TAtomic::Error));
+        }
     }
 
     Ok(())
@@ -620,7 +628,8 @@ where
 /// `List<int>|Box`, or `on_several_collections`, when the call resolves on more than one collection, as `List|Set`.
 /// The bridge lowers such a call to PHP on the array from the checker's one collection method, so an object the value
 /// holds never reaches its own method of that name, and a value that may be another collection runs as a
-/// `Sharp\Collection` method that is not that collection's. Returns whether it reported the call.
+/// `Sharp\Collection` method that is not that collection's. `count` is the exception on several collections: a
+/// `List`'s is PHP's `\count`, which counts a `Map` and a `Set` too. Returns whether it reported the call.
 fn report_collection_method_on_object<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
@@ -639,7 +648,7 @@ where
     let holds = |kind: fn(&TAtomic) -> bool| object_type.types.iter().any(kind);
     let on_object = holds(|atomic| matches!(atomic, TAtomic::Array(_)))
         && holds(|atomic| matches!(atomic, TAtomic::Object(_) | TAtomic::Callable(_)));
-    if !on_object && !on_several_collections {
+    if !on_object && (!on_several_collections || method.value.eq_ignore_ascii_case(b"count")) {
         return false;
     }
 

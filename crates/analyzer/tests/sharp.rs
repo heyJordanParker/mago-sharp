@@ -2565,6 +2565,7 @@ fn a_bare_call_of_a_plain_php_function_names_the_call_to_write() {
     let mut differing = Vec::new();
     for (signature, call, form) in [
         ("int counted(List<int> items)", "count(items)", "`items.count()`"),
+        ("int sized(List<int> items)", "sizeof(items)", "`items.count()`"),
         ("Any? kept(List<int> items, Function<bool(int)> keep)", "array_filter(items, keep)", "`items.filter(keep)`"),
         ("Any? doubled(List<int> items, Function<int(int)> twice)", "array_map(twice, items)", "`items.map(twice)`"),
         ("bool anyKept(List<int> items, Function<bool(int)> keep)", "array_any(items, keep)", "`items.any(keep)`"),
@@ -2578,6 +2579,7 @@ fn a_bare_call_of_a_plain_php_function_names_the_call_to_write() {
             "array_key_exists(key, prices)",
             "`prices.has(key)` on a `Map`",
         ),
+        ("bool listed(Map<string, int> prices, string key)", "key_exists(key, prices)", "`prices.has(key)` on a `Map`"),
         ("Any? names(Map<string, int> prices)", "array_keys(prices)", "`prices.keys()` on a `Map`"),
         ("Any? amounts(Map<string, int> prices)", "array_values(prices)", "`prices.values()` on a `Map`"),
     ] {
@@ -5026,6 +5028,18 @@ fn a_php_mixed_or_untyped_value_arrives_as_any_and_goes_back_to_php() {
     let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public Any? read(string key)\n    {\n        const value = Source.value(key);\n        Any? raw = Source.untyped(key);\n        Source.take(value);\n        Source.takeUntyped(raw);\n        return key == \"raw\" ? raw : value;\n    }\n\n    public Any keep(Any value)\n    {\n        const kept = value;\n        Source.take(kept);\n        return kept;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Inbox.sharp", sharp), &[("src/Demo/Source.php", SOURCE)]), Vec::<String>::new());
+}
+
+/// A method call on an unchecked `Any` is refused once: its result is refused too, so a return, an operator or an
+/// argument that uses it reports nothing more.
+#[test]
+fn a_method_call_on_an_unchecked_any_is_refused_once() {
+    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public int counted(Any? cells) => cells.count();\n    public int more(Any cells) => cells.count() + 1;\n    public void kept(Any? cells)\n    {\n        Source.takeInt(cells.count());\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Inbox.sharp", sharp), &[("src/Demo/Source.php", SOURCE)]),
+        ["5:45 mixed-method-access", "6:41 mixed-method-access", "9:30 mixed-method-access"]
+    );
 }
 
 #[test]
@@ -8707,7 +8721,7 @@ fn a_bare_index_read_of_a_local_that_may_be_a_list_or_a_map_is_an_error() {
 /// element and throws past the end, and a `Map` one inserts a key, so a write by index to it is refused.
 #[test]
 fn a_local_that_may_be_a_list_or_a_map_is_not_written_by_index_after_it_holds_the_map() {
-    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int run(bool ready, List<int> sizes, Map<int, int> counts)\n    {\n        let rows = ready ? sizes : counts;\n        rows = counts;\n        rows[1] = 2;\n        return 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int run(bool ready, List<int> sizes, Map<int, int> counts)\n    {\n        let rows = ready ? sizes : counts;\n        rows = counts;\n        rows[1] = 2;\n        return rows.count();\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Sizes.sharp", sharp), &[]),
@@ -9377,7 +9391,7 @@ fn list_wrap_of_a_map_literal_holds_the_map() {
 /// A return or a parameter that declares both a `List` and a `Map` takes a literal of either collection.
 #[test]
 fn a_literal_where_a_list_or_a_map_is_declared_is_accepted() {
-    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public List<int>|Map<string, int> none() => [:];\n\n    public List<int>|Map<string, int> empty() => [];\n\n    public int fill() => Grid.size([:]) + Grid.size([]);\n\n    private static int size(List<int>|Map<string, int> cells) => cells is List<int> list ? list.count() : 0;\n}\n";
+    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public List<int>|Map<string, int> none() => [:];\n\n    public List<int>|Map<string, int> empty() => [];\n\n    public int fill() => Grid.size([:]) + Grid.size([]);\n\n    private static int size(List<int>|Map<string, int> cells) => cells.count();\n}\n";
 
     assert_eq!(issues(("src/Demo/Grid.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -9385,7 +9399,7 @@ fn a_literal_where_a_list_or_a_map_is_declared_is_accepted() {
 /// A return or a parameter that declares a `Map` before a `List` takes a literal of either collection too.
 #[test]
 fn a_literal_where_a_map_or_a_list_is_declared_is_accepted() {
-    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public Map<string, int>|List<int> none() => [:];\n\n    public Map<string, int>|List<int> empty() => [];\n\n    public int fill() => Grid.size([:]) + Grid.size([]);\n\n    private static int size(Map<string, int>|List<int> cells) => cells is Map<string, int> map ? map.count() : 0;\n}\n";
+    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public Map<string, int>|List<int> none() => [:];\n\n    public Map<string, int>|List<int> empty() => [];\n\n    public int fill() => Grid.size([:]) + Grid.size([]);\n\n    private static int size(Map<string, int>|List<int> cells) => cells.count();\n}\n";
 
     assert_eq!(issues(("src/Demo/Grid.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -9554,7 +9568,7 @@ fn a_local_copied_from_a_php_array_property_refuses_a_list_literal() {
 /// as a `Map`: its `Map` methods and its `[k, v]` loop check clean, and a bare index read is refused.
 #[test]
 fn an_emptied_php_array_property_keeps_the_map_rules() {
-    let sharp = "namespace Demo;\n\nimport Lib.Store;\n\npublic class Rows : Store\n{\n    public int total()\n    {\n        this.items = [];\n        this.items.remove(\"a\");\n        let total = 0;\n        for (const [key, value] of this.items) {\n            total += 1;\n        }\n        this.items = [:];\n        const first = this.items.get(\"a\");\n        return total + (first == null ? 0 : 1);\n    }\n\n    public Any? read() => this.items[\"b\"];\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Store;\n\npublic class Rows : Store\n{\n    public int total()\n    {\n        this.items = [];\n        this.items.remove(\"a\");\n        let total = 0;\n        for (const [key, value] of this.items) {\n            total += 1;\n        }\n        this.items = [:];\n        const first = this.items.get(\"a\");\n        return total + this.items.count() + (first == null ? 0 : 1);\n    }\n\n    public Any? read() => this.items[\"b\"];\n}\n";
 
     assert_eq!(issues(("src/Demo/Rows.sharp", sharp), &[STORE]), ["20:27 possibly-undefined-array-index"]);
 }
@@ -9716,11 +9730,25 @@ fn a_list_of_a_nullable_type_takes_null_and_refuses_another_type() {
     );
 }
 
+/// A `List<int>` has `max()` and `min()`, its largest and smallest element, typed `int`. A list of any other element
+/// type has neither, and the refusal names the elements they need.
+#[test]
+fn a_list_of_int_has_its_largest_and_smallest_element() {
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int largest(List<int> sizes) => sizes.max();\n    public int smallest(List<int> sizes) => sizes.min();\n    public string first(List<string> names) => names.max();\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Sizes.sharp", sharp), &[]),
+        [
+            "7:54 where-constraint-violation `max` needs elements of type `int`, and this is a `List<string>`. | Call it on a collection whose elements are `int`."
+        ]
+    );
+}
+
 /// The semantic checks refuse an empty literal declared without a type, so a method called on it reports nothing
 /// more, and never names the `Map<never, never>` the literal alone would give.
 #[test]
 fn a_method_on_an_untyped_empty_literal_adds_no_issue() {
-    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public int run()\n    {\n        let messages = [];\n        messages.add(\"a\");\n        const totals = [:];\n        totals.set(\"a\", 1);\n        return 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public int run()\n    {\n        let messages = [];\n        messages.add(\"a\");\n        const totals = [:];\n        totals.set(\"a\", 1);\n        return messages.count();\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Inbox.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -9847,7 +9875,7 @@ fn a_set_property_without_a_set_refuses_a_changing_method() {
 /// `List|Set` local and `filter` on a `List|Map` or a `List|Set` run.
 #[test]
 fn a_changing_method_of_a_union_of_collections_is_refused_once() {
-    let sharp = "namespace Demo;\n\nclass Box\n{\n    public bool add(int value) => true;\n    public bool remove(string key) => true;\n}\n\nclass Shop\n{\n    public int run(bool ready, List<int> lines, Set<int> ids, Map<string, int> counts, Box box)\n    {\n        (ready ? lines : ids).add(1);\n        (ready ? counts : ids).add(1);\n        (ready ? ids : box).add(1);\n        let tags = ready ? lines : ids;\n        tags.add(3);\n        (ready ? lines : counts).filter(n => n > 0);\n        (ready ? counts : box).remove(\"a\");\n        return tags.filter(tag => tag > 0) is List<int> kept ? kept.count() : 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Box\n{\n    public bool add(int value) => true;\n    public bool remove(string key) => true;\n}\n\nclass Shop\n{\n    public int run(bool ready, List<int> lines, Set<int> ids, Map<string, int> counts, Box box)\n    {\n        (ready ? lines : ids).add(1);\n        (ready ? counts : ids).add(1);\n        (ready ? ids : box).add(1);\n        let tags = ready ? lines : ids;\n        tags.add(3);\n        (ready ? lines : counts).filter(n => n > 0);\n        (ready ? counts : box).remove(\"a\");\n        return tags.filter(tag => tag > 0).count();\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Shop.sharp", sharp), &[]),
