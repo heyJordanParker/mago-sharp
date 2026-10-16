@@ -12455,6 +12455,20 @@ fn an_override_keeps_a_bound_that_names_the_parents_type_parameter() {
     );
 }
 
+/// A class that takes an interface's default body keeps its bound with the class header's type arguments in place of
+/// the interface's type parameters, spec section 11, as an override does: `OrderShelf : Shelved<Order>` takes `kind`'s
+/// `TBox : Query<T>` as `TBox : Query<Order>`, and so does a generic class through its own `Shelf<TItem>`. A call of
+/// the default body is checked against the bound with the receiver's type argument.
+#[test]
+fn a_default_body_keeps_a_bound_that_names_the_interfaces_type_parameter() {
+    let sharp = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic class Line : DatabaseEntity\n{\n}\n\npublic interface Query<TItem>\n{\n    List<TItem> rows();\n}\n\npublic class OrderQuery : Query<Order>\n{\n    public List<Order> rows() => [];\n}\n\npublic interface Shelved<T : DatabaseEntity>\n{\n    int kind<TBox : Query<T>>(TBox box) => 1;\n}\n\npublic class OrderShelf : Shelved<Order>\n{\n}\n\npublic class Shelf<TItem : DatabaseEntity> : Shelved<TItem>\n{\n}\n\npublic class Run\n{\n    public static int run(OrderShelf orders, Shelf<Line> lines) => orders.kind(new OrderQuery()) + lines.kind(new OrderQuery());\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Shelved.sharp", sharp), &[]),
+        ["`OrderQuery` does not satisfy the bound `Query<Line>` of type parameter `TBox`."]
+    );
+}
+
 /// An override that declares type parameters declares one for each of the method it overrides, as C# requires, so one
 /// that declares more or fewer, or declares any over a method with none, is refused with the count to declare. One that
 /// declares none keeps its own types, as `PlainRepository.count` does.

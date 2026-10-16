@@ -1197,6 +1197,10 @@ fn reparent_types(method: &mut FunctionLikeMetadata, reparent: &TemplateResult, 
         replace(&mut parameter.type_metadata);
         replace(&mut parameter.out_type);
     }
+    // A bound of the method's own type parameters, as `TBox : Query<T>`, names the interface's too.
+    for template in method.template_types.values_mut() {
+        template.constraint = inferred_type_replacer::replace(&template.constraint, reparent, codebase);
+    }
 }
 
 #[allow(clippy::expect_used)]
