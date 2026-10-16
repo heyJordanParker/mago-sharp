@@ -287,6 +287,7 @@ impl std::fmt::Display for ParseError {
                 T!["use"] => "`use` is PHP syntax: PHP# imports a class with `import`".to_string(),
                 T!["foreach"] => "`foreach` is PHP syntax: PHP# loops over a collection with `for … of`".to_string(),
                 T!["=>"] => "PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow".to_string(),
+                T!["<?php"] => "`<?php` is PHP syntax: a `.sharp` file has no opening tag, so delete it".to_string(),
                 T!["#["] => {
                     "`#[` is PHP syntax: PHP# writes attributes in square brackets, as in `[Searchable]`".to_string()
                 }

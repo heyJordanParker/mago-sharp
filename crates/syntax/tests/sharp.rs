@@ -2535,6 +2535,22 @@ fn foreach_is_a_php_syntax_error() {
     assert_eq!(messages, ["`foreach` is PHP syntax: PHP# loops over a collection with `for … of`"]);
 }
 
+/// Spec section 27: a `.sharp` file starts in code, so an opening tag is one error, and the file parses on.
+#[test]
+fn an_opening_tag_is_a_php_syntax_error() {
+    const CODE: &str = "<?php\nnamespace App;\n\nclass Report\n{\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/App/Report.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(
+        errors,
+        [("`<?php` is PHP syntax: a `.sharp` file has no opening tag, so delete it".to_owned(), "<?php")]
+    );
+    assert!(matches!(program.statements.get(1), Some(Statement::Namespace(_))), "{:#?}", program.statements);
+}
+
 #[test]
 fn a_php_for_loop_has_no_declaration() {
     let arena = LocalArena::new();

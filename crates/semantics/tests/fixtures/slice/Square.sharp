@@ -1,0 +1,19 @@
+namespace App.Tenant;
+
+class Square : Shape, Measured
+{
+    public override float area()
+    {
+        return 1.0;
+    }
+
+    protected override string name(int digits)
+    {
+        return "square";
+    }
+
+    public virtual int sides()
+    {
+        return 4;
+    }
+}

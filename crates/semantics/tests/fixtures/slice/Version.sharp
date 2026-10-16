@@ -1,0 +1,6 @@
+namespace App.Tenant;
+
+final class Version : Comparable<Version>
+{
+    public int compareTo(Any? other) => 0;
+}

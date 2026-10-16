@@ -43,17 +43,19 @@ impl Lowered {
         Self(common::checked(path, code, &[], lower))
     }
 
-    /// Lowers `code` beside the `library` files, each a path and its code, which declare what `code` uses.
+    /// Lowers `code`, as the file its type names, beside the `library` files, each a path and its code, which declare
+    /// what `code` uses.
     fn with(code: &str, library: &[(&str, &str)]) -> Self {
-        Self(common::checked("src/Report.sharp", code, library, lower))
+        Self(common::checked(&common::sharp_files::type_file(code), code, library, lower))
     }
 
     /// Lowers `code` beside the `library` files and the standard library files `standard`, inlining the forms the
     /// standard library files give.
     fn inlining(code: &str, library: &[(&str, &str)], standard: &[(&str, &str)]) -> Self {
         let declarations: Vec<(&str, &str)> = library.iter().chain(standard).copied().collect();
+        let path = common::sharp_files::type_file(code);
 
-        Self(common::checked_inlining("src/Report.sharp", code, &declarations, &common::library_forms(standard), lower))
+        Self(common::checked_inlining(&path, code, &declarations, &common::library_forms(standard), lower))
     }
 
     fn unit(&self) -> Option<&Unit> {
@@ -249,6 +251,61 @@ impl Lowered {
     fn text(&self, text: sharp_str) -> String {
         String::from_utf8_lossy(self.unit().expect("the source lowers").text(text)).into_owned()
     }
+}
+
+/// Each of `files`, a path and its code, lowered beside the others and the `library` files, as a project of one type
+/// per file compiles them.
+fn lowered_each(files: &[(&str, &str)], library: &[(&str, &str)]) -> Vec<Lowered> {
+    files
+        .iter()
+        .map(|(path, code)| {
+            let others = files.iter().filter(|(other, _)| other != path);
+            let declarations: Vec<(&str, &str)> = library.iter().chain(others).copied().collect();
+
+            Lowered(common::checked(path, code, &declarations, lower))
+        })
+        .collect()
+}
+
+/// The lowered file of `files` that declares the class PHP names `name`, and the class's node.
+fn class_in<'files>(files: &'files [Lowered], name: &str) -> (&'files Lowered, u32) {
+    files
+        .iter()
+        .find_map(|lowered| {
+            let class = lowered
+                .nodes()
+                .iter()
+                .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == name)?;
+
+            Some((lowered, class as u32))
+        })
+        .unwrap_or_else(|| panic!("a file declares `{name}`"))
+}
+
+/// The tree of a file in the PHP namespace `namespace` that declares one type, whose tree is `declaration`.
+fn file_tree(namespace: &str, declaration: &str) -> String {
+    let declaration: String = declaration.lines().flat_map(|line| ["  ", line, "\n"]).collect();
+    let header = indoc! {r#"
+        STMT_LIST
+          DECLARE
+            CONST_DECL
+              CONST_ELEM
+                ZVAL "strict_types"
+                ZVAL 1
+                null
+            null
+          NAMESPACE
+    "#};
+
+    format!("{header}    ZVAL {namespace:?}\n    null\n{declaration}")
+}
+
+/// The node at `path` below the members of the class PHP names `name` in `files`, one child index for each level.
+fn member_in(files: &[Lowered], name: &str, path: &[u32]) -> String {
+    let (lowered, class) = class_in(files, name);
+    let node = path.iter().fold(lowered.child(class, 2), |node, &index| lowered.child(node, index));
+
+    lowered.render(node)
 }
 
 /// The signature `method` declares `run` with.
@@ -787,9 +844,14 @@ fn a_foreign_class_lowers_to_the_nodes_of_the_plain_class() {
 fn a_class_an_enum_or_a_module_with_a_law_lowers_to_the_nodes_it_lowers_to_without_it() {
     for (path, with, without) in [
         (
-            "src/Report.sharp",
-            "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n    law amountIsItself(Money a) => a.amount == a.amount;\n}\n\npublic enum Status\n{\n    case Open;\n\n    law openIsOpen(Status s) => Status.Open == Status.Open;\n}\n",
-            "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n\n}\n\npublic enum Status\n{\n    case Open;\n\n\n}\n",
+            "src/Money.sharp",
+            "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n    law amountIsItself(Money a) => a.amount == a.amount;\n}\n",
+            "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n\n}\n",
+        ),
+        (
+            "src/Status.sharp",
+            "namespace App.Shared;\n\npublic enum Status\n{\n    case Open;\n\n    law openIsOpen(Status s) => Status.Open == Status.Open;\n}\n",
+            "namespace App.Shared;\n\npublic enum Status\n{\n    case Open;\n\n\n}\n",
         ),
         (
             "app/Shared/Module.sharp",
@@ -938,11 +1000,12 @@ fn the_standard_library_module_binds_its_services_for_the_root_namespace() {
     }
 }
 
-/// Spec section 32: a test file's module applies while a test of a class the file declares runs, so the file hands
-/// its bindings to the container for each of its classes, as `\Sharp\Internal\testModule([...], [...])`, and returns
-/// nothing. Each row is the types the file declares beside its module and the classes the call names.
+/// Spec section 32: a test file's module applies while a test of the class the file declares runs, so the file hands
+/// its bindings to the container for its class, as `\Sharp\Internal\testModule('App\Shop\CheckoutTest', [...])`, and
+/// returns nothing. A file declares one type, spec section 27, so a second class beside the module is refused, and a
+/// file whose type is no class has no test, so it calls nothing.
 #[test]
-fn a_test_module_hands_its_bindings_to_the_container_for_each_class_its_file_declares() {
+fn a_test_module_hands_its_bindings_to_the_container_for_the_class_its_file_declares() {
     let library = [
         ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
         ("app/Mail/FakeMailer.sharp", "namespace App.Mail;\n\npublic class FakeMailer : Mailer\n{\n}\n"),
@@ -958,42 +1021,49 @@ fn a_test_module_hands_its_bindings_to_the_container_for_each_class_its_file_dec
         )
     };
 
-    for (types, classes) in [
-        ("public class CheckoutTest\n{\n}\n", vec!["App\\Shop\\CheckoutTest"]),
-        (
-            "public class CheckoutTest\n{\n}\n\npublic class RefundTest\n{\n}\n",
-            vec!["App\\Shop\\CheckoutTest", "App\\Shop\\RefundTest"],
-        ),
-        ("public class CheckoutTest\n{\n}\n\npublic interface Step\n{\n}\n", vec!["App\\Shop\\CheckoutTest"]),
-    ] {
-        let lowered = Lowered(common::checked("tests/Shop/CheckoutTest.sharp", &file(types), &library, lower));
-        let calls: Vec<u32> = (0..lowered.nodes().len() as u32)
+    let two = Lowered(common::checked(
+        "tests/Shop/CheckoutTest.sharp",
+        &file("public class CheckoutTest\n{\n}\n\npublic class RefundTest\n{\n}\n"),
+        &library,
+        lower,
+    ));
+    assert_eq!(
+        two.diagnostics(),
+        ["15:14 compile error: A `.sharp` file declares one type: move `RefundTest` to `RefundTest.sharp`."]
+    );
+
+    // Each call of `\Sharp\Internal\testModule` the file makes.
+    let calls = |lowered: &Lowered| -> Vec<u32> {
+        (0..lowered.nodes().len() as u32)
             .filter(|&node| {
                 lowered.nodes()[node as usize].kind == sharp_kind::SHARP_AST_CALL
                     && lowered.render(lowered.child(node, 0)) == "ZVAL \"Sharp\\\\Internal\\\\testModule\"\n"
             })
-            .collect();
-        let elements = classes
-            .iter()
-            .map(|class| format!("  ARRAY_ELEM\n    ZVAL {class:?}\n    null\n"))
-            .collect::<Vec<_>>()
-            .concat();
+            .collect()
+    };
+    let interface =
+        Lowered(common::checked("tests/Shop/Step.sharp", &file("public interface Step\n{\n}\n"), &library, lower));
+    assert_eq!(interface.diagnostics(), Vec::<String>::new());
+    assert_eq!(calls(&interface), Vec::<u32>::new());
 
-        assert_eq!(calls.len(), 1, "{types}");
-        assert_eq!(
-            lowered.render(lowered.child(lowered.child(calls[0], 1), 0)),
-            format!("ARRAY [3]\n{elements}"),
-            "{types}"
-        );
-        let root = lowered.root();
-        let statements = 0..lowered.nodes()[root as usize].child_count;
-        assert!(
-            statements
-                .map(|index| lowered.child(root, index))
-                .all(|statement| lowered.nodes()[statement as usize].kind != sharp_kind::SHARP_AST_RETURN),
-            "{types}: the file returns no binding table"
-        );
-    }
+    let lowered = Lowered(common::checked(
+        "tests/Shop/CheckoutTest.sharp",
+        &file("public class CheckoutTest\n{\n}\n"),
+        &library,
+        lower,
+    ));
+    let calls = calls(&lowered);
+
+    assert_eq!(calls.len(), 1);
+    assert_eq!(lowered.render(lowered.child(lowered.child(calls[0], 1), 0)), "ZVAL \"App\\\\Shop\\\\CheckoutTest\"\n");
+    let root = lowered.root();
+    let statements = 0..lowered.nodes()[root as usize].child_count;
+    assert!(
+        statements
+            .map(|index| lowered.child(root, index))
+            .all(|statement| lowered.nodes()[statement as usize].kind != sharp_kind::SHARP_AST_RETURN),
+        "the file returns no binding table"
+    );
 }
 
 /// Spec section 32: PHPUnit runs the methods `Before` and `After` mark in its own process and in a child one, so
@@ -2522,9 +2592,13 @@ fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
         "src/Upper.sharp",
         "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Upper : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.strtoupper(value);\n}\n",
     );
+    let trimmed = (
+        "src/Trimmed.sharp",
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n",
+    );
     let lowered = Lowered::with(
-        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n\npublic class Report\n{\n    public string name { get; set; } via Trimmed, Upper = \"\";\n}\n",
-        &[behavior, upper],
+        "namespace App;\n\npublic class Report\n{\n    public string name { get; set; } via Trimmed, Upper = \"\";\n}\n",
+        &[behavior, upper, trimmed],
     );
 
     assert_eq!(
@@ -2561,7 +2635,7 @@ fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
                       null
                       null
                       STMT_LIST
-                        PROPERTY_HOOK "get" @14-14
+                        PROPERTY_HOOK "get" @5-5
                           null
                           null
                           PROPERTY_HOOK_SHORT_BODY
@@ -2585,7 +2659,7 @@ fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
                                       ZVAL "name"
                           null
                           null
-                        PROPERTY_HOOK "set" @14-14
+                        PROPERTY_HOOK "set" @5-5
                           null
                           null
                           STMT_LIST
@@ -2645,7 +2719,7 @@ fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
         "#}
     );
     assert_eq!(
-        lowered.parameters_of("set"),
+        Lowered::with(trimmed.1, &[behavior]).parameters_of("set"),
         indoc! {r#"
             PARAM_LIST
               PARAM [64]
@@ -2676,15 +2750,19 @@ fn a_copy_gets_new_behaviors_after_its_parent_s_copy_runs() {
         "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
     );
     let named = ("src/Named.sharp", "namespace App;\n\npublic abstract class Named\n{\n}\n");
+    let trimmed = (
+        "src/Trimmed.sharp",
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n",
+    );
     let lowered = Lowered::with(
-        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n\npublic class Report : Named\n{\n    public string name { get; set; } via Trimmed = \"\";\n}\n",
-        &[behavior, named],
+        "namespace App;\n\npublic class Report : Named\n{\n    public string name { get; set; } via Trimmed = \"\";\n}\n",
+        &[behavior, named, trimmed],
     );
 
     assert_eq!(
         lowered.declared("__clone"),
         indoc! {r#"
-            METHOD [1] "__clone" @12-15
+            METHOD [1] "__clone" @3-6
               PARAM_LIST
               null
               STMT_LIST
@@ -2723,15 +2801,19 @@ fn a_generic_behavior_is_created_with_its_type_arguments() {
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
         "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
     );
+    let kept = (
+        "src/Kept.sharp",
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Kept<T> : Behavior<T>\n{\n    public T get(T value) => value;\n\n    public T set(T value) => value;\n}\n",
+    );
     let lowered = Lowered::with(
-        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Kept<T> : Behavior<T>\n{\n    public T get(T value) => value;\n\n    public T set(T value) => value;\n}\n\npublic class Report\n{\n    public int level { get; set; } via Kept<int> = 1;\n}\n",
-        &[behavior],
+        "namespace App;\n\npublic class Report\n{\n    public int level { get; set; } via Kept<int> = 1;\n}\n",
+        &[behavior, kept],
     );
 
     assert_eq!(
         lowered.declared("__construct"),
         indoc! {r#"
-            METHOD [1] "__construct" @12-15
+            METHOD [1] "__construct" @3-6
               PARAM_LIST
               null
               STMT_LIST
@@ -2997,8 +3079,8 @@ fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
 #[test]
 fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() {
     let lowered = Lowered::with(
-        "import Lib.Model;\nimport InvalidArgumentException;\n\nclass Order : Model\n{\n    public int price { get; set { if (value < 0) { throw new InvalidArgumentException(\"negative\"); } field = value; } } = 0;\n    public Address shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n}\n\nclass Address\n{\n}\n",
-        &[common::MODEL],
+        "import Lib.Model;\nimport InvalidArgumentException;\n\nclass Order : Model\n{\n    public int price { get; set { if (value < 0) { throw new InvalidArgumentException(\"negative\"); } field = value; } } = 0;\n    public Address shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n}\n",
+        &[common::MODEL, common::ADDRESS],
     );
 
     assert_eq!(
@@ -3096,8 +3178,8 @@ fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() 
 #[test]
 fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
     let lowered = Lowered::with(
-        "import Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n",
-        &[common::MODEL],
+        "import Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n",
+        &[common::MODEL, common::ADDRESS],
     );
 
     assert_eq!(
@@ -3482,33 +3564,34 @@ fn super_calls_the_constructor_a_base_class_gets_for_its_initial_values() {
         "src/Lib/Stamped.sharp",
         "namespace Lib;\n\npublic class Stamped\n{\n    public string stamp { get; set; } = global.strtoupper(\"p\");\n}\n",
     );
+    let own = (
+        "src/App/Tenant/Stamped.sharp",
+        "namespace App.Tenant;\n\nclass Stamped\n{\n    public string stamp { get; set; } = global.strtoupper(\"q\");\n}\n",
+    );
     let parent_construct = "  STATIC_CALL\n    ZVAL [1] \"parent\"\n    ZVAL \"__construct\"\n    ARG_LIST\n";
-    for (code, body) in [
+    for (code, library, body) in [
         (
             "namespace App.Tenant;\n\nimport Lib.Stamped;\n\nclass Report : Stamped\n{\n    public Report() : super() { }\n}\n",
+            base,
             format!("STMT_LIST\n{parent_construct}"),
         ),
         (
-            "namespace App.Tenant;\n\nclass Stamped\n{\n    public string stamp { get; set; } = global.strtoupper(\"q\");\n}\n\nclass Report : Stamped\n{\n    public Report() : super() { }\n}\n",
+            "namespace App.Tenant;\n\nclass Report : Stamped\n{\n    public Report() : super() { }\n}\n",
+            own,
             format!("STMT_LIST\n{parent_construct}"),
         ),
         (
             "namespace App.Tenant;\n\nimport Lib.Stamped;\n\nclass Report : Stamped\n{\n    private string extra = global.strtoupper(\"e\");\n}\n",
+            base,
             format!(
                 "STMT_LIST\n  ASSIGN\n    PROP\n      VAR\n        ZVAL \"this\"\n      ZVAL \"extra\"\n    CALL\n      ZVAL \"strtoupper\"\n      ARG_LIST\n        ZVAL \"e\"\n{parent_construct}"
             ),
         ),
     ] {
-        let lowered = Lowered::with(code, &[base]);
-        assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "{code}");
-        // `Report` is the file's last class, so its constructor is the last one.
-        let report = lowered
-            .nodes()
-            .iter()
-            .rposition(|node| node.kind == sharp_kind::SHARP_AST_METHOD && lowered.text(node.text) == "__construct")
-            .expect("Report declares a constructor") as u32;
+        let lowered = Lowered::with(code, &[library]);
 
-        assert_eq!(lowered.render(lowered.child(report, 2)), body, "{code}");
+        assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "{code}");
+        assert_eq!(lowered.render(lowered.child(lowered.method_named("__construct"), 2)), body, "{code}");
     }
 }
 
@@ -3557,14 +3640,18 @@ fn a_named_constructor_without_an_access_modifier_is_a_private_static_method() {
 
 #[test]
 fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
-    let lowered = Lowered::new(
-        "namespace App;\n\nclass Base\n{\n    public Base() { }\n    public string describe() => \"base\";\n}\n\nclass Report : Base\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) : super() { }\n\n    public Report.sized(int size, string ...notes) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = super.describe();\n        let read = () => { return this.label; };\n        let skip = () => { return; };\n    }\n}\n",
+    let lowered = Lowered::with(
+        "namespace App;\n\nclass Report : Base\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) : super() { }\n\n    public Report.sized(int size, string ...notes) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = super.describe();\n        let read = () => { return this.label; };\n        let skip = () => { return; };\n    }\n}\n",
+        &[(
+            "src/App/Base.sharp",
+            "namespace App;\n\nclass Base\n{\n    public Base() { }\n    public string describe() => \"base\";\n}\n",
+        )],
     );
 
     assert_eq!(
         lowered.render(lowered.method_named("sized")),
         indoc! {r#"
-            METHOD [17] "sized" @15-24
+            METHOD [17] "sized" @9-18
               PARAM_LIST
                 PARAM
                   ZVAL [1] "int"
@@ -3595,7 +3682,7 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                   ARG_LIST
                     VAR
                       ZVAL "this#1"
-                    CLOSURE "" @16-24
+                    CLOSURE "" @10-18
                       PARAM_LIST
                         PARAM
                           null
@@ -3634,7 +3721,7 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                         ASSIGN
                           VAR
                             ZVAL "read"
-                          CLOSURE "" @22-22
+                          CLOSURE "" @16-16
                             PARAM_LIST
                             null
                             STMT_LIST
@@ -3650,7 +3737,7 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                         ASSIGN
                           VAR
                             ZVAL "skip"
-                          CLOSURE "" @23-23
+                          CLOSURE "" @17-17
                             PARAM_LIST
                             null
                             STMT_LIST
@@ -3816,13 +3903,27 @@ fn a_named_constructor_of_a_generic_class_takes_the_class_type_arguments_as_its_
 /// method call binds the field to a reference first, so `items.add(item)` changes the list where it lives.
 #[test]
 fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own() {
-    let lowered = Lowered::new(
-        "namespace App;\n\nclass Order\n{\n}\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n\n    public static bool track(TItem item)\n    {\n        Counter<TItem>.count++;\n        Counter<TItem>.items.add(item);\n\n        return item is TItem;\n    }\n}\n\nclass Orders : Counter<Order>\n{\n}\n\nclass Report\n{\n    public static int run(Order order)\n    {\n        Counter<Order>.track(order);\n        Orders.track(order);\n        Orders.items.add(order);\n        Orders.count = 5;\n\n        return Orders.count;\n    }\n}\n",
+    let files = lowered_each(
+        &[
+            ("src/App/Order.sharp", "namespace App;\n\nclass Order\n{\n}\n"),
+            (
+                "src/App/Counter.sharp",
+                "namespace App;\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n\n    public static bool track(TItem item)\n    {\n        Counter<TItem>.count++;\n        Counter<TItem>.items.add(item);\n\n        return item is TItem;\n    }\n}\n",
+            ),
+            ("src/App/Orders.sharp", "namespace App;\n\nclass Orders : Counter<Order>\n{\n}\n"),
+            (
+                "src/App/Report.sharp",
+                "namespace App;\n\nclass Report\n{\n    public static int run(Order order)\n    {\n        Counter<Order>.track(order);\n        Orders.track(order);\n        Orders.items.add(order);\n        Orders.count = 5;\n\n        return Orders.count;\n    }\n}\n",
+            ),
+        ],
+        &[],
     );
-    let track = lowered.method_named("track");
+    let counter = class_in(&files, "Counter").0;
+    let lowered = class_in(&files, "Report").0;
+    let track = counter.method_named("track");
 
     assert_eq!(
-        lowered.render(lowered.child(track, 0)),
+        counter.render(counter.child(track, 0)),
         indoc! {r##"
             PARAM_LIST
               PARAM
@@ -3838,7 +3939,7 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
         "##}
     );
     assert_eq!(
-        lowered.render(lowered.child(track, 2)),
+        counter.render(counter.child(track, 2)),
         indoc! {r##"
             STMT_LIST
               POST_INC
@@ -3994,8 +4095,15 @@ fn a_generic_class_keeps_the_initial_values_of_its_static_fields_in_one_hidden_s
 /// type arguments stays PHP's `Order::class`.
 #[test]
 fn new_through_a_class_value_creates_the_class_with_the_type_arguments_it_carries() {
-    let lowered = Lowered::new(
-        "namespace App;\n\nclass Order\n{\n    public required Order()\n    {\n    }\n}\n\nclass Box<TItem>\n{\n    public required Box()\n    {\n    }\n}\n\nclass Report\n{\n    public static void run()\n    {\n        const type = typeof(Box<Order>);\n        const made = new (type)();\n        const page = new (type)<Order>();\n        const plain = new (typeof(Order))();\n    }\n}\n",
+    let lowered = Lowered::with(
+        "namespace App;\n\nclass Report\n{\n    public static void run()\n    {\n        const type = typeof(Box<Order>);\n        const made = new (type)();\n        const page = new (type)<Order>();\n        const plain = new (typeof(Order))();\n    }\n}\n",
+        &[
+            ("src/App/Order.sharp", "namespace App;\n\nclass Order\n{\n    public required Order()\n    {\n    }\n}\n"),
+            (
+                "src/App/Box.sharp",
+                "namespace App;\n\nclass Box<TItem>\n{\n    public required Box()\n    {\n    }\n}\n",
+            ),
+        ],
     );
 
     assert_eq!(
@@ -4045,8 +4153,15 @@ fn new_through_a_class_value_creates_the_class_with_the_type_arguments_it_carrie
 /// binds the field to a reference first, so `type.items.add(order)` changes the list where it lives.
 #[test]
 fn a_write_through_a_class_value_writes_the_static_field_of_the_type_arguments_it_carries() {
-    let lowered = Lowered::new(
-        "namespace App;\n\nclass Order\n{\n}\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n}\n\nclass Report\n{\n    public static void run(Order order)\n    {\n        const type = typeof(Counter<Order>);\n        type.count = 5;\n        type.items.add(order);\n    }\n}\n",
+    let lowered = Lowered::with(
+        "namespace App;\n\nclass Report\n{\n    public static void run(Order order)\n    {\n        const type = typeof(Counter<Order>);\n        type.count = 5;\n        type.items.add(order);\n    }\n}\n",
+        &[
+            ("src/App/Order.sharp", "namespace App;\n\nclass Order\n{\n}\n"),
+            (
+                "src/App/Counter.sharp",
+                "namespace App;\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n}\n",
+            ),
+        ],
     );
 
     assert_eq!(
@@ -7198,8 +7313,13 @@ fn a_write_into_a_list_a_hooked_property_holds_sets_it_through_the_property() {
 /// past parentheses too, so a parenthesized link is tested the same way.
 #[test]
 fn a_collection_method_after_a_null_safe_link_tests_the_link_around_the_function() {
-    let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Holder? holder, Holder other)\n    {\n        const lines = holder?.lines.count();\n        const next = other.next?.lines.count();\n        const made = holder?.make().count();\n        const parenthesized = (holder?.lines).count();\n    }\n}\n\nclass Holder\n{\n    public List<int> lines { get; private set; } = [];\n    public Holder? next { get; private set; } = null;\n\n    public List<int> make() => this.lines;\n}\n",
+    let holder = (
+        "src/App/Tenant/Holder.sharp",
+        "namespace App.Tenant;\n\nclass Holder\n{\n    public List<int> lines { get; private set; } = [];\n    public Holder? next { get; private set; } = null;\n\n    public List<int> make() => this.lines;\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Holder? holder, Holder other)\n    {\n        const lines = holder?.lines.count();\n        const next = other.next?.lines.count();\n        const made = holder?.make().count();\n        const parenthesized = (holder?.lines).count();\n    }\n}\n",
+        &[holder],
     );
 
     assert_eq!(
@@ -7420,8 +7540,9 @@ fn a_null_safe_set_method_tests_its_receiver_first() {
 /// statements.
 #[test]
 fn a_set_parameter_becomes_a_set_before_the_body_runs() {
+    let interface = Lowered::new("namespace App.Tenant;\n\ninterface Tagged\n{\n    void keep(Set<string> kept);\n}\n");
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\ninterface Tagged\n{\n    void keep(Set<string> kept);\n}\n\nclass Order\n{\n    public Order(public Set<string> tags { get; }, Set<int> ids) {}\n}\n",
+        "namespace App.Tenant;\n\nclass Order\n{\n    public Order(public Set<string> tags { get; }, Set<int> ids) {}\n}\n",
     );
     let body = |name: &str| lowered.render(lowered.child(lowered.method_named(name), 2));
 
@@ -7479,7 +7600,7 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
                 ZVAL "Set<string>, Set<int>"
         "#}
     );
-    assert_eq!(body("keep"), "null\n");
+    assert_eq!(interface.render(interface.child(interface.method_named("keep"), 2)), "null\n");
     assert_eq!(
         body("__construct"),
         indoc! {r#"
@@ -9441,43 +9562,27 @@ fn type_arguments_of_a_plain_php_new_lower_to_nothing_and_of_a_call_to_its_type_
 /// a generic type.
 #[test]
 fn a_class_like_metadata_holds_its_header_type_arguments_its_bounds_and_its_variance() {
-    let lowered = Lowered::with(
-        indoc! {"
-        namespace App;
-
-        public interface Query<TItem : DatabaseEntity>
-        {
-        }
-
-        public class Base<T>
-        {
-        }
-
-        public class Sub<T> : Base<List<T>>, Query<Order>
-        {
-        }
-
-        public class OrderPage : Base<Order>
-        {
-        }
-
-        public interface Feed<out TItem, in TKey, TValue>
-        {
-        }
-    "},
+    let files = lowered_each(
+        &[
+            ("src/App/Query.sharp", "namespace App;\n\npublic interface Query<TItem : DatabaseEntity>\n{\n}\n"),
+            ("src/App/Base.sharp", "namespace App;\n\npublic class Base<T>\n{\n}\n"),
+            ("src/App/Sub.sharp", "namespace App;\n\npublic class Sub<T> : Base<List<T>>, Query<Order>\n{\n}\n"),
+            ("src/App/OrderPage.sharp", "namespace App;\n\npublic class OrderPage : Base<Order>\n{\n}\n"),
+            ("src/App/Feed.sharp", "namespace App;\n\npublic interface Feed<out TItem, in TKey, TValue>\n{\n}\n"),
+        ],
         &[(
             "src/App/Entities.php",
             "<?php namespace App; abstract class DatabaseEntity {} final class Order extends DatabaseEntity {}",
         )],
     );
-    let metadata = |class: u32| {
-        let members = lowered.child(lowered.child(lowered.root(), class), 2);
+    let metadata = |lowered: &Lowered| {
+        let members = lowered.child(lowered.child(lowered.root(), 2), 2);
 
         lowered.render(lowered.child(members, lowered.nodes()[members as usize].child_count - 1))
     };
 
     assert_eq!(
-        [metadata(2), metadata(3), metadata(4), metadata(5), metadata(6)],
+        files.iter().map(metadata).collect::<Vec<_>>(),
         [
             indoc! {r#"
                 SHARP_CLASS_METADATA
@@ -9517,32 +9622,22 @@ fn a_class_like_metadata_holds_its_header_type_arguments_its_bounds_and_its_vari
 /// object plain PHP creates, which has no type argument to give it, and a text that names one would be open.
 #[test]
 fn a_bound_writes_a_type_parameter_of_its_own_class_as_any() {
-    let lowered = Lowered::with(
-        indoc! {"
-        namespace Demo;
-
-        public interface Comparable<T>
-        {
-        }
-
-        public class Sorted<TItem : Comparable<TItem>>
-        {
-        }
-
-        public class Ranked<TKey, TItem : Comparable<TKey>>
-        {
-        }
-    "},
-        &[],
-    );
-    let bounds = |class: u32| {
-        let members = lowered.child(lowered.child(lowered.root(), class), 2);
+    let comparable = ("src/Demo/Comparable.sharp", "namespace Demo;\n\npublic interface Comparable<T>\n{\n}\n");
+    let bounds = |declaration: &str| {
+        let lowered = Lowered::with(&format!("namespace Demo;\n\n{declaration}"), &[comparable]);
+        let members = lowered.child(lowered.child(lowered.root(), 2), 2);
         let metadata = lowered.child(members, lowered.nodes()[members as usize].child_count - 1);
 
         lowered.render(lowered.child(metadata, 1))
     };
 
-    assert_eq!([bounds(3), bounds(4)], ["ZVAL \"Demo.Comparable<Any?>\"\n", "ZVAL \"Any?, Demo.Comparable<Any?>\"\n"]);
+    assert_eq!(
+        [
+            bounds("public class Sorted<TItem : Comparable<TItem>>\n{\n}\n"),
+            bounds("public class Ranked<TKey, TItem : Comparable<TKey>>\n{\n}\n"),
+        ],
+        ["ZVAL \"Demo.Comparable<Any?>\"\n", "ZVAL \"Any?, Demo.Comparable<Any?>\"\n"]
+    );
 }
 
 /// A call of a generic method carries the type arguments the checker found, written or inferred, as the last child of
@@ -9557,19 +9652,38 @@ fn a_bound_writes_a_type_parameter_of_its_own_class_as_any() {
 /// plain PHP gives a method's own type parameters none, so a parameter of one is never checked either.
 #[test]
 fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata() {
-    let lowered = Lowered::with(
+    let entities = (
+        "src/App/Entities.php",
+        "<?php namespace App; abstract class DatabaseEntity {} final class Order extends DatabaseEntity {}",
+    );
+    let holder = (
+        "src/App/Holder.php",
+        "<?php namespace App; /** @template T */ final class Holder { /** @return T */ public function get(): mixed { return null; } }",
+    );
+    let r#box = ("src/App/Box.sharp", "namespace App;\n\npublic class Box<TValue>\n{\n    public Box() { }\n}\n");
+    let pair =
+        ("src/App/Pair.sharp", "namespace App;\n\npublic class Pair<TFirst, TSecond>\n{\n    public Pair() { }\n}\n");
+    let paginated = (
+        "src/App/PaginatedList.sharp",
         indoc! {"
         namespace App;
 
-        public class Box<TValue>
+        public class PaginatedList<TItem : DatabaseEntity>
         {
-            public Box() { }
-        }
+            public PaginatedList() { }
 
-        public class Pair<TFirst, TSecond>
-        {
-            public Pair() { }
+            public Pair<TItem, TOther> pairWith<TOther>() => new Pair<TItem, TOther>();
+
+            public Pair<TItem, TOther> again<TOther>() => this.pairWith<TOther>();
+
+            public int checks<TOther>(Box<TOther> box, Box<TItem> own, Pair<Box<TOther>, Order> nested) => 1;
         }
+    "},
+    );
+    let list = Lowered::with(paginated.1, &[entities, r#box, pair]);
+    let lowered = Lowered::with(
+        indoc! {"
+        namespace App;
 
         public class Repository
         {
@@ -9597,28 +9711,8 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
 
             public void types(Class<int|string> either, Class<int> number, Class<Any> anything) { }
         }
-
-        public class PaginatedList<TItem : DatabaseEntity>
-        {
-            public PaginatedList() { }
-
-            public Pair<TItem, TOther> pairWith<TOther>() => new Pair<TItem, TOther>();
-
-            public Pair<TItem, TOther> again<TOther>() => this.pairWith<TOther>();
-
-            public int checks<TOther>(Box<TOther> box, Box<TItem> own, Pair<Box<TOther>, Order> nested) => 1;
-        }
     "},
-        &[
-            (
-                "src/App/Entities.php",
-                "<?php namespace App; abstract class DatabaseEntity {} final class Order extends DatabaseEntity {}",
-            ),
-            (
-                "src/App/Holder.php",
-                "<?php namespace App; /** @template T */ final class Holder { /** @return T */ public function get(): mixed { return null; } }",
-            ),
-        ],
+        &[entities, holder, r#box, pair, paginated],
     );
 
     let call = |count: u32, type_arguments: &str| {
@@ -9684,7 +9778,7 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
         indoc! {r##"
             STMT_LIST
               RETURN
-                CLOSURE "" @25-25
+                CLOSURE "" @15-15
                   PARAM_LIST
                   CLOSURE_USES
                     ZVAL "\0<sharp>\0types"
@@ -9706,14 +9800,14 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
         indoc! {r##"
             STMT_LIST
               RETURN
-                CLOSURE "" @27-27
+                CLOSURE "" @17-17
                   PARAM_LIST
                   CLOSURE_USES
                     ZVAL "item"
                     ZVAL "\0<sharp>\0types"
                   STMT_LIST
                     RETURN
-                      CLOSURE "" @27-27
+                      CLOSURE "" @17-17
                         PARAM_LIST
                         CLOSURE_USES
                           ZVAL "item"
@@ -9741,7 +9835,7 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
         "##}
     );
     assert_eq!(
-        lowered.body_of("pairWith"),
+        list.body_of("pairWith"),
         indoc! {r##"
             STMT_LIST
               RETURN
@@ -9753,7 +9847,7 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
         "##}
     );
     assert_eq!(
-        lowered.body_of("again"),
+        list.body_of("again"),
         indoc! {r##"
             STMT_LIST
               RETURN
@@ -9779,11 +9873,10 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
     // A class all of whose type arguments are the method's own takes any object of it, and one that holds such a class
     // as its type argument checks the class.
     assert!(
-        lowered
-            .parameters_of("checks")
+        list.parameters_of("checks")
             .ends_with(&metadata(r#"ZVAL "Any?""#, r##"ZVAL "Any?, App.Box<$0>, App.Pair<App.Box<#0>, App.Order>""##)),
         "{}",
-        lowered.parameters_of("checks")
+        list.parameters_of("checks")
     );
     assert!(
         lowered.parameters_of("show").ends_with(&metadata("null", r#"ZVAL "App.PaginatedList<App.Order>, Any?""#)),
@@ -9805,9 +9898,9 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
         "{}",
         lowered.parameters_of("types")
     );
-    assert_eq!(lowered.parameters_of("pairWith"), format!("PARAM_LIST\n{}", metadata(r#"ZVAL "Any?""#, "null")));
+    assert_eq!(list.parameters_of("pairWith"), format!("PARAM_LIST\n{}", metadata(r#"ZVAL "Any?""#, "null")));
     assert!(!lowered.parameters_of("run").contains("SHARP_TYPE_ARGS"));
-    assert!(!lowered.parameters_of("__construct").contains("SHARP_TYPE_ARGS"));
+    assert!(!list.parameters_of("__construct").contains("SHARP_TYPE_ARGS"));
     assert!(!lowered.parameters_of("keep").contains("SHARP_TYPE_ARGS"), "{}", lowered.parameters_of("keep"));
 }
 
@@ -9818,16 +9911,16 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
 /// skips. A PHP# call's return, a call of a function a property holds and a type with nothing to check need none.
 #[test]
 fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
+    let r#box = ("src/App/Box.sharp", "namespace App;\n\npublic class Box<TValue>\n{\n    public Box() { }\n}\n");
+    let order = (
+        "src/App/Order.sharp",
+        "namespace App;\n\npublic class Order\n{\n    private static Box<Order>? latest = null;\n\n    public static Box<Order> make() => new Box<Order>();\n}\n",
+    );
     let lowered = Lowered::with(
         indoc! {"
         namespace App;
 
         import Lib.Pager;
-
-        public class Box<TValue>
-        {
-            public Box() { }
-        }
 
         public class Shelf<TItem>
         {
@@ -9883,15 +9976,10 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
 
             public void keep(Box<Order> box) { }
         }
-
-        public class Order
-        {
-            private static Box<Order>? latest = null;
-
-            public static Box<Order> make() => new Box<Order>();
-        }
         "},
         &[
+            r#box,
+            order,
             (
                 "src/Lib/Pager.php",
                 "<?php\n\nnamespace Lib;\n\nuse App\\Box;\n\nfinal class Pager\n{\n    /** @return Box<\\App\\Order> */\n    public static function orders(): Box\n    {\n        return new Box();\n    }\n\n    public static function count(): int\n    {\n        return 1;\n    }\n}\n",
@@ -9988,20 +10076,22 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
         ("hidden", "App.Box<App.Order>?"),
         ("fixed", "App.Box<App.Order>?"),
         ("created", "App.Box<App.Order>?"),
-        ("latest", "App.Box<App.Order>?"),
     ] {
         assert!(tree.contains(&typed(property, text)), "{property}: {tree}");
     }
+    let static_tree = Lowered::with(order.1, &[r#box]).tree();
+    assert!(static_tree.contains(&typed("latest", "App.Box<App.Order>?")), "latest: {static_tree}");
     for parameter in ["promoted", "frozen"] {
         let typed = format!(
             "SHARP_TYPE_ARGS\n              ZVAL [256] \"App\\\\Box\"\n              ZVAL \"App.Box<App.Order>?\"\n            ZVAL \"{parameter}\"\n"
         );
         assert!(tree.contains(&typed), "{parameter}: {tree}");
     }
-    // Each of the eight properties above, and no other: a method's result type holds its function type instead.
+    // Each of the seven properties of `Shelf` above, and no other: a method's result type holds its function type
+    // instead.
     assert_eq!(
         tree.matches("SHARP_TYPE_ARGS\n          ZVAL [256] \"App\\\\Box\"\n          ZVAL \"App.").count(),
-        8,
+        7,
         "{tree}"
     );
     // PHP's typed property check runs the check, so a property takes no `set` hook for it: only a written `set` or
@@ -10034,19 +10124,17 @@ fn a_collection_the_project_returns_from_plain_php_is_checked_element_by_element
 /// expression body. Each one's parameter list ends with the metadata that holds the parameter's type text.
 #[test]
 fn every_function_plain_php_calls_checks_its_parameters_type_arguments() {
-    let lowered = Lowered::new(indoc! {"
+    let library = [
+        ("src/App/Order.sharp", "namespace App;\n\npublic class Order\n{\n}\n"),
+        (
+            "src/App/PaginatedList.sharp",
+            "namespace App;\n\npublic class PaginatedList<TItem>\n{\n    public PaginatedList() { }\n}\n",
+        ),
+    ];
+    let event = Lowered::with("namespace App;\n\npublic event Paged(PaginatedList<Order> page);\n", &library);
+    let lowered = Lowered::with(
+        indoc! {"
         namespace App;
-
-        public event Paged(PaginatedList<Order> page);
-
-        public class Order
-        {
-        }
-
-        public class PaginatedList<TItem>
-        {
-            public PaginatedList() { }
-        }
 
         public class Shelf
         {
@@ -10066,10 +10154,12 @@ fn every_function_plain_php_calls_checks_its_parameters_type_arguments() {
                 };
             }
         }
-    "});
+    "},
+        &library,
+    );
     let metadata = |checks: &str| format!("  SHARP_TYPE_ARGS\n    null\n    ZVAL \"{checks}\"\n");
 
-    assert!(lowered.parameters_of("__construct").ends_with(&metadata("App.PaginatedList<App.Order>")));
+    assert!(event.parameters_of("__construct").ends_with(&metadata("App.PaginatedList<App.Order>")));
     assert!(lowered.parameters_of("of").ends_with(&metadata("App.PaginatedList<App.Order>")));
     assert!(lowered.parameters_of("op_Addition").ends_with(&metadata("Any?, App.PaginatedList<App.Order>")));
     assert_eq!(
@@ -10077,7 +10167,7 @@ fn every_function_plain_php_calls_checks_its_parameters_type_arguments() {
         indoc! {r#"
             STMT_LIST
               RETURN
-                ARROW_FUNC "" @22-22
+                ARROW_FUNC "" @11-11
                   PARAM_LIST
                     PARAM
                       ZVAL "App\\PaginatedList"
@@ -10106,7 +10196,7 @@ fn every_function_plain_php_calls_checks_its_parameters_type_arguments() {
                   ZVAL "seen"
                 ZVAL 0
               RETURN
-                CLOSURE "" @27-29
+                CLOSURE "" @16-18
                   PARAM_LIST
                     PARAM
                       ZVAL "App\\PaginatedList"
@@ -10192,30 +10282,18 @@ fn a_type_argument_a_plain_php_refinement_fixes_carries_its_php_sharp_text() {
 #[test]
 fn a_generic_call_on_a_value_of_a_type_parameter_carries_its_type_arguments() {
     let lowered = Lowered::with(
-        indoc! {"
-        namespace App;
-
-        public class Box<TValue>
-        {
-            public Box() { }
-        }
-
-        public class Shelf
-        {
-            public Shelf() { }
-
-            public Box<T> make<T>() => new Box<T>();
-        }
-
-        public class Store
-        {
-            public Box<Order> stock<TShelf : Shelf>(TShelf shelf) => shelf.make<Order>();
-        }
-    "},
-        &[(
-            "src/App/Entities.php",
-            "<?php namespace App; abstract class DatabaseEntity {} final class Order extends DatabaseEntity {}",
-        )],
+        "namespace App;\n\npublic class Store\n{\n    public Box<Order> stock<TShelf : Shelf>(TShelf shelf) => shelf.make<Order>();\n}\n",
+        &[
+            (
+                "src/App/Entities.php",
+                "<?php namespace App; abstract class DatabaseEntity {} final class Order extends DatabaseEntity {}",
+            ),
+            ("src/App/Box.sharp", "namespace App;\n\npublic class Box<TValue>\n{\n    public Box() { }\n}\n"),
+            (
+                "src/App/Shelf.sharp",
+                "namespace App;\n\npublic class Shelf\n{\n    public Shelf() { }\n\n    public Box<T> make<T>() => new Box<T>();\n}\n",
+            ),
+        ],
     );
 
     assert_eq!(
@@ -10241,16 +10319,18 @@ fn a_generic_call_on_a_value_of_a_type_parameter_carries_its_type_arguments() {
 /// for a type parameter, which no value is.
 #[test]
 fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs() {
+    let entities = (
+        "src/App/Entities.php",
+        "<?php namespace App; abstract class DatabaseEntity {} final class Order extends DatabaseEntity {}",
+    );
+    let r#box = (
+        "src/App/Box.sharp",
+        "namespace App;\n\npublic class Box<TValue>\n{\n    public Box() { }\n\n    public bool holds(Any value) => value is TValue;\n}\n",
+    );
+    let generic = Lowered::with(r#box.1, &[entities]);
     let lowered = Lowered::with(
         indoc! {"
         namespace App;
-
-        public class Box<TValue>
-        {
-            public Box() { }
-
-            public bool holds(Any value) => value is TValue;
-        }
 
         public class Shelf
         {
@@ -10265,10 +10345,7 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs
             public Class<T> kind<T>() => typeof(T);
         }
     "},
-        &[(
-            "src/App/Entities.php",
-            "<?php namespace App; abstract class DatabaseEntity {} final class Order extends DatabaseEntity {}",
-        )],
+        &[entities, r#box],
     );
 
     let test = |text: &str| {
@@ -10276,7 +10353,7 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs
     };
 
     assert_eq!(lowered.diagnostics(), Vec::<String>::new());
-    assert_eq!(lowered.body_of("holds"), test("$0"));
+    assert_eq!(generic.body_of("holds"), test("$0"));
     assert_eq!(lowered.body_of("boxed"), test("App.Box<App.Order>"));
     assert_eq!(lowered.body_of("kept"), test("#0"));
     assert_eq!(
@@ -10344,19 +10421,9 @@ fn typeof_of_a_type_that_is_no_class_spells_its_type() {
 /// declare its own.
 #[test]
 fn new_and_a_static_member_of_a_type_parameter_read_its_class_while_the_code_runs() {
-    let lowered = Lowered::new(indoc! {"
+    let lowered = Lowered::with(
+        indoc! {"
         namespace App;
-
-        public abstract class Maker
-        {
-            public const int LIMIT = 3;
-
-            public static int count { get; set; } = 0;
-
-            public required Maker(public int size { get; }) { }
-
-            public static int make() => 1;
-        }
 
         public class Builder<TItem : Maker>
         {
@@ -10371,7 +10438,12 @@ fn new_and_a_static_member_of_a_type_parameter_read_its_class_while_the_code_run
                 TItem.count = 2;
             }
         }
-    "});
+    "},
+        &[(
+            "src/App/Maker.sharp",
+            "namespace App;\n\npublic abstract class Maker\n{\n    public const int LIMIT = 3;\n\n    public static int count { get; set; } = 0;\n\n    public required Maker(public int size { get; }) { }\n\n    public static int make() => 1;\n}\n",
+        )],
+    );
 
     assert_eq!(lowered.diagnostics(), Vec::<String>::new());
     assert_eq!(
@@ -10422,41 +10494,54 @@ fn a_generic_method_call_on_a_list_carries_no_type_arguments() {
 /// gives it the method's own type argument at that index.
 #[test]
 fn new_of_a_generic_php_sharp_class_carries_its_type_arguments() {
-    let lowered = Lowered::with(
-        indoc! {"
-        namespace App;
+    let files = lowered_each(
+        &[
+            (
+                "src/App/PaginatedList.sharp",
+                indoc! {"
+                namespace App;
 
-        public class PaginatedList<TItem : DatabaseEntity, TKey>
-        {
-            public required PaginatedList(private List<TItem> rows)
-            {
-            }
+                public class PaginatedList<TItem : DatabaseEntity, TKey>
+                {
+                    public required PaginatedList(private List<TItem> rows)
+                    {
+                    }
 
-            public PaginatedList<TItem, TKey> copy() => new Self(this.rows);
+                    public PaginatedList<TItem, TKey> copy() => new Self(this.rows);
 
-            public PaginatedList<TItem, List<TKey>?> nested() => new PaginatedList<TItem, List<TKey>?>(this.rows);
-        }
+                    public PaginatedList<TItem, List<TKey>?> nested() => new PaginatedList<TItem, List<TKey>?>(this.rows);
+                }
+            "},
+            ),
+            (
+                "src/App/Report.sharp",
+                indoc! {"
+                namespace App;
 
-        public class Report
-        {
-            public PaginatedList<Order, int> run(List<Order> rows) => new PaginatedList<Order, int>(rows);
+                public class Report
+                {
+                    public PaginatedList<Order, int> run(List<Order> rows) => new PaginatedList<Order, int>(rows);
 
-            public PaginatedList<TItem, int> open<TItem : DatabaseEntity>(List<TItem> rows) => new PaginatedList<TItem, int>(rows);
-        }
-    "},
+                    public PaginatedList<TItem, int> open<TItem : DatabaseEntity>(List<TItem> rows) => new PaginatedList<TItem, int>(rows);
+                }
+            "},
+            ),
+        ],
         &[(
             "src/App/Entities.php",
             "<?php namespace App; abstract class DatabaseEntity {} final class Order extends DatabaseEntity {}",
         )],
     );
-    let last_member = |class: u32| {
-        let members = lowered.child(lowered.child(lowered.root(), class), 2);
+    let list = class_in(&files, "PaginatedList").0;
+    let lowered = class_in(&files, "Report").0;
+    let last_member = |lowered: &Lowered| {
+        let members = lowered.child(lowered.child(lowered.root(), 2), 2);
 
         lowered.child(members, lowered.nodes()[members as usize].child_count - 1)
     };
 
     assert_eq!(
-        lowered.render(last_member(2)),
+        list.render(last_member(list)),
         indoc! {r#"
             SHARP_CLASS_METADATA
               null
@@ -10464,7 +10549,7 @@ fn new_of_a_generic_php_sharp_class_carries_its_type_arguments() {
               null
         "#}
     );
-    assert_eq!(lowered.nodes()[last_member(3) as usize].kind, sharp_kind::SHARP_AST_METHOD);
+    assert_eq!(lowered.nodes()[last_member(lowered) as usize].kind, sharp_kind::SHARP_AST_METHOD);
     assert_eq!(
         lowered.body(),
         indoc! {r#"
@@ -10480,7 +10565,7 @@ fn new_of_a_generic_php_sharp_class_carries_its_type_arguments() {
         "#}
     );
     assert_eq!(
-        lowered.body_of("copy"),
+        list.body_of("copy"),
         indoc! {r#"
             STMT_LIST
               RETURN
@@ -10496,7 +10581,7 @@ fn new_of_a_generic_php_sharp_class_carries_its_type_arguments() {
         "#}
     );
     assert_eq!(
-        lowered.body_of("nested"),
+        list.body_of("nested"),
         indoc! {r#"
             STMT_LIST
               RETURN
@@ -10600,24 +10685,13 @@ fn an_object_type_is_the_object_name() {
 /// as php-src's grammar writes it. An abstract method has no statement list.
 #[test]
 fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_flags() {
-    let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nabstract class Shape\n{\n    public abstract float area();\n}\n\nfinal class Unit\n{\n}\n\ninterface Measured\n{\n    string label(int digits);\n}\n",
-    );
+    let tree = |declaration: &str| Lowered::new(&format!("namespace App.Tenant;\n\n{declaration}")).tree();
 
     assert_eq!(
-        lowered.tree(),
-        indoc! {r#"
-            STMT_LIST
-              DECLARE
-                CONST_DECL
-                  CONST_ELEM
-                    ZVAL "strict_types"
-                    ZVAL 1
-                    null
-                null
-              NAMESPACE
-                ZVAL "App\\Tenant"
-                null
+        tree("abstract class Shape\n{\n    public abstract float area();\n}\n"),
+        file_tree(
+            "App\\Tenant",
+            indoc! {r#"
               CLASS [64] "Shape" @3-6
                 null
                 null
@@ -10632,17 +10706,33 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                     null
                 null
                 null
-              CLASS [32] "Unit" @8-10
+        "#}
+        )
+    );
+    assert_eq!(
+        tree("final class Unit\n{\n}\n"),
+        file_tree(
+            "App\\Tenant",
+            indoc! {r#"
+              CLASS [32] "Unit" @3-5
                 null
                 null
                 STMT_LIST
                 null
                 null
-              CLASS [1] "Measured" @12-15
+        "#}
+        )
+    );
+    assert_eq!(
+        tree("interface Measured\n{\n    string label(int digits);\n}\n"),
+        file_tree(
+            "App\\Tenant",
+            indoc! {r#"
+              CLASS [1] "Measured" @3-6
                 null
                 null
                 STMT_LIST
-                  METHOD [1] "label" @14-14
+                  METHOD [1] "label" @5-5
                     PARAM_LIST
                       PARAM
                         ZVAL [1] "int"
@@ -10660,6 +10750,7 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                 null
                 null
         "#}
+        )
     );
 }
 
@@ -10805,40 +10896,41 @@ fn an_extern_method_outside_the_library_is_refused_before_lowering() {
 /// `extends` list does.
 #[test]
 fn a_header_is_the_parent_class_and_the_interface_name_list() {
-    let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Entity;\nimport Lib.Named;\n\ninterface Linkable : Named\n{\n}\n\nclass Page : Entity, Linkable\n{\n}\n",
-        &[("src/Lib/Entity.php", "<?php namespace Lib; interface Named {} class Entity {}")],
+    let entity = ("src/Lib/Entity.php", "<?php namespace Lib; interface Named {} class Entity {}");
+    let linkable = (
+        "src/App/Tenant/Linkable.sharp",
+        "namespace App.Tenant;\n\nimport Lib.Named;\n\ninterface Linkable : Named\n{\n}\n",
     );
+    let interface = Lowered::with(linkable.1, &[entity]);
+    let class = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Entity;\n\nclass Page : Entity, Linkable\n{\n}\n",
+        &[entity, linkable],
+    );
+    let file = |declaration: &str| file_tree("App\\Tenant", declaration);
 
     assert_eq!(
-        lowered.tree(),
-        indoc! {r#"
-            STMT_LIST
-              DECLARE
-                CONST_DECL
-                  CONST_ELEM
-                    ZVAL "strict_types"
-                    ZVAL 1
-                    null
-                null
-              NAMESPACE
-                ZVAL "App\\Tenant"
-                null
-              CLASS [1] "Linkable" @6-8
+        interface.tree(),
+        file(indoc! {r#"
+              CLASS [1] "Linkable" @5-7
                 null
                 NAME_LIST
                   ZVAL "Lib\\Named"
                 STMT_LIST
                 null
                 null
-              CLASS "Page" @10-12
+        "#})
+    );
+    assert_eq!(
+        class.tree(),
+        file(indoc! {r#"
+              CLASS "Page" @5-7
                 ZVAL "Lib\\Entity"
                 NAME_LIST
                   ZVAL "App\\Tenant\\Linkable"
                 STMT_LIST
                 null
                 null
-        "#}
+        "#})
     );
 }
 
@@ -10907,17 +10999,20 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
     // A method's type parameter bounded by the trait checks its bound, and the trait leaves an intersection to the
     // classes beside it.
     let lowered = Lowered::with(
-        "namespace App;\n\nimport Lib.HasLabel;\n\npublic interface Greeter\n{\n    string hi();\n}\n\npublic class Seeder\n{\n    public string bound<T : HasLabel>(T owner) => owner.label();\n\n    public string both<T : Greeter & HasLabel>(T owner) => owner.hi() + owner.label();\n}\n",
-        &[(
-            "src/Lib/HasLabel.php",
-            "<?php namespace Lib; trait HasLabel { public function label(): string { return 'label'; } }",
-        )],
+        "namespace App;\n\nimport Lib.HasLabel;\n\npublic class Seeder\n{\n    public string bound<T : HasLabel>(T owner) => owner.label();\n\n    public string both<T : Greeter & HasLabel>(T owner) => owner.hi() + owner.label();\n}\n",
+        &[
+            (
+                "src/Lib/HasLabel.php",
+                "<?php namespace Lib; trait HasLabel { public function label(): string { return 'label'; } }",
+            ),
+            ("src/App/Greeter.sharp", "namespace App;\n\npublic interface Greeter\n{\n    string hi();\n}\n"),
+        ],
     );
 
     assert_eq!(
         [lowered.declared("bound"), lowered.declared("both")].concat(),
         indoc! {r#"
-            METHOD [1] "bound" @12-12
+            METHOD [1] "bound" @7-7
               PARAM_LIST
                 PARAM
                   TYPE [8]
@@ -10941,7 +11036,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
                 ZVAL [1] "string"
                 ZVAL "string"
               null
-            METHOD [1] "both" @14-14
+            METHOD [1] "both" @9-9
               PARAM_LIST
                 PARAM
                   ZVAL "App\\Greeter"
@@ -10995,8 +11090,18 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
 /// can't clash with one.
 #[test]
 fn super_of_an_interface_calls_a_protected_alias_of_its_default_body() {
-    let lowered = Lowered::new(
-        "namespace App;\n\npublic interface Described\n{\n    string describe() => \"described\";\n}\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n\npublic class Both : Described, Told\n{\n    public override string describe() => super<Described>.describe() + super<Told>.describe();\n}\n",
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Both : Described, Told\n{\n    public override string describe() => super<Described>.describe() + super<Told>.describe();\n}\n",
+        &[
+            (
+                "src/App/Described.sharp",
+                "namespace App;\n\npublic interface Described\n{\n    string describe() => \"described\";\n}\n",
+            ),
+            (
+                "src/App/Told.sharp",
+                "namespace App;\n\npublic interface Told\n{\n    string describe() => \"told\";\n}\n",
+            ),
+        ],
     );
     let class = lowered
         .nodes()
@@ -11023,7 +11128,7 @@ fn super_of_an_interface_calls_a_protected_alias_of_its_default_body() {
                       ZVAL "App\\Told\\Defaults"
                       ZVAL "describe"
                     ZVAL "describe@App\\Told"
-              METHOD [1] "describe" @15-15
+              METHOD [1] "describe" @5-5
                 PARAM_LIST
                 null
                 STMT_LIST
@@ -11078,29 +11183,37 @@ fn super_of_an_interface_calls_a_protected_alias_of_its_default_body() {
 /// them too.
 #[test]
 fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interface_and_its_trait() {
-    let lowered = Lowered::with(
-        "namespace App;\n\nimport Lib.HasSlug;\nimport Lib.Model;\n\npublic interface HasDesign\n{\n    string designColumn { get; }\n    string designKey() => this.designColumn;\n    string title();\n}\n\npublic interface Labeled\n{\n    string label() => \"labeled\";\n}\n\npublic abstract class Page : Model, HasSlug, HasDesign\n{\n}\n\npublic abstract class Child : Page\n{\n}\n\npublic enum Shade : Labeled\n{\n    case Light;\n}\n\npublic event Painted(int id) : Labeled;\n",
+    let files = [
+        (
+            "src/App/HasDesign.sharp",
+            "namespace App;\n\npublic interface HasDesign\n{\n    string designColumn { get; }\n    string designKey() => this.designColumn;\n    string title();\n}\n",
+        ),
+        (
+            "src/App/Labeled.sharp",
+            "namespace App;\n\npublic interface Labeled\n{\n    string label() => \"labeled\";\n}\n",
+        ),
+        (
+            "src/App/Page.sharp",
+            "namespace App;\n\nimport Lib.HasSlug;\nimport Lib.Model;\n\npublic abstract class Page : Model, HasSlug, HasDesign\n{\n}\n",
+        ),
+        ("src/App/Child.sharp", "namespace App;\n\npublic abstract class Child : Page\n{\n}\n"),
+        ("src/App/Shade.sharp", "namespace App;\n\npublic enum Shade : Labeled\n{\n    case Light;\n}\n"),
+        ("src/App/Painted.sharp", "namespace App;\n\npublic event Painted(int id) : Labeled;\n"),
+    ];
+    let lowered = lowered_each(
+        &files,
         &[(
             "src/Lib/Model.php",
             "<?php namespace Lib; abstract class Model {} trait HasSlug { public function slug(): string { return 'slug'; } }",
         )],
     );
+    let tree = |name: &str| class_in(&lowered, name).0.tree();
+    let file = |declaration: &str| file_tree("App", declaration);
 
     assert_eq!(
-        lowered.tree(),
-        indoc! {r#"
-            STMT_LIST
-              DECLARE
-                CONST_DECL
-                  CONST_ELEM
-                    ZVAL "strict_types"
-                    ZVAL 1
-                    null
-                null
-              NAMESPACE
-                ZVAL "App"
-                null
-              CLASS [1] "HasDesign" @6-11
+        tree("HasDesign"),
+        file(indoc! {r#"
+              CLASS [1] "HasDesign" @3-8
                 null
                 null
                 STMT_LIST
@@ -11112,14 +11225,14 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                         null
                         null
                         STMT_LIST
-                          PROPERTY_HOOK "get" @8-8
+                          PROPERTY_HOOK "get" @5-5
                             null
                             null
                             null
                             null
                             null
                     null
-                  METHOD [1] "designKey" @9-9
+                  METHOD [1] "designKey" @6-6
                     PARAM_LIST
                     null
                     null
@@ -11127,7 +11240,7 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                       ZVAL [1] "string"
                       ZVAL "Function<string()>"
                     null
-                  METHOD [1] "title" @10-10
+                  METHOD [1] "title" @7-7
                     PARAM_LIST
                     null
                     null
@@ -11137,11 +11250,11 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     null
                 null
                 null
-              CLASS [2] "HasDesign\\Defaults" @6-11
+              CLASS [2] "HasDesign\\Defaults" @3-8
                 null
                 null
                 STMT_LIST
-                  METHOD [1] "designKey" @9-9
+                  METHOD [1] "designKey" @6-6
                     PARAM_LIST
                     null
                     STMT_LIST
@@ -11156,11 +11269,16 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     null
                 null
                 null
-              CLASS [1] "Labeled" @13-16
+        "#})
+    );
+    assert_eq!(
+        tree("Labeled"),
+        file(indoc! {r#"
+              CLASS [1] "Labeled" @3-6
                 null
                 null
                 STMT_LIST
-                  METHOD [1] "label" @15-15
+                  METHOD [1] "label" @5-5
                     PARAM_LIST
                     null
                     null
@@ -11170,11 +11288,11 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     null
                 null
                 null
-              CLASS [2] "Labeled\\Defaults" @13-16
+              CLASS [2] "Labeled\\Defaults" @3-6
                 null
                 null
                 STMT_LIST
-                  METHOD [1] "label" @15-15
+                  METHOD [1] "label" @5-5
                     PARAM_LIST
                     null
                     STMT_LIST
@@ -11186,7 +11304,12 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     null
                 null
                 null
-              CLASS [64] "Page" @18-20
+        "#})
+    );
+    assert_eq!(
+        tree("Page"),
+        file(indoc! {r#"
+              CLASS [64] "Page" @6-8
                 ZVAL "Lib\\Model"
                 NAME_LIST
                   ZVAL "App\\HasDesign"
@@ -11203,13 +11326,23 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                         ZVAL "designKey@App\\HasDesign"
                 null
                 null
-              CLASS [64] "Child" @22-24
+        "#})
+    );
+    assert_eq!(
+        tree("Child"),
+        file(indoc! {r#"
+              CLASS [64] "Child" @3-5
                 ZVAL "App\\Page"
                 null
                 STMT_LIST
                 null
                 null
-              CLASS [268435488] "Shade" @26-29
+        "#})
+    );
+    assert_eq!(
+        tree("Shade"),
+        file(indoc! {r#"
+              CLASS [268435488] "Shade" @3-6
                 null
                 NAME_LIST
                   ZVAL "App\\Labeled"
@@ -11230,7 +11363,12 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     null
                 null
                 null
-              CLASS [32] "Painted" @31-31
+        "#})
+    );
+    assert_eq!(
+        tree("Painted"),
+        file(indoc! {r#"
+              CLASS [32] "Painted" @3-3
                 null
                 NAME_LIST
                   ZVAL "App\\Labeled"
@@ -11244,7 +11382,7 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                           ZVAL "App\\Labeled\\Defaults"
                           ZVAL "label"
                         ZVAL "label@App\\Labeled"
-                  METHOD [1] "__construct" @31-31
+                  METHOD [1] "__construct" @3-3
                     PARAM_LIST
                       PARAM [129]
                         ZVAL [1] "int"
@@ -11259,15 +11397,16 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     null
                 null
                 null
-        "#}
+        "#})
     );
 
     // A struct and an enum with a case that carries data, whose class runs each case's class's methods, start with
     // the same `use`.
-    let lowered = Lowered::new(
-        "namespace App;\n\npublic interface Labeled\n{\n    string label() => \"labeled\";\n}\n\npublic struct Badge : Labeled\n{\n}\n\npublic enum Mark : Labeled\n{\n    case Plain;\n    case Tagged(string tag);\n}\n",
-    );
-    for name in ["Badge", "Mark"] {
+    for (name, code) in [
+        ("Badge", "namespace App;\n\npublic struct Badge : Labeled\n{\n}\n"),
+        ("Mark", "namespace App;\n\npublic enum Mark : Labeled\n{\n    case Plain;\n    case Tagged(string tag);\n}\n"),
+    ] {
+        let lowered = Lowered::with(code, &[files[1]]);
         let class = lowered
             .nodes()
             .iter()
@@ -11332,24 +11471,25 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
 /// the parent's, which `super<Shows>` still reaches through its alias.
 #[test]
 fn a_sub_interfaces_default_body_runs_instead_of_its_parents() {
-    let lowered = Lowered::new(
-        "namespace App;\n\npublic interface Shows\n{\n    string label() => \"shows\";\n\n    string tag => \"s\";\n}\n\npublic interface ShowsMore : Shows\n{\n    override string label() => \"more\";\n\n    override string tag => \"m\";\n}\n\npublic class Fancy : ShowsMore\n{\n}\n",
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Shows.sharp",
+                "namespace App;\n\npublic interface Shows\n{\n    string label() => \"shows\";\n\n    string tag => \"s\";\n}\n",
+            ),
+            (
+                "src/App/ShowsMore.sharp",
+                "namespace App;\n\npublic interface ShowsMore : Shows\n{\n    override string label() => \"more\";\n\n    override string tag => \"m\";\n}\n",
+            ),
+            ("src/App/Fancy.sharp", "namespace App;\n\npublic class Fancy : ShowsMore\n{\n}\n"),
+        ],
+        &[],
     );
-    let class = |name: &str| {
-        lowered
-            .nodes()
-            .iter()
-            .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == name)
-            .expect("the source declares the class") as u32
-    };
+    let member = |name: &str, path: &[u32]| member_in(&files, name, path);
 
     // The trait's body has no parent, so only the interface's signature carries `#[\Override]`.
     assert_eq!(
-        [
-            lowered.render(lowered.child(lowered.child(lowered.child(class("ShowsMore"), 2), 0), 4)),
-            lowered.render(lowered.child(lowered.child(lowered.child(class("ShowsMore\\Defaults"), 2), 0), 4)),
-        ]
-        .concat(),
+        [member("ShowsMore", &[0, 4]), member("ShowsMore\\Defaults", &[0, 4])].concat(),
         indoc! {r#"
             ATTRIBUTE_LIST
               ATTRIBUTE_GROUP
@@ -11361,14 +11501,14 @@ fn a_sub_interfaces_default_body_runs_instead_of_its_parents() {
     );
     // A computed property's body of the sub-interface replaces its parent's too.
     assert_eq!(
-        lowered.render(lowered.child(lowered.child(lowered.child(lowered.child(class("Fancy"), 2), 1), 1), 0)),
+        member("Fancy", &[1, 1, 0]),
         indoc! {r#"
             PROP_ELEM
               ZVAL "tag"
               null
               null
               STMT_LIST
-                PROPERTY_HOOK "get" @18-18
+                PROPERTY_HOOK "get" @4-4
                   null
                   null
                   PROPERTY_HOOK_SHORT_BODY
@@ -11382,7 +11522,7 @@ fn a_sub_interfaces_default_body_runs_instead_of_its_parents() {
         "#}
     );
     assert_eq!(
-        lowered.render(lowered.child(lowered.child(class("Fancy"), 2), 0)),
+        member("Fancy", &[0]),
         indoc! {r#"
             USE_TRAIT
               NAME_LIST
@@ -11432,25 +11572,38 @@ fn a_sub_interfaces_default_body_runs_instead_of_its_parents() {
 /// as its header, so the engine counts a default body's `$0` among the interface's type arguments.
 #[test]
 fn an_interface_computed_property_runs_its_default_body_through_a_protected_method_of_the_trait() {
-    let lowered = Lowered::new(
-        "namespace App;\n\npublic interface Tagged\n{\n    string tag => \"tagged\";\n}\n\npublic class Note : Tagged\n{\n}\n\npublic class Own : Tagged\n{\n    public override string tag => \"own\";\n}\n\npublic class Kept : Tagged\n{\n    public override string tag { get; set; } = \"kept\";\n}\n\npublic interface Keyed<TKey>\n{\n    TKey key();\n\n    bool holds(Any value) => value is TKey;\n}\n",
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Tagged.sharp",
+                "namespace App;\n\npublic interface Tagged\n{\n    string tag => \"tagged\";\n}\n",
+            ),
+            ("src/App/Note.sharp", "namespace App;\n\npublic class Note : Tagged\n{\n}\n"),
+            (
+                "src/App/Own.sharp",
+                "namespace App;\n\npublic class Own : Tagged\n{\n    public override string tag => \"own\";\n}\n",
+            ),
+            (
+                "src/App/Kept.sharp",
+                "namespace App;\n\npublic class Kept : Tagged\n{\n    public override string tag { get; set; } = \"kept\";\n}\n",
+            ),
+            (
+                "src/App/Keyed.sharp",
+                "namespace App;\n\npublic interface Keyed<TKey>\n{\n    TKey key();\n\n    bool holds(Any value) => value is TKey;\n}\n",
+            ),
+        ],
+        &[],
     );
-    let class = |name: &str| {
-        lowered
-            .nodes()
-            .iter()
-            .position(|node| node.kind == sharp_kind::SHARP_AST_CLASS && lowered.text(node.text) == name)
-            .expect("the source declares the class") as u32
-    };
+    let member = |name: &str, path: &[u32]| member_in(&files, name, path);
 
     assert_eq!(
         [
-            lowered.render(lowered.child(class("Tagged"), 2)),
-            lowered.render(lowered.child(class("Tagged\\Defaults"), 2)),
-            lowered.render(lowered.child(class("Note"), 2)),
-            lowered.render(lowered.child(lowered.child(class("Own"), 2), 1)),
-            lowered.render(lowered.child(lowered.child(class("Kept"), 2), 1)),
-            lowered.render(lowered.child(lowered.child(class("Keyed\\Defaults"), 2), 1)),
+            member("Tagged", &[]),
+            member("Tagged\\Defaults", &[]),
+            member("Note", &[]),
+            member("Own", &[1]),
+            member("Kept", &[1]),
+            member("Keyed\\Defaults", &[1]),
         ]
         .concat(),
         indoc! {r#"
@@ -11492,7 +11645,7 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
                     null
                     null
                     STMT_LIST
-                      PROPERTY_HOOK "get" @9-9
+                      PROPERTY_HOOK "get" @4-4
                         null
                         null
                         PROPERTY_HOOK_SHORT_BODY
@@ -11512,7 +11665,7 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
                   null
                   null
                   STMT_LIST
-                    PROPERTY_HOOK "get" @14-14
+                    PROPERTY_HOOK "get" @5-5
                       null
                       null
                       PROPERTY_HOOK_SHORT_BODY
@@ -11549,11 +11702,15 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
 /// `.sharp/listeners.php`, so a listener lowers to its method alone.
 #[test]
 fn a_listener_lowers_to_its_method_alone() {
-    let code = "namespace App;\n\npublic interface OrderEvent\n{\n    int orderId { get; }\n}\n\npublic event OrderPaid(int orderId) : OrderEvent;\n\npublic class Notices\n{\n    public void send(OrderEvent e) on OrderPaid { }\n\n    public void refresh() on OrderPaid, OrderEvent => this.send(new OrderPaid(1));\n}\n";
+    let library = [
+        ("src/App/OrderEvent.sharp", "namespace App;\n\npublic interface OrderEvent\n{\n    int orderId { get; }\n}\n"),
+        ("src/App/OrderPaid.sharp", "namespace App;\n\npublic event OrderPaid(int orderId) : OrderEvent;\n"),
+    ];
+    let code = "namespace App;\n\npublic class Notices\n{\n    public void send(OrderEvent e) on OrderPaid { }\n\n    public void refresh() on OrderPaid, OrderEvent => this.send(new OrderPaid(1));\n}\n";
 
     assert_eq!(
-        Lowered::new(code).tree(),
-        Lowered::new(&code.replace(" on OrderPaid, OrderEvent", "").replace(" on OrderPaid", "")).tree()
+        Lowered::with(code, &library).tree(),
+        Lowered::with(&code.replace(" on OrderPaid, OrderEvent", "").replace(" on OrderPaid", ""), &library).tree()
     );
 }
 
@@ -11678,8 +11835,14 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
 /// it hashes a struct.
 #[test]
 fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
-    let lowered = Lowered::new(
-        "namespace App;\n\npublic enum CheckoutState\n{\n    case Open;\n    case Paying(string gateway);\n\n    public string label() => \"checkout\";\n}\n\npublic class Shop\n{\n    public CheckoutState open() => CheckoutState.Open;\n    public CheckoutState pay() => CheckoutState.Paying(gateway: \"stripe\");\n    public bool same(CheckoutState a, CheckoutState b) => a == b;\n}\n",
+    let checkout_state = (
+        "src/App/CheckoutState.sharp",
+        "namespace App;\n\npublic enum CheckoutState\n{\n    case Open;\n    case Paying(string gateway);\n\n    public string label() => \"checkout\";\n}\n",
+    );
+    let lowered = Lowered::new(checkout_state.1);
+    let shop = Lowered::with(
+        "namespace App;\n\npublic class Shop\n{\n    public CheckoutState open() => CheckoutState.Open;\n    public CheckoutState pay() => CheckoutState.Paying(gateway: \"stripe\");\n    public bool same(CheckoutState a, CheckoutState b) => a == b;\n}\n",
+        &[checkout_state],
     );
 
     assert_eq!(
@@ -11830,11 +11993,18 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                     null
                 null
                 null
-              CLASS "Shop" @11-16
+        "#}
+    );
+    assert_eq!(
+        shop.tree(),
+        file_tree(
+            "App",
+            indoc! {r#"
+              CLASS "Shop" @3-8
                 null
                 null
                 STMT_LIST
-                  METHOD [1] "open" @13-13
+                  METHOD [1] "open" @5-5
                     PARAM_LIST
                     null
                     STMT_LIST
@@ -11847,7 +12017,7 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                       ZVAL "App\\CheckoutState"
                       ZVAL "Function<App.CheckoutState()>"
                     null
-                  METHOD [1] "pay" @14-14
+                  METHOD [1] "pay" @6-6
                     PARAM_LIST
                     null
                     STMT_LIST
@@ -11862,7 +12032,7 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                       ZVAL "App\\CheckoutState"
                       ZVAL "Function<App.CheckoutState()>"
                     null
-                  METHOD [1] "same" @15-15
+                  METHOD [1] "same" @7-7
                     PARAM_LIST
                       PARAM
                         ZVAL "App\\CheckoutState"
@@ -11896,6 +12066,7 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                 null
                 null
         "#}
+        )
     );
 }
 
@@ -11904,24 +12075,30 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
 /// list. An interface's get-only property, written bare, is a public property, `[1]`, with an abstract `get` hook.
 #[test]
 fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook() {
-    let lowered = Lowered::new(
-        "namespace App;\n\npublic interface OrderEvent\n{\n    int orderId { get; }\n}\n\npublic event OrderPaid(int orderId, int amount = 0) : OrderEvent;\n\npublic class Order\n{\n    public OrderPaid pay(int orderId) => new OrderPaid(orderId);\n}\n",
+    let files = lowered_each(
+        &[
+            (
+                "src/App/OrderEvent.sharp",
+                "namespace App;\n\npublic interface OrderEvent\n{\n    int orderId { get; }\n}\n",
+            ),
+            (
+                "src/App/OrderPaid.sharp",
+                "namespace App;\n\npublic event OrderPaid(int orderId, int amount = 0) : OrderEvent;\n",
+            ),
+            (
+                "src/App/Order.sharp",
+                "namespace App;\n\npublic class Order\n{\n    public OrderPaid pay(int orderId) => new OrderPaid(orderId);\n}\n",
+            ),
+        ],
+        &[],
     );
+    let tree = |name: &str| class_in(&files, name).0.tree();
 
     assert_eq!(
-        lowered.tree(),
-        indoc! {r#"
-            STMT_LIST
-              DECLARE
-                CONST_DECL
-                  CONST_ELEM
-                    ZVAL "strict_types"
-                    ZVAL 1
-                    null
-                null
-              NAMESPACE
-                ZVAL "App"
-                null
+        tree("OrderEvent"),
+        file_tree(
+            "App",
+            indoc! {r#"
               CLASS [1] "OrderEvent" @3-6
                 null
                 null
@@ -11943,12 +12120,20 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
                     null
                 null
                 null
-              CLASS [32] "OrderPaid" @8-8
+        "#}
+        )
+    );
+    assert_eq!(
+        tree("OrderPaid"),
+        file_tree(
+            "App",
+            indoc! {r#"
+              CLASS [32] "OrderPaid" @3-3
                 null
                 NAME_LIST
                   ZVAL "App\\OrderEvent"
                 STMT_LIST
-                  METHOD [1] "__construct" @8-8
+                  METHOD [1] "__construct" @3-3
                     PARAM_LIST
                       PARAM [129]
                         ZVAL [1] "int"
@@ -11970,11 +12155,19 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
                     null
                 null
                 null
-              CLASS "Order" @10-13
+        "#}
+        )
+    );
+    assert_eq!(
+        tree("Order"),
+        file_tree(
+            "App",
+            indoc! {r#"
+              CLASS "Order" @3-6
                 null
                 null
                 STMT_LIST
-                  METHOD [1] "pay" @12-12
+                  METHOD [1] "pay" @5-5
                     PARAM_LIST
                       PARAM
                         ZVAL [1] "int"
@@ -11998,6 +12191,7 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
                 null
                 null
         "#}
+        )
     );
 }
 
@@ -12723,13 +12917,14 @@ fn a_generic_super_call_through_a_plain_php_parent_carries_its_type_arguments() 
 /// The body of `run`, which calls `wrapper.wrap(order)` through `Wrapper`, the plain PHP class-like `plain` declares,
 /// whose `@template` method `wrap` the PHP# method `wrap` declares again in `SharpWrapper`.
 fn a_call_through_plain_php(wrap: &str, plain: &str) -> String {
-    let code = format!(
-        "namespace App;\n\npublic class SharpWrapper : Wrapper\n{{\n    {wrap} Box<T> wrap<T>(T item) => new Box<T>();\n}}\n\npublic class Report\n{{\n    public Box<Order> run(Wrapper wrapper, Order order) => wrapper.wrap(order);\n}}\n"
+    let sharp_wrapper = format!(
+        "namespace App;\n\npublic class SharpWrapper : Wrapper\n{{\n    {wrap} Box<T> wrap<T>(T item) => new Box<T>();\n}}\n"
     );
 
     Lowered::with(
-        &code,
+        "namespace App;\n\npublic class Report\n{\n    public Box<Order> run(Wrapper wrapper, Order order) => wrapper.wrap(order);\n}\n",
         &[
+            ("src/App/SharpWrapper.sharp", &sharp_wrapper),
             ("src/App/Box.sharp", "namespace App;\n\npublic class Box<TValue>\n{\n    public Box() { }\n}\n"),
             ("src/App/Wrapper.php", plain),
             ("src/App/Order.php", "<?php namespace App; final class Order {}"),
@@ -13131,8 +13326,9 @@ fn a_static_field_or_property_is_a_static_property_group() {
 /// reflection.
 #[test]
 fn a_static_property_with_type_arguments_has_its_type_text_around_its_type() {
-    let lowered = Lowered::new(
-        "namespace App;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Registry\n{\n    public static Box<int>? latest { get; set; } = null;\n\n    protected static Box<string>? inherited = null;\n\n    private static Box<int>? hidden = null;\n\n    public static Box<int>? last() => Registry.hidden;\n}\n",
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Registry\n{\n    public static Box<int>? latest { get; set; } = null;\n\n    protected static Box<string>? inherited = null;\n\n    private static Box<int>? hidden = null;\n\n    public static Box<int>? last() => Registry.hidden;\n}\n",
+        &[("src/App/Box.sharp", "namespace App;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n")],
     );
     let groups: Vec<String> = lowered
         .nodes()
@@ -14197,8 +14393,11 @@ fn a_method_value_through_an_intersection_bound_is_the_method_one_of_its_classes
 #[test]
 fn a_generic_method_value_is_a_closure_that_calls_the_method_with_its_type_arguments() {
     let lowered = Lowered::with(
-        "namespace App;\n\nimport Lib.Order;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\nclass Report\n{\n    public Box<T> box<T>(T item) => new Box<T>();\n\n    public Function<Box<Order>(Order)> run() => this.box;\n}\n",
-        &[("src/Lib/Order.php", "<?php namespace Lib; final class Order {}")],
+        "namespace App;\n\nimport Lib.Order;\n\nclass Report\n{\n    public Box<T> box<T>(T item) => new Box<T>();\n\n    public Function<Box<Order>(Order)> run() => this.box;\n}\n",
+        &[
+            ("src/Lib/Order.php", "<?php namespace Lib; final class Order {}"),
+            ("src/App/Box.sharp", "namespace App;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n"),
+        ],
     );
 
     assert_eq!(
@@ -14207,7 +14406,7 @@ fn a_generic_method_value_is_a_closure_that_calls_the_method_with_its_type_argum
             STMT_LIST
               RETURN
                 CALL
-                  CLOSURE "" @14-14
+                  CLOSURE "" @9-9
                     PARAM_LIST
                       PARAM
                         null
@@ -14219,7 +14418,7 @@ fn a_generic_method_value_is_a_closure_that_calls_the_method_with_its_type_argum
                     null
                     STMT_LIST
                       RETURN
-                        CLOSURE "" @14-14
+                        CLOSURE "" @9-9
                           PARAM_LIST
                             PARAM [16]
                               null
@@ -14256,8 +14455,8 @@ fn a_generic_method_value_is_a_closure_that_calls_the_method_with_its_type_argum
     // Inside a generic method, the value passes the method's own type argument on, so both closures capture the method's
     // hidden local.
     let generic = Lowered::with(
-        "namespace App;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\nclass Report\n{\n    public Box<T> box<T>(T item) => new Box<T>();\n\n    public Function<Box<T>(T)> boxer<T>() => this.box;\n}\n",
-        &[],
+        "namespace App;\n\nclass Report\n{\n    public Box<T> box<T>(T item) => new Box<T>();\n\n    public Function<Box<T>(T)> boxer<T>() => this.box;\n}\n",
+        &[("src/App/Box.sharp", "namespace App;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n")],
     );
     let boxer = generic.body_of("boxer");
 
@@ -14338,8 +14537,12 @@ fn a_property_of_a_plain_php_object_shape_is_a_property_read() {
 /// of that name.
 #[test]
 fn a_method_value_of_an_enum_value_is_a_first_class_callable() {
-    let lowered = Lowered::new(
-        "namespace App;\n\nenum Status\n{\n    case Active;\n\n    public string label() => \"active\";\n}\n\nclass Report\n{\n    public Function<string()> run(Status status) => status.label;\n}\n",
+    let lowered = Lowered::with(
+        "namespace App;\n\nclass Report\n{\n    public Function<string()> run(Status status) => status.label;\n}\n",
+        &[(
+            "src/App/Status.sharp",
+            "namespace App;\n\nenum Status\n{\n    case Active;\n\n    public string label() => \"active\";\n}\n",
+        )],
     );
 
     assert_eq!(
@@ -15090,11 +15293,15 @@ fn position_current_in_a_written_constructor_and_its_initial_values_names_the_co
 /// A computed property's body names the property, and an enum's method names the enum and the method.
 #[test]
 fn position_current_in_a_computed_property_or_an_enum_method_names_its_member() {
-    let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public string folder => Position.current().directory;\n}\n\nenum Status\n{\n    case Active;\n\n    public int line() => Position.current().line;\n}\n",
+    let class = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public string folder => Position.current().directory;\n}\n",
+    );
+    let r#enum = Lowered::new(
+        "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    public int line() => Position.current().line;\n}\n",
     );
 
-    assert_eq!(positions(&lowered), ["5:29 App.Tenant.Report.folder", "12:26 App.Tenant.Status.line"]);
+    assert_eq!(positions(&class), ["5:29 App.Tenant.Report.folder"]);
+    assert_eq!(positions(&r#enum), ["7:26 App.Tenant.Status.line"]);
 }
 
 /// ```php
@@ -15143,14 +15350,17 @@ fn position_current_in_an_initial_value_after_a_computed_property_names_the_cons
     assert_eq!(positions(&lowered), ["6:32 App.Tenant.Report.Report", "5:29 App.Tenant.Report.folder"]);
 }
 
-/// Each `Position.current()` as `line:column function`, in the order the bridge lowers them.
+/// Each new `Position` as `line:column function`, in the order the bridge lowers them.
 fn positions(lowered: &Lowered) -> Vec<String> {
     assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "the source lowers");
 
     lowered
         .written()
         .into_iter()
-        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_NEW)
+        .filter(|(index, node)| {
+            node.kind == sharp_kind::SHARP_AST_NEW
+                && lowered.text(lowered.nodes()[lowered.child(*index as u32, 0) as usize].text) == "Sharp\\Position"
+        })
         .map(|(index, node)| {
             let arguments = lowered.child(index as u32, 1);
             let argument = |index| &lowered.nodes()[lowered.child(arguments, index) as usize];
@@ -15185,6 +15395,54 @@ fn a_member_of_position_current_is_a_property_read_on_the_new_position() {
               RETURN
                 ZVAL 1
         "#}
+    );
+}
+
+/// ```php
+/// public static function logSlow(string $message, \Sharp\Position $caller = new \Sharp\Position(__FILE__, 5, 66, 'App.Reports.logSlow')): void {}
+/// public function run(): void
+/// {
+///     \App\Reports::logSlow('slow query', caller: new \Sharp\Position(__FILE__, 9, 9, 'App.Reports.run'));
+///     \App\Reports::logSlow('named', caller: new \Sharp\Position(__FILE__, 10, 42, 'App.Reports.run'));
+///     $log = \App\Reports::logSlow(...);
+///     $log('through a value');
+/// }
+/// ```
+///
+/// Spec section 27: as a parameter's default, `Position.current()` gives the caller's position, so a PHP# call that
+/// leaves the parameter out passes the start of the call, and one that names it passes its own. A call through a
+/// function value has no call the bridge knows, so it gets the default, the position of the declaration, as a plain PHP
+/// caller does.
+#[test]
+fn a_position_current_default_takes_the_position_of_the_php_sharp_call() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Reports\n{\n    public static void logSlow(string message, Position caller = Position.current()) { }\n\n    public void run()\n    {\n        Reports.logSlow(\"slow query\");\n        Reports.logSlow(\"named\", caller: Position.current());\n        const log = Reports.logSlow;\n        log(\"through a value\");\n    }\n}\n",
+    );
+
+    assert_eq!(positions(&lowered), ["5:66 App.Reports.logSlow", "9:9 App.Reports.run", "10:42 App.Reports.run"]);
+}
+
+/// ```php
+/// public function __construct(\Sharp\Position $made = new \Sharp\Position(__FILE__, 5, 33, 'App.Note.Note')) {}
+/// public function seen(int $times, \Sharp\Position $where = new \Sharp\Position(__FILE__, 7, 49, 'App.Note.seen')): int {}
+/// public static function make(): \App\Note
+/// {
+///     $note = new \App\Note(made: new \Sharp\Position(__FILE__, 14, 22, 'App.Note.make'));
+///     $note->seen(1, where: new \Sharp\Position(__FILE__, 15, 9, 'App.Note.make'));
+///     return $note;
+/// }
+/// ```
+///
+/// A constructor's parameter and an instance method's take the caller's position as a static method's does.
+#[test]
+fn a_position_current_default_of_a_constructor_or_an_instance_method_takes_the_callers_position() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Note\n{\n    public Note(Position made = Position.current()) { }\n\n    public int seen(int times, Position where = Position.current())\n    {\n        return times;\n    }\n\n    public static Note make()\n    {\n        const note = new Note();\n        note.seen(1);\n        return note;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        positions(&lowered),
+        ["5:33 App.Note.Note", "7:49 App.Note.seen", "14:22 App.Note.make", "15:9 App.Note.make"]
     );
 }
 
@@ -15272,8 +15530,12 @@ fn an_imported_or_declared_position_is_an_ordinary_static_call() {
             "<?php namespace App; final class Position { public static function current(): int { return 1; } }",
         )],
     );
-    let declared = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public int run()\n    {\n        Position.current();\n        return 1;\n    }\n}\n\nclass Position\n{\n    public static int current() => 1;\n}\n",
+    let declared = Lowered::with(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public int run()\n    {\n        Position.current();\n        return 1;\n    }\n}\n",
+        &[(
+            "src/App/Tenant/Position.sharp",
+            "namespace App.Tenant;\n\nclass Position\n{\n    public static int current() => 1;\n}\n",
+        )],
     );
 
     for (lowered, class) in [(imported, r#""App\\Position""#), (declared, r#""App\\Tenant\\Position""#)] {
@@ -17616,6 +17878,12 @@ fn try_without_a_catch_has_an_empty_catch_list() {
     );
 }
 
+/// `App\Failure`, a generic exception class.
+const FAILURE: (&str, &str) = (
+    "src/App/Failure.sharp",
+    "namespace App;\n\nimport RuntimeException;\n\npublic class Failure<TItem> : RuntimeException\n{\n}\n",
+);
+
 /// ```php
 /// try {
 ///     $extra += 1;
@@ -17642,16 +17910,12 @@ fn try_without_a_catch_has_an_empty_catch_list() {
 /// around this one still catches it.
 #[test]
 fn a_try_with_a_generic_catch_clause_catches_throwable_and_tests_each_clause_in_order() {
-    let lowered = Lowered::new(indoc! {"
+    let lowered = Lowered::with(
+        indoc! {"
         namespace App;
 
         import Exception;
         import LogicException;
-        import RuntimeException;
-
-        public class Failure<TItem> : RuntimeException
-        {
-        }
 
         public class Report
         {
@@ -17671,7 +17935,9 @@ fn a_try_with_a_generic_catch_clause_catches_throwable_and_tests_each_clause_in_
                 return extra;
             }
         }
-    "});
+    "},
+        &[FAILURE],
+    );
 
     assert_eq!(
         lowered.body(),
@@ -17760,13 +18026,13 @@ fn a_try_with_a_generic_catch_clause_catches_throwable_and_tests_each_clause_in_
 fn a_try_without_a_generic_catch_clause_keeps_its_catch_list_beside_one_with_it() {
     let source = |guarded: &str| {
         format!(
-            "namespace App;\n\nimport Exception;\nimport RuntimeException;\n\npublic class Failure<TItem> : RuntimeException\n{{\n}}\n\npublic class Report\n{{\n    public int plain(int extra)\n    {{\n        try {{\n            extra += 1;\n        }} catch (RuntimeException failure) {{\n            throw failure;\n        }} catch (Exception) {{\n        }}\n        return extra;\n    }}\n{guarded}}}\n"
+            "namespace App;\n\nimport Exception;\nimport RuntimeException;\n\npublic class Report\n{{\n    public int plain(int extra)\n    {{\n        try {{\n            extra += 1;\n        }} catch (RuntimeException failure) {{\n            throw failure;\n        }} catch (Exception) {{\n        }}\n        return extra;\n    }}\n{guarded}}}\n"
         )
     };
     let guarded = "\n    public int guarded(int extra)\n    {\n        try {\n            extra += 1;\n        } catch (Failure<int>) {\n        }\n        return extra;\n    }\n";
-    let alone = Lowered::new(&source(""));
+    let alone = Lowered::with(&source(""), &[FAILURE]);
 
-    assert_eq!(Lowered::new(&source(guarded)).body_of("plain"), alone.body_of("plain"));
+    assert_eq!(Lowered::with(&source(guarded), &[FAILURE]).body_of("plain"), alone.body_of("plain"));
     assert!(alone.body_of("plain").contains("CATCH\n        NAME_LIST\n          ZVAL \"RuntimeException\""));
 }
 
@@ -18400,8 +18666,12 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
 /// case, and each `Map` or `Set` it holds, at any depth, crossed too.
 #[test]
 fn a_map_or_set_property_carries_the_plan_a_php_array_crosses_by() {
-    let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Ledger\n{\n    public Map<string, int> stock { get; set; } = [:];\n    public Map<int, string> names { get; set; } = [:];\n    public Map<Status, int> counts { get; set; } = [:];\n    public Map<string, int>? spare { get; set; } = null;\n    public static Set<string> tags { get; set; } = [];\n    public Map<string, List<Set<int>>> shelves { get; set; } = [:];\n    public int count { get; set; } = 0;\n}\n",
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nclass Ledger\n{\n    public Map<string, int> stock { get; set; } = [:];\n    public Map<int, string> names { get; set; } = [:];\n    public Map<Status, int> counts { get; set; } = [:];\n    public Map<string, int>? spare { get; set; } = null;\n    public static Set<string> tags { get; set; } = [];\n    public Map<string, List<Set<int>>> shelves { get; set; } = [:];\n    public int count { get; set; } = 0;\n}\n",
+        &[(
+            "src/App/Tenant/Status.sharp",
+            "namespace App.Tenant;\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n",
+        )],
     );
     // The attribute list of `#[\Sharp\Crossing(plan)]`, with the plan's rendering indented under its `ARG_LIST`.
     let crossing = |plan: &str| {
@@ -20311,25 +20581,19 @@ fn an_int_backed_enum_is_a_final_enum_class_of_int_cases() {
 /// parent, so every name there is an interface.
 #[test]
 fn an_enum_header_is_the_interface_name_list() {
-    let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.HasLabel;\n\nenum Status : string, HasLabel, Sorted\n{\n    case Active = \"a\";\n}\n\nenum Suit : HasLabel\n{\n    case Hearts;\n}\n",
-        &[common::HAS_LABEL, ("src/App/Tenant/Sorted.php", "<?php namespace App\\Tenant; interface Sorted {}")],
-    );
+    let tree = |declaration: &str| {
+        Lowered::with(
+            &format!("namespace App.Tenant;\n\nimport Lib.HasLabel;\n\n{declaration}"),
+            &[common::HAS_LABEL, ("src/App/Tenant/Sorted.php", "<?php namespace App\\Tenant; interface Sorted {}")],
+        )
+        .tree()
+    };
 
     assert_eq!(
-        lowered.tree(),
-        indoc! {r#"
-            STMT_LIST
-              DECLARE
-                CONST_DECL
-                  CONST_ELEM
-                    ZVAL "strict_types"
-                    ZVAL 1
-                    null
-                null
-              NAMESPACE
-                ZVAL "App\\Tenant"
-                null
+        tree("enum Status : string, HasLabel, Sorted\n{\n    case Active = \"a\";\n}\n"),
+        file_tree(
+            "App\\Tenant",
+            indoc! {r#"
               CLASS [268435488] "Status" @5-8
                 null
                 NAME_LIST
@@ -20343,7 +20607,15 @@ fn an_enum_header_is_the_interface_name_list() {
                     null
                 null
                 ZVAL [1] "string"
-              CLASS [268435488] "Suit" @10-13
+        "#}
+        )
+    );
+    assert_eq!(
+        tree("enum Suit : HasLabel\n{\n    case Hearts;\n}\n"),
+        file_tree(
+            "App\\Tenant",
+            indoc! {r#"
+              CLASS [268435488] "Suit" @5-8
                 null
                 NAME_LIST
                   ZVAL "Lib\\HasLabel"
@@ -20356,6 +20628,7 @@ fn an_enum_header_is_the_interface_name_list() {
                 null
                 null
         "#}
+        )
     );
 }
 
@@ -20415,30 +20688,29 @@ fn an_enum_constant_is_a_class_constant_group_that_reads_a_case() {
 /// constant expressions, and a method body. A method called on a case is an instance call on that fetch.
 #[test]
 fn a_case_read_is_a_class_constant_in_every_place() {
+    let registry =
+        ("src/Lib/Registry.php", "<?php namespace Lib; final class Registry { public const string PAUSED = 'p'; }");
+    let status = (
+        "src/App/Tenant/Status.sharp",
+        "namespace App.Tenant;\n\nimport Lib.Registry;\n\npublic enum Status : string\n{\n    case Active = \"a\";\n    case Paused = Registry.PAUSED;\n\n    public const Status Default = Status.Active;\n\n    public bool active() => this == Status.Active;\n\n    public string label() => this.name;\n}\n",
+    );
+    let r#enum = Lowered::with(status.1, &[registry]);
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Registry;\n\npublic enum Status : string\n{\n    case Active = \"a\";\n    case Paused = Registry.PAUSED;\n\n    public const Status Default = Status.Active;\n\n    public bool active() => this == Status.Active;\n\n    public string label() => this.name;\n}\n\nclass Report\n{\n    public string run(Status status = Status.Active)\n    {\n        if (status == Status.Active) {\n            return Status.Active.label();\n        }\n        return Status.Default.label();\n    }\n}\n",
-        &[("src/Lib/Registry.php", "<?php namespace Lib; final class Registry { public const string PAUSED = 'p'; }")],
+        "namespace App.Tenant;\n\nclass Report\n{\n    public string run(Status status = Status.Active)\n    {\n        if (status == Status.Active) {\n            return Status.Active.label();\n        }\n        return Status.Default.label();\n    }\n}\n",
+        &[registry, status],
     );
-    let reads: Vec<String> = lowered
-        .nodes()
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_CLASS_CONST)
-        .map(|(index, _)| lowered.render(lowered.child(index as u32, 1)).trim_end().to_owned())
-        .collect();
+    let reads = |lowered: &Lowered| -> Vec<String> {
+        lowered
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_CLASS_CONST)
+            .map(|(index, _)| lowered.render(lowered.child(index as u32, 1)).trim_end().to_owned())
+            .collect()
+    };
 
-    assert_eq!(
-        reads,
-        [
-            "ZVAL \"PAUSED\"",
-            "ZVAL \"Active\"",
-            "ZVAL \"Active\"",
-            "ZVAL \"Active\"",
-            "ZVAL \"Active\"",
-            "ZVAL \"Active\"",
-            "ZVAL \"Default\"",
-        ]
-    );
+    assert_eq!(reads(&r#enum), ["ZVAL \"PAUSED\"", "ZVAL \"Active\"", "ZVAL \"Active\""]);
+    assert_eq!(reads(&lowered), ["ZVAL \"Active\"", "ZVAL \"Active\"", "ZVAL \"Active\"", "ZVAL \"Default\""]);
     assert_eq!(
         lowered.body(),
         indoc! {r#"
@@ -20704,12 +20976,24 @@ fn fixed_child_count(kind: sharp_kind) -> Option<u32> {
     }
 }
 
-/// The fixtures hold every construct the checker accepts, the standard library's own under the namespace `Sharp`, so
-/// the bridge lowers all of them, and each fixed-size node has the child count of its kind.
+/// The fixtures hold every construct the checker accepts, one file per type, the standard library's own under the
+/// namespace `Sharp`, so the bridge lowers all of them, each with the others scanned, and each fixed-size node has the
+/// child count of its kind.
 #[test]
 fn every_construct_of_the_slice_lowers_into_nodes_of_their_kinds_child_count() {
-    let slice = Lowered::with(
-        include_str!("../../semantics/tests/fixtures/slice.sharp"),
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../semantics/tests/fixtures/slice");
+    let slice: Vec<(String, String)> = std::fs::read_dir(folder)
+        .expect("the slice fixtures")
+        .map(|entry| {
+            let path = entry.expect("a slice fixture").path();
+            let name = path.file_name().expect("a file name").to_string_lossy().into_owned();
+
+            (format!("src/App/Tenant/{name}"), std::fs::read_to_string(&path).expect("a readable slice fixture"))
+        })
+        .collect();
+    let files: Vec<(&str, &str)> = slice.iter().map(|(path, code)| (path.as_str(), code.as_str())).collect();
+    let mut lowered = lowered_each(
+        &files,
         &[
             (
                 "src/Lib/Calc.php",
@@ -20728,13 +21012,15 @@ fn every_construct_of_the_slice_lowers_into_nodes_of_their_kinds_child_count() {
             common::FLOAT,
         ],
     );
-    let library = Lowered::named(
+    lowered.push(Lowered::named(
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp",
         include_str!("../../semantics/tests/fixtures/library.sharp"),
-    );
+    ));
 
-    for lowered in [slice, library] {
-        assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert_eq!(lowered.len(), 23, "the slice's 22 files and the library's");
+    let paths = files.iter().map(|(path, _)| *path).chain(["library.sharp"]);
+    for (lowered, path) in lowered.iter().zip(paths) {
+        assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "{path}");
 
         let wrong: Vec<String> = lowered
             .nodes()
@@ -20764,9 +21050,9 @@ fn each_node_carries_the_line_of_its_first_token() {
     );
 }
 
-/// The keys of the inline forms the standard library file `code` gives, in the order its methods are declared.
-fn form_names(code: &str) -> Vec<String> {
-    common::checked(TEXT.0, code, &[], inline_forms)
+/// The keys of the inline forms the standard library file `(path, code)` gives, in the order its methods are declared.
+fn form_names((path, code): (&str, &str)) -> Vec<String> {
+    common::checked(path, code, &[], inline_forms)
         .expect("the library file is checked")
         .into_iter()
         .map(|(name, _)| String::from_utf8_lossy(&name).into_owned())
@@ -20780,7 +21066,7 @@ fn form_names(code: &str) -> Vec<String> {
 /// `again` calls `Self`, which names the caller's class once copied there. `hidden` and `muted` are not public.
 #[test]
 fn a_method_whose_body_is_one_call_reading_each_slot_once_gives_an_inline_form() {
-    assert_eq!(form_names(TEXT.1), ["sharp\\text::shout", "sharp\\text::padded", "sharp\\text::wrapped"]);
+    assert_eq!(form_names(TEXT), ["sharp\\text::shout", "sharp\\text::padded", "sharp\\text::wrapped"]);
 }
 
 /// `Position.current()` in a standard library method is the position in the library's file, inside that method. Copied
@@ -20788,9 +21074,10 @@ fn a_method_whose_body_is_one_call_reading_each_slot_once_gives_an_inline_form()
 #[test]
 fn a_method_that_runs_position_current_gives_no_inline_form() {
     assert_eq!(
-        form_names(
+        form_names((
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Here.sharp",
             "namespace Sharp;\n\npublic class Here\n{\n    public static Position now() => Position.current();\n\n    public static string shout(string text) => global.strtoupper(text);\n}\n"
-        ),
+        )),
         ["sharp\\here::shout"]
     );
 }
@@ -25636,4 +25923,24 @@ fn readonly_lowers_to_the_same_php_as_without_it() {
     // The container fills `orders` with the service its PHP type, `array`, drops, and builds `ids` as a `Set`.
     assert!(plain.tree().contains(r#"ZVAL "list<app\\order>""#), "{}", plain.tree());
     assert_eq!(marked.tree(), plain.tree());
+}
+
+/// An enum declares no static member, and a file declares one type, so a case value reads a static member only of a
+/// class another file declares. The analyzer finds no constant of that name there.
+#[test]
+fn a_static_member_read_in_an_enum_case_value_is_an_error() {
+    let report = (
+        "src/App/Tenant/Report.sharp",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public static int count = 0;\n}\n",
+    );
+    let lowered =
+        Lowered::with("namespace App.Tenant;\n\nenum Tier : int\n{\n    case Low = Report.count;\n}\n", &[report]);
+
+    assert_eq!(
+        lowered.diagnostics(),
+        [
+            "5:23 compile error: Class-like constant `count` does not exist.",
+            "5:16 compile error: Invalid case value for `Tier.Low`. Expected `int`, but got `never`.",
+        ]
+    );
 }

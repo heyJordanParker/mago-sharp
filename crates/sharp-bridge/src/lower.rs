@@ -615,12 +615,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         {
             let line = self.line(*first);
             let table = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &bindings);
-            let statement = if self.tested {
-                self.test_module(checked, line, table)
+            if self.tested {
+                statements.extend(self.test_module(checked, line, table));
             } else {
-                self.node(SHARP_AST_RETURN, 0, line, &[table])
-            };
-            statements.push(statement);
+                statements.push(self.node(SHARP_AST_RETURN, 0, line, &[table]));
+            }
         }
 
         let root = self.node(SHARP_AST_STMT_LIST, 0, 1, &statements);
@@ -677,24 +676,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
     }
 
-    /// Spec section 32: a test file's module, the call `\Sharp\Internal\testModule([...], table)`, which hands the
-    /// container the module's bindings for each class the file declares, so the container uses them while a test of
-    /// one of those classes runs.
-    fn test_module(&mut self, checked: &CheckedProgram, line: u32, table: u32) -> u32 {
+    /// Spec section 32: a test file's module, the call `\Sharp\Internal\testModule('App\Shop\CheckoutTest', table)`,
+    /// which hands the container the module's bindings for the class the file declares, so the container uses them
+    /// while a test of that class runs. A file declares one type, spec section 27, and a file whose type is no class
+    /// has no test to run them in, so it calls nothing.
+    fn test_module(&mut self, checked: &CheckedProgram, line: u32, table: u32) -> Option<u32> {
         let names = Node::Program(checked.program()).filter_map(|node| match *node {
             Node::Class(class) => Some(self.names.get(&class.name)),
             _ => None,
         });
-        let mut classes = Vec::new();
-        for name in names {
-            let class = self.string(0, line, name);
-            classes.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[class, NULL]));
-        }
-        let classes = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &classes);
+        let class = self.string(0, line, names.first()?);
         let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\testModule");
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[classes, table]);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[class, table]);
 
-        self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+        Some(self.node(SHARP_AST_CALL, 0, line, &[function, arguments]))
     }
 
     /// Spec section 32: each test of a class a test file declares runs with the file's module, in PHPUnit's own
@@ -2273,10 +2268,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let callee =
                         self.types.parent_constructor(self.class).filter(|constructor| constructor.flags.is_sharp());
                     let line = self.line(initializer);
-                    let construct =
-                        self.call(&initializer.argument_list, None, parameters, callee, |this, arguments| {
-                            this.parent_construct(line, arguments)
-                        });
+                    let construct = self.call(
+                        Some(initializer.span()),
+                        &initializer.argument_list,
+                        None,
+                        parameters,
+                        callee,
+                        |this, arguments| this.parent_construct(line, arguments),
+                    );
                     statements.push(construct);
                 }
                 self.returns = method.return_type_hint.as_ref().map(|return_type| self.hint_type(&return_type.hint));
@@ -2619,9 +2618,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let parameters = self.types.new_parameters(name);
                     let callee = self.types.sharp_constructor(name);
 
-                    self.call(arguments, None, parameters, callee, |_, arguments| arguments)
+                    self.call(Some(instantiation.span()), arguments, None, parameters, callee, |_, arguments| arguments)
                 }
-                (_, Some(_)) => self.call(arguments, type_arguments.clone(), None, None, |_, arguments| arguments),
+                (_, Some(_)) => self.call(
+                    Some(instantiation.span()),
+                    arguments,
+                    type_arguments.clone(),
+                    None,
+                    None,
+                    |_, arguments| arguments,
+                ),
                 (None, None) => self.arguments(arguments),
             },
             None => self.node(SHARP_AST_ARG_LIST, 0, line, &[]),
@@ -4560,7 +4566,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     _ => (self.string(ZEND_NAME_FQ, self.line(function), function.value()), None),
                 };
 
-                self.call(argument_list, None, parameters, self.types.sharp_callee(expression), |this, arguments| {
+                // A call through a function value passes no caller's position, spec section 27, as a function type
+                // has no parameter for it.
+                let callee = self.types.sharp_callee(expression);
+                self.call(None, argument_list, None, parameters, callee, |this, arguments| {
                     this.node(SHARP_AST_CALL, 0, line, &[function, arguments])
                 })
             }
@@ -4632,9 +4641,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let parameters = self.types.call_parameters(expression);
                     let callee = self.types.sharp_callee(expression);
 
-                    return self.call(&call.argument_list, type_arguments, parameters, callee, |this, arguments| {
-                        this.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
-                    });
+                    return self.call(
+                        Some(call.span()),
+                        &call.argument_list,
+                        type_arguments,
+                        parameters,
+                        callee,
+                        |this, arguments| this.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]),
+                    );
                 }
 
                 let is_property_call = tested && self.is_property_call(expression, call.object);
@@ -4658,17 +4672,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let parameters = self.types.call_parameters(expression);
                 let callee = self.types.sharp_callee(expression);
 
-                self.call(&call.argument_list, type_arguments, parameters, callee, |this, arguments| {
-                    if is_property_call {
-                        let property = this.node(SHARP_AST_PROP, 0, line, &[object, method]);
+                self.call(
+                    Some(call.span()),
+                    &call.argument_list,
+                    type_arguments,
+                    parameters,
+                    callee,
+                    |this, arguments| {
+                        if is_property_call {
+                            let property = this.node(SHARP_AST_PROP, 0, line, &[object, method]);
 
-                        this.node(SHARP_AST_CALL, 0, line, &[property, arguments])
-                    } else if tested {
-                        this.node(SHARP_AST_METHOD_CALL, 0, line, &[object, method, arguments])
-                    } else {
-                        this.node(SHARP_AST_NULLSAFE_METHOD_CALL, 0, line, &[object, method, arguments])
-                    }
-                })
+                            this.node(SHARP_AST_CALL, 0, line, &[property, arguments])
+                        } else if tested {
+                            this.node(SHARP_AST_METHOD_CALL, 0, line, &[object, method, arguments])
+                        } else {
+                            this.node(SHARP_AST_NULLSAFE_METHOD_CALL, 0, line, &[object, method, arguments])
+                        }
+                    },
+                )
             }
             // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static member
             // read through a class value, the extension's member, the method value, or the plain property read.
@@ -6680,14 +6701,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             let (parameters, callee) = (self.types.call_parameters(expression), self.types.sharp_callee(expression));
 
-            return self.call(&call.argument_list, None, parameters, callee, |this, arguments| {
+            return self.call(Some(call.span()), &call.argument_list, None, parameters, callee, |this, arguments| {
                 this.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             });
         }
         if let Some(class) = self.names.static_call_class(call)
             && is_current_position(self.names.get(&class.name), call)
         {
-            return self.current_position(class, call);
+            return self.position(class.span());
         }
         if self.types.is_lazy_operation(expression) {
             return self.lazy_operation(self.line(call), call.object, &call.method, &call.argument_list);
@@ -6742,7 +6763,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let parameters = self.types.call_parameters(expression);
         let callee = self.types.sharp_callee(expression);
 
-        self.call(&call.argument_list, type_arguments, parameters, callee, |this, arguments| {
+        self.call(Some(call.span()), &call.argument_list, type_arguments, parameters, callee, |this, arguments| {
             if property_call {
                 let property = this.node(SHARP_AST_PROP, 0, line, &[object, method]);
 
@@ -6808,7 +6829,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let parameters = self.types.call_parameters(expression);
         let callee = self.types.sharp_callee(expression);
 
-        self.call(&call.argument_list, type_arguments, parameters, callee, |this, arguments| {
+        self.call(Some(call.span()), &call.argument_list, type_arguments, parameters, callee, |this, arguments| {
             this.node(SHARP_AST_METHOD_CALL, 0, line, &[object, method, arguments])
         })
     }
@@ -6845,22 +6866,23 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.operator_call(line, extension.class, extension.name.as_bytes(), &values)
     }
 
-    /// Spec section 27: `Position.current()` in a body is the position where it is written, a new `Position` of the
-    /// file, the line and byte column of `Position`, and the function, as
-    /// `new \Sharp\Position(__FILE__, 9, 22, 'App.Tenant.Report.run')`. The engine compiles the file under its source's
-    /// absolute path, which `__FILE__` reads where the file runs, so the compiled file holds no path.
-    fn current_position(&mut self, class: &ConstantAccess, call: &MethodCall) -> u32 {
-        let (line, column) = self.lines.line_and_column(class.span().start.offset);
+    /// Spec section 27: the position `at` starts at, a new `Position` of the file, the line and byte column, and the
+    /// function, as `new \Sharp\Position(__FILE__, 9, 22, 'App.Tenant.Report.run')`. `Position.current()` in a body is
+    /// the position of its `Position`, and a parameter's default of it is the position of its own `Position` too, which
+    /// a plain PHP caller gets. A PHP# call passes its own start instead, as [`Self::sharp_arguments`] says. The engine
+    /// compiles the file under its source's absolute path, which `__FILE__` reads where the file runs, so the compiled
+    /// file holds no path.
+    fn position(&mut self, at: Span) -> u32 {
+        let (line, column) = self.lines.line_and_column(at.start.offset);
         let name = self.string(ZEND_NAME_FQ, line, b"Sharp\\Position");
         let file = self.node(SHARP_AST_MAGIC_CONST, SHARP_T_FILE, line, &[]);
         let line_number = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = i64::from(line));
         let column = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = i64::from(column));
         let function = self.function.clone();
         let function = self.string(0, line, &function);
-        let arguments =
-            self.node(SHARP_AST_ARG_LIST, 0, self.line(&call.argument_list), &[file, line_number, column, function]);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[file, line_number, column, function]);
 
-        self.node(SHARP_AST_NEW, 0, self.line(call), &[name, arguments])
+        self.node(SHARP_AST_NEW, 0, line, &[name, arguments])
     }
 
     /// Makes `name`, a member of the class-like being lowered, the function `Position.current()` gives, by its full
@@ -6900,10 +6922,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The arguments of `list` as the PHP# function, method or constructor `callee` takes them, each lazy plain PHP
-    /// source checked where it enters an `Iterable<T>` parameter, as [`Types::lazy_argument_checks`] says.
-    fn sharp_arguments(&mut self, list: &ArgumentList, callee: &FunctionLikeMetadata) -> Vec<u32> {
+    /// source checked where it enters an `Iterable<T>` parameter, as [`Types::lazy_argument_checks`] says. Each
+    /// parameter whose default is `Position.current()` that the call leaves out takes the call's position, spec section
+    /// 27, as the named argument `caller: new \Sharp\Position(__FILE__, 12, 9, 'App.Reports.run')` of the call that
+    /// starts at `site`. A call through a function value, which has no `site`, passes none, and so does a call that
+    /// spreads a list, because the list may hold that parameter's value.
+    fn sharp_arguments(&mut self, site: Option<Span>, list: &ArgumentList, callee: &FunctionLikeMetadata) -> Vec<u32> {
         let checks = self.types.lazy_argument_checks(callee, list);
-        list.arguments
+        let mut arguments: Vec<u32> = list
+            .arguments
             .iter()
             .enumerate()
             .map(|(position, argument)| match (argument, checks.get(position)) {
@@ -6916,7 +6943,30 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 (Argument::Positional(positional), _) => self.positional_argument(positional),
                 (Argument::Named(named), _) => self.named_argument(named),
             })
-            .collect()
+            .collect();
+        let Some(site) = site.filter(|_| !list.arguments.iter().any(|argument| argument.is_unpacked())) else {
+            return arguments;
+        };
+        let positional =
+            list.arguments.iter().take_while(|argument| matches!(argument, Argument::Positional(_))).count();
+        for parameter in
+            callee.parameters.iter().skip(positional).filter(|parameter| parameter.flags.is_caller_position())
+        {
+            let name = &parameter.name.0.as_bytes()[1..];
+            if list
+                .arguments
+                .iter()
+                .any(|argument| matches!(argument, Argument::Named(named) if named.name.value == name))
+            {
+                continue;
+            }
+            let line = self.line(site);
+            let name = self.string(0, line, name);
+            let position = self.position(site);
+            arguments.push(self.node(SHARP_AST_NAMED_ARG, 0, line, &[name, position]));
+        }
+
+        arguments
     }
 
     fn argument_nodes(&mut self, list: &ArgumentList) -> Vec<u32> {
@@ -6937,8 +6987,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text])
     }
 
-    /// The call `call` builds from its lowered arguments, where `parameters` are the parameters of the plain PHP
-    /// function, method or constructor it runs, or none for a PHP# one, and `type_arguments` the type arguments of a
+    /// The call `call` builds from its lowered arguments, which starts at `site`, or none for a call through a function
+    /// value, where `parameters` are the parameters of the plain PHP function, method or constructor it runs, or none
+    /// for a PHP# one, and `type_arguments` the type arguments of a
     /// generic method, which go last, as [`Self::type_arguments_argument`] writes them. A `Map` or a `Set` crosses into
     /// a plain PHP parameter whose declared type names `array` as a PHP array, spec section 12, and a `Set` without its
     /// positions: `\is_object($m) ? \iterator_to_array($m) : $m`, so null and a PHP array pass as they are. Any other
@@ -6948,6 +6999,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// [`Self::crossed`] makes the object of what plain PHP wrote.
     fn call(
         &mut self,
+        site: Option<Span>,
         list: &ArgumentList,
         type_arguments: Option<String>,
         parameters: Option<Vec<PlainParameter>>,
@@ -6957,7 +7009,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(list);
         let (mut arguments, written) = match (parameters, callee) {
             (Some(parameters), _) => self.crossing_arguments(list, &parameters),
-            (None, Some(callee)) => (self.sharp_arguments(list, callee), Vec::new()),
+            (None, Some(callee)) => (self.sharp_arguments(site, list, callee), Vec::new()),
             (None, None) => (self.argument_nodes(list), Vec::new()),
         };
         if let Some(type_arguments) = type_arguments {

@@ -279,8 +279,8 @@ const OBJECT: &[u8] = b"Object";
 ///   variadic parameter that declares a member or has a `void` type in a `.sharp` file only, as upstream Mago reports
 ///   neither. An optional parameter before a required one is an error, because PHP would make it required. A
 ///   variadic parameter is not a required one, as in PHP. A default of `Position.current()` of the standard library is
-///   not supported yet, because as a default it gives the caller's position, spec section 27, which waits for typed
-///   compilation.
+///   the caller's position, spec section 27, which a PHP# call passes. A default that reads one part of it, as
+///   `Position.current().line`, is an error, because the parameter takes the whole position.
 /// - Types: `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter in scope written by its short name,
 ///   generic types of these, function types `Function<R(P1, P2)>` of these, tuple types `[Money total, int count]` of
 ///   these but `void`, spec section 30, whose element names are optional and past four of which `check_tuple`
@@ -1434,18 +1434,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             ),
             Parameter,
         ) => Some(Parameter),
+        // Spec section 27: as a default, `Position.current()` is the caller's position, which a PHP# call passes.
+        (Node::FunctionLikeParameterDefaultValue(default), Parameter) if is_current_position(default.value, context) => {
+            None
+        }
         (Node::FunctionLikeParameterDefaultValue(default), Parameter)
-            if let Expression::Call(Call::Method(call)) = default.value
-                && let Some(class) = context.names.static_call_class(call)
-                && context.names.get(&class.name).eq_ignore_ascii_case(b"Sharp\\Position")
-                && let ClassLikeMemberSelector::Identifier(method) = &call.method
-                && method.value.eq_ignore_ascii_case(b"current") =>
+            if let Expression::Access(Access::Property(access)) = default.value
+                && is_current_position(access.object, context) =>
         {
             context.report(
-                Issue::error("A `Position.current()` default is not supported yet in PHP#.")
-                    .with_annotation(Annotation::primary(call.span()).with_message("Not supported yet."))
+                Issue::error("Take the whole position: `Position caller = Position.current()`.")
+                    .with_annotation(Annotation::primary(default.value.span()).with_message("One part of the position."))
                     .with_note(
-                        "As a parameter's default, `Position.current()` gives the caller's position, which waits for typed compilation.",
+                        "As a default, `Position.current()` gives the caller's position, and the parameter takes all of it, as one value.",
                     ),
             );
 
@@ -4049,6 +4050,15 @@ fn is_key_hint(hint: &Hint) -> bool {
     }
 }
 
+/// Whether `expression` is the standard library's `Position.current()`, spec section 27.
+fn is_current_position(expression: &Expression, context: &Context<'_, '_, '_>) -> bool {
+    matches!(expression, Expression::Call(Call::Method(call))
+        if context.names.static_call_class(call)
+            .is_some_and(|class| context.names.get(&class.name).eq_ignore_ascii_case(b"Sharp\\Position"))
+            && matches!(&call.method, ClassLikeMemberSelector::Identifier(method) if method.value.eq_ignore_ascii_case(b"current"))
+            && call.argument_list.arguments.is_empty())
+}
+
 /// Whether the slice has a type: the built-in types of spec section 24, or a class or a type parameter written by its
 /// short name, or a case of an enum written through the enum, as `PaymentResult.Paid` of spec section 20, or a
 /// nullable type, or `List<T>`, `Map<TKey, TValue>` or `Set<T>` of spec section 12, `Class<T>` of section 25 or a class
@@ -5494,6 +5504,8 @@ fn check_capitalized(name: &[u8], span: Span, context: &mut Context<'_, '_, '_>)
 /// `autoload-dev` maps, may declare the namespace it tests.
 #[inline]
 pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) {
+    check_one_type(program, context);
+
     let (classes, imports) = declarations(program);
     let name = first_namespace(program).and_then(|namespace| namespace.name.as_ref());
 
@@ -5604,6 +5616,59 @@ pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) 
             );
         }
     }
+}
+
+/// Spec section 27: a `.sharp` file that declares a type declares one, named like the file, case included, as Java
+/// names a public class's file, so a reader finds a type by its namespace and its file. A type is a class, interface,
+/// enum, struct or event. An `extern` line and a module are none, so an `extern` declaration file and
+/// a `Module.sharp` hold no type, and `is_module_file_statement` refuses any type a module file declares.
+fn check_one_type(program: &Program, context: &mut Context<'_, '_, '_>) {
+    if Module::is_declared_in(context.source_file) || Module::environment_of(context.source_file).is_some() {
+        return;
+    }
+
+    let types = file_types(program);
+    let Some((first, others)) = types.split_first() else {
+        return;
+    };
+
+    let file = context.source_file.name.rsplit(|&byte| byte == b'/').next().unwrap_or_default();
+    let stem = file.strip_suffix(b".sharp").unwrap_or(file);
+    if first.value != stem {
+        let (file, name, stem) = (BytesDisplay(file), BytesDisplay(first.value), BytesDisplay(stem));
+        context.report(
+            Issue::error(format!("`{file}` declares `{name}`: rename the file `{name}.sharp`, or the type `{stem}`."))
+                .with_annotation(Annotation::primary(first.span).with_message("Declared here.")),
+        );
+    }
+
+    for other in others {
+        let name = BytesDisplay(other.value);
+        context.report(
+            Issue::error(format!("A `.sharp` file declares one type: move `{name}` to `{name}.sharp`."))
+                .with_annotation(Annotation::primary(other.span).with_message("A second type."))
+                .with_annotation(Annotation::secondary(first.span).with_message("The file's type.")),
+        );
+    }
+}
+
+/// The name of each type a PHP# file declares at its top level and in its first namespace, in source order.
+fn file_types<'ast, 'arena>(program: &'ast Program<'arena>) -> Vec<&'ast LocalIdentifier<'arena>> {
+    let statements = program.statements.iter();
+    // The slice refuses a second namespace, so its declarations are not the file's.
+    let namespaced = first_namespace(program).into_iter().flat_map(|namespace| namespace.statements().iter());
+
+    statements
+        .chain(namespaced)
+        .filter_map(|statement| match statement {
+            Statement::Class(class) => Some(&class.name),
+            Statement::Interface(interface) => Some(&interface.name),
+            Statement::Enum(r#enum) => Some(&r#enum.name),
+            Statement::Struct(r#struct) => Some(&r#struct.name),
+            Statement::Event(event) => Some(&event.name),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Checks a module's laws, spec section 28: each law's parameters as a class law's, and no two laws of one name,

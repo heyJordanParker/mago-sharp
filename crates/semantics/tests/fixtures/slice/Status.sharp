@@ -1,0 +1,38 @@
+namespace App.Tenant;
+
+import Lib.Field;
+import Lib.Entity;
+import Lib.HasLabel;
+
+[Entity("status"), Searchable]
+public enum Status : string, HasLabel
+{
+    public const Status DEFAULT = Status.Active;
+    public const int|string KEY = 1;
+    protected const (int|string)? CODE = null;
+
+    case Active = "active";
+    [Field("archived")]
+    case Archived = "archived";
+
+    public string title()
+    {
+        return this.value;
+    }
+
+    public string label()
+    {
+        return this == Status.Active ? "Active" : this.title();
+    }
+
+    public static Status parse(string value)
+    {
+        const all = Status.cases();
+        const fallback = Status.from("active");
+        return Status.tryFrom(value) ?? fallback;
+    }
+
+    public static Self first() => Status.Active;
+
+    public static List<Self> all() => Self.cases();
+}

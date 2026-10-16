@@ -99,6 +99,9 @@ impl MetadataFlags {
     pub const INTERNAL_REACH: MetadataFlags = MetadataFlags(1 << 59);
     /// A PHP# field, spec section 6: storage that is never a property, as `ReflectionProperty::isField()` tells.
     pub const FIELD: MetadataFlags = MetadataFlags(1 << 60);
+    /// A PHP# parameter whose default is `Position.current()`, spec section 27: a PHP# call that leaves it out passes
+    /// the caller's position, as C++20's `std::source_location::current()` default does.
+    pub const CALLER_POSITION: MetadataFlags = MetadataFlags(1 << 61);
 }
 
 impl MetadataFlags {
@@ -307,6 +310,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_field(self) -> bool {
         self.contains(Self::FIELD)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_caller_position(self) -> bool {
+        self.contains(Self::CALLER_POSITION)
     }
 
     #[inline]
@@ -610,6 +619,7 @@ mod tests {
             ("PROJECT", MetadataFlags::PROJECT),
             ("INTERNAL_REACH", MetadataFlags::INTERNAL_REACH),
             ("FIELD", MetadataFlags::FIELD),
+            ("CALLER_POSITION", MetadataFlags::CALLER_POSITION),
         ];
 
         let mut seen = MetadataFlags::empty();
