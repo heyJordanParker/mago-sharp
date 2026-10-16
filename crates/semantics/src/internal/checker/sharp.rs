@@ -1453,12 +1453,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         (Node::FunctionLikeParameterDefaultValue(default), Parameter)
-            if let Expression::Access(Access::Property(access)) = default.value
-                && is_current_position(access.object, context) =>
+            if !Node::Expression(default.value)
+                .filter_map(|node| match node {
+                    Node::Expression(expression) if is_current_position(expression, context) => Some(()),
+                    _ => None,
+                })
+                .is_empty() =>
         {
             context.report(
                 Issue::error("Take the whole position: `Position caller = Position.current()`.")
-                    .with_annotation(Annotation::primary(default.value.span()).with_message("One part of the position."))
+                    .with_annotation(
+                        Annotation::primary(default.value.span()).with_message("Computed from the position."),
+                    )
                     .with_note(
                         "As a default, `Position.current()` gives the caller's position, and the parameter takes all of it, as one value.",
                     ),
@@ -5530,9 +5536,9 @@ fn check_capitalized(name: &[u8], span: Span, context: &mut Context<'_, '_, '_>)
 /// `autoload-dev` maps, may declare the namespace it tests.
 #[inline]
 pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) {
-    check_one_type(program, context);
+    let Declarations { types, classes, imports } = declarations(program);
+    check_one_type(&types, context);
 
-    let (classes, imports) = declarations(program);
     let name = first_namespace(program).and_then(|namespace| namespace.name.as_ref());
 
     if let Some(FolderNamespace::Namespace(folder)) = &context.source_file.folder_namespace
@@ -5648,53 +5654,38 @@ pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) 
 /// names a public class's file, so a reader finds a type by its namespace and its file. A type is a class, interface,
 /// enum, struct or event. An `extern` line and a module are none, so an `extern` declaration file and
 /// a `Module.sharp` hold no type, and `is_module_file_statement` refuses any type a module file declares.
-fn check_one_type(program: &Program, context: &mut Context<'_, '_, '_>) {
+///
+/// The type named like the file is the file's own, and each other type moves to its own file. When none is, the
+/// first type is the file's own, which takes the file's name only when that name can name a type.
+fn check_one_type(types: &[&LocalIdentifier], context: &mut Context<'_, '_, '_>) {
     if Module::is_declared_in(context.source_file) || Module::environment_of(context.source_file).is_some() {
         return;
     }
 
-    let types = file_types(program);
-    let Some((first, others)) = types.split_first() else {
+    let file = context.source_file.name.rsplit(|&byte| byte == b'/').next().unwrap_or_default();
+    let stem = file.strip_suffix(b".sharp").unwrap_or(file);
+    let Some(own) = types.iter().find(|name| name.value == stem).or_else(|| types.first()) else {
         return;
     };
 
-    let file = context.source_file.name.rsplit(|&byte| byte == b'/').next().unwrap_or_default();
-    let stem = file.strip_suffix(b".sharp").unwrap_or(file);
-    if first.value != stem {
-        let (file, name, stem) = (BytesDisplay(file), BytesDisplay(first.value), BytesDisplay(stem));
+    if own.value != stem {
+        let (file, name) = (BytesDisplay(file), BytesDisplay(own.value));
+        let names_a_type = stem.first().is_some_and(u8::is_ascii_uppercase) && stem.iter().all(is_part_of_identifier);
+        let or_the_type = if names_a_type { format!(", or the type `{}`", BytesDisplay(stem)) } else { String::new() };
         context.report(
-            Issue::error(format!("`{file}` declares `{name}`: rename the file `{name}.sharp`, or the type `{stem}`."))
-                .with_annotation(Annotation::primary(first.span).with_message("Declared here.")),
+            Issue::error(format!("`{file}` declares `{name}`: rename the file `{name}.sharp`{or_the_type}."))
+                .with_annotation(Annotation::primary(own.span).with_message("Declared here.")),
         );
     }
 
-    for other in others {
+    for other in types.iter().filter(|other| other.span != own.span) {
         let name = BytesDisplay(other.value);
         context.report(
             Issue::error(format!("A `.sharp` file declares one type: move `{name}` to `{name}.sharp`."))
                 .with_annotation(Annotation::primary(other.span).with_message("A second type."))
-                .with_annotation(Annotation::secondary(first.span).with_message("The file's type.")),
+                .with_annotation(Annotation::secondary(own.span).with_message("The file's type.")),
         );
     }
-}
-
-/// The name of each type a PHP# file declares at its top level and in its first namespace, in source order.
-fn file_types<'ast, 'arena>(program: &'ast Program<'arena>) -> Vec<&'ast LocalIdentifier<'arena>> {
-    let statements = program.statements.iter();
-    // The slice refuses a second namespace, so its declarations are not the file's.
-    let namespaced = first_namespace(program).into_iter().flat_map(|namespace| namespace.statements().iter());
-
-    statements
-        .chain(namespaced)
-        .filter_map(|statement| match statement {
-            Statement::Class(class) => Some(&class.name),
-            Statement::Interface(interface) => Some(&interface.name),
-            Statement::Enum(r#enum) => Some(&r#enum.name),
-            Statement::Struct(r#struct) => Some(&r#struct.name),
-            Statement::Event(event) => Some(&event.name),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Checks a module's laws, spec section 28: each law's parameters as a class law's, and no two laws of one name,
@@ -5949,43 +5940,57 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
     }
 }
 
-/// The classes, enums and imports a PHP# file declares at its top level and in its first namespace, in source order.
-fn declarations<'ast, 'arena>(
-    program: &'ast Program<'arena>,
-) -> (Vec<ClassLike<'ast, 'arena>>, Vec<&'ast UseItem<'arena>>) {
-    let mut classes = Vec::new();
-    let mut imports = Vec::new();
-    for statement in &program.statements {
-        collect_declarations(statement, &mut classes, &mut imports);
-    }
-
-    // The slice refuses a second namespace, so its declarations are not the file's.
-    for statement in first_namespace(program).into_iter().flat_map(|namespace| namespace.statements().iter()) {
-        collect_declarations(statement, &mut classes, &mut imports);
-    }
-
-    (classes, imports)
+/// What a PHP# file declares at its top level and in its first namespace, each in source order.
+#[derive(Default)]
+struct Declarations<'ast, 'arena> {
+    /// The name of each type: a class, interface, enum, struct or event.
+    types: Vec<&'ast LocalIdentifier<'arena>>,
+    /// Each class, struct and enum.
+    classes: Vec<ClassLike<'ast, 'arena>>,
+    imports: Vec<&'ast UseItem<'arena>>,
 }
 
-fn collect_declarations<'ast, 'arena>(
-    statement: &'ast Statement<'arena>,
-    classes: &mut Vec<ClassLike<'ast, 'arena>>,
-    imports: &mut Vec<&'ast UseItem<'arena>>,
-) {
-    match statement {
-        Statement::Class(class) => classes.push(ClassLike::of_class(class)),
-        Statement::Struct(r#struct) => classes.push(ClassLike::of_struct(r#struct)),
-        Statement::Enum(r#enum) => classes.push(ClassLike {
-            name: &r#enum.name,
-            span: r#enum.span(),
-            type_parameters: None,
-            members: &r#enum.members,
-            is_static: false,
-            is_foreign: false,
-        }),
-        Statement::Use(Use { items: UseItems::Sequence(sequence), .. }) => imports.extend(sequence.items.iter()),
-        _ => {}
+impl<'ast, 'arena> Declarations<'ast, 'arena> {
+    fn collect(&mut self, statement: &'ast Statement<'arena>) {
+        match statement {
+            Statement::Class(class) => {
+                self.types.push(&class.name);
+                self.classes.push(ClassLike::of_class(class));
+            }
+            Statement::Struct(r#struct) => {
+                self.types.push(&r#struct.name);
+                self.classes.push(ClassLike::of_struct(r#struct));
+            }
+            Statement::Enum(r#enum) => {
+                self.types.push(&r#enum.name);
+                self.classes.push(ClassLike {
+                    name: &r#enum.name,
+                    span: r#enum.span(),
+                    type_parameters: None,
+                    members: &r#enum.members,
+                    is_static: false,
+                    is_foreign: false,
+                });
+            }
+            Statement::Interface(interface) => self.types.push(&interface.name),
+            Statement::Event(event) => self.types.push(&event.name),
+            Statement::Use(Use { items: UseItems::Sequence(sequence), .. }) => {
+                self.imports.extend(sequence.items.iter())
+            }
+            _ => {}
+        }
     }
+}
+
+fn declarations<'ast, 'arena>(program: &'ast Program<'arena>) -> Declarations<'ast, 'arena> {
+    let mut declarations = Declarations::default();
+    // The slice refuses a second namespace, so its declarations are not the file's.
+    let namespaced = first_namespace(program).into_iter().flat_map(|namespace| namespace.statements().iter());
+    for statement in program.statements.iter().chain(namespaced) {
+        declarations.collect(statement);
+    }
+
+    declarations
 }
 
 /// Checks the name of a PHP# local or parameter, which runs as the PHP variable of the same name, and a
@@ -6389,7 +6394,7 @@ fn report_static_member_in_constant(
     span: Span,
     context: &mut Context<'_, '_, '_>,
 ) {
-    let declared = declarations(context.program).0.into_iter().any(|declared| {
+    let declared = declarations(context.program).classes.into_iter().any(|declared| {
         declared.name.value.eq_ignore_ascii_case(class.name.value()) && is_static_property(declared, member.value)
     });
     if !declared {
@@ -6412,12 +6417,12 @@ fn report_static_member_in_constant(
 /// The class or enum of a PHP# file whose body holds `span`, in any of the file's namespaces, because the walk checks
 /// the classes of a namespace it refuses too.
 fn enclosing_class<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> Option<ClassLike<'ast, 'arena>> {
-    let mut classes = Vec::new();
+    let mut declarations = Declarations::default();
     for statement in file_statements(program) {
-        collect_declarations(statement, &mut classes, &mut Vec::new());
+        declarations.collect(statement);
     }
 
-    classes.into_iter().find(|class| class.span.contains(&span.start))
+    declarations.classes.into_iter().find(|class| class.span.contains(&span.start))
 }
 
 /// Whether `value` is the initial value of a static member that runs as code once the class is built, which

@@ -354,9 +354,32 @@ fn a_sharp_file_is_named_like_its_type() {
         issues_in("app/Shop/Bill.sharp", code),
         ["3:14 `Bill.sharp` declares `Invoice`: rename the file `Invoice.sharp`, or the type `Bill`."]
     );
+
+    // The type is renamed to the file's name only when that name can name a type: capital first, then letters, digits
+    // and `_`.
+    for file in ["app/Shop/invoice.sharp", "app/Shop/store-helper.sharp", "app/Shop/Order.Extra.sharp"] {
+        let name = file.rsplit('/').next().expect("the path names a file");
+
+        assert_eq!(
+            issues_in(file, code),
+            [format!("3:14 `{name}` declares `Invoice`: rename the file `Invoice.sharp`.")],
+            "{file}"
+        );
+    }
+
+    // A type named like its file in lowercase gets the capital letter error, which renames the type.
     assert_eq!(
-        issues_in("app/Shop/invoice.sharp", code),
-        ["3:14 `invoice.sharp` declares `Invoice`: rename the file `Invoice.sharp`, or the type `invoice`."]
+        issues_in("app/Shop/invoice.sharp", "namespace App.Shop;\n\npublic class invoice\n{\n}\n"),
+        [
+            "3:14 `invoice` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
+        ]
+    );
+
+    // The type named like the file is the file's own wherever it sits, so each other type moves.
+    let second = "namespace App.Shop;\n\npublic class First\n{\n}\n\npublic class Second\n{\n}\n";
+    assert_eq!(
+        issues_in("app/Shop/Second.sharp", second),
+        ["3:14 A `.sharp` file declares one type: move `First` to `First.sharp`."]
     );
 
     // A misnamed file with a second type reports both: the rename and the move.
@@ -5118,13 +5141,20 @@ fn position_current_as_a_parameter_default_is_the_callers_position() {
     assert_eq!(issues(lambda), Vec::<String>::new());
 }
 
-/// The parameter takes the whole position, so a default that reads one part of `Position.current()` is an error that
-/// names the whole form.
+/// The parameter takes the whole position, so a default computed from `Position.current()`, one part of it or a value
+/// built from one, is an error that names the whole form.
 #[test]
-fn a_default_that_reads_one_part_of_position_current_is_an_error() {
+fn a_default_computed_from_position_current_is_an_error() {
     let code = "namespace App;\n\nclass Reports\n{\n    public static void logSlow(string message, int line = Position.current().line)\n    {\n    }\n}\n";
+    let next = leak(code.replace("Position.current().line", "Position.current().line + 1"));
+    let shouted = leak(code.replace("Position.current().line", "Position.current().file.toUpper()"));
+    let nullable =
+        leak(code.replace("int line = Position.current().line", "Position? line = Position.current() ?? null"));
 
     assert_eq!(issues(code), ["5:59 Take the whole position: `Position caller = Position.current()`."]);
+    assert_eq!(issues(next), ["5:59 Take the whole position: `Position caller = Position.current()`."]);
+    assert_eq!(issues(shouted), ["5:59 Take the whole position: `Position caller = Position.current()`."]);
+    assert_eq!(issues(nullable), ["5:65 Take the whole position: `Position caller = Position.current()`."]);
     assert_eq!(
         check_in_type_file(code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
         [[

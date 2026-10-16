@@ -155,9 +155,14 @@ impl<'input> Lexer<'input> {
     }
 
     /// Creates a new `Lexer` instance for a PHP# file, which starts in code. Its `"…"` strings never interpolate,
-    /// and its backtick strings are templates that interpolate only `${…}`.
+    /// and its backtick strings are templates that interpolate only `${…}`. An editor may save it with a UTF-8 byte
+    /// order mark, which is no code, so the lexer skips it.
     #[must_use]
-    pub(crate) fn sharp(input: Input<'input>, settings: LexerSettings) -> Lexer<'input> {
+    pub(crate) fn sharp(mut input: Input<'input>, settings: LexerSettings) -> Lexer<'input> {
+        if input.is_at(b"\xEF\xBB\xBF", false) {
+            input.skip(3);
+        }
+
         Lexer { sharp: true, ..Self::scripting(input, settings) }
     }
 
@@ -425,8 +430,12 @@ impl<'input> Lexer<'input> {
                     [b'<', b'<', b'='] => (TokenKind::LeftShiftEqual, 3),
                     [b'>', b'>', b'='] => (TokenKind::RightShiftEqual, 3),
                     [b'*', b'*', b'='] => (TokenKind::AsteriskAsteriskEqual, 3),
-                    // A `.sharp` file starts in code, so the parser reports a PHP opening tag there as PHP syntax.
+                    // A `.sharp` file starts in code, so the parser reports a PHP tag there as PHP syntax. A short tag is
+                    // `<?` before a space, so `List<?int>` stays the nullable type PHP writes, which the parser reports.
                     [b'<', b'?', _] if self.sharp && self.input.is_at(b"<?php", true) => (TokenKind::OpenTag, 5),
+                    [b'<', b'?', b'='] if self.sharp => (TokenKind::EchoTag, 3),
+                    [b'<', b'?', after] if self.sharp && after.is_ascii_whitespace() => (TokenKind::ShortOpenTag, 2),
+                    [b'<', b'?'] if self.sharp => (TokenKind::ShortOpenTag, 2),
                     [b'<', b'<', b'<'] if matches_start_of_heredoc_document(&self.input, 0) => {
                         let (length, whitespaces, label_length) = read_start_of_heredoc_document(&self.input, false, 0);
 

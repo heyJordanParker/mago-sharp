@@ -10,9 +10,16 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
+    /// Parses a PHP echo tag. A `.sharp` file has none, spec section 27, so there the tag is an error, and the file
+    /// parses on.
     pub(crate) fn parse_echo_tag(&mut self) -> Result<EchoTag<'arena>, ParseError> {
+        let tag = self.stream.eat_span(T!["<?="])?;
+        if self.dialect.is_sharp() {
+            self.errors.push(ParseError::PhpSyntaxInSharp(T!["<?="], tag));
+        }
+
         Ok(EchoTag {
-            tag: self.stream.eat_span(T!["<?="])?,
+            tag,
             values: {
                 let mut values = self.new_vec();
                 let mut commas = self.new_vec();

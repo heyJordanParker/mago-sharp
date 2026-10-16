@@ -2487,7 +2487,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         self.types.parent_constructor(self.class).filter(|constructor| constructor.flags.is_sharp());
                     let line = self.line(initializer);
                     let construct = self.call(
-                        Some(initializer.span()),
+                        Some(initializer.keyword.span),
                         &initializer.argument_list,
                         None,
                         parameters,
@@ -2747,7 +2747,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(initializer);
         let object = self.variable(initializer.keyword.span, b"this#1");
         let class = self.string(ZEND_NAME_FQ, line, self.class);
-        let arguments = self.arguments(&initializer.argument_list);
+        let callee = self.types.sharp_method(self.class, b"__construct");
+        let arguments = self.call(
+            Some(initializer.keyword.span),
+            &initializer.argument_list,
+            None,
+            None,
+            callee,
+            |_, arguments| arguments,
+        );
         let mut new = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
         if let Some(count) = self.static_type_parameters {
             let own = self.type_text(line, &type_parameters_text(count));
@@ -2834,18 +2842,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some(arguments) => match (class_name, &instantiation.constructor) {
                 (Some(name), None) => {
                     let parameters = self.types.new_parameters(name);
-                    let callee = self.types.sharp_constructor(name);
+                    let callee = self.types.sharp_method(name, b"__construct");
 
                     self.call(Some(instantiation.span()), arguments, None, parameters, callee, |_, arguments| arguments)
                 }
-                (_, Some(_)) => self.call(
-                    Some(instantiation.span()),
-                    arguments,
-                    type_arguments.clone(),
-                    None,
-                    None,
-                    |_, arguments| arguments,
-                ),
+                (_, Some(constructor)) => {
+                    let callee = class_name.and_then(|name| self.types.sharp_method(name, constructor.name.value));
+
+                    self.call(
+                        Some(instantiation.span()),
+                        arguments,
+                        type_arguments.clone(),
+                        None,
+                        callee,
+                        |_, arguments| arguments,
+                    )
+                }
                 (None, None) => self.arguments(arguments),
             },
             None => self.node(SHARP_AST_ARG_LIST, 0, line, &[]),
@@ -7120,8 +7132,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The member `extension`, which an extension adds, spec section 26, called with `arguments` or read on `receiver`:
     /// the call of the static method it runs as, `\App\TextExtensions::slug($title, '-')`, or the library's inline
     /// form of it, as `trim($name)` for `name.trim()`. The checker chose it from the type the code shows, so it runs
-    /// on any value of that type, an object of a subclass with its own member of that name too. A generic member's
-    /// call ends with its type arguments, as any generic call does.
+    /// on any value of that type, an object of a subclass with its own member of that name too. A call passes the
+    /// caller's position, as [`Self::caller_positions`] says, and a generic member's call ends with its type
+    /// arguments, as any generic call does.
     fn extension_access(
         &mut self,
         access: &Expression,
@@ -7140,6 +7153,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Argument::Positional(positional) => self.positional_argument(positional),
                 Argument::Named(named) => self.named_argument(named),
             });
+        }
+        // The receiver is the static method's first parameter.
+        if let Some(list) = arguments
+            && let Some(callee) = self.types.sharp_method(extension.class.as_bytes(), extension.name.as_bytes())
+        {
+            values.extend(self.caller_positions(access.span(), list, callee, 1));
         }
         if let Some(type_arguments) = self.types.extension_type_arguments(access) {
             let text = self.type_text(line, &type_arguments);
@@ -7205,11 +7224,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The arguments of `list` as the PHP# function, method or constructor `callee` takes them, each lazy plain PHP
-    /// source checked where it enters an `Iterable<T>` parameter, as [`Types::lazy_argument_checks`] says. Each
-    /// parameter whose default is `Position.current()` that the call leaves out takes the call's position, spec section
-    /// 27, as the named argument `caller: new \Sharp\Position(__FILE__, 12, 9, 'App.Reports.run')` of the call that
-    /// starts at `site`. A call through a function value, which has no `site`, passes none, and so does a call that
-    /// spreads a list, because the list may hold that parameter's value.
+    /// source checked where it enters an `Iterable<T>` parameter, as [`Types::lazy_argument_checks`] says, then the
+    /// caller's positions [`Self::caller_positions`] passes.
     fn sharp_arguments(&mut self, site: Option<Span>, list: &ArgumentList, callee: &FunctionLikeMetadata) -> Vec<u32> {
         let checks = self.types.lazy_argument_checks(callee, list);
         let mut arguments: Vec<u32> = list
@@ -7227,29 +7243,55 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 (Argument::Named(named), _) => self.named_argument(named),
             })
             .collect();
-        let Some(site) = site.filter(|_| !list.arguments.iter().any(|argument| argument.is_unpacked())) else {
-            return arguments;
-        };
-        let positional =
-            list.arguments.iter().take_while(|argument| matches!(argument, Argument::Positional(_))).count();
+        if let Some(site) = site {
+            arguments.extend(self.caller_positions(site, list, callee, 0));
+        }
+
+        arguments
+    }
+
+    /// Spec section 27: each parameter of `callee` whose default is `Position.current()` that the call starting at
+    /// `site` leaves out takes the call's position, as the named argument
+    /// `caller: new \Sharp\Position(__FILE__, 12, 9, 'App.Reports.run')`. `leading` counts the parameters the call
+    /// fills before `list`, as an extension's receiver. A spread fills each parameter from its own on, so a parameter a
+    /// spread's list may hold a value for keeps its default, the declaration's position, since passing it too would
+    /// pass it twice.
+    fn caller_positions(
+        &mut self,
+        site: Span,
+        list: &ArgumentList,
+        callee: &FunctionLikeMetadata,
+        leading: usize,
+    ) -> Vec<u32> {
+        let positional = leading
+            + list
+                .arguments
+                .iter()
+                .take_while(
+                    |argument| matches!(argument, Argument::Positional(positional) if positional.ellipsis.is_none()),
+                )
+                .count();
+        let mut positions = Vec::new();
         for parameter in
             callee.parameters.iter().skip(positional).filter(|parameter| parameter.flags.is_caller_position())
         {
             let name = &parameter.name.0.as_bytes()[1..];
-            if list
-                .arguments
-                .iter()
-                .any(|argument| matches!(argument, Argument::Named(named) if named.name.value == name))
-            {
+            let given = list.arguments.iter().any(|argument| match argument {
+                Argument::Named(named) => named.name.value == name,
+                Argument::Positional(positional) => {
+                    positional.ellipsis.is_some() && self.types.spread_can_fill(positional.value, parameter)
+                }
+            });
+            if given {
                 continue;
             }
             let line = self.line(site);
             let name = self.string(0, line, name);
             let position = self.position(site);
-            arguments.push(self.node(SHARP_AST_NAMED_ARG, 0, line, &[name, position]));
+            positions.push(self.node(SHARP_AST_NAMED_ARG, 0, line, &[name, position]));
         }
 
-        arguments
+        positions
     }
 
     fn argument_nodes(&mut self, list: &ArgumentList) -> Vec<u32> {

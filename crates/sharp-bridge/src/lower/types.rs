@@ -24,6 +24,7 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
@@ -690,9 +691,25 @@ impl<'analysis> Types<'analysis> {
         self.codebase.get_function_like(callee).filter(|metadata| metadata.flags.is_sharp())
     }
 
-    /// The constructor `new` runs for the fully qualified class name `class` when PHP# declares it.
-    pub(crate) fn sharp_constructor(&self, class: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
-        self.codebase.get_declaring_method(class, b"__construct").filter(|metadata| metadata.flags.is_sharp())
+    /// Whether the list the spread `spread` spreads may hold a value of `parameter`'s type, and so may fill it, as a
+    /// list of `Any` or of the parameter's own type does. A spread of anything but a `List` or a `Map` may fill any.
+    pub(crate) fn spread_can_fill(&self, spread: &Expression, parameter: &FunctionLikeParameterMetadata) -> bool {
+        let spread = self.expression_type(spread);
+        let Some(r#type) = parameter.type_metadata.as_ref().map(|metadata| &metadata.type_union) else {
+            return true;
+        };
+        if !spread.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_))) {
+            return true;
+        }
+
+        can_expression_types_be_identical(self.codebase, &self.element_type(spread), r#type, false, false)
+    }
+
+    /// The method `method` of the fully qualified class name `class` runs, where it declares it or inherits it, when
+    /// PHP# declares it: `__construct` for `new`, a named constructor, or the static method an extension's member runs
+    /// as.
+    pub(crate) fn sharp_method(&self, class: &[u8], method: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
+        self.codebase.get_declaring_method(class, method).filter(|metadata| metadata.flags.is_sharp())
     }
 
     /// The name PHP's return check gives `call`, as `Lib\Pager::orders()`, and the metadata of the plain PHP function or
