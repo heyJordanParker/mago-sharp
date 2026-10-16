@@ -189,6 +189,7 @@ where
 
     let mut flags = MetadataFlags::origin_flags(context.file.file_type);
     let is_sharp = context.program.dialect.is_sharp();
+    flags.set(MetadataFlags::RUNTIME_INITIAL_VALUE, is_sharp && property.initial_value_runs_after_class());
 
     match property {
         Property::Plain(plain_property) => {

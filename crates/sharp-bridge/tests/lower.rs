@@ -4221,6 +4221,111 @@ fn a_generic_class_runs_its_statics_initial_values_and_accessors_with_its_type_a
 }
 
 /// ```php
+/// \App\Tally::{'#entry'}(/* type args "App.Order" */)['made'] = 2;
+/// ${'statics#1'}[\array_key_exists('made', ${'statics#1'} = &\App\Tally::{'#entry'}(/* type args "App.Order" */))
+///     ? 'made'
+///     : throw new \Error('Typed static property App\Tally::$made must not be accessed before initialization')] += 1;
+/// return (\App\Tally::{'#entry'}(/* type args "App.Order" */)['made']
+///         ?? (\array_key_exists('made', \App\Tally::{'#entry'}(/* type args "App.Order" */)) ? null : throw /* the same */))
+///     + \App\Tally::{'#entry'}(/* type args "App.Order" */)['count'];
+/// ```
+///
+/// Spec section 6: a throw in a static's initial value that runs as code leaves the static unset, and in a class that
+/// isn't generic PHP throws its error on a read before it is set. So a read of such a static of a generic class checks
+/// that its entry holds it when the value it reads is not there or null, a compound assignment, `++` or `--` checks
+/// before it writes, with its own hidden variable, and a write alone sets it. A static with a constant initial value is
+/// always in the entry.
+#[test]
+fn a_read_of_a_generic_static_whose_initial_value_runs_as_code_checks_its_entry_holds_it() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Order\n{\n}\n\nclass Tally<T>\n{\n    public static int count { get; set; } = 0;\n\n    public static int made { get; set; } = Tally<T>.count + 1;\n}\n\nclass Report\n{\n    public static int run()\n    {\n        Tally<Order>.made = 2;\n        Tally<Order>.made += 1;\n        return Tally<Order>.made + Tally<Order>.count;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r##"
+            STMT_LIST
+              ASSIGN
+                DIM
+                  STATIC_CALL
+                    ZVAL "App\\Tally"
+                    ZVAL "#entry"
+                    ARG_LIST
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "App.Order"
+                  ZVAL "made"
+                ZVAL 2
+              ASSIGN_OP [1]
+                DIM
+                  VAR
+                    ZVAL "statics#1"
+                  CONDITIONAL [1]
+                    CALL
+                      ZVAL "array_key_exists"
+                      ARG_LIST
+                        ZVAL "made"
+                        ASSIGN_REF
+                          VAR
+                            ZVAL "statics#1"
+                          STATIC_CALL
+                            ZVAL "App\\Tally"
+                            ZVAL "#entry"
+                            ARG_LIST
+                              SHARP_TYPE_ARGS
+                                null
+                                ZVAL "App.Order"
+                    ZVAL "made"
+                    THROW
+                      NEW
+                        ZVAL "Error"
+                        ARG_LIST
+                          ZVAL "Typed static property App\\Tally::$made must not be accessed before initialization"
+                ZVAL 1
+              RETURN
+                BINARY_OP [1]
+                  COALESCE
+                    DIM
+                      STATIC_CALL
+                        ZVAL "App\\Tally"
+                        ZVAL "#entry"
+                        ARG_LIST
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "App.Order"
+                      ZVAL "made"
+                    CONDITIONAL [1]
+                      CALL
+                        ZVAL "array_key_exists"
+                        ARG_LIST
+                          ZVAL "made"
+                          STATIC_CALL
+                            ZVAL "App\\Tally"
+                            ZVAL "#entry"
+                            ARG_LIST
+                              SHARP_TYPE_ARGS
+                                null
+                                ZVAL "App.Order"
+                      ZVAL null
+                      THROW
+                        NEW
+                          ZVAL "Error"
+                          ARG_LIST
+                            ZVAL "Typed static property App\\Tally::$made must not be accessed before initialization"
+                  DIM
+                    STATIC_CALL
+                      ZVAL "App\\Tally"
+                      ZVAL "#entry"
+                      ARG_LIST
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "App.Order"
+                    ZVAL "count"
+        "##}
+    );
+}
+
+/// ```php
 /// $type = /* the class value of "App.Box<App.Order>" */;
 /// $made = new ($type)();
 /// $page = new ($type)(/* type args "App.Order" */);
