@@ -620,15 +620,15 @@ impl<'analysis> Types<'analysis> {
     /// spec section 12 lets in, wherever it goes next. A collection's elements are tested only in the result of the
     /// project's own plain PHP: PHP's internal functions and the prelude's stubs have types the engine guarantees.
     ///
-    /// A call of a function value, `f(2)` or `holder.onTotal(2)`, checks its result when the result holds a `float`,
-    /// named as `f()`: the value may hold a plain PHP closure, which returns an `int` for a `float`, and the check
-    /// converts it, spec section 24. A PHP# lambda already returns a `float`.
+    /// A call whose result no PHP# code checked, as [`Self::unchecked_result_call`] finds it, checks its result when the
+    /// result holds a `float`, an `Any` or an `Object`, spec section 24: plain PHP's `int` becomes the `float`, and its
+    /// null or non-object is refused where it enters.
     pub(crate) fn call_check(&self, call: &Expression) -> Option<(String, String)> {
-        if let Some(function) = self.function_value_name(call) {
+        if let Some(name) = self.unchecked_result_call(call) {
             let r#type = self.artifacts.get_expression_type(call)?;
 
-            return holds_float(r#type)
-                .then(|| (text(r#type, self.codebase, Parameter::Index), format!("{function}()")));
+            return needs_result_check(r#type)
+                .then(|| (text(r#type, self.codebase, Parameter::Index), format!("{name}()")));
         }
         let (name, metadata) = self.plain_php_call(call)?;
         let text = self.checked_text(self.artifacts.get_expression_type(call)?, metadata.flags.is_user_defined())?;
@@ -714,6 +714,45 @@ impl<'analysis> Types<'analysis> {
         };
 
         Some((format!("{name}()"), metadata))
+    }
+
+    /// The name of the call `call` when plain PHP may give its result, which no PHP# code checked: a function value's
+    /// call, which may run a plain PHP closure, a PHP# interface method's, which a plain PHP class may implement, as
+    /// `App\Source::read`, and the engine's collection method given a function value, which stores what the function
+    /// returns, as `map` of `numbers.map(f)`.
+    fn unchecked_result_call(&self, call: &Expression) -> Option<String> {
+        if let Some(function) = self.function_value_name(call) {
+            return Some(function);
+        }
+        let callee = self.artifacts.get_callees(call).find_map(|target| match target {
+            CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(..), .. } => Some(callee),
+            _ => None,
+        })?;
+        let FunctionLikeIdentifier::Method(class, _) = callee else {
+            return None;
+        };
+        let class = self.codebase.get_class_like(class.as_bytes())?;
+        let method = self.codebase.get_function_like(callee)?;
+        if class.flags.is_sharp() && class.kind.is_interface() {
+            return Some(format!("{}::{}", class.original_name, method.original_name));
+        }
+        let takes_function_value = || match call {
+            Expression::Call(Call::Method(method_call)) => method_call.argument_list.arguments.iter().any(|argument| {
+                !matches!(argument.value(), Expression::ArrowFunction(_) | Expression::Closure(_))
+                    && self
+                        .artifacts
+                        .get_expression_type(argument.value())
+                        .is_some_and(|r#type| r#type.types.iter().all(|atomic| matches!(atomic, TAtomic::Callable(_))))
+            }),
+            _ => false,
+        };
+
+        let is_collection_method =
+            ["Sharp\\ListMethods", "Sharp\\MapMethods", "Sharp\\SetMethods", "Sharp\\IterableMethods"]
+                .iter()
+                .any(|methods| class.name.as_bytes().eq_ignore_ascii_case(methods.as_bytes()));
+
+        (is_collection_method && takes_function_value()).then(|| method.original_name.to_string())
     }
 
     /// The name of the function value the call `call` runs: the local of `f(2)` and `f?.(2)`, or the property of
@@ -1529,13 +1568,17 @@ pub(crate) fn type_text(r#type: &TUnion, codebase: &CodebaseMetadata) -> String 
     text(r#type, codebase, Parameter::Any)
 }
 
-/// Whether `r#type` holds a `float`, itself or as a collection's element, key or value, where an `int` from plain PHP
-/// becomes a `float` at its entry check.
-fn holds_float(r#type: &TUnion) -> bool {
+/// Whether `r#type` holds, itself or as a collection's element, key or value, a part an entry check acts on for a
+/// value plain PHP gives: a `float`, which an `int` becomes, an `Any`, which refuses null, or an `Object`, which
+/// refuses a value that is no object.
+fn needs_result_check(r#type: &TUnion) -> bool {
     r#type.types.iter().any(|atomic| match get_sharp_type(atomic) {
-        Some(SharpType::List(element) | SharpType::Set(element) | SharpType::Iterable(element)) => holds_float(element),
-        Some(SharpType::Map(key, value)) => holds_float(key) || holds_float(value),
-        _ => atomic.is_float(),
+        Some(SharpType::List(element) | SharpType::Set(element) | SharpType::Iterable(element)) => {
+            needs_result_check(element)
+        }
+        Some(SharpType::Map(key, value)) => needs_result_check(key) || needs_result_check(value),
+        Some(SharpType::Float | SharpType::Object) => true,
+        _ => matches!(atomic, TAtomic::Mixed(mixed) if mixed.is_non_null()),
     })
 }
 

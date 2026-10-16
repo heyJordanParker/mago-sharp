@@ -15624,6 +15624,29 @@ fn a_call_of_a_function_value_checks_a_float_result() {
 }
 
 /// ```php
+/// $read = $source->read(); return $numbers->map($f);
+/// ```
+///
+/// Spec section 24: a plain PHP class may implement a PHP# interface, and a collection method stores what the
+/// function value it takes returns, so a call of either checks a result that holds an `Any` or a `float`. A lambda
+/// written in PHP# returns what its type says, so the collection method given one checks nothing.
+#[test]
+fn an_interface_method_and_a_collection_method_given_a_function_value_check_their_results() {
+    let body = Lowered::with(
+        &method_with(
+            "List<float> run(Source source, List<int> numbers, Function<float(int)> f)",
+            "        Any read = source.read();\n        List<float> doubled = numbers.map((int n) => n * 2.0);\n        return numbers.map(f);\n",
+        ),
+        &[("src/App/Tenant/Source.sharp", "namespace App.Tenant;\n\npublic interface Source\n{\n    Any read();\n}\n")],
+    )
+    .body();
+
+    assert!(body.contains("      ZVAL \"Any\"\n      ZVAL \"App\\\\Tenant\\\\Source::read()\"\n"), "{body}");
+    assert!(body.contains("      ZVAL \"List<float>\"\n      ZVAL \"map()\"\n"), "{body}");
+    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 2, "{body}");
+}
+
+/// ```php
 /// $total = $maybe === null ? null : $maybe(2); return $totals();
 /// ```
 ///
