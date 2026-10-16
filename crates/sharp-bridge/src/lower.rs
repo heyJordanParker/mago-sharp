@@ -1776,16 +1776,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// section 11. It takes the class's type arguments as its own, as any static method of the class does, and returns
     /// by reference their entry of [`Self::statics_store`]. The call that adds the entry runs each initial value that
     /// runs as code, in declaration order, as C# runs a closed type's static initializer on its first use:
-    /// `public static function &'#entry'(): array { $entry#1 = &\Sharp\Internal\statics(\App\Counter::class,
+    /// `public static function &'#entry'() { $entry#1 = &\Sharp\Internal\statics(\App\Counter::class,
     /// <the type arguments' text>, $created#2); if ($created#2) { $entry#1['made'] = …; } return $entry#1; }`. A throw
-    /// leaves the entry's other fields as they are and runs nothing again, as a class's `#statics` does.
+    /// leaves the entry's other fields as they are and runs nothing again, as a class's `#statics` does. A class whose
+    /// initial values are all constant returns the entry the call gives, `return \Sharp\Internal\statics(…);`. Its
+    /// accesses are its only callers, so it declares no return type for PHP to check on each one.
     fn statics_entry(&mut self, class: &Class) -> u32 {
         let line = self.line(class.name);
         let span = class.name.span;
         self.static_type_parameters = self.types.static_type_parameters(self.class);
-        let taken = self.temporaries;
-        let entry = self.hidden("entry");
-        let created = self.hidden("created");
         let initial_values: Vec<&Property> = class
             .members
             .iter()
@@ -1794,18 +1793,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 _ => None,
             })
             .collect();
-
         let name = self.string(ZEND_NAME_FQ, line, self.class);
         let mut arguments = vec![self.node(SHARP_AST_CLASS_NAME, 0, line, &[name]), self.own_type_arguments(line)];
-        if !initial_values.is_empty() {
-            arguments.push(self.variable(span, &created));
-        }
         let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\statics");
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
-        let call = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
-        let variable = self.variable(span, &entry);
-        let mut statements = vec![self.node(SHARP_AST_ASSIGN_REF, 0, line, &[variable, call])];
-        if !initial_values.is_empty() {
+
+        let statements = if initial_values.is_empty() {
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+            let call = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+
+            vec![self.node(SHARP_AST_RETURN, 0, line, &[call])]
+        } else {
+            let taken = self.temporaries;
+            let entry = self.hidden("entry");
+            let created = self.hidden("created");
+            arguments.push(self.variable(span, &created));
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+            let call = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+            let variable = self.variable(span, &entry);
+            let held = self.node(SHARP_AST_ASSIGN_REF, 0, line, &[variable, call]);
             let mut writes = Vec::new();
             for property in initial_values {
                 let variable = property.first_variable();
@@ -1814,26 +1819,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 };
                 let field_line = self.line(variable);
                 let value = self.expression(value);
-                let held = self.variable(variable.span, &entry);
+                let entry = self.variable(variable.span, &entry);
                 let name = self.string(0, field_line, variable.name);
-                let field = self.node(SHARP_AST_DIM, 0, field_line, &[held, name]);
+                let field = self.node(SHARP_AST_DIM, 0, field_line, &[entry, name]);
                 writes.push(self.node(SHARP_AST_ASSIGN, 0, field_line, &[field, value]));
             }
             let writes = self.node(SHARP_AST_STMT_LIST, 0, line, &writes);
             let condition = self.variable(span, &created);
             let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[condition, writes]);
-            statements.push(self.node(SHARP_AST_IF, 0, line, &[branch]));
-        }
-        let returned = self.variable(span, &entry);
-        statements.push(self.node(SHARP_AST_RETURN, 0, line, &[returned]));
-        self.temporaries = taken;
+            let returned = self.variable(span, &entry);
+            self.temporaries = taken;
+
+            vec![held, self.node(SHARP_AST_IF, 0, line, &[branch]), self.node(SHARP_AST_RETURN, 0, line, &[returned])]
+        };
         self.static_type_parameters = None;
 
         let bounds = self.types.bounds(self.class);
         let parameters: Vec<u32> = self.parameter_metadata((bounds, None), line).into_iter().collect();
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
-        let array = self.node(SHARP_AST_TYPE, IS_ARRAY, line, &[]);
 
         self.declaration(
             SHARP_AST_METHOD,
@@ -1841,7 +1845,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             span,
             span,
             STATICS_ENTRY,
-            &[parameters, NULL, body, array, NULL],
+            &[parameters, NULL, body, NULL, NULL],
         )
     }
 

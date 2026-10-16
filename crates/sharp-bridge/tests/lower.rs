@@ -3972,10 +3972,14 @@ fn a_generic_class_keeps_the_initial_values_of_its_static_fields_in_one_hidden_s
 }
 
 /// ```php
-/// public static function &'#entry'(/* type args: bounds "App.Order" */): array {
+/// public static function &'#entry'(/* type args: bounds "App.Order" */) {
 ///     ${'entry#1'} = &\Sharp\Internal\statics(\App\Tally::class, /* the text of "#0" */, ${'created#2'});
 ///     if (${'created#2'}) { ${'entry#1'}['made'] = \App\Tally::fresh(/* type args "#0" */); }
 ///     return ${'entry#1'};
+/// }
+/// // In `Counter<T>`, whose initial values are all constant:
+/// public static function &'#entry'(/* type args: bounds "Any?" */) {
+///     return \Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */);
 /// }
 /// public static function 'doubled#get'(/* type args: bounds "App.Order" */): int {
 ///     return \App\Tally::{'#entry'}(/* type args "#0" */)['doubled'] * 2;
@@ -4040,7 +4044,32 @@ fn a_generic_class_runs_its_statics_initial_values_and_accessors_with_its_type_a
                 RETURN
                   VAR
                     ZVAL "entry#1"
-              TYPE [7]
+              null
+              null
+        "##}
+    );
+    // A class whose initial values are all constant returns the entry the call gives.
+    let constant =
+        Lowered::new("namespace App;\n\nclass Counter<T>\n{\n    public static int count { get; set; } = 0;\n}\n");
+    assert_eq!(
+        constant.declared("#entry"),
+        indoc! {r##"
+            METHOD [4113] "#entry" @3-3
+              PARAM_LIST
+                SHARP_TYPE_ARGS
+                  ZVAL "Any?"
+                  null
+              null
+              STMT_LIST
+                RETURN
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
+                    ARG_LIST
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
+                        ZVAL "#0"
+              null
               null
         "##}
     );
