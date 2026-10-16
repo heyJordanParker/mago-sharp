@@ -8314,7 +8314,7 @@ fn a_null_safe_lazy_operation_is_a_conditional_over_the_sequence_call() {
 #[test]
 fn a_variadic_or_operator_set_parameter_becomes_a_set_before_the_body_runs() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Order\n{\n    public int many(Set<string> ...groups) => global.count(groups);\n\n    public static readonly Order operator +(Order order, Set<string> tags) => order;\n\n    public int maybe(Set<string>? ...groups) => global.count(groups);\n}\n",
+        "namespace App.Tenant;\n\nclass Order\n{\n    public int many(Set<string> ...groups) => groups.count();\n\n    public static readonly Order operator +(Order order, Set<string> tags) => order;\n\n    public int maybe(Set<string>? ...groups) => groups.count();\n}\n",
     );
     let body = |name: &str| lowered.render(lowered.child(lowered.method_named(name), 2));
 
@@ -8356,11 +8356,11 @@ fn a_variadic_or_operator_set_parameter_becomes_a_set_before_the_body_runs() {
                     VAR
                       ZVAL "groups"
               RETURN
-                CALL
+                METHOD_CALL
+                  VAR
+                    ZVAL "groups"
                   ZVAL "count"
                   ARG_LIST
-                    VAR
-                      ZVAL "groups"
         "#}
     );
     assert_eq!(
@@ -8426,11 +8426,11 @@ fn a_variadic_or_operator_set_parameter_becomes_a_set_before_the_body_runs() {
                     VAR
                       ZVAL "groups"
               RETURN
-                CALL
+                METHOD_CALL
+                  VAR
+                    ZVAL "groups"
                   ZVAL "count"
                   ARG_LIST
-                    VAR
-                      ZVAL "groups"
         "#}
     );
 }
@@ -9064,7 +9064,7 @@ fn a_generic_class_type_is_its_class_and_a_class_value_type_is_string() {
 
             public Class<Model>? load(Class<Model> type, Class<Model>? other = null) { return other; }
 
-            public PaginatedList<Order>? page(PaginatedList<Order> rows) { return global.count(this.elements) > 0 ? rows : null; }
+            public PaginatedList<Order>? page(PaginatedList<Order> rows) { return this.elements.count() > 0 ? rows : null; }
         }
     "},
         &[(
@@ -9125,7 +9125,7 @@ fn a_generic_class_type_is_its_class_and_a_class_value_type_is_string() {
                 null
             SHARP_TYPE_ARGS
               ZVAL [256] "Lib\\PaginatedList"
-              ZVAL "Lib.PaginatedList<Lib.Order>?"
+              ZVAL "Function<Lib.PaginatedList<Lib.Order>?(Lib.PaginatedList<Lib.Order>)>"
         "#}
     );
 }
@@ -9567,7 +9567,7 @@ fn a_lambda_takes_union_and_variadic_parameters_and_a_spread_call() {
     assert_eq!(
         body_in(
             "int run(List<int> extra)",
-            "        const pick = (int|string key, (int|Calc)? fallback, int ...rest) => global.count(rest);\n        return pick(1, null, ...extra);\n",
+            "        const pick = (int|string key, (int|Calc)? fallback, int ...rest) => rest.count();\n        return pick(1, null, ...extra);\n",
             &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")]
         ),
         indoc! {r#"
@@ -9611,7 +9611,7 @@ fn a_lambda_takes_union_and_variadic_parameters_and_a_spread_call() {
                         ZVAL "rest"
                   SHARP_TYPE_ARGS
                     null
-                    ZVAL "int"
+                    ZVAL "Function<int(int|string, (Lib.Calc|int)?, int)>"
                   null
               RETURN
                 CALL
@@ -18409,7 +18409,7 @@ fn a_catch_clause_of_a_type_parameter_tests_its_type_argument() {
 }
 
 /// ```php
-/// return \strlen(\Vendor\Pdf\render(\sprintf("%d", \count($extra, mode: 0))));
+/// return \strlen(\Vendor\Pdf\render(\sprintf("%s", \str_pad("x", length: $extra))));
 /// ```
 ///
 /// Spec section 23 calls a plain PHP function through its namespace: `global.strlen(…)` a function of PHP's root
@@ -18418,7 +18418,7 @@ fn a_catch_clause_of_a_type_parameter_tests_its_type_argument() {
 #[test]
 fn a_call_through_a_namespace_is_a_call_of_its_plain_php_function() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public int run(List<int> extra)\n    {\n        return global.strlen(Pdf.render(global.sprintf(\"%d\", global.count(extra, mode: 0))));\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        return global.strlen(Pdf.render(global.sprintf(\"%s\", global.str_pad(\"x\", length: extra))));\n    }\n}\n",
         &[(
             "src/Vendor/Pdf/functions.php",
             "<?php namespace Vendor\\Pdf; function render(string $html): string { return $html; }",
@@ -18439,15 +18439,15 @@ fn a_call_through_a_namespace_is_a_call_of_its_plain_php_function() {
                         CALL
                           ZVAL "sprintf"
                           ARG_LIST
-                            ZVAL "%d"
+                            ZVAL "%s"
                             CALL
-                              ZVAL "count"
+                              ZVAL "str_pad"
                               ARG_LIST
-                                VAR
-                                  ZVAL "extra"
+                                ZVAL "x"
                                 NAMED_ARG
-                                  ZVAL "mode"
-                                  ZVAL 0
+                                  ZVAL "length"
+                                  VAR
+                                    ZVAL "extra"
         "#}
     );
 }
@@ -20785,7 +20785,7 @@ fn a_backed_enum_is_a_final_enum_class_with_its_backing_type_cases_and_methods()
 #[test]
 fn a_pure_enum_is_a_final_enum_class_of_unit_cases_without_a_backing_type() {
     let lowered = Lowered::new(
-        "enum Suit\n{\n    case Hearts;\n    case Spades;\n\n    public string label() => this.name;\n\n    public static int size() => global.count(Suit.cases());\n}\n",
+        "enum Suit\n{\n    case Hearts;\n    case Spades;\n\n    public string label() => this.name;\n\n    public static int size() => Suit.cases().count();\n}\n",
     );
 
     assert_eq!(
@@ -20840,7 +20840,7 @@ fn a_pure_enum_is_a_final_enum_class_of_unit_cases_without_a_backing_type() {
                               ARG_LIST
                     SHARP_TYPE_ARGS
                       ZVAL [1] "int"
-                      ZVAL "int"
+                      ZVAL "Function<int()>"
                     null
                 null
                 null

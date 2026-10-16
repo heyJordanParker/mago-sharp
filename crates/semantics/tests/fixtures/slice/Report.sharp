@@ -299,7 +299,7 @@ public class Report
             mark();
             extra -= 1;
         }
-        count += twice(half(4)) + add(1, by: 2) + bump() + global.array_sum(global.array_map(x => x * 2, [1, 2]));
+        count += twice(half(4)) + add(1, by: 2) + bump() + global.array_reduce([1, 2], (int total, int x) => total + x * 2, 0);
         return n => check("n", n) ? n + count : n;
     }
 

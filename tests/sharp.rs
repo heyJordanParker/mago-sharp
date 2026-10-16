@@ -613,7 +613,7 @@ fn analyze_reports_an_extern_method_in_a_project_file() {
 fn analyze_reports_extern_and_silence_in_a_project_file_under_sharp() {
     assert_eq!(
         page_errors(
-            "namespace Sharp.Mine;\n\npublic static class Page\n{\n    public static extern string slug(string title);\n\n    public static string quiet(string title) => @global.trim(title);\n}\n"
+            "namespace Sharp.Mine;\n\npublic static class Page\n{\n    public static extern string slug(string title);\n\n    public static string quiet(string title) => @global.strtoupper(title);\n}\n"
         ),
         [
             library_namespace_error("Sharp.Mine"),

@@ -7,5 +7,5 @@ enum Suit
 
     public string label() => this.name;
 
-    public static int size() => global.count(Suit.cases());
+    public static int size() => Suit.cases().count();
 }

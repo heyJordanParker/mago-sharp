@@ -235,6 +235,9 @@ where
     );
     if let Some(metadata) = target.as_ref().and_then(InvocationTarget::get_function_like_metadata) {
         check_function_use(context, block_context, metadata, function, call.method.span());
+        if context.dialect.is_sharp() {
+            report_replaced_global_call(context, block_context, artifacts, metadata, &call.argument_list, call.span());
+        }
     }
 
     let analyze = |context: &mut Context<'ctx, 'arena, A>| {
@@ -519,6 +522,9 @@ enum Replacement {
     /// (section 12) or `for … of` (section 17). `{x}` stands for the call's first argument, `{a}` and `{b}` for its
     /// first two, and `{...}` for every argument, each spread.
     Syntax(&'static str),
+    /// A collection method of spec section 12, written on the call's collection with the same placeholders as
+    /// [`Replacement::Syntax`], and with the kind of collection when only one kind has the method.
+    CollectionMethod(&'static str),
 }
 
 /// Each plain PHP function PHP# replaces, with its replacement. A row that names a standard library member lands in
@@ -533,6 +539,18 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("array_merge", Replacement::Syntax("`[{...}]`")),
     ("array_replace", Replacement::Syntax("`[{...}]`")),
     ("array_walk_recursive", Replacement::Syntax("a `for … of` loop")),
+    ("count", Replacement::CollectionMethod("`{a}.count()`")),
+    ("array_filter", Replacement::CollectionMethod("`{a}.filter({b})`")),
+    ("array_map", Replacement::CollectionMethod("`{b}.map({a})`")),
+    ("array_any", Replacement::CollectionMethod("`{a}.any({b})`")),
+    ("array_find", Replacement::CollectionMethod("`{a}.first({b})`")),
+    ("in_array", Replacement::CollectionMethod("`{b}.contains({a})` on a `List`")),
+    ("array_search", Replacement::CollectionMethod("`{b}.indexOf({a})` on a `List`")),
+    ("end", Replacement::CollectionMethod("`{a}.last()` on a `List`")),
+    ("array_push", Replacement::CollectionMethod("`{a}.add({b})` on a `List`")),
+    ("array_key_exists", Replacement::CollectionMethod("`{b}.has({a})` on a `Map`")),
+    ("array_keys", Replacement::CollectionMethod("`{a}.keys()` on a `Map`")),
+    ("array_values", Replacement::CollectionMethod("`{a}.values()` on a `Map`")),
     ("intval", Replacement::Members(&[("Sharp\\Int", "parse")])),
     ("floatval", Replacement::Members(&[("Sharp\\Float", "parse")])),
     (
@@ -577,6 +595,8 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("log", Replacement::Members(&[("Sharp\\Math\\Math", "log")])),
     ("round", Replacement::Members(&[("Sharp\\Math\\Math", "round")])),
     ("pow", Replacement::Members(&[("Sharp\\Math\\Math", "pow")])),
+    ("max", Replacement::Members(&[("Sharp\\Math\\Math", "max")])),
+    ("min", Replacement::Members(&[("Sharp\\Math\\Math", "min")])),
     ("inet_pton", Replacement::Members(&[("Sharp\\Net\\Ip", "toBinary")])),
     ("rawurlencode", Replacement::Members(&[("Sharp\\Net\\Url", "encode")])),
     ("urlencode", Replacement::Members(&[("Sharp\\Net\\Url", "encodeForm")])),
@@ -596,6 +616,7 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("preg_quote", Replacement::Members(&[("Sharp\\Text\\Regex", "escape")])),
     ("chr", Replacement::Members(&[("Sharp\\Text\\Text", "fromByte")])),
     ("trim", Replacement::Members(&[("Sharp\\Text\\Text", "trim")])),
+    ("str_getcsv", Replacement::Members(&[("Sharp\\Text\\Text", "parseCsv")])),
     ("date", Replacement::Members(&[("Sharp\\Time\\Date", "format")])),
     ("gmdate", Replacement::Members(&[("Sharp\\Time\\Date", "format")])),
     ("strtotime", Replacement::Members(&[("Sharp\\Time\\Date", "parse")])),
@@ -604,8 +625,7 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
 
 /// Spec section 23: PHP# calls a plain PHP function through its namespace, so a bare call of one is refused with the
 /// form to write: the replacement [`REPLACEMENTS`] gives it, or the call through its namespace, `global.strlen(…)` or
-/// `Pdf.render(…)`. A member the codebase lacks is never named, and the call references each member its replacement
-/// names, so a change to one reaches the call.
+/// `Pdf.render(…)`.
 pub(crate) fn report_bare_function_call<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -617,38 +637,90 @@ pub(crate) fn report_bare_function_call<A>(
     A: Arena,
 {
     let name = function.original_name;
-    let replacement = REPLACEMENTS
-        .iter()
-        .find(|(replaced, _)| replaced.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
-        .map(|(_, replacement)| replacement);
-    if let Some(Replacement::Members(members)) = replacement {
-        for (class, method) in *members {
-            artifacts.symbol_references.add_reference_to_class_member(
-                &block_context.scope,
-                (ascii_lowercase_word(class.as_bytes()), ascii_lowercase_word(method.as_bytes())),
-                false,
-            );
-        }
-    }
-
-    let (code, message) = match replacement {
-        Some(Replacement::Syntax(form)) => (
-            IssueCode::ReplacedBySyntax,
-            format!("`{name}` is replaced by PHP# syntax: write {}.", syntax_form(context, form, arguments)),
-        ),
-        Some(Replacement::Members(members)) => match member_form(context, members, arguments) {
-            Some(form) => {
-                (IssueCode::WrappedFunction, format!("`{name}` is wrapped by the standard library: write {form}"))
-            }
-            None => (IssueCode::BareFunctionCall, namespace_form(context, name)),
-        },
-        None => (IssueCode::BareFunctionCall, namespace_form(context, name)),
-    };
+    let (code, message) = replacement_of(name)
+        .and_then(|replacement| replacement_refusal(context, block_context, artifacts, name, replacement, arguments))
+        .unwrap_or_else(|| (IssueCode::BareFunctionCall, namespace_form(context, name)));
 
     context.collector.report_with_code(
         code,
         Issue::error(message).with_annotation(Annotation::primary(span).with_message("Called here.")),
     );
+}
+
+/// Spec sections 8 and 23: a call through `global` of a function the standard library replaces is refused as its bare
+/// call is, so PHP# code never reaches around the library. A function PHP# syntax replaces keeps its `global.` call,
+/// and so does the standard library, whose members are made of those calls.
+fn report_replaced_global_call<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    function: &FunctionLikeMetadata,
+    arguments: &ArgumentList<'_>,
+    span: Span,
+) where
+    A: Arena,
+{
+    if context.source_file.is_standard_library {
+        return;
+    }
+    let name = function.original_name;
+    let Some(replacement @ (Replacement::Members(_) | Replacement::CollectionMethod(_))) = replacement_of(name) else {
+        return;
+    };
+    if let Some((code, message)) =
+        replacement_refusal(context, block_context, artifacts, name, replacement, Some(arguments))
+    {
+        context.collector.report_with_code(
+            code,
+            Issue::error(message).with_annotation(Annotation::primary(span).with_message("Called here.")),
+        );
+    }
+}
+
+/// The row of [`REPLACEMENTS`] that replaces the plain PHP function `name`.
+fn replacement_of(name: Word) -> Option<&'static Replacement> {
+    REPLACEMENTS
+        .iter()
+        .find(|(replaced, _)| replaced.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+        .map(|(_, replacement)| replacement)
+}
+
+/// The refusal of a call of `name`, which `replacement` replaces, as its code and message. A member the codebase lacks
+/// is never named, so a row whose members it lacks gives none, and the call references each member the row names, so
+/// a change to one reaches the call.
+fn replacement_refusal<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    name: Word,
+    replacement: &Replacement,
+    arguments: Option<&ArgumentList<'_>>,
+) -> Option<(IssueCode, String)>
+where
+    A: Arena,
+{
+    let wrapped = |form: String| {
+        (IssueCode::WrappedFunction, format!("`{name}` is wrapped by the standard library: write {form}"))
+    };
+
+    match replacement {
+        Replacement::Syntax(form) => Some((
+            IssueCode::ReplacedBySyntax,
+            format!("`{name}` is replaced by PHP# syntax: write {}.", syntax_form(context, form, arguments)),
+        )),
+        Replacement::CollectionMethod(form) => Some(wrapped(format!("{}.", syntax_form(context, form, arguments)))),
+        Replacement::Members(members) => {
+            for (class, method) in *members {
+                artifacts.symbol_references.add_reference_to_class_member(
+                    &block_context.scope,
+                    (ascii_lowercase_word(class.as_bytes()), ascii_lowercase_word(method.as_bytes())),
+                    false,
+                );
+            }
+
+            member_form(context, members, arguments).map(wrapped)
+        }
+    }
 }
 
 /// The standard library members `members` names, as a `.sharp` file writes them, with the imports the file lacks. An
@@ -861,7 +933,7 @@ mod tests {
             .iter()
             .flat_map(|(function, replacement)| match replacement {
                 Replacement::Members(members) => members.iter().map(|member| (*function, *member)).collect(),
-                Replacement::Syntax(_) => Vec::new(),
+                Replacement::Syntax(_) | Replacement::CollectionMethod(_) => Vec::new(),
             })
             .filter(|(_, (class, method))| {
                 codebase
