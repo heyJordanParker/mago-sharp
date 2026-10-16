@@ -1557,6 +1557,20 @@ where
     if !declaring_class.flags.is_sharp() || declaring_class.template_types.is_empty() {
         return None;
     }
+    let type_arguments = type_arguments.unwrap_or_default();
+    // A header's type argument may hold `class`'s own type parameters, as `Sub<TX> : Base<Box<TX>>` does, which the
+    // access's type arguments then fix, so `Sub<Order>.count` reads `Base<Box<Order>>`'s.
+    let own = TemplateResult::new(
+        IndexMap::default(),
+        class
+            .template_types
+            .iter()
+            .zip(type_arguments)
+            .map(|((name, template), argument)| {
+                (*name, HashMap::from_iter([(template.defining_entity, argument.clone())]))
+            })
+            .collect(),
+    );
 
     Some(
         declaring_class
@@ -1568,8 +1582,9 @@ where
                     Arc::new(template.constraint.clone()),
                     template.defining_entity,
                 )));
+                let localized = localize_property_type(context, &parameter, type_arguments, class, declaring_class);
 
-                localize_property_type(context, &parameter, type_arguments.unwrap_or_default(), class, declaring_class)
+                inferred_type_replacer::replace(&localized, &own, context.codebase)
             })
             .collect(),
     )
