@@ -18220,7 +18220,10 @@ fn a_pure_method_may_change_its_object_and_its_arguments() {
         "app/Shop/Tally.sharp",
         "namespace App.Shop;\n\npublic class Tally\n{\n    public int count { get; set; } = 0;\n}\n",
     );
-    let counter = ("app/Shop/Counter.sharp", "namespace App.Shop;\n\npublic interface Counter\n{\n    int next();\n\n    void bump(Tally tally);\n}\n");
+    let counter = (
+        "app/Shop/Counter.sharp",
+        "namespace App.Shop;\n\npublic interface Counter\n{\n    int next();\n\n    void bump(Tally tally);\n}\n",
+    );
     let ticker = (
         "app/Shop/Ticker.sharp",
         "namespace App.Shop;\n\npublic class Ticker : Counter\n{\n    private int count = 0;\n\n    public int next()\n    {\n        this.count += 1;\n        return this.count;\n    }\n\n    public void bump(Tally tally)\n    {\n        tally.count += 1;\n    }\n}\n",
@@ -18229,19 +18232,20 @@ fn a_pure_method_may_change_its_object_and_its_arguments() {
     assert_eq!(issues(ticker, &[counter, tally]), Vec::<String>::new(), "a pure implementation changes `this`");
     assert_eq!(effect_issues(&[ticker, counter, tally]), Vec::<String>::new(), "and its argument");
 
-    let peek = ("app/Shop/Peek.sharp", "namespace App.Shop;\n\npublic interface Peek\n{\n    int peek() readonly;\n}\n");
+    let peek =
+        ("app/Shop/Peek.sharp", "namespace App.Shop;\n\npublic interface Peek\n{\n    int peek() readonly;\n}\n");
     let peeker = (
         "app/Shop/Peeker.sharp",
         "namespace App.Shop;\n\npublic class Peeker : Peek\n{\n    private int count = 0;\n\n    public int peek() readonly\n    {\n        this.count += 1;\n        return this.count;\n    }\n}\n",
     );
     assert!(!issues(peeker, &[peek]).is_empty(), "a readonly implementation changes `this`");
 
-    let counted = (
+    let law = (
         "app/Shop/Counted.sharp",
         "namespace App.Shop;\n\npublic class Counted\n{\n    public static int bumped(Tally tally)\n    {\n        tally.count += 1;\n        return tally.count;\n    }\n\n    law grows(Tally tally) => Counted.bumped(tally) > 0;\n}\n",
     );
     assert_eq!(
-        effect_issues(&[counted, tally]),
+        effect_issues(&[law, tally]),
         [
             "app/Shop/Counted.sharp:11:31 impure-law: Law `grows` reaches `Counted.bumped`, which changes `tally.count`. Laws hold only over pure code."
         ],
