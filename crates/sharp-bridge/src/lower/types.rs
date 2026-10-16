@@ -736,15 +736,18 @@ impl<'analysis> Types<'analysis> {
         if class.flags.is_sharp() && class.kind.is_interface() {
             return Some(format!("{}::{}", class.original_name, method.original_name));
         }
-        let takes_function_value = || match call {
-            Expression::Call(Call::Method(method_call)) => method_call.argument_list.arguments.iter().any(|argument| {
+        let takes_function_value = || {
+            let Expression::Call(collection_call) = call else {
+                return false;
+            };
+
+            collection_call.get_argument_list().arguments.iter().any(|argument| {
                 !matches!(argument.value(), Expression::ArrowFunction(_) | Expression::Closure(_))
                     && self
                         .artifacts
                         .get_expression_type(argument.value())
                         .is_some_and(|r#type| r#type.types.iter().all(|atomic| matches!(atomic, TAtomic::Callable(_))))
-            }),
-            _ => false,
+            })
         };
 
         let is_collection_method =
