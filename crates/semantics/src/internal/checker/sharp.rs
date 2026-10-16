@@ -4260,10 +4260,10 @@ fn bounds_itself(list: &TypeParameterList, parameter: &TypeParameter) -> bool {
     false
 }
 
-/// Whether a type parameter's bound is another type parameter, as in `<TSub : T>`, or a bound that joins others, as
-/// spec section 11 writes it.
+/// Whether a type parameter's bound is another type parameter, as in `<TSub : T>`, or a class bound, as spec section
+/// 11 writes it.
 fn is_slice_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
-    is_type_parameter_bound(hint, context) || is_joining_bound(hint, context)
+    is_type_parameter_bound(hint, context) || is_class_bound(hint, context)
 }
 
 /// Whether `hint` is a type parameter, a bound that stands alone, as Java's `<U extends T>` does.
@@ -4283,7 +4283,7 @@ fn joins_type_parameter(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
 
 /// Whether `hint` is `Object`, a class or an interface, a generic class type, or several of them joined with `&`.
 /// Mago's own check of an intersection refuses `Object` in one.
-fn is_joining_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
+fn is_class_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
     match hint {
         Hint::Object(object) => object.value == OBJECT,
         Hint::Identifier(name @ Identifier::Local(_)) => !context.names.is_type_parameter(name),
@@ -4291,7 +4291,7 @@ fn is_joining_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
             built_in_generic_arity(generic.name.value).is_none() && !context.names.is_type_parameter(&generic.name)
         }
         Hint::Intersection(intersection) => {
-            is_joining_bound(intersection.left, context) && is_joining_bound(intersection.right, context)
+            is_class_bound(intersection.left, context) && is_class_bound(intersection.right, context)
         }
         _ => false,
     }
