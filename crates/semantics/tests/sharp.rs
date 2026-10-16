@@ -299,7 +299,7 @@ fn every_construct_outside_the_slice_is_not_supported_yet() {
         [
             "7:1 This statement is not supported yet in PHP#.",
             "15:22 This `new` without arguments is not supported yet in PHP#.",
-            "16:25 This expression is not supported yet in PHP#.",
+            "16:25 PHP# writes a method value without `(...)`: `this.run`.",
             "17:22 This expression is not supported yet in PHP#.",
         ]
     );
@@ -374,7 +374,7 @@ fn a_template_is_in_the_slice_with_any_slice_expression_in_its_interpolations() 
 fn an_interpolation_outside_the_slice_is_not_supported_yet() {
     let code = leak(method("        const label = `made ${this.run(...)}`;\n        return extra;\n"));
 
-    assert_eq!(issues(code), ["7:31 This expression is not supported yet in PHP#."]);
+    assert_eq!(issues(code), ["7:31 PHP# writes a method value without `(...)`: `this.run`."]);
 }
 
 #[test]
@@ -858,15 +858,59 @@ fn a_construct_outside_the_slice_is_not_supported_yet_in_a_catch_block_or_a_call
 
     assert_eq!(
         issues(code),
-        ["9:27 This operator is not supported yet in PHP#.", "11:22 This expression is not supported yet in PHP#."]
+        [
+            "9:27 This operator is not supported yet in PHP#.",
+            "11:22 PHP# writes a method value without `(...)`: `this.run`."
+        ]
     );
 }
 
+/// Spec section 14.1: any expression that gives a function is called by writing its arguments after it, as `f?.(x)`
+/// calls it. A bare name that is no local stays the plain PHP function a pattern's PHP shape calls.
 #[test]
-fn a_function_called_through_an_expression_is_not_supported_yet() {
-    let code = leak(method("        return this.callback()(extra);\n"));
+fn any_expression_that_gives_a_function_is_called() {
+    let rows = [
+        "        return this.steps[0](extra);\n",
+        "        return this.handlers[\"double\"](extra);\n",
+        "        return this.callback()(extra);\n",
+        "        return (this.step)(extra);\n",
+        "        return (extra > 0 ? this.step : this.callback())(extra);\n",
+        "        return ((int a) => a + 1)(extra);\n",
+        "        return Report.factory()(extra);\n",
+        "        return this.callback()(extra)(extra);\n",
+    ];
 
-    assert_eq!(issues(code), ["7:16 This expression is not supported yet in PHP#."]);
+    for row in rows {
+        assert_eq!(issues(leak(method(row))), Vec::<String>::new(), "{row}");
+    }
+}
+
+/// Spec section 14.3: a method named without parentheses is a function value, which PHP writes `Str::slug(...)`.
+#[test]
+fn a_php_first_class_callable_names_the_method_value() {
+    let code = leak(method(
+        "        const doubled = Report.doubled(...);\n        const plus = this.plus(...);\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:25 PHP# writes a method value without `(...)`: `Report.doubled`.",
+            "8:22 PHP# writes a method value without `(...)`: `this.plus`.",
+        ]
+    );
+}
+
+/// Spec section 14.1: one name covers every function type, so PHP's `Closure` is no type a `.sharp` file imports, as
+/// `callable` is no type it writes.
+#[test]
+fn an_import_of_closure_is_an_error_that_names_the_function_type() {
+    let code = "namespace App;\n\nimport Closure;\nimport Closure as Callback;\nimport Lib.Tools.Closure as Tool;\n\nclass Report\n{\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["3:8 PHP# has no `Closure`: write `Function<R(P)>`.", "4:8 PHP# has no `Closure`: write `Function<R(P)>`."]
+    );
 }
 
 #[test]
@@ -2552,7 +2596,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             format!("21:21 PHP# has no `__LINE__`: {line}"),
             "23:19 A constructor parameter declared `public` needs accessors: it is a property, as in `public int id { get; }`.".to_owned(),
             format!("23:35 PHP# has no `__LINE__`: {line}"),
-            "23:45 A by-reference parameter is not supported yet in PHP#.".to_owned(),
+            "23:45 PHP# has no by-reference parameter: return the new value.".to_owned(),
             format!("23:54 PHP# has no `__LINE__`: {line}"),
             "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.".to_owned(),
             "29:18 PHP# has no `callable`: write `Function<R(P)>`.".to_owned(),
@@ -4332,11 +4376,12 @@ fn a_nullable_void_reports_only_the_php_error() {
     assert_eq!(issues(code), ["3:12 Type `void` cannot be nullable."]);
 }
 
+/// PHP# has no by-reference parameter: a method returns the new value.
 #[test]
-fn a_by_reference_parameter_is_not_supported_yet() {
+fn a_method_parameter_by_reference_is_an_error_that_names_the_sharp_way() {
     let code = leak(method("        return 1;\n").replace("int extra", "&extra"));
 
-    assert_eq!(issues(code), ["5:20 A by-reference parameter is not supported yet in PHP#."]);
+    assert_eq!(issues(code), ["5:20 PHP# has no by-reference parameter: return the new value."]);
 }
 
 #[test]
@@ -5518,7 +5563,7 @@ fn an_enum_named_like_a_reserved_class_name_or_an_import_is_an_error_as_a_class_
 fn an_enum_method_takes_collection_and_function_types_and_holds_lambdas_as_a_class_method_does() {
     let code = "namespace App.Tenant;\n\nenum Status : string\n{\n    case Active = \"a\";\n\n    public static Map<string, Status> byValue(List<Status> all)\n    {\n        const Function<string(Status)> key = s => s.value;\n        return all.associateBy(key);\n    }\n\n    public List<Function<bool()>> checks(List<Status> all)\n    {\n        List<Function<bool()>> checks = [];\n        for (let other of all) {\n            other = Status.Active;\n            checks.add(() => other === this);\n        }\n        return checks;\n    }\n}\n";
 
-    assert_eq!(issues(code), ["18:30 This capture of a loop variable that changes is not supported yet in PHP#."]);
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
@@ -5839,11 +5884,18 @@ fn function_types_are_in_the_slice_as_field_parameter_local_and_return_types() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 14.1: `void` is a function type's return type, and a function that takes nothing has no parameter.
 #[test]
-fn a_void_parameter_of_a_function_type_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Function<int(void)> priceOf;\n}\n";
+fn a_function_type_takes_no_void_parameter() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Function<int(void)> priceOf;\n    private Function<int(string, void)> labelOf;\n    private Function<void()> log;\n}\n";
 
-    assert_eq!(issues(code), ["5:13 This type is not supported yet in PHP#."]);
+    assert_eq!(
+        issues(code),
+        [
+            "5:26 A function type takes no `void` parameter: `void` is only a return type, and `Function<int()>` takes nothing.",
+            "6:34 A function type takes no `void` parameter: `void` is only a return type, and `Function<int()>` takes nothing.",
+        ]
+    );
 }
 
 /// A call `x.priceOf(line)` runs the property's function only when the class has no method `priceOf`, and PHP finds
@@ -5871,8 +5923,9 @@ fn a_property_named_as_its_class_is_no_clash_with_the_constructor() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// PHP# has no by-reference parameter: a lambda changes a variable it captures, and a method returns the new value.
 #[test]
-fn a_lambda_parameter_outside_the_slice_is_not_supported_yet() {
+fn a_lambda_parameter_by_reference_is_an_error_that_names_the_sharp_way() {
     let code = leak(method(
         "        const changed = (&value) => value;\n        const marked = (readonly int value) => value;\n        return extra;\n",
     ));
@@ -5880,7 +5933,7 @@ fn a_lambda_parameter_outside_the_slice_is_not_supported_yet() {
     assert_eq!(
         issues(code),
         [
-            "7:26 A by-reference parameter is not supported yet in PHP#.",
+            "7:26 PHP# has no by-reference parameter: return the new value, or let the lambda change a variable it captures.",
             "8:25 An `int` never changes, so `readonly` changes nothing: write `int`.",
         ]
     );
@@ -5967,19 +6020,15 @@ fn a_lambda_parameter_named_like_an_enclosing_local_is_an_error() {
     assert_eq!(issues(code), ["7:24 `extra` is already declared in an enclosing block of this method."]);
 }
 
+/// Spec sections 3 and 14.2: each loop pass has its own loop variable, and a lambda captures the variable itself, so a
+/// lambda captures a loop variable that changes as it captures any other.
 #[test]
-fn a_lambda_capturing_a_loop_variable_that_changes_is_not_supported_yet() {
+fn a_lambda_captures_a_loop_variable_that_changes() {
     let code = leak(method(
         "        for (let step = 0; step < extra; step++) {\n            const show = () => step;\n        }\n        for (let value of Store.values()) {\n            value += 1;\n            const read = () => value;\n        }\n        for (const item of Store.values()) {\n            const keep = () => item;\n        }\n        return extra;\n",
     ));
 
-    assert_eq!(
-        issues(code),
-        [
-            "8:32 This capture of a loop variable that changes is not supported yet in PHP#.",
-            "12:32 This capture of a loop variable that changes is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// Every semantic issue in the source, in the dialect its path names, as its message and its annotations' messages.
@@ -6083,8 +6132,8 @@ fn a_class_error_names_the_class_as_sharp_writes_it() {
     );
 }
 
-/// Spec section 14 gives no form that calls a lambda where it is written, and no form that reads a member of a `new`
-/// expression, so the errors for those PHP forms name no code to write in a `.sharp` file. The PHP twin keeps
+/// Spec section 14 calls a lambda where it is written only inside parentheses, and gives no form that reads a member of
+/// a `new` expression, so the errors for those PHP forms name no code to write in a `.sharp` file. The PHP twin keeps
 /// upstream's examples.
 #[test]
 fn an_error_for_a_php_form_without_a_sharp_form_names_no_php_code() {
@@ -6112,7 +6161,6 @@ fn an_error_for_a_php_form_without_a_sharp_form_names_no_php_code() {
         [
             ("This expression is not supported yet in PHP#.".to_owned(), None),
             ("`[` cannot follow a class name in a `new` expression.".to_owned(), None),
-            ("This expression is not supported yet in PHP#.".to_owned(), None),
             ("Immediately invoked closure must be wrapped in parentheses.".to_owned(), None),
         ]
     );

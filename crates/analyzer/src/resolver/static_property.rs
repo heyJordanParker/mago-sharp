@@ -3,6 +3,7 @@ use mago_word::Word;
 use mago_word::concat_word;
 use mago_word::word;
 
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
@@ -33,6 +34,7 @@ use crate::expression::instantiation::report_missing_type_arguments;
 use crate::expression::unary::cast_type_to_string;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::class_name::statics_type_arguments;
+use crate::resolver::method::CalledProperty;
 use crate::resolver::property::PropertyResolutionResult;
 use crate::resolver::property::ResolvedProperty;
 use crate::resolver::property::localize_property_type;
@@ -252,6 +254,69 @@ where
     }
 
     Ok(result)
+}
+
+/// Spec section 14.3: the static property `property_name` of `class` that the PHP# call at `call_span` runs, as
+/// `Rates.round(x)` of a class with no static method `round` runs `(Rates::$round)($x)`. The property is read as a
+/// static read through `class_expression` reads it, with the type arguments the class is written with, its visibility
+/// checked, so a generic class's static field holds the function of those type arguments. None when the class declares
+/// no static property of that name.
+pub(crate) fn resolve_called_static_property<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    class_expression: &Expression<'arena>,
+    class: Word,
+    property_name: Word,
+    name_span: Span,
+    call_span: Span,
+) -> Option<CalledProperty>
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp()
+        || !context
+            .codebase
+            .get_declaring_property(class.as_bytes(), property_name.as_bytes())
+            .is_some_and(|property| property.flags.is_static())
+    {
+        return None;
+    }
+
+    let type_arguments: Option<Vec<TUnion>> = match statics_type_arguments(artifacts, class_expression) {
+        Some(type_arguments) => Some(type_arguments.to_vec()),
+        None => bare_generic_class(context, class_expression).map(|(generic, bounds)| {
+            report_missing_type_arguments(context, generic, class_expression.span());
+
+            bounds
+        }),
+    };
+    let mut result = PropertyResolutionResult::default();
+    let Some(property) = find_static_property_in_class(
+        context,
+        block_context,
+        class,
+        property_name,
+        name_span,
+        class_expression,
+        type_arguments.as_deref(),
+        false,
+        &mut result,
+    ) else {
+        // The read reported why the call can't reach the property, as for a private one, so the call runs nothing.
+        let declaring_class =
+            context.codebase.get_declaring_property_class(class.as_bytes(), property_name.as_bytes())?;
+
+        return Some(CalledProperty {
+            declaring_class,
+            property_name,
+            property_type: TUnion::from_atomic(TAtomic::Error),
+        });
+    };
+    let declaring_class = property.declaring_class_id?;
+    record_statics_type_arguments(context, artifacts, call_span, class, declaring_class, type_arguments.as_deref());
+
+    Some(CalledProperty { declaring_class, property_name, property_type: property.property_type })
 }
 
 /// Records the type arguments the access at `span` reads the statics of `declaring_class` with, through `class`, which

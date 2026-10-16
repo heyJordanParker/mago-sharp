@@ -38,7 +38,6 @@ use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
-use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Inheritance;
@@ -751,24 +750,26 @@ impl<'analysis> Types<'analysis> {
         (!method.flags.is_user_defined() && takes_function_value).then(|| method.original_name.to_string())
     }
 
-    /// The name of the function value the call `call` runs: the local of `f(2)` and `f?.(2)`, or the property of
-    /// `holder.onTotal(2)`. None for a call of a function or a method.
+    /// The name of the function value the call `call` runs, as the file writes it: the local of `f(2)` and `f?.(2)`,
+    /// the expression of `steps[0](2)` and `this.make()?.(2)`, or the property of `holder.onTotal(2)`. None for a call
+    /// of a function or a method.
     fn function_value_name(&self, call: &Expression) -> Option<String> {
         match call {
-            // The parser reads the name before `?.(` as a constant, which a local of that name is.
             Expression::Call(
-                Call::Function(FunctionCall { function: function @ Expression::Identifier(local), .. })
-                | Call::NullSafeFunction(NullSafeFunctionCall {
-                    function: function @ Expression::ConstantAccess(ConstantAccess { name: local }),
-                    ..
-                }),
+                Call::Function(FunctionCall { function, .. })
+                | Call::NullSafeFunction(NullSafeFunctionCall { function, .. }),
             ) => self
                 .artifacts
                 .get_expression_type(function)
                 .is_some_and(|r#type| {
                     r#type.types.iter().all(|atomic| matches!(atomic, TAtomic::Callable(_) | TAtomic::Null))
                 })
-                .then(|| String::from_utf8_lossy(local.value()).into_owned()),
+                .then(|| {
+                    let span = function.span();
+                    let written = &self.file.contents[span.start.offset as usize..span.end.offset as usize];
+
+                    String::from_utf8_lossy(written).into_owned()
+                }),
             _ => self.artifacts.get_callees(call).find_map(|target| match target {
                 CallTarget::Property { property, .. } => {
                     let property = property.as_bytes();
@@ -1254,13 +1255,13 @@ impl<'analysis> Types<'analysis> {
         plain_parameters(owner, self.codebase.get_function_like(callee))
     }
 
-    /// The parameters of the plain PHP closure a local holds, which the call `local(…)` runs, as the signature of the
-    /// local's type gives them, as [`Self::call_parameters`] gives a call's. None for a function value whose signature
-    /// PHP# wrote, which takes the object, and for a local of any other type, such as an object whose `__invoke` the
-    /// call runs, which [`Self::call_parameters`] finds.
-    pub(crate) fn closure_parameters(&self, local: &Expression) -> Option<Vec<PlainParameter<'analysis>>> {
+    /// The parameters of the plain PHP closure the expression `function` gives, which the call `function(…)` runs, as
+    /// the signature of its type gives them, as [`Self::call_parameters`] gives a call's. None for a function value
+    /// whose signature PHP# wrote, which takes the object, and for a value of any other type, such as an object whose
+    /// `__invoke` the call runs, which [`Self::call_parameters`] finds.
+    pub(crate) fn closure_parameters(&self, function: &Expression) -> Option<Vec<PlainParameter<'analysis>>> {
         let [TAtomic::Callable(TCallable::Signature(signature))] =
-            self.artifacts.get_expression_type(local)?.types.as_ref()
+            self.artifacts.get_expression_type(function)?.types.as_ref()
         else {
             return None;
         };

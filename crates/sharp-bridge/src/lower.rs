@@ -527,6 +527,9 @@ struct Lowering<'lowering, 'arena> {
     by_reference: HashSet<u32>,
     /// How many loop bodies hold the statement being lowered, inside the innermost method or lambda.
     loop_depth: u32,
+    /// Whether the innermost loop body being lowered runs inside the `do { … } while (false)` of a `for` whose counter
+    /// moves into a fresh variable after each pass, so a `break` of that loop leaves two PHP loops.
+    breaks_twice: bool,
     captures_type_arguments: bool,
     /// How many type parameters the generic class has whose static member is being lowered. Its static method has no
     /// `this` to read the class's type arguments from, so it takes them as its leading own ones.
@@ -573,6 +576,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             tested_links: Vec::new(),
             by_reference: HashSet::default(),
             loop_depth: 0,
+            breaks_twice: false,
             captures_type_arguments: false,
             static_type_parameters: None,
             property: Vec::new(),
@@ -4204,7 +4208,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             Statement::Try(r#try) => self.r#try(r#try),
             Statement::PatternMatch(_) => self.pattern(Node::Statement(statement)),
-            Statement::Break(r#break) => self.node(SHARP_AST_BREAK, 0, self.line(r#break), &[NULL]),
+            Statement::Break(r#break) => self.r#break(self.line(r#break)),
             Statement::Continue(r#continue) => self.node(SHARP_AST_CONTINUE, 0, self.line(r#continue), &[NULL]),
             _ => unreachable!("check_slice refuses the statement `{statement}`"),
         })
@@ -4222,6 +4226,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `Sharp\Map` and a PHP array give alike: `foreach ($plans as $key => $value) { $entry = [$key, $value]; … }`.
     /// `[a, b]` reads a `Map`'s key and value, and unpacks each two-element tuple of any other collection, as
     /// `foreach ($rows as [$a, $b])`.
+    ///
+    /// Spec section 3 gives each pass its own loop variable, and PHP reuses one, so a loop variable a lambda captures by
+    /// reference takes the element through a hidden variable and is unset before each pass assigns it, as a captured
+    /// `let` in a loop body is: `foreach ($values as $value#1) { { unset($value); $value = $value#1; } … }`.
     fn for_of(&mut self, for_of: &ForOf) -> u32 {
         let line = self.line(for_of);
         let holds_map = self.types.holds_map(for_of.expression);
@@ -4233,8 +4241,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         } else {
             self.expression(for_of.expression)
         };
-        let variable =
-            |this: &mut Self, variable: &ForOfVariable| this.variable(variable.name.span, variable.name.value);
+        let mut fresh = Vec::new();
+        let mut variable = |this: &mut Self, variable: &ForOfVariable| {
+            let name = variable.name;
+            if !this.by_reference.contains(&name.span.start.offset) {
+                return this.variable(name.span, name.value);
+            }
+
+            let element = this.hidden(&String::from_utf8_lossy(name.value));
+            let local = this.variable(name.span, name.value);
+            let unset = this.node(SHARP_AST_UNSET, 0, line, &[local]);
+            let unset = this.node(SHARP_AST_STMT_LIST, 0, line, &[unset]);
+            let local = this.variable(name.span, name.value);
+            let value = this.variable(name.span, &element);
+            let assignment = this.node(SHARP_AST_ASSIGN, 0, line, &[local, value]);
+            fresh.push(this.node(SHARP_AST_STMT_LIST, 0, line, &[unset, assignment]));
+
+            this.variable(name.span, &element)
+        };
         let taken = self.temporaries;
         let (key, value, entry) = match &for_of.target {
             ForOfTarget::Value(entry) if holds_map => {
@@ -4265,21 +4289,39 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 (NULL, self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &elements), None)
             }
         };
-        let mut body = self.loop_body(for_of.body);
-        if let Some(entry) = entry {
-            body = self.node(SHARP_AST_STMT_LIST, 0, line, &[entry, body]);
-        }
+        let body = self.loop_body(for_of.body);
+        let statements: Vec<u32> = entry.into_iter().chain(fresh).chain([body]).collect();
+        let body = match statements.as_slice() {
+            [body] => *body,
+            statements => self.node(SHARP_AST_STMT_LIST, 0, line, statements),
+        };
         self.temporaries = taken;
 
         self.node(SHARP_AST_FOREACH, 0, line, &[collection, value, key, body])
     }
 
     fn loop_body(&mut self, body: &Statement) -> u32 {
+        self.loop_body_breaking(body, false)
+    }
+
+    /// The body of a loop, whose `break` leaves `breaks_twice` PHP loops: the loop's own, and the `do { … } while
+    /// (false)` a `for` with a fresh counter runs its body in.
+    fn loop_body_breaking(&mut self, body: &Statement, breaks_twice: bool) -> u32 {
         self.loop_depth += 1;
+        let around = std::mem::replace(&mut self.breaks_twice, breaks_twice);
         let body = self.statement(body);
+        self.breaks_twice = around;
         self.loop_depth -= 1;
 
         body
+    }
+
+    /// A `break`, which leaves the `do { … } while (false)` of a `for` with a fresh counter too, as `break 2`.
+    fn r#break(&mut self, line: u32) -> u32 {
+        let depth =
+            if self.breaks_twice { self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = 2) } else { NULL };
+
+        self.node(SHARP_AST_BREAK, 0, line, &[depth])
     }
 
     /// A `let` or `const` local is the assignment of its value to its variable, and an unpacked tuple, spec section 30,
@@ -4363,9 +4405,45 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let conditions = self.expression_list(&conditions);
         let increments: Vec<u32> = r#for.increments.iter().map(|increment| self.expression(increment)).collect();
         let increments = self.expression_list(&increments);
-        let body = self.loop_body(body);
+        let captured: Vec<&LocalIdentifier> = r#for
+            .declaration
+            .iter()
+            .flat_map(|declaration| declaration.target.names())
+            .filter(|name| self.by_reference.contains(&name.span.start.offset))
+            .collect();
+        let line = self.line(r#for);
+        let body =
+            if captured.is_empty() { self.loop_body(body) } else { self.fresh_counter_body(line, body, &captured) };
 
-        self.node(SHARP_AST_FOR, 0, self.line(r#for), &[initializations, conditions, increments, body])
+        self.node(SHARP_AST_FOR, 0, line, &[initializations, conditions, increments, body])
+    }
+
+    /// The body of a `for` whose counters a lambda captures by reference. Spec section 3 gives each pass its own
+    /// counter, which starts as the last pass left it, as JavaScript copies a `let` counter, and PHP reuses one
+    /// variable. PHP's increments take expressions, and `unset` is a statement, so the body runs inside
+    /// `do { … } while (false)`, and each counter moves into a fresh variable after it, before the increments run:
+    /// `do { … } while (false); $step#1 = $step; unset($step); $step = $step#1;`. A `continue` leaves the `do` and
+    /// reaches the move, and a `break` leaves both loops.
+    fn fresh_counter_body(&mut self, line: u32, body: &Statement, counters: &[&LocalIdentifier]) -> u32 {
+        let taken = self.temporaries;
+        let body = self.loop_body_breaking(body, true);
+        let never = self.zval(line, sharp_value::SHARP_FALSE, |_| {});
+        let mut statements = vec![self.node(SHARP_AST_DO_WHILE, 0, line, &[body, never])];
+        for counter in counters {
+            let moved = self.hidden(&String::from_utf8_lossy(counter.value));
+            let hidden = self.variable(counter.span, &moved);
+            let local = self.variable(counter.span, counter.value);
+            statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[hidden, local]));
+            let local = self.variable(counter.span, counter.value);
+            let unset = self.node(SHARP_AST_UNSET, 0, line, &[local]);
+            statements.push(self.node(SHARP_AST_STMT_LIST, 0, line, &[unset]));
+            let local = self.variable(counter.span, counter.value);
+            let hidden = self.variable(counter.span, &moved);
+            statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[local, hidden]));
+        }
+        self.temporaries = taken;
+
+        self.node(SHARP_AST_STMT_LIST, 0, line, &statements)
     }
 
     /// An `EXPR_LIST` at the line of its first expression, or null when there are no expressions.
@@ -4837,6 +4915,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     this.node(SHARP_AST_CALL, 0, line, &[function, arguments])
                 })
             }
+            // Spec section 14: any other expression that gives a function, as `steps[0](x)` or `this.make()(x)`, is
+            // called as PHP's `($steps[0])($x)`, with the parameters of the closure it gives.
+            Expression::Call(Call::Function(FunctionCall { function, argument_list })) => {
+                let parameters = self.types.closure_parameters(function);
+                let function = self.expression(function);
+
+                self.call(argument_list, None, parameters, self.types.sharp_callee(expression), |this, arguments| {
+                    this.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+                })
+            }
             Expression::Construct(Construct::Exit(_)) => {
                 unreachable!("the checker refuses a bare call of PHP's `exit`, spec section 23")
             }
@@ -5016,7 +5104,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::Leave(Leave::Return(r#return)) => self.r#return(r#return),
             Expression::Propagate(propagate) => self.propagate(expression, propagate),
             Expression::Leave(Leave::Continue(_)) => self.node(SHARP_AST_CONTINUE, 0, line, &[NULL]),
-            Expression::Leave(Leave::Break(_)) => self.node(SHARP_AST_BREAK, 0, line, &[NULL]),
+            Expression::Leave(Leave::Break(_)) => self.r#break(line),
             Expression::CompositeString(CompositeString::Interpolated(template)) => self.template(template),
             Expression::ArrowFunction(arrow_function) => self.arrow_function(arrow_function),
             Expression::Closure(closure) => self.closure(closure),
@@ -6111,10 +6199,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `#i`, so the lambda captures the method's type arguments, as each lambda around it does.
     fn lambda_body<T>(&mut self, lower: impl FnOnce(&mut Self) -> T) -> (T, bool) {
         let loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+        let breaks_twice = std::mem::take(&mut self.breaks_twice);
         let returns = self.returns.take();
         let around = std::mem::take(&mut self.captures_type_arguments);
         let body = lower(self);
         self.loop_depth = loop_depth;
+        self.breaks_twice = breaks_twice;
         self.returns = returns;
         let captures_type_arguments = self.captures_type_arguments;
         self.captures_type_arguments |= around;
@@ -7030,8 +7120,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let line = self.line(call);
+        let mut classes = vec![];
         let (kind, object) = match (self.names.static_call_class(call), call.object) {
-            (Some(class), _) => (SHARP_AST_STATIC_CALL, self.static_class(class).0),
+            (Some(class), _) => {
+                let (object, found) = self.static_class(class);
+                classes = found;
+
+                (SHARP_AST_STATIC_CALL, object)
+            }
             (None, Expression::Parent(keyword)) => {
                 (SHARP_AST_STATIC_CALL, self.string(ZEND_NAME_NOT_FQ, self.line(keyword), b"parent"))
             }
@@ -7039,7 +7135,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 (SHARP_AST_STATIC_CALL, self.string(ZEND_NAME_NOT_FQ, self.line(keyword), b"static"))
             }
             (None, object) => match self.class_value(object) {
-                Some((class, _)) => (SHARP_AST_STATIC_CALL, class),
+                Some((class, found)) => {
+                    classes = found;
+
+                    (SHARP_AST_STATIC_CALL, class)
+                }
                 None if self.reads_plain_map(expression, object) => {
                     let r#type = self.types.expression_type(object).clone();
 
@@ -7055,13 +7155,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return self.node(kind, 0, line, &[object, method, arguments]);
         }
         let property_call = kind == SHARP_AST_METHOD_CALL && self.is_property_call(expression, call.object);
-        let type_arguments = self.types.call_type_arguments(expression);
+        // Spec section 14.3: `Rates.round(x)` of a class with no method `round` runs the function its static field
+        // `round` holds, as `(Rates::$round)($x)`.
+        let static_property_call =
+            kind == SHARP_AST_STATIC_CALL && self.types.call_target(expression).kind == DeclarationKind::StaticProperty;
+        // The type arguments a static field's call records are its class's, which pick the field's statics entry, and
+        // a function value takes none.
+        let type_arguments = if static_property_call { None } else { self.types.call_type_arguments(expression) };
         let parameters = self.types.call_parameters(expression);
         let callee = self.types.sharp_callee(expression);
 
         self.call(&call.argument_list, type_arguments, parameters, callee, |this, arguments| {
             if property_call {
                 let property = this.node(SHARP_AST_PROP, 0, line, &[object, method]);
+
+                return this.node(SHARP_AST_CALL, 0, line, &[property, arguments]);
+            }
+            if static_property_call && let ClassLikeMemberSelector::Identifier(name) = &call.method {
+                let property =
+                    this.static_property(expression, object, &classes, name.value, method, line, PlaceUse::Read);
 
                 return this.node(SHARP_AST_CALL, 0, line, &[property, arguments]);
             }

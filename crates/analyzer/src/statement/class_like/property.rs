@@ -137,6 +137,28 @@ fn analyze_default_value<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    let declared = block_context.scope.get_class_like().and_then(|class_metadata| {
+        let declared_type_metadata =
+            class_metadata.properties.get(&php_variable_name(variable_name))?.type_metadata.as_ref()?;
+        let mut declared_type = declared_type_metadata.type_union.clone();
+        expand_union(
+            context.codebase,
+            &mut declared_type,
+            &TypeExpansionOptions {
+                self_class: Some(class_metadata.original_name),
+                static_class_type: StaticClassType::Name(class_metadata.original_name),
+                ..Default::default()
+            },
+        );
+        if class_metadata.flags.is_sharp() {
+            declared_type = known_type_or_error(declared_type);
+        }
+
+        Some((class_metadata, declared_type_metadata, declared_type))
+    });
+
+    // Spec section 14.2: a lambda takes its parameter types from the property's type, as from a typed local's.
+    expect_type(context, artifacts, value, declared.as_ref().map(|(_, _, declared_type)| declared_type));
     let is_constant = !runs_as_code && value.is_constant(&context.settings.version, false);
     if is_constant {
         block_context.in_constant_expression(|block_context| value.analyze(context, block_context, artifacts))?;
@@ -148,10 +170,7 @@ where
     // are checked too.
     let is_sharp = context.dialect.is_sharp();
 
-    if let Some(class_metadata) = block_context.scope.get_class_like()
-        && let Some(property_metadata) = class_metadata.properties.get(&php_variable_name(variable_name))
-        && let Some(declared_type_metadata) = property_metadata.type_metadata.as_ref()
-    {
+    if let Some((class_metadata, declared_type_metadata, declared_type)) = declared {
         check_sharp_literal_kind(context, value, &declared_type_metadata.type_union);
 
         if (is_sharp
@@ -160,19 +179,6 @@ where
             && let Some(value_type) = artifacts.get_expression_type(value).cloned()
             && !value_type.is_never()
         {
-            let mut declared_type = declared_type_metadata.type_union.clone();
-            expand_union(
-                context.codebase,
-                &mut declared_type,
-                &TypeExpansionOptions {
-                    self_class: Some(class_metadata.original_name),
-                    static_class_type: StaticClassType::Name(class_metadata.original_name),
-                    ..Default::default()
-                },
-            );
-            if class_metadata.flags.is_sharp() {
-                declared_type = known_type_or_error(declared_type);
-            }
             let value_type = get_set_literal_type(context, artifacts, value, &declared_type).unwrap_or(value_type);
 
             let mut comparison_result = ComparisonResult::for_dialect(context.dialect);

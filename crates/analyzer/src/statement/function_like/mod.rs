@@ -272,6 +272,81 @@ where
     parameter_types
 }
 
+/// Refuses each parameter of a PHP# lambda that writes no type where nothing gives it one, spec section 14.2: no
+/// function type the lambda is written for, and no parameter of the method it is passed to, as C#'s CS8917 refuses a
+/// lambda whose delegate type nothing infers. `inferred` holds the types [`closure_parameter_types`] gave.
+pub fn report_untyped_lambda_parameters<A>(
+    context: &mut Context<'_, '_, A>,
+    parameter_list: &FunctionLikeParameterList<'_>,
+    inferred: Option<&HashMap<usize, TUnion>>,
+) where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+
+    for (index, parameter) in parameter_list.parameters.iter().enumerate() {
+        if parameter.hint.is_some() || inferred.is_some_and(|types| types.contains_key(&index)) {
+            continue;
+        }
+
+        let name = parameter.variable.name;
+        let name = String::from_utf8_lossy(name.strip_prefix(b"$").unwrap_or(name));
+        context.collector.report_with_code(
+            IssueCode::MissingParameterType,
+            Issue::error(format!(
+                "Nothing gives the parameter `{name}` a type here: write it, as in `(int {name}) => …`, or give the lambda a function type."
+            ))
+            .with_annotation(Annotation::primary(parameter.variable.span).with_message("Written without a type.")),
+        );
+    }
+}
+
+/// Refuses a PHP# lambda whose expression body gives a value where every function type it is written for returns
+/// `void`, spec section 14.1, as C#'s CS0201 refuses one: the body is a call, a change of a variable or `new`, or it
+/// throws.
+pub fn report_value_for_void<A>(context: &mut Context<'_, '_, A>, expected: &TUnion, body: &Expression<'_>)
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+
+    let mut signatures = expected.types.iter().filter_map(|atomic| match atomic {
+        TAtomic::Callable(TCallable::Signature(signature)) => Some(signature),
+        _ => None,
+    });
+    let returns_void = signatures.next().is_some_and(|first| {
+        first.get_return_type().is_some_and(TUnion::is_void)
+            && signatures.all(|signature| signature.get_return_type().is_some_and(TUnion::is_void))
+    });
+    let has_effect = match body.unparenthesized() {
+        Expression::UnaryPrefix(prefix) => prefix.operator.is_increment_or_decrement(),
+        expression => matches!(
+            expression,
+            Expression::Call(_)
+                | Expression::Assignment(_)
+                | Expression::UnaryPostfix(_)
+                | Expression::Instantiation(_)
+                | Expression::Throw(_)
+        ),
+    };
+    if !returns_void || has_effect {
+        return;
+    }
+
+    let function_type = crate::utils::names::display_type(context, expected);
+    context.collector.report_with_code(
+        IssueCode::InvalidReturnStatement,
+        Issue::error(format!(
+            "This lambda gives a value, and `{function_type}` returns nothing: write a call or a change, or give the function type a return type."
+        ))
+        .with_annotation(Annotation::primary(body.span()).with_message("Gives a value here.")),
+    );
+}
+
 /// The result type a lambda takes from the callable types it is written for, as its parameters take theirs. A `void`
 /// result gives its body no declared type, as a `void` method's body gets none.
 fn closure_result_type<A>(context: &Context<'_, '_, A>, expected: &TUnion) -> Option<TUnion>

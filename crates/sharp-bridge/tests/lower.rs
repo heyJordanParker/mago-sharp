@@ -14371,6 +14371,130 @@ fn a_call_of_a_property_holding_a_function_calls_the_function() {
 }
 
 /// ```php
+/// return (\App\Tenant\Report::$round)($extra);
+/// ```
+///
+/// Spec section 14.3: a call through the class of a static field holding a function calls the function the field holds.
+#[test]
+fn a_call_of_a_static_field_holding_a_function_calls_the_function() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    private static Function<int(int)> round = (int n) => n - 1;\n\n    public int run(int extra)\n    {\n        return Report.round(extra);\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  STATIC_PROP
+                    ZVAL "App\\Tenant\\Report"
+                    ZVAL "round"
+                  ARG_LIST
+                    VAR
+                      ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
+/// return (\Sharp\Internal\statics(\App\Tenant\Holder::class, <T>, 'shared')['shared'])($value);
+/// ```
+///
+/// A call through a generic class of its static field calls the function the field holds for the call's type
+/// arguments, read as every read of that field is, spec section 11, and passes no type arguments of its own.
+#[test]
+fn a_call_of_a_generic_class_s_static_field_calls_the_function_of_its_type_arguments() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Holder<T>\n{\n    private static Function<T(T)> shared = (T value) => value;\n\n    public static T run(T value)\n    {\n        return Holder<T>.shared(value);\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r##"
+            STMT_LIST
+              RETURN
+                CALL
+                  DIM
+                    CALL
+                      ZVAL "Sharp\\Internal\\statics"
+                      ARG_LIST
+                        CLASS_NAME
+                          ZVAL "App\\Tenant\\Holder"
+                        SHARP_TYPE_OF [1]
+                          ZVAL "#0"
+                        ZVAL "shared"
+                    ZVAL "shared"
+                  ARG_LIST
+                    VAR
+                      ZVAL "value"
+        "##}
+    );
+}
+
+/// ```php
+/// return ($steps[0])($extra) + ($this->make())($extra) + (fn (int $a) => $a)($extra);
+/// ```
+///
+/// Spec section 14: any expression that gives a function is called as PHP calls what the expression gives, as
+/// `f?.(x)` is.
+#[test]
+fn a_call_of_any_expression_that_gives_a_function_calls_what_it_gives() {
+    let tree = body_in(
+        "int run(List<Function<int(int)>> steps, int extra)",
+        "        return steps[0](extra) + this.make()(extra) + ((int a) => a)(extra);\n    }\n\n    public Function<int(int)> make()\n    {\n        return n => n;\n",
+        &[],
+    );
+
+    assert_eq!(
+        tree,
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [1]
+                  BINARY_OP [1]
+                    CALL
+                      DIM
+                        VAR
+                          ZVAL "steps"
+                        ZVAL 0
+                      ARG_LIST
+                        VAR
+                          ZVAL "extra"
+                    CALL
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "make"
+                        ARG_LIST
+                      ARG_LIST
+                        VAR
+                          ZVAL "extra"
+                  CALL
+                    ARROW_FUNC "" @9-9
+                      PARAM_LIST
+                        PARAM
+                          ZVAL [1] "int"
+                          ZVAL "a"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      VAR
+                        ZVAL "a"
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<int(int)>"
+                      null
+                    ARG_LIST
+                      VAR
+                        ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
 /// return ($this->format)($amount);
 /// ```
 ///
@@ -15871,20 +15995,20 @@ fn equality_of_an_unchecked_any_compares_by_value() {
 }
 
 /// ```php
-/// return [$f(2), $holder->onTotal(2), $count(2)];
+/// return [$f(2), $holder->onTotal(2), $count(2), ($steps[0])(2)];
 /// ```
 ///
 /// Spec section 24: a function value may hold a plain PHP closure, which returns an `int` where the function type says
 /// `float`. So a call of a function value whose result holds a `float` checks its result, as a call into plain PHP
-/// does, and the check converts the `int`, whether the value is a local or a property. A result with no `float` needs
-/// no check.
+/// does, and the check converts the `int`, whether the value is a local, a property or any other expression, which
+/// the check names as the file writes it. A result with no `float` needs no check.
 #[test]
 fn a_call_of_a_function_value_checks_a_float_result() {
     assert_eq!(
         Lowered::with(
             &method_with(
-                "List<Any> run(Function<float(int)> f, Holder holder, Function<int(int)> count)",
-                "        return [f(2), holder.onTotal(2), count(2)];\n",
+                "List<Any> run(Function<float(int)> f, Holder holder, Function<int(int)> count, List<Function<float(int)>> steps)",
+                "        return [f(2), holder.onTotal(2), count(2), steps[0](2)];\n",
             ),
             &[("src/App/Tenant/Holder.sharp", "namespace App.Tenant;\n\npublic class Holder\n{\n    public Function<List<float>(int)> onTotal { get; } = (int n) => [1.5];\n}\n")],
         )
@@ -15921,6 +16045,18 @@ fn a_call_of_a_function_value_checks_a_float_result() {
                         ZVAL "count"
                       ARG_LIST
                         ZVAL 2
+                    null
+                  ARRAY_ELEM
+                    VERIFY_TYPE_ARGS
+                      CALL
+                        DIM
+                          VAR
+                            ZVAL "steps"
+                          ZVAL 0
+                        ARG_LIST
+                          ZVAL 2
+                      ZVAL "float"
+                      ZVAL "steps[0]()"
                     null
         "#}
     );
@@ -17722,17 +17858,17 @@ fn a_named_tuple_element_is_an_index_read_of_its_position() {
 }
 
 /// ```php
-/// foreach ($pending as $element#1) { yield $element#1; } yield $latest; yield fn($x) => $x; return;
+/// foreach ($pending as $element#1) { yield $element#1; } yield $latest; yield fn(int $x) => $x; return;
 /// ```
 ///
 /// `yield value;` is a `YIELD` of its value and a null key, alone as a statement, as php-src's grammar builds
 /// `yield $value;`. `yield ...other;` is a loop that yields each element of `other`, so each takes the generator's
-/// next automatic key, where PHP's `yield from` would give the keys of `other`. `yield x => x;` yields a lambda,
+/// next automatic key, where PHP's `yield from` would give the keys of `other`. `yield (int x) => x;` yields a lambda,
 /// because `=>` is the lambda arrow in PHP#.
 #[test]
 fn yield_is_a_yield_statement_and_yield_spread_is_a_loop_that_yields_each_element() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<Any> run(List<int> pending, int latest)\n    {\n        yield ...pending;\n        yield latest;\n        yield x => x;\n        return;\n    }\n}\n",
+        "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<Any> run(List<int> pending, int latest)\n    {\n        yield ...pending;\n        yield latest;\n        yield (int x) => x;\n        return;\n    }\n}\n",
     );
 
     assert_eq!(
@@ -17758,7 +17894,7 @@ fn yield_is_a_yield_statement_and_yield_spread_is_a_loop_that_yields_each_elemen
                 ARROW_FUNC "" @9-9
                   PARAM_LIST
                     PARAM
-                      null
+                      ZVAL [1] "int"
                       ZVAL "x"
                       null
                       null
@@ -17769,7 +17905,7 @@ fn yield_is_a_yield_statement_and_yield_spread_is_a_loop_that_yields_each_elemen
                     ZVAL "x"
                   SHARP_TYPE_ARGS
                     null
-                    ZVAL "Function<Any?(Any?)>"
+                    ZVAL "Function<int(int)>"
                   null
                 null
               RETURN
@@ -18474,6 +18610,156 @@ fn a_lambda_with_a_block_or_a_written_capture_is_a_closure_with_a_use_list() {
               RETURN
                 VAR
                   ZVAL "count"
+        "#}
+    );
+}
+
+/// ```php
+/// foreach ($values as $value#1) { { unset($value); $value = $value#1; } $value += 1; $read = function () use (&$value) { return $value; }; }
+/// ```
+///
+/// Spec sections 3 and 14.2: each loop pass has its own loop variable, and a lambda captures the variable itself. PHP's
+/// `foreach` reuses one variable, so a loop variable a lambda captures by reference takes each element through a
+/// hidden variable, and is unset before it is assigned, as a captured `let` in a loop body is.
+#[test]
+fn a_for_of_variable_a_lambda_captures_by_reference_is_fresh_in_each_pass() {
+    assert_eq!(
+        body_in(
+            "void run(List<int> values)",
+            "        for (let value of values) {\n            value += 1;\n            const read = () => value;\n        }\n",
+            &[],
+        ),
+        indoc! {r#"
+            STMT_LIST
+              FOREACH
+                VAR
+                  ZVAL "values"
+                VAR
+                  ZVAL "value#1"
+                null
+                STMT_LIST
+                  STMT_LIST
+                    STMT_LIST
+                      UNSET
+                        VAR
+                          ZVAL "value"
+                    ASSIGN
+                      VAR
+                        ZVAL "value"
+                      VAR
+                        ZVAL "value#1"
+                  STMT_LIST
+                    ASSIGN_OP [1]
+                      VAR
+                        ZVAL "value"
+                      ZVAL 1
+                    ASSIGN
+                      VAR
+                        ZVAL "read"
+                      CLOSURE "" @11-11
+                        PARAM_LIST
+                        CLOSURE_USES
+                          ZVAL [1] "value"
+                        STMT_LIST
+                          RETURN
+                            VAR
+                              ZVAL "value"
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "Function<int()>"
+                        null
+        "#}
+    );
+}
+
+/// ```php
+/// for ($step = 0; $step < $extra; $step++) {
+///     do { if ($step == 1) { continue; } if ($step == 5) { break 2; } $show = function () use (&$step) { return $step; }; } while (false);
+///     $step#1 = $step; unset($step); $step = $step#1;
+/// }
+/// ```
+///
+/// Spec sections 3 and 14.2: each pass of `for (let step = …; …; step++)` has its own `step`, which starts as the last
+/// pass left it, as JavaScript copies a `let` counter. PHP's increments take expressions and `unset` is a statement, so
+/// the body runs inside `do { … } while (false)` and the counter moves into a fresh variable after it: a `continue`
+/// leaves the `do` and reaches the move, and a `break` leaves both.
+#[test]
+fn a_for_counter_a_lambda_captures_by_reference_is_fresh_in_each_pass() {
+    assert_eq!(
+        body_in(
+            "void run(int extra)",
+            "        for (let step = 0; step < extra; step++) {\n            if (step == 1) { continue; }\n            if (step == 5) { break; }\n            const show = () => step;\n        }\n",
+            &[],
+        ),
+        indoc! {r#"
+            STMT_LIST
+              FOR
+                EXPR_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "step"
+                    ZVAL 0
+                EXPR_LIST
+                  BINARY_OP [20]
+                    VAR
+                      ZVAL "step"
+                    VAR
+                      ZVAL "extra"
+                EXPR_LIST
+                  POST_INC
+                    VAR
+                      ZVAL "step"
+                STMT_LIST
+                  DO_WHILE
+                    STMT_LIST
+                      IF
+                        IF_ELEM
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "step"
+                            ZVAL 1
+                          STMT_LIST
+                            CONTINUE
+                              null
+                      IF
+                        IF_ELEM
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "step"
+                            ZVAL 5
+                          STMT_LIST
+                            BREAK
+                              ZVAL 2
+                      ASSIGN
+                        VAR
+                          ZVAL "show"
+                        CLOSURE "" @12-12
+                          PARAM_LIST
+                          CLOSURE_USES
+                            ZVAL [1] "step"
+                          STMT_LIST
+                            RETURN
+                              VAR
+                                ZVAL "step"
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<int()>"
+                          null
+                    ZVAL false
+                  ASSIGN
+                    VAR
+                      ZVAL "step#1"
+                    VAR
+                      ZVAL "step"
+                  STMT_LIST
+                    UNSET
+                      VAR
+                        ZVAL "step"
+                  ASSIGN
+                    VAR
+                      ZVAL "step"
+                    VAR
+                      ZVAL "step#1"
         "#}
     );
 }

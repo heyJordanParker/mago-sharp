@@ -104,6 +104,7 @@ use crate::utils::names::display_type;
 use crate::utils::names::sharp_method_declaration;
 use crate::utils::template::find_broken_marker;
 use crate::utils::template::find_template_uses;
+use crate::visibility::is_visible_from_scope;
 
 pub mod constant;
 pub mod enum_case;
@@ -1575,6 +1576,7 @@ where
 
     if context.dialect.is_sharp() && class_like_metadata.flags.is_sharp() {
         report_statics_named_like_class_members(context, members);
+        report_members_named_like_inherited_members(context, class_like_metadata);
     }
 
     // Check trait constant overrides AFTER constants have been analyzed
@@ -1634,6 +1636,75 @@ where
             IssueCode::NameAlreadyInUse,
             Issue::error(format!(
                 "`type.{name}` on a class value reaches `Class`'s member `{member}`, never this static. Rename it."
+            ))
+            .with_annotation(Annotation::primary(span).with_message("Declared here.")),
+        );
+    }
+}
+
+/// Reports each member of the PHP# class `class` named like a member of the other kind that it inherits and can see,
+/// spec section 14.3: `x.discount(…)` runs a method `discount` or the function a field or property `discount` holds, so
+/// a class has one or the other, from a PHP# ancestor or a plain PHP one. A private member of an ancestor is no member
+/// the class sees, and two members of one body are the semantics check's. Names compare ignoring case, as PHP calls a
+/// method.
+fn report_members_named_like_inherited_members<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    let is_own = |declaring: Word| declaring.as_bytes().eq_ignore_ascii_case(class.name.as_bytes());
+    let visible = |visibility: Visibility, declaring: Word| {
+        is_own(declaring) || is_visible_from_scope(context.codebase, visibility, declaring.as_bytes(), Some(class.name))
+    };
+
+    let mut clashes = vec![];
+    for (property_name, &property_class) in &class.declaring_property_ids {
+        let name = property_name.as_bytes().strip_prefix(b"$").unwrap_or(property_name.as_bytes());
+        let Some(method_id) = class.declaring_method_ids.get(&ascii_lowercase_word(name)) else {
+            continue;
+        };
+        let method_class = method_id.get_class_name();
+        if is_own(method_class) == is_own(property_class) {
+            continue;
+        }
+        let Some(declaring) = context.codebase.get_class_like(property_class.as_bytes()) else {
+            continue;
+        };
+        let (Some(method), Some(property)) =
+            (context.codebase.get_method_by_id(method_id), declaring.properties.get(property_name))
+        else {
+            continue;
+        };
+        let method_visibility =
+            method.method_metadata.as_ref().map_or(Visibility::Public, |metadata| metadata.visibility);
+        if !visible(method_visibility, method_class) || !visible(property.read_visibility, property_class) {
+            continue;
+        }
+
+        // A plain PHP property without hooks is storage, as a PHP# field is.
+        let is_field = property.flags.is_field() || (!declaring.flags.is_sharp() && property.hooks.is_empty());
+        let property_kind = if is_field { "field" } else { "property" };
+        let (span, declared, inherited, ancestor) = if is_own(method_class) {
+            (method.name_span, "method", property_kind, property_class)
+        } else {
+            (property.name_span, property_kind, "method", method_class)
+        };
+        let Some(span) = span else {
+            continue;
+        };
+
+        clashes.push((span, declared, inherited, ancestor, BytesDisplay(name).to_string()));
+    }
+
+    clashes.sort_by_key(|(span, ..)| span.start.offset);
+    for (span, declared, inherited, ancestor, name) in clashes {
+        let class_name = display_class_like_name(context, class.original_name);
+        let ancestor =
+            context.codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |metadata| metadata.original_name);
+        let ancestor = display_class_like_name(context, ancestor);
+        context.collector.report_with_code(
+            IssueCode::NameAlreadyInUse,
+            Issue::error(format!(
+                "`{class_name}` declares the {declared} `{name}` and inherits the {inherited} `{name}` from `{ancestor}`, so `x.{name}(…)` could run either. Rename one of them."
             ))
             .with_annotation(Annotation::primary(span).with_message("Declared here.")),
         );
