@@ -16529,6 +16529,25 @@ fn a_function_parameter_whose_type_states_no_effects_never_escapes() {
     );
 }
 
+/// Spec section 29: a gap in a collection literal, as in `[f, , f]`, holds no function, so the escape check refuses only
+/// each element that stores the parameter, beside the gap's own refusal.
+#[test]
+fn a_gap_in_a_collection_literal_holds_no_function_parameter() {
+    let keeper = (
+        "app/Shop/Keeper.sharp",
+        "namespace App.Shop;\n\npublic class Keeper\n{\n    public List<Function<int()>> gapped(Function<int()> f) => [f, , f];\n}\n",
+    );
+
+    assert_eq!(
+        worded(keeper, &[]).iter().map(|issue| issue.split(" | ").next().unwrap()).collect::<Vec<_>>(),
+        [
+            "5:67 invalid-array-element Missing array element: skipping elements is only allowed in list assignments (destructuring).",
+            "5:64 invalid-array-element `f` can't be stored in a collection: its type states no effects.",
+            "5:69 invalid-array-element `f` can't be stored in a collection: its type states no effects.",
+        ]
+    );
+}
+
 /// Spec section 29: a method has, at each call, its body's own effects plus the effects of each function passed to a
 /// function parameter whose type states none: a lambda's, a method value's method's, or a function value's type's. The
 /// function passed is not held to the parameter's type, a parameter passed on to another such parameter carries it on,
