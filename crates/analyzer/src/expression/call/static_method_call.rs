@@ -3,7 +3,6 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
-use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
@@ -38,6 +37,7 @@ use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::StaticCall;
 use crate::resolver::class_name::generic_class_type;
+use crate::resolver::class_name::statics_type_arguments;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
 use crate::statement::class_like::listener::check_events_on;
@@ -159,7 +159,7 @@ where
                 context,
                 resolved_method.classname,
                 resolved_method.method_identifier.get_class_name(),
-                generic_class.as_ref().and_then(TNamedObject::get_type_parameters),
+                statics_type_arguments(artifacts, call.class),
             );
         }
 
@@ -186,7 +186,13 @@ where
             && (method_name.as_bytes().eq_ignore_ascii_case(b"parse")
                 || method_name.as_bytes().eq_ignore_ascii_case(b"tryParse"))
         {
-            check_struct_parse(context, metadata, method_name.as_bytes().eq_ignore_ascii_case(b"parse"), call.span);
+            check_struct_parse(
+                context,
+                metadata,
+                class_type_arguments.as_deref().unwrap_or_default(),
+                method_name.as_bytes().eq_ignore_ascii_case(b"parse"),
+                call.span,
+            );
         }
 
         // Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`. PHP calls the static

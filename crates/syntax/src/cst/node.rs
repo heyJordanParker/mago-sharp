@@ -1955,6 +1955,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 }
                 f(Node::Keyword(&node.r#struct));
                 f(Node::LocalIdentifier(&node.name));
+                for item in node.type_parameters.iter() {
+                    f(Node::TypeParameterList(item));
+                }
                 for item in node.inheritance.iter() {
                     f(Node::Inheritance(item));
                 }

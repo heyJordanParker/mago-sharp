@@ -147,10 +147,6 @@ pub struct BlockContext<'ctx> {
     /// mutating invocation.
     pub stable_method_calls: WordSet,
 
-    /// The result type of the PHP# lambda whose body this is, which the function type it is written for gives, as
-    /// `Function<Result<Order, PaymentError>()>` does, spec section 14.2. A lambda writes none itself.
-    pub lambda_result_type: Option<TUnion>,
-
     class_type_relations: WordMap<WordSet>,
 }
 
@@ -243,7 +239,6 @@ impl<'ctx> BlockContext<'ctx> {
             active_method_call_assertions: WordMap::default(),
             stable_method_call_assertions: WordMap::default(),
             stable_method_calls: WordSet::default(),
-            lambda_result_type: None,
             class_type_relations: WordMap::default(),
         };
 

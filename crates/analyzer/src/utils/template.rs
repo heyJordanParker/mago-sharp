@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use foldhash::HashMap;
 use foldhash::fast::RandomState;
 use indexmap::IndexMap;
@@ -14,19 +16,27 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::r#enum::TEnum;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::combiner::combine;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::template::GenericTemplate;
+use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
@@ -260,7 +270,7 @@ pub(crate) struct TemplateUse {
 /// parameter. A method's parameters take their types in and its return type hands its type out, a property hands its
 /// type out and takes it in when another class can write it, and the header hands its type arguments out, as C# and
 /// Kotlin check a base type's. Private members and the constructors, main and named, are exempt, as Kotlin exempts its
-/// primary and secondary constructors, and a private member that
+/// primary and secondary constructors, and so are the generated `parse` and `tryParse`, and a private member that
 /// breaks a marker is reachable only through `this`, which `check_private_method_reach` and
 /// `check_private_property_reach` check where it is reached. A header entry stands at its span in `header_spans`, by
 /// its parent's lowercase name, or at the class's name without one.
@@ -303,8 +313,10 @@ where
         let Some(method) = codebase.get_method(class.name.as_bytes(), method_name.as_bytes()) else {
             unreachable!("a class lists only the methods it declares");
         };
+        // The `parse` and `tryParse` the codex writes span the whole type and create it, as a constructor does.
         if method.method_metadata.as_ref().is_some_and(|metadata| metadata.is_constructor)
             || method.flags.is_named_constructor()
+            || method.span == class.span
             || is_private_method(method)
         {
             continue;
@@ -703,4 +715,51 @@ where
             if widens { "out" } else { "in" }
         )),
     }
+}
+
+/// The bounds that give the type parameters of `class` the `type_arguments` an object or an access of it writes, in
+/// declaration order, so `inferred_type_replacer::replace` reads `TFirst` of `Pair<int, string>` as `int`.
+pub(crate) fn class_type_arguments(class: &ClassLikeMetadata, type_arguments: &[TUnion]) -> TemplateResult {
+    let mut bounds = TemplateResult::default();
+    for ((name, template), type_argument) in class.template_types.iter().zip(type_arguments) {
+        bounds.add_lower_bound(*name, template.defining_entity, type_argument.clone());
+    }
+
+    bounds
+}
+
+/// The type argument PHP# takes from a value of type `union`, a type PHP# writes, as C#, Kotlin and Swift have no
+/// literal types and TypeScript widens the literal it infers: each scalar its general type, as `int` for `5` or for a
+/// list's key, each enum case its enum, and each array, and each array inside one, the `List`, `Map` or `Set` of its
+/// key and value types, as `List<int>` for `[1, 2]` and `Map<string, int>` for `["k": 1]`.
+pub(crate) fn written_type_argument(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    let mut type_argument = written_type(union, codebase);
+    type_argument.widen_scalars();
+
+    TUnion::from_vec(combine(type_argument.types.into_owned(), codebase, CombinerOptions::default()))
+}
+
+/// `union` with each enum case in it as its enum, and each array as the `List`, `Map` or `Set` of its key and value
+/// types, the arrays inside one too.
+fn written_type(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    TUnion::from_vec(
+        union
+            .types
+            .iter()
+            .map(|atomic| match atomic {
+                TAtomic::Array(array) => {
+                    let (key, value) = get_array_parameters(array, codebase);
+                    let value = Arc::new(written_type(&value, codebase));
+
+                    TAtomic::Array(match array {
+                        TArray::List(_) => TArray::List(TList::new(value)),
+                        TArray::Keyed(_) => TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(key), value)),
+                        TArray::Set(_) => TArray::Set(value),
+                    })
+                }
+                TAtomic::Object(TObject::Enum(r#enum)) => TAtomic::Object(TObject::Enum(TEnum::new(r#enum.name))),
+                atomic => atomic.clone(),
+            })
+            .collect(),
+    )
 }

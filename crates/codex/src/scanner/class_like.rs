@@ -1,6 +1,7 @@
 use mago_allocator::Arena;
 use mago_word::Word;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use mago_names::binding::php_variable_name;
 use mago_names::kind::NameKind;
@@ -90,6 +91,7 @@ use crate::scanner::version_claim::evaluate_version_attributes;
 use crate::symbol::SymbolKind;
 use crate::ttype::TType;
 use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::generic::TGenericParameter;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::r#enum::TEnum;
 use crate::ttype::atomic::object::named::TNamedObject;
@@ -511,7 +513,7 @@ where
         None,
         None,
         r#struct.inheritance.as_ref(),
-        None,
+        r#struct.type_parameters.as_ref(),
         None,
         context,
         scope,
@@ -2032,9 +2034,24 @@ fn leaves_parse_free(members: &Sequence<ClassLikeMember<'_>>) -> bool {
 }
 
 /// A struct's or a PHP# class's `parse` and `tryParse`, spec section 10, which read a `Map<string, Any?>` or an
-/// object's public properties. Each spans the whole type, which no declared member does.
+/// object's public properties. Each spans the whole type, which no declared member does, and gives the type with its
+/// own type parameters, as `Pair<TFirst, TSecond>`, which a call such as `Pair<int, string>.parse(…)` fixes.
 fn create_parse_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
-    let instance = get_named_object(class_like.original_name, None);
+    let own_type_parameters: Vec<TUnion> = class_like
+        .template_types
+        .iter()
+        .map(|(name, template)| {
+            wrap_atomic(TAtomic::GenericParameter(TGenericParameter::new(
+                *name,
+                Arc::new(template.constraint.clone()),
+                template.defining_entity,
+            )))
+        })
+        .collect();
+    let instance = wrap_atomic(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(
+        class_like.original_name,
+        (!own_type_parameters.is_empty()).then_some(own_type_parameters),
+    ))));
     let input = || {
         let map = get_keyed_array(get_string(), get_mixed());
         create_parameter("$value", TUnion::from_vec([map.types.as_ref(), get_object().types.as_ref()].concat()), span)

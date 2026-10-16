@@ -55,6 +55,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::invocation::MethodTargetContext;
 use crate::utils::names::display_type;
+use crate::utils::template::written_type_argument;
 
 #[derive(Debug, Clone, Copy)]
 pub struct InferenceOptions {
@@ -1089,11 +1090,18 @@ fn infer_templates_from_input_and_container_types<A>(
             );
         }
 
+        // A PHP# type argument is a type PHP# writes, so `Factory.of(5)` fixes `int`, which `Box<int>` takes.
+        let bound_type = if context.dialect.is_sharp() {
+            written_type_argument(&residual_input_type, context.codebase)
+        } else {
+            residual_input_type.clone()
+        };
+
         insert_bound_type(
             template_result,
             *template_parameter_name,
             &container_generic.defining_entity,
-            residual_input_type.clone(),
+            bound_type,
             DefinitionReplacementOptions { appearance_depth: 1, ..Default::default() },
             options.argument_offset,
         );

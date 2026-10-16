@@ -102,6 +102,7 @@ use crate::statement::class_like::override_attribute;
 use crate::statement::class_like::property::accessor_property_type;
 use crate::statement::class_like::r#struct::data_cases;
 use crate::statement::class_like::r#struct::data_enum;
+use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::body_return_type;
 use crate::statement::function_like::expect_type;
 use crate::statement::function_like::known_type_or_error;
@@ -456,11 +457,6 @@ where
         return Ok(());
     }
 
-    // A `match` gives its PHP the declared type its value goes into, which the PHP gives each arm.
-    let expected = match node {
-        Node::Expression(expression) => artifacts.get_expected_type(expression).cloned(),
-        _ => None,
-    };
     let tests_function_type = hints.iter().any(|hint| names_function_type(hint));
     let mut case_types = generic_case_types(node, &hints, context, block_context, artifacts)?;
     let mut is_refused = false;
@@ -471,7 +467,7 @@ where
             artifacts.record_tested_type(hint, case_type);
             continue;
         }
-        is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint);
+        is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint, HintPlace::TypeTest);
         is_refused |= report_erased_type_test(context, hint);
 
         // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any`, of a
@@ -532,12 +528,15 @@ where
         }
         _ => {}
     }
+    // The declared type a `match`'s value goes into is the one its PHP's value goes into, which gives it to each arm.
+    if let (Node::Expression(expression), Node::Expression(php)) = (node, php)
+        && let Some(expected) = artifacts.get_expected_type(expression).cloned()
+    {
+        expect_type(context, artifacts, php, Some(&expected));
+    }
     context.temporaries += temporaries;
     let (result, issues) = context.record(|context| match php {
-        Node::Expression(expression) => {
-            expect_type(context, artifacts, expression, expected.as_ref());
-            expression.analyze(context, block_context, artifacts)
-        }
+        Node::Expression(expression) => expression.analyze(context, block_context, artifacts),
         Node::Statement(statement) => statement.analyze(context, block_context, artifacts),
         _ => Ok(()),
     });
@@ -1634,7 +1633,7 @@ where
     let in_lambda = function
         .is_some_and(|function| matches!(function.kind, FunctionLikeKind::Closure | FunctionLikeKind::ArrowFunction));
     let declared = if in_lambda {
-        block_context.lambda_result_type.clone().map(|result| (result, None))
+        artifacts.lambda_result.clone().map(|result| (result, None))
     } else if let Some((_, accessor)) = block_context.scope.get_property_hook() {
         Some(match accessor_property_type(block_context).filter(|_| accessor.name.as_bytes() == b"get") {
             Some(property_type) => (property_type.type_union.clone(), Some(property_type.span)),

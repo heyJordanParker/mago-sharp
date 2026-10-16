@@ -297,7 +297,7 @@ where
 }
 
 /// The names of the type parameters `list` declares, as `T` or `TKey, TValue`, or `None` when it declares none.
-fn type_parameter_names(list: Option<&TypeParameterList<'_>>) -> Option<std::boxed::Box<str>> {
+pub(crate) fn type_parameter_names(list: Option<&TypeParameterList<'_>>) -> Option<std::boxed::Box<str>> {
     list.map(|list| {
         let names = list.parameters.iter().map(|parameter| String::from_utf8_lossy(parameter.name.value));
 

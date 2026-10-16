@@ -35,6 +35,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::intersect_union_types;
+use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::definition_type_replacer;
@@ -87,6 +88,7 @@ use crate::resolver::extension::class_member;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
 use crate::statement::function_like::FunctionLikeBody;
+use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_type_references;
@@ -453,6 +455,11 @@ fn check_unused_template_parameters<'ctx, A>(
             else {
                 continue;
             };
+            // The `parse`, `tryParse` and `op_Equality` the codex writes span the whole type and give its own type
+            // parameters back, which uses none of them.
+            if function_like.span == class_like_metadata.span {
+                continue;
+            }
 
             // Check parameters
             for param in &function_like.parameters {
@@ -1449,6 +1456,17 @@ where
     scope.set_static(true);
 
     let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
+    // A PHP# property's initial value and accessor bodies name its class's type parameters, as a method's body does
+    // through the type parameters the codex gives the method, spec section 11.
+    let property_type_context =
+        (context.dialect.is_sharp() && !class_like_metadata.template_types.is_empty()).then(|| {
+            class_like_metadata
+                .template_types
+                .iter()
+                .fold(TypeResolutionContext::new(), |type_context, (name, template)| {
+                    type_context.with_template_definition(*name, vec![template.clone()])
+                })
+        });
 
     for member in members {
         match member {
@@ -1506,7 +1524,7 @@ where
                         && let Some(type_meta) = &prop_meta.type_metadata
                     {
                         report_undefined_type_references(context, type_meta);
-                        report_invalid_template_arguments(context, type_meta);
+                        report_invalid_template_arguments(context, type_meta, HintPlace::Declaration);
 
                         if type_meta.from_docblock
                             && let Some(type_decl_meta) = &prop_meta.type_declaration_metadata
@@ -1517,7 +1535,14 @@ where
                     }
                 }
 
-                property.analyze(context, &mut block_context, artifacts)?;
+                let outer_type_context = property_type_context
+                    .clone()
+                    .map(|type_context| std::mem::replace(&mut context.type_resolution_context, type_context));
+                let analyzed = property.analyze(context, &mut block_context, artifacts);
+                if let Some(outer_type_context) = outer_type_context {
+                    context.type_resolution_context = outer_type_context;
+                }
+                analyzed?;
             }
             ClassLikeMember::EnumCase(enum_case) => {
                 if context.settings.diff {

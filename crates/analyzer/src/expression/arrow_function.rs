@@ -16,7 +16,6 @@ use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::capture_lambda_locals;
 use crate::statement::function_like::closure_parameter_types;
-use crate::statement::function_like::lambda_result_type;
 use crate::statement::function_like::merge_captured_references;
 use crate::statement::function_like::receiver_class;
 use crate::statement::function_like::resolve_closure_like_type;
@@ -66,8 +65,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrowFunction<'arena> {
         }
 
         let mut inner_block_context = BlockContext::new(scope, context.settings.register_super_globals);
-        inner_block_context.lambda_result_type =
-            artifacts.get_expected_type(self).and_then(|expected| lambda_result_type(context, expected));
 
         let variables = if context.dialect.is_sharp() {
             capture_lambda_locals(context, s, block_context, &mut inner_block_context);
