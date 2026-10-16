@@ -742,15 +742,14 @@ pub(crate) fn report_wrapped_class<A>(
             false,
         );
     }
-    let Some(form) = member_form(context, members, None) else {
-        return;
-    };
+    // A project without the standard library has no member to name, and creating one is refused all the same.
+    let form = member_form(context, members, None).map_or_else(|| ".".to_owned(), |form| format!(": write {form}"));
     let name = display_class_like_name(context, class.original_name);
 
     context.collector.report_with_code(
         IssueCode::WrappedClass,
         Issue::error(format!(
-            "Creating {} `{name}` is wrapped by the standard library: write {form}",
+            "Creating {} `{name}` is wrapped by the standard library{form}",
             article(&name.to_string())
         ))
         .with_annotation(Annotation::primary(span).with_message("Created here.")),

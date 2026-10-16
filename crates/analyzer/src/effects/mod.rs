@@ -687,10 +687,7 @@ fn is_effect(codebase: &CodebaseMetadata, name: &[u8]) -> bool {
 fn carried_effects(codebase: &CodebaseMetadata) -> HashMap<Word, Vec<Word>> {
     let mut carried: HashMap<Word, Vec<Word>> = HashMap::default();
     let mut pending: Vec<(Vec<&FunctionLikeMetadata>, Vec<Word>)> = Vec::new();
-    for declarations in codebase.externs.values() {
-        let Some(declaration) = declarations.first() else {
-            continue;
-        };
+    for declaration in codebase.externs.values().filter_map(|declarations| declarations.first()) {
         let (class, member) = declaration.target;
         let returning = if class.is_empty() {
             codebase.get_function(member.as_bytes()).into_iter().collect()
@@ -722,20 +719,17 @@ fn carried_effects(codebase: &CodebaseMetadata) -> HashMap<Word, Vec<Word>> {
 
 /// Every method a call through `class` can reach: its own, the ones it inherits, and the ones its docblock gives it.
 fn methods_of(codebase: &CodebaseMetadata, class: Word) -> Vec<&FunctionLikeMetadata> {
-    let Some(metadata) = codebase.get_class_like(class.as_bytes()) else {
-        return Vec::new();
-    };
-
-    metadata
-        .declaring_method_ids
-        .values()
-        .filter_map(|method| codebase.get_method_by_id(method))
-        .chain(
-            metadata
-                .pseudo_methods
-                .iter()
-                .filter_map(|method| codebase.get_method(class.as_bytes(), method.as_bytes())),
-        )
+    codebase
+        .get_class_like(class.as_bytes())
+        .into_iter()
+        .flat_map(|metadata| {
+            metadata.declaring_method_ids.values().filter_map(|method| codebase.get_method_by_id(method)).chain(
+                metadata
+                    .pseudo_methods
+                    .iter()
+                    .filter_map(|method| codebase.get_method(class.as_bytes(), method.as_bytes())),
+            )
+        })
         .collect()
 }
 

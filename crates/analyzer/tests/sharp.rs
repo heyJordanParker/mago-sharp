@@ -16941,7 +16941,7 @@ fn a_class_the_standard_library_replaces_may_be_named_and_only_creating_one_is_r
     );
     let named = (
         "app/Shop/Stamp.sharp",
-        "namespace App.Shop;\n\nimport DateTimeImmutable;\nimport Lib.Calendar;\n\npublic class Stamp\n{\n    public DateTimeImmutable today() => Calendar.today();\n\n    public string year(DateTimeImmutable moment) => moment.format(\"Y\");\n}\n",
+        "namespace App.Shop;\n\nimport DateTimeImmutable;\nimport Lib.Calendar;\nimport PDO;\n\npublic class Stamp\n{\n    public DateTimeImmutable today() => Calendar.today();\n\n    public string year(DateTimeImmutable moment) => moment.format(\"Y\");\n\n    public int drivers() => PDO.getAvailableDrivers().count();\n}\n",
     );
 
     assert_eq!(issues(named, &[calendar, date]), Vec::<String>::new());
@@ -17058,6 +17058,22 @@ fn a_standard_exception_needs_no_import_and_a_class_of_the_namespace_or_an_impor
     ] {
         assert_eq!(issues(analyzed, &others), Vec::<String>::new(), "{row}");
     }
+}
+
+/// A catch of a class that does not exist catches nothing, and its note names the checker, never the tool.
+#[test]
+fn a_catch_of_a_class_that_does_not_exist_is_reported() {
+    let gauge = (
+        "src/Gauge.php",
+        "<?php\n\nfunction first(int $read): int\n{\n    try {\n        return intdiv(10, $read);\n    } catch (OutOfRangeError $e) {\n        return 0;\n    }\n}\n",
+    );
+
+    assert_eq!(issues(gauge, &[]), ["7:14 non-existent-catch-type", "7:14 no-valid-catch-type-found"]);
+    assert!(
+        worded(gauge, &[]).last().is_some_and(|issue| issue.contains("the checker might internally default")),
+        "{:?}",
+        worded(gauge, &[])
+    );
 }
 
 /// A call of a method without a body has the effects its `uses` lists, which every implementation is held to, so a
