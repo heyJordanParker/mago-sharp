@@ -7369,6 +7369,39 @@ fn a_name_without_its_import_names_the_import_or_the_namespace() {
     }
 }
 
+/// A missing class that is no keyword in another case, no full name and the short name of no class the file could
+/// import keeps the error of the place that names it. So does a name the file imports, as `Log` after `import Log;`,
+/// and a class directly in `Sharp` that a newer standard library declares, which the file already names by default.
+#[test]
+fn a_missing_class_the_spec_says_nothing_about_keeps_the_error_of_its_place() {
+    const FRESH: &str = "namespace Sharp;\n\npublic static class Fresh\n{\n    public static int make() => 1;\n}\n";
+    let others = [("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Fresh.sharp", FRESH)];
+
+    for (code, expected) in [
+        (
+            "namespace App;\n\n[Missing]\nclass Report\n{\n}\n",
+            vec!["Attribute class `Missing` not found or could not be autoloaded."],
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n    public int run()\n    {\n        try {\n            return 1;\n        } catch (Missing e) {\n            return 0;\n        }\n    }\n}\n",
+            vec![
+                "Attempting to catch an undefined class or interface: `Missing`.",
+                "None of the types specified in the `catch` declaration are valid catchable exceptions.",
+            ],
+        ),
+        (
+            "namespace App;\n\nimport Log;\n\nclass Report\n{\n    public void run(Log log)\n    {\n    }\n}\n",
+            vec!["Imported class, interface, trait, or enum `Log` does not exist.", "Cannot find type `Log`."],
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n    public void run(Fresh fresh)\n    {\n    }\n}\n",
+            vec!["Cannot find type `Fresh`."],
+        ),
+    ] {
+        assert_eq!(messages(("src/App/Report.sharp", code), &others), expected, "{code}");
+    }
+}
+
 /// Spec section 23: the last part of an import is a class, or the namespace of a plain PHP library's functions and
 /// constants, whatever the use statement setting says. One function or constant, a namespace of classes only and a
 /// name that names nothing are each one error, and a capitalized last part never names PHP's function `log()`.
@@ -7407,6 +7440,7 @@ fn an_import_names_a_class_or_a_namespace_of_functions_and_constants() {
                 "An import names a class or a namespace, not a function: import `Vendor.Pdf`, and call `Pdf.render(…)`.",
             ),
         ),
+        ("PHP_EOL", Some("An import names a class or a namespace, not a constant: read `global.PHP_EOL`.")),
     ] {
         let code: &'static str =
             Box::leak(format!("namespace App;\n\nimport {import};\n\nclass Report\n{{\n}}\n").into_boxed_str());
@@ -20193,6 +20227,7 @@ fn a_keyword_in_another_case_that_names_nothing_suggests_the_keyword() {
 
     for (body, message) in [
         ("        return THIS.total;\n", "Write the keyword `this` in lowercase."),
+        ("        return THIS;\n", "Write the keyword `this` in lowercase."),
         ("        return This.total;\n", "Write the keyword `this` in lowercase."),
         ("        return SUPER.toString();\n", "Write the keyword `super` in lowercase."),
         ("        return new SELF();\n", "Write the keyword `Self` with a capital S and the rest in lowercase."),
