@@ -3852,22 +3852,23 @@ fn a_named_constructor_of_a_generic_class_takes_the_class_type_arguments_as_its_
 
 /// ```php
 /// public static function track($item, /* type args: bounds "Any?", checks "#0" */): bool {
-///     \App\Counter::{'#entry'}(/* type args "#0" */)['count']++;
-///     (${'receiver#1'} = &\App\Counter::{'#entry'}(/* type args "#0" */)['items'])->add($item);
+///     \Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */)['count']++;
+///     (${'receiver#1'} = &\Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */)['items'])->add($item);
 ///     return /* $item is #0 */;
 /// }
 /// \App\Counter::track($order, /* type args "App.Order" */);
 /// \App\Orders::track($order, /* type args "App.Order" */);
-/// (${'receiver#1'} = &\App\Counter::{'#entry'}(/* type args "App.Order" */)['items'])->add($order);
-/// \App\Counter::{'#entry'}(/* type args "App.Order" */)['count'] = 5;
+/// (${'receiver#1'} = &\Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['items'])
+///     ->add($order);
+/// \Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['count'] = 5;
 /// ```
 ///
 /// Spec section 11: a static method of a generic class has no `this` to read the class's type arguments from, so it
 /// takes them as its own, as a named constructor does. `TItem` is the method's `#0`, and `Counter<Order>.track(order)`
 /// passes `App.Order` after the arguments, as `Orders.track(order)` does from the header `Orders : Counter<Order>`. Each
-/// type argument keeps its own statics, which the class's hidden static method `#entry` returns by reference, so
-/// `Orders.count` is the entry `Counter<Order>.count` is, also where a write before it makes its type known. A method
-/// call binds the field to a reference first, so `items.add(item)` changes the list where it lives.
+/// type argument keeps its own statics, whose entry `\Sharp\Internal\statics` returns by reference for the text of the
+/// type arguments, so `Orders.count` is the entry `Counter<Order>.count` is, also where a write before it makes its
+/// type known. A method call binds the field to a reference first, so `items.add(item)` changes the list where it lives.
 #[test]
 fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own() {
     let lowered = Lowered::new(
@@ -3897,12 +3898,12 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
             STMT_LIST
               POST_INC
                 DIM
-                  STATIC_CALL
-                    ZVAL "App\\Counter"
-                    ZVAL "#entry"
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
                     ARG_LIST
-                      SHARP_TYPE_ARGS
-                        null
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
                         ZVAL "#0"
                   ZVAL "count"
               METHOD_CALL
@@ -3910,12 +3911,12 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
                   VAR
                     ZVAL "receiver#1"
                   DIM
-                    STATIC_CALL
-                      ZVAL "App\\Counter"
-                      ZVAL "#entry"
+                    CALL
+                      ZVAL "Sharp\\Internal\\statics"
                       ARG_LIST
-                        SHARP_TYPE_ARGS
-                          null
+                        CLASS_NAME
+                          ZVAL "App\\Counter"
+                        SHARP_TYPE_OF [1]
                           ZVAL "#0"
                     ZVAL "items"
                 ZVAL "add"
@@ -3956,12 +3957,12 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
                   VAR
                     ZVAL "receiver#1"
                   DIM
-                    STATIC_CALL
-                      ZVAL "App\\Counter"
-                      ZVAL "#entry"
+                    CALL
+                      ZVAL "Sharp\\Internal\\statics"
                       ARG_LIST
-                        SHARP_TYPE_ARGS
-                          null
+                        CLASS_NAME
+                          ZVAL "App\\Counter"
+                        SHARP_TYPE_OF [1]
                           ZVAL "App.Order"
                     ZVAL "items"
                 ZVAL "add"
@@ -3970,23 +3971,23 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
                     ZVAL "order"
               ASSIGN
                 DIM
-                  STATIC_CALL
-                    ZVAL "App\\Counter"
-                    ZVAL "#entry"
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
                     ARG_LIST
-                      SHARP_TYPE_ARGS
-                        null
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
                         ZVAL "App.Order"
                   ZVAL "count"
                 ZVAL 5
               RETURN
                 DIM
-                  STATIC_CALL
-                    ZVAL "App\\Counter"
-                    ZVAL "#entry"
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
                     ARG_LIST
-                      SHARP_TYPE_ARGS
-                        null
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
                         ZVAL "App.Order"
                   ZVAL "count"
         "##}
@@ -3999,7 +4000,7 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
 ///
 /// Spec section 11: a generic class keeps each type argument's static fields in one hidden static, whose entry under ""
 /// holds each constant initial value. `\Sharp\Internal\statics` copies that entry the first time a type argument uses
-/// its statics, and the class's `#entry` sets `made`, whose initial value runs as code.
+/// its statics, and the class's `#init` sets `made`, whose initial value runs as code.
 #[test]
 fn a_generic_class_keeps_the_initial_values_of_its_static_fields_in_one_hidden_static() {
     let lowered = Lowered::new(
@@ -4036,17 +4037,12 @@ fn a_generic_class_keeps_the_initial_values_of_its_static_fields_in_one_hidden_s
 }
 
 /// ```php
-/// public static function &'#entry'(/* type args: bounds "App.Order" */) {
-///     ${'entry#1'} = &\Sharp\Internal\statics(\App\Tally::class, /* the text of "#0" */, ${'created#2'});
-///     if (${'created#2'}) { ${'entry#1'}['made'] = \App\Tally::fresh(/* type args "#0" */); }
-///     return ${'entry#1'};
+/// private static function '#init'($"\0<sharp>\0types") {
+///     \Sharp\Internal\statics(\App\Tally::class, /* the text of "#0" */)['made'] = \App\Tally::fresh(/* type args "#0" */);
 /// }
-/// // In `Counter<T>`, whose initial values are all constant:
-/// public static function &'#entry'(/* type args: bounds "Any?" */) {
-///     return \Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */);
-/// }
+/// // `Counter<T>`, whose initial values are all constant, declares no `#init`.
 /// public static function 'doubled#get'(/* type args: bounds "App.Order" */): int {
-///     return \App\Tally::{'#entry'}(/* type args "#0" */)['doubled'] * 2;
+///     return \Sharp\Internal\statics(\App\Tally::class, /* the text of "#0" */)['doubled'] * 2;
 /// }
 /// public static function 'once#get'(/* type args: bounds "App.Order" */): string {
 ///     return \Sharp\Internal\keep('App\Tally<' . /* the text of "#0" */ . '>::once',
@@ -4056,11 +4052,11 @@ fn a_generic_class_keeps_the_initial_values_of_its_static_fields_in_one_hidden_s
 /// return \App\Tally::{'doubled#get'}(/* type args "App.Order" */);
 /// ```
 ///
-/// Spec section 11: each type argument of a generic class has its own statics. The class's hidden `#entry` takes the
-/// class's type arguments as its own, as any static method of the class does, returns their entry by reference, and runs
-/// each initial value that runs as code on the call that adds the entry. A static's accessors take them too, keep their
-/// storage in the entry, and the access passes its type arguments as a static method call does. A `static lazy` value
-/// is kept under a key that holds them.
+/// Spec section 11: each type argument of a generic class has its own statics. The call of `\Sharp\Internal\statics`
+/// that adds a type argument's entry runs the class's hidden `#init` with those type arguments in the hidden local a
+/// method keeps its own in, and `#init` sets each initial value that runs as code. A static's accessors take the type
+/// arguments as their own, as any static method of the class does, keep their storage in the entry, and the access
+/// passes its type arguments as a static method call does. A `static lazy` value is kept under a key that holds them.
 #[test]
 fn a_generic_class_runs_its_statics_initial_values_and_accessors_with_its_type_arguments() {
     let lowered = Lowered::new(
@@ -4068,76 +4064,44 @@ fn a_generic_class_runs_its_statics_initial_values_and_accessors_with_its_type_a
     );
 
     assert_eq!(
-        lowered.declared("#entry"),
+        lowered.declared("#init"),
         indoc! {r##"
-            METHOD [4113] "#entry" @7-7
+            METHOD [20] "#init" @7-7
               PARAM_LIST
-                SHARP_TYPE_ARGS
-                  ZVAL "App.Order"
+                PARAM
+                  null
+                  ZVAL "\0<sharp>\0types"
+                  null
+                  null
+                  null
                   null
               null
               STMT_LIST
-                ASSIGN_REF
-                  VAR
-                    ZVAL "entry#1"
-                  CALL
-                    ZVAL "Sharp\\Internal\\statics"
-                    ARG_LIST
-                      CLASS_NAME
-                        ZVAL "App\\Tally"
-                      SHARP_TYPE_OF [1]
-                        ZVAL "#0"
-                      VAR
-                        ZVAL "created#2"
-                IF
-                  IF_ELEM
-                    VAR
-                      ZVAL "created#2"
-                    STMT_LIST
-                      ASSIGN
-                        DIM
-                          VAR
-                            ZVAL "entry#1"
-                          ZVAL "made"
-                        STATIC_CALL
+                ASSIGN
+                  DIM
+                    CALL
+                      ZVAL "Sharp\\Internal\\statics"
+                      ARG_LIST
+                        CLASS_NAME
                           ZVAL "App\\Tally"
-                          ZVAL "fresh"
-                          ARG_LIST
-                            SHARP_TYPE_ARGS
-                              null
-                              ZVAL "#0"
-                RETURN
-                  VAR
-                    ZVAL "entry#1"
+                        SHARP_TYPE_OF [1]
+                          ZVAL "#0"
+                    ZVAL "made"
+                  STATIC_CALL
+                    ZVAL "App\\Tally"
+                    ZVAL "fresh"
+                    ARG_LIST
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "#0"
               null
               null
         "##}
     );
-    // A class whose initial values are all constant returns the entry the call gives.
+    // A class whose initial values are all constant has nothing to run when it adds an entry.
     let constant =
         Lowered::new("namespace App;\n\nclass Counter<T>\n{\n    public static int count { get; set; } = 0;\n}\n");
-    assert_eq!(
-        constant.declared("#entry"),
-        indoc! {r##"
-            METHOD [4113] "#entry" @3-3
-              PARAM_LIST
-                SHARP_TYPE_ARGS
-                  ZVAL "Any?"
-                  null
-              null
-              STMT_LIST
-                RETURN
-                  CALL
-                    ZVAL "Sharp\\Internal\\statics"
-                    ARG_LIST
-                      CLASS_NAME
-                        ZVAL "App\\Counter"
-                      SHARP_TYPE_OF [1]
-                        ZVAL "#0"
-              null
-              null
-        "##}
-    );
+    assert!(!constant.tree().contains(r##""#init""##), "{}", constant.tree());
     assert_eq!(
         lowered.declared("doubled#get"),
         indoc! {r##"
@@ -4151,12 +4115,12 @@ fn a_generic_class_runs_its_statics_initial_values_and_accessors_with_its_type_a
                 RETURN
                   BINARY_OP [3]
                     DIM
-                      STATIC_CALL
-                        ZVAL "App\\Tally"
-                        ZVAL "#entry"
+                      CALL
+                        ZVAL "Sharp\\Internal\\statics"
                         ARG_LIST
-                          SHARP_TYPE_ARGS
-                            null
+                          CLASS_NAME
+                            ZVAL "App\\Tally"
+                          SHARP_TYPE_OF [1]
                             ZVAL "#0"
                       ZVAL "doubled"
                     ZVAL 2
@@ -4229,22 +4193,18 @@ fn a_generic_class_runs_its_statics_initial_values_and_accessors_with_its_type_a
 }
 
 /// ```php
-/// \App\Tally::{'#entry'}(/* type args "App.Order" */)['made'] = 2;
-/// ${'statics#1'}[\array_key_exists('made', ${'statics#1'} = &\App\Tally::{'#entry'}(/* type args "App.Order" */))
-///     ? 'made'
-///     : throw new \Error('Typed static property App\Tally::$made must not be accessed before initialization')] += 1;
-/// return (\App\Tally::{'#entry'}(/* type args "App.Order" */)['made']
-///         ?? (\array_key_exists('made', \App\Tally::{'#entry'}(/* type args "App.Order" */)) ? null : throw /* the same */))
-///     + \App\Tally::{'#entry'}(/* type args "App.Order" */)['count'];
+/// \Sharp\Internal\statics(\App\Tally::class, /* the text of "App.Order" */)['made'] = 2;
+/// \Sharp\Internal\statics(\App\Tally::class, /* the text of "App.Order" */, 'made')['made'] += 1;
+/// return \Sharp\Internal\statics(\App\Tally::class, /* the text of "App.Order" */, 'made')['made']
+///     + \Sharp\Internal\statics(\App\Tally::class, /* the text of "App.Order" */)['count'];
 /// ```
 ///
 /// Spec section 6: a throw in a static's initial value that runs as code leaves the static unset, and in a class that
-/// isn't generic PHP throws its error on a read before it is set. So a read of such a static of a generic class checks
-/// that its entry holds it when the value it reads is not there or null, a compound assignment, `++` or `--` checks
-/// before it writes, with its own hidden variable, and a write alone sets it. A static with a constant initial value is
-/// always in the entry.
+/// isn't generic PHP throws its error on a read before it is set. So a read of such a static of a generic class, and a
+/// compound assignment, `++` or `--`, which read it first, name it, and the engine throws that error when the entry
+/// does not hold it. A write alone sets it. A static with a constant initial value is always in the entry.
 #[test]
-fn a_read_of_a_generic_static_whose_initial_value_runs_as_code_checks_its_entry_holds_it() {
+fn a_read_of_a_generic_static_whose_initial_value_runs_as_code_names_it_for_the_engine_to_check() {
     let lowered = Lowered::new(
         "namespace App;\n\nclass Order\n{\n}\n\nclass Tally<T>\n{\n    public static int count { get; set; } = 0;\n\n    public static int made { get; set; } = Tally<T>.count + 1;\n}\n\nclass Report\n{\n    public static int run()\n    {\n        Tally<Order>.made = 2;\n        Tally<Order>.made += 1;\n        return Tally<Order>.made + Tally<Order>.count;\n    }\n}\n",
     );
@@ -4255,78 +4215,46 @@ fn a_read_of_a_generic_static_whose_initial_value_runs_as_code_checks_its_entry_
             STMT_LIST
               ASSIGN
                 DIM
-                  STATIC_CALL
-                    ZVAL "App\\Tally"
-                    ZVAL "#entry"
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
                     ARG_LIST
-                      SHARP_TYPE_ARGS
-                        null
+                      CLASS_NAME
+                        ZVAL "App\\Tally"
+                      SHARP_TYPE_OF [1]
                         ZVAL "App.Order"
                   ZVAL "made"
                 ZVAL 2
               ASSIGN_OP [1]
                 DIM
-                  VAR
-                    ZVAL "statics#1"
-                  CONDITIONAL [1]
-                    CALL
-                      ZVAL "array_key_exists"
-                      ARG_LIST
-                        ZVAL "made"
-                        ASSIGN_REF
-                          VAR
-                            ZVAL "statics#1"
-                          STATIC_CALL
-                            ZVAL "App\\Tally"
-                            ZVAL "#entry"
-                            ARG_LIST
-                              SHARP_TYPE_ARGS
-                                null
-                                ZVAL "App.Order"
-                    ZVAL "made"
-                    THROW
-                      NEW
-                        ZVAL "Error"
-                        ARG_LIST
-                          ZVAL "Typed static property App\\Tally::$made must not be accessed before initialization"
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
+                    ARG_LIST
+                      CLASS_NAME
+                        ZVAL "App\\Tally"
+                      SHARP_TYPE_OF [1]
+                        ZVAL "App.Order"
+                      ZVAL "made"
+                  ZVAL "made"
                 ZVAL 1
               RETURN
                 BINARY_OP [1]
-                  COALESCE
-                    DIM
-                      STATIC_CALL
-                        ZVAL "App\\Tally"
-                        ZVAL "#entry"
-                        ARG_LIST
-                          SHARP_TYPE_ARGS
-                            null
-                            ZVAL "App.Order"
-                      ZVAL "made"
-                    CONDITIONAL [1]
-                      CALL
-                        ZVAL "array_key_exists"
-                        ARG_LIST
-                          ZVAL "made"
-                          STATIC_CALL
-                            ZVAL "App\\Tally"
-                            ZVAL "#entry"
-                            ARG_LIST
-                              SHARP_TYPE_ARGS
-                                null
-                                ZVAL "App.Order"
-                      ZVAL null
-                      THROW
-                        NEW
-                          ZVAL "Error"
-                          ARG_LIST
-                            ZVAL "Typed static property App\\Tally::$made must not be accessed before initialization"
                   DIM
-                    STATIC_CALL
-                      ZVAL "App\\Tally"
-                      ZVAL "#entry"
+                    CALL
+                      ZVAL "Sharp\\Internal\\statics"
                       ARG_LIST
-                        SHARP_TYPE_ARGS
-                          null
+                        CLASS_NAME
+                          ZVAL "App\\Tally"
+                        SHARP_TYPE_OF [1]
+                          ZVAL "App.Order"
+                        ZVAL "made"
+                    ZVAL "made"
+                  DIM
+                    CALL
+                      ZVAL "Sharp\\Internal\\statics"
+                      ARG_LIST
+                        CLASS_NAME
+                          ZVAL "App\\Tally"
+                        SHARP_TYPE_OF [1]
                           ZVAL "App.Order"
                     ZVAL "count"
         "##}
@@ -4388,8 +4316,9 @@ fn new_through_a_class_value_creates_the_class_with_the_type_arguments_it_carrie
 
 /// ```php
 /// $type = /* the class value of "App.Counter<App.Order>" */;
-/// \App\Counter::{'#entry'}(/* type args "App.Order" */)['count'] = 5;
-/// (${'receiver#1'} = &\App\Counter::{'#entry'}(/* type args "App.Order" */)['items'])->add($order);
+/// \Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['count'] = 5;
+/// (${'receiver#1'} = &\Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['items'])
+///     ->add($order);
 /// ```
 ///
 /// Spec section 25: a write through a class value writes the static field of the class it holds, as
@@ -4412,12 +4341,12 @@ fn a_write_through_a_class_value_writes_the_static_field_of_the_type_arguments_i
                   ZVAL "App.Counter<App.Order>"
               ASSIGN
                 DIM
-                  STATIC_CALL
-                    ZVAL "App\\Counter"
-                    ZVAL "#entry"
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
                     ARG_LIST
-                      SHARP_TYPE_ARGS
-                        null
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
                         ZVAL "App.Order"
                   ZVAL "count"
                 ZVAL 5
@@ -4426,12 +4355,12 @@ fn a_write_through_a_class_value_writes_the_static_field_of_the_type_arguments_i
                   VAR
                     ZVAL "receiver#1"
                   DIM
-                    STATIC_CALL
-                      ZVAL "App\\Counter"
-                      ZVAL "#entry"
+                    CALL
+                      ZVAL "Sharp\\Internal\\statics"
                       ARG_LIST
-                        SHARP_TYPE_ARGS
-                          null
+                        CLASS_NAME
+                          ZVAL "App\\Counter"
+                        SHARP_TYPE_OF [1]
                           ZVAL "App.Order"
                     ZVAL "items"
                 ZVAL "add"
