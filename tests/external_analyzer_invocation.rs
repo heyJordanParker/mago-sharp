@@ -625,23 +625,34 @@ fn effective_signatures_name_the_logical_callable_and_parameter_in_diagnostics()
     Ok(())
 }
 
+/// `Demo\Calc`, the PHP# class whose static `make` the hook tests call, in a file of its own.
+const CALC: (&str, &str) = (
+    "src/Calc.sharp",
+    "namespace Demo;\n\nclass Calc\n{\n    public static Calc make(Calc calc)\n    {\n        return calc;\n    }\n\n    public int add(int value)\n    {\n        return value;\n    }\n}\n",
+);
+
+/// `Demo\Report`, whose `total` calls `Calc.make(calc).add(1)`.
+const REPORT: (&str, &str) = (
+    "src/Report.sharp",
+    "namespace Demo;\n\nclass Report\n{\n    public static int total(Calc calc)\n    {\n        return Calc.make(calc).add(1);\n    }\n}\n",
+);
+
 #[test]
 fn node_hooks_see_a_sharp_static_call_as_static_as_in_php() -> Result<(), Box<dyn std::error::Error>> {
     if !php_sdk_is_available() {
         return Ok(());
     }
 
-    const SHARP: &str = "namespace Demo;\n\nclass Calc\n{\n    public static Calc make(Calc calc)\n    {\n        return calc;\n    }\n\n    public int add(int value)\n    {\n        return value;\n    }\n}\n\nclass Report\n{\n    public static int total(Calc calc)\n    {\n        return Calc.make(calc).add(1);\n    }\n}\n";
     const PHP: &str = "<?php\n\nnamespace Demo;\n\nclass Calc\n{\n    public static function make(Calc $calc): Calc\n    {\n        return $calc;\n    }\n\n    public function add(int $value): int\n    {\n        return $value;\n    }\n}\n\nclass Report\n{\n    public static function total(Calc $calc): int\n    {\n        return Calc::make($calc)->add(1);\n    }\n}\n";
 
-    for (file, source) in [("src/Report.sharp", SHARP), ("src/Report.php", PHP)] {
-        let observation = analyze_with_fixture(file, source, &["MAGO_INVOCATION_CALL_KINDS"])?;
+    for files in [&[CALC, REPORT][..], &[("src/Report.php", PHP)]] {
+        let observation = analyze_files_with_fixture(files, &["MAGO_INVOCATION_CALL_KINDS"])?;
 
-        assert_eq!(observation.issues, [], "{file}");
+        assert_eq!(observation.issues, [], "{files:?}");
         assert_eq!(
             observation.invocations,
             ["call-kind-add-instance", "receiver-call-kind-make-static", "call-kind-make-static"],
-            "{file}"
+            "{files:?}"
         );
     }
 
@@ -654,14 +665,13 @@ fn a_hook_that_targets_static_calls_receives_a_sharp_static_call() -> Result<(),
         return Ok(());
     }
 
-    const SHARP: &str = "namespace Demo;\n\nclass Calc\n{\n    public static Calc make(Calc calc)\n    {\n        return calc;\n    }\n\n    public int add(int value)\n    {\n        return value;\n    }\n}\n\nclass Report\n{\n    public static int total(Calc calc)\n    {\n        return Calc.make(calc).add(1);\n    }\n}\n";
     const PHP: &str = "<?php\n\nnamespace Demo;\n\nclass Calc\n{\n    public static function make(Calc $calc): Calc\n    {\n        return $calc;\n    }\n\n    public function add(int $value): int\n    {\n        return $value;\n    }\n}\n\nclass Report\n{\n    public static function total(Calc $calc): int\n    {\n        return Calc::make($calc)->add(1);\n    }\n}\n";
 
-    for (file, source) in [("src/Report.sharp", SHARP), ("src/Report.php", PHP)] {
-        let observation = analyze_with_fixture(file, source, &["MAGO_INVOCATION_STATIC_CALL_KINDS"])?;
+    for files in [&[CALC, REPORT][..], &[("src/Report.php", PHP)]] {
+        let observation = analyze_files_with_fixture(files, &["MAGO_INVOCATION_STATIC_CALL_KINDS"])?;
 
-        assert_eq!(observation.issues, [], "{file}");
-        assert_eq!(observation.invocations, ["call-kind-make-static"], "{file}");
+        assert_eq!(observation.issues, [], "{files:?}");
+        assert_eq!(observation.invocations, ["call-kind-make-static"], "{files:?}");
     }
 
     Ok(())
@@ -673,14 +683,23 @@ fn a_method_call_hook_receives_a_sharp_static_call() -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    const SHARP: &str = "namespace Demo;\n\nclass Calc\n{\n    public static Calc make(Calc calc)\n    {\n        return calc;\n    }\n}\n\nclass Report\n{\n    public static Calc total(Calc calc)\n    {\n        return Calc.make(calc);\n    }\n}\n";
+    const SHARP: [(&str, &str); 2] = [
+        (
+            "src/Calc.sharp",
+            "namespace Demo;\n\nclass Calc\n{\n    public static Calc make(Calc calc)\n    {\n        return calc;\n    }\n}\n",
+        ),
+        (
+            "src/Report.sharp",
+            "namespace Demo;\n\nclass Report\n{\n    public static Calc total(Calc calc)\n    {\n        return Calc.make(calc);\n    }\n}\n",
+        ),
+    ];
     const PHP: &str = "<?php\n\nnamespace Demo;\n\nclass Calc\n{\n    public static function make(Calc $calc): Calc\n    {\n        return $calc;\n    }\n}\n\nclass Report\n{\n    public static function total(Calc $calc): Calc\n    {\n        return Calc::make($calc);\n    }\n}\n";
 
-    for (file, source) in [("src/Report.sharp", SHARP), ("src/Report.php", PHP)] {
-        let observation = analyze_with_fixture(file, source, &["MAGO_INVOCATION_METHOD_CALL_HOOK"])?;
+    for files in [&SHARP[..], &[("src/Report.php", PHP)]] {
+        let observation = analyze_files_with_fixture(files, &["MAGO_INVOCATION_METHOD_CALL_HOOK"])?;
 
-        assert_eq!(observation.issues, [], "{file}");
-        assert_eq!(observation.invocations, ["method-call-hook-make-static"], "{file}");
+        assert_eq!(observation.issues, [], "{files:?}");
+        assert_eq!(observation.invocations, ["method-call-hook-make-static"], "{files:?}");
     }
 
     Ok(())
@@ -711,9 +730,7 @@ fn hooks_without_the_subtree_split_sharp_method_and_static_calls() -> Result<(),
         return Ok(());
     }
 
-    const SHARP: &str = "namespace Demo;\n\nclass Calc\n{\n    public static Calc make(Calc calc)\n    {\n        return calc;\n    }\n\n    public int add(int value)\n    {\n        return value;\n    }\n}\n\nclass Report\n{\n    public static int total(Calc calc)\n    {\n        return Calc.make(calc).add(1);\n    }\n}\n";
-
-    let observation = analyze_with_fixture("src/Report.sharp", SHARP, &["MAGO_INVOCATION_BARE_CALL_HOOKS"])?;
+    let observation = analyze_files_with_fixture(&[CALC, REPORT], &["MAGO_INVOCATION_BARE_CALL_HOOKS"])?;
 
     assert_eq!(observation.issues, []);
     assert_eq!(
@@ -735,6 +752,16 @@ fn analyze_with_fixture(
     source: &str,
     switches: &[&str],
 ) -> Result<AnalysisObservation, Box<dyn std::error::Error>> {
+    analyze_files_with_fixture(&[(file, source)], switches)
+}
+
+/// Analyzes `files`, each a path and its source, as one project with the invocation fixture worker, as
+/// [`analyze_with_fixture`] does one file. A `.sharp` file declares one type, spec section 27, so a PHP# project of two
+/// classes is two files.
+fn analyze_files_with_fixture(
+    files: &[(&'static str, &str)],
+    switches: &[&str],
+) -> Result<AnalysisObservation, Box<dyn std::error::Error>> {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     let temporary = tempfile::tempdir()?;
     let audit = temporary.path().join("invocations.txt");
@@ -753,12 +780,14 @@ fn analyze_with_fixture(
 
     let configuration = common::database_configuration("/invocation-proof", vec![Cow::Borrowed(b"src")]);
     let mut database = Database::new(configuration);
-    database.add(File::new(
-        Cow::Borrowed(file.as_bytes()),
-        FileType::Host,
-        None,
-        Cow::Owned(source.as_bytes().to_vec()),
-    ));
+    for (file, source) in files {
+        database.add(File::new(
+            Cow::Borrowed(file.as_bytes()),
+            FileType::Host,
+            None,
+            Cow::Owned(source.as_bytes().to_vec()),
+        ));
+    }
 
     let mut settings = Settings::new(PHPVersion::PHP85);
     settings.find_unused_parameters = false;

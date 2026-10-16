@@ -256,6 +256,15 @@ pub(crate) fn imports_by_default(scope: &NamespaceScope, name: Word) -> bool {
             || STANDARD_EXCEPTIONS.iter().any(|exception| exception.as_bytes().eq_ignore_ascii_case(name)))
 }
 
+/// Whether the full name `name` is `Sharp\Internal`, the namespace of the engine's functions that only the standard
+/// library imports (spec section 15), or a name under it, compared ignoring case.
+pub(crate) fn is_sharp_internal(name: &[u8]) -> bool {
+    let internal = b"Sharp\\Internal";
+
+    name.get(..internal.len()).is_some_and(|root| root.eq_ignore_ascii_case(internal))
+        && matches!(name.get(internal.len()), None | Some(b'\\'))
+}
+
 /// Returns the property `name`, which the codebase keys with its `$`, as the analyzed file names it in prose: `total`
 /// in a `.sharp` file, and `$total` in PHP.
 #[inline]
@@ -364,9 +373,9 @@ where
     context.codebase.get_function(name.as_bytes()).map_or(name, |m| m.original_name)
 }
 
-/// Returns the PHP# collection type, as in `Map<string, int>`, that `object` stands for when it is `Sharp\ListMethods`,
-/// `Sharp\MapMethods`, `Sharp\SetMethods` or `Sharp\IterableMethods`. The analyzer checks a method call on a `List`,
-/// `Map`, `Set` or `Iterable` against those classes, and a message names the type the code wrote instead.
+/// Returns the PHP# collection type, as in `Map<string, int>`, that `object` stands for when it is one of the classes
+/// [`sharp_collection_name`] names. The analyzer checks a method call on a `List`, `Map`, `Set` or `Iterable` against
+/// those classes, and a message names the type the code wrote instead.
 #[must_use]
 pub(crate) fn display_sharp_collection<A>(context: &Context<'_, '_, A>, object: &TObject) -> Option<String>
 where
@@ -563,7 +572,25 @@ where
                 Some(parameters) if !parameters.is_empty() => {
                     let parameters: Vec<String> =
                         parameters.iter().map(|parameter| display_sharp_type(context, parameter)).collect();
-                    format!("{readonly}{name}<{}>", parameters.join(", "))
+                    // Spec section 31: a case of a generic enum writes the enum's type arguments, as in
+                    // `Result<Order, PaymentError>.Ok`.
+                    let case_of = object
+                        .get_name()
+                        .and_then(|name| context.codebase.get_class_like(name.as_bytes()))
+                        .and_then(|class| class.direct_parent_class.filter(|_| class.flags.is_enum_case_class()));
+                    match case_of {
+                        Some(r#enum) => format!(
+                            "{readonly}{}<{}>.{name}",
+                            sharp_class_like_name(
+                                context.codebase,
+                                &context.imported_names,
+                                &context.short_name_counts,
+                                r#enum
+                            ),
+                            parameters.join(", ")
+                        ),
+                        None => format!("{readonly}{name}<{}>", parameters.join(", ")),
+                    }
                 }
                 _ => format!("{readonly}{name}"),
             }
@@ -788,19 +815,19 @@ pub(crate) fn sharp_code_class_name(
     sharp_import_alias(codebase, imported_names, scope, name).unwrap_or_else(|| short_name(name))
 }
 
-/// Returns `List`, `Map`, `Set` or `Iterable` when `object` is `Sharp\ListMethods`, `Sharp\MapMethods`,
-/// `Sharp\SetMethods` or `Sharp\IterableMethods`.
+/// Returns `List`, `Map`, `Set` or `Iterable` when `object` is `Sharp\Internal\ListMethods`,
+/// `Sharp\Internal\MapMethods`, `Sharp\Internal\SetMethods` or `Sharp\Internal\IterableMethods`.
 #[must_use]
 pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
     let name = object.get_name()?;
 
-    if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\ListMethods") {
+    if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\ListMethods") {
         Some("List")
-    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\MapMethods") {
+    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\MapMethods") {
         Some("Map")
-    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\SetMethods") {
+    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\SetMethods") {
         Some("Set")
-    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\IterableMethods") {
+    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\IterableMethods") {
         Some("Iterable")
     } else {
         None

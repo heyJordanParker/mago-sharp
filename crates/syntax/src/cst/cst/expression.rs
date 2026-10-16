@@ -72,6 +72,17 @@ pub enum Leave<'arena> {
     Break(Break<'arena>),
 }
 
+/// Represents PHP#'s `try` before a value, spec section 31: the `Ok` value of the `Result` it reads, or, when that is
+/// `Err`, leaving the function with an `Err` holding the same error.
+///
+/// Example: `try gateway.charge(cart)`
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct Propagate<'arena> {
+    pub r#try: Keyword<'arena>,
+    pub value: &'arena Expression<'arena>,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Parenthesized<'arena> {
@@ -109,6 +120,7 @@ pub enum Expression<'arena> {
     Construct(Construct<'arena>),
     Throw(Throw<'arena>),
     Leave(Leave<'arena>),
+    Propagate(Propagate<'arena>),
     Clone(Clone<'arena>),
     Call(Call<'arena>),
     PartialApplication(PartialApplication<'arena>),
@@ -481,6 +493,7 @@ impl<'arena> Expression<'arena> {
             Expression::Construct(_) => NodeKind::Construct,
             Expression::Throw(_) => NodeKind::Throw,
             Expression::Leave(_) => NodeKind::Leave,
+            Expression::Propagate(_) => NodeKind::Propagate,
             Expression::Clone(_) => NodeKind::Clone,
             Expression::Call(_) => NodeKind::Call,
             Expression::PartialApplication(_) => NodeKind::PartialApplication,
@@ -520,6 +533,12 @@ impl HasSpan for Leave<'_> {
     }
 }
 
+impl HasSpan for Propagate<'_> {
+    fn span(&self) -> Span {
+        self.r#try.span().join(self.value.span())
+    }
+}
+
 impl HasSpan for Expression<'_> {
     fn span(&self) -> Span {
         ensure_sufficient_stack(|| match &self {
@@ -547,6 +566,7 @@ impl HasSpan for Expression<'_> {
             Expression::Construct(expression) => expression.span(),
             Expression::Throw(expression) => expression.span(),
             Expression::Leave(expression) => expression.span(),
+            Expression::Propagate(expression) => expression.span(),
             Expression::Clone(expression) => expression.span(),
             Expression::Call(expression) => expression.span(),
             Expression::PartialApplication(expression) => expression.span(),

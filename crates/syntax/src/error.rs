@@ -87,6 +87,13 @@ pub enum ParseError {
     /// A `uses` clause written after a PHP# function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, at
     /// the clause. A function type lists its effects inside its brackets.
     UsesAfterFunctionTypeInSharp(Span),
+    /// A PHP# method's function parameter named in its `uses`, as `f` in `apply(Function<int()> f) uses f`, with the
+    /// name, at the name. Spec section 29: a method takes on the effects of each function it is given, with nothing
+    /// written.
+    FunctionParameterInUsesInSharp(Box<str>, Span),
+    /// A `uses` clause written on a PHP# `import`, as in `import Vendor.Pdf uses Files;`, at the clause. Spec section
+    /// 23: a library's effect lives in its one `extern` declaration.
+    UsesOnImportInSharp(Span),
     /// A PHP# method's `readonly` written before its `on` or `uses` clause, at the `readonly`. Spec section 13: it is
     /// always the last clause.
     ReadonlyNotLastInSharp(Span),
@@ -109,6 +116,9 @@ pub enum ParseError {
     /// class-like as a message names it, `A class`, and the type's name, at the whole type. Every type, events and
     /// interfaces included, is declared in its own file.
     NestedTypeInSharp(&'static str, Box<str>, Span),
+    /// C#'s `partial` written before a PHP# type, as in `public partial class Order`, at the `partial`. A class lives
+    /// in one file, spec section 27.
+    PartialTypeInSharp(Span),
     /// A type other than an interface name in a PHP# struct's header, as in `struct Username : string`, at the type.
     /// Spec section 10: a struct implements interfaces, and keys a `Map` by its whole value.
     StructHeaderTypeInSharp(Span),
@@ -117,7 +127,8 @@ pub enum ParseError {
     /// type arguments, as Dart's does, and declares none.
     NamedConstructorTypeParametersInSharp(Box<str>, Option<Box<str>>, Span),
     /// A PHP# keyword written in another case, as in `Return 5;`, with the keyword as PHP# writes it, at the keyword.
-    /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are.
+    /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are, except `Self`. The analyzer reports it too, where
+    /// a name that spells a keyword names nothing, as `THIS` does.
     MiscasedKeywordInSharp(&'static str, Span),
     /// A class name in parentheses before a value, as in `(Admin) user`, with the class and the value when it is a
     /// dotted name, at the whole cast. Spec section 24: a class or an interface narrows only with `as`.
@@ -159,6 +170,8 @@ impl HasFileId for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::FunctionParameterInUsesInSharp(_, span)
+            | ParseError::UsesOnImportInSharp(span)
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
@@ -166,6 +179,7 @@ impl HasFileId for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::PartialTypeInSharp(span)
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
@@ -211,6 +225,8 @@ impl HasSpan for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::FunctionParameterInUsesInSharp(_, span)
+            | ParseError::UsesOnImportInSharp(span)
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
@@ -218,6 +234,7 @@ impl HasSpan for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::PartialTypeInSharp(span)
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
@@ -287,6 +304,12 @@ impl std::fmt::Display for ParseError {
                 T!["use"] => "`use` is PHP syntax: PHP# imports a class with `import`".to_string(),
                 T!["foreach"] => "`foreach` is PHP syntax: PHP# loops over a collection with `for … of`".to_string(),
                 T!["=>"] => "PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow".to_string(),
+                T!["<?php"] => "`<?php` is PHP syntax: a `.sharp` file has no opening tag, so delete it".to_string(),
+                T!["<?"] => "`<?` is PHP syntax: a `.sharp` file has no opening tag, so delete it".to_string(),
+                T!["<?="] => {
+                    "`<?=` is PHP syntax: a `.sharp` file has no tags, and writes output with `global.printf`".to_string()
+                }
+                T!["?>"] => "`?>` is PHP syntax: a `.sharp` file has no closing tag, so delete it".to_string(),
                 T!["#["] => {
                     "`#[` is PHP syntax: PHP# writes attributes in square brackets, as in `[Searchable]`".to_string()
                 }
@@ -349,6 +372,12 @@ impl std::fmt::Display for ParseError {
                 "A function type lists its effects inside its brackets, as in `Function<Charge(Cart) uses Http>`."
                     .to_string()
             }
+            ParseError::FunctionParameterInUsesInSharp(name, _) => format!(
+                "`{name}` is a function parameter, and a method takes on the effects of each function it is given, so `uses` names no parameter: delete it."
+            ),
+            ParseError::UsesOnImportInSharp(_) => {
+                "An import never carries `uses`: declare the library's effect once, with `extern`.".to_string()
+            }
             ParseError::ReadonlyNotLastInSharp(_) => {
                 "A method's `readonly` is its last clause, after `on` and `uses`, as in `Money quote(Cart cart) uses Http readonly;`."
                     .to_string()
@@ -372,12 +401,16 @@ impl std::fmt::Display for ParseError {
             ParseError::NestedTypeInSharp(owner, name, _) => {
                 format!("{owner} can't declare a type inside it: declare `{name}` in its own file.")
             }
+            ParseError::PartialTypeInSharp(_) => "PHP# has no partial classes: a class lives in one file.".to_string(),
             ParseError::StructHeaderTypeInSharp(_) => {
                 "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value."
                     .to_string()
             }
             ParseError::NamedConstructorTypeParametersInSharp(..) => {
                 "A named constructor takes its class's type arguments and declares none of its own.".to_string()
+            }
+            ParseError::MiscasedKeywordInSharp("Self", _) => {
+                "Write the keyword `Self` with a capital S and the rest in lowercase.".to_string()
             }
             ParseError::MiscasedKeywordInSharp(keyword, _) => format!("Write the keyword `{keyword}` in lowercase."),
             ParseError::ClassCastInSharp(class, Some(value), _) => {
@@ -439,6 +472,8 @@ impl From<&ParseError> for Issue {
             | ParseError::ConditionalInGuardInSharp(..)
             | ParseError::UndeclarableOperatorInSharp(..)
             | ParseError::UsesAfterFunctionTypeInSharp(..)
+            | ParseError::FunctionParameterInUsesInSharp(..)
+            | ParseError::UsesOnImportInSharp(..)
             | ParseError::ReadonlyNotLastInSharp(..)
             | ParseError::OtherMemberInSharpModule(..)
             | ParseError::ComputedParameterInSharp(..)
@@ -446,6 +481,7 @@ impl From<&ParseError> for Issue {
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)
             | ParseError::NestedTypeInSharp(..)
+            | ParseError::PartialTypeInSharp(..)
             | ParseError::StructHeaderTypeInSharp(..)
             | ParseError::MiscasedKeywordInSharp(..)
             | ParseError::ClassCastInSharp(..) => Issue::error(error.to_string())

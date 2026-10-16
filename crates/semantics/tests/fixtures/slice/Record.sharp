@@ -1,0 +1,20 @@
+namespace App.Tenant;
+
+abstract class Record
+{
+    public const int|string KEY = 1;
+    protected const (int|string)? CODE = null;
+
+    public required Record(int id)
+    {
+    }
+
+    public static Self make(int id)
+    {
+        return new Self(id);
+    }
+
+    public static Self? find(int id) => id > 0 ? Self.make(id) : null;
+
+    public static (Self|int)? either(int id) => Self.find(id);
+}

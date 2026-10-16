@@ -659,12 +659,20 @@ fn analyze_types_the_parse_calls_of_the_standard_library_from_the_vendored_packa
 /// and the analyzer refuses the namespace in a project file.
 #[test]
 fn analyze_reports_a_type_class_of_the_standard_library_in_a_project_file() {
-    assert_eq!(
-        page_errors(
-            "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => null;\n}\n"
-        ),
-        [library_namespace_error("Sharp")]
+    let directory = library_workspace("namespace App;\n\npublic class Page\n{\n}\n");
+    write(
+        directory.path(),
+        "src/App/Bool.sharp",
+        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => null;\n}\n",
     );
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let errors: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with("src/App/Bool.sharp:"))
+        .map(str::to_owned)
+        .collect();
+
+    assert_eq!(errors, [library_namespace_error("Sharp").replace("Page.sharp", "Bool.sharp")]);
 }
 
 /// The standard library's module serves the root namespace, so it is never the app's top module that binds

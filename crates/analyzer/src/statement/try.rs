@@ -33,10 +33,13 @@ use crate::context::scope::control_action::ControlAction;
 use crate::context::scope::finally_scope::FinallyScope;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
+use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::statement::analyze_statements;
+use crate::statement::function_like::HintPlace;
 use crate::statement::get_type_from_hint;
 use crate::statement::report_erased_type_test;
 use crate::statement::report_hint_type_arguments;
+use crate::utils::names::display_class_like_name;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
     fn analyze<'ctx, A>(
@@ -203,7 +206,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
             let (caught_classes, caught_types) =
                 get_caught_classes(context, &catch_block_context, artifacts, &catch_clause.hint);
             if context.dialect.is_sharp() {
-                report_hint_type_arguments(context, &catch_block_context, artifacts, &catch_clause.hint);
+                report_hint_type_arguments(
+                    context,
+                    &catch_block_context,
+                    artifacts,
+                    &catch_clause.hint,
+                    HintPlace::TypeTest,
+                );
                 report_erased_type_test(context, &catch_clause.hint);
             }
 
@@ -606,7 +615,30 @@ where
             continue;
         }
 
+        // Spec section 31: in PHP# `Error` names the interface of the failures a method returns, which nothing throws.
+        if context.dialect.is_sharp() && caught_type.as_bytes().eq_ignore_ascii_case(b"Sharp\\Error") {
+            context.collector.report_with_code(
+                IssueCode::InvalidCatchType,
+                Issue::error("`Error` is PHP#'s interface of the failures a method returns, and no exception is one.")
+                    .with_annotation(Annotation::primary(caught_span).with_message("Caught here."))
+                    .with_help(
+                        "Catch a bug as `Throwable`, and read an expected failure from the `Result` it returns.",
+                    ),
+            );
+            // Its error is the clause's, so the clause's flow reads it as `Throwable`.
+            caught_classes.insert(throwable);
+
+            continue;
+        }
+
         let Some(class_like_metadata) = context.codebase.get_class_like(caught_type.as_bytes()) else {
+            // The error names the class the code meant, so the block catches what any class does, with no second error.
+            if report_unknown_sharp_class(context, caught_type.as_bytes(), caught_span) {
+                caught_classes.insert(throwable);
+                continue;
+            }
+
+            let caught_type = display_class_like_name(context, caught_type);
             context.collector.report_with_code(
                 IssueCode::NonExistentCatchType,
                 Issue::error(format!("Attempting to catch an undefined class or interface: `{caught_type}`."))

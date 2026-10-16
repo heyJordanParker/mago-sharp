@@ -18,6 +18,10 @@ regen-sdk-node-kinds:
 regen-sharp-kinds zend_ast_h zend_language_parser_h:
     php scripts/regen-sharp-kinds.php {{zend_ast_h}} {{zend_language_parser_h}} > crates/sharp-bridge/src/kind.rs
 
+# Regenerate the class-likes directly in `Sharp`, which a `.sharp` file names with no import, from php-sharp's `sharp/composer/library` and the prelude.
+regen-sharp-classes library:
+    php scripts/regen-sharp-classes.php {{library}} > crates/names/src/sharp_classes.rs
+
 # Copy the PHP# bridge's C header, `sharp_unit.h`, which php-sharp commits as `ext/sharp/sharp_unit.h`.
 sharp-header destination:
     #!/usr/bin/env php

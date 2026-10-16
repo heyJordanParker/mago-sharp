@@ -46,6 +46,7 @@ use crate::invocation::InvocationTarget;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::NamedCall;
+use crate::resolver::class_name::report_keyword_in_another_case;
 use crate::resolver::extension::is_imported_by_default;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::utils::expression::get_bare_name_variable_id;
@@ -67,6 +68,18 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
     where
         A: Arena,
     {
+        // PHP# calls no function by its bare name, so a bare call whose name spells a keyword in another case, as
+        // `Typeof(Order)`, is the keyword, spec section 2. Its arguments are the keyword's, so nothing else is checked.
+        if let Expression::Identifier(name) = self.function
+            && name.is_local()
+            && get_bare_name_variable_id(name, context.resolved_names).is_none()
+            && report_keyword_in_another_case(context, name.value(), name.span())
+        {
+            artifacts.set_expression_type(self, get_mixed());
+
+            return Ok(());
+        }
+
         let mut template_result = TemplateResult::default();
         let (invocation_targets, encountered_invalid_targets) = resolve_targets(
             context,

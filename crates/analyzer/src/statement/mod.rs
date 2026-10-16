@@ -80,6 +80,7 @@ use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::NamedCall;
 use crate::resolver::method::get_declared_collection;
+use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_types;
@@ -213,7 +214,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                             }
                         }
                     }
-                    if context.settings.check_use_statements {
+                    // A `.sharp` file's imports are checked above, whatever the setting says.
+                    if context.settings.check_use_statements && !context.dialect.is_sharp() {
                         r#use.analyze(context, block_context, artifacts)?;
                     }
                     if context.settings.check_name_casing {
@@ -526,7 +528,7 @@ where
     };
 
     // A refused type gives the local no type, so its later uses report nothing again.
-    let local_type = if report_hint_type_arguments(context, block_context, artifacts, hint) {
+    let local_type = if report_hint_type_arguments(context, block_context, artifacts, hint, HintPlace::Declaration) {
         wrap_atomic(TAtomic::Error)
     } else {
         get_type_from_hint(context, block_context, artifacts, hint)
@@ -544,21 +546,22 @@ where
     Some(local_type)
 }
 
-/// Reports the type arguments a PHP# `hint` in a body leaves out or gets wrong, as a local's type, a type test or a
-/// `catch` writes it, spec section 11: a type names the type arguments of a generic class. Returns whether it refused a
-/// class's type arguments, as [`report_invalid_template_arguments`] does.
+/// Reports the type arguments a PHP# `hint` in a body leaves out or gets wrong, as a local's type, a call's type
+/// argument, a type test or a `catch` writes it, at `place`, spec section 11: a type names the type arguments of a
+/// generic class. Returns whether it refused a class's type arguments, as [`report_invalid_template_arguments`] does.
 pub(crate) fn report_hint_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
     artifacts: &mut AnalysisArtifacts,
     hint: &Hint<'_>,
+    place: HintPlace,
 ) -> bool
 where
     A: Arena,
 {
     let written_type = get_written_type_from_hint(context, block_context, artifacts, hint);
 
-    report_invalid_template_arguments(context, &TypeMetadata::new(written_type, hint.span()))
+    report_invalid_template_arguments(context, &TypeMetadata::new(written_type, hint.span()), place)
 }
 
 /// Refuses each type a PHP# type test of `hint` gives a plain PHP class type arguments for, at any depth, as `value is

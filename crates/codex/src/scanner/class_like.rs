@@ -1,6 +1,7 @@
 use mago_allocator::Arena;
 use mago_word::Word;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use mago_names::binding::php_variable_name;
 use mago_names::kind::NameKind;
@@ -80,6 +81,7 @@ use crate::scanner::enum_case::scan_enum_case;
 use crate::scanner::function_like::scan_binding_expression;
 use crate::scanner::function_like::scan_law;
 use crate::scanner::function_like::scan_promoted_constructor;
+use crate::scanner::parameter::scan_function_like_parameter;
 use crate::scanner::property::scan_properties;
 use crate::scanner::ttype::get_type_metadata_from_hint;
 use crate::scanner::ttype::get_type_metadata_from_type;
@@ -89,11 +91,14 @@ use crate::scanner::version_claim::evaluate_version_attributes;
 use crate::symbol::SymbolKind;
 use crate::ttype::TType;
 use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::generic::TGenericParameter;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::r#enum::TEnum;
+use crate::ttype::atomic::object::named::TNamedObject;
 use crate::ttype::atomic::reference::TReference;
 use crate::ttype::atomic::scalar::TScalar;
 use crate::ttype::builder;
+use crate::ttype::builder::get_template_atomic;
 use crate::ttype::get_bool;
 use crate::ttype::get_keyed_array;
 use crate::ttype::get_list;
@@ -107,6 +112,7 @@ use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
 use crate::ttype::template::variance::Variance;
 use crate::ttype::union::TUnion;
+use crate::ttype::wrap_atomic;
 use crate::visibility::Visibility;
 
 /// Return type for class-like registration functions.
@@ -276,7 +282,7 @@ where
     A: Arena,
 {
     let span = r#enum.span();
-    let carries_data = r#enum.has_data_case();
+    let carries_data = r#enum.runs_as_classes();
     let mut class_like_metadata = scan_class_like(
         codebase,
         word(context.resolved_names.get(&r#enum.name)),
@@ -291,7 +297,7 @@ where
         None,
         r#enum.implements.as_ref(),
         r#enum.inheritance.as_ref(),
-        None,
+        r#enum.type_parameters.as_ref(),
         if carries_data { None } else { r#enum.backing_type_hint.as_ref() },
         context,
         scope,
@@ -323,6 +329,7 @@ fn register_case_classes<'arena, A>(
 {
     enum_metadata.flags |= MetadataFlags::ABSTRACT;
     let flags = MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP;
+    let enum_templates = template_context(&enum_metadata.template_types);
 
     for member in &r#enum.members {
         let ClassLikeMember::EnumCase(case) = member else {
@@ -343,7 +350,26 @@ fn register_case_classes<'arena, A>(
         case_metadata.all_parent_classes.insert(enum_metadata.name);
         codebase.symbols.add_symbol_name(name, SymbolKind::Class);
         enum_metadata.permitted_inheritors.get_or_insert_default().insert(name);
-        let case_type = TUnion::from_vec(vec![get_named_object(original_name, None).get_single_owned()]);
+        // Spec section 31: a case of a generic enum is a class with the enum's type parameters, which it passes to the
+        // enum, as `Result.Ok<T, TError> : Result<T, TError>`. Its fields read them as its own.
+        for (template_name, template) in &enum_metadata.template_types {
+            let template = GenericTemplate::new(GenericParent::ClassLike(name), template.constraint.clone());
+            case_metadata.add_template_type(*template_name, template);
+        }
+        case_metadata.set_template_variance(enum_metadata.template_variance.clone());
+        let case_templates = template_context(&case_metadata.template_types);
+        if !case_metadata.template_types.is_empty() {
+            case_metadata.template_type_extends_count.insert(enum_metadata.name, case_metadata.template_types.len());
+            case_metadata
+                .add_template_extended_offset(enum_metadata.name, template_arguments(&case_metadata.template_types));
+        }
+        // A factory is a static method of the enum, so its types read the enum's type parameters, which the call's
+        // type arguments fix, as `Result<Order, PaymentError>.Ok(order)`.
+        let enum_type_arguments = template_arguments(&enum_metadata.template_types);
+        let case_type = wrap_atomic(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(
+            original_name,
+            (!enum_type_arguments.is_empty()).then_some(enum_type_arguments),
+        ))));
 
         let factory = match &case.item {
             EnumCaseItem::Data(item) => {
@@ -351,11 +377,26 @@ fn register_case_classes<'arena, A>(
                     span,
                     case_name.span,
                     &item.parameter_list,
+                    &case_templates,
                     &mut case_metadata,
                     context,
                     scope,
                 );
-                let mut factory = create_static_method("", span, constructor.parameters.clone(), case_type, vec![]);
+                let parameters = item
+                    .parameter_list
+                    .parameters
+                    .iter()
+                    .filter_map(|parameter| {
+                        scan_function_like_parameter(
+                            parameter,
+                            Some(enum_metadata.original_name),
+                            &enum_templates,
+                            context,
+                            scope,
+                        )
+                    })
+                    .collect();
+                let mut factory = create_static_method("", span, parameters, case_type, vec![]);
                 add_method(codebase, b"__construct", &mut case_metadata, constructor);
 
                 factory.name = word(case_name.value);
@@ -435,6 +476,7 @@ where
         span,
         event.name.span,
         &event.parameter_list,
+        &TypeResolutionContext::new(),
         &mut class_like_metadata,
         context,
         scope,
@@ -471,7 +513,7 @@ where
         None,
         None,
         r#struct.inheritance.as_ref(),
-        None,
+        r#struct.type_parameters.as_ref(),
         None,
         context,
         scope,
@@ -1992,9 +2034,24 @@ fn leaves_parse_free(members: &Sequence<ClassLikeMember<'_>>) -> bool {
 }
 
 /// A struct's or a PHP# class's `parse` and `tryParse`, spec section 10, which read a `Map<string, Any?>` or an
-/// object's public properties. Each spans the whole type, which no declared member does.
+/// object's public properties. Each spans the whole type, which no declared member does, and gives the type with its
+/// own type parameters, as `Pair<TFirst, TSecond>`, which a call such as `Pair<int, string>.parse(…)` fixes.
 fn create_parse_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
-    let instance = get_named_object(class_like.original_name, None);
+    let own_type_parameters: Vec<TUnion> = class_like
+        .template_types
+        .iter()
+        .map(|(name, template)| {
+            wrap_atomic(TAtomic::GenericParameter(TGenericParameter::new(
+                *name,
+                Arc::new(template.constraint.clone()),
+                template.defining_entity,
+            )))
+        })
+        .collect();
+    let instance = wrap_atomic(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(
+        class_like.original_name,
+        (!own_type_parameters.is_empty()).then_some(own_type_parameters),
+    ))));
     let input = || {
         let map = get_keyed_array(get_string(), get_mixed());
         create_parameter("$value", TUnion::from_vec([map.types.as_ref(), get_object().types.as_ref()].concat()), span)
@@ -2102,4 +2159,22 @@ fn create_static_method(
         flags: MetadataFlags::POPULATED,
         version_constraint: crate::metadata::version_constraint::VersionConstraint::unconstrained(),
     }
+}
+
+/// A class-like's type parameters as the type arguments that name them inside it, as `<T, TError>` in `Result`.
+pub(crate) fn template_arguments(templates: &TemplateTypes) -> Vec<TUnion> {
+    templates
+        .iter()
+        .map(|(name, template)| wrap_atomic(get_template_atomic(std::slice::from_ref(template), *name)))
+        .collect()
+}
+
+/// The context in which a hint reads a class-like's type parameters by their names.
+fn template_context(templates: &TemplateTypes) -> TypeResolutionContext {
+    let mut context = TypeResolutionContext::new();
+    for (name, template) in templates {
+        context.get_template_definitions_mut().insert(*name, vec![template.clone()]);
+    }
+
+    context
 }

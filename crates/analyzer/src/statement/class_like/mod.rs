@@ -35,6 +35,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::intersect_union_types;
+use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::definition_type_replacer;
@@ -83,10 +84,12 @@ use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_statics;
 use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
+use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::extension::class_member;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
 use crate::statement::function_like::FunctionLikeBody;
+use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_type_references;
@@ -224,6 +227,49 @@ fn report_class_like_named_as_a_namespace<A>(
         .with_annotation(
             Annotation::secondary(inside.name_span.unwrap_or(inside.span))
                 .with_message(format!("`{inside_name}` is in the namespace `{full_name}`.")),
+        ),
+    );
+}
+
+/// Refuses a PHP# class-like whose namespace, or a namespace above it, is the full name of a plain PHP class-like:
+/// spec section 23 counts plain PHP classes the checker sees. The plain PHP file reports the clash as well, but
+/// `mago compile` prints only `.sharp` files' errors, so the PHP# file reports it too.
+fn report_namespace_named_as_a_plain_php_class_like<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    name_span: Span,
+) where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+
+    let name = class_like_metadata.original_name.as_bytes();
+    let Some(plain) = name
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\\')
+        .filter_map(|(end, _)| context.codebase.get_class_like(&name[..end]))
+        .find(|namespace| !namespace.flags.is_sharp())
+    else {
+        return;
+    };
+
+    let namespace = plain.original_name.to_string().replace('\\', ".");
+    let kind = plain.kind.as_str();
+    context.collector.report_with_code(
+        IssueCode::NameAlreadyInUse,
+        Issue::error(format!(
+            "`{namespace}` is both a plain PHP {kind} and a namespace: rename the {kind} or the folder."
+        ))
+        .with_annotation(Annotation::primary(name_span).with_message(format!(
+            "`{}` is in the namespace `{namespace}`.",
+            class_like_metadata.original_name.to_string().replace('\\', ".")
+        )))
+        .with_annotation(
+            Annotation::secondary(plain.name_span.unwrap_or(plain.span))
+                .with_message(format!("The plain PHP {kind} is declared here.")),
         ),
     );
 }
@@ -453,6 +499,11 @@ fn check_unused_template_parameters<'ctx, A>(
             else {
                 continue;
             };
+            // The `parse`, `tryParse` and `op_Equality` the codex writes span the whole type and give its own type
+            // parameters back, which uses none of them.
+            if function_like.span == class_like_metadata.span {
+                continue;
+            }
 
             // Check parameters
             for param in &function_like.parameters {
@@ -1159,6 +1210,11 @@ where
 
     context.prepare_class_initializers(class_like_metadata)?;
     report_class_like_named_as_a_namespace(context, class_like_metadata, name_span.unwrap_or(declaration_span));
+    report_namespace_named_as_a_plain_php_class_like(
+        context,
+        class_like_metadata,
+        name_span.unwrap_or(declaration_span),
+    );
 
     let name = display_class_like_name(context, class_like_metadata.original_name);
 
@@ -1449,6 +1505,17 @@ where
     scope.set_static(true);
 
     let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
+    // A PHP# property's initial value and accessor bodies name its class's type parameters, as a method's body does
+    // through the type parameters the codex gives the method, spec section 11.
+    let property_type_context =
+        (context.dialect.is_sharp() && !class_like_metadata.template_types.is_empty()).then(|| {
+            class_like_metadata
+                .template_types
+                .iter()
+                .fold(TypeResolutionContext::new(), |type_context, (name, template)| {
+                    type_context.with_template_definition(*name, vec![template.clone()])
+                })
+        });
 
     for member in members {
         match member {
@@ -1506,7 +1573,7 @@ where
                         && let Some(type_meta) = &prop_meta.type_metadata
                     {
                         report_undefined_type_references(context, type_meta);
-                        report_invalid_template_arguments(context, type_meta);
+                        report_invalid_template_arguments(context, type_meta, HintPlace::Declaration);
 
                         if type_meta.from_docblock
                             && let Some(type_decl_meta) = &prop_meta.type_declaration_metadata
@@ -1517,7 +1584,14 @@ where
                     }
                 }
 
-                property.analyze(context, &mut block_context, artifacts)?;
+                let outer_type_context = property_type_context
+                    .clone()
+                    .map(|type_context| std::mem::replace(&mut context.type_resolution_context, type_context));
+                let analyzed = property.analyze(context, &mut block_context, artifacts);
+                if let Some(outer_type_context) = outer_type_context {
+                    context.type_resolution_context = outer_type_context;
+                }
+                analyzed?;
             }
             ClassLikeMember::EnumCase(enum_case) => {
                 if context.settings.diff {
@@ -2054,7 +2128,7 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                 implemented_metadata,
                 checked_signatures,
             );
-        } else {
+        } else if !report_unknown_sharp_class(context, implemented_type_str, implemented_type.span()) {
             let implemented_name = BytesDisplay(implemented_type.value());
             let (note, help) = if is_struct {
                 ("A struct's header lists the interfaces it implements.", "Check the interface's name and its import.")
@@ -5558,8 +5632,7 @@ fn check_readonly_class_trait_properties<'ctx, 'arena, A>(
 /// body for, unless the class writes the method itself: two of its header traits and the traits of its interfaces'
 /// default bodies, which PHP refuses, or a default body and the base class, whose body PHP would replace. A header
 /// trait replaces the base class's method, as PHP's `use` does. A computed property's default body beside another
-/// default body, a header trait's property or the base class's property is reported alike, and an enum, which has no
-/// property, gets none.
+/// default body, a header trait's property or the base class's property is reported alike.
 fn check_members_given_twice<A>(
     context: &mut Context<'_, '_, A>,
     class_like_metadata: &ClassLikeMetadata,
@@ -5669,31 +5742,6 @@ fn check_members_given_twice<A>(
             continue;
         }
         let property = mago_bytes::BytesDisplay(mago_bytes::trim_start_byte(name.as_bytes(), b'$'));
-        // An enum has no property, its own or a default body's, as PHP gives an enum none. An enum with a case that
-        // carries data runs as the class its cases extend.
-        if class_like_metadata.kind.is_enum()
-            || class_like_metadata.permitted_inheritors.iter().flatten().any(|inheritor| {
-                context
-                    .codebase
-                    .get_class_like(inheritor.as_bytes())
-                    .is_some_and(|case| case.flags.is_enum_case_class())
-            })
-        {
-            let Some((_, interface, _)) = given.iter().find(|(_, _, default)| *default) else {
-                unreachable!("the group holds a default body");
-            };
-            let interface = display_class_like_name(context, interface.original_name);
-            context.collector.report_with_code(
-                IssueCode::InvalidImplement,
-                Issue::error(format!(
-                    "Enum `{class_name}` cannot have properties, and `{interface}` gives it the computed property `{property}`."
-                ))
-                .with_annotation(Annotation::primary(name_span).with_message(format!("`{class_name}` gets `{property}` here.")))
-                .with_help(format!("Make `{property}` a method of `{interface}`, or implement `{interface}` in a class.")),
-            );
-
-            continue;
-        }
         // A sub-interface's default body replaces its parent's here too.
         let givers: Vec<Word> = parent
             .filter(|parent| parent.properties.contains_key(&name))

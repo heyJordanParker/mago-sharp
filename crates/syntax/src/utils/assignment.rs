@@ -125,6 +125,7 @@ pub fn get_assignment_from_expression<'expr, 'arena>(
         },
         Expression::Throw(throw) => get_assignment_from_expression(throw.exception),
         Expression::Leave(Leave::Return(r#return)) => r#return.value.and_then(get_assignment_from_expression),
+        Expression::Propagate(propagate) => get_assignment_from_expression(propagate.value),
         Expression::Clone(clone) => get_assignment_from_expression(clone.object),
         Expression::Call(call) => match &call {
             Call::Function(FunctionCall { function, argument_list })

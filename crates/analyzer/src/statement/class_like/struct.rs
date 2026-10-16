@@ -5,9 +5,11 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -28,6 +30,7 @@ use crate::statement::class_like::report_duplicate_definition;
 use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_sharp_type;
+use crate::utils::template::class_type_arguments;
 use mago_word::Word;
 
 /// A PHP# struct, spec section 10, analyzes as the final class it runs as. Its header names interfaces only, because
@@ -174,11 +177,14 @@ pub(crate) fn report_keys_read_twice<A>(
 
 /// Reports `Order.parse`, or `Order.tryParse` when it does not `throws`, on a struct or a PHP# class with a field
 /// `parse` can't read from a value, spec section 10's language rule 11: an enum with no backing value, a function
-/// type, or a class no `parse` builds, also inside a collection or a nested struct or class. The type itself compiles,
-/// so code that never parses it may hold such a field.
+/// type, or a class no `parse` builds, also inside a collection or a nested struct or class. A generic type's field
+/// reads as the call's `type_arguments` give it, as `int` for `TFirst` of `Pair<int, string>.parse`, and one of a type
+/// parameter only through the walk, whose type argument holds no part `parse` builds first. The type itself
+/// compiles, so code that never parses it may hold such a field.
 pub(crate) fn check_struct_parse<A>(
     context: &mut Context<'_, '_, A>,
     r#struct: &ClassLikeMetadata,
+    type_arguments: &[TUnion],
     throws: bool,
     span: Span,
 ) where
@@ -187,7 +193,9 @@ pub(crate) fn check_struct_parse<A>(
     let method = if throws { "parse" } else { "tryParse" };
     let class = display_class_like_name(context, r#struct.original_name);
     for field in context.codebase.struct_parse_fields(r#struct.name.as_bytes()) {
-        let Some((unreadable, why)) = unreadable_part(context.codebase, field.r#type, &mut vec![r#struct.name]) else {
+        let Some((unreadable, why)) =
+            unreadable_field(context.codebase, r#struct, type_arguments, &field, &mut vec![r#struct.name])
+        else {
             continue;
         };
 
@@ -242,7 +250,7 @@ pub(crate) fn data_enum(codebase: &CodebaseMetadata, class: &ClassLikeMetadata) 
 }
 
 /// The classes the cases of `class` run as, when it is an enum with a case that carries data, spec section 20.
-fn data_cases<'codebase>(
+pub(crate) fn data_cases<'codebase>(
     codebase: &'codebase CodebaseMetadata,
     class: &ClassLikeMetadata,
 ) -> Vec<&'codebase ClassLikeMetadata> {
@@ -412,11 +420,13 @@ fn unreadable_part(
             Some((atomic.clone(), why))
         }
         TAtomic::Object(TObject::Named(object)) => {
+            let class = codebase.get_class_like(object.name.as_bytes())?;
+            let type_arguments = object.get_type_parameters().unwrap_or_default();
             visiting.push(object.name);
             let found = codebase
                 .struct_parse_fields(object.name.as_bytes())
                 .iter()
-                .find_map(|field| unreadable_part(codebase, field.r#type, visiting));
+                .find_map(|field| unreadable_field(codebase, class, type_arguments, field, visiting));
             visiting.pop();
 
             found
@@ -430,5 +440,47 @@ fn unreadable_part(
         | TAtomic::Null
         | TAtomic::Scalar(TScalar::Integer(_) | TScalar::Float(_) | TScalar::String(_) | TScalar::Bool(_)) => None,
         _ => Some((atomic.clone(), "is no type `parse` reads")),
+    })
+}
+
+/// The part of the field `field` of the struct or class `class`, read with `type_arguments`, that `parse` can't read,
+/// with why, as [`unreadable_part`] finds it in the field's type as those type arguments give it. A field of a type
+/// parameter reads through the walk alone, so a type argument with a part `parse` builds first is refused for it.
+fn unreadable_field(
+    codebase: &CodebaseMetadata,
+    class: &ClassLikeMetadata,
+    type_arguments: &[TUnion],
+    field: &ParsedField<'_>,
+    visiting: &mut Vec<Word>,
+) -> Option<(TAtomic, &'static str)> {
+    let used = field.r#type.get_template_types();
+    let built = class.template_types.iter().zip(type_arguments).find_map(|((name, _), type_argument)| {
+        used.iter()
+            .any(|used| matches!(used, TAtomic::GenericParameter(parameter) if parameter.parameter_name == *name))
+            .then(|| built_part(type_argument))
+            .flatten()
+    });
+    if let Some(part) = built {
+        return Some((
+            part.clone(),
+            "is a type argument `parse` builds, and it reads a field of a type parameter only as its input holds it",
+        ));
+    }
+    let localized =
+        inferred_type_replacer::replace(field.r#type, &class_type_arguments(class, type_arguments), codebase);
+
+    unreadable_part(codebase, &localized, visiting)
+}
+
+/// The part of `r#type` that `parse` builds before the walk checks the value: a struct or a class through its own
+/// `parse`, an enum case from its backing value, or a `Map` or a `Set` from the array plain PHP passes, also inside a
+/// `List`. The bridge writes one `parse` for a generic type, which reads a field of a type parameter through the walk
+/// alone, so it reads a type argument that holds none of them. A type argument is written, as `List<Address>`, so a
+/// `List` of it has no known elements.
+fn built_part(r#type: &TUnion) -> Option<&TAtomic> {
+    r#type.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Object(_) | TAtomic::Array(TArray::Keyed(_) | TArray::Set(_)) => Some(atomic),
+        TAtomic::Array(TArray::List(list)) => built_part(&list.element_type),
+        _ => None,
     })
 }

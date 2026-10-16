@@ -362,6 +362,8 @@ final class AnalyzerCodeModuleGenerator
         'replaced-by-syntax',
         'bare-function-call',
         'function-import',
+        'constant-import',
+        'class-namespace-import',
         'duplicate-extern',
         'extern-on-sharp',
         'getter-writes-this',

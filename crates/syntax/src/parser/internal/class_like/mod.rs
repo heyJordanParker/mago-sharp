@@ -86,6 +86,7 @@ where
         attributes: Sequence<'arena, AttributeList<'arena>>,
     ) -> Result<Statement<'arena>, ParseError> {
         let modifiers = self.parse_modifier_sequence()?;
+        self.read_php_type_declaration()?;
         if self.is_at_event()? {
             return Ok(Statement::Event(self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?));
         }
@@ -93,8 +94,6 @@ where
         if self.is_at_struct()? {
             return Ok(Statement::Struct(self.parse_struct_with_attributes_and_modifiers(attributes, modifiers)?));
         }
-
-        self.read_php_type_declaration()?;
 
         if self.dialect.is_sharp() {
             match self.stream.peek_kind(0)? {
@@ -245,6 +244,8 @@ where
     ) -> Result<Enum<'arena>, ParseError> {
         let r#enum = self.expect_keyword(T!["enum"])?;
         let name = self.parse_local_identifier()?;
+        let type_parameters = self.parse_optional_type_parameter_list()?;
+        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
         let (backing_type_hint, inheritance) = self.parse_enum_header()?;
 
         Ok(Enum {
@@ -252,11 +253,12 @@ where
             modifiers,
             r#enum,
             name,
+            type_parameters,
             backing_type_hint,
             inheritance,
             implements: self.parse_optional_implements()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: self.parse_class_like_members("An enum", Some(&name), None)?,
+            members: self.parse_class_like_members("An enum", Some(&name), type_parameter_names)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -294,7 +296,7 @@ where
 }
 
 /// The names of the type parameters `list` declares, as `T` or `TKey, TValue`, or `None` when it declares none.
-fn type_parameter_names(list: Option<&TypeParameterList<'_>>) -> Option<std::boxed::Box<str>> {
+pub(crate) fn type_parameter_names(list: Option<&TypeParameterList<'_>>) -> Option<std::boxed::Box<str>> {
     list.map(|list| {
         let names = list.parameters.iter().map(|parameter| String::from_utf8_lossy(parameter.name.value));
 

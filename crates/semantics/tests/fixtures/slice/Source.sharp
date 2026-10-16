@@ -1,0 +1,6 @@
+namespace App.Tenant;
+
+public interface Source<out TItem>
+{
+    TItem next();
+}

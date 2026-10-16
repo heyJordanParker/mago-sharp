@@ -150,8 +150,9 @@ where
     /// unless the name starts a local whose type it names, as in `Return refund = new Return();`. At a declaration's
     /// head, it is a modifier followed by another modifier or by a type and a name, as `Static` in
     /// `public Static int run()`, so `public Static run()` keeps `Static` a return type, and so does an operator's name,
-    /// as in `public static Lazy operator +(…)`. After a type's modifiers, it is a type's keyword followed by its name,
-    /// as `Class` in `public Class Cart {`.
+    /// as in `public static Lazy operator +(…)`, and in an enum it is `case` followed by a name. After a type's
+    /// modifiers, it is a type's keyword followed by its name, as `Class` in `public Class Cart {`. At a file's
+    /// statement, it is a modifier followed by another or by a type's keyword, as `Public` in `Public class Cart {`.
     fn miscased_construct_follows(&mut self, word: &'static str, head: Head) -> Result<bool, ParseError> {
         let next = self.stream.lookahead(1)?;
         let next_kind = next.map(|next| next.kind);
@@ -165,6 +166,11 @@ where
                 return Ok(matches!(word, "class" | "interface" | "enum" | "struct")
                     && matches!(after_name, Some(T!["{" | ":" | "<"])));
             }
+            // Only an enum declares a case, so there `Case Hearts;` is the keyword, and in a class a field's type.
+            Head::Declaration if word == "case" => {
+                return Ok(self.state.members_of == "An enum"
+                    && next_kind.is_some_and(|kind| kind.is_identifier_maybe_reserved()));
+            }
             Head::Declaration => {
                 return Ok(is_modifier_word(word)
                     && (next.is_some_and(|next| {
@@ -172,6 +178,17 @@ where
                     }) || next.is_some_and(|next| next.value != b"operator")
                         && after_name
                             .is_some_and(|kind| !matches!(kind, T!["(" | ")" | ";" | "=" | "{" | "=>" | ","]))));
+            }
+            // A file's statement that starts with a modifier declares a type, as `Public class Cart {` does.
+            Head::Statement if is_modifier_word(word) && !self.state.within_block => {
+                return Ok(next.is_some_and(|next| {
+                    next.kind.is_modifier()
+                        || matches!(next.kind, T!["class" | "interface" | "enum"])
+                        || matches!(next.value, b"struct" | b"sealed" | b"foreign" | b"internal")
+                        || self.miscased_keyword(next).is_some_and(|next| {
+                            is_modifier_word(next) || matches!(next, "class" | "interface" | "enum" | "struct")
+                        })
+                }));
             }
             Head::Expression | Head::Statement => {}
         }
@@ -193,7 +210,7 @@ where
     /// The PHP# keyword a name in a `.sharp` file spells in another case, as `return` for `Return`, or `None` for a name
     /// in its own case. `true`, `false`, `null`, `this`, `super` and `Self` are values, which the semantic checks
     /// report.
-    fn miscased_keyword(&self, token: Token<'_>) -> Option<&'static str> {
+    pub(crate) fn miscased_keyword(&self, token: Token<'_>) -> Option<&'static str> {
         if !self.dialect.is_sharp() || token.kind != T![Identifier] || is_sharp_keyword(token.value) {
             return None;
         }
@@ -206,7 +223,7 @@ where
 
     /// Reads `token`, at the head of the stream, as the PHP# keyword `word` it spells in another case, with one error,
     /// as rustc's `eat_keyword_case` reads `Fn` as `fn`.
-    fn read_miscased_keyword(&mut self, token: Token<'_>, word: &'static str) {
+    pub(crate) fn read_miscased_keyword(&mut self, token: Token<'_>, word: &'static str) {
         self.stream.read_as_keyword(0, lookup_keyword(word.as_bytes()).unwrap_or(T![Identifier]), word);
         self.errors.push(ParseError::MiscasedKeywordInSharp(word, token.span_for(self.stream.file_id())));
     }

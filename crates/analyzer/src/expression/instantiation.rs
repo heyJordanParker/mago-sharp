@@ -52,6 +52,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::access::report_full_name;
 use crate::expression::call::function_call::report_wrapped_class;
 use crate::expression::is_refused_type;
 use crate::expression::with::analyze_object_initializer;
@@ -69,6 +70,7 @@ use crate::resolver::class_name::class_value_class;
 use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_class_value_of_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
+use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::statement::function_like::get_this_type;
 use crate::utils::names::article;
@@ -92,6 +94,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     {
         // PHP#'s `new (type)(…)` creates an object from a class value, spec section 25, and only a class's `Class`
         // creates one: a `Class<int>` or a `Class<int|string>` holds a type that is no class.
+        // As a call with an invalid target, a full name, as `new App.Order()` writes, gets no type.
+        if report_full_name(context, self.class, self.constructor.as_ref().map(|constructor| &constructor.name)) {
+            self.argument_list.analyze(context, block_context, artifacts)?;
+            artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+            return Ok(());
+        }
+
         let is_class_value = context.dialect.is_sharp() && matches!(self.class, Expression::Parenthesized(_));
         if is_class_value {
             let was_inside_call = block_context.flags.inside_call();
@@ -469,8 +479,13 @@ where
     };
 
     let Some(metadata) = context.codebase.get_class_like(fq_classname.as_bytes()) else {
-        let missing_class = display_class_like_name(context, fq_classname);
+        if report_unknown_sharp_class(context, fq_classname.as_bytes(), class_expression_span) {
+            argument_list.analyze(context, block_context, artifacts)?;
 
+            return Ok(get_never());
+        }
+
+        let missing_class = display_class_like_name(context, fq_classname);
         context.collector.report_with_code(
             IssueCode::NonExistentClass,
             Issue::error(format!("Class `{missing_class}` not found."))
@@ -1004,10 +1019,11 @@ where
     Ok(wrap_atomic(result_atomic))
 }
 
-/// Reports `class` written at `span` in a PHP# file without type arguments, as a type, after `new` or before a static
-/// member, when it is a generic PHP# class, which spec section 11 refuses, as C# does (CS0305). Each type argument has
-/// its own static members, so a bare `Counter.count` names none of them. Returns whether it refused it, so the caller
-/// gives the refused type no type the next check would report again.
+/// Reports `class`, a generic class of PHP# or of plain PHP's `@template`, written at `span` in a PHP# file without the
+/// type arguments of its type parameters that have no default, as a type, after `new` or before a static member of a
+/// PHP# class, which spec section 11 refuses, as C# does (CS0305), with the type parameters to write. Each type
+/// argument of a PHP# class has its own static members, so a bare `Counter.count` names none of them. Returns whether
+/// it refused it, so the caller gives the refused type no type the next check would report again.
 pub(crate) fn report_missing_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     class: &ClassLikeMetadata,
@@ -1016,21 +1032,23 @@ pub(crate) fn report_missing_type_arguments<A>(
 where
     A: Arena,
 {
-    if !context.dialect.is_sharp() || !class.flags.is_sharp() || class.template_types.is_empty() {
+    if !context.dialect.is_sharp() || class.template_types.values().all(|template| template.default.is_some()) {
         return false;
     }
 
     let class_name = short_name(class.original_name);
-    let arguments = match class.template_types.len() {
-        1 => "type argument".to_owned(),
-        count => format!("{count} type arguments"),
+    let parameters = class.template_types.keys().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+    let (arguments, help) = match class.template_types.len() {
+        1 => ("type argument".to_owned(), "Write a type for its type parameter"),
+        count => (format!("{count} type arguments"), "Write a type for each of its type parameters"),
     };
 
     context.collector.report_with_code(
         IssueCode::MissingTemplateParameter,
         Issue::error(format!("`{class_name}` needs its {arguments}."))
             .with_annotation(Annotation::primary(span).with_message(format!("`{class_name}` has type parameters")))
-            .with_note("A type, `new` and a static member name the type arguments of a generic class."),
+            .with_note("A type, `new` and a static member name the type arguments of a generic class.")
+            .with_help(format!("{help}: `{class_name}<{parameters}>`.")),
     );
 
     true

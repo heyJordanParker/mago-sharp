@@ -17,6 +17,8 @@ use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
 use mago_codex::ttype::builder::get_class_strings_of;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
+use mago_names::kind::NameKind;
+use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -27,6 +29,8 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::SuperOf;
+use mago_syntax::error::ParseError;
+use mago_syntax::token::SHARP_KEYWORDS;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -39,6 +43,8 @@ use crate::statement::get_type_from_hint;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
+use crate::utils::names::is_sharp_internal;
+use crate::utils::names::sharp_missing_imports;
 
 /// Describes the origin and nature of a class name resolution.
 ///
@@ -439,6 +445,24 @@ pub(crate) fn generic_class_type<'artifacts>(
         (_, [TAtomic::Scalar(TScalar::ClassLikeString(class_value))]) => class_value_class(class_value),
         _ => None,
     }
+}
+
+/// The type arguments a static member read or called through `class_expression` takes its class's statics with:
+/// those of [`generic_class_type`], or for a type parameter those of its bound, as `Order` for `TCounter :
+/// Counter<Order>`, which the type argument the code runs with fits, as a class value takes those its type names, spec
+/// section 11.
+pub(crate) fn statics_type_arguments<'artifacts>(
+    artifacts: &'artifacts AnalysisArtifacts,
+    class_expression: &Expression<'_>,
+) -> Option<&'artifacts [TUnion]> {
+    // `resolve_type_parameter` records a type parameter written as a class as its tested type.
+    let tested = artifacts.get_tested_type(class_expression.unparenthesized());
+    let bound = match tested.map(|tested| tested.types.as_ref()) {
+        Some([TAtomic::GenericParameter(parameter)]) => parameter.constraint.get_single_named_object(),
+        _ => None,
+    };
+
+    bound.or_else(|| generic_class_type(artifacts, class_expression)).and_then(TNamedObject::get_type_parameters)
 }
 
 /// Resolves a CST `Expression` to one or more `ResolvedClassname` instances.
@@ -845,6 +869,10 @@ pub fn report_non_existent_class_like<A>(context: &mut Context<'_, '_, A>, span:
 where
     A: Arena,
 {
+    if report_unknown_sharp_class(context, classname.as_bytes(), span) {
+        return;
+    }
+
     let classname = display_class_like_name(context, classname);
     context.collector.report_with_code(
         IssueCode::NonExistentClassLike,
@@ -854,4 +882,121 @@ where
             )
             .with_help(format!("Ensure the `{classname}` is defined in the codebase.")),
     );
+}
+
+/// Reports the class `name`, as the binder resolved what a `.sharp` file's code wrote at `span`, when it names no
+/// class-like and the spec says what the code meant, and returns whether it reported, so the caller's own error stays
+/// for any other name:
+///
+/// - a keyword written in another case, as `THIS` (spec section 2),
+/// - a full name, which only an `import` line writes, as `App.Order` (spec section 23),
+/// - the short name of exactly one class-like the file doesn't import, as `Math` (spec section 23).
+pub(crate) fn report_unknown_sharp_class<A>(context: &mut Context<'_, '_, A>, name: &[u8], span: Span) -> bool
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return false;
+    }
+
+    // A name resolves against the file's namespace, so what the code wrote follows it.
+    let name = mago_bytes::trim_start_byte(name, b'\\');
+    let written = match context.scope.namespace_name() {
+        Some(namespace)
+            if name.len() > namespace.len()
+                && name[..namespace.len()].eq_ignore_ascii_case(namespace)
+                && name[namespace.len()] == b'\\' =>
+        {
+            &name[namespace.len() + 1..]
+        }
+        _ => name,
+    };
+
+    if written.contains(&b'\\') {
+        return context.codebase.class_like_exists(written) && report_full_class_name(context, written, span);
+    }
+
+    // A capitalized keyword is a name, spec section 2, so a class of that name is what the code meant.
+    let classes: Vec<Word> = context
+        .codebase
+        .class_likes
+        .values()
+        .filter(|class| short_name(class.original_name).as_bytes().eq_ignore_ascii_case(written))
+        .map(|class| class.original_name)
+        .collect();
+    match classes.as_slice() {
+        [] => report_keyword_in_another_case(context, written, span),
+        [class] => report_not_imported(context, written, *class, span),
+        _ => false,
+    }
+}
+
+/// Reports `name`, written at `span` in a PHP# file where it names nothing, as the PHP# keyword it spells in another
+/// case, as `this` for `THIS`, and returns whether it reported. Spec section 2: a keyword in another case is an
+/// ordinary name, so only a name that names nothing gets the keyword suggested.
+pub(crate) fn report_keyword_in_another_case<A>(context: &mut Context<'_, '_, A>, name: &[u8], span: Span) -> bool
+where
+    A: Arena,
+{
+    let Some(keyword) = SHARP_KEYWORDS
+        .into_iter()
+        .find(|keyword| keyword.as_bytes() != name && keyword.as_bytes().eq_ignore_ascii_case(name))
+        .filter(|_| context.dialect.is_sharp())
+    else {
+        return false;
+    };
+
+    context.collector.report(Issue::from(&ParseError::MiscasedKeywordInSharp(keyword, span)));
+
+    true
+}
+
+/// Reports the full class name `full_name`, written at `span` in a PHP# file's code, which spec section 23 keeps in
+/// `import` lines, with the import to add. Returns true.
+pub(crate) fn report_full_class_name<A>(context: &mut Context<'_, '_, A>, full_name: &[u8], span: Span) -> bool
+where
+    A: Arena,
+{
+    let class = short_name(full_name);
+    let full_name = String::from_utf8_lossy(full_name).replace('\\', ".");
+    context.collector.report_with_code(
+        IssueCode::NonExistentClassLike,
+        Issue::error(format!(
+            "Full names appear only in `import` lines: add `import {full_name};` and write `{class}`."
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Full name used here."))
+        .with_help(
+            "In code, `.` is always member access, so a class is written by the short name its import brings in.",
+        ),
+    );
+
+    true
+}
+
+/// Reports `name`, a short name written at `span` in a PHP# file that binds it to nothing, as the one class-like
+/// `class` of the codebase that has it, as `Math` names `Sharp.Math.Math` (spec section 23), with the import to add.
+/// Returns whether it reported. A class of `Sharp.Internal`, which only the standard library imports (spec section
+/// 15), gets no import.
+fn report_not_imported<A>(context: &mut Context<'_, '_, A>, name: &[u8], class: Word, span: Span) -> bool
+where
+    A: Arena,
+{
+    if context.scope.resolve(NameKind::Default, name).1
+        || (!context.source_file.is_standard_library && is_sharp_internal(class.as_bytes()))
+    {
+        return false;
+    }
+
+    let Some(import) = sharp_missing_imports(context.codebase, &context.imported_names, &context.scope, [class]) else {
+        return false;
+    };
+
+    context.collector.report_with_code(
+        IssueCode::NonExistentClassLike,
+        Issue::error(format!("`{}` is not imported.", BytesDisplay(name)))
+            .with_annotation(Annotation::primary(span).with_message("Used here without an import."))
+            .with_help(import),
+    );
+
+    true
 }

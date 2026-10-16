@@ -113,6 +113,8 @@ use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::TryFinallyClause;
 use mago_syntax::cst::TupleHint;
 use mago_syntax::cst::TypeOf;
+use mago_syntax::cst::TypeParameter;
+use mago_syntax::cst::TypeParameterBound;
 use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPostfix;
@@ -186,8 +188,9 @@ const OBJECT: &[u8] = b"Object";
 ///   `<out TItem : DatabaseEntity & Shareable, TKey>`. A name is `T`, or `T` and an uppercase ASCII letter, as in
 ///   `TItem`, and any other name is an error, as C# names them. A list that declares a name twice is an error. `in` and
 ///   `out` on a method's type parameter are errors, because only a class or an interface declares variance, spec
-///   section 11.1. A bound is `Object`, a class or an interface, a generic class type, as in `Comparable<TItem>`, or
-///   several classes and interfaces joined with `&`, and any other bound is an error. A type parameter is in scope in its class's or interface's
+///   section 11.1. A bound is `Object`, a class or an interface, a generic class type, as in `Comparable<TItem>`,
+///   several classes and interfaces joined with `&`, or another type parameter alone, as in `<TSub : T>`, and any
+///   other bound is an error. A type parameter is in scope in its class's or interface's
 ///   whole declaration, its header included, and in its method's signature and body, as the binder decides. A
 ///   constant uses none of its class's type parameters, because every `Box<…>` shares it. A static field, property or
 ///   method uses them, because each type argument has its own, as `Box<int>.count` reaches it. The analyzer checks
@@ -280,8 +283,8 @@ const OBJECT: &[u8] = b"Object";
 ///   variadic parameter that declares a member or has a `void` type in a `.sharp` file only, as upstream Mago reports
 ///   neither. An optional parameter before a required one is an error, because PHP would make it required. A
 ///   variadic parameter is not a required one, as in PHP. A default of `Position.current()` of the standard library is
-///   not supported yet, because as a default it gives the caller's position, spec section 27, which waits for typed
-///   compilation.
+///   the caller's position, spec section 27, which a PHP# call passes. A default that reads one part of it, as
+///   `Position.current().line`, is an error, because the parameter takes the whole position.
 /// - Types: `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter in scope written by its short name,
 ///   generic types of these, function types `Function<R(P1, P2)>` of these, tuple types `[Money total, int count]` of
 ///   these but `void`, spec section 30, whose element names are optional and past four of which `check_tuple`
@@ -384,10 +387,11 @@ const OBJECT: &[u8] = b"Object";
 ///   CS8780, except under the `not` that starts the pattern of `is`. `not` beside `or` is an error that names both
 ///   readings, as decision 045 decides, and `!x is T`, which reads as `(!x) is T`, is an error that writes
 ///   `x is not T`, as decision 044 decides. A list pattern has one rest.
-/// - What reads a type argument while the code runs, which R3 compiles, is not supported yet: a type parameter in a
+/// - What reads a type argument while the code runs, which R3 compiles, passes this check: a type parameter in a
 ///   pattern, a `match` arm, `as` or a catch clause, `typeof` and `new` of a type parameter, a static member reached
-///   through a type parameter, as in `TItem.make()` and `TItem.LIMIT`, and any type with type arguments in a pattern or
-///   `as`, as in `value is List<int>`, `value as PaginatedList<Order>` and `value is Class<Order>`.
+///   through a type parameter, as in `TItem.make()` and `TItem.LIMIT`, and a type with type arguments in a pattern or
+///   `as`, as in `value is List<int>`. The analyzer refuses what no test can read, as a plain PHP class's type
+///   arguments. A named constructor through a type parameter, as in `new TItem.from(…)`, is not supported yet.
 /// - Casts: `(int)`, `(float)` and `(string)` in a method body, as spec section 24 writes them. PHP's other casts and
 ///   its cast aliases, such as `(bool)` and `(integer)`, are errors. A cast is lowercase only, so the lexer reads
 ///   `(Int)` as the class `Int` in parentheses, as in `typeof(Int)`.
@@ -403,7 +407,8 @@ const OBJECT: &[u8] = b"Object";
 /// list does not name. It reports each refusal once, at its outermost node, and skips the nodes inside the refusal's
 /// span. A node refused at a part, such as a method at its name or a cast at its operator, keeps its other parts
 /// checked, so every PHP form PHP# removes is refused by name wherever it is written. It does not run on a file with a
-/// parse error, which is the one error to fix first. The constructs PHP# never has, such as `$`
+/// parse error, which is the one error to fix first, except a keyword in another case, which reads as the keyword and
+/// leaves the tree whole. The constructs PHP# never has, such as `$`
 /// variables, `global` and top-level functions, keep their own errors. So do the PHP forms PHP# removes, each an error
 /// that names its replacement. In a method body, they are `echo`, `print`, `die`, `exit` without parentheses or
 /// with a string literal or a template as its first argument, and `switch`. In a method body and a constant
@@ -651,6 +656,17 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(place)
         }
         (Node::Extern(r#extern), File) if r#extern.event.is_some() => check_extern_event(r#extern, context),
+        (Node::UseItem(item), File) if imports_error(item) => {
+            context.report(
+                Issue::error("`Error` is PHP#'s interface of every failure, so no import names it.")
+                    .with_annotation(Annotation::primary(item.span()).with_message("Imported here."))
+                    .with_note(
+                        "A bare `Error` always names the standard library's interface. Catch a bug as `Throwable`, and rename another library's `Error` with `as`.",
+                    ),
+            );
+
+            Some(File)
+        }
 
         (
             Node::Program(_)
@@ -710,6 +726,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(r#enum), File) => {
             check_case_class_names(r#enum, context);
+            // Spec section 20: a backed enum runs as a PHP enum, which carries no type arguments.
+            if let (Some(list), Some(backing)) = (&r#enum.type_parameters, &r#enum.backing_type_hint) {
+                context.report(
+                    Issue::error("A backed enum takes no type parameters: it runs as a PHP enum, which holds none.")
+                        .with_annotation(Annotation::primary(list.span()).with_message("Declared here."))
+                        .with_annotation(Annotation::secondary(backing.span()).with_message("Backed here."))
+                        .with_note("Remove the backing type to give the enum type parameters, as in `enum Option<T>`."),
+                );
+            }
 
             Some(Enum)
         }
@@ -789,7 +814,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         {
             Some(Parameter)
         }
-        (Node::TypeParameterList(list), Class | Interface | Method | Signature) => {
+        (Node::TypeParameterList(list), Class | Interface | Method | Signature | Place::Struct) => {
+            check_type_parameters(list, place, context);
+
+            Some(Place::TypeParameter)
+        }
+        (Node::TypeParameterList(list), Enum) => {
             check_type_parameters(list, place, context);
 
             Some(Place::TypeParameter)
@@ -802,8 +832,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             let message = if matches!(bound.hint, Hint::Union(_)) {
                 "A bound can't be a union: join several bounds with `&`."
+            } else if joins_type_parameter(&bound.hint, context) {
+                "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."
             } else {
-                "A bound is `Object`, a class or an interface, as in `<TItem : DatabaseEntity>`."
+                "A bound is `Object`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
             };
             context.report(
                 Issue::error(message)
@@ -1014,7 +1046,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(Method)
         }
         (Node::BinaryOperator(_), Method) => Some(Method),
-        // `check_enum` reports a property in an enum, and a backing type other than `int` or `string`.
+        // Spec section 22: an enum's computed property is checked as a class's. `check_enum` reports any other property
+        // in an enum, and a backing type other than `int` or `string`.
+        (Node::ClassLikeMember(ClassLikeMember::Property(property @ Property::Computed(_))), Enum)
+            if !property.modifiers().contains_static() =>
+        {
+            enter(node, Class, context)
+        }
         (Node::ClassLikeMember(ClassLikeMember::Property(_)) | Node::EnumBackingTypeHint(_), Enum) => None,
         (Node::EnumCase(case), Enum) if case.item.name().value.eq_ignore_ascii_case(b"class") => {
             context.report(
@@ -1063,7 +1101,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                     let kind = if matches!(property, Property::Plain(_)) { "Field" } else { "Property" };
                     check_member_name(property.modifiers(), variable.name, variable.span, kind, context);
                     report_static_without_initial_value(property, context);
-                    report_generic_static(property, context);
 
                     Some(FieldOrProperty)
                 }
@@ -1145,10 +1182,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // A computed property's expression runs on each read, as a method body does.
         (Node::ComputedProperty(_), FieldOrProperty) => Some(FieldOrProperty),
         (Node::Block(_) | Node::PropertyHookConcreteExpressionBody(_), FieldOrProperty | Parameter) => Some(Body),
-        // A constant initial value is the member's default, which PHP evaluates as a constant expression.
+        // A constant initial value is the member's default, which PHP evaluates as a constant expression. A static
+        // member's that reads a static member, `Class.name`, runs as code, as `Property::initial_value_runs_after_class`
+        // decides.
         (Node::Expression(value), FieldOrProperty) => {
             let uses_this = report_this_in_initial_value(node, context);
-            let place = if !uses_this && value.is_constant(&context.version, false) { Constant } else { Body };
+            let place = if !uses_this
+                && value.is_constant(&context.version, false)
+                && !is_static_initial_value_run_as_code(value, context)
+            {
+                Constant
+            } else {
+                Body
+            };
 
             enter(node, place, context)
         }
@@ -1435,18 +1481,28 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             ),
             Parameter,
         ) => Some(Parameter),
+        // Spec section 27: as a default, `Position.current()` is the caller's position, which a PHP# call passes.
         (Node::FunctionLikeParameterDefaultValue(default), Parameter)
             if let Expression::Call(Call::Method(call)) = default.value
-                && let Some(class) = context.names.static_call_class(call)
-                && context.names.get(&class.name).eq_ignore_ascii_case(b"Sharp\\Position")
-                && let ClassLikeMemberSelector::Identifier(method) = &call.method
-                && method.value.eq_ignore_ascii_case(b"current") =>
+                && context.names.is_current_position(call) =>
+        {
+            None
+        }
+        (Node::FunctionLikeParameterDefaultValue(default), Parameter)
+            if !Node::Expression(default.value)
+                .filter_map(|node| match node {
+                    Node::MethodCall(call) if context.names.is_current_position(call) => Some(()),
+                    _ => None,
+                })
+                .is_empty() =>
         {
             context.report(
-                Issue::error("A `Position.current()` default is not supported yet in PHP#.")
-                    .with_annotation(Annotation::primary(call.span()).with_message("Not supported yet."))
+                Issue::error("Take the whole position: `Position caller = Position.current()`.")
+                    .with_annotation(
+                        Annotation::primary(default.value.span()).with_message("Computed from the position."),
+                    )
                     .with_note(
-                        "As a parameter's default, `Position.current()` gives the caller's position, which waits for typed compilation.",
+                        "As a default, `Position.current()` gives the caller's position, and the parameter takes all of it, as one value.",
                     ),
             );
 
@@ -1970,11 +2026,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Expression::Access(Access::Property(_) | Access::NullSafeProperty(_))
                 | Expression::Throw(_)
                 | Expression::Leave(_)
+                | Expression::Propagate(_)
                 // The parser reads a template, and only a template, into an interpolated string.
                 | Expression::CompositeString(CompositeString::Interpolated(_)),
             )
             | Node::Throw(_)
             | Node::Leave(_)
+            | Node::Propagate(_)
             | Node::CompositeString(CompositeString::Interpolated(_))
             | Node::InterpolatedString(_)
             | Node::StringPart(StringPart::Literal(_) | StringPart::BracedExpression(_))
@@ -2611,10 +2669,9 @@ fn is_extern(method: &Method) -> bool {
     method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_)))
 }
 
-/// Refuses every name but a function parameter in the `uses` of a method with a body, spec section 29: the checker
-/// works a body's effects out from its code, so only a method without a body states the effects its implementations
-/// may have. A function parameter in `uses`, as `charge(…) uses prepare => …` writes it, belongs to function effects,
-/// so it passes.
+/// Refuses every name in the `uses` of a method with a body, spec section 29: the checker works a body's effects out
+/// from its code, so only a method without a body states the effects its implementations may have. A function
+/// parameter in `uses`, as the old `charge(…) uses prepare => …` wrote it, is the parser's error.
 fn check_method_uses(method: &Method, context: &mut Context<'_, '_, '_>) {
     if method.is_abstract() {
         return;
@@ -2623,11 +2680,11 @@ fn check_method_uses(method: &Method, context: &mut Context<'_, '_, '_>) {
     for name in MethodParts::of_method(method).uses_effects() {
         context.report(
             Issue::error(format!(
-                "A method with a body takes no effect in `uses`, and `{}` is not one of its function parameters.",
+                "A method with a body takes no effect in `uses`, and it names `{}`.",
                 BytesDisplay(name.value)
             ))
             .with_annotation(Annotation::primary(name.span).with_message("Written here."))
-            .with_note("Its effects come from its code, so its `uses` names only its function parameters.")
+            .with_note("Its effects come from its code.")
             .with_help("Remove it from `uses`, or declare the method without a body."),
         );
     }
@@ -2674,6 +2731,16 @@ fn check_extern(method: &Method, context: &mut Context<'_, '_, '_>) -> Option<Pl
         Place::Method,
         context,
     )
+}
+
+/// Whether an import names PHP's engine class `Error`, or gives the file the name `Error`, which a `.sharp` file keeps
+/// for the standard library's interface, spec section 31.
+fn imports_error(item: &UseItem) -> bool {
+    let name = item.name.value();
+    let last = name.rsplit(|byte| matches!(byte, b'.' | b'\\')).next().unwrap_or(name);
+    let given = item.alias.as_ref().map_or(last, |alias| alias.identifier.value);
+
+    given == b"Error" || name.strip_prefix(b"\\").unwrap_or(name) == b"Error"
 }
 
 /// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose
@@ -3026,49 +3093,6 @@ fn report_parameter_accessor_bodies(
             .with_annotation(Annotation::primary(body.span()).with_message(annotation)),
         );
     }
-}
-
-/// Reports a static member of a generic class whose initial value runs as code, or that runs accessors. Each type
-/// argument's statics are an entry of one hidden table, spec section 11, which starts as a copy of constant initial
-/// values, and the engine runs no code on that first use and gives the entry no accessors.
-fn report_generic_static(property: &Property, context: &mut Context<'_, '_, '_>) {
-    if !property.modifiers().contains_static()
-        || enclosing_class(context.program, property.span()).is_none_or(|class| class.type_parameters.is_none())
-    {
-        return;
-    }
-
-    let runs_accessors = match property {
-        Property::Computed(_) => true,
-        Property::Hooked(hooked) => {
-            hooked.hook_list.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
-        }
-        Property::Plain(_) => false,
-    };
-    let refused = if runs_accessors {
-        Some((
-            property.first_variable().span,
-            "A static property with accessors in a generic class is not supported yet in PHP#.",
-        ))
-    } else if property.initial_value_runs_after_class()
-        && let Some(value) = property.initial_value()
-    {
-        Some((
-            value.span(),
-            "A static member of a generic class with an initial value that runs as code is not supported yet in PHP#.",
-        ))
-    } else {
-        None
-    };
-    let Some((span, message)) = refused else {
-        return;
-    };
-
-    context.report(
-        Issue::error(message)
-            .with_annotation(Annotation::primary(span).with_message("Not supported yet."))
-            .with_note("Each type argument's statics are an entry of one table, which starts as a copy of constant initial values, and the engine runs no code on that first use."),
-    );
 }
 
 /// Reports a static field or a static property with storage that has no initial value, spec section 6. No constructor
@@ -4055,6 +4079,8 @@ fn is_key_hint(hint: &Hint) -> bool {
         Hint::Generic(collection) if matches!(collection.name.value, b"List" | b"Set" | b"Map") => {
             collection.type_arguments.arguments.iter().all(is_key_hint)
         }
+        // A generic struct or class, as `Pair<int, string>`, is a named type, whose `==` and `hash()` the analyzer checks.
+        Hint::Generic(generic) => built_in_generic_arity(generic.name.value).is_none(),
         _ => false,
     }
 }
@@ -4232,11 +4258,23 @@ fn report_static_member_use(span: Span, refusal: String, context: &mut Context<'
 }
 
 /// Reports each type parameter of a list whose name is not `T`, or `T` and an uppercase letter, as C# names them, a
-/// name the list declares twice, and `in` or `out` on a method's, because only a class or an interface declares
-/// variance, spec section 11.1.
+/// name the list declares twice, a bound that leads back to its type parameter, as C# refuses a circular constraint
+/// (CS0454), and `in` or `out` on a method's or an enum's, because only a class or an interface declares variance,
+/// spec section 11.1.
 fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut Context<'_, '_, '_>) {
     for (index, parameter) in list.parameters.iter().enumerate() {
         let name = parameter.name.value;
+        if let Some(bound) = &parameter.bound
+            && bounds_itself(list, parameter)
+        {
+            context.report(
+                Issue::error(format!(
+                    "A type parameter can't bound itself: the bound of `{0}` leads back to `{0}`.",
+                    BytesDisplay(name)
+                ))
+                .with_annotation(Annotation::primary(bound.hint.span()).with_message("Bound written here.")),
+            );
+        }
         if !matches!(name, [b'T'] | [b'T', b'A'..=b'Z', ..]) {
             context.report(
                 Issue::error("A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.")
@@ -4252,10 +4290,14 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
             );
         }
 
-        if matches!(place, Place::Method | Place::Signature | Place::Extension)
+        if matches!(place, Place::Method | Place::Signature | Place::Extension | Place::Enum)
             && let Some(variance) = parameter.variance
         {
-            let owner = if place == Place::Extension { "An extension block's" } else { "A method's" };
+            let owner = match place {
+                Place::Extension => "An extension block's",
+                Place::Enum => "An enum's",
+                _ => "A method's",
+            };
             context.report(
                 Issue::error(format!(
                     "{owner} type parameter takes no `{}`: only a class or an interface declares variance, so remove it.",
@@ -4267,17 +4309,61 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
     }
 }
 
-/// Whether a type parameter's bound is `Object`, a class or an interface, a generic class type, or several of them
-/// joined with `&`, as spec section 11 writes it. Mago's own check of an intersection refuses `Object` in one.
+/// Whether the bound of `parameter` names it, through the bounds of the other type parameters of `list` it names, as
+/// `<T : T>` and `<TA : TB, TB : TA>` do.
+fn bounds_itself(list: &TypeParameterList, parameter: &TypeParameter) -> bool {
+    let mut current = parameter;
+    for _ in 0..list.parameters.len() {
+        let Some(TypeParameterBound { hint: Hint::Identifier(Identifier::Local(bound)), .. }) = &current.bound else {
+            return false;
+        };
+        if bound.value == parameter.name.value {
+            return true;
+        }
+        let Some(next) = list.parameters.iter().find(|other| other.name.value == bound.value) else {
+            return false;
+        };
+        current = next;
+    }
+
+    false
+}
+
+/// Whether a type parameter's bound is another type parameter, as in `<TSub : T>`, or a class bound, as spec section
+/// 11 writes it.
 fn is_slice_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
+    is_type_parameter_bound(hint, context) || is_class_bound(hint, context)
+}
+
+/// Whether `hint` is a type parameter, a bound that stands alone, as Java's `<U extends T>` does.
+fn is_type_parameter_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
+    matches!(hint, Hint::Identifier(name @ Identifier::Local(_)) if context.names.is_type_parameter(name))
+}
+
+/// Whether `hint` joins a type parameter with other bounds by `&`, as in `<TL : Order & TA>`.
+fn joins_type_parameter(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
+    match hint {
+        Hint::Intersection(intersection) => {
+            joins_type_parameter(intersection.left, context) || joins_type_parameter(intersection.right, context)
+        }
+        hint => is_type_parameter_bound(hint, context),
+    }
+}
+
+/// Whether `hint` is `Object`, a class or an interface, a generic class type, or several of them joined with `&`.
+/// Mago's own check of an intersection refuses `Object` in one.
+fn is_class_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
     match hint {
         Hint::Object(object) => object.value == OBJECT,
         Hint::Identifier(name @ Identifier::Local(_)) => !context.names.is_type_parameter(name),
+        // A dotted name is a case type or a full name, which the analyzer refuses with the import to add, spec section
+        // 23.
+        Hint::Identifier(Identifier::Dotted(_)) => true,
         Hint::Generic(generic) => {
             built_in_generic_arity(generic.name.value).is_none() && !context.names.is_type_parameter(&generic.name)
         }
         Hint::Intersection(intersection) => {
-            is_slice_bound(intersection.left, context) && is_slice_bound(intersection.right, context)
+            is_class_bound(intersection.left, context) && is_class_bound(intersection.right, context)
         }
         _ => false,
     }
@@ -4607,6 +4693,12 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
     }
 
     if instantiation.argument_list.is_none() && instantiation.initializer.is_none() {
+        // `new App.Shop.Order()` reads as the named constructor `Shop` of `App` and a call of `Order` on it. Only the
+        // codebase tells a full name from a member, so the analyzer refuses the chain, spec section 23.
+        if instantiation.constructor.is_some() && is_member_chain_object(instantiation, context) {
+            return Some(Place::Instantiation);
+        }
+
         report_not_supported(
             instantiation.span(),
             "`new` without arguments",
@@ -4671,6 +4763,19 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
     }
 
     Some(Place::Instantiation)
+}
+
+/// Whether `instantiation` is the object a member read or a method call reads through, as the `new App.Shop` of
+/// `new App.Shop.Order()` is.
+fn is_member_chain_object(instantiation: &Instantiation, context: &Context<'_, '_, '_>) -> bool {
+    // The check of an expression runs before the walk enters it, so the last ancestor is its parent.
+    let object = match context.ancestors.last() {
+        Some(Node::Expression(Expression::Call(Call::Method(call)))) => call.object,
+        Some(Node::Expression(Expression::Access(Access::Property(access)))) => access.object,
+        _ => return false,
+    };
+
+    object.span() == instantiation.span()
 }
 
 /// Whether a class's constructor is marked `required`.
@@ -5260,14 +5365,14 @@ fn supported(place: Place) -> &'static str {
             "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body or a default body."
         }
         Place::Enum => {
-            "A PHP# enum has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."
+            "A PHP# enum has attributes, an optional `public`, a name, optional type parameters as in `<T, TError : Error>` when it has no backing type, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, computed properties, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."
         }
         Place::Case => unreachable!("`enter` takes a case's name, its field list and each of its fields"),
         Place::Header => {
             "A PHP# header names each base class and interface by its short name, as in `: DatabaseEntity, Linkable`, and a generic one with its type arguments, as in `: PaginatedList<Order>`."
         }
         Place::TypeParameter => {
-            "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
+            "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
         }
         Place::Event => {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
@@ -5297,7 +5402,7 @@ fn supported(place: Place) -> &'static str {
         | Place::SuperCall
         | Place::SelfCall
         | Place::RefusedPart(_) => {
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`."
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `try` before a `Result`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`."
         }
         Place::Attribute => {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
@@ -5542,7 +5647,9 @@ fn check_capitalized(name: &[u8], span: Span, context: &mut Context<'_, '_, '_>)
 /// `autoload-dev` maps, may declare the namespace it tests.
 #[inline]
 pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) {
-    let (classes, imports) = declarations(program);
+    let Declarations { types, classes, imports } = declarations(program);
+    check_one_type(&types, context);
+
     let name = first_namespace(program).and_then(|namespace| namespace.name.as_ref());
 
     if let Some(FolderNamespace::Namespace(folder)) = &context.source_file.folder_namespace
@@ -5651,6 +5758,44 @@ pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) 
                 .with_help(rename),
             );
         }
+    }
+}
+
+/// Spec section 27: a `.sharp` file that declares a type declares one, named like the file, case included, as Java
+/// names a public class's file, so a reader finds a type by its namespace and its file. A type is a class, interface,
+/// enum, struct or event. An `extern` line and a module are none, so an `extern` declaration file and
+/// a `Module.sharp` hold no type, and `is_module_file_statement` refuses any type a module file declares.
+///
+/// The type named like the file is the file's own, and each other type moves to its own file. When none is, the
+/// first type is the file's own, which takes the file's name only when that name can name a type.
+fn check_one_type(types: &[&LocalIdentifier], context: &mut Context<'_, '_, '_>) {
+    if Module::is_declared_in(context.source_file) || Module::environment_of(context.source_file).is_some() {
+        return;
+    }
+
+    let file = context.source_file.name.rsplit(|&byte| byte == b'/').next().unwrap_or_default();
+    let stem = file.strip_suffix(b".sharp").unwrap_or(file);
+    let Some(own) = types.iter().find(|name| name.value == stem).or_else(|| types.first()) else {
+        return;
+    };
+
+    if own.value != stem {
+        let (file, name) = (BytesDisplay(file), BytesDisplay(own.value));
+        let names_a_type = stem.first().is_some_and(u8::is_ascii_uppercase) && stem.iter().all(is_part_of_identifier);
+        let or_the_type = if names_a_type { format!(", or the type `{}`", BytesDisplay(stem)) } else { String::new() };
+        context.report(
+            Issue::error(format!("`{file}` declares `{name}`: rename the file `{name}.sharp`{or_the_type}."))
+                .with_annotation(Annotation::primary(own.span).with_message("Declared here.")),
+        );
+    }
+
+    for other in types.iter().filter(|other| other.span != own.span) {
+        let name = BytesDisplay(other.value);
+        context.report(
+            Issue::error(format!("A `.sharp` file declares one type: move `{name}` to `{name}.sharp`."))
+                .with_annotation(Annotation::primary(other.span).with_message("A second type."))
+                .with_annotation(Annotation::secondary(own.span).with_message("The file's type.")),
+        );
     }
 }
 
@@ -5898,7 +6043,7 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
         Self {
             name: &r#struct.name,
             span: r#struct.span(),
-            type_parameters: None,
+            type_parameters: r#struct.type_parameters.as_ref(),
             members: &r#struct.members,
             is_static: false,
             is_foreign: false,
@@ -5906,43 +6051,57 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
     }
 }
 
-/// The classes, enums and imports a PHP# file declares at its top level and in its first namespace, in source order.
-fn declarations<'ast, 'arena>(
-    program: &'ast Program<'arena>,
-) -> (Vec<ClassLike<'ast, 'arena>>, Vec<&'ast UseItem<'arena>>) {
-    let mut classes = Vec::new();
-    let mut imports = Vec::new();
-    for statement in &program.statements {
-        collect_declarations(statement, &mut classes, &mut imports);
-    }
-
-    // The slice refuses a second namespace, so its declarations are not the file's.
-    for statement in first_namespace(program).into_iter().flat_map(|namespace| namespace.statements().iter()) {
-        collect_declarations(statement, &mut classes, &mut imports);
-    }
-
-    (classes, imports)
+/// What a PHP# file declares at its top level and in its first namespace, each in source order.
+#[derive(Default)]
+struct Declarations<'ast, 'arena> {
+    /// The name of each type: a class, interface, enum, struct or event.
+    types: Vec<&'ast LocalIdentifier<'arena>>,
+    /// Each class, struct and enum.
+    classes: Vec<ClassLike<'ast, 'arena>>,
+    imports: Vec<&'ast UseItem<'arena>>,
 }
 
-fn collect_declarations<'ast, 'arena>(
-    statement: &'ast Statement<'arena>,
-    classes: &mut Vec<ClassLike<'ast, 'arena>>,
-    imports: &mut Vec<&'ast UseItem<'arena>>,
-) {
-    match statement {
-        Statement::Class(class) => classes.push(ClassLike::of_class(class)),
-        Statement::Struct(r#struct) => classes.push(ClassLike::of_struct(r#struct)),
-        Statement::Enum(r#enum) => classes.push(ClassLike {
-            name: &r#enum.name,
-            span: r#enum.span(),
-            type_parameters: None,
-            members: &r#enum.members,
-            is_static: false,
-            is_foreign: false,
-        }),
-        Statement::Use(Use { items: UseItems::Sequence(sequence), .. }) => imports.extend(sequence.items.iter()),
-        _ => {}
+impl<'ast, 'arena> Declarations<'ast, 'arena> {
+    fn collect(&mut self, statement: &'ast Statement<'arena>) {
+        match statement {
+            Statement::Class(class) => {
+                self.types.push(&class.name);
+                self.classes.push(ClassLike::of_class(class));
+            }
+            Statement::Struct(r#struct) => {
+                self.types.push(&r#struct.name);
+                self.classes.push(ClassLike::of_struct(r#struct));
+            }
+            Statement::Enum(r#enum) => {
+                self.types.push(&r#enum.name);
+                self.classes.push(ClassLike {
+                    name: &r#enum.name,
+                    span: r#enum.span(),
+                    type_parameters: None,
+                    members: &r#enum.members,
+                    is_static: false,
+                    is_foreign: false,
+                });
+            }
+            Statement::Interface(interface) => self.types.push(&interface.name),
+            Statement::Event(event) => self.types.push(&event.name),
+            Statement::Use(Use { items: UseItems::Sequence(sequence), .. }) => {
+                self.imports.extend(sequence.items.iter())
+            }
+            _ => {}
+        }
     }
+}
+
+fn declarations<'ast, 'arena>(program: &'ast Program<'arena>) -> Declarations<'ast, 'arena> {
+    let mut declarations = Declarations::default();
+    // The slice refuses a second namespace, so its declarations are not the file's.
+    let namespaced = first_namespace(program).into_iter().flat_map(|namespace| namespace.statements().iter());
+    for statement in program.statements.iter().chain(namespaced) {
+        declarations.collect(statement);
+    }
+
+    declarations
 }
 
 /// Checks the name of a PHP# local or parameter, which runs as the PHP variable of the same name, and a
@@ -5979,11 +6138,11 @@ fn check_local_name(name: &[u8], span: Span, kind: &str, context: &mut Context<'
     }
 }
 
-/// Refuses, in an enum with a case that carries data, spec section 20, a case named as a type PHP# reserves, since each
+/// Refuses, in an enum that runs as classes, spec sections 20 and 31, a case named as a type PHP# reserves, since each
 /// case runs as a class of its name, and a method named as a case that carries data, ignoring case as PHP does, since
 /// `PaymentResult.Paid(…)` creates that case.
 fn check_case_class_names(r#enum: &mago_syntax::cst::Enum, context: &mut Context<'_, '_, '_>) {
-    if !r#enum.has_data_case() {
+    if !r#enum.runs_as_classes() {
         return;
     }
 
@@ -5995,7 +6154,7 @@ fn check_case_class_names(r#enum: &mago_syntax::cst::Enum, context: &mut Context
         if is_reserved_class_name(name.value) {
             context.report(
                 Issue::error(format!(
-                    "A case of an enum whose cases carry data is a class, so it can't be named `{}`.",
+                    "A case of an enum whose cases carry data or type arguments is a class, so it can't be named `{}`.",
                     BytesDisplay(name.value)
                 ))
                 .with_annotation(Annotation::primary(name.span).with_message("Case declared here."))
@@ -6346,7 +6505,7 @@ fn report_static_member_in_constant(
     span: Span,
     context: &mut Context<'_, '_, '_>,
 ) {
-    let declared = declarations(context.program).0.into_iter().any(|declared| {
+    let declared = declarations(context.program).classes.into_iter().any(|declared| {
         declared.name.value.eq_ignore_ascii_case(class.name.value()) && is_static_property(declared, member.value)
     });
     if !declared {
@@ -6369,12 +6528,24 @@ fn report_static_member_in_constant(
 /// The class or enum of a PHP# file whose body holds `span`, in any of the file's namespaces, because the walk checks
 /// the classes of a namespace it refuses too.
 fn enclosing_class<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> Option<ClassLike<'ast, 'arena>> {
-    let mut classes = Vec::new();
+    let mut declarations = Declarations::default();
     for statement in file_statements(program) {
-        collect_declarations(statement, &mut classes, &mut Vec::new());
+        declarations.collect(statement);
     }
 
-    classes.into_iter().find(|class| class.span.contains(&span.start))
+    declarations.classes.into_iter().find(|class| class.span.contains(&span.start))
+}
+
+/// Whether `value` is the initial value of a static member that runs as code once the class is built, which
+/// `Property::initial_value_runs_after_class` decides for the checker, the analyzer and the engine alike.
+fn is_static_initial_value_run_as_code(value: &Expression, context: &Context<'_, '_, '_>) -> bool {
+    enclosing_class(context.program, value.span()).is_some_and(|class| {
+        class.members.iter().any(|member| {
+            matches!(member, ClassLikeMember::Property(property)
+                if property.initial_value().is_some_and(|initial_value| initial_value.span() == value.span())
+                    && property.initial_value_runs_after_class())
+        })
+    })
 }
 
 /// The name of the class, struct, interface or enum of a PHP# file whose body holds `span`, in any of the file's

@@ -348,6 +348,7 @@ where
                 initializer,
                 body,
             );
+            effects::check::report_escaping_functions(context, artifacts, method_metadata, method.parameter_list, body);
         }
 
         if method_metadata.return_from_body.is_some() {

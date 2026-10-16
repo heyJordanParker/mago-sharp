@@ -41,7 +41,7 @@ where
         // Each path returns its parser's `Result` as it is, never unwrapped with `?` and wrapped again: an unoptimized
         // build gives every unwrapped value its own stack slot, and this frame sits between two `ensure_sufficient_stack`
         // calls, so it must stay inside their red zone.
-        if !self.state.within_block && (self.is_internal(token) || self.is_foreign(token)) {
+        if !self.state.within_block && (self.is_internal(token) || self.is_foreign(token) || self.is_at_partial()?) {
             return self.parse_modified_class_like_with_attributes(Sequence::empty());
         }
 
@@ -50,6 +50,15 @@ where
             T!["<?php"] | T!["<?"] => self.parse_opening_tag().map(Statement::OpeningTag),
             T!["<?="] => self.parse_echo_tag().map(Statement::EchoTag),
             T!["?>"] => self.parse_closing_tag().map(Statement::ClosingTag),
+            T!["?"]
+                if self.dialect.is_sharp()
+                    && self
+                        .stream
+                        .lookahead(1)?
+                        .is_some_and(|next| next.kind == T![">"] && next.start.offset == token.start.offset + 1) =>
+            {
+                self.parse_closing_tag().map(Statement::ClosingTag)
+            }
             T!["declare"] => self.parse_declare().map(Statement::Declare),
             T!["namespace"] => self.parse_namespace().map(Statement::Namespace),
             T!["use"] => self.parse_use().map(Statement::Use),
@@ -113,7 +122,11 @@ where
                             terminator: self.parse_terminator()?,
                         }))
                     }
-                    kind if kind.is_modifier() || self.is_internal(next) || self.is_foreign(next) => {
+                    kind if kind.is_modifier()
+                        || self.is_internal(next)
+                        || self.is_foreign(next)
+                        || self.is_at_partial()? =>
+                    {
                         self.parse_modified_class_like_with_attributes(attributes)
                     }
                     T![Identifier] if self.is_at_event()? => self
@@ -172,7 +185,11 @@ where
             T!["break"] => self.parse_break().map(Statement::Break),
             T!["unset"] => self.parse_unset().map(Statement::Unset),
             T!["{"] => self.parse_block().map(Statement::Block),
-            T!["try"] => self.parse_try().map(Statement::Try),
+            // In PHP#, `try` before a value is the expression that passes a failure up, spec section 31, so only a `try`
+            // before `{` starts the statement.
+            T!["try"] if !self.dialect.is_sharp() || self.stream.peek_kind(1)? == Some(T!["{"]) => {
+                self.parse_try().map(Statement::Try)
+            }
             T!["echo"] => self.parse_echo().map(Statement::Echo),
             T!["goto"] => self.parse_goto().map(Statement::Goto),
             kind if kind.is_identifier_maybe_reserved() && matches!(self.stream.peek_kind(1)?, Some(T![":"])) => {

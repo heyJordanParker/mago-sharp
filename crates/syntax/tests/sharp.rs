@@ -689,12 +689,96 @@ fn a_case_type_is_written_through_its_enum() {
     assert_eq!(hints, [b"PaymentResult.Paid".as_slice(), b"PaymentResult.Paid"]);
 }
 
-/// A generic struct waits for generics, spec section 10's question 4, so its type parameters are one error, nested
-/// ones included, and the struct parses on. It is refused whole, so it keeps no members, whose types name its
-/// parameters, and the file has that one error.
+/// Spec section 31: an enum declares type parameters after its name, with bounds, before its header.
 #[test]
-fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
-    for parameters in ["<T>", "<TKey, TValue>", "<T : Box<int>>", "<T : Map<string, List<int>>>"] {
+fn an_enum_declares_type_parameters_after_its_name() {
+    const CODE: &str =
+        "public enum Result<T, TError : Error> : HasLabel\n{\n    case Ok(T value);\n    case Err(TError error);\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Result.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Enum(result)) = program.statements.first() else {
+        panic!("expected an enum, got {:#?}", program.statements);
+    };
+    let Some(parameters) = &result.type_parameters else {
+        panic!("expected type parameters, got {result:#?}");
+    };
+    let written: Vec<&str> = parameters.parameters.iter().map(|parameter| source(CODE, parameter)).collect();
+    assert_eq!(written, ["T", "TError : Error"]);
+    assert!(result.inheritance.is_some(), "the header after the type parameters parses");
+    assert!(result.runs_as_classes());
+}
+
+/// Spec section 31: `try` before a value is a prefix operator at `!`'s precedence, so a member read or a call binds
+/// tighter and `+` looser, and parentheses read a member of the `Ok` value. `try {` stays the statement.
+#[test]
+fn try_before_a_value_is_a_prefix_operator_and_try_before_a_brace_is_the_statement() {
+    let arena = LocalArena::new();
+    for (statement, propagated, around) in [
+        ("try gateway.charge(cart);", "gateway.charge(cart)", "try gateway.charge(cart)"),
+        ("(try gateway.charge(cart)).total;", "gateway.charge(cart)", "(try gateway.charge(cart)).total"),
+        ("try a.b.c;", "a.b.c", "try a.b.c"),
+        ("try result + 1;", "result", "try result + 1"),
+        ("!try result;", "result", "!try result"),
+        ("[try result];", "result", "[try result]"),
+    ] {
+        let code: &'static str = Box::leak(
+            format!("class Shop\n{{\n    void run()\n    {{\n        {statement}\n    }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Shop.sharp", code);
+        assert!(program.errors.is_empty(), "{statement}: {:#?}", program.errors);
+
+        let [written] = method_body(program) else {
+            panic!("expected one statement for `{statement}`, got {:#?}", method_body(program));
+        };
+        assert_eq!(source(code, expression(written)), around, "{statement}");
+        let values: Vec<&str> = Node::Statement(written).filter_map(|node| match node {
+            Node::Propagate(propagate) => Some(source(code, propagate.value)),
+            _ => None,
+        });
+        assert_eq!(values, [propagated], "{statement}");
+    }
+
+    let code = "class Shop\n{\n    void run()\n    {\n        try { } catch (Throwable error) { }\n    }\n}\n";
+    let program = parse(&arena, "src/Shop.sharp", code);
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    assert!(matches!(method_body(program), [Statement::Try(_)]), "{:#?}", method_body(program));
+}
+
+/// Spec section 31: a case of a generic enum is a type written with the enum's type arguments before the case, as
+/// `Result<Order, PaymentError>.Ok`. A `.` that follows a nested list's `>` is no case of it, so a static read through
+/// a generic type still parses.
+#[test]
+fn a_case_type_of_a_generic_enum_writes_the_type_arguments_before_the_case() {
+    const CODE: &str = "class Shop\n{\n    public Order paid(Result<Order, PaymentError>.Ok ok, Result<List<Order>, PaymentError> all) => ok.value;\n\n    public int count() => Counter<List<Order>>.items;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Shop.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let cases: Vec<(&str, Option<&[u8]>)> = Node::Program(program).filter_map(|node| match node {
+        Node::GenericHint(hint) if hint.name.value == b"Result" => {
+            Some((source(CODE, hint), hint.case.as_ref().map(|case| case.value)))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        cases,
+        [("Result<Order, PaymentError>.Ok", Some(b"Ok".as_slice())), ("Result<List<Order>, PaymentError>", None)]
+    );
+}
+
+/// A struct can be generic, spec section 10, with section 11's type parameters: one, several, a bounded one, a nested
+/// bound, and a variance marker, each before the header and the members.
+#[test]
+fn a_generic_struct_takes_type_parameters() {
+    for (parameters, names) in [
+        ("<T>", &[&b"T"[..]][..]),
+        ("<TKey, TValue>", &[b"TKey", b"TValue"]),
+        ("<T : Box<int>>", &[b"T"]),
+        ("<T : Map<string, List<int>>>", &[b"T"]),
+        ("<out T>", &[b"T"]),
+    ] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
             format!("struct Pair{parameters} : HasLabel\n{{\n    public int run() {{ return 1; }}\n}}\n\nstruct Next {{ }}\n")
@@ -702,16 +786,17 @@ fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
         );
         let program = parse(&arena, "src/Pair.sharp", code);
 
-        let [error] = program.errors else {
-            panic!("expected one error for `{parameters}`, got {:#?}", program.errors);
-        };
-        assert_eq!(error.to_string(), "A generic struct is not supported yet in PHP#.");
-        assert_eq!(source(code, error), parameters);
+        assert!(program.errors.is_empty(), "`{parameters}` parses, got {:#?}", program.errors);
         let Some(Statement::Struct(pair)) = program.statements.first() else {
             panic!("expected a struct for `{parameters}`, got {:#?}", program.statements);
         };
+        let Some(written) = &pair.type_parameters else {
+            panic!("the struct keeps `{parameters}`");
+        };
+        let declared: Vec<&[u8]> = written.parameters.iter().map(|parameter| parameter.name.value).collect();
+        assert_eq!(declared, names, "the type parameters of `{parameters}`");
         assert!(pair.inheritance.is_some(), "the header after `{parameters}` parses");
-        assert!(pair.members.is_empty(), "the struct keeps no members after `{parameters}`");
+        assert_eq!(pair.members.len(), 1, "the struct keeps its member after `{parameters}`");
         assert!(
             matches!(program.statements.get(1), Some(Statement::Struct(_))),
             "the struct after `{parameters}` parses"
@@ -1167,6 +1252,30 @@ fn effects_after_a_function_type_are_a_parse_error_that_names_the_written_form()
             "{code}"
         );
         assert!(source(code, error).starts_with("uses Http"), "{code}: {}", source(code, error));
+    }
+}
+
+/// Spec section 23: an import never carries `uses`, because a library's effect lives in its one `extern`. The clause
+/// is one error that says so, and the parse goes on after it, with or without `as`.
+#[test]
+fn effects_on_an_import_are_a_parse_error_that_names_extern() {
+    for code in [
+        "import Vendor.Pdf uses Files;\n\nclass Report\n{\n}\n",
+        "import Vendor.Pdf as Pdf uses Files, Http;\n\nclass Report\n{\n}\n",
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{code}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            Issue::from(error).message,
+            "An import never carries `uses`: declare the library's effect once, with `extern`.",
+            "{code}"
+        );
+        assert!(source(code, error).starts_with("uses Files"), "{code}: {}", source(code, error));
+        assert!(program.statements.iter().any(|statement| matches!(statement, Statement::Class(_))), "{code}");
     }
 }
 
@@ -2535,6 +2644,99 @@ fn foreach_is_a_php_syntax_error() {
     assert_eq!(messages, ["`foreach` is PHP syntax: PHP# loops over a collection with `for … of`"]);
 }
 
+/// Spec section 27: a `.sharp` file starts in code, so an opening tag is one error, and the file parses on.
+#[test]
+fn an_opening_tag_is_a_php_syntax_error() {
+    const CODE: &str = "<?php\nnamespace App;\n\nclass Report\n{\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/App/Report.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(
+        errors,
+        [("`<?php` is PHP syntax: a `.sharp` file has no opening tag, so delete it".to_owned(), "<?php")]
+    );
+    assert!(matches!(program.statements.get(1), Some(Statement::Namespace(_))), "{:#?}", program.statements);
+}
+
+/// Each other PHP tag is one error that names it, and the file parses on: a short opening tag, an echo tag and a
+/// closing tag, which a `.sharp` file lexes as `?` and `>` because they close a nullable type argument there.
+#[test]
+fn every_php_tag_is_a_php_syntax_error() {
+    for (code, message, tag) in [
+        (
+            "<?\nnamespace App;\n\nclass Report\n{\n}\n",
+            "`<?` is PHP syntax: a `.sharp` file has no opening tag, so delete it",
+            "<?",
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n}\n<?= 1;\n",
+            "`<?=` is PHP syntax: a `.sharp` file has no tags, and writes output with `global.printf`",
+            "<?=",
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n}\n?>\n",
+            "`?>` is PHP syntax: a `.sharp` file has no closing tag, so delete it",
+            "?>",
+        ),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/App/Report.sharp", code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        assert_eq!(errors, [(message.to_owned(), tag)], "{code}");
+    }
+
+    // `<?` before a type is PHP's nullable type, and `?>` ends a nullable type argument.
+    let arena = LocalArena::new();
+    let nullable = "namespace App;\n\nclass Report\n{\n    List<?int> a = [];\n    List<int?> b = [];\n}\n";
+    let program = parse(&arena, "src/App/Report.sharp", nullable);
+    let errors: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
+    assert_eq!(errors, ["`?` before a type is PHP syntax: PHP# writes it after the type, as in `int?`"]);
+}
+
+/// Spec section 27: a class lives in one file, so C#'s `partial` before a type is one error, and the type parses on.
+#[test]
+fn a_partial_type_is_an_error() {
+    for code in [
+        "namespace App;\n\npublic partial class Report { }\n",
+        "namespace App;\n\npartial class Report { }\n",
+        "namespace App;\n\n[Searchable]\npartial class Report { }\n",
+        "namespace App;\n\npartial static class Report { }\n",
+        "namespace App;\n\npublic partial struct Report { }\n",
+        "namespace App;\n\npartial interface Report { }\n",
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/App/Report.sharp", code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        assert_eq!(
+            errors,
+            [("PHP# has no partial classes: a class lives in one file.".to_owned(), "partial")],
+            "{code}"
+        );
+    }
+
+    // Everywhere else `partial` is a name.
+    let arena = LocalArena::new();
+    let local = "namespace App;\n\nclass Report\n{\n    void run()\n    {\n        const partial = 1;\n    }\n}\n";
+    assert!(parse(&arena, "src/App/Report.sharp", local).errors.is_empty());
+}
+
+/// Spec section 27: an editor may save a `.sharp` file with a UTF-8 byte order mark, which is no code.
+#[test]
+fn a_byte_order_mark_is_skipped() {
+    const CODE: &str = "\u{FEFF}namespace App;\n\nclass Report\n{\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/App/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    assert!(matches!(program.statements.first(), Some(Statement::Namespace(_))), "{:#?}", program.statements);
+}
+
 #[test]
 fn a_php_for_loop_has_no_declaration() {
     let arena = LocalArena::new();
@@ -2966,8 +3168,9 @@ fn a_php_keyword_reads_as_its_construct_only_where_the_construct_follows() {
 /// PHP#'s keywords are lowercase. A PHP# keyword written in another case reads as the keyword, with one error each,
 /// wherever its construct follows and the name could not stand, as rustc's `eat_keyword_case` reads `Fn`: at a
 /// statement's or an expression's head, after a `try` or an `if` statement's body, where only the keyword can stand,
-/// and among a declaration's modifiers. A PHP keyword PHP# doesn't use reads as its construct, whose own error names
-/// the PHP# form, and a word that can be a name stays one.
+/// among a declaration's modifiers, before a file's type, as `is` or `as` after a value, and as `case` in an enum. A
+/// PHP keyword PHP# doesn't use reads as its construct, whose own error names the PHP# form, and a word that can be a
+/// name stays one, as `Case` does in a class.
 #[test]
 fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() {
     let method = |body: &str| -> &'static str {
@@ -3005,6 +3208,15 @@ fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() 
         ("public Interface Drawable\n{\n}\n", &["interface"]),
         ("Import Lib.Calc;\n\nclass Report\n{\n}\n", &["import"]),
         ("Namespace App;\n\nclass Report\n{\n}\n", &["namespace"]),
+        (method("        return value IS int;\n"), &["is"]),
+        (method("        return value Is int n && n > 0;\n"), &["is"]),
+        (method("        return value AS int;\n"), &["as"]),
+        (method("        return value As Report ?? value;\n"), &["as"]),
+        ("public enum Suit\n{\n    Case Hearts;\n    CASE Spades = 2;\n}\n", &["case", "case"]),
+        ("public enum Result\n{\n    Case Ok(int value);\n}\n", &["case"]),
+        ("Public class Report\n{\n}\n", &["public"]),
+        ("Public Static class Report\n{\n}\n", &["public", "static"]),
+        ("public Struct Point\n{\n    public Point(public int x { get; }) { }\n}\n", &["struct"]),
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/Report.sharp", code);
@@ -3038,6 +3250,7 @@ fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() 
         ("class Report\n{\n    private Static items;\n\n    public Static(int x) { }\n}\n", "Static", 2),
         ("class Report\n{\n    public Struct shape { get; set; }\n}\n", "Struct", 1),
         ("class Report\n{\n    public Class kind { get; set; }\n}\n", "Class", 1),
+        ("class Report\n{\n    Case kind;\n}\n", "Case", 1),
         ("class Lazy\n{\n    public static Lazy operator +(Lazy a, Lazy b) { return a; }\n}\n", "Lazy", 4),
     ] {
         let arena = LocalArena::new();
@@ -6020,6 +6233,25 @@ fn readonly_before_another_clause_is_an_error_that_names_the_last_place() {
         "{:#?}",
         class_members(program)
     );
+}
+
+/// Spec section 29: a method takes on the effects of each function it is given, with nothing written, so a function
+/// parameter in `uses`, nullable or not, with or without a body, is an error at its name that says to delete it. An
+/// effect, and a parameter that is no function, are other names, which semantics checks.
+#[test]
+fn a_function_parameter_in_uses_is_an_error_that_says_to_delete_it() {
+    const CODE: &str = "class Pricing\n{\n    public int apply(Function<int()> f) uses f => f();\n    public int maybe(Function<int()>? g, int n) uses Http, g, n;\n    public int plain(int n) uses n, Http;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Pricing.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    let message = |name: &str| {
+        format!(
+            "`{name}` is a function parameter, and a method takes on the effects of each function it is given, so `uses` names no parameter: delete it."
+        )
+    };
+    assert_eq!(errors, [(message("f"), "f"), (message("g"), "g")]);
 }
 
 /// Before `class` or another modifier, `readonly` stays a modifier, and the checker refuses it there. In plain PHP it

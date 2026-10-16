@@ -169,7 +169,9 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
     let root = directory.path();
     compile_succeeds(root);
 
-    std::fs::rename(root.join("app/Order.sharp"), root.join("app/Invoice.sharp")).unwrap();
+    // A file is named like its type, so renaming the file renames the class.
+    std::fs::remove_file(root.join("app/Order.sharp")).unwrap();
+    std::fs::write(root.join("app/Invoice.sharp"), ORDER.replace("class Order", "class Invoice")).unwrap();
     compile_succeeds(root);
     assert!(!compiled(root, "app/Order.sharp").exists());
     assert!(compiled(root, "app/Invoice.sharp").exists());
@@ -1465,6 +1467,18 @@ fn compile_refuses_each_file_that_breaks_a_structure_rule_on_the_code_that_break
     }
 }
 
+/// The standard library's package with its `Sharp.Json.Json`, which an import names only where the project installs it.
+const JSON_LIBRARY: [(&str, &str); 2] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/composer.json",
+        "{\"name\": \"heyjordanparker/php-sharp-composer\", \"autoload\": {\"psr-4\": {\"Sharp\\\\\": \"library/Sharp/\"}}}\n",
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Json/Json.sharp",
+        "namespace Sharp.Json;\n\npublic static class Json\n{\n    public static int one() => 1;\n}\n",
+    ),
+];
+
 /// What a rule allows compiles. `Rule.importsOnly` allows the rule's own namespace and the standard library, and a
 /// namespace holds only the names under it: `App.TenantDirectory` is not inside `App.Tenant`. Each row is an import
 /// section 28.1's rules allow, and the project compiles.
@@ -1477,7 +1491,11 @@ fn a_structure_rule_accepts_every_import_it_allows() {
     let library = service("Sharp.Json.Json");
     for files in [
         vec![("app/Shared/Module.lean", fine.as_str()), ("app/Tenant/Store/StoreService.sharp", own.as_str())],
-        vec![("app/Shared/Module.lean", fine.as_str()), ("app/Tenant/Store/StoreService.sharp", library.as_str())],
+        [
+            vec![("app/Shared/Module.lean", fine.as_str()), ("app/Tenant/Store/StoreService.sharp", library.as_str())],
+            JSON_LIBRARY.to_vec(),
+        ]
+        .concat(),
         vec![
             (
                 "app/Shared/Ledger.sharp",
@@ -1612,14 +1630,8 @@ fn a_structure_rule_names_a_namespace_by_its_full_name_and_a_misspelled_one_is_a
             ("vendor/illuminate/support/Facades/DB.php", "<?php\n\nnamespace Illuminate\\Support\\Facades;\n\nclass DB {}\n"),
             // A namespace Lean already names, as `List`, is declared by none, so the rest of `Code` still builds.
             ("vendor/acme/list/Item.php", "<?php\n\nnamespace List;\n\nclass Item {}\n"),
-            (
-                "vendor/heyjordanparker/php-sharp-composer/composer.json",
-                "{\"name\": \"heyjordanparker/php-sharp-composer\", \"autoload\": {\"psr-4\": {\"Sharp\\\\\": \"library/Sharp/\"}}}\n",
-            ),
-            (
-                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Json/Json.sharp",
-                "namespace Sharp.Json;\n\npublic static class Json\n{\n    public static int one() => 1;\n}\n",
-            ),
+            JSON_LIBRARY[0],
+            JSON_LIBRARY[1],
         ]);
         let root = directory.path();
 
@@ -2270,9 +2282,12 @@ fn a_second_compile_of_a_project_with_structure_rules_starts_no_lean_process() {
 #[test]
 fn compile_checks_a_structure_rule_over_thousands_of_imports() {
     let imports: String = (0..4072).map(|index| format!("import Vendor.Package.Class{index};\n")).collect();
+    let classes: String = (0..4072).map(|index| format!("class Class{index} {{}}\n")).collect();
+    let package = format!("<?php\n\nnamespace Vendor\\Package;\n\n{classes}");
     let ledger =
         LEDGER.replace("import App.Tenant.Store.Receipts;\n", &format!("{imports}import App.Tenant.Store.Receipts;\n"));
-    let directory = structured(&[("app/Shared/Ledger.sharp", ledger.as_str())]);
+    let directory =
+        structured(&[("app/Shared/Ledger.sharp", ledger.as_str()), ("vendor/vendor/package/Classes.php", &package)]);
     let root = directory.path();
 
     let output = compile_lines(root);
@@ -2652,7 +2667,14 @@ fn compile_refuses_an_unproven_law_whatever_pragma_ignore_entry_or_baseline_entr
 /// Compiles `source` as `app/Shared/Shape.sharp` and checks that the compile refuses it with the unmodeled-construct
 /// error `message`, before any Lean process starts.
 fn assert_unmodeled(source: &str, message: &str) {
-    let directory = lawful_project(&[("app/Shared/Shape.sharp", source)]);
+    assert_unmodeled_beside(source, &[], message);
+}
+
+/// [`assert_unmodeled`] with the project's `others` files, each a path and its code, beside `app/Shared/Shape.sharp`.
+fn assert_unmodeled_beside(source: &str, others: &[(&str, &str)], message: &str) {
+    let files: Vec<(&str, &str)> =
+        [("app/Shared/Shape.sharp", source)].into_iter().chain(others.iter().copied()).collect();
+    let directory = lawful_project(&files);
     let root = directory.path();
 
     let output = compile_without_lean(root);
@@ -2779,8 +2801,9 @@ fn a_law_reaching_a_lambda_is_refused() {
 
 #[test]
 fn a_law_reaching_an_inherited_class_is_refused() {
-    assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Base\n{\n}\n\npublic class Shape : Base\n{\n    law any(Shape s) => true;\n}\n",
+    assert_unmodeled_beside(
+        "namespace App.Shared;\n\npublic class Shape : Base\n{\n    law any(Shape s) => true;\n}\n",
+        &[("app/Shared/Base.sharp", "namespace App.Shared;\n\npublic class Base\n{\n}\n")],
         "Law any reaches the class Shape, which extends Base in Shape. A law cannot reason about inheritance.",
     );
 }
@@ -2795,8 +2818,12 @@ fn a_law_reaching_a_named_constructor_is_refused() {
 
 #[test]
 fn a_law_reaching_an_extension_member_lean_cannot_see_is_refused() {
-    assert_unmodeled(
-        "namespace App.Shared;\n\npublic final class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    law summed(Shape s) => s.sum() >= 0;\n}\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int sum()\n        {\n            let total = 0;\n            for (let i = 0; i < shape.sides; i++) {\n                total += i;\n            }\n            return total;\n        }\n    }\n}\n",
+    assert_unmodeled_beside(
+        "namespace App.Shared;\n\npublic final class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    law summed(Shape s) => s.sum() >= 0;\n}\n",
+        &[(
+            "app/Shared/ShapeMath.sharp",
+            "namespace App.Shared;\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int sum()\n        {\n            let total = 0;\n            for (let i = 0; i < shape.sides; i++) {\n                total += i;\n            }\n            return total;\n        }\n    }\n}\n",
+        )],
         "Law summed reaches a loop in ShapeMath.sum. A law cannot reason about a loop.",
     );
 }

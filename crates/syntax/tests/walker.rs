@@ -40,19 +40,25 @@ fn sources() -> Vec<(String, Vec<u8>)> {
         }
     }
 
-    for fixture in ["slice.sharp", "library.sharp"] {
-        let fixture = crates.join("semantics/tests/fixtures").join(fixture);
-        sources.push((fixture.display().to_string(), std::fs::read(&fixture).expect("a slice fixture")));
-    }
+    sources.extend(slice_fixtures());
+    let library = crates.join("semantics/tests/fixtures/library.sharp");
+    sources.push((library.display().to_string(), std::fs::read(&library).expect("the library fixture")));
 
     sources
 }
 
-/// The path and contents of the PHP# slice fixture, which holds every form of the slice.
-fn slice_fixture() -> (String, Vec<u8>) {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../semantics/tests/fixtures/slice.sharp");
+/// The path and contents of each PHP# slice fixture, one file per type, which together hold every form of the slice.
+fn slice_fixtures() -> Vec<(String, Vec<u8>)> {
+    let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../semantics/tests/fixtures/slice");
 
-    (fixture.display().to_string(), std::fs::read(&fixture).expect("the slice fixture"))
+    std::fs::read_dir(folder)
+        .expect("the slice fixtures")
+        .map(|entry| {
+            let path = entry.expect("a slice fixture").path();
+
+            (path.display().to_string(), std::fs::read(&path).expect("a readable slice fixture"))
+        })
+        .collect()
 }
 
 /// The checks that run in one walk, such as PHP#'s slice check, see every node `Node::visit_children` reaches. Keywords
@@ -78,31 +84,33 @@ fn the_walker_enters_every_node_visit_children_reaches() {
         assert!(missed.is_empty(), "the walker misses these nodes of {name}: {missed:?}");
     }
 
-    assert_eq!(parsed, 469, "the number of sources without a parse error");
+    assert_eq!(parsed, 490, "the number of sources without a parse error");
 }
 
-/// The walker enters every type parameter list, type parameter, bound and type argument list of the slice fixture: the
-/// lists of `Page`, `convert`, `Listing`, `Source` and `Comparable`, the bounds of `Page`, `convert` and `Listing`, and
-/// the type arguments of its types, headers, `new`, method calls and null-safe method calls.
+/// The walker enters every type parameter list, type parameter, bound and type argument list of the slice fixtures:
+/// the lists of `Page`, `convert`, `Listing`, `Source` and `Comparable`, the bounds of `Page`, `convert` and `Listing`,
+/// and the type arguments of their types, headers, `new`, method calls and null-safe method calls.
 #[test]
 fn the_walker_enters_every_type_parameter_and_type_argument_list() {
-    let (name, contents) = slice_fixture();
-    let arena = LocalArena::new();
-    let file = File::ephemeral(Cow::Owned(name.into_bytes()), Cow::Owned(contents));
-    let program = parse_file(&arena, &file);
-    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let mut counts = [0; 4];
+    for (name, contents) in slice_fixtures() {
+        let arena = LocalArena::new();
+        let file = File::ephemeral(Cow::Owned(name.into_bytes()), Cow::Owned(contents));
+        let program = parse_file(&arena, &file);
+        assert!(program.errors.is_empty(), "{:#?}", program.errors);
 
-    let mut walked = HashSet::new();
-    Entering.walk_program(program, &mut walked);
-    let count = |kind: NodeKind| walked.iter().filter(|(entered, _, _)| *entered == kind).count();
+        let mut walked = HashSet::new();
+        Entering.walk_program(program, &mut walked);
+        let kinds = [
+            NodeKind::TypeParameterList,
+            NodeKind::TypeParameter,
+            NodeKind::TypeParameterBound,
+            NodeKind::TypeArgumentList,
+        ];
+        for (count, kind) in counts.iter_mut().zip(kinds) {
+            *count += walked.iter().filter(|(entered, _, _)| *entered == kind).count();
+        }
+    }
 
-    assert_eq!(
-        [
-            count(NodeKind::TypeParameterList),
-            count(NodeKind::TypeParameter),
-            count(NodeKind::TypeParameterBound),
-            count(NodeKind::TypeArgumentList),
-        ],
-        [5, 6, 4, 28]
-    );
+    assert_eq!(counts, [5, 6, 4, 28]);
 }

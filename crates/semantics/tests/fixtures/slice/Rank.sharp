@@ -1,0 +1,8 @@
+namespace App.Tenant;
+
+enum Rank : int
+{
+    case Ace = 1;
+    case Two = 1 + 1;
+    case Top = global.PHP_INT_MAX;
+}

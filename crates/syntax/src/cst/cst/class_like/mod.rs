@@ -166,6 +166,8 @@ pub struct Enum<'arena> {
     pub modifiers: Sequence<'arena, Modifier<'arena>>,
     pub r#enum: Keyword<'arena>,
     pub name: LocalIdentifier<'arena>,
+    /// PHP#'s type parameters, as in `public enum Result<T, TError : Error> {}`. Always `None` in PHP.
+    pub type_parameters: Option<TypeParameterList<'arena>>,
     pub backing_type_hint: Option<EnumBackingTypeHint<'arena>>,
     /// PHP#'s interfaces in the `: string, Interface` header. Always `None` in PHP. After a backing type, its `colon` is
     /// the `,` that opens the interfaces.
@@ -265,13 +267,14 @@ impl HasSpan for Enum<'_> {
 }
 
 impl Enum<'_> {
-    /// Whether a case of this PHP# enum carries data, spec section 20, so the enum runs as an abstract class and each
-    /// case as a class of its own.
+    /// Whether this PHP# enum runs as an abstract class with each case a class of its own: a case carries data, spec
+    /// section 20, or the enum has type parameters, which a PHP enum's cases can't carry, spec section 31.
     #[must_use]
-    pub fn has_data_case(&self) -> bool {
-        self.members.iter().any(
-            |member| matches!(member, ClassLikeMember::EnumCase(case) if matches!(case.item, EnumCaseItem::Data(_))),
-        )
+    pub fn runs_as_classes(&self) -> bool {
+        self.type_parameters.is_some()
+            || self.members.iter().any(
+                |member| matches!(member, ClassLikeMember::EnumCase(case) if matches!(case.item, EnumCaseItem::Data(_))),
+            )
     }
 }
 

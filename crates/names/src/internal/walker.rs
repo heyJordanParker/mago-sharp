@@ -26,6 +26,7 @@ use mago_syntax::cst::Conditional;
 use mago_syntax::cst::Constant;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Enum;
+use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extends;
@@ -38,6 +39,7 @@ use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionPartialApplication;
 use mago_syntax::cst::GenericClass;
+use mago_syntax::cst::GenericHint;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
@@ -108,7 +110,9 @@ use crate::binding::BindingError;
 use crate::binding::Local;
 use crate::binding::LocalKind;
 use crate::default_class;
+use crate::default_classes;
 use crate::default_short_name;
+use crate::fixed_default_class;
 use crate::internal::context::NameResolutionContext;
 use crate::internal::locals::LocalScopes;
 use crate::kind::NameKind;
@@ -116,8 +120,6 @@ use crate::resolver::NamespaceClasses;
 use crate::scope::concat_with_sep;
 use crate::scope::php_name;
 use crate::scope::trim_start_byte;
-use crate::shadowable_default_classes;
-use crate::shadows_a_default_class;
 
 /// A CST visitor (`MutWalker`) that traverses a PHP Concrete Syntax Tree
 /// to resolve names (classes, functions, constants, etc.) according to
@@ -419,6 +421,21 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
     where
         A: Arena,
     {
+        if self.sharp
+            && let Some(class) = fixed_default_class(name)
+        {
+            return ((class, false), None);
+        }
+        // A case type of a default enum, as `Result.Err`, names the case class under the enum's class, spec sections
+        // 20 and 31.
+        if self.sharp
+            && let Some(separator) = name.iter().position(|byte| *byte == b'\\').filter(|separator| *separator > 0)
+            && let ((enum_class, false), _) = self.class_meaning(context, &name[..separator])
+            && default_class(&name[..separator]).is_some_and(|class| class.eq_ignore_ascii_case(enum_class))
+        {
+            return ((context.intern(&[enum_class, &name[separator..]].concat()), false), None);
+        }
+
         let (fqn, imported) = context.resolve(NameKind::Default, name);
         if !self.sharp || imported || self.declared_classes.contains(&IgnoringCase(name)) {
             return ((fqn, imported), None);
@@ -428,7 +445,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
             return ((fqn, imported), None);
         };
         // A default class-like is the class-like of its own namespace, so no other one wins over it there.
-        if !shadows_a_default_class(name) || fqn.eq_ignore_ascii_case(class) {
+        if fqn.eq_ignore_ascii_case(class) {
             return ((class, false), None);
         }
 
@@ -898,24 +915,40 @@ where
         self.exit_type_parameters();
     }
 
-    /// An extension's computed property runs as a static method too, so its expression sees the receiver.
+    /// A PHP# case's fields are the parameters of the constructor its class runs, so they are its own.
+    fn walk_in_enum_case(&mut self, _case: &'ast EnumCase<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        if self.sharp {
+            self.locals.enter_method();
+        }
+    }
+
+    fn walk_out_enum_case(&mut self, _case: &'ast EnumCase<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        if self.sharp {
+            self.locals.exit_method();
+        }
+    }
+
+    /// A PHP# computed property runs as a function of its own, as an accessor does, so its locals are its own. An
+    /// extension's runs as a static method, so its expression sees the receiver.
     fn walk_in_computed_property(
         &mut self,
         property: &'ast ComputedProperty<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        if self.is_extension_member(property.span()) {
+        if self.sharp {
             self.locals.enter_method();
+        }
+        if self.is_extension_member(property.span()) {
             self.declare_receiver(property.span());
         }
     }
 
     fn walk_out_computed_property(
         &mut self,
-        property: &'ast ComputedProperty<'arena>,
+        _property: &'ast ComputedProperty<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        if self.is_extension_member(property.span()) {
+        if self.sharp {
             self.locals.exit_method();
         }
     }
@@ -1379,12 +1412,14 @@ where
         if self.sharp {
             self.class_members.push(class_member_names(&r#enum.members));
         }
+        self.enter_type_parameters(r#enum.type_parameters.as_ref());
     }
 
     fn walk_out_enum(&mut self, _enum: &'ast Enum<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
             self.class_members.pop();
         }
+        self.exit_type_parameters();
     }
 
     fn walk_in_struct(&mut self, r#struct: &'ast Struct<'arena>, context: &mut NameResolutionContext<'arena, A>) {
@@ -1392,10 +1427,12 @@ where
 
         self.resolved_names.insert_at(r#struct.name.span, classlike, false);
         self.class_members.push(class_member_names(&r#struct.members));
+        self.enter_type_parameters(r#struct.type_parameters.as_ref());
     }
 
     fn walk_out_struct(&mut self, _struct: &'ast Struct<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         self.class_members.pop();
+        self.exit_type_parameters();
     }
 
     fn walk_in_trait_use(&mut self, trait_use: &'ast TraitUse<'arena>, context: &mut NameResolutionContext<'arena, A>) {
@@ -1428,9 +1465,9 @@ where
 
     fn walk_in_on(&mut self, on: &'ast On<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         for event in &on.events {
-            let (event_classlike, imported) = self.resolve_class(context, event.value);
+            let (event_classlike, imported) = self.resolve_class(context, arena_name(context, event));
 
-            self.resolved_names.insert_at(event.span, event_classlike, imported);
+            self.resolved_names.insert_at(event.span(), event_classlike, imported);
         }
     }
 
@@ -1450,7 +1487,11 @@ where
             return;
         }
 
-        let (name, imported) = self.resolve_class(context, name);
+        let (mut name, imported) = self.resolve_class(context, name);
+        // A case of a generic enum, `Result<Order, PaymentError>.Ok`, names the class the case runs as, spec section 31.
+        if let Hint::Generic(GenericHint { case: Some(case), .. }) = hint {
+            name = context.intern(&[name, b"\\", case.value].concat());
+        }
         self.resolved_names.insert_at(span, name, imported);
     }
 
@@ -1459,7 +1500,7 @@ where
         attribute: &'ast Attribute<'arena>,
         context: &mut NameResolutionContext<'arena, A>,
     ) {
-        let (name, imported) = self.resolve_class(context, attribute.name.value());
+        let (name, imported) = self.resolve_class(context, arena_name(context, &attribute.name));
 
         self.resolved_names.insert_at(attribute.name.span(), name, imported);
     }
@@ -1535,7 +1576,7 @@ where
     }
 
     fn walk_in_name_of(&mut self, name_of: &'ast NameOf<'arena>, context: &mut NameResolutionContext<'arena, A>) {
-        let (name, imported) = self.resolve_class(context, name_of.class.value());
+        let (name, imported) = self.resolve_class(context, arena_name(context, &name_of.class));
 
         self.resolved_names.insert_at(name_of.class.span(), name, imported);
     }
@@ -1657,7 +1698,7 @@ where
     /// help reads it, and a refused file is analyzed again on every run.
     fn walk_out_namespace(&mut self, _namespace: &Namespace<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
-            for class in shadowable_default_classes() {
+            for class in default_classes() {
                 let ((meaning, _), _) = self.class_meaning(context, default_short_name(class));
                 if meaning != class.as_bytes() {
                     self.resolved_names.shadow_default_class(class.as_bytes());

@@ -791,8 +791,8 @@ fn a_collection_type_keeps_its_written_name_unresolved() {
 
 /// Spec section 23: a class-like of the file's namespace wins over the one `Sharp` imports by default, as a class of
 /// the same package does in Kotlin, C# and Java. A default name its namespace holds no class-like of stays the default
-/// one, and the file records each class-like of its namespace that would win, held or not. PHP reserves `Int` as a
-/// class name, so no `App\Int` is recorded.
+/// one, and the file records each class-like of its namespace that would win, held or not, `App\Int` included,
+/// though PHP reserves `Int` as a class name.
 #[test]
 fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
     const CODE: &str = "namespace App;\n\nclass Shape\n{\n    private Cache? cache = null;\n\n    public bool run(Any value, Environment environment)\n    {\n        const made = new Cache();\n        Cache.clear();\n        Int.parse(\"1\");\n        return value is Cache;\n    }\n}\n";
@@ -813,10 +813,51 @@ fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
     }
     let mut recorded: Vec<_> = names.namespace_classes().map(String::from_utf8_lossy).collect();
     recorded.sort_unstable();
-    assert_eq!(recorded, ["App\\Cache", "App\\Environment"]);
+    assert_eq!(recorded, ["App\\Cache", "App\\Environment", "App\\Int"]);
 
     let alone = NameResolver::new(&arena).resolve(program);
     assert_eq!(resolved(&alone, CODE, "Cache?", 0), b"Sharp\\Cache");
+}
+
+/// Spec section 23 imports all of `Sharp` by default, so a bare name of a class-like the standard library or the
+/// prelude declares directly in `Sharp` is that class-like, with no import.
+#[test]
+fn every_class_like_directly_in_sharp_is_a_default_name() {
+    const CODE: &str = "namespace App;\n\nclass Wiring\n{\n    public void run(Behavior<int> a, ClassMembers b, Dispatcher c, ImmediateDispatcher d, InvalidFields e, Listening f, Key g)\n    {\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    for class in ["Behavior", "ClassMembers", "Dispatcher", "ImmediateDispatcher", "InvalidFields", "Listening", "Key"]
+    {
+        let needle = format!("{class} ");
+        let needle = if class == "Behavior" { "Behavior<" } else { needle.as_str() };
+        assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, 0)), format!("Sharp\\{class}"), "{class}");
+    }
+}
+
+/// The default names are generated from the standard library beside this tree's `sharp/mago` and from the prelude, so
+/// a class added to either is a default name once `just regen-sharp-classes` runs, and this test fails until it does.
+#[test]
+fn the_default_class_likes_are_generated_from_the_standard_library_and_the_prelude() {
+    let mago = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let available =
+        std::process::Command::new("php").arg("--version").output().is_ok_and(|output| output.status.success());
+    assert!(available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(), "PHP is required to generate");
+    if !available {
+        return;
+    }
+
+    let output = std::process::Command::new("php")
+        .arg(mago.join("scripts/regen-sharp-classes.php"))
+        .arg(mago.join("../composer/library"))
+        .output()
+        .expect("php runs");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        include_str!("../src/sharp_classes.rs"),
+        "the standard library or the prelude changed: run `just regen-sharp-classes ../composer/library` in sharp/mago"
+    );
 }
 
 /// A help that names a standard class reads whether the file's bare short name names another class-like: one of its
@@ -857,6 +898,36 @@ fn a_file_records_each_default_class_its_short_name_no_longer_names() {
         recorded.sort_unstable();
         assert_eq!(recorded, shadowed, "{code}");
         assert_eq!(names.namespace_classes().count(), 0, "{code}");
+    }
+}
+
+/// Spec section 31: a bare `Error` in a `.sharp` file always names the standard library's interface, whatever the file
+/// declares or its namespace holds, while `Result` names the standard library's enum unless a class-like of the file's
+/// namespace wins over it, as the other default classes do. A case written through `Result` resolves under the enum.
+#[test]
+fn error_always_names_the_standard_interface_and_result_is_a_default_class() {
+    let namespace_classes = NamespaceClasses::new(["App\\Error", "Shop\\Result"]);
+
+    for (code, error, result) in [
+        (
+            "namespace App;\n\nclass Paths\n{\n    public Result<int, Error> run(Error e) => Result.Err(e);\n}\n",
+            "Sharp\\Error",
+            "Sharp\\Result",
+        ),
+        (
+            "namespace Shop;\n\nclass Paths\n{\n    public Result<int, Error> run(Error e) => Result.Err(e);\n}\n",
+            "Sharp\\Error",
+            "Shop\\Result",
+        ),
+    ] {
+        let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(code.as_bytes()));
+        let arena = LocalArena::new();
+        let names = NameResolver::new(&arena).resolve_in(parse_file(&arena, &file), &namespace_classes);
+
+        assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Error e", 0)), error, "{code}");
+        assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Error>", 0)), error, "{code}");
+        assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Result<", 0)), result, "{code}");
+        assert_eq!(names.shadows_default_class(b"Sharp\\Result"), result != "Sharp\\Result", "{code}");
     }
 }
 

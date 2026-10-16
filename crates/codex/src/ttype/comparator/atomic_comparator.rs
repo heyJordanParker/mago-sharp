@@ -146,11 +146,23 @@ pub fn is_contained_by(
         }
     }
 
+    // A PHP# type parameter holds itself, and a type parameter whose bound names it, as `TSub` of `<TSub : T>` goes
+    // where `T` goes, spec section 11.
     if atomic_comparison_result.sharp_rules
         && let TAtomic::GenericParameter(container_generic) = container_type_part
     {
         return match input_type_part {
-            TAtomic::GenericParameter(input_generic) => is_same_type_parameter(input_generic, container_generic),
+            TAtomic::GenericParameter(input_generic) => {
+                is_same_type_parameter(input_generic, container_generic)
+                    || union_comparator::are_parts_contained_by(
+                        input_generic.constraint.types.iter(),
+                        atomic_comparison_result,
+                        |input_bound, result| {
+                            matches!(input_bound, TAtomic::GenericParameter(_))
+                                && is_contained_by(codebase, input_bound, container_type_part, inside_assertion, result)
+                        },
+                    )
+            }
             TAtomic::Never => true,
             _ => false,
         };

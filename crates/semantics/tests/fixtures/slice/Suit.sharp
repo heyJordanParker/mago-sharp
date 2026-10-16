@@ -1,0 +1,11 @@
+namespace App.Tenant;
+
+enum Suit
+{
+    case Hearts;
+    case Spades;
+
+    public string label() => this.name;
+
+    public static int size() => global.count(Suit.cases());
+}

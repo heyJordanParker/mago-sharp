@@ -202,6 +202,16 @@ final class Set implements \ArrayAccess, \IteratorAggregate, \Countable, \JsonSe
 }
 
 /**
+ * The handle of a listener `Events.on` starts: the engine stops the listener when the handle is destroyed.
+ */
+final class Listening
+{
+    private function __construct() {}
+}
+
+namespace Sharp\Internal;
+
+/**
  * The methods a PHP# `List<T>` has. The analyzer checks a call on a list against them, and the engine runs them on
  * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which the bridge lowers from
  * the list's type. A method without `@mutation-free` changes the list.
@@ -689,16 +699,6 @@ final class IterableMethods
 }
 
 /**
- * The handle of a listener `Events.on` starts: the engine stops the listener when the handle is destroyed.
- */
-final class Listening
-{
-    private function __construct() {}
-}
-
-namespace Sharp\Internal;
-
-/**
  * Starts a listener on every event of the class or interface named `$event`, until its handle is destroyed. The
  * standard library's `Events.on` runs it, and only the standard library reaches `Sharp.Internal`.
  *
@@ -716,3 +716,15 @@ function listen(string $event, \Closure $listener): \Sharp\Listening {}
  * @return list<\Closure(object): void>
  */
 function listenersFor(object $event): array {}
+
+/**
+ * Runs `$body` in a new scope, which keeps each scoped service `$body` builds until it returns or throws, and returns
+ * what `$body` returns. The standard library's `Scope.run` runs it.
+ *
+ * @template T
+ *
+ * @param \Closure(): T $body
+ *
+ * @return T
+ */
+function runScoped(\Closure $body): mixed {}

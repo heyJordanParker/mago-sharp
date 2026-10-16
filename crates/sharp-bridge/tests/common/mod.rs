@@ -19,6 +19,7 @@ use mago_codex::populator::populate_codebase;
 use mago_codex::scanner::scan_program;
 use mago_database::file::File;
 use mago_names::resolver::NameResolver;
+use mago_names::resolver::NamespaceClasses;
 use mago_php_version::PHPVersion;
 use mago_prelude::Prelude;
 use mago_reporting::Issue;
@@ -30,12 +31,15 @@ use mago_sharp_bridge::check;
 use mago_sharp_bridge::inline_forms;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Program;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
 use mago_syntax::parser::parse_file_with_dialect;
 use mago_syntax::settings::ParserSettings;
 use mago_word::WordSet;
 
+#[path = "../../../../tests/support/sharp_files.rs"]
+pub mod sharp_files;
 #[path = "../../../../tests/support/sharp_words.rs"]
 mod sharp_words;
 
@@ -47,6 +51,9 @@ pub const MODEL: (&str, &str) = (
     "src/Lib/Model.php",
     "<?php namespace Lib; class Model { public function getAttribute(string $key): \\Address { return new \\Address(); } public function setAttribute(string $key, mixed $value): void {} }",
 );
+
+/// `Address`, the PHP# class `MODEL`'s accessors return.
+pub const ADDRESS: (&str, &str) = ("src/Address.sharp", "class Address\n{\n}\n");
 
 /// `Lib\Field`, an attribute for any declaration with an optional value, label and limit.
 pub const FIELD: (&str, &str) = (
@@ -141,17 +148,44 @@ pub fn checked_file<R>(
     let Prelude { mut metadata, mut symbol_references, .. } = PRELUDE.clone();
     let settings = Settings::default();
     let arena = LocalArena::new();
-    for (path, code) in library.iter().chain(&effect_classes::EFFECT_CLASSES) {
-        let file = File::ephemeral(Cow::Owned(path.as_bytes().to_vec()), Cow::Owned(code.as_bytes().to_vec()));
-        let program = parse_file(&arena, &file);
-        assert!(program.errors.is_empty(), "{path} parses: {:?}", program.errors);
-        let names = NameResolver::new(&arena).resolve(program);
-        metadata.extend(scan_program(&arena, &file, program, &names, settings.version));
-    }
+    let library: Vec<File> = library
+        .iter()
+        .chain(&effect_classes::EFFECT_CLASSES)
+        .map(|(path, code)| File::ephemeral(Cow::Owned(path.as_bytes().to_vec()), Cow::Owned(code.as_bytes().to_vec())))
+        .collect();
+    let library: Vec<(&File, &Program)> = library
+        .iter()
+        .map(|library_file| {
+            let program = parse_file(&arena, library_file);
+            assert!(
+                program.errors.is_empty(),
+                "{} parses: {:?}",
+                String::from_utf8_lossy(&library_file.name),
+                program.errors
+            );
 
+            (library_file, program)
+        })
+        .collect();
     let code = String::from_utf8_lossy(&file.contents);
     let program = parse_file_with_dialect(&arena, file, Dialect::Sharp, ParserSettings::default());
-    let names = NameResolver::new(&arena).resolve(program);
+
+    // A class-like's name never depends on how names resolve, so a first scan finds each class-like that wins over a
+    // default class-like in its namespace, as `mago compile` finds them across the project's files.
+    let namespace_classes =
+        NamespaceClasses::new(library.iter().chain([&(file, program)]).flat_map(|(file, program)| {
+            let names = NameResolver::new(&arena).resolve(program);
+            scan_program(&arena, file, program, &names, settings.version)
+                .class_likes
+                .into_values()
+                .map(|class_like| class_like.original_name)
+        }));
+    for (library_file, library_program) in &library {
+        let names = NameResolver::new(&arena).resolve_in(library_program, &namespace_classes);
+        metadata.extend(scan_program(&arena, library_file, library_program, &names, settings.version));
+    }
+
+    let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes);
     let semantic_issues = SemanticsChecker::new(PHPVersion::PHP85).check(file, program, &names);
 
     metadata.extend(scan_program(&arena, file, program, &names, settings.version));

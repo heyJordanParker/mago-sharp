@@ -8,6 +8,7 @@ use mago_bytes::BytesDisplay;
 use mago_bytes::trim_start_byte;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::class_like::TemplateTypes;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
@@ -20,6 +21,7 @@ use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::callable::parameter::TCallableParameter;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::atomic::scalar::string::TString;
@@ -53,6 +55,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
+use crate::expression::ancestor_type_arguments;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
@@ -69,6 +72,7 @@ use crate::invocation::resolver::resolve_invocation_type;
 use crate::invocation::return_type_fetcher::keys_a_map_by_its_function;
 use crate::invocation::template_inference::infer_parameter_templates_from_argument;
 use crate::invocation::template_inference::infer_unfixed_templates;
+use crate::invocation::template_inference::widen_to_declared_templates;
 use crate::invocation::template_result::get_class_template_parameters_from_result;
 use crate::invocation::template_result::populate_template_result_from_invocation;
 use crate::invocation::template_result::refine_template_result_for_function_like;
@@ -81,6 +85,36 @@ use crate::utils::names::display_variable_name;
 use crate::utils::names::is_prelude_stub;
 use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
+
+/// Whether `parameter` is a PHP# function parameter whose type states no effects, spec section 29: a call takes on the
+/// effects of the function it passes there, so that function is held to no effect list.
+fn takes_on_effects(parameter: InvocationTargetParameter<'_>) -> bool {
+    matches!(parameter, InvocationTargetParameter::FunctionLike(metadata) if metadata.flags.takes_on_effects())
+}
+
+/// The type an argument for `parameter`, of the type `parameter_type`, meets: a parameter that takes on effects takes
+/// a function with any effects, so its function types list none to compare.
+fn effect_free_parameter_type<'parameter>(
+    parameter: InvocationTargetParameter<'_>,
+    parameter_type: &'parameter TUnion,
+) -> Cow<'parameter, TUnion> {
+    if !takes_on_effects(parameter) {
+        return Cow::Borrowed(parameter_type);
+    }
+
+    let types = parameter_type
+        .types
+        .iter()
+        .map(|atomic| match atomic {
+            TAtomic::Callable(TCallable::Signature(signature)) => {
+                TAtomic::Callable(TCallable::Signature(TCallableSignature { effects: None, ..signature.clone() }))
+            }
+            atomic => atomic.clone(),
+        })
+        .collect();
+
+    Cow::Owned(parameter_type.clone_with_types(types))
+}
 
 /// The type `parameter` of a PHP# function declares, when that type names a type parameter of the function itself,
 /// spec section 11. Such a type parameter takes a readonly value only where the parameter writes `readonly`, spec
@@ -276,6 +310,7 @@ where
     }
 
     populate_template_result_from_invocation(context, invocation, template_result);
+    let call_template_types = call_template_types(context, invocation, template_result);
     if context.dialect.is_sharp() && keys_a_map_by_its_function(&invocation.target) {
         for template in template_result.template_types.values_mut().flatten() {
             if matches!(template.defining_entity, GenericParent::FunctionLike(_)) {
@@ -326,6 +361,33 @@ where
     let calling_instance_type = calling_class_like.and_then(|(_, atomic)| atomic);
     let method_class_type = method_call_context.map(|ctx| &ctx.class_type);
 
+    // Spec section 11: the declared type the PHP# call's result goes into, read before an argument takes its own. It
+    // fixes the type arguments nothing else fixes. `declared_type_arguments` adds what it fixes to the ones known before
+    // any argument, and an argument whose parameter's type nothing else has fixed yet takes that type from them, so
+    // `this.keep(cache.get("nested"))` fixes both calls, as Swift and TypeScript infer nested calls.
+    let declared_type =
+        context.dialect.is_sharp().then(|| artifacts.get_expected_type(&invocation.span).cloned()).flatten();
+    let declared_return_type =
+        declared_type.as_ref().zip(invocation.target.get_return_type()).map(|(declared, return_type)| {
+            let return_type = resolve_type_in_class_context(
+                context,
+                return_type.clone(),
+                base_class_metadata,
+                calling_class_like_metadata,
+                calling_instance_type,
+                method_class_type,
+            );
+
+            as_declared_ancestor(context, return_type, declared)
+        });
+    let declared_type_arguments =
+        declared_type.as_ref().zip(declared_return_type.as_ref()).map(|(declared, returned)| {
+            let mut fixed = template_result.clone();
+            let returned = inferred_type_replacer::replace(returned, &fixed, context.codebase);
+            infer_unfixed_templates(context, &returned, declared, &mut fixed);
+            fixed
+        });
+
     for (argument_offset, argument) in &non_closure_arguments {
         let Some(argument_expression) = argument.value() else {
             continue;
@@ -333,8 +395,9 @@ where
 
         let parameter = get_parameter_of_argument(&invocation.target, argument, *argument_offset);
         // A PHP# argument takes its parameter's type as the declared type its value goes into, as `expect_type` gives a
-        // typed local's, once that type holds no type parameter of this call that nothing has fixed yet. A method value
-        // takes it even then, as `pages.map(this.take)` fixes both calls' type arguments together.
+        // typed local's, once that type holds no type parameter of this call that nothing has fixed yet, by an argument
+        // or by the declared type the call's result goes into. A method value takes it even then, as
+        // `pages.map(this.take)` fixes both calls' type arguments together.
         let expected_type = parameter
             .filter(|_| context.dialect.is_sharp() && takes_declared_type(argument_expression))
             .map(|(_, parameter)| {
@@ -347,8 +410,15 @@ where
                     calling_instance_type,
                     method_class_type,
                 );
+                let parameter_type =
+                    inferred_type_replacer::replace(&parameter_type, template_result, context.codebase);
 
-                inferred_type_replacer::replace(&parameter_type, template_result, context.codebase)
+                match &declared_type_arguments {
+                    Some(declared) if holds_unfixed_template(&parameter_type, template_result) => {
+                        inferred_type_replacer::replace(&parameter_type, declared, context.codebase)
+                    }
+                    _ => parameter_type,
+                }
             })
             .filter(|parameter_type| {
                 is_member_read(argument_expression) || !holds_unfixed_template(parameter_type, template_result)
@@ -463,12 +533,21 @@ where
                 parameter_type_had_template_types = true;
                 // Store the original type before replacement for inference
                 base_parameter_type_for_inference = Some(base_parameter_type.clone());
-                inferred_type_replacer::replace_with_polarity(
+                let parameter_type = inferred_type_replacer::replace_with_polarity(
                     &base_parameter_type,
                     template_result,
                     context.codebase,
                     mago_codex::ttype::template::variance::Variance::Contravariant,
-                )
+                );
+
+                // A PHP# lambda takes the type arguments the declared type the call's result goes into fixes, as any
+                // other argument does, so `this.call(() => this.make())` into a `Box<Order>` fixes both calls.
+                match &declared_type_arguments {
+                    Some(declared) if holds_unfixed_template(&parameter_type, template_result) => {
+                        inferred_type_replacer::replace(&parameter_type, declared, context.codebase)
+                    }
+                    _ => parameter_type,
+                }
             } else {
                 base_parameter_type
             };
@@ -841,11 +920,12 @@ where
                         context,
                         artifacts,
                         &argument_value_type,
-                        &final_parameter_type,
+                        &effect_free_parameter_type(parameter_ref, &final_parameter_type),
                         *argument_offset,
                         argument_expression,
                         &invocation.target,
                     )
+                    && !takes_on_effects(parameter_ref)
                 {
                     record_function_values(
                         context,
@@ -924,7 +1004,7 @@ where
         last_argument_offset = *argument_offset as isize;
     }
 
-    let function_template_types = invocation.target.get_template_types();
+    let function_template_types = call_template_types.as_ref();
 
     // Apply @template T2 = T1 defaults for templates not yet bound from actual arguments.
     // This must run before unused-parameter PHP-default inference so that explicit template
@@ -1043,21 +1123,20 @@ where
     }
 
     // Spec section 11: a PHP# call takes the type arguments its arguments and the ones it writes leave unfixed from the
-    // declared type its result goes into, as Swift infers them from the contextual type of the result. A declared type
-    // outside a type parameter's bound fixes nothing, and the declared type's own check reports the call's result.
-    if context.dialect.is_sharp()
-        && let Some(expected_type) = artifacts.get_expected_type(&invocation.span)
-        && let Some(return_type) = invocation.target.get_return_type()
+    // declared type its result goes into, as Swift infers them from the contextual type of the result, and one the
+    // declared type gives wins over the narrower one an argument fixed. A declared type outside a type parameter's
+    // bound fixes nothing, and the declared type's own check reports the call's result.
+    if let Some(expected_type) = &declared_type
+        && let Some(return_type) = &declared_return_type
     {
-        let return_type = resolve_type_in_class_context(
+        widen_to_declared_templates(
             context,
-            return_type.clone(),
-            base_class_metadata,
-            calling_class_like_metadata,
-            calling_instance_type,
-            method_class_type,
+            return_type,
+            expected_type,
+            template_result,
+            bound_before_arguments.as_ref(),
         );
-        let return_type = inferred_type_replacer::replace(&return_type, template_result, context.codebase);
+        let return_type = inferred_type_replacer::replace(return_type, template_result, context.codebase);
 
         violated_templates.extend(
             infer_unfixed_templates(context, &return_type, expected_type, template_result)
@@ -1119,15 +1198,22 @@ where
             .get_function_like_metadata()
             .filter(|metadata| context.dialect.is_sharp() && metadata.flags.is_sharp());
         if let Some(metadata) = sharp_metadata {
-            report_unfixed_type_arguments(context, invocation, metadata, &type_arguments, &violated_templates);
+            report_unfixed_type_arguments(
+                context,
+                invocation,
+                metadata,
+                template_types,
+                &type_arguments,
+                &violated_templates,
+            );
         }
 
         artifacts.record_type_arguments(invocation.span, type_arguments.into_iter(), context.codebase);
-        if let Some(metadata) = sharp_metadata
+        if sharp_metadata.is_some()
             && let Some(recorded) =
                 artifacts.inferred_type_arguments.get(&(invocation.span.start.offset, invocation.span.end.offset))
         {
-            report_unwritable_type_arguments(context, invocation, metadata, recorded);
+            report_unwritable_type_arguments(context, invocation, template_types, recorded);
         }
     }
 
@@ -1510,6 +1596,74 @@ where
     Ok(())
 }
 
+/// `result`, a call's result type, with each object of a subclass of a class `declared` names written as that class,
+/// with the type arguments the subclass gives it, so the declared type fixes them: `Result.Ok<T, TError>` goes into
+/// `Result<int, PaymentError>` as `Result<T, TError>`, spec section 31.
+fn as_declared_ancestor<A>(context: &Context<'_, '_, A>, result: TUnion, declared: &TUnion) -> TUnion
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let ancestors: Vec<&ClassLikeMetadata> = declared
+        .types
+        .iter()
+        .filter_map(|atomic| match atomic {
+            TAtomic::Object(TObject::Named(named)) => codebase.get_class_like(named.name.as_bytes()),
+            _ => None,
+        })
+        .collect();
+
+    let types = result
+        .types
+        .iter()
+        .map(|atomic| {
+            let ancestor = ancestors.iter().find_map(|ancestor| {
+                Some((ancestor.original_name, ancestor_type_arguments(codebase, atomic, ancestor)?))
+            });
+
+            ancestor.map_or_else(
+                || atomic.clone(),
+                |(name, arguments)| {
+                    TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(name, Some(arguments))))
+                },
+            )
+        })
+        .collect();
+
+    TUnion::from_vec(types)
+}
+
+/// The type parameters a call fixes: the target's own, after those of the generic PHP# class a static call names
+/// without its type arguments, as `Holder.of(5)` names `Holder`, spec section 11. The class's type arguments are the
+/// ones the class or its header gives otherwise, as in `Holder<int>.of(5)`, which bind them before any argument.
+fn call_template_types<A>(
+    context: &Context<'_, '_, A>,
+    invocation: &Invocation<'_, '_, '_>,
+    template_result: &TemplateResult,
+) -> Option<TemplateTypes>
+where
+    A: Arena,
+{
+    let own = invocation.target.get_template_types()?;
+    let InvocationTarget::FunctionLike { metadata, method_context: Some(method_context), .. } = &invocation.target
+    else {
+        return Some(own.clone());
+    };
+    let class = method_context
+        .declaring_method_id
+        .and_then(|method| context.codebase.get_class_like(method.get_class_name().as_bytes()))
+        .filter(|class| {
+            context.dialect.is_sharp()
+                && class.flags.is_sharp()
+                && metadata.method_metadata.as_ref().is_some_and(|method| method.is_static && !method.is_constructor)
+        });
+    let unwritten = class.into_iter().flat_map(|class| &class.template_types).filter(|(name, template)| {
+        !template_result.has_lower_bound(**name, &template.defining_entity) && !own.contains_key(*name)
+    });
+
+    Some(unwritten.chain(own).map(|(name, template)| (*name, template.clone())).collect())
+}
+
 /// Spec section 11: a call of a PHP# generic method takes its type arguments from its arguments, from those it writes
 /// and from the declared type its result goes into. A type argument none fixes, `None` in `type_arguments`, is refused,
 /// as C#'s CS0411, instead of running with its bound. An argument or declared type outside the bound fixes one of
@@ -1518,13 +1672,13 @@ fn report_unfixed_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     invocation: &Invocation<'_, '_, '_>,
     metadata: &FunctionLikeMetadata,
+    template_types: &TemplateTypes,
     type_arguments: &[Option<TUnion>],
     violated_templates: &WordSet,
 ) where
     A: Arena,
 {
-    let unfixed: Vec<_> = metadata
-        .template_types
+    let unfixed: Vec<_> = template_types
         .iter()
         .zip(type_arguments)
         .filter(|((name, _), type_argument)| type_argument.is_none() && !violated_templates.contains(name))
@@ -1537,7 +1691,14 @@ fn report_unfixed_type_arguments<A>(
     let method_name = invocation.target.guess_name(context);
     let unfixed_arguments = if unfixed.len() == 1 { "argument" } else { "arguments" };
     let unfixed_names = unfixed.iter().map(|(name, _)| format!("`{name}`")).collect::<Vec<_>>().join(", ");
-    let written_arguments = if metadata.template_types.len() == 1 { "argument" } else { "arguments" };
+    let written_arguments = if template_types.len() == 1 { "argument" } else { "arguments" };
+    // A class's type arguments are written on the class, as in `Result<int, PaymentError>.Ok(5)`.
+    let written_on =
+        if unfixed.iter().any(|(_, template)| matches!(template.defining_entity, GenericParent::ClassLike(_))) {
+            "the class"
+        } else {
+            "the call"
+        };
     let result_fixes = metadata.return_type_metadata.as_ref().is_some_and(|result| {
         result.type_union.get_all_child_nodes().into_iter().any(|node| {
             matches!(
@@ -1550,9 +1711,9 @@ fn report_unfixed_type_arguments<A>(
     });
     // C#'s CS0411 quotes no code: the type parameters' names are no types where the call is written.
     let help = if result_fixes {
-        format!("Write the type {written_arguments} on the call, or give the result a declared type.")
+        format!("Write the type {written_arguments} on {written_on}, or give the result a declared type.")
     } else {
-        format!("Write the type {written_arguments} on the call.")
+        format!("Write the type {written_arguments} on {written_on}.")
     };
 
     context.collector.report_with_code(
@@ -1574,13 +1735,15 @@ fn report_unfixed_type_arguments<A>(
 fn report_unwritable_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     invocation: &Invocation<'_, '_, '_>,
-    metadata: &FunctionLikeMetadata,
+    template_types: &TemplateTypes,
     type_arguments: &[TUnion],
 ) where
     A: Arena,
 {
-    for ((name, _), type_argument) in metadata.template_types.iter().zip(type_arguments) {
-        if is_written_in_sharp(type_argument) || is_refused_type(type_argument) {
+    for ((name, _), type_argument) in template_types.iter().zip(type_arguments) {
+        // A type argument that names a missing type, as a declared `Result<Unknown, PaymentError>` gives it, is refused
+        // where the type is written.
+        if is_written_in_sharp(type_argument) || is_refused_type(&known_type_or_error(type_argument.clone())) {
             continue;
         }
 

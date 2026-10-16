@@ -41,6 +41,7 @@ use mago_codex::ttype::get_non_negative_int;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::sharp_iterable_value;
 use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
 use mago_codex::ttype::template::definition_type_replacer::DefinitionReplacementOptions;
 use mago_codex::ttype::template::definition_type_replacer::insert_bound_type;
 use mago_codex::ttype::template::inferred_type_replacer;
@@ -54,6 +55,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::invocation::MethodTargetContext;
 use crate::utils::names::display_type;
+use crate::utils::template::written_type_argument;
 
 #[derive(Debug, Clone, Copy)]
 pub struct InferenceOptions {
@@ -1088,11 +1090,18 @@ fn infer_templates_from_input_and_container_types<A>(
             );
         }
 
+        // A PHP# type argument is a type PHP# writes, so `Factory.of(5)` fixes `int`, which `Box<int>` takes.
+        let bound_type = if context.dialect.is_sharp() {
+            written_type_argument(&residual_input_type, context.codebase)
+        } else {
+            residual_input_type.clone()
+        };
+
         insert_bound_type(
             template_result,
             *template_parameter_name,
             &container_generic.defining_entity,
-            residual_input_type.clone(),
+            bound_type,
             DefinitionReplacementOptions { appearance_depth: 1, ..Default::default() },
             options.argument_offset,
         );
@@ -1223,11 +1232,17 @@ pub fn infer_parameter_templates_from_argument<A>(
 where
     A: Arena,
 {
+    // Spec section 11: a PHP# argument fixes a type argument as its general type, so `5` fixes `int`, as C# and
+    // TypeScript infer, and `Holder.of(5)` is a `Holder<int>`.
+    let mut general = argument_type.clone();
+    if context.dialect.is_sharp() {
+        general.widen_literals();
+    }
     let mut violations = vec![];
     infer_templates_from_input_and_container_types(
         context,
         parameter_type,
-        argument_type,
+        &general,
         template_result,
         InferenceOptions {
             infer_only_if_new: is_callable_argument,
@@ -1305,6 +1320,61 @@ where
     );
 
     violations
+}
+
+/// Gives each type argument the arguments fixed the one the declared type `expected` gives it instead, when that one
+/// holds it, so the declared type decides: `Result.Err(PaymentError.Declined(reason))` into a
+/// `Result<Order, PaymentError>` fixes `PaymentError`, not its case, spec section 31, as C# and TypeScript take the
+/// type a contextual type gives. `container_type` is the call's result type with no type argument replaced, and a type
+/// argument `written` binds, as `Holder<int>` binds `T`, keeps it.
+pub fn widen_to_declared_templates<A>(
+    context: &Context<'_, '_, A>,
+    container_type: &TUnion,
+    expected: &TUnion,
+    template_result: &mut TemplateResult,
+    written: Option<&TemplateResult>,
+) where
+    A: Arena,
+{
+    let mut declared = TemplateResult::new(template_result.template_types.clone(), HashMap::default());
+    infer_templates_from_input_and_container_types(
+        context,
+        container_type,
+        expected,
+        &mut declared,
+        InferenceOptions::default(),
+        &mut Vec::new(),
+    );
+
+    for (name, entities) in declared.lower_bounds {
+        for (entity, bounds) in entities {
+            if written.is_some_and(|written| written.has_lower_bound(name, &entity)) {
+                continue;
+            }
+            let Some(fixed) =
+                template_result.lower_bounds.get_mut(&name).and_then(|entities| entities.get_mut(&entity))
+            else {
+                continue;
+            };
+
+            // Inference adds each list of bounds with its first bound, so neither list is empty.
+            let fixed_type = get_most_specific_type_from_bounds(fixed, context.codebase);
+            let declared_type = get_most_specific_type_from_bounds(&bounds, context.codebase);
+            if fixed_type != declared_type
+                && union_comparator::is_contained_by(
+                    context.codebase,
+                    &fixed_type,
+                    &declared_type,
+                    false,
+                    false,
+                    false,
+                    &mut ComparisonResult::for_dialect(context.dialect),
+                )
+            {
+                *fixed = bounds;
+            }
+        }
+    }
 }
 
 /// Replaces unbound `GenericParameter` types with their constraint types.
