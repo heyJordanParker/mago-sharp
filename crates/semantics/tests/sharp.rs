@@ -4241,7 +4241,7 @@ fn a_type_php_sharp_writes_another_way_is_an_error_that_names_its_form() {
 
         assert_eq!(
             issues(code),
-            [format!("7:32 {}", rows.iter().find(|row| row.0 == written).unwrap().1)],
+            [format!("7:32 {}", rows.iter().find(|row| row.0 == written).expect("each spelling has a row").1)],
             "{written}"
         );
     }
