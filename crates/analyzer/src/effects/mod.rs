@@ -13,6 +13,7 @@ use foldhash::HashSet;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_database::file::FileId;
 use mago_names::display_sharp_member;
 use mago_names::scope::NamespaceScope;
@@ -312,7 +313,8 @@ impl Effects {
         let successors: Vec<Vec<usize>> =
             targets.iter().map(|calls| calls.iter().flatten().copied().collect()).collect();
 
-        let mut solved: Vec<Vec<(Item, Origin)>> = summaries.iter().map(own_items).collect();
+        let carried = carried_effects(codebase);
+        let mut solved: Vec<Vec<(Item, Origin)>> = summaries.iter().map(|summary| own_items(summary, &carried)).collect();
         for part in strongly_connected_parts(&successors) {
             loop {
                 let mut grew = false;
@@ -363,8 +365,17 @@ impl Effects {
             function_values: summaries
                 .iter()
                 .enumerate()
-                .flat_map(|(position, summary)| {
-                    summary.function_values.iter().map(move |value| (value.clone(), position))
+                .flat_map(|(position, summary)| summary.function_values.iter().map(move |value| (value, position)))
+                .map(|(value, position)| {
+                    let runs = match &value.runs {
+                        Runs::Foreign { callee, effects } => Runs::Foreign {
+                            callee: *callee,
+                            effects: effects.iter().flat_map(|effect| carried_through(*effect, &carried)).collect(),
+                        },
+                        runs => runs.clone(),
+                    };
+
+                    (FunctionValue { runs, ..value.clone() }, position)
                 })
                 .collect(),
             readonly_calls: summaries
@@ -683,10 +694,93 @@ fn is_effect(codebase: &CodebaseMetadata, name: &[u8]) -> bool {
         || codebase.get_class_like(name).is_some_and(|class| class.flags.is_foreign())
 }
 
-/// A body's own effects and changes, in source order, an effect before a change at the same place.
-fn own_items(summary: &EffectSummary) -> Vec<(Item, Origin)> {
+/// The effects each plain PHP class carries because a call an `extern` declares returns it, spec section 29, by the
+/// class's lowercase name: the effects of every such call, and through a chain, those of every class whose method
+/// returns it, as `Builder.where(): static` keeps the builder's. A call into the class finds no `extern`, so it reads
+/// these in place of an unknown effect, and an `extern` on the class wins because its calls are never unknown.
+fn carried_effects(codebase: &CodebaseMetadata) -> HashMap<Word, Vec<Word>> {
+    let mut carried: HashMap<Word, Vec<Word>> = HashMap::default();
+    let mut pending: Vec<(Vec<&FunctionLikeMetadata>, Vec<Word>)> = Vec::new();
+    for declarations in codebase.externs.values() {
+        let Some(declaration) = declarations.first() else {
+            continue;
+        };
+        let (class, member) = declaration.target;
+        let returning = if class.is_empty() {
+            codebase.get_function(member.as_bytes()).into_iter().collect()
+        } else if member.is_empty() {
+            methods_of(codebase, class)
+        } else {
+            codebase.get_declaring_method(class.as_bytes(), member.as_bytes()).into_iter().collect()
+        };
+        pending.push((returning, declaration.effects.clone()));
+    }
+
+    while let Some((returning, effects)) = pending.pop() {
+        for returned in returning.iter().flat_map(|function| returned_classes(function)) {
+            let known = carried.entry(returned).or_default();
+            let before = known.len();
+            for effect in &effects {
+                if !known.contains(effect) {
+                    known.push(*effect);
+                }
+            }
+            if known.len() != before {
+                pending.push((methods_of(codebase, returned), known.clone()));
+            }
+        }
+    }
+
+    carried
+}
+
+/// Every method a call through `class` can reach: its own, the ones it inherits, and the ones its docblock gives it.
+fn methods_of(codebase: &CodebaseMetadata, class: Word) -> Vec<&FunctionLikeMetadata> {
+    let Some(metadata) = codebase.get_class_like(class.as_bytes()) else {
+        return Vec::new();
+    };
+
+    metadata
+        .declaring_method_ids
+        .values()
+        .filter_map(|method| codebase.get_method_by_id(method))
+        .chain(metadata.pseudo_methods.iter().filter_map(|method| codebase.get_method(class.as_bytes(), method.as_bytes())))
+        .collect()
+}
+
+/// The lowercase name of each class `function` declares it returns.
+fn returned_classes(function: &FunctionLikeMetadata) -> impl Iterator<Item = Word> + '_ {
+    function
+        .return_type_metadata
+        .iter()
+        .flat_map(|returned| returned.type_union.types.iter())
+        .filter_map(|atomic| match atomic {
+            TAtomic::Object(object) => object.get_name(),
+            _ => None,
+        })
+        .map(|name| ascii_lowercase_word(name.as_bytes()))
+}
+
+/// `effect`, or the effects its class carries when it is an unknown call into a class a declared call returns.
+fn carried_through(effect: Effect, carried: &HashMap<Word, Vec<Word>>) -> Vec<Effect> {
+    match effect {
+        Effect::Unknown(Some((class, _))) if !class.is_empty() => {
+            match carried.get(&ascii_lowercase_word(class.as_bytes())) {
+                Some(effects) => effects.iter().map(|effect| Effect::Foreign(*effect)).collect(),
+                None => vec![effect],
+            }
+        }
+        effect => vec![effect],
+    }
+}
+
+/// A body's own effects and changes, in source order, an effect before a change at the same place, with an unknown call
+/// into a class a declared call returns read as the effects it carries.
+fn own_items(summary: &EffectSummary, carried: &HashMap<Word, Vec<Word>>) -> Vec<(Item, Origin)> {
     let mut items: Vec<(Item, Origin)> = Vec::new();
-    let effects = summary.effects.iter().map(|(effect, span, cause)| (Item::Effect(*effect), *span, *cause));
+    let effects = summary.effects.iter().flat_map(|(effect, span, cause)| {
+        carried_through(*effect, carried).into_iter().map(move |effect| (Item::Effect(effect), *span, *cause))
+    });
     let changes =
         summary.changes.iter().map(|(changed, span, place)| (Item::Changed(*changed), *span, (empty_word(), *place)));
     for (item, span, cause) in effects.chain(changes) {

@@ -16750,6 +16750,76 @@ fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write(
     );
 }
 
+/// The plain PHP a returned-object row calls: `Client` and `Desk` return a `Session`, which has no `extern` of its own,
+/// as `DB::table()` returns a query builder through `Facade::__callStatic`.
+const RETURNED: [(&str, &str); 4] = [
+    (
+        "src/Lib/Client.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Client\n{\n    public static function make(): Session\n    {\n        return new Session();\n    }\n}\n",
+    ),
+    (
+        "src/Lib/Session.php",
+        "<?php\n\nnamespace Lib;\n\nclass Session\n{\n    public function send(): void\n    {\n    }\n\n    public function next(): static\n    {\n        return $this;\n    }\n}\n",
+    ),
+    (
+        "src/Lib/Facade.php",
+        "<?php\n\nnamespace Lib;\n\nabstract class Facade\n{\n    public static function __callStatic(string $method, array $args): mixed\n    {\n        return null;\n    }\n}\n",
+    ),
+    (
+        "src/Lib/Desk.php",
+        "<?php\n\nnamespace Lib;\n\n/**\n * @method static Session open()\n */\nfinal class Desk extends Facade\n{\n}\n",
+    ),
+];
+
+/// Spec section 29: an object a declared plain PHP call returns carries that call's effect, through a chain, a local, a
+/// field, a `static` return and a facade's `__callStatic`, and an `extern` on the returned class wins over it. A class
+/// two declared calls return carries the effects of both.
+#[test]
+fn an_object_a_declared_call_returns_carries_its_effect() {
+    let stub = |externs: &'static str| {
+        ("app/Stubs/Lib.sharp", &*Box::leak(format!("namespace App.Stubs;\n\nimport Lib.Client;\nimport Lib.Desk;\nimport Lib.Session;\n\n{externs}").into_boxed_str()))
+    };
+    let sender = (
+        "app/Shop/Sender.sharp",
+        "namespace App.Shop;\n\npublic interface Sender\n{\n    void chain() uses Http;\n\n    void local() uses Http;\n\n    void field() uses Http;\n\n    void next() uses Http;\n}\n",
+    );
+    let client_sender = (
+        "app/Shop/ClientSender.sharp",
+        "namespace App.Shop;\n\nimport Lib.Client;\nimport Lib.Session;\n\npublic class ClientSender : Sender\n{\n    private Session session = Client.make();\n\n    public void chain() { Client.make().send(); }\n\n    public void local()\n    {\n        const session = Client.make();\n        session.send();\n    }\n\n    public void field() { this.session.send(); }\n\n    public void next() { Client.make().next().send(); }\n}\n",
+    );
+    let desk = (
+        "app/Shop/DeskSender.sharp",
+        "namespace App.Shop;\n\nimport Lib.Desk;\n\npublic interface Opens\n{\n    void open() uses Http;\n}\n\npublic class DeskSender : Opens\n{\n    public void open() { Desk.open().send(); }\n}\n",
+    );
+    let [client, session, facade, desk_class] = RETURNED;
+
+    assert_eq!(
+        effect_issues(&[client_sender, sender, stub("extern Client uses Http;\nextern Desk uses Http;\n"), client, session, facade, desk_class, desk]),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        effect_issues(&[client_sender, sender, stub("extern Client uses Http;\nextern Desk uses Http;\nextern Session uses Mail;\n"), client, session, facade, desk_class, desk]),
+        [
+            "app/Shop/ClientSender.sharp:10:27 incompatible-effects: `ClientSender.chain` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.chain` cannot accept it.",
+            "app/Shop/ClientSender.sharp:15:9 incompatible-effects: `ClientSender.local` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.local` cannot accept it.",
+            "app/Shop/ClientSender.sharp:18:27 incompatible-effects: `ClientSender.field` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.field` cannot accept it.",
+            "app/Shop/ClientSender.sharp:20:26 incompatible-effects: `ClientSender.next` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.next` cannot accept it.",
+            "app/Shop/DeskSender.sharp:12:26 incompatible-effects: `DeskSender.open` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Opens.open` cannot accept it.",
+        ]
+    );
+    // `Desk` returns a `Session` with `Mail`, and `Client` one with `Http`, so every `Session` has both.
+    assert_eq!(
+        effect_issues(&[client_sender, sender, stub("extern Client uses Http;\nextern Desk uses Mail;\n"), client, session, facade, desk_class, desk]),
+        [
+            "app/Shop/ClientSender.sharp:10:27 incompatible-effects: `ClientSender.chain` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.chain` cannot accept it.",
+            "app/Shop/ClientSender.sharp:15:9 incompatible-effects: `ClientSender.local` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.local` cannot accept it.",
+            "app/Shop/ClientSender.sharp:18:27 incompatible-effects: `ClientSender.field` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.field` cannot accept it.",
+            "app/Shop/ClientSender.sharp:20:26 incompatible-effects: `ClientSender.next` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.next` cannot accept it.",
+            "app/Shop/DeskSender.sharp:12:26 incompatible-effects: `DeskSender.open` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Opens.open` cannot accept it.",
+        ]
+    );
+}
+
 /// A call of a method without a body has the effects its `uses` lists, which every implementation is held to, so a
 /// law reading a getter that calls it through an interface is refused naming them.
 #[test]
