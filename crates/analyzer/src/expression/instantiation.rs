@@ -283,7 +283,9 @@ fn check_foreign_outside_module<A>(
         return;
     }
     let Some(foreign) = std::iter::once(metadata)
-        .chain(metadata.all_parent_classes.iter().filter_map(|parent| context.codebase.get_class_like(parent.as_bytes())))
+        .chain(
+            metadata.all_parent_classes.iter().filter_map(|parent| context.codebase.get_class_like(parent.as_bytes())),
+        )
         .find(|class| class.flags.is_foreign())
     else {
         return;

@@ -39,6 +39,9 @@ use mago_word::WordSet;
 #[path = "../../../../tests/support/sharp_words.rs"]
 mod sharp_words;
 
+#[path = "../../../../tests/support/effect_classes.rs"]
+mod effect_classes;
+
 /// `Lib\Model`, a plain PHP parent whose accessors read and write an attribute by name, as Eloquent's do.
 pub const MODEL: (&str, &str) = (
     "src/Lib/Model.php",
@@ -82,13 +85,6 @@ pub const FLOAT: (&str, &str) = (
     "namespace Sharp;\n\npublic static class Float\n{\n    public static float parse(Any? value) => 0.0;\n\n    public static float? tryParse(Any? value) => null;\n}\n",
 );
 
-/// The standard library's `Sharp\Environment`, the `foreign` class of the effect `Environment`, with the signatures of
-/// its `variable` and its instance method `require`.
-pub const ENVIRONMENT: (&str, &str) = (
-    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Environment.sharp",
-    "namespace Sharp;\n\npublic foreign class Environment\n{\n    public string? variable(string name) => null;\n\n    public string require(string name) => name;\n}\n",
-);
-
 /// The standard library's package in `vendor/`. A checked file under it is the standard library's, as the loader marks
 /// a file whose nearest `composer.json` names the package.
 const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";
@@ -96,8 +92,9 @@ const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";
 static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
 
-/// Parses `code` as the PHP# file at `path`, runs the semantic checks, scans it with the prelude and the `library`
-/// files, each a path and its code, analyzes it and passes the result to `check`. Returns what `then` returns for the
+/// Parses `code` as the PHP# file at `path`, runs the semantic checks, scans it with the prelude, the standard
+/// library's effect classes and the `library` files, each a path and its code, analyzes it and passes the result to
+/// `check`. Returns what `then` returns for the
 /// checked program, or the refusal as `line:column parse error: message` or `line:column compile error: message` lines.
 pub fn checked<R>(
     path: &str,
@@ -144,7 +141,7 @@ pub fn checked_file<R>(
     let Prelude { mut metadata, mut symbol_references, .. } = PRELUDE.clone();
     let settings = Settings::default();
     let arena = LocalArena::new();
-    for (path, code) in library {
+    for (path, code) in library.iter().chain(&effect_classes::EFFECT_CLASSES) {
         let file = File::ephemeral(Cow::Owned(path.as_bytes().to_vec()), Cow::Owned(code.as_bytes().to_vec()));
         let program = parse_file(&arena, &file);
         assert!(program.errors.is_empty(), "{path} parses: {:?}", program.errors);

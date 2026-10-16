@@ -314,7 +314,8 @@ impl Effects {
             targets.iter().map(|calls| calls.iter().flatten().copied().collect()).collect();
 
         let carried = carried_effects(codebase);
-        let mut solved: Vec<Vec<(Item, Origin)>> = summaries.iter().map(|summary| own_items(summary, &carried)).collect();
+        let mut solved: Vec<Vec<(Item, Origin)>> =
+            summaries.iter().map(|summary| own_items(summary, &carried)).collect();
         for part in strongly_connected_parts(&successors) {
             loop {
                 let mut grew = false;
@@ -672,25 +673,10 @@ fn accepts_any_effect(class: Word, method: Word) -> bool {
             && (method.eq_ignore_ascii_case(b"get") || method.eq_ignore_ascii_case(b"set")))
 }
 
-/// The standard effects that are names and no class, spec section 29, in the spec's order. As `Events` is, each is an
-/// effect only an `extern` gives plain PHP.
-const NAMED_EFFECTS: [&str; 9] = [
-    "Sharp\\Database",
-    "Sharp\\Http",
-    "Sharp\\Files",
-    "Sharp\\Console",
-    "Sharp\\Process",
-    "Sharp\\Clock",
-    "Sharp\\Random",
-    "Sharp\\Cache",
-    "Sharp\\Mail",
-];
-
-/// Whether `name`, a class name as the binder resolves it, is an effect, spec section 29: a `foreign` class, a named
-/// effect, or `Events`.
+/// Whether `name`, a class name as the binder resolves it, is an effect, spec section 29: a `foreign` class, the
+/// standard library's among them, or `Events`.
 fn is_effect(codebase: &CodebaseMetadata, name: &[u8]) -> bool {
     name.eq_ignore_ascii_case(events().as_bytes())
-        || NAMED_EFFECTS.iter().any(|effect| effect.as_bytes().eq_ignore_ascii_case(name))
         || codebase.get_class_like(name).is_some_and(|class| class.flags.is_foreign())
 }
 
@@ -744,7 +730,12 @@ fn methods_of(codebase: &CodebaseMetadata, class: Word) -> Vec<&FunctionLikeMeta
         .declaring_method_ids
         .values()
         .filter_map(|method| codebase.get_method_by_id(method))
-        .chain(metadata.pseudo_methods.iter().filter_map(|method| codebase.get_method(class.as_bytes(), method.as_bytes())))
+        .chain(
+            metadata
+                .pseudo_methods
+                .iter()
+                .filter_map(|method| codebase.get_method(class.as_bytes(), method.as_bytes())),
+        )
         .collect()
 }
 

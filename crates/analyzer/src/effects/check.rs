@@ -38,7 +38,6 @@ use crate::effects::Body;
 use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
-use crate::effects::NAMED_EFFECTS;
 use crate::effects::Runs;
 use crate::effects::events;
 use crate::effects::is_effect;
@@ -447,7 +446,7 @@ pub(crate) fn check_uses<A>(
         for class in &nameable {
             artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, class.name, false);
         }
-        let mut foreign: Vec<String> = nameable
+        let mut effects: Vec<String> = nameable
             .into_iter()
             .filter(|class| class.flags.is_foreign())
             .map(|class| {
@@ -459,19 +458,18 @@ pub(crate) fn check_uses<A>(
                 )
             })
             .collect();
-        foreign.sort_unstable();
-        let effects: Vec<String> = NAMED_EFFECTS.iter().map(short_name).chain(foreign).collect();
+        effects.sort_unstable();
+        effects.push(short_name(events()));
 
         context.collector.report_with_code(
             IssueCode::InvalidEffect,
             Issue::error(format!(
-                "`{}` is not an effect: `uses` takes {}, {} or a `foreign` class.",
+                "`{}` is not an effect: `uses` takes {} or a `foreign` class.",
                 String::from_utf8_lossy(name.value),
                 effects.join(", "),
-                short_name(events()),
             ))
             .with_annotation(Annotation::primary(name.span).with_message("Written here."))
-            .with_note("An effect is a standard effect, a `foreign` class, or `Events`, the effect of `emit`."),
+            .with_note("An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`."),
         );
     }
 }

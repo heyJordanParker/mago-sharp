@@ -13,6 +13,11 @@ use mago_orchestrator::service::lint::LintMode;
 use mago_orchestrator::service::lint::LintService;
 use mago_syntax::settings::ParserSettings;
 
+#[path = "support/effect_classes.rs"]
+mod effect_classes;
+
+use effect_classes::EFFECT_CLASSES;
+
 const REPORT: &str = include_str!("fixtures/sharp/Report.sharp");
 
 /// A PHP class whose property read on a possibly `null` value gets the analyzer's `?->` fix.
@@ -369,10 +374,6 @@ fn analyze_fix_refuses_a_fix_that_would_edit_a_sharp_file() {
 /// its own exception, and its extension on `string`, spec section 26, whose `trim` the checker names in place of PHP's.
 const TEXT: &str = "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n\n    public static string quiet(string title) => @global.trim(title);\n\n    public static string shout(string title) => global.strtoupper(title);\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
 
-/// The standard library's `Environment`, the `foreign` class of the effect `Environment`, spec section 29. Its getter
-/// is pure: its constructor reads the arguments once, and its methods call plain PHP, as a `foreign` class's code does.
-const ENVIRONMENT: &str = "namespace Sharp;\n\nimport RuntimeException;\nimport ValueError;\n\npublic foreign class Environment\n{\n    public List<string> arguments { get; }\n\n    public Environment()\n    {\n        this.arguments = Environment.commandLine();\n    }\n\n    public string? variable(string name) => global.getenv(name) is string value ? value : null;\n\n    public string currentDirectory()\n        => global.getcwd() is string directory ? directory : throw new RuntimeException(\"Environment.currentDirectory: the current directory cannot be read\");\n\n    public void changeDirectory(string path)\n    {\n        if (!@global.chdir(path)) {\n            throw new RuntimeException(`Environment.changeDirectory: the directory \"${path}\" cannot be entered`);\n        }\n    }\n\n    public string require(string name)\n        => global.getenv(name) is string value ? value : throw new ValueError(`Environment.require: the environment variable \"${name}\" is not set`);\n\n    private static extern List<string> commandLine();\n}\n";
-
 /// The standard library's `Int`, `Float` and `Bool`, spec section 24, with the library's signatures. Their names are
 /// reserved, and only the standard library declares them.
 const TYPE_CLASSES: [(&str, &str); 3] = [
@@ -425,14 +426,16 @@ fn write(root: &Path, name: &str, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
-/// The standard library's package under `root`: its `composer.json`, its `Text`, its `Int`, `Float` and `Bool`, and
-/// the classes whose methods the checker names in place of PHP functions.
+/// The standard library's package under `root`: its `composer.json`, its `Text`, its `Int`, `Float` and `Bool`, the
+/// classes whose methods the checker names in place of PHP functions, and its effect classes.
 fn write_library(root: &Path) {
     write(root, "composer.json", LIBRARY_PACKAGE);
     write(root, "library/Sharp/Text/Text.sharp", TEXT);
-    write(root, "library/Sharp/Environment.sharp", ENVIRONMENT);
     for (class, source) in TYPE_CLASSES.into_iter().chain(WRAPPERS) {
         write(root, &format!("library/Sharp/{class}.sharp"), source);
+    }
+    for (path, source) in EFFECT_CLASSES {
+        write(root, path.strip_prefix("vendor/heyjordanparker/php-sharp-composer/").unwrap(), source);
     }
 }
 
@@ -535,7 +538,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Compiled 11 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
+    assert!(printed.contains("Compiled 27 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
     assert!(root.join(".sharp/library/Sharp/Text/Text.sharpc").is_file(), "{printed}");
     assert!(root.join(".sharp/library/Sharp/Environment.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
@@ -1396,12 +1399,14 @@ fn stripe_stub(extra: &str) -> String {
     format!("namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient uses Http;\n{extra}")
 }
 
-/// A project with section 29's `extern` declaration file, a file with each other `extern` form, and the plain PHP
-/// they declare.
+/// A project with section 29's `extern` declaration file, a file with each other `extern` form, the plain PHP they
+/// declare, and the standard library's package in `vendor/`.
 fn extern_workspace(stripe: &str) -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\n");
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
+    write(root, "composer.json", "{\n    \"name\": \"acme/app\"\n}\n");
+    write_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
     write(root, "app/Stubs/Stripe.sharp", stripe);
     write(
         root,

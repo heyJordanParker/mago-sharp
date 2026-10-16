@@ -4976,11 +4976,19 @@ fn report_removed(span: Span, form: &[u8], instead: &str, note: &str, context: &
 /// and why. A `.sharp` file reads the word as a plain name, so the construct written as a call, or a bare `die`,
 /// reaches the checker as a call of a function, or a read of a constant, that no code declares.
 const REMOVED_CONSTRUCTS: [(&[u8], &str, &str); 8] = [
-    (b"echo", "write `global.printf` or `global.fwrite`.", "Output is a function call in PHP#."),
-    (b"print", "write `global.printf` or `global.fwrite`.", "Output is a function call in PHP#."),
+    (
+        b"echo",
+        "write `console.write(text)` on the `Console` your constructor takes.",
+        "Output is a call of the standard library's `Console`.",
+    ),
+    (
+        b"print",
+        "write `console.write(text)` on the `Console` your constructor takes.",
+        "Output is a call of the standard library's `Console`.",
+    ),
     (
         b"die",
-        "write the message to STDERR, then `global.exit(1)`.",
+        "write the message with `console.writeError(text)`, then `process.exit(1)`.",
         "`die(\"…\")` and `exit(\"…\")` print the message and exit with status 0, which reports success.",
     ),
     (b"isset", "test it against null, as in `value != null`.", "A PHP# value is never undefined."),

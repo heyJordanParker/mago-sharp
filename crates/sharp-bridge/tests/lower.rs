@@ -703,7 +703,9 @@ fn every_line_is_the_line_the_zend_scanner_counts() {
     let refused = Lowered::new("class Report\r{\r    public void run() { echo 1; }\r}\r");
     assert_eq!(
         refused.diagnostics(),
-        ["3:25 compile error: PHP# has no `echo`: write `global.printf` or `global.fwrite`."]
+        [
+            "3:25 compile error: PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes."
+        ]
     );
 }
 
@@ -929,7 +931,7 @@ fn the_standard_library_module_binds_its_services_for_the_root_namespace() {
         ("app/Module.sharp", "App", "ZVAL \"app\"\n"),
     ] {
         let code = format!("namespace {namespace};\n\n{binding}");
-        let lowered = Lowered(common::checked(path, &code, &[common::ENVIRONMENT], lower));
+        let lowered = Lowered(common::checked(path, &code, &[], lower));
         // `return [[namespace, service, class, lifetime, value]];`, the file's third statement.
         let table = lowered.child(lowered.root(), 2);
         let entry = lowered.child(lowered.child(lowered.child(table, 0), 0), 0);
@@ -15224,7 +15226,7 @@ fn environment_list_and_class_are_the_classes_of_the_sharp_namespace() {
         body_in(
             RUN,
             "        const settings = typeof(Environment);\n        const lines = List.wrap(extra);\n        const type = Class.of(this);\n        return 1;\n",
-            &[common::ENVIRONMENT]
+            &[]
         ),
         indoc! {r#"
             STMT_LIST

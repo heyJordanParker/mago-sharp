@@ -626,7 +626,8 @@ fn cache_root() -> io::Result<PathBuf> {
         return Ok(PathBuf::from(local).join("mago"));
     }
 
-    let home = std::env::home_dir().ok_or_else(|| io::Error::other("The checker's cache folder needs a home folder"))?;
+    let home =
+        std::env::home_dir().ok_or_else(|| io::Error::other("The checker's cache folder needs a home folder"))?;
 
     Ok(if cfg!(target_os = "macos") { home.join("Library/Caches/mago") } else { home.join(".cache/mago") })
 }
