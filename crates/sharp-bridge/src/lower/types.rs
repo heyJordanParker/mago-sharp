@@ -36,6 +36,7 @@ use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Inheritance;
@@ -607,10 +608,12 @@ impl<'analysis> Types<'analysis> {
     /// `holder.onTotal(2)`. None for a call of a function or a method.
     fn function_value_name(&self, call: &Expression) -> Option<String> {
         match call {
+            // The parser reads the name before `?.(` as a constant, which a local of that name is.
             Expression::Call(
                 Call::Function(FunctionCall { function: function @ Expression::Identifier(local), .. })
                 | Call::NullSafeFunction(NullSafeFunctionCall {
-                    function: function @ Expression::Identifier(local), ..
+                    function: function @ Expression::ConstantAccess(ConstantAccess { name: local }),
+                    ..
                 }),
             ) => self
                 .artifacts

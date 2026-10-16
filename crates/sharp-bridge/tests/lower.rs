@@ -15291,6 +15291,51 @@ fn a_call_of_a_function_value_checks_a_float_result() {
 }
 
 /// ```php
+/// $total = $maybe === null ? null : $maybe(2); return $totals();
+/// ```
+///
+/// A `?.(…)` call of a function value checks its result as a plain call does, and a `Map` whose values are `float`s
+/// is checked too.
+#[test]
+fn a_null_safe_call_and_a_map_of_floats_check_their_results() {
+    assert_eq!(
+        body_in(
+            "Map<string, float> run(Function<float(int)>? maybe, Function<Map<string, float>()> totals)",
+            "        const total = maybe?.(2);\n        return totals();\n",
+            &[],
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "total"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "maybe"
+                    ZVAL null
+                  ZVAL null
+                  VERIFY_TYPE_ARGS
+                    CALL
+                      VAR
+                        ZVAL "maybe"
+                      ARG_LIST
+                        ZVAL 2
+                    ZVAL "float?"
+                    ZVAL "maybe()"
+              RETURN
+                VERIFY_TYPE_ARGS
+                  CALL
+                    VAR
+                      ZVAL "totals"
+                    ARG_LIST
+                  ZVAL "Map<string, float>"
+                  ZVAL "totals()"
+        "#}
+    );
+}
+
+/// ```php
 /// $b = \Sharp\Internal\equals($kind, $other); $b = !\Sharp\Internal\equals($kind, $other);
 /// $found = array_find_key($kinds, (fn ($value#1) => fn ($element#2) => \Sharp\Internal\equals($element#2, $value#1))($kind)) !== null;
 /// ```

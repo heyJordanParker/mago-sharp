@@ -2149,14 +2149,38 @@ fn a_name_that_breaks_its_case_is_a_warning() {
     let rows = [
         ("namespace App.Tenant;\n\nclass Http_Client\n{\n}\n", "3:7 Type name `Http_Client` should be in Pascal case."),
         ("namespace App.Bad_Part;\n\nclass Box\n{\n}\n", "1:15 Namespace name `Bad_Part` should be in Pascal case."),
-        ("namespace App.Tenant;\n\nenum Status\n{\n    case Paid_Now;\n}\n", "5:10 Enum case name `Paid_Now` should be in Pascal case."),
-        ("namespace App.Tenant;\n\nclass Box\n{\n    private int Total = 0;\n}\n", "5:17 Field name `Total` should be in camel case."),
-        ("namespace App.Tenant;\n\nclass Box\n{\n    public int due_date { get; } = 0;\n}\n", "5:16 Property name `due_date` should be in camel case."),
-        ("namespace App.Tenant;\n\nclass Box\n{\n    public const int maxLines = 1;\n}\n", "5:22 Constant name `maxLines` should be in upper snake case."),
-        ("namespace App.Tenant;\n\nclass Box\n{\n    public int TotalIn() => 1;\n}\n", "5:16 Method name `TotalIn` should be in camel case."),
-        ("namespace App.Tenant;\n\nclass Box\n{\n    public int run(int Count) => Count;\n}\n", "5:24 Parameter name `Count` should be in camel case."),
-        ("namespace App.Tenant;\n\nclass Box\n{\n    public int run()\n    {\n        const line_count = 1;\n        return line_count;\n    }\n}\n", "7:15 Local name `line_count` should be in camel case."),
-        ("namespace App.Tenant;\n\ninterface Priced\n{\n    int Price();\n}\n", "5:9 Method name `Price` should be in camel case."),
+        (
+            "namespace App.Tenant;\n\nenum Status\n{\n    case Paid_Now;\n}\n",
+            "5:10 Enum case name `Paid_Now` should be in Pascal case.",
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Box\n{\n    private int Total = 0;\n}\n",
+            "5:17 Field name `Total` should be in camel case.",
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Box\n{\n    public int due_date { get; } = 0;\n}\n",
+            "5:16 Property name `due_date` should be in camel case.",
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Box\n{\n    public const int maxLines = 1;\n}\n",
+            "5:22 Constant name `maxLines` should be in upper snake case.",
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Box\n{\n    public int TotalIn() => 1;\n}\n",
+            "5:16 Method name `TotalIn` should be in camel case.",
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Box\n{\n    public int run(int Count) => Count;\n}\n",
+            "5:24 Parameter name `Count` should be in camel case.",
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Box\n{\n    public int run()\n    {\n        const line_count = 1;\n        return line_count;\n    }\n}\n",
+            "7:15 Local name `line_count` should be in camel case.",
+        ),
+        (
+            "namespace App.Tenant;\n\ninterface Priced\n{\n    int Price();\n}\n",
+            "5:9 Method name `Price` should be in camel case.",
+        ),
     ];
 
     for (code, warning) in rows {
@@ -2169,7 +2193,8 @@ fn a_name_that_breaks_its_case_is_a_warning() {
     let overridden = "namespace App.Tenant;\n\nclass Box : Base\n{\n    public override int Total() => 1;\n    public override int Count { get; } = 0;\n}\n";
     assert_eq!(issues(overridden), Vec::<String>::new());
 
-    let helped = check("src/Report.sharp", "namespace App.Tenant;\n\nclass Box\n{\n    public int TotalIn() => 1;\n}\n");
+    let helped =
+        check("src/Report.sharp", "namespace App.Tenant;\n\nclass Box\n{\n    public int TotalIn() => 1;\n}\n");
     assert_eq!(helped[0].level, mago_reporting::Level::Warning);
     assert_eq!(helped[0].help.as_deref(), Some("Rename it `totalIn`."));
 }
@@ -4015,7 +4040,10 @@ fn a_union_type_is_in_the_slice_wherever_a_type_is() {
 fn a_union_that_holds_null_is_an_error_that_names_its_nullable_form() {
     let code = leak(
         method("        int|string|null local = null;\n        return 1;\n")
-            .replace("int extra", "int?|string a, int|string? b, int|null c, null|Calc d, int|string|null e, List<int|null> f")
+            .replace(
+                "int extra",
+                "int?|string a, int|string? b, int|null c, null|Calc d, int|string|null e, List<int|null> f",
+            )
             .replace("public int run", "public string|null|int run"),
     );
 
@@ -4189,7 +4217,11 @@ fn a_type_php_sharp_writes_another_way_is_an_error_that_names_its_form() {
     assert_eq!(issues(void), ["5:12 PHP# writes the type `void`."]);
     let union = leak(method("        return 1;\n").replace("int extra", "Int|string extra"));
     assert_eq!(issues(union), ["5:20 PHP# writes the type `int`."]);
-    let written = leak(method("        return 1;\n").replace("int extra", "int a, float b, bool c, string d, Any e, Any? f, Object g"));
+    let keyword_union = leak(method("        return 1;\n").replace("int extra", "int|false extra"));
+    assert_eq!(issues(keyword_union), ["5:24 PHP# has no `false` type: write `bool`."]);
+    let written = leak(
+        method("        return 1;\n").replace("int extra", "int a, float b, bool c, string d, Any e, Any? f, Object g"),
+    );
     assert_eq!(issues(written), Vec::<String>::new());
 }
 
