@@ -388,6 +388,8 @@ final class AnalyzerCodeModuleGenerator
         'internal-access',
         'too-wide-member',
         'missing-readonly-marker',
+        'invalid-json-key',
+        'method-name-case',
     ];
 
     /**

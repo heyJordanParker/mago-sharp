@@ -3546,6 +3546,16 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 /// `\Sharp\Internal\build` binds the closure as `Closure::call` does while the object is still being built, so the
 /// body's writes run no observer, spec section 6.2.
 #[test]
+fn a_named_constructor_without_an_access_modifier_is_a_private_static_method() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Report\n{\n    public Report(int size) { }\n\n    Report.empty() : this(0) { }\n}\n",
+    );
+
+    // `[20]` is `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`: a member with no access modifier is `private`, spec section 5.
+    assert!(lowered.render(lowered.method_named("empty")).starts_with("METHOD [20] \"empty\""));
+}
+
+#[test]
 fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
     let lowered = Lowered::new(
         "namespace App;\n\nclass Base\n{\n    public Base() { }\n    public string describe() => \"base\";\n}\n\nclass Report : Base\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) : super() { }\n\n    public Report.sized(int size, string ...notes) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = super.describe();\n        let read = () => { return this.label; };\n        let skip = () => { return; };\n    }\n}\n",
@@ -8666,7 +8676,7 @@ fn a_type_parameter_bounded_by_object_is_php_object() {
         indoc! {r#"
             PARAM_LIST
               PARAM
-                ZVAL [1] "Object"
+                ZVAL [1] "object"
                 ZVAL "value"
                 null
                 null
@@ -8676,7 +8686,7 @@ fn a_type_parameter_bounded_by_object_is_php_object() {
                 ZVAL "Object"
                 null
             SHARP_TYPE_ARGS
-              ZVAL [1] "Object"
+              ZVAL [1] "object"
               ZVAL "Function<#0(#0)>"
         "#}
     );
@@ -8999,7 +9009,8 @@ fn literals_are_short_arrays_and_an_index_is_a_dim() {
 /// ```
 ///
 /// `Any` and `Any?` are both PHP's `mixed`, which already holds null and refuses `?`, so neither carries
-/// `ZEND_TYPE_NULLABLE`. `[1]` is `ZEND_NAME_NOT_FQ`.
+/// `ZEND_TYPE_NULLABLE`. `[1]` is `ZEND_NAME_NOT_FQ`. An `Any` refuses null, spec section 24, so the parameter list
+/// ends with the type texts a call from plain PHP is checked against, as for a generic class.
 #[test]
 fn any_and_nullable_any_are_mixed() {
     let lowered = Lowered::new(
@@ -9025,6 +9036,9 @@ fn any_and_nullable_any_are_mixed() {
                 null
                 null
                 null
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "Any, Any?"
         "#}
     );
     assert_eq!(
@@ -10725,6 +10739,50 @@ fn a_public_enum_is_an_enum() {
 }
 
 /// ```php
+/// public function keep(object $first, ?object $source = null): object { return $first; }
+/// ```
+///
+/// `Object` is PHP's `object`, a built-in type, so its type is the name `object` with `ZEND_NAME_NOT_FQ`, which is 1,
+/// as php-src's grammar builds it, and `[257]` adds `ZEND_TYPE_NULLABLE`. The result carries the method's function type,
+/// as a method's does when a function type can say its whole type.
+#[test]
+fn an_object_type_is_the_object_name() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Object keep(Object first, Object? source = null) { return first; }\n}\n",
+    );
+    let method = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_METHOD).expect("a method");
+
+    assert_eq!(
+        lowered.render(lowered.child(method as u32, 0)),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM
+                ZVAL [1] "object"
+                ZVAL "first"
+                null
+                null
+                null
+                null
+              PARAM
+                ZVAL [257] "object"
+                ZVAL "source"
+                ZVAL null
+                null
+                null
+                null
+        "#}
+    );
+    assert_eq!(
+        lowered.render(lowered.child(method as u32, 3)),
+        indoc! {r#"
+            SHARP_TYPE_ARGS
+              ZVAL [1] "object"
+              ZVAL "Function<Object(Object, Object?)>"
+        "#}
+    );
+}
+
+/// ```php
 /// abstract class Shape { abstract public function area(): float; }
 /// final class Unit { }
 /// interface Measured { public function label(int $digits): string; }
@@ -11051,7 +11109,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
                   null
                 SHARP_TYPE_ARGS
                   null
-                  ZVAL "Lib.HasLabel, List<Lib.HasLabel>, Any?"
+                  ZVAL "Lib.HasLabel, List<Lib.HasLabel>, Any"
               null
               STMT_LIST
                 RETURN
@@ -13163,14 +13221,16 @@ fn typeof_in_an_attribute_argument_is_the_class_name() {
 /// ```php
 /// public const int MAX = 3;
 /// protected const LIMIT = \PHP_INT_MAX - 1;
+/// private const int MIN = 0;
 /// ```
 ///
 /// A constant is a class constant group of one constant, as php-src's grammar builds it: the constant list, no
-/// attributes, then the type. `[1]` and `[2]` on the groups are `ZEND_ACC_PUBLIC` and `ZEND_ACC_PROTECTED`.
+/// attributes, then the type. `[1]`, `[2]` and `[4]` on the groups are `ZEND_ACC_PUBLIC`, `ZEND_ACC_PROTECTED` and
+/// `ZEND_ACC_PRIVATE`, which a constant written with no access modifier has, spec section 5.
 #[test]
 fn a_class_constant_is_a_class_constant_group_of_one_constant() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 3;\n    protected const LIMIT = global.PHP_INT_MAX - 1;\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 3;\n    protected const LIMIT = global.PHP_INT_MAX - 1;\n    const int MIN = 0;\n}\n",
     );
     let class = lowered.child(lowered.root(), 2);
 
@@ -13197,6 +13257,14 @@ fn a_class_constant_is_a_class_constant_group_of_one_constant() {
                     null
                 null
                 null
+              CLASS_CONST_GROUP [4]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "MIN"
+                    ZVAL 0
+                    null
+                null
+                ZVAL [1] "int"
         "#}
     );
 }
@@ -15659,6 +15727,196 @@ fn equality_of_strings_ints_and_enums_is_identity() {
     );
 
     assert_eq!(assigned_values(&tree), ["BINARY_OP [16]", "BINARY_OP [17]", "BINARY_OP [16]", "BINARY_OP [16]"]);
+}
+
+/// ```php
+/// $b = \Sharp\Internal\equals($raw, $counts); $b = !\Sharp\Internal\equals($raw, 1.5); $b = $raw === "pro";
+/// return $raw === null;
+/// ```
+///
+/// Spec section 24: an unchecked `Any?` compares by value with whatever it holds, so `==` on it runs the engine's
+/// `\Sharp\Internal\equals`, which compares a `Map` by its entries and an `int` with a `float` as two floats, and `!=`
+/// is its `!`. A string, a `bool` and `null` equal only the same one, so `===` tests them. The body starts with the
+/// statement that makes `counts` a `Map`.
+#[test]
+fn equality_of_an_unchecked_any_compares_by_value() {
+    let body = body_in(
+        "bool run(Any? raw, Map<string, int> counts)",
+        "        let b = raw == counts;\n        b = raw != 1.5;\n        b = raw == \"pro\";\n        return raw == null;\n",
+        &[],
+    );
+    let comparisons = &body[body.find("  ASSIGN\n    VAR\n      ZVAL \"b\"").expect("the comparisons")..];
+
+    assert_eq!(
+        format!("STMT_LIST\n{comparisons}"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                CALL
+                  ZVAL "Sharp\\Internal\\equals"
+                  ARG_LIST
+                    VAR
+                      ZVAL "raw"
+                    VAR
+                      ZVAL "counts"
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                UNARY_OP [14]
+                  CALL
+                    ZVAL "Sharp\\Internal\\equals"
+                    ARG_LIST
+                      VAR
+                        ZVAL "raw"
+                      ZVAL 1.5
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                BINARY_OP [16]
+                  VAR
+                    ZVAL "raw"
+                  ZVAL "pro"
+              RETURN
+                BINARY_OP [16]
+                  VAR
+                    ZVAL "raw"
+                  ZVAL null
+        "#}
+    );
+}
+
+/// ```php
+/// return [$f(2), $holder->onTotal(2), $count(2)];
+/// ```
+///
+/// Spec section 24: a function value may hold a plain PHP closure, which returns an `int` where the function type says
+/// `float`. So a call of a function value whose result holds a `float` checks its result, as a call into plain PHP
+/// does, and the check converts the `int`, whether the value is a local or a property. A result with no `float` needs
+/// no check.
+#[test]
+fn a_call_of_a_function_value_checks_a_float_result() {
+    assert_eq!(
+        Lowered::with(
+            &method_with(
+                "List<Any> run(Function<float(int)> f, Holder holder, Function<int(int)> count)",
+                "        return [f(2), holder.onTotal(2), count(2)];\n",
+            ),
+            &[("src/App/Tenant/Holder.sharp", "namespace App.Tenant;\n\npublic class Holder\n{\n    public Function<List<float>(int)> onTotal { get; } = (int n) => [1.5];\n}\n")],
+        )
+        .body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                ARRAY [3]
+                  ARRAY_ELEM
+                    VERIFY_TYPE_ARGS
+                      CALL
+                        VAR
+                          ZVAL "f"
+                        ARG_LIST
+                          ZVAL 2
+                      ZVAL "float"
+                      ZVAL "f()"
+                    null
+                  ARRAY_ELEM
+                    VERIFY_TYPE_ARGS
+                      CALL
+                        PROP
+                          VAR
+                            ZVAL "holder"
+                          ZVAL "onTotal"
+                        ARG_LIST
+                          ZVAL 2
+                      ZVAL "List<float>"
+                      ZVAL "onTotal()"
+                    null
+                  ARRAY_ELEM
+                    CALL
+                      VAR
+                        ZVAL "count"
+                      ARG_LIST
+                        ZVAL 2
+                    null
+        "#}
+    );
+}
+
+/// ```php
+/// $read = $source->read(); return $numbers->map($f);
+/// ```
+///
+/// Spec section 24: a plain PHP class may implement a PHP# interface, and the engine runs the function value a
+/// collection method takes and keeps what it returns, so a call of either checks a result that holds an `Any` or a
+/// `float`. A lambda written in PHP# returns what its type says, so the collection method given one checks nothing,
+/// and a PHP# method given a function value checks its own result where it returns.
+#[test]
+fn an_interface_method_and_a_collection_method_given_a_function_value_check_their_results() {
+    let body = Lowered::with(
+        &method_with(
+            "List<float> run(Source source, List<int> numbers, Function<float(int)> f)",
+            "        Any read = source.read();\n        List<float> doubled = numbers.map((int n) => n * 2.0);\n        List<float> applied = Doubler.apply(f);\n        return numbers.map(f);\n",
+        ),
+        &[
+            ("src/App/Tenant/Source.sharp", "namespace App.Tenant;\n\npublic interface Source\n{\n    Any read();\n}\n"),
+            (
+                "src/App/Tenant/Doubler.sharp",
+                "namespace App.Tenant;\n\npublic static class Doubler\n{\n    public static List<float> apply(Function<float(int)> f) => [f(1)];\n}\n",
+            ),
+        ],
+    )
+    .body();
+
+    assert!(body.contains("      ZVAL \"Any\"\n      ZVAL \"App\\\\Tenant\\\\Source::read()\"\n"), "{body}");
+    assert!(body.contains("      ZVAL \"List<float>\"\n      ZVAL \"map()\"\n"), "{body}");
+    assert!(body.contains("ZVAL \"apply\""), "{body}");
+    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 2, "{body}");
+}
+
+/// ```php
+/// $total = $maybe === null ? null : $maybe(2); return $totals();
+/// ```
+///
+/// A `?.(…)` call of a function value checks its result as a plain call does, and a `Map` whose values are `float`s
+/// is checked too.
+#[test]
+fn a_null_safe_call_and_a_map_of_floats_check_their_results() {
+    assert_eq!(
+        body_in(
+            "Map<string, float> run(Function<float(int)>? maybe, Function<Map<string, float>()> totals)",
+            "        const total = maybe?.(2);\n        return totals();\n",
+            &[],
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "total"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "maybe"
+                    ZVAL null
+                  ZVAL null
+                  VERIFY_TYPE_ARGS
+                    CALL
+                      VAR
+                        ZVAL "maybe"
+                      ARG_LIST
+                        ZVAL 2
+                    ZVAL "float?"
+                    ZVAL "maybe()"
+              RETURN
+                VERIFY_TYPE_ARGS
+                  CALL
+                    VAR
+                      ZVAL "totals"
+                    ARG_LIST
+                  ZVAL "Map<string, float>"
+                  ZVAL "totals()"
+        "#}
+    );
 }
 
 /// ```php

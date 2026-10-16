@@ -1,4 +1,6 @@
 use mago_syntax::cst::Modifier;
+use mago_syntax::cst::ModifierSequenceExt;
+use mago_syntax::cst::Sequence;
 
 /// Represents the visibility level of class members (properties, methods, constants) in PHP.
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, Default, PartialOrd, Ord)]
@@ -36,6 +38,17 @@ impl Visibility {
     #[must_use]
     pub const fn is_private(&self) -> bool {
         matches!(self, Visibility::Private)
+    }
+
+    /// The visibility a member's `modifiers` give it: its first `public`, `protected` or `private`, or with none,
+    /// `default`, unless it is `internal`, which runs as PHP's `public`.
+    #[must_use]
+    pub(crate) fn from_modifiers(modifiers: &Sequence<'_, Modifier<'_>>, default: Visibility) -> Self {
+        match modifiers.get_first_read_visibility() {
+            Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
+            None if modifiers.contains_internal() => Visibility::Public,
+            None => default,
+        }
     }
 
     /// Returns the visibility level as static bytes.

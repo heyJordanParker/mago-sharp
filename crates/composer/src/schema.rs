@@ -60,13 +60,6 @@ pub struct ComposerPackage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
 
-    /// A list of directories which should get added to PHP's include path.
-    #[serde(rename = "include-path", default, skip_serializing_if = "Vec::is_empty")]
-    #[deprecated(
-        note = "This is only present to support legacy projects, and all new code should preferably use autoloading"
-    )]
-    pub include_path: Vec<String>,
-
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
 
@@ -138,12 +131,6 @@ pub struct ComposerPackage {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub support: Option<ComposerPackageSupport>,
-
-    /// Forces the package to be installed into the given subdirectory path. This is used for autoloading PSR-0 packages that do not contain their full path.
-    /// Use forward slashes for cross-platform compatibility
-    #[serde(rename = "target-dir", default, skip_serializing_if = "Option::is_none")]
-    #[deprecated]
-    pub target_dir: Option<String>,
 
     /// Package release date, in 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DDTHH:MM:SSZ' format
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -990,13 +977,6 @@ pub struct InlinePackage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
 
-    /// A list of directories which should get added to PHP's include path.
-    #[serde(rename = "include-path", default, skip_serializing_if = "Vec::is_empty")]
-    #[deprecated(
-        note = "this is only present to support legacy projects, and all new code should preferably use autoloading"
-    )]
-    pub include_path: Vec<String>,
-
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
 
@@ -1020,10 +1000,6 @@ pub struct InlinePackage {
 
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub suggest: HashMap<String, String>,
-
-    #[serde(rename = "target-dir", default, skip_serializing_if = "Option::is_none")]
-    #[deprecated]
-    pub target_dir: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
