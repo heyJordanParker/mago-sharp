@@ -608,7 +608,8 @@ impl<'analysis> Types<'analysis> {
     /// since PHP's own `array` type checks none. None for a type only a plain PHP docblock writes, such as
     /// `array<array-key, int>`, since the engine reads the check as PHP#. None otherwise: plain PHP's generics are
     /// erased, since an object of a plain PHP generic class carries no type arguments, and a call from plain PHP gives a
-    /// method's own type parameters none, so they match any value.
+    /// method's own type parameters none, so one nested in a type matches any type argument, and a value whose type is
+    /// one of them is checked as its bound.
     fn checked_text(&self, r#type: &TUnion, collections: bool) -> Option<String> {
         let is_method_parameter = |r#type: &TUnion| {
             r#type.types.iter().filter(|atomic| !atomic.is_null()).all(|atomic| {
@@ -630,23 +631,23 @@ impl<'analysis> Types<'analysis> {
                 matches!(part, TAtomic::Object(TObject::Named(part)) if self.codebase.get_trait(part.name.as_bytes()).is_some())
             })
         };
-        // A method's own type parameter matches any value from plain PHP, so one bounded by a trait checks its bound.
-        let bounded_by_trait = |atomic: &TAtomic| match atomic {
+        // A call from plain PHP gives a method's own type parameters no type arguments, so a value whose type is one of
+        // them checks its bound, spec section 11. One nested in a type matches any type argument.
+        let bound_of = |atomic: &TAtomic| match atomic {
             TAtomic::GenericParameter(parameter)
-                if matches!(parameter.defining_entity, GenericParent::FunctionLike(_))
-                    && parameter.constraint.types.iter().any(names_trait) =>
+                if matches!(parameter.defining_entity, GenericParent::FunctionLike(_)) =>
             {
                 Some(parameter.constraint.types.to_vec())
             }
             _ => None,
         };
         let bounded;
-        let r#type = if r#type.types.iter().any(|atomic| bounded_by_trait(atomic).is_some()) {
+        let r#type = if r#type.types.iter().any(|atomic| bound_of(atomic).is_some()) {
             bounded = TUnion::from_vec(
                 r#type
                     .types
                     .iter()
-                    .flat_map(|atomic| bounded_by_trait(atomic).unwrap_or_else(|| vec![atomic.clone()]))
+                    .flat_map(|atomic| bound_of(atomic).unwrap_or_else(|| vec![atomic.clone()]))
                     .collect(),
             );
             &bounded
