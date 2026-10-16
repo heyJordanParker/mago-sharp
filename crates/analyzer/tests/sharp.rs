@@ -16649,8 +16649,8 @@ fn a_call_of_a_method_a_magic_method_serves_has_the_effects_of_the_magic_method(
     assert_eq!(
         effect_issues(&[SHELF, MAGIC]),
         [
-            "app/Shop/Shelf.sharp:14:33 impure-law: Law `counted` reaches `Shelf.count`, which calls `Bag.__call` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Bag.__call;` when it has no effect, or name its effects after `uses`.",
-            "app/Shop/Shelf.sharp:16:31 impure-law: Law `coded` reaches `Shelf.code`, which calls `Codes.__callStatic` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Codes.__callStatic;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Shelf.sharp:14:33 impure-law: Law `counted` reaches `Shelf.count`, which calls `Bag.__call` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Bag;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Shelf.sharp:16:31 impure-law: Law `coded` reaches `Shelf.code`, which calls `Codes.__callStatic` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Codes;` when it has no effect, or name its effects after `uses`.",
         ]
     );
     assert_eq!(issues(pure, &[MAGIC]), Vec::<String>::new());
@@ -16728,9 +16728,24 @@ fn an_implementation_has_only_the_effects_its_declaration_allows() {
 }
 
 /// An implementation that calls plain PHP with no `extern` is refused like a getter that does: the help names the
-/// `extern` to write, and the import its file lacks.
+/// `extern` of the class to write, with the effects the declaration's `uses` lists, and the import its file lacks.
 #[test]
 fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write() {
+    let sync = (
+        "app/Shop/AudienceSync.sharp",
+        "namespace App.Shop;\n\npublic interface AudienceSync\n{\n    void sync(int contact) uses Http, Mail;\n}\n",
+    );
+    let mailchimp = (
+        "app/Shop/MailchimpSync.sharp",
+        "namespace App.Shop;\n\nimport Lib.Meter;\n\npublic class MailchimpSync : AudienceSync\n{\n    public MailchimpSync(private Meter meter) { }\n\n    public void sync(int contact) { this.meter.read(); }\n}\n",
+    );
+    assert_eq!(
+        effect_issues(&[mailchimp, sync, METER]),
+        [
+            "app/Shop/MailchimpSync.sharp:9:37 incompatible-effects: `MailchimpSync.sync` calls `Meter.read`, which has no `extern` declaration, so `uses Http, Mail` on `AudienceSync.sync` cannot accept it. Help: Declare its effect in a .sharp file, such as `extern Meter uses Http, Mail;`."
+        ]
+    );
+
     let gauge = (
         "app/Shop/Gauge.sharp",
         "namespace App.Shop;\n\nimport Lib.Meter;\n\npublic class Gauge\n{\n    public Gauge(private Meter source) { }\n\n    public Meter meter() => this.source;\n}\n",
@@ -16745,7 +16760,7 @@ fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write(
     assert_eq!(
         effect_issues(&[implementation, rates, gauge, METER]),
         [
-            "app/Shop/MeterRates.sharp:7:32 incompatible-effects: `MeterRates.rate` calls `Meter.read`, which has no `extern` declaration, so the pure `Rates.rate` cannot accept it. Help: Declare it in a .sharp file: `extern Meter.read;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
+            "app/Shop/MeterRates.sharp:7:32 incompatible-effects: `MeterRates.rate` calls `Meter.read`, which has no `extern` declaration, so the pure `Rates.rate` cannot accept it. Help: Declare it in a .sharp file: `extern Meter;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
         ]
     );
 }
@@ -17114,7 +17129,7 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect(
                     "app/Shop/Checkout.sharp:24:36 impure-law: Law `positive` calls `Client.get`, which has the effect `{name}`. Laws hold only over pure code."
                 ),
                 format!(
-                    "app/Shop/Checkout.sharp:15:21 invalid-property-assignment-value: This lambda calls `Store.get`, which has no `extern` declaration, so a `Function<int(int) uses {name}>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`."
+                    "app/Shop/Checkout.sharp:15:21 invalid-property-assignment-value: This lambda calls `Store.get`, which has no `extern` declaration, so a `Function<int(int) uses {name}>` cannot hold it. Help: Declare its effect in a .sharp file, such as `extern Store uses {name};`."
                 ),
                 format!(
                     "app/Shop/Checkout.sharp:22:55 invalid-argument: `Client.get` has the effect `{name}`, so a `Function<int(int)>` cannot hold it."
@@ -17152,7 +17167,7 @@ fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
         effect_issues(&[pricing, SERVICES, SERVICES_STUB, ENVIRONMENT]),
         [
             "app/Shop/Pricing.sharp:16:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
-            "app/Shop/Pricing.sharp:16:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int)>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Pricing.sharp:16:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int)>` cannot hold it. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
             "app/Shop/Pricing.sharp:18:43 invalid-argument: `Environment.variable` has the effect `Environment`, so a `Function<string?(string)>` cannot hold it.",
         ]
     );
@@ -17283,7 +17298,7 @@ fn a_call_of_a_plain_php_property_holding_a_function_has_an_unknown_effect() {
     let refused = [
         "app/Shop/Till.sharp:15:30 impure-law: Law `closes` reaches `Till.closed`, which calls `Holder.closure` with no `extern` declaration. Laws hold only over pure code. Help: Property `Holder.closure` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Holder` that an `extern` declares.",
         "app/Shop/Till.sharp:17:29 impure-law: Law `calls` reaches `Till.called`, which calls `Holder.callback` with no `extern` declaration. Laws hold only over pure code. Help: Property `Holder.callback` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Holder` that an `extern` declares.",
-        "app/Shop/Till.sharp:19:31 impure-law: Law `formats` reaches `Till.formatted`, which calls `Formatter.__invoke` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Formatter.__invoke;` when it has no effect, or name its effects after `uses`. Add `import Lib.Formatter;` to the file.",
+        "app/Shop/Till.sharp:19:31 impure-law: Law `formats` reaches `Till.formatted`, which calls `Formatter.__invoke` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Formatter;` when it has no effect, or name its effects after `uses`. Add `import Lib.Formatter;` to the file.",
     ];
 
     assert_eq!(effect_issues(&[till, holder]), refused);
@@ -18158,7 +18173,7 @@ fn a_law_calling_plain_php_with_no_extern_names_the_missing_declaration() {
     assert_eq!(
         effect_issues(&[refund, GATEWAY]),
         [
-            "app/Shop/Refund.sharp:7:38 impure-law: Law `refundAllowed` calls `Gateway.charge`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Gateway.charge;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Refund.sharp:7:38 impure-law: Law `refundAllowed` calls `Gateway.charge`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Gateway;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
@@ -18191,7 +18206,7 @@ fn a_call_of_a_method_of_a_class_that_shares_its_short_name_names_the_class_in_f
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
+            "app/Shop/Timer.sharp:9:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
@@ -18223,7 +18238,7 @@ fn a_call_of_a_method_of_a_class_imported_under_another_name_names_the_class_by_
     assert_eq!(
         effect_issues(&[timer, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `VendorClock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `VendorClock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
@@ -18265,7 +18280,7 @@ fn a_law_reaching_a_call_in_another_file_names_the_class_as_the_law_file_does() 
     assert_eq!(
         effect_issues(&[cart, order, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Cart.sharp:9:30 impure-law: Law `stamps` reaches `Order.stamp`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
+            "app/Shop/Cart.sharp:9:30 impure-law: Law `stamps` reaches `Order.stamp`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
@@ -18291,7 +18306,7 @@ fn a_call_of_a_class_its_file_does_not_import_names_the_import_the_extern_needs(
     assert_eq!(
         effect_issues(&[panel, gauge, METER]),
         [
-            "app/Shop/Panel.sharp:9:32 impure-law: Law `levels` reaches `Panel.level`, which calls `Meter.read` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Meter.read;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
+            "app/Shop/Panel.sharp:9:32 impure-law: Law `levels` reaches `Panel.level`, which calls `Meter.read` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Meter;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
         ]
     );
 }
@@ -18311,7 +18326,7 @@ fn a_call_of_a_class_of_its_own_namespace_names_no_import() {
     assert_eq!(
         effect_issues(&[kiosk, printer]),
         [
-            "app/Shop/Kiosk.sharp:9:32 impure-law: Law `prints` reaches `Kiosk.printed`, which calls `Printer.print` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Printer.print;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Kiosk.sharp:9:32 impure-law: Law `prints` reaches `Kiosk.printed`, which calls `Printer.print` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Printer;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
@@ -18333,7 +18348,7 @@ fn a_call_of_a_class_whose_short_name_its_file_imports_names_an_aliased_import()
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock;` to the file."
         ]
     );
     assert_eq!(effect_issues(&[declared, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]), Vec::<String>::new());
@@ -18359,7 +18374,7 @@ fn an_aliased_import_capitalizes_each_part_of_a_lowercase_namespace() {
     assert_eq!(
         effect_issues(&[timer, source, clock, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock.now;` when it has no effect, or name its effects after `uses`. Add `import vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock;` when it has no effect, or name its effects after `uses`. Add `import vendor.Clock as VendorClock;` to the file."
         ]
     );
 }
@@ -18376,7 +18391,7 @@ fn an_aliased_import_whose_alias_the_file_binds_takes_the_first_free_number() {
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:12:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock1.now;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock1;` to the file."
+            "app/Shop/Timer.sharp:12:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock1;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock1;` to the file."
         ]
     );
 }

@@ -105,6 +105,7 @@ pub(crate) fn laws_must_be_pure(
                 impurity.span,
                 "law",
                 &impurity,
+                &[],
                 &class_name,
                 &code_class_name,
                 &missing_import,
@@ -140,6 +141,7 @@ pub(crate) fn function_values_must_fit_their_types(
                 (Runs::Foreign { .. }, _) => format!("{} has no `extern` declaration", method()),
             };
             let body = if matches!(value.runs, Runs::Body(Body::Lambda(_))) { "lambda" } else { "method" };
+            let allowed: Vec<String> = value.allowed.iter().map(|effect| effect_name(*effect)).collect();
 
             let issue = impure(
                 value.code,
@@ -147,6 +149,7 @@ pub(crate) fn function_values_must_fit_their_types(
                 value.span,
                 body,
                 &impurity,
+                &allowed,
                 &class_name,
                 &code_class_name,
                 &missing_import,
@@ -177,11 +180,10 @@ pub(crate) fn implementations_must_fit_their_declarations(
             let ancestor =
                 codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |ancestor| ancestor.original_name);
             let declared = display_sharp_member(class_name(ancestor), declaration.original_name);
-            let allows = if declaration.uses.is_empty() {
+            let uses: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
+            let allows = if uses.is_empty() {
                 format!("the pure `{declared}`")
             } else {
-                let uses: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
-
                 format!("`uses {}` on `{declared}`", uses.join(", "))
             };
 
@@ -195,6 +197,7 @@ pub(crate) fn implementations_must_fit_their_declarations(
                 impurity.span,
                 "method",
                 &impurity,
+                &uses,
                 &class_name,
                 &code_class_name,
                 &missing_import,
@@ -248,9 +251,10 @@ pub(crate) fn readonly_values_call_readonly_methods(
 }
 
 /// The error at `span` on the `impurity` of the `body` it refuses, a getter, a law, a lambda or a method, with the
-/// `extern` to write when the callee has none, or how to call a plain PHP property's code from outside `body`.
-/// `class_name` names each class in prose, `code_class_name` names it in the `extern`, and `missing_import` names the
-/// import the `extern` needs when the body's file doesn't bind its class.
+/// `extern` to write when the callee has none, or how to call a plain PHP property's code from outside `body`. The
+/// `extern` names the callee's class, or its function, and the effects `allowed` lists, as the place's `uses` names
+/// them. `class_name` names each class in prose, `code_class_name` names it in the `extern`, and `missing_import`
+/// names the import the `extern` needs when the body's file doesn't bind its class.
 #[allow(clippy::too_many_arguments)]
 fn impure(
     code: IssueCode,
@@ -258,6 +262,7 @@ fn impure(
     span: Span,
     body: &str,
     impurity: &Impurity,
+    allowed: &[String],
     class_name: &dyn Fn(Word) -> String,
     code_class_name: &dyn Fn(Word) -> String,
     missing_import: &dyn Fn(Word) -> Option<String>,
@@ -279,16 +284,17 @@ fn impure(
                     None => (member.to_string(), None),
                 }
             } else {
-                let name = code_class_name(class);
-                let target = if member.is_empty() { name } else { display_sharp_member(&name, member) };
-
-                (target, missing_import(class))
+                (code_class_name(class), missing_import(class))
             };
             let import = import.map(|import| format!(" {import}")).unwrap_or_default();
 
-            issue.with_help(format!(
-                "Declare it in a .sharp file: `extern {target};` when it has no effect, or name its effects after `uses`.{import}"
-            ))
+            issue.with_help(if allowed.is_empty() {
+                format!(
+                    "Declare it in a .sharp file: `extern {target};` when it has no effect, or name its effects after `uses`.{import}"
+                )
+            } else {
+                format!("Declare its effect in a .sharp file, such as `extern {target} uses {};`.{import}", allowed.join(", "))
+            })
         }
         Some(Effect::Unknown(None)) => {
             let (class, property) = impurity.cause;
