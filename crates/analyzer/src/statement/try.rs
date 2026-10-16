@@ -33,10 +33,12 @@ use crate::context::scope::control_action::ControlAction;
 use crate::context::scope::finally_scope::FinallyScope;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
+use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::statement::analyze_statements;
 use crate::statement::get_type_from_hint;
 use crate::statement::report_erased_type_test;
 use crate::statement::report_hint_type_arguments;
+use crate::utils::names::display_class_like_name;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
     fn analyze<'ctx, A>(
@@ -607,6 +609,11 @@ where
         }
 
         let Some(class_like_metadata) = context.codebase.get_class_like(caught_type.as_bytes()) else {
+            if report_unknown_sharp_class(context, caught_type.as_bytes(), caught_span) {
+                continue;
+            }
+
+            let caught_type = display_class_like_name(context, caught_type);
             context.collector.report_with_code(
                 IssueCode::NonExistentCatchType,
                 Issue::error(format!("Attempting to catch an undefined class or interface: `{caught_type}`."))

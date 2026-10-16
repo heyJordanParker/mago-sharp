@@ -14,6 +14,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_database::file::FileId;
+use mago_names::NAMED_EFFECTS;
 use mago_names::display_sharp_member;
 use mago_names::scope::NamespaceScope;
 use mago_reporting::IssueCollection;
@@ -660,20 +661,6 @@ fn accepts_any_effect(class: Word, method: Word) -> bool {
         || (class.eq_ignore_ascii_case(b"Sharp\\Behavior")
             && (method.eq_ignore_ascii_case(b"get") || method.eq_ignore_ascii_case(b"set")))
 }
-
-/// The standard effects that are names and no class, spec section 29, in the spec's order. As `Events` is, each is an
-/// effect only an `extern` gives plain PHP.
-const NAMED_EFFECTS: [&str; 9] = [
-    "Sharp\\Database",
-    "Sharp\\Http",
-    "Sharp\\Files",
-    "Sharp\\Console",
-    "Sharp\\Process",
-    "Sharp\\Clock",
-    "Sharp\\Random",
-    "Sharp\\Cache",
-    "Sharp\\Mail",
-];
 
 /// Whether `name`, a class name as the binder resolves it, is an effect, spec section 29: a `foreign` class, a named
 /// effect, or `Events`.

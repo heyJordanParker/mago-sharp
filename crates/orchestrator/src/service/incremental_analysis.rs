@@ -1153,19 +1153,20 @@ impl IncrementalAnalysisService {
             .flat_map(|state| state.reads.listings.iter().copied())
             .map(|listing| (listing, listing.answer(&self.codebase)))
             .collect();
-        // The analyzer refuses a class-like whose full name is also a namespace (spec section 23), so a file is
-        // analyzed again when a class-like it declares names the namespace of a class-like scanned again.
-        let scanned_namespaces: WordSet = new_file_scans
-            .iter()
-            .flat_map(|(_, metadata)| metadata.class_likes.keys())
-            .flat_map(|name| {
-                let name = name.as_bytes();
-                name.iter()
-                    .enumerate()
-                    .filter(|(_, byte)| **byte == b'\\')
-                    .map(|(end, _)| mago_word::word(&name[..end]))
-            })
-            .collect();
+        // The analyzer refuses a class-like whose full name is also a namespace (spec section 23), on either side, so a
+        // file is analyzed again when a class-like it declares names the namespace of a class-like scanned again, or
+        // lies in the namespace a class-like scanned again names.
+        let namespaces_of = |name: &mago_word::Word| {
+            let name = name.as_bytes();
+            name.iter()
+                .enumerate()
+                .filter(|(_, byte)| **byte == b'\\')
+                .map(|(end, _)| mago_word::word(&name[..end]))
+                .collect::<Vec<_>>()
+        };
+        let scanned_class_likes: WordSet =
+            new_file_scans.iter().flat_map(|(_, metadata)| metadata.class_likes.keys().copied()).collect();
+        let scanned_namespaces: WordSet = scanned_class_likes.iter().flat_map(namespaces_of).collect();
 
         let mut merged_codebase = std::mem::take(&mut self.codebase);
 
@@ -1248,7 +1249,10 @@ impl IncrementalAnalysisService {
         for file_id in &unchanged_file_ids {
             if self.file_states.get(file_id).is_some_and(|state| {
                 state.reads.listings.iter().any(|listing| changed_listings.contains(listing))
-                    || state.entry_keys.class_like_names.iter().any(|name| scanned_namespaces.contains(name))
+                    || state.entry_keys.class_like_names.iter().any(|name| {
+                        scanned_namespaces.contains(name)
+                            || namespaces_of(name).iter().any(|namespace| scanned_class_likes.contains(namespace))
+                    })
             }) && let Ok(file) = self.database.get(file_id)
             {
                 invalid_files.insert(mago_word::word(file.name.as_ref()));

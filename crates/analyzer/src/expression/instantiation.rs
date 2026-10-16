@@ -51,6 +51,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::access::report_full_name;
 use crate::expression::is_refused_type;
 use crate::expression::with::analyze_object_initializer;
 use crate::invocation::Invocation;
@@ -67,6 +68,7 @@ use crate::resolver::class_name::class_value_class;
 use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_class_value_of_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
+use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::statement::function_like::get_this_type;
 use crate::utils::names::article;
@@ -90,6 +92,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     {
         // PHP#'s `new (type)(…)` creates an object from a class value, spec section 25, and only a class's `Class`
         // creates one: a `Class<int>` or a `Class<int|string>` holds a type that is no class.
+        // As a call with an invalid target, a full name, as `new App.Order()` writes, gets no type.
+        if report_full_name(context, self.class, self.constructor.as_ref().map(|constructor| &constructor.name)) {
+            self.argument_list.analyze(context, block_context, artifacts)?;
+            artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+            return Ok(());
+        }
+
         let is_class_value = context.dialect.is_sharp() && matches!(self.class, Expression::Parenthesized(_));
         if is_class_value {
             let was_inside_call = block_context.flags.inside_call();
@@ -422,8 +432,13 @@ where
     };
 
     let Some(metadata) = context.codebase.get_class_like(fq_classname.as_bytes()) else {
-        let missing_class = display_class_like_name(context, fq_classname);
+        if report_unknown_sharp_class(context, fq_classname.as_bytes(), class_expression_span) {
+            argument_list.analyze(context, block_context, artifacts)?;
 
+            return Ok(get_never());
+        }
+
+        let missing_class = display_class_like_name(context, fq_classname);
         context.collector.report_with_code(
             IssueCode::NonExistentClass,
             Issue::error(format!("Class `{missing_class}` not found."))

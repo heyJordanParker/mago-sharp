@@ -86,6 +86,7 @@ where
         attributes: Sequence<'arena, AttributeList<'arena>>,
     ) -> Result<Statement<'arena>, ParseError> {
         let modifiers = self.parse_modifier_sequence()?;
+        self.read_php_type_declaration()?;
         if self.is_at_event()? {
             return Ok(Statement::Event(self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?));
         }
@@ -93,8 +94,6 @@ where
         if self.is_at_struct()? {
             return Ok(Statement::Struct(self.parse_struct_with_attributes_and_modifiers(attributes, modifiers)?));
         }
-
-        self.read_php_type_declaration()?;
 
         if self.dialect.is_sharp() {
             match self.stream.peek_kind(0)? {

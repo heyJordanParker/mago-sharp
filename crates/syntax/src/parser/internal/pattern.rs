@@ -36,13 +36,19 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    /// Whether the next token is PHP#'s `is` or `as` after a value, which bind as tightly as `<`, as in C#.
+    /// Whether the next token is PHP#'s `is` or `as` after a value, which bind as tightly as `<`, as in C#. A name
+    /// after a value can only be one of them, so `IS` or `As` reads as it with one error, spec section 2.
     pub(crate) fn is_at_is_or_as(&mut self) -> Result<bool, ParseError> {
-        Ok(self.dialect.is_sharp()
-            && self
-                .stream
-                .lookahead(0)?
-                .is_some_and(|token| token.kind == T!["as"] || (token.kind == T![Identifier] && token.value == b"is")))
+        let Some(token) = self.stream.lookahead(0)?.filter(|_| self.dialect.is_sharp()) else {
+            return Ok(false);
+        };
+        if let Some(word @ ("is" | "as")) = self.miscased_keyword(token) {
+            self.read_miscased_keyword(token, word);
+
+            return Ok(true);
+        }
+
+        Ok(token.kind == T!["as"] || (token.kind == T![Identifier] && token.value == b"is"))
     }
 
     /// Parses `is` and its pattern, or `as` and its type, after `value`.

@@ -402,7 +402,8 @@ const OBJECT: &[u8] = b"Object";
 /// list does not name. It reports each refusal once, at its outermost node, and skips the nodes inside the refusal's
 /// span. A node refused at a part, such as a method at its name or a cast at its operator, keeps its other parts
 /// checked, so every PHP form PHP# removes is refused by name wherever it is written. It does not run on a file with a
-/// parse error, which is the one error to fix first. The constructs PHP# never has, such as `$`
+/// parse error, which is the one error to fix first, except a keyword in another case, which reads as the keyword and
+/// leaves the tree whole. The constructs PHP# never has, such as `$`
 /// variables, `global` and top-level functions, keep their own errors. So do the PHP forms PHP# removes, each an error
 /// that names its replacement. In a method body, they are `echo`, `print`, `die`, `exit` without parentheses or
 /// with a string literal or a template as its first argument, and `switch`. In a method body and a constant

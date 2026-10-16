@@ -18,6 +18,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::TypeArgumentList;
 use mago_word::Word;
@@ -130,7 +131,16 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
                 None => call.analyze(context, block_context, artifacts),
             },
             // As a call with an invalid target, it gets no type, and only its arguments are analyzed.
-            Call::Method(call) if report_full_name(context, call.object, None) => {
+            Call::Method(call)
+                if report_full_name(
+                    context,
+                    call.object,
+                    match &call.method {
+                        ClassLikeMemberSelector::Identifier(method) => Some(method),
+                        _ => None,
+                    },
+                ) =>
+            {
                 call.argument_list.analyze(context, block_context, artifacts)
             }
             // PHP# calls a plain PHP function through its namespace, `Pdf.render(html)` or `global.now()`.

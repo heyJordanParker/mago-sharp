@@ -87,6 +87,9 @@ pub enum ParseError {
     /// A `uses` clause written after a PHP# function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, at
     /// the clause. A function type lists its effects inside its brackets.
     UsesAfterFunctionTypeInSharp(Span),
+    /// A `uses` clause written on a PHP# `import`, as in `import Vendor.Pdf uses Files;`, at the clause. Spec section
+    /// 23: a library's effect lives in its one `extern` declaration.
+    UsesOnImportInSharp(Span),
     /// A PHP# method's `readonly` written before its `on` or `uses` clause, at the `readonly`. Spec section 13: it is
     /// always the last clause.
     ReadonlyNotLastInSharp(Span),
@@ -117,7 +120,8 @@ pub enum ParseError {
     /// type arguments, as Dart's does, and declares none.
     NamedConstructorTypeParametersInSharp(Box<str>, Option<Box<str>>, Span),
     /// A PHP# keyword written in another case, as in `Return 5;`, with the keyword as PHP# writes it, at the keyword.
-    /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are.
+    /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are, except `Self`. The analyzer reports it too, where
+    /// a name that spells a keyword names nothing, as `THIS` does.
     MiscasedKeywordInSharp(&'static str, Span),
     /// A class name in parentheses before a value, as in `(Admin) user`, with the class and the value when it is a
     /// dotted name, at the whole cast. Spec section 24: a class or an interface narrows only with `as`.
@@ -159,6 +163,7 @@ impl HasFileId for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::UsesOnImportInSharp(span)
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
@@ -211,6 +216,7 @@ impl HasSpan for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::UsesOnImportInSharp(span)
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
@@ -349,6 +355,9 @@ impl std::fmt::Display for ParseError {
                 "A function type lists its effects inside its brackets, as in `Function<Charge(Cart) uses Http>`."
                     .to_string()
             }
+            ParseError::UsesOnImportInSharp(_) => {
+                "An import never carries `uses`: declare the library's effect once, with `extern`.".to_string()
+            }
             ParseError::ReadonlyNotLastInSharp(_) => {
                 "A method's `readonly` is its last clause, after `on` and `uses`, as in `Money quote(Cart cart) uses Http readonly;`."
                     .to_string()
@@ -378,6 +387,9 @@ impl std::fmt::Display for ParseError {
             }
             ParseError::NamedConstructorTypeParametersInSharp(..) => {
                 "A named constructor takes its class's type arguments and declares none of its own.".to_string()
+            }
+            ParseError::MiscasedKeywordInSharp("Self", _) => {
+                "Write the keyword `Self` with a capital S and the rest in lowercase.".to_string()
             }
             ParseError::MiscasedKeywordInSharp(keyword, _) => format!("Write the keyword `{keyword}` in lowercase."),
             ParseError::ClassCastInSharp(class, Some(value), _) => {
@@ -439,6 +451,7 @@ impl From<&ParseError> for Issue {
             | ParseError::ConditionalInGuardInSharp(..)
             | ParseError::UndeclarableOperatorInSharp(..)
             | ParseError::UsesAfterFunctionTypeInSharp(..)
+            | ParseError::UsesOnImportInSharp(..)
             | ParseError::ReadonlyNotLastInSharp(..)
             | ParseError::OtherMemberInSharpModule(..)
             | ParseError::ComputedParameterInSharp(..)

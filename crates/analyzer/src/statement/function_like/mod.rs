@@ -82,6 +82,7 @@ use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::instantiation::report_missing_type_arguments;
+use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::property::localize_property_type;
 use crate::resolver::property::resolve_declared_property;
 use crate::statement::analyze_statements;
@@ -1885,6 +1886,10 @@ pub(crate) fn report_undefined_type<A>(context: &mut Context<'_, '_, A>, name: W
 where
     A: Arena,
 {
+    if report_unknown_sharp_class(context, name.as_bytes(), span) {
+        return;
+    }
+
     let issue = if context.dialect.is_sharp() {
         let name = display_class_like_name(context, name);
         Issue::error(format!("Cannot find type `{name}`."))

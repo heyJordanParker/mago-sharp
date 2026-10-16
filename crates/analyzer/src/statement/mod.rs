@@ -213,7 +213,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                             }
                         }
                     }
-                    if context.settings.check_use_statements {
+                    // A `.sharp` file's imports are checked above, whatever the setting says.
+                    if context.settings.check_use_statements && !context.dialect.is_sharp() {
                         r#use.analyze(context, block_context, artifacts)?;
                     }
                     if context.settings.check_name_casing {

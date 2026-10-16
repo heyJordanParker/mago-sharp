@@ -340,7 +340,7 @@ fn the_analyzer_reads_the_dialect_from_the_program_not_the_file_name() {
 /// `@mutation-free`, which changes the collection.
 #[test]
 fn the_binder_knows_every_changing_collection_method() {
-    for class in ["Sharp\\ListMethods", "Sharp\\MapMethods", "Sharp\\SetMethods"] {
+    for class in ["Sharp\\Internal\\ListMethods", "Sharp\\Internal\\MapMethods", "Sharp\\Internal\\SetMethods"] {
         let metadata =
             PRELUDE.metadata.get_class_like(class.as_bytes()).expect("the collection stub is in the prelude");
         let mut changing: Vec<&str> = metadata
@@ -370,7 +370,7 @@ fn the_binder_knows_every_changing_collection_method() {
 #[test]
 fn every_inlined_collection_method_is_a_method_of_its_collection() {
     for (collection, method) in INLINED_COLLECTION_METHODS {
-        let class = format!("Sharp\\{collection}Methods");
+        let class = format!("Sharp\\Internal\\{collection}Methods");
 
         assert!(PRELUDE.metadata.get_method(class.as_bytes(), method.as_bytes()).is_some(), "{class} has no {method}");
     }
@@ -3784,6 +3784,21 @@ fn a_class_that_shares_its_full_name_with_a_namespace_is_an_error() {
             ),
         ),
         (php_store, vec![php_order], None),
+        // `mago compile` prints only `.sharp` files' errors, so the PHP# side of the clash reports it too.
+        (
+            order,
+            vec![php_store],
+            Some(
+                "3:14 name-already-in-use `App.Tenant.Store` is both a plain PHP class and a namespace: rename the class or the folder. | The plain PHP class is declared here.",
+            ),
+        ),
+        (
+            ("src/App/Tenant/Store/Shelf/Item.sharp", "namespace App.Tenant.Store.Shelf;\n\npublic class Item\n{\n}\n"),
+            vec![php_store],
+            Some(
+                "3:14 name-already-in-use `App.Tenant.Store` is both a plain PHP class and a namespace: rename the class or the folder. | The plain PHP class is declared here.",
+            ),
+        ),
         (
             ("src/App/Tenant/Store/Store.sharp", "namespace App.Tenant.Store;\n\npublic class Store\n{\n}\n"),
             vec![order],
@@ -4439,7 +4454,7 @@ fn sorted_by_a_key_of_two_types_that_never_match_is_refused_as_less_than_refuses
 #[test]
 fn sorted_by_an_any_key_reports_what_less_than_reports_on_two_any_values() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool a(Any left, Any right) => left < right;\n\n    public bool b(Any? left, Any? right) => left < right;\n\n    public List<Any> c(List<Any> values) => values.sortedBy(v => v);\n\n    public List<Any?> d(List<Any?> values) => values.sortedBy(v => v);\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Report\n{\n    public function a(mixed $left, mixed $right): bool\n    {\n        return $left < $right;\n    }\n\n    /**\n     * @param ListMethods<mixed> $values\n     *\n     * @return list<mixed>\n     */\n    public function c(ListMethods $values): array\n    {\n        return $values->sortedBy(fn (mixed $v): mixed => $v);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\n\nfinal class Report\n{\n    public function a(mixed $left, mixed $right): bool\n    {\n        return $left < $right;\n    }\n\n    /**\n     * @param ListMethods<mixed> $values\n     *\n     * @return list<mixed>\n     */\n    public function c(ListMethods $values): array\n    {\n        return $values->sortedBy(fn (mixed $v): mixed => $v);\n    }\n}\n";
     let mixed = |at: &str, side: &str| {
         format!(
             "{at} mixed-operand {side} operand in `<` comparison has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `<` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
@@ -7266,6 +7281,145 @@ fn a_member_read_through_a_full_name_names_the_import_to_add() {
     assert_eq!(issues(analyzed, &others), ["7:16 non-existent-class-like", "7:16 mixed-return-statement"]);
 }
 
+/// Spec section 23 keeps full names in `import` lines wherever code writes one: a type, a local's type, `new`,
+/// `nameof`, `typeof`, an attribute, `catch`, a class header, a read, a call or an `extern` through a library's
+/// namespace, and a class through an imported namespace. Each is one error that names the import to add and what to
+/// write.
+#[test]
+fn a_full_name_anywhere_in_code_names_the_import_to_add() {
+    const FAILURE: &str = "<?php\n\nnamespace App\\Shared;\n\nfinal class Failure extends \\Exception {}\n";
+    const PDF: &str = "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfunction render(string $html): string { return $html; }\n\nfinal class Document\n{\n    public static function blank(): self { return new self(); }\n}\n";
+    const BASE: &str = "<?php\n\nnamespace App\\Shared;\n\nclass Base {}\n";
+    let money = "Full names appear only in `import` lines: add `import App.Shared.Money;` and write `Money`.";
+    let document = "Full names appear only in `import` lines: add `import Vendor.Pdf.Document;` and write `Document`.";
+    let render = "Full names appear only in `import` lines: add `import Vendor.Pdf;` and write `Pdf.render`.";
+
+    for (head, member, message) in [
+        ("class Report", "    public void take(App.Shared.Money money) { }\n", money),
+        ("class Report", "    public App.Shared.Money? find() => null;\n", money),
+        ("class Report", "    public App.Shared.Money? last { get; set; } = null;\n", money),
+        ("class Report", "    public List<App.Shared.Money> all() => [];\n", money),
+        ("class Report", "    public void run()\n    {\n        App.Shared.Money? money = null;\n    }\n", money),
+        ("class Report", "    public Any make() => new App.Shared.Money();\n", money),
+        ("class Report", "    public string name() => nameof(App.Shared.Money.cents);\n", money),
+        ("class Report", "    public Any kind() => typeof(App.Shared.Money);\n", money),
+        ("class Report", "    [App.Shared.Money]\n    public void run() { }\n", money),
+        (
+            "class Report",
+            "    public void run()\n    {\n        try { } catch (App.Shared.Failure e) { }\n    }\n",
+            "Full names appear only in `import` lines: add `import App.Shared.Failure;` and write `Failure`.",
+        ),
+        (
+            "class Report : App.Shared.Base",
+            "",
+            "Full names appear only in `import` lines: add `import App.Shared.Base;` and write `Base`.",
+        ),
+        (
+            "class Report",
+            "    public int dpi() => Vendor.Pdf.DEFAULT_DPI;\n",
+            "Full names appear only in `import` lines: add `import Vendor.Pdf;` and write `Pdf.DEFAULT_DPI`.",
+        ),
+        ("class Report", "    public string draw(string html) => Vendor.Pdf.render(html);\n", render),
+        ("extern Vendor.Pdf.render uses Files;\n\nclass Report", "", render),
+        ("import Vendor.Pdf;\n\nclass Report", "    public Any blank() => Pdf.Document.blank();\n", document),
+        ("import Vendor.Pdf;\n\nclass Report", "    public Any make() => new Pdf.Document();\n", document),
+    ] {
+        let code: &'static str =
+            Box::leak(format!("namespace App.Tenant;\n\n{head}\n{{\n{member}}}\n").into_boxed_str());
+        let others = [
+            ("src/App/Shared/Money.php", MONEY),
+            ("src/App/Shared/Failure.php", FAILURE),
+            ("src/App/Shared/Base.php", BASE),
+            ("src/Vendor/Pdf/Pdf.php", PDF),
+        ];
+        let errors: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Tenant/Report.sharp", code), &others)
+            .into_iter()
+            .filter(|issue| issue.level == Level::Error)
+            .map(|issue| issue.message)
+            .collect();
+
+        assert_eq!(errors.first().map(String::as_str), Some(message), "{code}: {errors:?}");
+    }
+}
+
+/// Spec section 23 names what a name without its import needs: a standard library class its file doesn't import, as
+/// `Math`, names the import, and a bare constant of a namespace the file imports names the read through it.
+#[test]
+fn a_name_without_its_import_names_the_import_or_the_namespace() {
+    const MATH: &str = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static int max(int a, int b) => a > b ? a : b;\n}\n";
+    const PDF: &str = "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n";
+    let others = [
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp", MATH),
+        ("src/Vendor/Pdf/Pdf.php", PDF),
+    ];
+
+    for (code, message) in [
+        (
+            "namespace App;\n\nclass Report\n{\n    public int largest(int a, int b) => Math.max(a, b);\n}\n",
+            "`Math` is not imported. | Used here without an import. | Add `import Sharp.Math.Math;` to the file.",
+        ),
+        (
+            "namespace App;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public int dpi() => DEFAULT_DPI;\n}\n",
+            "Read the library's constant through its namespace: write `Pdf.DEFAULT_DPI`. | A bare name reads only this code's own constant.",
+        ),
+    ] {
+        let worded = worded(("src/App/Report.sharp", code), &others);
+
+        assert!(worded.first().is_some_and(|first| first.ends_with(message)), "{code}: {worded:?}");
+    }
+}
+
+/// Spec section 23: the last part of an import is a class, or the namespace of a plain PHP library's functions and
+/// constants, whatever the use statement setting says. One function or constant, a namespace of classes only and a
+/// name that names nothing are each one error, and a capitalized last part never names PHP's function `log()`.
+#[test]
+fn an_import_names_a_class_or_a_namespace_of_functions_and_constants() {
+    const PDF: &str = "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfunction render(string $html): string { return $html; }\n";
+    const ENTITY: &str = "<?php\n\nnamespace App\\Shared\\Schema;\n\nclass Entity {}\n";
+    const COLUMN: &str = "<?php\n\nnamespace App\\Shared\\Schema;\n\nclass Column {}\n";
+    let others = [
+        ("src/Vendor/Pdf/Pdf.php", PDF),
+        ("src/App/Shared/Money.php", MONEY),
+        ("src/App/Shared/Schema/Entity.php", ENTITY),
+        ("src/App/Shared/Schema/Column.php", COLUMN),
+    ];
+
+    for (import, expected) in [
+        ("App.Shared.Money", None),
+        ("Vendor.Pdf", None),
+        ("Nowhere.Missing", Some("Imported class, interface, trait, or enum `Nowhere.Missing` does not exist.")),
+        ("Log", Some("Imported class, interface, trait, or enum `Log` does not exist.")),
+        (
+            "App.Shared.Schema",
+            Some(
+                "`App.Shared.Schema` holds classes only, and an import names a class or a namespace of functions: import the class, as in `import App.Shared.Schema.Column;` or `import App.Shared.Schema.Entity;`.",
+            ),
+        ),
+        (
+            "Vendor.Pdf.DEFAULT_DPI",
+            Some(
+                "An import names a class or a namespace, not a constant: import `Vendor.Pdf`, and read `Pdf.DEFAULT_DPI`.",
+            ),
+        ),
+        (
+            "Vendor.Pdf.render",
+            Some(
+                "An import names a class or a namespace, not a function: import `Vendor.Pdf`, and call `Pdf.render(…)`.",
+            ),
+        ),
+    ] {
+        let code: &'static str =
+            Box::leak(format!("namespace App;\n\nimport {import};\n\nclass Report\n{{\n}}\n").into_boxed_str());
+        let errors: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Report.sharp", code), &others)
+            .into_iter()
+            .filter(|issue| issue.level == Level::Error)
+            .map(|issue| issue.message)
+            .collect();
+
+        assert_eq!(errors, expected.into_iter().collect::<Vec<_>>(), "{import}");
+    }
+}
+
 /// A root that names a class is a class whatever follows it, even when its name and the next one also name a class.
 #[test]
 fn a_class_declared_in_the_file_is_never_the_root_of_a_full_name() {
@@ -9240,7 +9394,7 @@ fn a_search_needs_equality_on_the_element_type() {
 #[test]
 fn every_collection_counts_its_elements() {
     let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int total(List<int> sizes, Map<string, int> counts)\n    {\n        return sizes.count() + counts.count();\n    }\n\n    public void wrong(List<int> sizes)\n    {\n        if (sizes.count()) { }\n        sizes.count(1);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\nuse Sharp\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int> $sizes\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(ListMethods $sizes, MapMethods $counts): int\n    {\n        return $sizes->count() + $counts->count();\n    }\n\n    /**\n     * @param ListMethods<int> $sizes\n     */\n    public function wrong(ListMethods $sizes): void\n    {\n        $sizes->count(1);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int> $sizes\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(ListMethods $sizes, MapMethods $counts): int\n    {\n        return $sizes->count() + $counts->count();\n    }\n\n    /**\n     * @param ListMethods<int> $sizes\n     */\n    public function wrong(ListMethods $sizes): void\n    {\n        $sizes->count(1);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Shelf.sharp", sharp), &[]), ["12:13 invalid-operand", "13:21 too-many-arguments"]);
     assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["24:23 too-many-arguments"]);
@@ -9253,7 +9407,7 @@ fn every_collection_counts_its_elements() {
 #[test]
 fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_yet() {
     let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public bool any(Function<bool(int)> predicate) => true;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1) || items.contains(1)) {\n            return items.any(i => i > 0) ? 1 : 0;\n        }\n        return items.count();\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int>|list<int> $sizes\n     */\n    public function run(ListMethods|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int>|list<int> $sizes\n     */\n    public function run(ListMethods|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[]);
 
     assert_eq!(
@@ -9264,8 +9418,8 @@ fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_ye
     assert!(!codes(&self::issues(("src/Demo/Shelf.php", php), &[])).contains(&"not-supported-yet"));
 }
 
-/// The analyzer checks a collection method against `Sharp\ListMethods` or `Sharp\MapMethods`, and every message names
-/// the PHP# type the code wrote instead, as in "`add` doesn't exist on `Map<string, int>`".
+/// The analyzer checks a collection method against `Sharp\Internal\ListMethods` or `Sharp\Internal\MapMethods`, and
+/// every message names the PHP# type the code wrote instead, as in "`add` doesn't exist on `Map<string, int>`".
 #[test]
 fn a_collection_method_message_names_the_sharp_type() {
     let sharp = "namespace Demo;\n\nclass Order\n{\n    public void wrong(List<Line> lines, List<int> sizes, Map<string, int> counts)\n    {\n        lines.add(1);\n        sizes.getOrNull(\"a\");\n        counts.add(1);\n        sizes.delete(0);\n        counts.get(1.5);\n        sizes.getOrNull();\n        sizes.getOrNull(0, 1);\n        counts.has(1);\n        counts.remove(1);\n    }\n}\n\nclass Line\n{\n}\n";
@@ -9423,7 +9577,7 @@ fn a_changing_collection_method_writes_back_through_a_null_safe_property() {
 /// docblock calls its changing methods on a variable as on any other object.
 #[test]
 fn a_changing_collection_method_called_from_php_needs_no_place() {
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\nuse Sharp\\MapMethods;\nuse Sharp\\SetMethods;\n\nfinal class Shop\n{\n    /**\n     * @param ListMethods<int> $lines\n     * @param MapMethods<string, int> $counts\n     * @param SetMethods<int> $ids\n     */\n    public function change(ListMethods $lines, MapMethods $counts, SetMethods $ids): bool\n    {\n        $lines->add(1);\n        $counts->remove('a');\n\n        return $ids->add(1);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\nuse Sharp\\Internal\\MapMethods;\nuse Sharp\\Internal\\SetMethods;\n\nfinal class Shop\n{\n    /**\n     * @param ListMethods<int> $lines\n     * @param MapMethods<string, int> $counts\n     * @param SetMethods<int> $ids\n     */\n    public function change(ListMethods $lines, MapMethods $counts, SetMethods $ids): bool\n    {\n        $lines->add(1);\n        $counts->remove('a');\n\n        return $ids->add(1);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Shop.php", php), &[]), Vec::<String>::new());
 }
@@ -9534,12 +9688,12 @@ fn a_map_keyed_by_a_backed_enum_takes_exactly_the_enum_as_a_key() {
     );
 }
 
-/// `Sharp\MapMethods` declares the key of `get`, `has` and `remove` as `K`, which a `Map<Status, int>` fills with
-/// `Status`, so each takes the case. A `.php` call on `MapMethods<string, int>` takes its `K` the same way.
+/// `Sharp\Internal\MapMethods` declares the key of `get`, `has` and `remove` as `K`, which a `Map<Status, int>` fills
+/// with `Status`, so each takes the case. A `.php` call on `MapMethods<string, int>` takes its `K` the same way.
 #[test]
 fn map_get_has_and_remove_take_a_backed_enum_key_in_sharp_and_in_php() {
     let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int? lookup(Map<Status, int> counts, Status status)\n    {\n        counts.remove(status);\n        return counts.has(status) ? counts.get(status) : null;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\MapMethods;\n\nfinal class Tally\n{\n    /** @param MapMethods<string, int> $counts */\n    public function lookup(MapMethods $counts, string $name): ?int\n    {\n        return $counts->get($name);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Tally\n{\n    /** @param MapMethods<string, int> $counts */\n    public function lookup(MapMethods $counts, string $name): ?int\n    {\n        return $counts->get($name);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
     assert_eq!(issues(("src/Demo/Tally.php", php), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
@@ -9875,7 +10029,13 @@ fn a_class_parses_as_a_struct_does() {
 fn a_sharp_class_cannot_implement_the_struct_marker() {
     let sharp = "namespace Demo;\n\nimport Sharp.Struct;\n\nclass Fake : Struct\n{\n    public Fake() { }\n}\n";
 
-    assert_eq!(messages(("src/Demo/Fake.sharp", sharp), &[]), ["Class `Fake` cannot implement unknown type `Struct`"]);
+    assert_eq!(
+        messages(("src/Demo/Fake.sharp", sharp), &[]),
+        [
+            "Imported class, interface, trait, or enum `Sharp.Struct` does not exist.",
+            "Class `Fake` cannot implement unknown type `Struct`"
+        ]
+    );
 }
 
 /// Spec section 12 keys a `Map` by anything with `==` and `hash()`, so a class that declares `operator ==` with
@@ -9939,7 +10099,7 @@ fn a_group_key_is_checked_only_where_a_function_fills_the_key_parameter() {
 /// `array-key` bound there, as on master: a class or a backed enum key is refused at the call.
 #[test]
 fn a_php_caller_of_group_by_keys_the_array_by_an_array_key() {
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Line;\nuse Lib\\Status;\nuse Sharp\\ListMethods;\n\nfinal class Tally\n{\n    /** @param ListMethods<Line> $lines */\n    public function group(ListMethods $lines): int\n    {\n        $byLine = $lines->groupBy(fn (Line $line) => $line);\n        $byStatus = $lines->associateBy(fn (Line $line) => Status::Active);\n        $byName = $lines->groupBy(fn (Line $line) => 'all');\n\n        return count($byLine) + count($byStatus) + count($byName);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Line;\nuse Lib\\Status;\nuse Sharp\\Internal\\ListMethods;\n\nfinal class Tally\n{\n    /** @param ListMethods<Line> $lines */\n    public function group(ListMethods $lines): int\n    {\n        $byLine = $lines->groupBy(fn (Line $line) => $line);\n        $byStatus = $lines->associateBy(fn (Line $line) => Status::Active);\n        $byName = $lines->groupBy(fn (Line $line) => 'all');\n\n        return count($byLine) + count($byStatus) + count($byName);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.php", php), &[("src/Lib/Status.php", STATUS)]),
@@ -10195,8 +10355,8 @@ fn a_set_element_takes_what_a_map_key_takes() {
     );
 }
 
-/// A `Set` has the methods of `Sharp\SetMethods`, each typed by its elements: `add`, `remove` and `clear` change it,
-/// `filter` gives a `Set`, and `map` and `sortedBy` give a `List`.
+/// A `Set` has the methods of `Sharp\Internal\SetMethods`, each typed by its elements: `add`, `remove` and `clear`
+/// change it, `filter` gives a `Set`, and `map` and `sortedBy` give a `List`.
 #[test]
 fn set_methods_take_and_give_the_types_of_their_elements() {
     let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tags\n{\n    public int run(Set<string> tags, Set<Status> statuses)\n    {\n        bool added = tags.add(\"vip\");\n        bool removed = tags.remove(\"new\");\n        bool held = tags.contains(\"vip\") && statuses.contains(Status.Active);\n        List<string> listed = tags.toList();\n        Set<string> kept = tags.filter(tag => tag != \"x\");\n        List<int> sizes = tags.map(tag => global.strlen(tag));\n        bool lengthy = tags.any(tag => global.strlen(tag) > 3);\n        string first = tags.first(tag => tag != \"\");\n        List<Status> sorted = statuses.sortedBy(status => status.value);\n        statuses.add(Status.Closed);\n        statuses.remove(Status.Active);\n        tags.clear();\n        return tags.count() + tags.sumOf(tag => global.strlen(tag)) + listed.count() + kept.count() + sizes.count() + sorted.count() + (added && removed && held && lengthy ? 1 : 0) + global.strlen(first);\n    }\n\n    public void wrong(Set<string> tags, Set<Status> statuses)\n    {\n        tags.add(1);\n        statuses.add(\"active\");\n        List<int> kept = tags.filter(tag => tag != \"x\");\n        Set<int> sizes = tags.map(tag => global.strlen(tag));\n        tags.get(0);\n    }\n}\n";
@@ -10213,13 +10373,13 @@ fn set_methods_take_and_give_the_types_of_their_elements() {
     );
 }
 
-/// A message about a `Set` method names the `Set` type the code wrote, never `Sharp\SetMethods`, and a parameter's
-/// `Set` type reads as PHP# writes it. A `.php` call on `SetMethods<string>` names the receiver as `Set<string>` too,
-/// as one on `MapMethods` names a `Map`, and the argument by its PHP type.
+/// A message about a `Set` method names the `Set` type the code wrote, never `Sharp\Internal\SetMethods`, and a
+/// parameter's `Set` type reads as PHP# writes it. A `.php` call on `SetMethods<string>` names the receiver as
+/// `Set<string>` too, as one on `MapMethods` names a `Map`, and the argument by its PHP type.
 #[test]
 fn a_set_message_names_the_sharp_type() {
     let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public void wrong(Set<string> tags, Set<Status> statuses, Map<string, int> counts)\n    {\n        tags.add(1);\n        statuses.contains(\"active\");\n        tags.get(0);\n        this.mark(counts);\n    }\n\n    public void mark(Set<Status> statuses)\n    {\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\SetMethods;\n\nfinal class Tally\n{\n    /** @param SetMethods<string> $tags */\n    public function wrong(SetMethods $tags): void\n    {\n        $tags->add(1);\n        $tags->get(0);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\SetMethods;\n\nfinal class Tally\n{\n    /** @param SetMethods<string> $tags */\n    public function wrong(SetMethods $tags): void\n    {\n        $tags->add(1);\n        $tags->get(0);\n    }\n}\n";
 
     let issues =
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]);
@@ -10406,7 +10566,7 @@ fn a_list_literal_is_passed_where_a_set_is_expected_and_a_list_or_a_map_is_not()
 /// A list literal becomes a `Set` only in the body of the PHP# method or lambda that declares the parameter `Set`, so
 /// only a call of one takes a list literal there, each element of a variadic one too, and a lambda a local holds is
 /// one, while a `List` variable is refused everywhere. Neither
-/// `Sharp\ListMethods.add` of a `List<Set<string>>`, whose `Set` comes from its template, nor a call through a
+/// `Sharp\Internal\ListMethods.add` of a `List<Set<string>>`, whose `Set` comes from its template, nor a call through a
 /// `Function` value runs such a body, so each takes only a `Set`. A plain PHP caller still passes a list to a PHP#
 /// method.
 #[test]
@@ -10476,8 +10636,9 @@ fn an_iterable_has_no_index() {
     );
 }
 
-/// An `Iterable<T>` has the lazy operations of spec section 12, checked against `Sharp\IterableMethods<T>`: `filter`
-/// and `take` keep the element type, `map` takes the lambda's return type, and `toList` reads them into a `List<T>`.
+/// An `Iterable<T>` has the lazy operations of spec section 12, checked against `Sharp\Internal\IterableMethods<T>`:
+/// `filter` and `take` keep the element type, `map` takes the lambda's return type, and `toList` reads them into a
+/// `List<T>`.
 #[test]
 fn lazy_operations_on_an_iterable_type_their_results_by_the_elements() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Iterable<Order> orders, Iterable<Order>? maybe)\n    {\n        Iterable<Order> paid = orders.filter(o => o.paid);\n        Iterable<string> numbers = paid.map(o => o.number);\n        Iterable<string> first = numbers.take(100);\n        List<string> list = first.toList();\n        Iterable<int> wrongMap = paid.map(o => o.number);\n        List<int> wrongList = first.toList();\n        Iterable<Order>? kept = maybe?.filter(o => o.paid);\n        List<string> chain = orders.filter(o => o.paid).map(o => o.number).take(100).toList();\n        return global.count(list) + global.count(wrongList) + global.count(chain) + (kept == null ? 0 : 1) + Report.size(wrongMap);\n    }\n\n    private static int size(Iterable<int> values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; }, public string number { get; })\n    {\n    }\n}\n";
@@ -16187,13 +16348,14 @@ fn an_extern_target_that_names_nothing_is_a_non_existent_class_method_or_functio
     assert_eq!(
         issues(stub, &[STRIPE]),
         [
+            "4:8 non-existent-use-import",
             "6:8 non-existent-class-like",
             "7:8 non-existent-method",
             "8:8 non-existent-function",
             "9:14 non-existent-class-like"
         ]
     );
-    assert_eq!(messages(stub, &[STRIPE])[3], "Cannot find class, interface, enum, or type alias `Nowhere`.");
+    assert_eq!(messages(stub, &[STRIPE])[4], "Cannot find class, interface, enum, or type alias `Nowhere`.");
 
     // An imported namespace that names no class holds functions, spec section 23, so its missing member is a missing
     // function, as `global.nowhere` is.
@@ -20014,5 +20176,43 @@ fn a_method_name_out_of_camel_case_is_a_warning_unless_a_parent_names_it() {
             "8:9 method-name-case Method name `Grand_Total` should be in camel case. | Named here. | Rename it `grandTotal`.",
             "21:16 method-name-case Method name `Total_In` should be in camel case. | Named here. | Rename it `totalIn`.",
         ]
+    );
+}
+
+/// Spec section 2: a keyword written in another case is an ordinary name, so where no such name exists the error
+/// suggests the keyword. A value reads as `TRUE` does, and a keyword before parentheses as `Return` does. Where a class
+/// of that name exists, the name is that class.
+#[test]
+fn a_keyword_in_another_case_that_names_nothing_suggests_the_keyword() {
+    let method = |body: &str| -> &'static str {
+        Box::leak(
+            format!("namespace Demo;\n\nclass Base\n{{\n}}\n\nclass Report : Base\n{{\n    public int total {{ get; set; }} = 0;\n\n    public Any run()\n    {{\n{body}    }}\n}}\n")
+                .into_boxed_str(),
+        )
+    };
+
+    for (body, message) in [
+        ("        return THIS.total;\n", "Write the keyword `this` in lowercase."),
+        ("        return This.total;\n", "Write the keyword `this` in lowercase."),
+        ("        return SUPER.toString();\n", "Write the keyword `super` in lowercase."),
+        ("        return new SELF();\n", "Write the keyword `Self` with a capital S and the rest in lowercase."),
+        ("        return Typeof(Report);\n", "Write the keyword `typeof` in lowercase."),
+        ("        return Nameof(total);\n", "Write the keyword `nameof` in lowercase."),
+        ("        Exit(1);\n        return 1;\n", "Write the keyword `exit` in lowercase."),
+    ] {
+        let code = method(body);
+        let errors: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", code), &[])
+            .into_iter()
+            .filter(|issue| issue.level == Level::Error)
+            .map(|issue| issue.message)
+            .collect();
+
+        assert_eq!(errors.first().map(String::as_str), Some(message), "{code}: {errors:?}");
+    }
+
+    let this = "namespace Demo;\n\nclass This\n{\n    public static int count() => 1;\n}\n";
+    assert_eq!(
+        errors(("src/Demo/Report.sharp", method("        return This.count();\n")), &[("src/Demo/This.sharp", this)]),
+        Vec::<String>::new()
     );
 }

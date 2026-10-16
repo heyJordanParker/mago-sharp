@@ -108,6 +108,7 @@ use crate::binding::BindingError;
 use crate::binding::Local;
 use crate::binding::LocalKind;
 use crate::default_class;
+use crate::default_classes;
 use crate::internal::context::NameResolutionContext;
 use crate::internal::locals::LocalScopes;
 use crate::kind::NameKind;
@@ -115,8 +116,6 @@ use crate::resolver::NamespaceClasses;
 use crate::scope::concat_with_sep;
 use crate::scope::php_name;
 use crate::scope::trim_start_byte;
-use crate::shadowable_default_classes;
-use crate::shadows_a_default_class;
 
 /// A CST visitor (`MutWalker`) that traverses a PHP Concrete Syntax Tree
 /// to resolve names (classes, functions, constants, etc.) according to
@@ -427,7 +426,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
             return ((fqn, imported), None);
         };
         // A default class-like is the class-like of its own namespace, so no other one wins over it there.
-        if !shadows_a_default_class(name) || fqn.eq_ignore_ascii_case(class) {
+        if fqn.eq_ignore_ascii_case(class) {
             return ((class, false), None);
         }
 
@@ -1457,7 +1456,7 @@ where
         attribute: &'ast Attribute<'arena>,
         context: &mut NameResolutionContext<'arena, A>,
     ) {
-        let (name, imported) = self.resolve_class(context, attribute.name.value());
+        let (name, imported) = self.resolve_class(context, arena_name(context, &attribute.name));
 
         self.resolved_names.insert_at(attribute.name.span(), name, imported);
     }
@@ -1533,7 +1532,7 @@ where
     }
 
     fn walk_in_name_of(&mut self, name_of: &'ast NameOf<'arena>, context: &mut NameResolutionContext<'arena, A>) {
-        let (name, imported) = self.resolve_class(context, name_of.class.value());
+        let (name, imported) = self.resolve_class(context, arena_name(context, &name_of.class));
 
         self.resolved_names.insert_at(name_of.class.span(), name, imported);
     }
@@ -1655,7 +1654,7 @@ where
     /// help reads it, and a refused file is analyzed again on every run.
     fn walk_out_namespace(&mut self, _namespace: &Namespace<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
-            for class in shadowable_default_classes().map(str::as_bytes) {
+            for class in default_classes().map(str::as_bytes) {
                 let ((meaning, _), _) = self.class_meaning(context, &class[b"Sharp\\".len()..]);
                 if meaning != class {
                     self.resolved_names.shadow_default_class(class);
