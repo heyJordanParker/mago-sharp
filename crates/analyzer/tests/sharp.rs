@@ -20158,7 +20158,7 @@ fn a_plain_case_of_a_generic_enum_takes_its_type_arguments_from_the_declared_typ
 /// `Result<Order, PaymentError>`.
 #[test]
 fn match_and_is_on_a_result_take_the_subjects_type_arguments() {
-    let code = "namespace App;\n\nclass Reads\n{\n    public string describe(Result<Order, PaymentError> result) => match (result) {\n        Result.Ok(Order order) => \"paid\",\n        Result.Err(PaymentError error) => error.message,\n    };\n\n    public string missing(Result<Order, PaymentError> result) => match (result) {\n        Result.Ok(Order order) => \"paid\",\n    };\n\n    public string failure(Result<Order, PaymentError> result) => result is Result.Err e ? e.error.message : \"paid\";\n\n    public int total(Result<Order, PaymentError> result) => result is Result.Ok(Order order) ? order.total : 0;\n}\n";
+    let code = "namespace App;\n\nclass Reads\n{\n    public string describe(Result<Order, PaymentError> result) => match (result) {\n        Result.Ok(Order order) => \"paid\",\n        Result.Err(PaymentError error) => error.message,\n    };\n\n    public string missing(Result<Order, PaymentError> result) => match (result) {\n        Result.Ok(Order order) => \"paid\",\n    };\n\n    public string failure(Result<Order, PaymentError> result) => result is Result.Err e ? e.error.message : \"paid\";\n\n    public int total(Result<Order, PaymentError> result) => result is Result.Ok(Order order) ? order.total : 0;\n\n    public int optional(Result<Order, PaymentError>? result) => result is Result.Ok(Order order) ? order.total : 0;\n}\n";
 
     assert_eq!(issues(("src/App/Reads.sharp", code), &payments()), ["10:66 match-not-exhaustive"]);
     assert_eq!(messages(("src/App/Reads.sharp", code), &payments()), ["This `match` misses `Result.Err`."]);
