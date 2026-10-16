@@ -1,0 +1,5 @@
+namespace App.Tenant;
+
+interface Sized
+{
+}

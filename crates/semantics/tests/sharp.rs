@@ -13,6 +13,8 @@ use mago_semantics::SemanticsChecker;
 use mago_syntax::parser::parse_file;
 use mago_syntax::token::SHARP_KEYWORDS;
 
+#[path = "../../../tests/support/sharp_files.rs"]
+mod sharp_files;
 #[path = "../../../tests/support/sharp_words.rs"]
 mod sharp_words;
 
@@ -42,9 +44,14 @@ fn check(path: &'static str, code: &'static str) -> Vec<Issue> {
     issues
 }
 
-/// Every semantic issue in the PHP# source, as `line:column message` at its primary span.
+/// Every semantic issue in the PHP# source, as `line:column message` at its primary span, in the file its type names.
 fn issues(code: &'static str) -> Vec<String> {
-    issues_in("src/Report.sharp", code)
+    issues_in(leak(sharp_files::type_file(code)), code)
+}
+
+/// Every semantic issue in the PHP# source, in the file its type names.
+fn check_in_type_file(code: &'static str) -> Vec<Issue> {
+    check(leak(sharp_files::type_file(code)), code)
 }
 
 /// Every semantic issue in the source, in the dialect its path names, as `line:column message` at its primary span.
@@ -75,11 +82,22 @@ fn leak(code: String) -> &'static str {
     Box::leak(code.into_boxed_str())
 }
 
-/// Two files that use every construct `check_slice` accepts: the slice, and the constructs only the standard library
-/// declares, under the namespace `Sharp`. The engine's bridge lowers the same files.
+/// The fixtures use every construct `check_slice` accepts: the slice's folder, one file per type, and the constructs
+/// only the standard library declares, under the namespace `Sharp`. The engine's bridge lowers the same files.
 #[test]
 fn the_slice_fixtures_have_no_semantic_issues() {
-    assert_eq!(issues(include_str!("fixtures/slice.sharp")), Vec::<String>::new());
+    let slice = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/slice");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(slice).expect("the slice fixtures") {
+        let path = entry.expect("a slice fixture").path();
+        let name = path.file_name().expect("a file name").to_string_lossy();
+        let code = leak(std::fs::read_to_string(&path).expect("a readable slice fixture"));
+
+        assert_eq!(issues_in(leak(format!("src/{name}")), code), Vec::<String>::new(), "{name}");
+        checked += 1;
+    }
+
+    assert_eq!(checked, 22, "the number of slice fixtures");
     assert_eq!(issues(include_str!("fixtures/library.sharp")), Vec::<String>::new());
 }
 
@@ -105,27 +123,54 @@ fn an_extern_event_names_a_class() {
 /// class, so any capitalized word but a reserved type name names one, as `Print` and `Exit` do, and `Self` is refused.
 #[test]
 fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties() {
-    let code = "namespace App.Shop;\n\nprivate event Hidden(int id);\nstatic event Shared(int id);\npublic event Typed(public int id, int ...rest);\npublic event Tagged(Set<string> tags);\n[Logged] public event Noted(int id);\npublic event Tracked(int id { get; });\npublic event Maybe(int id, Set<int>? tags);\npublic event Paid(int orderId, string note = \"\") : Placed;\nevent Moved(int id);\ninterface Placed { }\npublic event Empty();\npublic event Print(int id);\npublic event Exit(int code);\npublic event Frozen(readonly int id);\npublic event Scoped(internal int id);\npublic event Self(int id);\n";
-    let fixed = "namespace App.Shop;\n\npublic event Moved(int id);\n\nevent Emptied();\n";
+    for (declaration, expected) in [
+        ("private event Hidden(int id);", vec!["3:1 An event takes only `public` or `internal`."]),
+        ("static event Shared(int id);", vec!["3:1 An event takes only `public` or `internal`."]),
+        (
+            "public event Typed(public int id, int ...rest);",
+            vec![
+                "3:20 An event's parameter takes no modifier: it is a public get-only property of the event.",
+                "3:39 An event's parameter cannot be variadic: it is one property of the event.",
+            ],
+        ),
+        (
+            "public event Tagged(Set<string> tags);",
+            vec!["3:21 A `Set` parameter of an event is not supported yet in PHP#."],
+        ),
+        ("[Logged] public event Noted(int id);", vec!["3:1 This construct is not supported yet in PHP#."]),
+        (
+            "public event Tracked(int id { get; });",
+            vec!["3:29 An event's parameter takes no accessors: it is a get-only property of the event."],
+        ),
+        (
+            "public event Maybe(int id, Set<int>? tags);",
+            vec!["3:28 A `Set` parameter of an event is not supported yet in PHP#."],
+        ),
+        ("public event Paid(int orderId, string note = \"\") : Placed;", vec![]),
+        ("event Moved(int id);", vec![]),
+        ("interface Placed { }", vec![]),
+        ("public event Empty();", vec![]),
+        ("public event Print(int id);", vec![]),
+        ("public event Exit(int code);", vec![]),
+        (
+            "public event Frozen(readonly int id);",
+            vec!["3:21 An `int` never changes, so `readonly` changes nothing: write `int`."],
+        ),
+        (
+            "public event Scoped(internal int id);",
+            vec!["3:21 An event's parameter takes no modifier: it is a public get-only property of the event."],
+        ),
+        ("public event Self(int id);", vec!["3:14 Cannot use `Self` as a class name: it is reserved."]),
+        ("public event Moved(int id);", vec![]),
+        ("event Emptied();", vec![]),
+    ] {
+        let code = leak(format!("namespace App.Shop;\n\n{declaration}\n"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "3:1 An event takes only `public` or `internal`.",
-            "4:1 An event takes only `public` or `internal`.",
-            "5:20 An event's parameter takes no modifier: it is a public get-only property of the event.",
-            "5:39 An event's parameter cannot be variadic: it is one property of the event.",
-            "6:21 A `Set` parameter of an event is not supported yet in PHP#.",
-            "7:1 This construct is not supported yet in PHP#.",
-            "8:29 An event's parameter takes no accessors: it is a get-only property of the event.",
-            "9:28 A `Set` parameter of an event is not supported yet in PHP#.",
-            "16:21 An `int` never changes, so `readonly` changes nothing: write `int`.",
-            "17:21 An event's parameter takes no modifier: it is a public get-only property of the event.",
-            "18:14 Cannot use `Self` as a class name: it is reserved."
-        ]
-    );
-    assert_eq!(issues(fixed), Vec::<String>::new());
-    let construct_notes: Vec<Vec<String>> = check("src/Report.sharp", code)
+        assert_eq!(issues(code), expected, "{declaration}");
+    }
+
+    let code = "namespace App.Shop;\n\n[Logged] public event Noted(int id);\n";
+    let construct_notes: Vec<Vec<String>> = check_in_type_file(code)
         .into_iter()
         .filter(|issue| issue.message == "This construct is not supported yet in PHP#.")
         .map(|issue| issue.notes)
@@ -141,9 +186,13 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
 /// Spec section 28: a law states a fact about the values of a class or an enum, and an interface has no values.
 #[test]
 fn a_law_is_a_member_of_a_class_or_an_enum_and_of_no_interface() {
-    let code = "namespace App.Shared;\n\npublic class Money\n{\n    law sameAmount(int a) => a == a;\n}\n\npublic enum Status\n{\n    case Open;\n\n    law openIsOpen(Status s) => Status.Open == Status.Open;\n}\n\npublic interface Priced\n{\n    law positive(int a) => a >= 0;\n}\n";
+    let class = "namespace App.Shared;\n\npublic class Money\n{\n    law sameAmount(int a) => a == a;\n}\n";
+    let r#enum = "namespace App.Shared;\n\npublic enum Status\n{\n    case Open;\n\n    law openIsOpen(Status s) => Status.Open == Status.Open;\n}\n";
+    let interface = "namespace App.Shared;\n\npublic interface Priced\n{\n    law positive(int a) => a >= 0;\n}\n";
 
-    assert_eq!(issues(code), ["17:5 This class member is not supported yet in PHP#."]);
+    assert_eq!(issues(class), Vec::<String>::new());
+    assert_eq!(issues(r#enum), Vec::<String>::new());
+    assert_eq!(issues(interface), ["5:5 This class member is not supported yet in PHP#."]);
 }
 
 /// A law's parameters range over every value, so none has a default and none collects the rest of the arguments, in a
@@ -153,7 +202,7 @@ fn a_law_parameter_with_a_default_or_a_spread_is_refused() {
     let class = "namespace App.Shared;\n\npublic class Money\n{\n    law withDefault(int a = 1) => a == a;\n    law withRest(int ...rest) => true;\n}\n";
     let module = "namespace App.Shared;\n\nmodule\n{\n    law withDefault(int a = 1) => a == a;\n    law withRest(int ...rest) => true;\n}\n";
 
-    for (path, code) in [("src/Report.sharp", class), ("app/Shared/Module.sharp", module)] {
+    for (path, code) in [("src/Money.sharp", class), ("app/Shared/Module.sharp", module)] {
         assert_eq!(
             issues_in(path, code),
             [
@@ -258,6 +307,103 @@ fn module_sharp_holds_only_its_folders_module() {
     );
 }
 
+/// Spec section 27: a `.sharp` file declares one type, so each further class, interface, enum, struct or event is an
+/// error that names the file it moves to.
+#[test]
+fn a_sharp_file_declares_one_type() {
+    let class = "namespace App.Shop;\n\npublic class Invoice\n{\n}\n\n";
+
+    for (declaration, name) in [
+        ("class Line\n{\n}\n", "Line"),
+        ("interface Priced\n{\n}\n", "Priced"),
+        ("enum Status\n{\n    case Open;\n}\n", "Status"),
+        ("struct Money { }\n", "Money"),
+        ("event Paid(int id);\n", "Paid"),
+    ] {
+        let code = leak(format!("{class}{declaration}"));
+        let column = declaration.find(name).expect("the declaration names its type") + 1;
+
+        assert_eq!(
+            issues_in("app/Shop/Invoice.sharp", code),
+            [format!("7:{column} A `.sharp` file declares one type: move `{name}` to `{name}.sharp`.")],
+            "{declaration}"
+        );
+    }
+
+    let three = "namespace App.Shop;\n\npublic class Invoice\n{\n}\n\nenum Status\n{\n    case Open;\n}\n\nevent Paid(int id);\n";
+    let second = check("app/Shop/Invoice.sharp", three);
+    assert_eq!(
+        second.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>(),
+        [
+            "A `.sharp` file declares one type: move `Status` to `Status.sharp`.",
+            "A `.sharp` file declares one type: move `Paid` to `Paid.sharp`.",
+        ]
+    );
+    let annotations: Vec<Option<&str>> =
+        second[0].annotations.iter().map(|annotation| annotation.message.as_deref()).collect();
+    assert_eq!(annotations, [Some("A second type."), Some("The file's type.")]);
+}
+
+/// Spec section 27: the file's type is named like the file, case included, as a PSR-4 lookup on Linux reads it.
+#[test]
+fn a_sharp_file_is_named_like_its_type() {
+    let code = "namespace App.Shop;\n\npublic class Invoice\n{\n}\n";
+
+    assert_eq!(issues_in("app/Shop/Invoice.sharp", code), Vec::<String>::new());
+    assert_eq!(
+        issues_in("app/Shop/Bill.sharp", code),
+        ["3:14 `Bill.sharp` declares `Invoice`: rename the file `Invoice.sharp`, or the type `Bill`."]
+    );
+
+    // The type is renamed to the file's name only when that name can name a type: capital first, then letters, digits
+    // and `_`.
+    for file in ["app/Shop/invoice.sharp", "app/Shop/store-helper.sharp", "app/Shop/Order.Extra.sharp"] {
+        let name = file.rsplit('/').next().expect("the path names a file");
+
+        assert_eq!(
+            issues_in(file, code),
+            [format!("3:14 `{name}` declares `Invoice`: rename the file `Invoice.sharp`.")],
+            "{file}"
+        );
+    }
+
+    // A type named like its file in lowercase gets the capital letter error, which renames the type.
+    assert_eq!(
+        issues_in("app/Shop/invoice.sharp", "namespace App.Shop;\n\npublic class invoice\n{\n}\n"),
+        [
+            "3:14 `invoice` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
+        ]
+    );
+
+    // The type named like the file is the file's own wherever it sits, so each other type moves.
+    let second = "namespace App.Shop;\n\npublic class First\n{\n}\n\npublic class Second\n{\n}\n";
+    assert_eq!(
+        issues_in("app/Shop/Second.sharp", second),
+        ["3:14 A `.sharp` file declares one type: move `First` to `First.sharp`."]
+    );
+
+    // A misnamed file with a second type reports both: the rename and the move.
+    let two = "namespace App.Shop;\n\npublic class Invoice\n{\n}\n\nenum Status\n{\n    case Open;\n}\n";
+    assert_eq!(
+        issues_in("app/Shop/Bill.sharp", two),
+        [
+            "3:14 `Bill.sharp` declares `Invoice`: rename the file `Invoice.sharp`, or the type `Bill`.",
+            "7:6 A `.sharp` file declares one type: move `Status` to `Status.sharp`.",
+        ]
+    );
+}
+
+/// An `extern` declaration file and a test file that states only its module declare no type, so any name is theirs.
+#[test]
+fn a_sharp_file_without_a_type_takes_any_name() {
+    let externs =
+        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient uses Http;\nextern trim;\n";
+    let test = "namespace App.Shop;\n\nmodule : App.Shop\n{\n    singleton Mailer = SmtpMailer;\n}\n";
+
+    assert_eq!(issues_in("app/Stubs/Effects.sharp", externs), Vec::<String>::new());
+    assert_eq!(issues_in("app/Shop/CheckoutTest.sharp", test), Vec::<String>::new());
+}
+
 /// A module's laws are named by the module and their own names, compared ignoring case, so each name is stated once.
 #[test]
 fn a_module_states_each_law_once() {
@@ -292,15 +438,18 @@ fn a_law_and_a_method_named_alike_are_a_duplicate_member() {
 
 #[test]
 fn every_construct_outside_the_slice_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\ninterface Shape\n{\n}\n\ntrait Named\n{\n}\n\nclass Report\n{\n    public int run(int extra)\n    {\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
+    let interface = "namespace App.Tenant;\n\ninterface Shape\n{\n}\n";
+    let r#trait = "namespace App.Tenant;\n\ntrait Named\n{\n}\n";
+    let class = "namespace App.Tenant;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
 
+    assert_eq!(issues(interface), Vec::<String>::new());
+    assert_eq!(issues(r#trait), ["3:1 This statement is not supported yet in PHP#."]);
     assert_eq!(
-        issues(code),
+        issues(class),
         [
-            "7:1 This statement is not supported yet in PHP#.",
-            "15:22 This `new` without arguments is not supported yet in PHP#.",
-            "16:25 PHP# writes a method value without `(...)`: `this.run`.",
-            "17:22 This expression is not supported yet in PHP#.",
+            "7:22 This `new` without arguments is not supported yet in PHP#.",
+            "8:25 PHP# writes a method value without `(...)`: `this.run`.",
+            "9:22 This expression is not supported yet in PHP#.",
         ]
     );
 }
@@ -469,7 +618,7 @@ fn every_body_is_written_in_braces() {
 
     for (body, at, fix) in refused {
         let code = leak(method(&format!("{body}        return extra;\n")));
-        let issue = check("src/Report.sharp", code).remove(0);
+        let issue = check_in_type_file(code).remove(0);
         let span = issue.primary_span().expect("a primary span");
         let fixed = leak(format!("{}{fix}{}", &code[..span.start.offset as usize], &code[span.end.offset as usize..]));
 
@@ -779,6 +928,27 @@ fn true_false_or_null_written_in_another_case_is_one_error() {
     }
 }
 
+/// Spec section 2: a keyword in another case reads as the keyword with one parse error, so the file's tree is the tree
+/// of the lowercase keyword, and the file's other PHP# errors are still reported, as `keyword-case` writes both.
+#[test]
+fn a_keyword_in_another_case_leaves_the_files_other_errors_reported() {
+    let code = method("        const shipped = TRUE;\n        $total = 1;\n        Return;\n")
+        .replace("public int run", "public void run");
+    let arena = LocalArena::new();
+    let file = File::ephemeral(Cow::Borrowed(b"src/Report.sharp"), Cow::Owned(code.into_bytes()));
+    let program = parse_file(&arena, &file);
+    let names = NameResolver::new(&arena).resolve(program);
+    let parse_errors: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
+    let semantic_issues: Vec<String> = SemanticsChecker::new(PHPVersion::new(8, 4, 0))
+        .check(&file, program, &names)
+        .into_iter()
+        .map(|issue| issue.message)
+        .collect();
+
+    assert_eq!(parse_errors, ["Write the keyword `return` in lowercase."]);
+    assert_eq!(semantic_issues, ["Write `true` in lowercase.", "PHP# variables have no `$`: write `total`."]);
+}
+
 /// PHP reserves `X::class` for a class's name, so a constant named `class` in any case fails when PHP loads the file.
 #[test]
 fn a_constant_named_class_is_an_error() {
@@ -811,7 +981,7 @@ fn declare_of_another_setting_is_one_error_that_names_it() {
     ] {
         let code = leak(method(&format!("{body}        return extra;\n")));
         let issues: Vec<(String, Option<String>)> =
-            check("src/Report.sharp", code).into_iter().map(|issue| (issue.message, issue.help)).collect();
+            check_in_type_file(code).into_iter().map(|issue| (issue.message, issue.help)).collect();
 
         assert_eq!(
             issues,
@@ -1077,7 +1247,7 @@ fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
                 )
             };
             let refused: Vec<(String, Option<String>)> =
-                check("src/Report.sharp", code).into_iter().map(|issue| (issue.message, issue.help)).collect();
+                check_in_type_file(code).into_iter().map(|issue| (issue.message, issue.help)).collect();
 
             assert_eq!(refused, [(message, help)], "{code}");
             assert_eq!(issues(code)[0].split_once(' ').map(|(location, _)| location), Some(at), "{code}");
@@ -1132,16 +1302,21 @@ fn a_chain_of_capitalized_names_on_a_class_of_another_file_is_a_member_read() {
 
 #[test]
 fn an_abstract_class_with_an_abstract_method_and_a_final_class_are_in_the_slice() {
-    let code = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    public abstract float area();\n\n    protected abstract string name();\n}\n\nfinal class Unit\n{\n    public int one()\n    {\n        return 1;\n    }\n}\n";
+    let r#abstract = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    public abstract float area();\n\n    protected abstract string name();\n}\n";
+    let r#final =
+        "namespace App.Tenant;\n\nfinal class Unit\n{\n    public int one()\n    {\n        return 1;\n    }\n}\n";
 
-    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(r#abstract), Vec::<String>::new());
+    assert_eq!(issues(r#final), Vec::<String>::new());
 }
 
 #[test]
 fn an_interface_declares_methods_without_an_access_modifier_or_a_body() {
-    let code = "namespace App.Tenant;\n\npublic interface Measured\n{\n    float area();\n\n    string label(int digits);\n}\n\ninterface Sized\n{\n}\n";
+    let measured = "namespace App.Tenant;\n\npublic interface Measured\n{\n    float area();\n\n    string label(int digits);\n}\n";
+    let sized = "namespace App.Tenant;\n\ninterface Sized\n{\n}\n";
 
-    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(measured), Vec::<String>::new());
+    assert_eq!(issues(sized), Vec::<String>::new());
 }
 
 /// Spec section 22: an interface method gives a default body, as a block or an expression, and so does a computed
@@ -1186,18 +1361,22 @@ fn an_interface_holds_no_fields() {
 
 #[test]
 fn a_class_or_an_interface_names_its_base_class_and_interfaces_after_a_colon() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Entity;\n\npublic interface Linkable : Named\n{\n    string link();\n}\n\npublic class Page : Entity, Linkable\n{\n    public string link()\n    {\n        return \"page\";\n    }\n}\n";
+    let interface = "namespace App.Tenant;\n\npublic interface Linkable : Named\n{\n    string link();\n}\n";
+    let class = "namespace App.Tenant;\n\nimport Lib.Entity;\n\npublic class Page : Entity, Linkable\n{\n    public string link()\n    {\n        return \"page\";\n    }\n}\n";
 
-    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(interface), Vec::<String>::new());
+    assert_eq!(issues(class), Vec::<String>::new());
 }
 
 #[test]
 fn a_method_opens_with_virtual_and_replaces_with_override() {
-    let code = "namespace App.Tenant;\n\npublic class Image\n{\n    public virtual int size()\n    {\n        return 1;\n    }\n}\n\npublic class Thumbnail : Image\n{\n    public override int size()\n    {\n        return 2;\n    }\n\n    private virtual int cached;\n}\n";
+    let base = "namespace App.Tenant;\n\npublic class Image\n{\n    public virtual int size()\n    {\n        return 1;\n    }\n}\n";
+    let subclass = "namespace App.Tenant;\n\npublic class Thumbnail : Image\n{\n    public override int size()\n    {\n        return 2;\n    }\n\n    private virtual int cached;\n}\n";
 
+    assert_eq!(issues(base), Vec::<String>::new());
     assert_eq!(
-        issues(code),
-        ["18:13 A field takes no `virtual`: a subclass overrides a `protected` field with a property already."]
+        issues(subclass),
+        ["10:13 A field takes no `virtual`: a subclass overrides a `protected` field with a property already."]
     );
 }
 
@@ -1221,20 +1400,34 @@ fn super_of_an_interface_calls_its_default_body() {
 /// method body's expressions without `this`. Only a named constructor calls `: this(…)`.
 #[test]
 fn the_main_constructor_passes_control_with_super_and_its_arguments_cannot_use_this() {
-    let code = "namespace App.Tenant;\n\npublic class Order : Entity\n{\n    public Order(Row row, int count) : super(row, count + 1) { }\n}\n\npublic class Copy : Entity\n{\n    public Copy(Row row) : this(row) { }\n}\n\npublic class Early : Entity\n{\n    public Early(Row row) : super(this, this.row) { }\n}\n\npublic class Late : Entity\n{\n    public Late(Row row) : super(super.row) { }\n}\n\npublic class Lambda : Entity\n{\n    public Lambda(Row row) : super(Rows.call(() => this.row), Rows.call(() => { return this.row; })) { }\n}\n\npublic class Named : Entity\n{\n    public Named(Row row) : super(row: this.row) { }\n}\n";
+    let before = "`this` is not available before the constructor runs: pass a parameter instead.";
 
-    assert_eq!(
-        issues(code),
-        [
-            "10:28 The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`.",
-            "15:35 `this` is not available before the constructor runs: pass a parameter instead.",
-            "15:41 `this` is not available before the constructor runs: pass a parameter instead.",
-            "20:34 `super` only calls a method, as in `super.label()` or `super<HasLabel>.label()`.",
-            "25:52 `this` is not available before the constructor runs: pass a parameter instead.",
-            "25:88 `this` is not available before the constructor runs: pass a parameter instead.",
-            "30:40 `this` is not available before the constructor runs: pass a parameter instead.",
-        ]
-    );
+    for (class, constructor, expected) in [
+        ("Order", "Order(Row row, int count) : super(row, count + 1) { }", vec![]),
+        (
+            "Copy",
+            "Copy(Row row) : this(row) { }",
+            vec![
+                "5:28 The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`.".to_owned(),
+            ],
+        ),
+        ("Early", "Early(Row row) : super(this, this.row) { }", vec![format!("5:35 {before}"), format!("5:41 {before}")]),
+        (
+            "Late",
+            "Late(Row row) : super(super.row) { }",
+            vec!["5:34 `super` only calls a method, as in `super.label()` or `super<HasLabel>.label()`.".to_owned()],
+        ),
+        (
+            "Lambda",
+            "Lambda(Row row) : super(Rows.call(() => this.row), Rows.call(() => { return this.row; })) { }",
+            vec![format!("5:52 {before}"), format!("5:88 {before}")],
+        ),
+        ("Named", "Named(Row row) : super(row: this.row) { }", vec![format!("5:40 {before}")]),
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\npublic class {class} : Entity\n{{\n    public {constructor}\n}}\n"));
+
+        assert_eq!(issues(code), expected, "{class}");
+    }
 }
 
 /// Spec section 9.1: a named constructor passes control to the main constructor with `: this(…)`, never `: super(…)`,
@@ -1258,7 +1451,8 @@ fn a_named_constructor_passes_control_with_this_and_its_arguments_cannot_use_thi
 /// abstract class has no objects of its own, and named constructors are not inherited, so it declares none.
 #[test]
 fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_and_a_body() {
-    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n}\n\npublic abstract class Shape\n{\n    public Shape(int sides) { }\n\n    public Shape.triangle() : this(3) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n}\n";
+    let r#abstract = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    public Shape(int sides) { }\n\n    public Shape.triangle() : this(3) { }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -1269,8 +1463,11 @@ fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_a
             "10:12 A named constructor takes only `public`, `protected` or `private`: remove `static`.",
             "12:23 A named constructor's parameter declares no property: only the main constructor's parameters do.",
             "13:35 A named constructor needs a body, even an empty `{ }`.",
-            "20:18 An abstract class has no objects of its own, so it declares no named constructor.",
         ]
+    );
+    assert_eq!(
+        issues(r#abstract),
+        ["7:18 An abstract class has no objects of its own, so it declares no named constructor."]
     );
 }
 
@@ -1284,7 +1481,7 @@ fn a_named_constructor_shares_no_name_with_a_method() {
     let static_method = "namespace App.Tenant;\n\npublic class Clash\n{\n    public Clash() { }\n\n    public Clash.of() : this() { }\n    public static Clash of() => new Clash();\n}\n";
     let law = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    law copy(int a) => a == a;\n    public Order.copy() : this(1) { }\n}\n";
     let coded = |code: &'static str| -> Vec<(String, Option<String>)> {
-        check("src/Report.sharp", code).into_iter().map(|issue| (issue.message, issue.code)).collect()
+        check_in_type_file(code).into_iter().map(|issue| (issue.message, issue.code)).collect()
     };
     let clash = |message: &str| vec![(message.to_owned(), Some("named-constructor-clash".to_owned()))];
 
@@ -1326,16 +1523,23 @@ fn only_a_class_with_instances_declares_a_named_constructor() {
 /// `__construct`. The base class's arguments go in `: super(…)`.
 #[test]
 fn a_constructor_runs_once_so_no_code_calls_it_as_a_member() {
-    let code = "namespace App.Tenant;\n\npublic class Base\n{\n    public Base(public int id { get; }) { }\n}\n\npublic class Once : Base\n{\n    public Once(int id) : super(id) { }\n}\n\npublic class Twice : Base\n{\n    public Twice(int id) : super(id)\n    {\n        super.__construct(id + 1);\n    }\n}\n\npublic class Again : Base\n{\n    public Again(int id) : super(id) { }\n\n    public void reset(Base other, Base? maybe)\n    {\n        super.__construct(2);\n        this.__construct(3);\n        other.__construct(4);\n        maybe?.__CONSTRUCT(5);\n    }\n}\n";
+    let base = "namespace App.Tenant;\n\npublic class Base\n{\n    public Base(public int id { get; }) { }\n}\n";
+    let once = "namespace App.Tenant;\n\npublic class Once : Base\n{\n    public Once(int id) : super(id) { }\n}\n";
+    let twice = "namespace App.Tenant;\n\npublic class Twice : Base\n{\n    public Twice(int id) : super(id)\n    {\n        super.__construct(id + 1);\n    }\n}\n";
+    let again = "namespace App.Tenant;\n\npublic class Again : Base\n{\n    public Again(int id) : super(id) { }\n\n    public void reset(Base other, Base? maybe)\n    {\n        super.__construct(2);\n        this.__construct(3);\n        other.__construct(4);\n        maybe?.__CONSTRUCT(5);\n    }\n}\n";
+    let runs_once =
+        "A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.";
 
+    assert_eq!(issues(base), Vec::<String>::new());
+    assert_eq!(issues(once), Vec::<String>::new());
+    assert_eq!(issues(twice), [format!("7:15 {runs_once}")]);
     assert_eq!(
-        issues(code),
+        issues(again),
         [
-            "17:15 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
-            "27:15 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
-            "28:14 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
-            "29:15 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
-            "30:16 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+            format!("9:15 {runs_once}"),
+            format!("10:14 {runs_once}"),
+            format!("11:15 {runs_once}"),
+            format!("12:16 {runs_once}")
         ]
     );
 }
@@ -1344,9 +1548,13 @@ fn a_constructor_runs_once_so_no_code_calls_it_as_a_member() {
 /// constructor, which a subclass's constructor calls with `: super(…)`.
 #[test]
 fn self_is_a_return_type_creates_with_a_required_constructor_and_calls_static_methods() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Row;\nimport Lib.Clock;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n\n    public static Self fromSchema(Row row)\n    {\n        return new Self(row);\n    }\n\n    public static Self? find(Row row) => Self.fromSchema(row);\n\n    public static Self|int counted(Row row) => Self.fromSchema(row);\n\n    public static (Self|int)? either(Row row) => null;\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null) : super(row)\n    {\n    }\n}\n\npublic interface Copyable\n{\n    Self copy();\n}\n";
+    let entity = "namespace App.Tenant;\n\nimport Lib.Row;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n\n    public static Self fromSchema(Row row)\n    {\n        return new Self(row);\n    }\n\n    public static Self? find(Row row) => Self.fromSchema(row);\n\n    public static Self|int counted(Row row) => Self.fromSchema(row);\n\n    public static (Self|int)? either(Row row) => null;\n}\n";
+    let subclass = "namespace App.Tenant;\n\nimport Lib.Row;\nimport Lib.Clock;\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null) : super(row)\n    {\n    }\n}\n";
+    let interface = "namespace App.Tenant;\n\npublic interface Copyable\n{\n    Self copy();\n}\n";
 
-    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(entity), Vec::<String>::new());
+    assert_eq!(issues(subclass), Vec::<String>::new());
+    assert_eq!(issues(interface), Vec::<String>::new());
 }
 
 #[test]
@@ -1383,7 +1591,7 @@ fn new_self_cannot_name_a_named_constructor() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int count)\n    {\n    }\n\n    public Report.of(int count) : this(count)\n    {\n    }\n\n    public static Report make() => new Self.of(1);\n}\n";
     let fixed = code.replace("new Self.of(1)", "new Report.of(1)");
 
-    let issue = check("src/Report.sharp", code).remove(0);
+    let issue = check_in_type_file(code).remove(0);
     assert_eq!(
         issue.message,
         "`Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass."
@@ -1404,24 +1612,19 @@ fn new_self_cannot_name_a_named_constructor() {
 
 #[test]
 fn new_self_needs_a_required_constructor() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int count)\n    {\n    }\n\n    public static Self make() => new Self(1);\n}\n\nclass Total\n{\n    public static Self make() => new Self();\n}\n\nclass Entity\n{\n    public required Entity(int count)\n    {\n    }\n\n    public static Self make() => new Self;\n}\n";
+    let report = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int count)\n    {\n    }\n\n    public static Self make() => new Self(1);\n}\n";
+    let total = "namespace App.Tenant;\n\nclass Total\n{\n    public static Self make() => new Self();\n}\n";
+    let entity = "namespace App.Tenant;\n\nclass Entity\n{\n    public required Entity(int count)\n    {\n    }\n\n    public static Self make() => new Self;\n}\n";
+    let needs = "`new Self(…)` needs a `required` constructor: `Self` can be any subclass, so every subclass must keep a constructor that `new Self(…)` can call.";
+    let help = |code: &'static str| -> Vec<String> {
+        check_in_type_file(code).into_iter().filter_map(|issue| issue.help).collect()
+    };
 
-    assert_eq!(
-        issues(code),
-        [
-            "9:34 `new Self(…)` needs a `required` constructor: `Self` can be any subclass, so every subclass must keep a constructor that `new Self(…)` can call.",
-            "14:34 `new Self(…)` needs a `required` constructor: `Self` can be any subclass, so every subclass must keep a constructor that `new Self(…)` can call.",
-            "23:34 This `new` without arguments is not supported yet in PHP#.",
-        ]
-    );
-    let help: Vec<_> = check("src/Report.sharp", code).into_iter().filter_map(|issue| issue.help).collect();
-    assert_eq!(
-        help,
-        [
-            "Declare the constructor of `Report` `required`, as in `public required Report(…)`.",
-            "Declare the constructor of `Total` `required`, as in `public required Total(…)`.",
-        ]
-    );
+    assert_eq!(issues(report), [format!("9:34 {needs}")]);
+    assert_eq!(issues(total), [format!("5:34 {needs}")]);
+    assert_eq!(issues(entity), ["9:34 This `new` without arguments is not supported yet in PHP#."]);
+    assert_eq!(help(report), ["Declare the constructor of `Report` `required`, as in `public required Report(…)`."]);
+    assert_eq!(help(total), ["Declare the constructor of `Total` `required`, as in `public required Total(…)`."]);
 }
 
 /// `Self.y` is not ruled yet, as `super.y` is not.
@@ -1442,22 +1645,34 @@ fn a_member_of_self_read_or_written_is_not_supported_yet() {
 /// PHP's `self` is removed, spec section 25: a class writes its own name, or `Self` where `Self` goes.
 #[test]
 fn self_names_the_class_and_self_where_it_goes() {
-    let code = "namespace App.Tenant;\n\nstruct Spot\n{\n    public self moved() => this;\n}\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n\ninterface Copyable\n{\n    self copy();\n}\n";
+    let r#struct = "namespace App.Tenant;\n\nstruct Spot\n{\n    public self moved() => this;\n}\n";
+    let class = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n";
+    let interface = "namespace App.Tenant;\n\ninterface Copyable\n{\n    self copy();\n}\n";
     let without_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class.";
     let with_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class, or `Self` for the class a static method is called on.";
 
     assert_eq!(
-        issues(code),
+        issues(r#struct),
         [
-            "5:12 PHP# has no `self`: write the class's own name, `Spot`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
-            format!("11:13 {without_self}"),
-            format!("13:28 {without_self}"),
-            format!("17:19 {with_self}"),
-            format!("19:9 {without_self}"),
-            format!("20:20 {with_self}"),
-            format!("21:20 {with_self}"),
-            format!("21:25 {without_self}"),
-            "27:5 PHP# has no `self`: write the class's own name, `Copyable`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
+            "5:12 PHP# has no `self`: write the class's own name, `Spot`, for the declaring class, or `Self` for the class a static method is called on."
+        ]
+    );
+    assert_eq!(
+        issues(class),
+        [
+            format!("6:13 {without_self}"),
+            format!("8:28 {without_self}"),
+            format!("12:19 {with_self}"),
+            format!("14:9 {without_self}"),
+            format!("15:20 {with_self}"),
+            format!("16:20 {with_self}"),
+            format!("16:25 {without_self}"),
+        ]
+    );
+    assert_eq!(
+        issues(interface),
+        [
+            "5:5 PHP# has no `self`: write the class's own name, `Copyable`, for the declaring class, or `Self` for the class a static method is called on."
         ]
     );
 }
@@ -1506,16 +1721,17 @@ fn a_required_property_has_init_or_set() {
 /// only modifier. Each refusal's fix, a plain `public struct`, compiles, and so does a struct's attribute.
 #[test]
 fn a_struct_takes_only_public() {
-    let code = "namespace App.Tenant;\n\npublic readonly struct Size { }\n\nabstract struct Area { }\n\nfinal struct Shape { }\n\npublic struct Width { }\n\n[Stable]\npublic struct Height { }\n";
+    for (declaration, expected) in [
+        ("public readonly struct Size { }", vec!["3:8 Every struct is already read-only: write `struct`."]),
+        ("abstract struct Area { }", vec!["3:1 A struct takes only `public`: remove `abstract`."]),
+        ("final struct Shape { }", vec!["3:1 A struct takes only `public`: remove `final`."]),
+        ("public struct Width { }", vec![]),
+        ("[Stable]\npublic struct Height { }", vec![]),
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\n{declaration}\n"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "3:8 Every struct is already read-only: write `struct`.",
-            "5:1 A struct takes only `public`: remove `abstract`.",
-            "7:1 A struct takes only `public`: remove `final`.",
-        ]
-    );
+        assert_eq!(issues(code), expected, "{declaration}");
+    }
 }
 
 /// Spec section 10: a struct never changes, so its property takes `init`, not `set`, as a declared property or a main
@@ -1596,7 +1812,7 @@ fn a_type_an_interface_method_cannot_take_names_what_it_has() {
 
     assert_eq!(issues(code), ["5:5 This type is not supported yet in PHP#."]);
     assert_eq!(
-        check("src/Report.sharp", code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
+        check_in_type_file(code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
         [[
             "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body or a default body."
         ]]
@@ -1759,7 +1975,7 @@ fn an_interface_property_is_get_only_or_settable() {
         ]
     );
     let helps: Vec<Option<String>> =
-        check("src/Report.sharp", code).into_iter().skip(2).take(2).map(|issue| issue.help).collect();
+        check_in_type_file(code).into_iter().skip(2).take(2).map(|issue| issue.help).collect();
     assert_eq!(
         helps,
         [
@@ -1916,6 +2132,10 @@ fn a_type_takes_any_capitalized_word_but_a_reserved_type_name() {
             let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
             let expected = if RESERVED.contains(&name.as_str()) {
                 vec![format!("{at} Cannot use `{name}` as a class name: it is reserved.")]
+            } else if name == "Module" {
+                // A type is declared in the file its name names, spec section 27, and a folder's `Module.sharp` holds
+                // only its module, spec section 32.
+                vec!["3:1 Module.sharp holds only its folder's module.".to_owned()]
             } else if name.contains('_') {
                 // Spec section 24 names a type in Pascal case, so `Include_once` compiles with a warning.
                 vec![format!("{at} {kind} name `{name}` should be in Pascal case.")]
@@ -2156,7 +2376,7 @@ fn renaming_an_import_away_from_a_taken_or_reserved_name_is_valid() {
 fn a_clashing_import_is_helped_with_the_import_renamed() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Other.Calc;\nimport App.Shared.Report;\nimport Lib.Any;\n\nclass Report\n{\n}\n";
 
-    let helps: Vec<Option<String>> = check("src/Report.sharp", code).into_iter().map(|issue| issue.help).collect();
+    let helps: Vec<Option<String>> = check_in_type_file(code).into_iter().map(|issue| issue.help).collect();
 
     assert_eq!(
         helps,
@@ -2172,21 +2392,21 @@ fn a_clashing_import_is_helped_with_the_import_renamed() {
 /// a type with type arguments. So a class, an interface, an enum and an event start with a capital letter.
 #[test]
 fn a_class_interface_or_enum_name_starts_with_a_capital_letter() {
-    let lowercase = "namespace App.Tenant;\n\nclass box\n{\n}\n\ninterface priced\n{\n}\n\nenum status\n{\n    case Open;\n}\n\nevent paid(int id);\n";
-    let capitalized = "namespace App.Tenant;\n\nclass Box\n{\n}\n\ninterface Priced\n{\n}\n\nenum Status\n{\n    case Open;\n}\n\nevent Paid(int id);\n";
     let rule =
         "must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones.";
 
-    assert_eq!(
-        issues(lowercase),
-        [
-            format!("3:7 `box` {rule}"),
-            format!("7:11 `priced` {rule}"),
-            format!("11:6 `status` {rule}"),
-            format!("16:7 `paid` {rule}")
-        ]
-    );
-    assert_eq!(issues(capitalized), Vec::<String>::new());
+    for (lowercase, capitalized, at) in [
+        ("class box\n{\n}\n", "class Box\n{\n}\n", "3:7 `box`"),
+        ("interface priced\n{\n}\n", "interface Priced\n{\n}\n", "3:11 `priced`"),
+        ("enum status\n{\n    case Open;\n}\n", "enum Status\n{\n    case Open;\n}\n", "3:6 `status`"),
+        ("event paid(int id);\n", "event Paid(int id);\n", "3:7 `paid`"),
+    ] {
+        let lowercase = leak(format!("namespace App.Tenant;\n\n{lowercase}"));
+        let capitalized = leak(format!("namespace App.Tenant;\n\n{capitalized}"));
+
+        assert_eq!(issues(lowercase), [format!("{at} {rule}")], "{lowercase}");
+        assert_eq!(issues(capitalized), Vec::<String>::new(), "{capitalized}");
+    }
 }
 
 /// Spec section 24 names things as TypeScript does: namespaces, types and enum cases in PascalCase, methods,
@@ -2245,7 +2465,7 @@ fn a_name_that_breaks_its_case_is_a_warning() {
     let overridden = "namespace App.Tenant;\n\nclass Box : Base\n{\n    public override int Total() => 1;\n    public override int Count { get; } = 0;\n}\n";
     assert_eq!(issues(overridden), Vec::<String>::new());
 
-    let helped = check("src/Report.sharp", "namespace App.Tenant;\n\nclass Box\n{\n    private int Total = 0;\n}\n");
+    let helped = check_in_type_file("namespace App.Tenant;\n\nclass Box\n{\n    private int Total = 0;\n}\n");
     assert_eq!(helped[0].level, mago_reporting::Level::Warning);
     assert_eq!(helped[0].help.as_deref(), Some("Rename it `total`."));
 }
@@ -2507,7 +2727,7 @@ fn a_help_names_a_standard_class_the_file_shadows_through_an_aliased_import() {
             "11:20 PHP# has no superglobals; take a Request",
         ]
     );
-    let superglobal = check("src/Report.sharp", code).into_iter().find(|issue| issue.message.contains("superglobals"));
+    let superglobal = check_in_type_file(code).into_iter().find(|issue| issue.message.contains("superglobals"));
     assert_eq!(
         superglobal.expect("the superglobal is refused").notes,
         [
@@ -2520,33 +2740,43 @@ fn a_help_names_a_standard_class_the_file_shadows_through_an_aliased_import() {
 /// PHP's magic methods are, starting but not ending with `__`, keeps its own error.
 #[test]
 fn a_declared_double_underscore_name_is_an_error_that_names_position() {
-    let code = "namespace App.Tenant;\n\nclass __Shape__\n{\n}\n\ninterface __Named__\n{\n    int __area__(int __side__);\n}\n\nenum __Suit__\n{\n    case __Hearts__;\n}\n\nclass Report\n{\n    private int __count__ = 0;\n    public int __views__ { get; set; }\n    public string __slug__ => \"a\";\n    public const int __MAX__ = 1;\n\n    public Report(private int __kept__)\n    {\n    }\n\n    public int __run__(int __extra__)\n    {\n        let __a__ = 1;\n        const __b__ = 2;\n        int __c__ = 3;\n        for (let __i__ = 0; __i__ < 1; __i__++) {\n        }\n        for (const __v__ of Store.values()) {\n        }\n        try {\n        } catch (Missing __e__) {\n        }\n        const f = (int __x__) => __x__;\n        return 1;\n    }\n\n    public int __get(string name) => 1;\n}\n";
+    let class = "namespace App.Tenant;\n\nclass __Shape__\n{\n}\n";
+    let interface = "namespace App.Tenant;\n\ninterface __Named__\n{\n    int __area__(int __side__);\n}\n";
+    let r#enum = "namespace App.Tenant;\n\nenum __Suit__\n{\n    case __Hearts__;\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private int __count__ = 0;\n    public int __views__ { get; set; }\n    public string __slug__ => \"a\";\n    public const int __MAX__ = 1;\n\n    public Report(private int __kept__)\n    {\n    }\n\n    public int __run__(int __extra__)\n    {\n        let __a__ = 1;\n        const __b__ = 2;\n        int __c__ = 3;\n        for (let __i__ = 0; __i__ < 1; __i__++) {\n        }\n        for (const __v__ of Store.values()) {\n        }\n        try {\n        } catch (Missing __e__) {\n        }\n        const f = (int __x__) => __x__;\n        return 1;\n    }\n\n    public int __get(string name) => 1;\n}\n";
     let position = "`Position.current()` gives the file, directory, line, column and function.";
 
+    assert_eq!(issues(class), [format!("3:7 PHP# has no `__Shape__`: {position}")]);
+    assert_eq!(
+        issues(interface),
+        [
+            format!("3:11 PHP# has no `__Named__`: {position}"),
+            format!("5:9 PHP# has no `__area__`: {position}"),
+            format!("5:22 PHP# has no `__side__`: {position}"),
+        ]
+    );
+    assert_eq!(
+        issues(r#enum),
+        [format!("3:6 PHP# has no `__Suit__`: {position}"), format!("5:10 PHP# has no `__Hearts__`: {position}")]
+    );
     assert_eq!(
         issues(code),
         [
-            format!("3:7 PHP# has no `__Shape__`: {position}"),
-            format!("7:11 PHP# has no `__Named__`: {position}"),
-            format!("9:9 PHP# has no `__area__`: {position}"),
-            format!("9:22 PHP# has no `__side__`: {position}"),
-            format!("12:6 PHP# has no `__Suit__`: {position}"),
-            format!("14:10 PHP# has no `__Hearts__`: {position}"),
-            format!("19:17 PHP# has no `__count__`: {position}"),
-            format!("20:16 PHP# has no `__views__`: {position}"),
-            format!("21:19 PHP# has no `__slug__`: {position}"),
-            format!("22:22 PHP# has no `__MAX__`: {position}"),
-            format!("24:31 PHP# has no `__kept__`: {position}"),
-            format!("28:16 PHP# has no `__run__`: {position}"),
-            format!("28:28 PHP# has no `__extra__`: {position}"),
-            format!("30:13 PHP# has no `__a__`: {position}"),
-            format!("31:15 PHP# has no `__b__`: {position}"),
-            format!("32:13 PHP# has no `__c__`: {position}"),
-            format!("33:18 PHP# has no `__i__`: {position}"),
-            format!("35:20 PHP# has no `__v__`: {position}"),
-            format!("38:26 PHP# has no `__e__`: {position}"),
-            format!("40:24 PHP# has no `__x__`: {position}"),
-            "44:16 This method name is not supported yet in PHP#.".to_owned(),
+            format!("5:17 PHP# has no `__count__`: {position}"),
+            format!("6:16 PHP# has no `__views__`: {position}"),
+            format!("7:19 PHP# has no `__slug__`: {position}"),
+            format!("8:22 PHP# has no `__MAX__`: {position}"),
+            format!("10:31 PHP# has no `__kept__`: {position}"),
+            format!("14:16 PHP# has no `__run__`: {position}"),
+            format!("14:28 PHP# has no `__extra__`: {position}"),
+            format!("16:13 PHP# has no `__a__`: {position}"),
+            format!("17:15 PHP# has no `__b__`: {position}"),
+            format!("18:13 PHP# has no `__c__`: {position}"),
+            format!("19:18 PHP# has no `__i__`: {position}"),
+            format!("21:20 PHP# has no `__v__`: {position}"),
+            format!("24:26 PHP# has no `__e__`: {position}"),
+            format!("26:24 PHP# has no `__x__`: {position}"),
+            "30:16 This method name is not supported yet in PHP#.".to_owned(),
         ]
     );
 }
@@ -2582,25 +2812,34 @@ fn a_method_refused_at_its_name_has_its_body_checked() {
 /// A member refused at its name, a modifier or a type keeps its parameters, initial values and body checked.
 #[test]
 fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    void __get(string name = _SERVER[\"x\"]);\n}\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n        echo \"a\";\n    }\n}\n\nclass Report\n{\n    int count = __LINE__;\n    const int MAX = __LINE__;\n\n    public Report(public int id = __LINE__, &total = __LINE__)\n    {\n    }\n\n    int run()\n    {\n        Map<Any, callable> rows = [:];\n        echo \"b\";\n        return 1;\n    }\n}\n";
+    let interface = "namespace App.Tenant;\n\ninterface Named\n{\n    void __get(string name = _SERVER[\"x\"]);\n}\n";
+    let r#enum = "namespace App.Tenant;\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n        echo \"a\";\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    int count = __LINE__;\n    const int MAX = __LINE__;\n\n    public Report(public int id = __LINE__, &total = __LINE__)\n    {\n    }\n\n    int run()\n    {\n        Map<Any, callable> rows = [:];\n        echo \"b\";\n        return 1;\n    }\n}\n";
     let line = "write `Position.current().line`.";
 
     assert_eq!(
+        issues(interface),
+        ["5:10 This method name is not supported yet in PHP#.", "5:30 PHP# has no superglobals; take a Request"]
+    );
+    assert_eq!(
+        issues(r#enum),
+        [
+            "7:12 An enum has no constructor: its cases are its only values.",
+            "9:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
+        ]
+    );
+    assert_eq!(
         issues(code),
         [
-            "5:10 This method name is not supported yet in PHP#.".to_owned(),
-            "5:30 PHP# has no superglobals; take a Request".to_owned(),
-            "12:12 An enum has no constructor: its cases are its only values.".to_owned(),
-            "14:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
-            format!("20:17 PHP# has no `__LINE__`: {line}"),
-            format!("21:21 PHP# has no `__LINE__`: {line}"),
-            "23:19 A constructor parameter declared `public` needs accessors: it is a property, as in `public int id { get; }`.".to_owned(),
-            format!("23:35 PHP# has no `__LINE__`: {line}"),
-            "23:45 PHP# has no by-reference parameter: return the new value.".to_owned(),
-            format!("23:54 PHP# has no `__LINE__`: {line}"),
-            "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.".to_owned(),
-            "29:18 PHP# has no `callable`: write `Function<R(P)>`.".to_owned(),
-            "30:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
+            format!("5:17 PHP# has no `__LINE__`: {line}"),
+            format!("6:21 PHP# has no `__LINE__`: {line}"),
+            "8:19 A constructor parameter declared `public` needs accessors: it is a property, as in `public int id { get; }`.".to_owned(),
+            format!("8:35 PHP# has no `__LINE__`: {line}"),
+            "8:45 PHP# has no by-reference parameter: return the new value.".to_owned(),
+            format!("8:54 PHP# has no `__LINE__`: {line}"),
+            "14:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.".to_owned(),
+            "14:18 PHP# has no `callable`: write `Function<R(P)>`.".to_owned(),
+            "15:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
         ]
     );
 }
@@ -2758,9 +2997,11 @@ fn a_bare_call_named_like_a_method_of_its_class_compiles_as_the_global_function(
 
 #[test]
 fn extends_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Base\n{\n}\n\nclass Report extends Base\n{\n}\n";
+    let base = "namespace App.Tenant;\n\nclass Base\n{\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report extends Base\n{\n}\n";
 
-    assert_eq!(issues(code), ["7:14 This `extends` clause is not supported yet in PHP#."]);
+    assert_eq!(issues(base), Vec::<String>::new());
+    assert_eq!(issues(code), ["3:14 This `extends` clause is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -2821,22 +3062,22 @@ fn an_enum_may_be_public() {
 
 #[test]
 fn a_protected_or_private_class_reports_only_the_php_error() {
-    let code = "namespace App.Tenant;\n\nprotected class Report\n{\n}\n\nprivate class Calc\n{\n}\n";
+    let protected = "namespace App.Tenant;\n\nprotected class Report\n{\n}\n";
+    let private = "namespace App.Tenant;\n\nprivate class Calc\n{\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "3:1 Class `Report` cannot have the `protected` visibility modifier.",
-            "7:1 Class `Calc` cannot have the `private` visibility modifier.",
-        ]
-    );
+    assert_eq!(issues(protected), ["3:1 Class `Report` cannot have the `protected` visibility modifier."]);
+    assert_eq!(issues(private), ["3:1 Class `Calc` cannot have the `private` visibility modifier."]);
 }
 
 /// Spec section 22: `final override` stops an override chain. A PHP# method is closed unless it is `virtual`, so every
 /// other modifier that can't change what a subclass may do is an error that says why.
 #[test]
 fn final_marks_only_an_override_and_a_modifier_that_cant_matter_is_an_error() {
-    let code = "namespace App.Tenant;\n\npublic abstract class Middle : Root\n{\n    public final override string kind() => \"middle\";\n    public final string name() => \"middle\";\n    private virtual string secret() => \"middle\";\n    public virtual override string label() => \"middle\";\n    public abstract virtual string draw();\n    public static virtual string make() => \"middle\";\n    public virtual Middle() { }\n}\n\npublic final class Closed\n{\n    public virtual string open() => \"closed\";\n}\n\npublic final class Leaf : Middle\n{\n    public final override string label() => \"leaf\";\n}\n\npublic enum Shade\n{\n    case Light;\n    public virtual string label() => \"light\";\n}\n";
+    let code = "namespace App.Tenant;\n\npublic abstract class Middle : Root\n{\n    public final override string kind() => \"middle\";\n    public final string name() => \"middle\";\n    private virtual string secret() => \"middle\";\n    public virtual override string label() => \"middle\";\n    public abstract virtual string draw();\n    public static virtual string make() => \"middle\";\n    public virtual Middle() { }\n}\n";
+    let closed =
+        "namespace App.Tenant;\n\npublic final class Closed\n{\n    public virtual string open() => \"closed\";\n}\n";
+    let leaf = "namespace App.Tenant;\n\npublic final class Leaf : Middle\n{\n    public final override string label() => \"leaf\";\n}\n";
+    let shade = "namespace App.Tenant;\n\npublic enum Shade\n{\n    case Light;\n    public virtual string label() => \"light\";\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2846,10 +3087,19 @@ fn final_marks_only_an_override_and_a_modifier_that_cant_matter_is_an_error() {
             "8:12 An override is already open to the subclasses below it, so `virtual` can't matter.",
             "9:21 An `abstract` method is already open to the subclasses below it, so `virtual` can't matter.",
             "11:12 A constructor is never replaced, so `virtual` can't matter.",
-            "16:12 `Closed` is `final`, so no subclass replaces its methods, and `virtual` can't matter.",
-            "21:12 `Leaf` is `final`, so no subclass replaces its methods, and `final` can't matter.",
-            "27:12 `Shade` is an enum, so no subclass replaces its methods, and `virtual` can't matter."
         ]
+    );
+    assert_eq!(
+        issues(closed),
+        ["5:12 `Closed` is `final`, so no subclass replaces its methods, and `virtual` can't matter."]
+    );
+    assert_eq!(
+        issues(leaf),
+        ["5:12 `Leaf` is `final`, so no subclass replaces its methods, and `final` can't matter."]
+    );
+    assert_eq!(
+        issues(shade),
+        ["6:12 `Shade` is an enum, so no subclass replaces its methods, and `virtual` can't matter."]
     );
 }
 
@@ -2890,15 +3140,11 @@ fn an_abstract_method_states_public_or_protected() {
 
 #[test]
 fn a_method_named_after_its_class_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int report() { return 1; }\n}\n\nclass Calc\n{\n    public int CALC() { return 1; }\n}\n";
+    let report = "namespace App.Tenant;\n\nclass Report\n{\n    public int report() { return 1; }\n}\n";
+    let calc = "namespace App.Tenant;\n\nclass Calc\n{\n    public int CALC() { return 1; }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:16 A method named after its class is not supported yet in PHP#.",
-            "10:16 A method named after its class is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(report), ["5:16 A method named after its class is not supported yet in PHP#."]);
+    assert_eq!(issues(calc), ["5:16 A method named after its class is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -3031,7 +3277,7 @@ fn a_class_has_one_main_constructor() {
     let second = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public Report(string name) {}\n}\n";
     let fixed = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public Report.fromName(string name) : this(strlen(name)) { }\n}\n";
 
-    let issue = check("src/Report.sharp", second).remove(0);
+    let issue = check_in_type_file(second).remove(0);
     assert_eq!(issue.message, "A class has one main constructor: PHP# has no overloading by argument types.");
     assert_eq!(
         issue.help.as_deref(),
@@ -3338,16 +3584,15 @@ fn a_static_class_cannot_extend_a_class_or_implement_an_interface() {
 
 #[test]
 fn a_static_class_takes_only_public_and_static() {
-    let code = "namespace App.Tenant;\n\nabstract static class Text\n{\n}\n\nfinal static class Slug\n{\n}\n\nforeign static class Clock\n{\n}\n";
+    for (modifier, class) in [("abstract", "Text"), ("final", "Slug"), ("foreign", "Clock")] {
+        let code = leak(format!("namespace App.Tenant;\n\n{modifier} static class {class}\n{{\n}}\n"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "3:1 A static class takes only `public` and `static`: remove `abstract`.",
-            "7:1 A static class takes only `public` and `static`: remove `final`.",
-            "11:1 A static class takes only `public` and `static`: remove `foreign`.",
-        ]
-    );
+        assert_eq!(
+            issues(code),
+            [format!("3:1 A static class takes only `public` and `static`: remove `{modifier}`.")],
+            "{modifier}"
+        );
+    }
     assert_eq!(
         issues_in("src/Text.php", "<?php\n\nstatic class Text\n{\n}\n"),
         ["3:1 Class `Text` cannot have the `static` modifier."]
@@ -3370,32 +3615,35 @@ fn an_extern_method_outside_the_sharp_namespace_is_left_to_the_analyzer() {
 /// a `static` one is accepted there as in a static class, whatever its access.
 #[test]
 fn an_extern_method_is_static_in_a_static_or_foreign_class_with_no_body_in_any_namespace() {
-    for namespace in ["Sharp.Text", "App"] {
-        let code = leak(format!(
-            "namespace {namespace};\n\npublic class Plain\n{{\n    public static extern string slug(string title);\n}}\n\npublic static class Text\n{{\n    private static extern string trim(string title);\n    public static extern string pad(string title) => title;\n    public extern string cut(string title);\n}}\n\npublic foreign class Shell\n{{\n    private static extern List<string> lines();\n    public extern string name();\n}}\n"
-        ));
+    let rule = "An `extern` method is `static`, in a static or `foreign` class, with no body.";
 
-        assert_eq!(
-            issues(code),
-            [
-                "5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
-                "11:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
-                "12:26 An `extern` method is `static`, in a static or `foreign` class, with no body.",
-                "18:26 An `extern` method is `static`, in a static or `foreign` class, with no body.",
-            ],
-            "{namespace}"
-        );
+    for namespace in ["Sharp.Text", "App"] {
+        for (class, expected) in [
+            (
+                "public class Plain\n{\n    public static extern string slug(string title);\n}\n",
+                vec![format!("5:33 {rule}")],
+            ),
+            (
+                "public static class Text\n{\n    private static extern string trim(string title);\n    public static extern string pad(string title) => title;\n    public extern string cut(string title);\n}\n",
+                vec![format!("6:33 {rule}"), format!("7:26 {rule}")],
+            ),
+            (
+                "public foreign class Shell\n{\n    private static extern List<string> lines();\n    public extern string name();\n}\n",
+                vec![format!("6:26 {rule}")],
+            ),
+        ] {
+            let code = leak(format!("namespace {namespace};\n\n{class}"));
+
+            assert_eq!(issues(code), expected, "{namespace}: {class}");
+        }
     }
 }
 
 /// Spec section 29 works a body's effects out from its code, so only a method without a body, an interface's or an
-/// abstract class's, names effects in `uses`. A method with a body names only its function parameters there, as in
-/// `charge(…) uses prepare => …`.
+/// abstract class's, names effects in `uses`. A function parameter in `uses` is the parser's error.
 #[test]
-fn a_method_with_a_body_names_only_its_function_parameters_in_uses() {
-    let refused = |name: &str| {
-        format!("A method with a body takes no effect in `uses`, and `{name}` is not one of its function parameters.")
-    };
+fn a_method_with_a_body_names_no_effect_in_uses() {
+    let refused = |name: &str| format!("A method with a body takes no effect in `uses`, and it names `{name}`.");
     for (code, expected) in [
         (
             "public class Gateway\n{\n    public int charge(int cents) uses Http => cents;\n}\n",
@@ -3406,16 +3654,8 @@ fn a_method_with_a_body_names_only_its_function_parameters_in_uses() {
             vec![format!("5:39 {}", refused("Http"))],
         ),
         (
-            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
-            vec![],
-        ),
-        (
-            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)>? prepare) uses prepare => cents;\n}\n",
-            vec![],
-        ),
-        (
-            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare, cents, Http => cents;\n}\n",
-            vec![format!("5:76 {}", refused("cents")), format!("5:83 {}", refused("Http"))],
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses cents, Http => prepare(cents);\n}\n",
+            vec![format!("5:67 {}", refused("cents")), format!("5:74 {}", refused("Http"))],
         ),
         ("public interface Gateway\n{\n    int charge(int cents) uses Http;\n}\n", vec![]),
         ("public abstract class Gateway\n{\n    public abstract int charge(int cents) uses Http;\n}\n", vec![]),
@@ -3663,9 +3903,11 @@ fn a_get_only_nullable_property_without_an_initial_value_is_in_the_slice() {
 /// runs once for each type argument, when its statics are first used, spec section 11.
 #[test]
 fn a_static_member_takes_any_initial_value_and_is_get_only_or_settable() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n    public static int next { get; } = Report.size + 1;\n}\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n    private static int next = Box<T>.count + 1;\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n    public static int next { get; } = Report.size + 1;\n}\n";
+    let generic = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n    private static int next = Box<T>.count + 1;\n}\n";
 
     assert_eq!(issues(code), ["7:23 Give `id` an initial value: no constructor sets a static."]);
+    assert_eq!(issues(generic), Vec::<String>::new());
 }
 
 #[test]
@@ -3840,7 +4082,7 @@ fn an_access_level_on_get_is_an_error_naming_a_method_that_reads_it() {
         ]
     );
     assert_eq!(
-        check("src/Report.sharp", code).into_iter().map(|issue| issue.help).collect::<Vec<_>>(),
+        check_in_type_file(code).into_iter().map(|issue| issue.help).collect::<Vec<_>>(),
         [help("views"), help("count")]
     );
 }
@@ -3850,7 +4092,8 @@ fn an_access_level_on_get_is_an_error_naming_a_method_that_reads_it() {
 /// parameter takes none, which the parser reports, as section 9 limits it to access levels and attributes.
 #[test]
 fn via_goes_on_an_instance_auto_property_with_get_and_set() {
-    let code = "namespace App.Tenant;\n\nimport App.Trimmed;\nimport App.Tracked;\n\npublic class Report\n{\n    public string name { get; set; } via Trimmed = \"\";\n    public string title { get; set; } via Trimmed, Tracked = \"\";\n    public string? note { get; set; } via Trimmed;\n    public string code { get; set => field = value; } via Trimmed = \"\";\n    public static string label { get; set; } via Trimmed = \"\";\n    public string tag { get; } via Trimmed = \"\";\n}\n\npublic interface Named\n{\n    string name { get; set; } via Trimmed;\n}\n";
+    let code = "namespace App.Tenant;\n\nimport App.Trimmed;\nimport App.Tracked;\n\npublic class Report\n{\n    public string name { get; set; } via Trimmed = \"\";\n    public string title { get; set; } via Trimmed, Tracked = \"\";\n    public string? note { get; set; } via Trimmed;\n    public string code { get; set => field = value; } via Trimmed = \"\";\n    public static string label { get; set; } via Trimmed = \"\";\n    public string tag { get; } via Trimmed = \"\";\n}\n";
+    let interface = "namespace App.Tenant;\n\nimport App.Trimmed;\n\npublic interface Named\n{\n    string name { get; set; } via Trimmed;\n}\n";
 
     assert_eq!(
         issues(code),
@@ -3858,8 +4101,11 @@ fn via_goes_on_an_instance_auto_property_with_get_and_set() {
             "11:55 `via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
             "12:46 A static property takes no `via`: each object keeps its own behaviors.",
             "13:32 `via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
-            "18:31 A property without storage takes no `via`: the class that stores the property names its behaviors.",
         ]
+    );
+    assert_eq!(
+        issues(interface),
+        ["7:31 A property without storage takes no `via`: the class that stores the property names its behaviors."]
     );
 
     // Each behavior names a class, with its type arguments when it is generic, and never another type.
@@ -3911,9 +4157,11 @@ fn accessor_bodies_are_in_the_slice() {
 /// when get-only, and one whose body uses `field` has storage, which starts with the value written, `null` included.
 #[test]
 fn nullable_properties_with_accessor_bodies_are_in_the_slice() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n";
+    let address = "namespace App.Tenant;\n\nclass Address\n{\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(address), Vec::<String>::new());
 }
 
 /// A lambda is a function of its own, so PHP would call the accessor again where it reads `$this->count`.
@@ -4005,9 +4253,11 @@ fn an_initial_value_on_a_property_whose_set_has_a_body_is_in_the_slice() {
 /// in a generic class too, whose type arguments each have their own, spec section 11.
 #[test]
 fn a_static_property_takes_accessors() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int b { get; set; didSet => Report.a = 1; } = 0;\n    public static int c => Report.a + 1;\n}\n\nclass Box<T>\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int c => 1;\n    public static int d { get; set; } = 0;\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int b { get; set; didSet => Report.a = 1; } = 0;\n    public static int c => Report.a + 1;\n}\n";
+    let generic = "namespace App.Tenant;\n\nclass Box<T>\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int c => 1;\n    public static int d { get; set; } = 0;\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(generic), Vec::<String>::new());
 }
 
 /// Spec section 6.1: `init` sets a property while its object is created, and no object creates a static property.
@@ -4062,15 +4312,13 @@ fn a_void_variadic_parameter_reports_only_the_php_error() {
 
 #[test]
 fn a_variadic_constructor_parameter_that_declares_a_member_is_an_error_as_in_php() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(private int ...values)\n    {\n    }\n}\n\nclass Total\n{\n    public Total(public int ...values { get; })\n    {\n    }\n}\n";
+    let report =
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Report(private int ...values)\n    {\n    }\n}\n";
+    let total =
+        "namespace App.Tenant;\n\nclass Total\n{\n    public Total(public int ...values { get; })\n    {\n    }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:19 Cannot declare variadic promoted property `values`.",
-            "12:18 Cannot declare variadic promoted property `values`.",
-        ]
-    );
+    assert_eq!(issues(report), ["5:19 Cannot declare variadic promoted property `values`."]);
+    assert_eq!(issues(total), ["5:18 Cannot declare variadic promoted property `values`."]);
 }
 
 #[test]
@@ -4729,6 +4977,17 @@ fn new_outside_the_slice_is_not_supported_yet() {
     assert_eq!(issues(code), ["7:23 This expression is not supported yet in PHP#."]);
 }
 
+/// A named constructor without arguments is refused, but one a member chain reads through, as the `new App.Shop` of
+/// `new App.Shop.Order()`, is left to the analyzer, which alone tells a full name from a member, spec section 23.
+#[test]
+fn a_new_without_arguments_is_refused_unless_a_member_chain_reads_through_it() {
+    let code = leak(method(
+        "        const bare = new Report.of;\n        const chained = new App.Shop.Order();\n        const read = new App.Shop.total;\n        return 1;\n",
+    ));
+
+    assert_eq!(issues(code), ["7:22 This `new` without arguments is not supported yet in PHP#."]);
+}
+
 /// `new (type)(…)` creates an object from a class value, with or without type arguments, spec section 25. It calls
 /// the constructor, so it names no named constructor, and it takes its arguments as any `new` does. The analyzer
 /// decides what the value holds.
@@ -4923,16 +5182,13 @@ fn mixed_does_not_exist_in_php_sharp() {
 
 #[test]
 fn an_interface_method_and_a_class_constant_take_any_and_never_mixed() {
-    let code = "namespace App.Tenant;\n\ninterface Source\n{\n    mixed read(mixed key);\n\n    Any? first(Any key);\n}\n\nclass Report\n{\n    public const mixed NONE = 1;\n\n    public const Any SOME = 1;\n}\n";
+    let interface =
+        "namespace App.Tenant;\n\ninterface Source\n{\n    mixed read(mixed key);\n\n    Any? first(Any key);\n}\n";
+    let class = "namespace App.Tenant;\n\nclass Report\n{\n    public const mixed NONE = 1;\n\n    public const Any SOME = 1;\n}\n";
+    let mixed = "PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.";
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:5 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
-            "5:16 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
-            "12:18 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
-        ]
-    );
+    assert_eq!(issues(interface), [format!("5:5 {mixed}"), format!("5:16 {mixed}")]);
+    assert_eq!(issues(class), [format!("5:18 {mixed}")]);
 }
 
 #[test]
@@ -4944,26 +5200,40 @@ fn a_cast_or_a_ternary_in_a_parameter_default_is_not_supported_yet() {
     assert_eq!(issues(ternary), ["5:32 This expression is not supported yet in PHP#."]);
 }
 
-/// Spec section 27: as a parameter's default, `Position.current()` gives the caller's position, which waits for
-/// typed compilation. The engine would run it as the parameter's own position, so the checker refuses it, and PHP
-/// compares method names ignoring case.
+/// Spec section 27: as a parameter's default, `Position.current()` gives the caller's position, which a PHP# call
+/// passes, of a method, a signature and a lambda alike. PHP compares method names ignoring case.
 #[test]
-fn position_current_as_a_parameter_default_is_not_supported_yet() {
+fn position_current_as_a_parameter_default_is_the_callers_position() {
     let code = "namespace App;\n\nclass Reports\n{\n    public static void logSlow(string message, Position caller = Position.current())\n    {\n    }\n}\n";
     let shouted = leak(code.replace("Position.current()", "Position.CURRENT()"));
     let signature = "namespace App;\n\ninterface Logs\n{\n    void log(Position caller = Position.current());\n}\n";
     let lambda =
         leak(method("        const log = (Position caller = Position.current()) => caller;\n        return extra;\n"));
-    let refusal = "A `Position.current()` default is not supported yet in PHP#.";
 
-    assert_eq!(issues(code), [format!("5:66 {refusal}")]);
-    assert_eq!(issues(shouted), [format!("5:66 {refusal}")]);
-    assert_eq!(issues(signature), [format!("5:32 {refusal}")]);
-    assert_eq!(issues(lambda), [format!("7:40 {refusal}")]);
+    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(shouted), Vec::<String>::new());
+    assert_eq!(issues(signature), Vec::<String>::new());
+    assert_eq!(issues(lambda), Vec::<String>::new());
+}
+
+/// The parameter takes the whole position, so a default computed from `Position.current()`, one part of it or a value
+/// built from one, is an error that names the whole form.
+#[test]
+fn a_default_computed_from_position_current_is_an_error() {
+    let code = "namespace App;\n\nclass Reports\n{\n    public static void logSlow(string message, int line = Position.current().line)\n    {\n    }\n}\n";
+    let next = leak(code.replace("Position.current().line", "Position.current().line + 1"));
+    let shouted = leak(code.replace("Position.current().line", "Position.current().file.toUpper()"));
+    let nullable =
+        leak(code.replace("int line = Position.current().line", "Position? line = Position.current() ?? null"));
+
+    assert_eq!(issues(code), ["5:59 Take the whole position: `Position caller = Position.current()`."]);
+    assert_eq!(issues(next), ["5:59 Take the whole position: `Position caller = Position.current()`."]);
+    assert_eq!(issues(shouted), ["5:59 Take the whole position: `Position caller = Position.current()`."]);
+    assert_eq!(issues(nullable), ["5:65 Take the whole position: `Position caller = Position.current()`."]);
     assert_eq!(
-        check("src/Report.sharp", code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
+        check_in_type_file(code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
         [[
-            "As a parameter's default, `Position.current()` gives the caller's position, which waits for typed compilation."
+            "As a default, `Position.current()` gives the caller's position, and the parameter takes all of it, as one value."
         ]]
     );
 }
@@ -4982,7 +5252,8 @@ fn position_current_in_a_body_or_an_initial_value_is_in_the_slice() {
 #[test]
 fn a_current_default_of_an_imported_or_declared_position_keeps_the_constant_expression_refusal() {
     let imported = "namespace App;\n\nimport App.Shared.Position;\n\nclass Reports\n{\n    public static void logSlow(Position caller = Position.current())\n    {\n    }\n}\n";
-    let declared = "namespace App;\n\nclass Reports\n{\n    public static void logSlow(Position caller = Position.current())\n    {\n    }\n}\n\nclass Position\n{\n}\n";
+    // A file names the class it declares, so in `Position.sharp` a bare `Position` is that class.
+    let declared = "namespace App;\n\nclass Position\n{\n    public static void logSlow(Position caller = Position.current())\n    {\n    }\n}\n";
 
     assert_eq!(issues(imported), ["7:50 This expression is not supported yet in PHP#."]);
     assert_eq!(issues(declared), ["5:50 This expression is not supported yet in PHP#."]);
@@ -4992,16 +5263,17 @@ fn a_current_default_of_an_imported_or_declared_position_keeps_the_constant_expr
 /// any call there. PHP's own check reports the constant's value too.
 #[test]
 fn position_current_as_a_constant_or_an_enum_case_value_keeps_the_constant_expression_refusal() {
-    let code = "namespace App;\n\nclass Reports\n{\n    public const Position HERE = Position.current();\n}\n\nenum Spot : string\n{\n    case Here = Position.current();\n}\n";
+    let code = "namespace App;\n\nclass Reports\n{\n    public const Position HERE = Position.current();\n}\n";
+    let r#enum = "namespace App;\n\nenum Spot : string\n{\n    case Here = Position.current();\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "5:34 Constant `Reports.HERE` value contains a non-constant expression.",
             "5:34 This expression is not supported yet in PHP#.",
-            "10:17 This expression is not supported yet in PHP#.",
         ]
     );
+    assert_eq!(issues(r#enum), ["5:17 This expression is not supported yet in PHP#."]);
 
     let php = "<?php\n\nnamespace App;\n\nclass Reports\n{\n    public const Position HERE = Position::current();\n}\n\nenum Spot: string\n{\n    case Here = Position::current();\n}\n";
     assert_eq!(
@@ -5071,45 +5343,59 @@ fn an_enum_constant_follows_the_class_constant_rules() {
 
 #[test]
 fn an_enum_names_its_backing_type_then_its_interfaces_after_a_colon() {
-    let code = "namespace App.Tenant;\n\nimport Lib.HasLabel;\n\nenum Status : string, HasLabel\n{\n    case Active = \"a\";\n}\n\nenum Suit : HasLabel\n{\n    case Hearts;\n}\n";
+    let backed = "namespace App.Tenant;\n\nimport Lib.HasLabel;\n\nenum Status : string, HasLabel\n{\n    case Active = \"a\";\n}\n";
+    let pure = "namespace App.Tenant;\n\nimport Lib.HasLabel;\n\nenum Suit : HasLabel\n{\n    case Hearts;\n}\n";
 
-    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(backed), Vec::<String>::new());
+    assert_eq!(issues(pure), Vec::<String>::new());
 }
 
 /// The engine refuses a declaration whose header names an interface twice. It adds `UnitEnum` to every enum, and
 /// `BackedEnum` to a backed one, so it refuses an enum header that names them as well.
 #[test]
 fn a_header_naming_an_interface_twice_or_an_enum_header_naming_unit_enum_is_an_error() {
-    let code = "namespace App.Tenant;\n\nimport Lib.HasLabel;\nimport UnitEnum;\nimport BackedEnum;\n\nclass Card : HasLabel, HasLabel\n{\n}\n\ninterface Shown : HasLabel, HasLabel\n{\n}\n\nenum Status : string, HasLabel, BackedEnum\n{\n    case Active = \"a\";\n}\n\nenum Suit : UnitEnum\n{\n    case Hearts;\n}\n";
+    let enum_header =
+        "Every enum implements `UnitEnum`, and every backed enum `BackedEnum`, so an enum header never names them.";
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:24 This header names `HasLabel` twice.",
-            "11:29 This header names `HasLabel` twice.",
-            "15:33 Every enum implements `UnitEnum`, and every backed enum `BackedEnum`, so an enum header never names them.",
-            "20:13 Every enum implements `UnitEnum`, and every backed enum `BackedEnum`, so an enum header never names them.",
-        ]
-    );
+    for (declaration, expected) in [
+        ("class Card : HasLabel, HasLabel\n{\n}\n", "7:24 This header names `HasLabel` twice.".to_owned()),
+        ("interface Shown : HasLabel, HasLabel\n{\n}\n", "7:29 This header names `HasLabel` twice.".to_owned()),
+        ("enum Status : string, HasLabel, BackedEnum\n{\n    case Active = \"a\";\n}\n", format!("7:33 {enum_header}")),
+        ("enum Suit : UnitEnum\n{\n    case Hearts;\n}\n", format!("7:13 {enum_header}")),
+    ] {
+        let code = leak(format!(
+            "namespace App.Tenant;\n\nimport Lib.HasLabel;\nimport UnitEnum;\nimport BackedEnum;\n\n{declaration}"
+        ));
+
+        assert_eq!(issues(code), [expected], "{declaration}");
+    }
 }
 
 /// A header parses any type, as C#'s base list does. It names a class or an interface, or a generic class type whose
 /// type arguments are checked as a parameter's types, and any other type is not supported yet where it is written.
 #[test]
 fn a_header_names_a_class_or_a_generic_class_type_and_any_other_type_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nimport Lib.PaginatedList;\n\npublic class OrderPage : PaginatedList<Order>, Comparable<OrderPage> { }\n\nclass Card : int { }\n\npublic class Bad : PaginatedList<void> { }\n\npublic class Worse<TItem, TOther> : TItem, Lines<Self>, List<int>, TOther<Order> { }\n";
+    for (declaration, expected) in [
+        ("public class OrderPage : PaginatedList<Order>, Comparable<OrderPage> { }", vec![]),
+        ("class Card : int { }", vec!["5:14 This type is not supported yet in PHP#."]),
+        (
+            "public class Bad : PaginatedList<void> { }",
+            vec!["5:34 A type argument cannot be `void`: `void` is only a return type."],
+        ),
+        (
+            "public class Worse<TItem, TOther> : TItem, Lines<Self>, List<int>, TOther<Order> { }",
+            vec![
+                "5:37 This type is not supported yet in PHP#.",
+                "5:50 `Self` is only a return type in PHP#.",
+                "5:57 This type is not supported yet in PHP#.",
+                "5:68 A type parameter takes no type arguments: write `TOther`.",
+            ],
+        ),
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\nimport Lib.PaginatedList;\n\n{declaration}\n"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:14 This type is not supported yet in PHP#.",
-            "9:34 A type argument cannot be `void`: `void` is only a return type.",
-            "11:37 This type is not supported yet in PHP#.",
-            "11:50 `Self` is only a return type in PHP#.",
-            "11:57 This type is not supported yet in PHP#.",
-            "11:68 A type parameter takes no type arguments: write `TOther`.",
-        ]
-    );
+        assert_eq!(issues(code), expected, "{declaration}");
+    }
 }
 
 /// Every example of spec sections 11 and 25 is in the slice: type parameters on a class, an interface and a method,
@@ -5117,48 +5403,65 @@ fn a_header_names_a_class_or_a_generic_class_type_and_any_other_type_is_not_supp
 /// and `out`.
 #[test]
 fn the_generics_examples_of_the_spec_are_in_the_slice() {
-    let code = "namespace App.Tenant;\n\nimport Illuminate.Database.Eloquent.Model;\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    public TItem first(List<TItem> items) => items[0];\n}\n\npublic class Repository\n{\n    private Map<string, Class<Element>> elements = [:];\n\n    public PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query) => new PaginatedList<TItem>(query.rows());\n\n    public void share<TItem : DatabaseEntity & Shareable>(TItem item, Any body)\n    {\n        const page = new PaginatedList<Order>(this.rows());\n        const payload = Json.decode<WebhookPayload>(body);\n        const found = this?.find<Order>(1);\n    }\n\n    public Model? load(Class<Model> type, int id) => type.find(id);\n}\n\npublic interface Validator<in TItem>\n{\n    bool check(TItem item);\n}\n\npublic interface Source<out TItem>\n{\n    TItem next();\n}\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n\npublic class Inbox\n{\n    public bool holds<TItem>(List<TItem> items, Any value) => value is TItem;\n}\n";
+    for declaration in [
+        "public class PaginatedList<TItem : DatabaseEntity>\n{\n    public TItem first(List<TItem> items) => items[0];\n}\n",
+        "public class Repository\n{\n    private Map<string, Class<Element>> elements = [:];\n\n    public PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query) => new PaginatedList<TItem>(query.rows());\n\n    public void share<TItem : DatabaseEntity & Shareable>(TItem item, Any body)\n    {\n        const page = new PaginatedList<Order>(this.rows());\n        const payload = Json.decode<WebhookPayload>(body);\n        const found = this?.find<Order>(1);\n    }\n\n    public Model? load(Class<Model> type, int id) => type.find(id);\n}\n",
+        "public interface Validator<in TItem>\n{\n    bool check(TItem item);\n}\n",
+        "public interface Source<out TItem>\n{\n    TItem next();\n}\n",
+        "public class OrderPage : PaginatedList<Order>\n{\n}\n",
+        "public class Inbox\n{\n    public bool holds<TItem>(List<TItem> items, Any value) => value is TItem;\n}\n",
+    ] {
+        let code =
+            leak(format!("namespace App.Tenant;\n\nimport Illuminate.Database.Eloquent.Model;\n\n{declaration}"));
 
-    assert_eq!(issues(code), Vec::<String>::new());
+        assert_eq!(issues(code), Vec::<String>::new(), "{declaration}");
+    }
 }
 
 /// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11, a struct's too.
 #[test]
 fn a_type_parameter_whose_name_does_not_start_with_t_and_an_uppercase_letter_is_an_error() {
-    let code = "namespace App.Tenant;\n\npublic class Box<Item, T, TKey, Tkey, T1, TK>\n{\n    public void run<Value>() { }\n}\n\npublic struct Pair<Item, out TOther>\n{\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Box<Item, T, TKey, Tkey, T1, TK>\n{\n    public void run<Value>() { }\n}\n";
+    let r#struct = "namespace App.Tenant;\n\npublic struct Pair<Item, out TOther>\n{\n}\n";
     let refusal = "A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.";
 
     assert_eq!(
         issues(code),
-        [
-            format!("3:18 {refusal}"),
-            format!("3:33 {refusal}"),
-            format!("3:39 {refusal}"),
-            format!("5:21 {refusal}"),
-            format!("8:20 {refusal}"),
-        ]
+        [format!("3:18 {refusal}"), format!("3:33 {refusal}"), format!("3:39 {refusal}"), format!("5:21 {refusal}")]
     );
+    assert_eq!(issues(r#struct), [format!("3:20 {refusal}")]);
 }
 
 /// A type parameter is a type, so it starts with a capital letter as every PHP# type does: the rule that names it `T`
 /// or `T` and a capital letter refuses a lowercase one wherever a list declares it, once.
 #[test]
 fn a_type_parameter_starts_with_a_capital_letter() {
-    let lowercase = "namespace App.Tenant;\n\nclass Box<t>\n{\n    public void run<item>() { }\n}\n\ninterface Source<t>\n{\n    void next<value>();\n}\n\nenum Status\n{\n    case Open;\n\n    public void run<item>() { }\n}\n";
-    let capitalized = "namespace App.Tenant;\n\nclass Box<T>\n{\n    public void run<TItem>() { }\n}\n\ninterface Source<T>\n{\n    void next<TValue>();\n}\n\nenum Status\n{\n    case Open;\n\n    public void run<TItem>() { }\n}\n";
     let refusal = "A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.";
 
-    assert_eq!(
-        issues(lowercase),
-        [
-            format!("3:11 {refusal}"),
-            format!("5:21 {refusal}"),
-            format!("8:18 {refusal}"),
-            format!("10:15 {refusal}"),
-            format!("17:21 {refusal}"),
-        ]
-    );
-    assert_eq!(issues(capitalized), Vec::<String>::new());
+    for (lowercase, capitalized, at) in [
+        (
+            "class Box<t>\n{\n    public void run<item>() { }\n}\n",
+            "class Box<T>\n{\n    public void run<TItem>() { }\n}\n",
+            vec!["3:11", "5:21"],
+        ),
+        (
+            "interface Source<t>\n{\n    void next<value>();\n}\n",
+            "interface Source<T>\n{\n    void next<TValue>();\n}\n",
+            vec!["3:18", "5:15"],
+        ),
+        (
+            "enum Status\n{\n    case Open;\n\n    public void run<item>() { }\n}\n",
+            "enum Status\n{\n    case Open;\n\n    public void run<TItem>() { }\n}\n",
+            vec!["7:21"],
+        ),
+    ] {
+        let lowercase = leak(format!("namespace App.Tenant;\n\n{lowercase}"));
+        let capitalized = leak(format!("namespace App.Tenant;\n\n{capitalized}"));
+        let expected: Vec<String> = at.iter().map(|at| format!("{at} {refusal}")).collect();
+
+        assert_eq!(issues(lowercase), expected, "{lowercase}");
+        assert_eq!(issues(capitalized), Vec::<String>::new(), "{capitalized}");
+    }
 }
 
 #[test]
@@ -5176,15 +5479,19 @@ fn a_type_parameter_list_that_declares_a_name_twice_is_an_error() {
 /// is an error, and on a class's or an interface's is not.
 #[test]
 fn in_or_out_is_an_error_only_on_a_method_type_parameter() {
-    let code = "namespace App.Tenant;\n\npublic class Box<out TItem, in TOther>\n{\n    public void run<out T, in TKey, TValue>() { }\n}\n\npublic interface Source<out TItem>\n{\n    TItem next<in T>();\n}\n";
+    let class = "namespace App.Tenant;\n\npublic class Box<out TItem, in TOther>\n{\n    public void run<out T, in TKey, TValue>() { }\n}\n";
+    let interface = "namespace App.Tenant;\n\npublic interface Source<out TItem>\n{\n    TItem next<in T>();\n}\n";
 
     assert_eq!(
-        issues(code),
+        issues(class),
         [
             "5:21 A method's type parameter takes no `out`: only a class or an interface declares variance, so remove it.",
             "5:28 A method's type parameter takes no `in`: only a class or an interface declares variance, so remove it.",
-            "10:16 A method's type parameter takes no `in`: only a class or an interface declares variance, so remove it.",
         ]
+    );
+    assert_eq!(
+        issues(interface),
+        ["5:16 A method's type parameter takes no `in`: only a class or an interface declares variance, so remove it."]
     );
 }
 
@@ -5212,7 +5519,7 @@ fn a_bound_that_is_not_object_a_class_an_interface_a_generic_class_type_or_a_typ
             })
             .collect::<Vec<_>>()
     );
-    assert!(check("src/Report.sharp", code).iter().filter(|issue| issue.message.starts_with("A bound")).all(|issue| issue
+    assert!(check_in_type_file(code).iter().filter(|issue| issue.message.starts_with("A bound")).all(|issue| issue
         .notes
         == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
 }
@@ -5332,24 +5639,39 @@ fn a_static_member_uses_its_class_type_parameters() {
 /// class without type parameters does, using its type parameters.
 #[test]
 fn a_generic_class_declares_a_named_constructor() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public Box(public TItem item { get; }) { }\n\n    public Box.of(TItem item) : this(item) { }\n}\n\npublic class Plain\n{\n    public Plain(public int item { get; }) { }\n\n    public Plain.of(int item) : this(item) { }\n}\n";
+    let generic = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public Box(public TItem item { get; }) { }\n\n    public Box.of(TItem item) : this(item) { }\n}\n";
+    let plain = "namespace App.Tenant;\n\npublic class Plain\n{\n    public Plain(public int item { get; }) { }\n\n    public Plain.of(int item) : this(item) { }\n}\n";
 
-    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(generic), Vec::<String>::new());
+    assert_eq!(issues(plain), Vec::<String>::new());
 }
 
 /// A class constant holds one value for every type argument, so its type uses none of its class's type parameters, nor
 /// `Self`, which carries them: the refusal names every type parameter `Self` carries.
 #[test]
 fn a_class_constant_cannot_use_its_class_type_parameters() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public const TItem EMPTY = 1;\n\n    public const int SIZE = 1;\n\n    public const Self? NONE = null;\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public const Self? NONE = null;\n}\n\npublic class Triple<TFirst, TSecond, TThird>\n{\n    public const Self? NONE = null;\n}\n";
+    let r#box = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public const TItem EMPTY = 1;\n\n    public const int SIZE = 1;\n\n    public const Self? NONE = null;\n}\n";
+    let pair =
+        "namespace App.Tenant;\n\npublic class Pair<TFirst, TSecond>\n{\n    public const Self? NONE = null;\n}\n";
+    let triple = "namespace App.Tenant;\n\npublic class Triple<TFirst, TSecond, TThird>\n{\n    public const Self? NONE = null;\n}\n";
 
     assert_eq!(
-        issues(code),
+        issues(r#box),
         [
             "5:18 A constant can't use `TItem`, because every `Box<…>` shares it.",
             "9:18 A constant can't use `Self`, because every `Box<…>` shares it and `Self` carries `TItem`.",
-            "14:18 A constant can't use `Self`, because every `Pair<…>` shares it and `Self` carries `TFirst` and `TSecond`.",
-            "19:18 A constant can't use `Self`, because every `Triple<…>` shares it and `Self` carries `TFirst`, `TSecond` and `TThird`.",
+        ]
+    );
+    assert_eq!(
+        issues(pair),
+        [
+            "5:18 A constant can't use `Self`, because every `Pair<…>` shares it and `Self` carries `TFirst` and `TSecond`."
+        ]
+    );
+    assert_eq!(
+        issues(triple),
+        [
+            "5:18 A constant can't use `Self`, because every `Triple<…>` shares it and `Self` carries `TFirst`, `TSecond` and `TThird`."
         ]
     );
 }
@@ -5367,7 +5689,9 @@ fn a_static_method_uses_its_own_type_parameters() {
 /// with `new Self()`, as `Box<int>.make()` makes a `Box<int>`. PHP's `self` there keeps its own refusal.
 #[test]
 fn a_static_member_of_a_generic_class_returns_self() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public static Self make() => new Self();\n\n    public static self? none() => null;\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public static Self? none() => null;\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public static Self make() => new Self();\n\n    public static self? none() => null;\n}\n";
+    let pair =
+        "namespace App.Tenant;\n\npublic class Pair<TFirst, TSecond>\n{\n    public static Self? none() => null;\n}\n";
 
     assert_eq!(
         issues(code),
@@ -5375,6 +5699,7 @@ fn a_static_member_of_a_generic_class_returns_self() {
             "11:19 PHP# has no `self`: write the class's own name, `Box`, for the declaring class, or `Self` for the class a static method is called on.",
         ]
     );
+    assert_eq!(issues(pair), Vec::<String>::new());
 }
 
 /// A generic member of a union gets the checks it gets outside a union, inside its type arguments too. Each union
@@ -5404,34 +5729,66 @@ fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union()
 /// and no enum declares a stored or static one.
 #[test]
 fn an_enum_declares_a_computed_property_and_no_stored_one() {
-    let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    private int count = 0;\n\n    public string label => \"active\";\n}\n\nenum Plan : string\n{\n    case Pro = \"pro\";\n\n    public string label => \"Pro\";\n\n    public static int total { get; set; } = 0;\n}\n\nenum Payment\n{\n    case Declined(string reason);\n\n    public string message => \"declined\";\n\n    public string code { get; set; } = \"x\";\n\n    public static string kind => \"payment\";\n\n    public string name => \"payment\";\n}\n\nenum Tier : string\n{\n    case Gold = \"gold\";\n\n    public static string first => \"gold\";\n\n    public string name => \"tier\";\n\n    public string value => \"tier\";\n}\n\nenum Level\n{\n    case High;\n\n    public string value => \"high\";\n}\n";
+    for (declaration, expected) in [
+        (
+            "enum Status\n{\n    case Active;\n\n    private int count = 0;\n\n    public string label => \"active\";\n}\n",
+            [
+                "7:5 Enum `Status` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+            ]
+            .as_slice(),
+        ),
+        (
+            "enum Plan : string\n{\n    case Pro = \"pro\";\n\n    public string label => \"Pro\";\n\n    public static int total { get; set; } = 0;\n}\n",
+            &[
+                "9:5 Enum `Plan` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+            ],
+        ),
+        (
+            "enum Payment\n{\n    case Declined(string reason);\n\n    public string message => \"declined\";\n\n    public string code { get; set; } = \"x\";\n\n    public static string kind => \"payment\";\n\n    public string name => \"payment\";\n}\n",
+            &[
+                "9:5 Enum `Payment` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
+                "13:19 Enum `Payment` already has the property `name`, which every enum has.",
+            ],
+        ),
+        (
+            "enum Tier : string\n{\n    case Gold = \"gold\";\n\n    public static string first => \"gold\";\n\n    public string name => \"tier\";\n\n    public string value => \"tier\";\n}\n",
+            &[
+                "9:19 Enum `Tier` already has the property `name`, which every enum has.",
+                "11:19 Enum `Tier` already has the property `value`, which a backed enum has.",
+            ],
+        ),
+        ("enum Level\n{\n    case High;\n\n    public string value => \"high\";\n}\n", &[]),
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:5 Enum `Status` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
-            "18:5 Enum `Plan` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
-            "27:5 Enum `Payment` declares no stored property: a computed property, as in `public string label => …;`, is allowed.",
-            "31:19 Enum `Payment` already has the property `name`, which every enum has.",
-            "40:19 Enum `Tier` already has the property `name`, which every enum has.",
-            "42:19 Enum `Tier` already has the property `value`, which a backed enum has.",
-        ]
-    );
+        assert_eq!(issues(code), expected, "{declaration}");
+    }
 }
 
 /// Spec section 31: an enum without a backing type declares type parameters as a class does, with bounds and without
 /// `in` or `out`. A backed enum runs as a PHP enum, which holds none.
 #[test]
 fn an_enum_declares_type_parameters_without_a_backing_type() {
-    let code = "namespace App.Tenant;\n\nenum Outcome<T, TFailure : Failure>\n{\n    case Done(T value);\n    case Failed(TFailure failure);\n    case Waiting;\n}\n\nenum Covariant<out T>\n{\n    case Some(T value);\n}\n\nenum Backed<T> : string\n{\n    case Pro = \"pro\";\n}\n\ninterface Failure\n{\n}\n";
+    for (declaration, expected) in [
+        (
+            "enum Outcome<T, TFailure : Failure>\n{\n    case Done(T value);\n    case Failed(TFailure failure);\n    case Waiting;\n}\n",
+            None,
+        ),
+        (
+            "enum Covariant<out T>\n{\n    case Some(T value);\n}\n",
+            Some(
+                "3:16 An enum's type parameter takes no `out`: only a class or an interface declares variance, so remove it.",
+            ),
+        ),
+        (
+            "enum Backed<T> : string\n{\n    case Pro = \"pro\";\n}\n",
+            Some("3:12 A backed enum takes no type parameters: it runs as a PHP enum, which holds none."),
+        ),
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "10:16 An enum's type parameter takes no `out`: only a class or an interface declares variance, so remove it.",
-            "15:12 A backed enum takes no type parameters: it runs as a PHP enum, which holds none.",
-        ]
-    );
+        assert_eq!(issues(code), Vec::from_iter(expected), "{declaration}");
+    }
 }
 
 /// Spec section 31: `Error` is PHP#'s interface of every failure, so no import names it, nor gives a name `Error`. An
@@ -5462,23 +5819,39 @@ fn a_backing_type_other_than_int_or_string_reports_only_the_php_error() {
 /// and cases that carry data. A case's fields are its class's public get-only properties, as an event's parameters are.
 #[test]
 fn enum_shapes_are_backed_or_not() {
-    let code = "namespace App.Shop;\n\nenum Plan : string\n{\n    case Free = \"free\";\n    case Custom(int seats);\n}\n\nenum PaymentResult\n{\n    case Paid(public string transactionId);\n    case Declined(string ...reasons);\n    case Tagged(Set<string> tags);\n    case Held(string reason { get; });\n}\n\nenum Timing\n{\n    case Later(int seconds);\n    case Never;\n    case Void;\n\n    public int later() => 1;\n    public int void() => 2;\n}\n";
-    let fixed = "namespace App.Shop;\n\nenum PaymentResult\n{\n    case Paid(string transactionId);\n    case Declined(string reason);\n    case RequiresAction(string redirect);\n}\n\nenum CheckoutState\n{\n    case Open;\n    case Paying(string gateway, int attempt = 1);\n    case Done(Order order);\n}\n\nclass Order { }\n";
+    let plan =
+        "namespace App.Shop;\n\nenum Plan : string\n{\n    case Free = \"free\";\n    case Custom(int seats);\n}\n";
+    let payment = "namespace App.Shop;\n\nenum PaymentResult\n{\n    case Paid(public string transactionId);\n    case Declined(string ...reasons);\n    case Tagged(Set<string> tags);\n    case Held(string reason { get; });\n}\n";
+    let timing = "namespace App.Shop;\n\nenum Timing\n{\n    case Later(int seconds);\n    case Never;\n    case Void;\n\n    public int later() => 1;\n    public int void() => 2;\n}\n";
 
+    assert_eq!(issues(plan), ["6:16 Case `Custom` of backed enum `Plan` must not carry data."]);
     assert_eq!(
-        issues(code),
+        issues(payment),
         [
-            "6:16 Case `Custom` of backed enum `Plan` must not carry data.",
-            "11:15 A case's field takes no modifier: it is a public get-only property of the case.",
-            "12:26 A case's field cannot be variadic: it is one property of the case.",
-            "13:17 A `Set` field of a case is not supported yet in PHP#.",
-            "14:29 A case's field takes no accessors: it is a get-only property of the case.",
-            "23:16 The method `later` shares its name with the case `Later`, which `Timing.Later(…)` creates.",
-            "20:10 A case of an enum whose cases carry data or type arguments is a class, so it can't be named `Never`.",
-            "21:10 A case of an enum whose cases carry data or type arguments is a class, so it can't be named `Void`.",
+            "5:15 A case's field takes no modifier: it is a public get-only property of the case.",
+            "6:26 A case's field cannot be variadic: it is one property of the case.",
+            "7:17 A `Set` field of a case is not supported yet in PHP#.",
+            "8:29 A case's field takes no accessors: it is a get-only property of the case.",
         ]
     );
-    assert_eq!(issues(fixed), Vec::<String>::new());
+    assert_eq!(
+        issues(timing),
+        [
+            "9:16 The method `later` shares its name with the case `Later`, which `Timing.Later(…)` creates.",
+            "6:10 A case of an enum whose cases carry data or type arguments is a class, so it can't be named `Never`.",
+            "7:10 A case of an enum whose cases carry data or type arguments is a class, so it can't be named `Void`.",
+        ]
+    );
+
+    for fixed in [
+        "enum PaymentResult\n{\n    case Paid(string transactionId);\n    case Declined(string reason);\n    case RequiresAction(string redirect);\n}\n",
+        "enum CheckoutState\n{\n    case Open;\n    case Paying(string gateway, int attempt = 1);\n    case Done(Order order);\n}\n",
+        "class Order { }\n",
+    ] {
+        let fixed = leak(format!("namespace App.Shop;\n\n{fixed}"));
+
+        assert_eq!(issues(fixed), Vec::<String>::new(), "{fixed}");
+    }
 }
 
 #[test]
@@ -5496,15 +5869,12 @@ fn an_enum_method_without_a_return_type_is_an_error() {
 
 #[test]
 fn an_enum_case_named_class_is_an_error_as_in_php() {
-    let code = "namespace App.Tenant;\n\nenum Status\n{\n    case class;\n}\n\nenum Mode : string\n{\n    case CLASS = \"c\";\n}\n";
+    let pure = "namespace App.Tenant;\n\nenum Status\n{\n    case class;\n}\n";
+    let backed = "namespace App.Tenant;\n\nenum Mode : string\n{\n    case CLASS = \"c\";\n}\n";
+    let refusal = "5:10 An enum case cannot be named `class`: PHP reserves `class` for the class name.";
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:10 An enum case cannot be named `class`: PHP reserves `class` for the class name.",
-            "10:10 An enum case cannot be named `class`: PHP reserves `class` for the class name.",
-        ]
-    );
+    assert_eq!(issues(pure), [refusal]);
+    assert_eq!(issues(backed), [refusal]);
 }
 
 #[test]
@@ -5522,39 +5892,35 @@ fn a_bare_case_name_in_an_enum_method_is_an_error_that_names_the_enum() {
 }
 
 #[test]
-fn an_enum_case_of_the_same_file_is_read_through_its_enum_name_in_a_class_and_in_the_enum() {
-    let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    public static Status first() => Status.Active;\n}\n\nclass Report\n{\n    public bool run(Status status = Status.Active)\n    {\n        return status === Status.Active;\n    }\n}\n";
+fn an_enum_case_is_read_through_its_enum_name_in_a_class_and_in_the_enum() {
+    let r#enum = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    public static Status first() => Status.Active;\n}\n";
+    let class = "namespace App.Tenant;\n\nclass Report\n{\n    public bool run(Status status = Status.Active)\n    {\n        return status === Status.Active;\n    }\n}\n";
 
-    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(r#enum), Vec::<String>::new());
+    assert_eq!(issues(class), Vec::<String>::new());
 }
 
 /// A case is read as `Status.Active` in a class, in the enum's own method, in a parameter default, in a constant, and
 /// with a method called on it. A case's value reads another class's constant the same way.
 #[test]
 fn a_case_is_read_through_its_enum_name_in_every_place() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Registry;\n\npublic enum Status : string\n{\n    case Active = \"a\";\n    case Paused = Registry.PAUSED;\n\n    public const Status DEFAULT = Status.Active;\n\n    public bool active() => this === Status.Active;\n\n    public string label() => this.name;\n}\n\nclass Report\n{\n    public string run(Status status = Status.Active)\n    {\n        if (status === Status.Active) {\n            return Status.Active.label();\n        }\n        return Status.DEFAULT.label();\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Registry;\n\npublic enum Status : string\n{\n    case Active = \"a\";\n    case Paused = Registry.PAUSED;\n\n    public const Status DEFAULT = Status.Active;\n\n    public bool active() => this === Status.Active;\n\n    public string label() => this.name;\n}\n";
+    let class = "namespace App.Tenant;\n\nclass Report\n{\n    public string run(Status status = Status.Active)\n    {\n        if (status === Status.Active) {\n            return Status.Active.label();\n        }\n        return Status.DEFAULT.label();\n    }\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
-}
-
-#[test]
-fn a_static_member_read_in_an_enum_case_value_is_an_error() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n}\n\nenum Tier : int\n{\n    case Low = Report.count;\n}\n";
-
-    assert_eq!(issues(code), ["10:16 `Report.count` is a static member, which a constant value cannot read."]);
+    assert_eq!(issues(class), Vec::<String>::new());
 }
 
 #[test]
 fn an_enum_named_like_a_reserved_class_name_or_an_import_is_an_error_as_a_class_is() {
-    let code = "namespace App.Tenant;\n\nimport App.Shared.Status;\n\nenum Status\n{\n    case Active;\n}\n\nenum Mixed\n{\n    case One;\n}\n";
+    let imported = "namespace App.Tenant;\n\nimport App.Shared.Status;\n\nenum Status\n{\n    case Active;\n}\n";
+    let reserved = "namespace App.Tenant;\n\nenum Mixed\n{\n    case One;\n}\n";
 
     assert_eq!(
-        issues(code),
-        [
-            "3:8 Cannot import `App.Shared.Status` as `Status`: this file declares a class named `Status`.",
-            "10:6 Cannot use `Mixed` as a class name: it is reserved.",
-        ]
+        issues(imported),
+        ["3:8 Cannot import `App.Shared.Status` as `Status`: this file declares a class named `Status`."]
     );
+    assert_eq!(issues(reserved), ["3:6 Cannot use `Mixed` as a class name: it is reserved."]);
 }
 
 /// An enum's method follows a class's method rules, so it takes `List`, `Map` and function types and holds lambdas,
@@ -5716,7 +6082,7 @@ fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
             "10:28 `as` converts to a type that is not nullable or `void`.",
         ]
     );
-    let helps: Vec<_> = check("src/Report.sharp", code).into_iter().filter_map(|issue| issue.help).collect();
+    let helps: Vec<_> = check_in_type_file(code).into_iter().filter_map(|issue| issue.help).collect();
     assert_eq!(
         helps,
         [
@@ -5743,7 +6109,7 @@ fn a_function_type_is_tested_like_any_type() {
 fn an_as_to_a_type_without_a_test_names_the_types_as_converts_to() {
     let code = leak(method("        const a = extra as Class<Report>;\n        return extra;\n"));
 
-    let notes: Vec<_> = check("src/Report.sharp", code).into_iter().flat_map(|issue| issue.notes).collect();
+    let notes: Vec<_> = check_in_type_file(code).into_iter().flat_map(|issue| issue.notes).collect();
     assert_eq!(
         notes,
         [
@@ -5756,7 +6122,7 @@ fn an_as_to_a_type_without_a_test_names_the_types_as_converts_to() {
 fn a_nullable_type_pattern_names_the_null_check_to_write() {
     let code = leak(method("        const a = extra is int? n;\n        return extra;\n"));
 
-    let help: Vec<_> = check("src/Report.sharp", code).into_iter().filter_map(|issue| issue.help).collect();
+    let help: Vec<_> = check_in_type_file(code).into_iter().filter_map(|issue| issue.help).collect();
     assert_eq!(help, ["Test for null with `x == null`, or join both with `or`, as in `x is int or null`."]);
 }
 
@@ -5918,9 +6284,11 @@ fn a_method_named_as_a_property_of_its_class_is_an_error() {
 /// case, is no clash, in the class body or declared by a constructor parameter.
 #[test]
 fn a_property_named_as_its_class_is_no_clash_with_the_constructor() {
-    let code = "namespace App.Tenant;\n\nclass Coupon\n{\n    public string coupon { get; }\n\n    public Coupon(string code)\n    {\n        this.coupon = code;\n    }\n}\n\nclass Label\n{\n    public Label(public string label { get; }) {}\n}\n";
+    let body = "namespace App.Tenant;\n\nclass Coupon\n{\n    public string coupon { get; }\n\n    public Coupon(string code)\n    {\n        this.coupon = code;\n    }\n}\n";
+    let parameter = "namespace App.Tenant;\n\nclass Label\n{\n    public Label(public string label { get; }) {}\n}\n";
 
-    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(body), Vec::<String>::new());
+    assert_eq!(issues(parameter), Vec::<String>::new());
 }
 
 /// PHP# has no by-reference parameter: a lambda changes a variable it captures, and a method returns the new value.
@@ -6100,7 +6468,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         ),
     ] {
         assert_eq!(
-            check("src/Report.sharp", code).into_iter().flat_map(|issue| issue.notes).collect::<Vec<_>>(),
+            check_in_type_file(code).into_iter().flat_map(|issue| issue.notes).collect::<Vec<_>>(),
             [note],
             "{code}"
         );
@@ -6285,19 +6653,26 @@ fn an_interface_or_an_enum_declares_no_operator() {
 /// Spec section 13: `readonly` goes before any type PHP# checks, a value's, and after a method's parameters, `this`'s.
 #[test]
 fn readonly_goes_before_a_value_s_type_and_after_a_method_s_parameters() {
-    let code = "namespace App;\n\npublic interface Quotes\n{\n    readonly Money quote(readonly Cart cart) uses Http readonly;\n}\n\npublic class Shop\n{\n    private Customer owner = new Customer();\n\n    public Shop(readonly Order order) { }\n\n    public readonly Customer customer => this.owner;\n\n    public readonly Customer? buyer(readonly List<readonly Line> lines, Function<Money?(readonly Line, string)> priceOf) readonly\n    {\n        readonly Customer c = this.owner;\n        const free = (readonly Line line) => line.free;\n        return c;\n    }\n}\n\npublic static class OrderLabels\n{\n    extension(readonly Order order)\n    {\n        public string caption() => \"order\";\n    }\n}\n";
+    for declaration in [
+        "public interface Quotes\n{\n    readonly Money quote(readonly Cart cart) uses Http readonly;\n}\n",
+        "public class Shop\n{\n    private Customer owner = new Customer();\n\n    public Shop(readonly Order order) { }\n\n    public readonly Customer customer => this.owner;\n\n    public readonly Customer? buyer(readonly List<readonly Line> lines, Function<Money?(readonly Line, string)> priceOf) readonly\n    {\n        readonly Customer c = this.owner;\n        const free = (readonly Line line) => line.free;\n        return c;\n    }\n}\n",
+        "public static class OrderLabels\n{\n    extension(readonly Order order)\n    {\n        public string caption() => \"order\";\n    }\n}\n",
+    ] {
+        let code = leak(format!("namespace App;\n\n{declaration}"));
 
-    assert_eq!(issues_in("src/Shop.sharp", code), Vec::<String>::new());
+        assert_eq!(issues(code), Vec::<String>::new(), "{declaration}");
+    }
 }
 
 /// Spec section 13: a field, a property, a parameter that declares a member and a class keep a value with `{ get; }`,
 /// so `readonly` on one is an error that names it.
 #[test]
 fn readonly_on_storage_names_a_get_only_property() {
-    let code = "namespace App;\n\npublic class Invoice\n{\n    private readonly Money total;\n    public readonly Money due { get; set; }\n    private readonly static int count = 0;\n    protected readonly Money owed;\n\n    public Invoice(public readonly Money paid, private readonly Money left { get; }) { }\n}\n\npublic readonly class Receipt { }\n";
+    let code = "namespace App;\n\npublic class Invoice\n{\n    private readonly Money total;\n    public readonly Money due { get; set; }\n    private readonly static int count = 0;\n    protected readonly Money owed;\n\n    public Invoice(public readonly Money paid, private readonly Money left { get; }) { }\n}\n";
+    let class = "namespace App;\n\npublic readonly class Receipt { }\n";
 
     assert_eq!(
-        issues_in("src/Invoice.sharp", code),
+        issues(code),
         [
             "5:13 A field or property is never `readonly`: declare a get-only property, as in `private Money total { get; }`.",
             "6:12 A field or property is never `readonly`: declare a get-only property, as in `public Money due { get; }`.",
@@ -6305,8 +6680,11 @@ fn readonly_on_storage_names_a_get_only_property() {
             "8:15 A field or property is never `readonly`: declare a get-only property, as in `protected Money owed { get; }`.",
             "10:27 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `public Money paid { get; }`.",
             "10:56 A constructor parameter that declares a member is never `readonly`: declare a get-only property, as in `private Money left { get; }`.",
-            "13:8 A class is never `readonly`: declare each of its properties get-only, with `{ get; }`.",
         ]
+    );
+    assert_eq!(
+        issues(class),
+        ["3:8 A class is never `readonly`: declare each of its properties get-only, with `{ get; }`."]
     );
 }
 
@@ -6314,10 +6692,21 @@ fn readonly_on_storage_names_a_get_only_property() {
 /// changes, twice, in a pattern, on a method with no `this` to keep, and where the language already reads only.
 #[test]
 fn readonly_that_cannot_matter_is_an_error() {
-    let code = "namespace App;\n\npublic class Report\n{\n    public int count(readonly int a, readonly string? b, readonly bool c, readonly float d) => 0;\n    public void any(readonly Any value) { }\n    public void twice(readonly readonly Order order) { }\n    public bool test(Any value) => value is readonly Order || (value as readonly Order) != null;\n    public static int total() readonly => 0;\n    public Report() readonly { }\n    public int hash() readonly => 1;\n    public string toString() readonly => \"report\";\n    public static bool operator ==(readonly Report a, Report b) => true;\n}\n\npublic enum Suit\n{\n    case Hearts;\n\n    public string label() readonly => \"hearts\";\n}\n\npublic static class Labels\n{\n    extension(Report report)\n    {\n        public string caption() readonly => \"report\";\n    }\n}\n\npublic class Digest\n{\n    public string hash(string text) readonly => text;\n\n    public string toString(int width) readonly => \"digest\";\n}\n";
+    let code = "namespace App;\n\npublic class Report\n{\n    public int count(readonly int a, readonly string? b, readonly bool c, readonly float d) => 0;\n    public void any(readonly Any value) { }\n    public void twice(readonly readonly Order order) { }\n    public bool test(Any value) => value is readonly Order || (value as readonly Order) != null;\n    public static int total() readonly => 0;\n    public Report() readonly { }\n    public int hash() readonly => 1;\n    public string toString() readonly => \"report\";\n    public static bool operator ==(readonly Report a, Report b) => true;\n}\n";
+    let r#enum = "namespace App;\n\npublic enum Suit\n{\n    case Hearts;\n\n    public string label() readonly => \"hearts\";\n}\n";
+    let extension = "namespace App;\n\npublic static class Labels\n{\n    extension(Report report)\n    {\n        public string caption() readonly => \"report\";\n    }\n}\n";
+    let digest = "namespace App;\n\npublic class Digest\n{\n    public string hash(string text) readonly => text;\n\n    public string toString(int width) readonly => \"digest\";\n}\n";
 
+    assert_eq!(issues(r#enum), ["7:27 An enum case never changes, so an enum method needs no `readonly`: remove it."]);
     assert_eq!(
-        issues_in("src/Report.sharp", code),
+        issues(extension),
+        [
+            "7:33 An extension member has no `this`: write `readonly` before its receiver's type, as in `extension(readonly Report report)`."
+        ]
+    );
+    assert_eq!(issues(digest), Vec::<String>::new());
+    assert_eq!(
+        issues(code),
         [
             "5:22 An `int` never changes, so `readonly` changes nothing: write `int`.",
             "5:38 A `string?` never changes, so `readonly` changes nothing: write `string?`.",
@@ -6332,8 +6721,6 @@ fn readonly_that_cannot_matter_is_an_error() {
             "11:23 `hash()` is readonly by definition: remove `readonly`.",
             "12:30 `toString()` is readonly by definition: remove `readonly`.",
             "13:36 An operator's operands are readonly by definition: write `Report a`.",
-            "20:27 An enum case never changes, so an enum method needs no `readonly`: remove it.",
-            "27:33 An extension member has no `this`: write `readonly` before its receiver's type, as in `extension(readonly Report report)`.",
         ]
     );
 }

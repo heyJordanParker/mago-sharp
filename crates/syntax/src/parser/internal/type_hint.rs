@@ -125,12 +125,12 @@ where
                 // PHP# writes PHP's `mixed` as `Any`, as spec section 24 decides.
                 b"Any" if self.dialect.is_sharp() => Hint::Mixed(self.parse_local_identifier()?),
                 val if val.eq_ignore_ascii_case(b"iterable") => Hint::Iterable(self.parse_local_identifier()?),
-                // Spec section 20: a case of an enum is a type of its own, written `PaymentResult.Paid`. A name
-                // followed by `(` or `<` is a named constructor's, as in `public Money.of(int cents)`, and a longer
-                // dotted name is no type.
+                // Spec section 20: a case of an enum is a type of its own, written `PaymentResult.Paid`. A longer
+                // dotted name is a full name, which the analyzer refuses with the import to add, spec section 23. A
+                // name followed by `(` or `<` is a named constructor's, as in `public Money.of(int cents)`.
                 _ if self.dialect.is_sharp()
                     && self.stream.peek_kind(1)? == Some(T!["."])
-                    && !matches!(self.stream.peek_kind(3)?, Some(T!["(" | "." | "<"])) =>
+                    && !self.peek_dotted_name()?.1.is_some_and(|after| matches!(after.kind, T!["(" | "<"])) =>
                 {
                     Hint::Identifier(self.parse_dotted_identifier()?)
                 }
@@ -284,6 +284,22 @@ where
         Ok(self
             .peek_after_tuple_hint()?
             .is_some_and(|(_, after)| after.kind == T![Identifier] && matches!(after.value, b"of" | b"in")))
+    }
+
+    /// The number of names joined by `.` that start here, and the token after them, as `2` and `(` for `Money.of(`, or
+    /// `None` at the end of the file. A `.` that no name follows is the token after them.
+    pub(crate) fn peek_dotted_name(&self) -> Result<(usize, Option<Token<'_>>), ParseError> {
+        let mut tokens = self.stream.peek_tokens().skip(1);
+        let mut parts = 1;
+        loop {
+            match tokens.next().transpose()? {
+                Some(dot) if dot.kind == T!["."] => match tokens.next().transpose()? {
+                    Some(name) if name.kind.is_identifier_maybe_reserved() => parts += 1,
+                    _ => return Ok((parts, Some(dot))),
+                },
+                after => return Ok((parts, after)),
+            }
+        }
     }
 
     /// The name after the PHP# tuple type that may start here, and the token after that name: a `[` whose closing `]`,

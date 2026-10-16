@@ -42,6 +42,7 @@ memchr = { workspace = true }
 
 [dev-dependencies]
 mago-prelude = { workspace = true, features = ["build"] }
+mago-semantics = { workspace = true }
 indoc = { workspace = true }
 criterion = { workspace = true }
 

@@ -24,6 +24,7 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
@@ -372,10 +373,11 @@ impl<'analysis> Types<'analysis> {
 
     /// The type arguments the generic method call at `span` gives the method, as [`Self::type_arguments`] writes those
     /// of a `new`. None when the method declares no type parameter, or a built-in class declares it, whose method never
-    /// reads them, as the prelude's `Sharp\ListMethods` and `Sharp\MapMethods` declare a list's and a map's. A method
-    /// of any project class, PHP# or plain PHP, may run a PHP# method that overrides or implements it, so a call through
-    /// a plain PHP `@template` interface or parent carries them, and a plain PHP method ignores them. The class that
-    /// declares the method decides, so `super.m()` carries them through a plain PHP parent that inherits a PHP# `m`.
+    /// reads them, as the prelude's `Sharp\Internal\ListMethods` and `Sharp\Internal\MapMethods` declare a list's and a
+    /// map's. A method of any project class, PHP# or plain PHP, may run a PHP# method that overrides or implements it,
+    /// so a call through a plain PHP `@template` interface or parent carries them, and a plain PHP method ignores them.
+    /// The class that declares the method decides, so `super.m()` carries them through a plain PHP parent that inherits
+    /// a PHP# `m`.
     pub(crate) fn call_type_arguments(&self, call: &Expression) -> Option<String> {
         let span = call.span();
         let arguments = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?;
@@ -690,9 +692,22 @@ impl<'analysis> Types<'analysis> {
         self.codebase.get_function_like(callee).filter(|metadata| metadata.flags.is_sharp())
     }
 
-    /// The constructor `new` runs for the fully qualified class name `class` when PHP# declares it.
-    pub(crate) fn sharp_constructor(&self, class: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
-        self.codebase.get_declaring_method(class, b"__construct").filter(|metadata| metadata.flags.is_sharp())
+    /// Whether the list the spread `spread` spreads may hold a value of `parameter`'s type, and so may fill it, as a
+    /// list of `Any` or of the parameter's own type does. Only a `List` spreads into a call, spec section 7.
+    pub(crate) fn spread_can_fill(&self, spread: &Expression, parameter: &FunctionLikeParameterMetadata) -> bool {
+        let Some(metadata) = &parameter.type_metadata else {
+            unreachable!("semantics refuses a PHP# parameter without a type");
+        };
+        let elements = self.element_type(self.expression_type(spread));
+
+        can_expression_types_be_identical(self.codebase, &elements, &metadata.type_union, false, false)
+    }
+
+    /// The method `method` of the fully qualified class name `class` runs, where it declares it or inherits it, when
+    /// PHP# declares it: `__construct` for `new`, a named constructor, or the static method an extension's member runs
+    /// as.
+    pub(crate) fn sharp_method(&self, class: &[u8], method: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
+        self.codebase.get_declaring_method(class, method).filter(|metadata| metadata.flags.is_sharp())
     }
 
     /// The name PHP's return check gives `call`, as `Lib\Pager::orders()`, and the metadata of the plain PHP function or
@@ -1166,23 +1181,24 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The type of the elements a value of `r#type` holds, the `T` of a `List<T>`, leaving out `null`. The caller asks
-    /// only about a value the checker typed as a collection.
+    /// only about a value the checker typed as a collection: a collection method's receiver, an operand of a
+    /// collection's `==`, or a spread.
     pub(crate) fn element_type(&self, r#type: &TUnion) -> TUnion {
         let mut element_type = None;
         for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
             let TAtomic::Array(array) = atomic else {
-                unreachable!("the checker runs a collection method only on a collection, not on {atomic:?}");
+                unreachable!("the checker types the value as a collection, not as {atomic:?}");
             };
             let (_, value) = get_array_parameters(array, self.codebase);
             element_type = Some(add_optional_union_type(value, element_type.as_ref(), self.codebase));
         }
 
-        element_type.unwrap_or_else(|| unreachable!("a collection method's receiver is a collection"))
+        element_type.unwrap_or_else(|| unreachable!("the checker types the value as a collection"))
     }
 
     /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the collection method the analyzer checked
-    /// the method call `call` against, null-safe or not: a method of `Sharp\ListMethods`, `Sharp\MapMethods` or
-    /// `Sharp\SetMethods`. None for a call of any other method.
+    /// the method call `call` against, null-safe or not: a method of `Sharp\Internal\ListMethods`,
+    /// `Sharp\Internal\MapMethods` or `Sharp\Internal\SetMethods`. None for a call of any other method.
     pub(crate) fn collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>)> {
         let mut callees = self.artifacts.get_callees(call);
         let (Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }), None) =
@@ -1190,8 +1206,11 @@ impl<'analysis> Types<'analysis> {
         else {
             return None;
         };
-        let methods: [(&str, &[u8]); 3] =
-            [("List", b"Sharp\\ListMethods"), ("Map", b"Sharp\\MapMethods"), ("Set", b"Sharp\\SetMethods")];
+        let methods: [(&str, &[u8]); 3] = [
+            ("List", b"Sharp\\Internal\\ListMethods"),
+            ("Map", b"Sharp\\Internal\\MapMethods"),
+            ("Set", b"Sharp\\Internal\\SetMethods"),
+        ];
         let collection = methods
             .into_iter()
             .find_map(|(collection, methods)| class.as_bytes().eq_ignore_ascii_case(methods).then_some(collection))?;
@@ -1200,24 +1219,24 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// Whether the method call `call`, null-safe or not, runs a `Map` method that leaves its receiver as it is, which
-    /// `Sharp\MapMethods` declares mutation-free.
+    /// `Sharp\Internal\MapMethods` declares mutation-free.
     pub(crate) fn reads_map(&self, call: &Expression) -> bool {
         let Some(("Map", method)) = self.collection_method(call) else {
             return false;
         };
 
         self.codebase
-            .get_method(b"Sharp\\MapMethods", &method)
+            .get_method(b"Sharp\\Internal\\MapMethods", &method)
             .is_some_and(|metadata| metadata.flags.is_mutation_free())
     }
 
     /// Whether the method call `call`, null-safe or not, runs a lazy operation of a PHP# `Iterable<T>`, spec section 12,
-    /// which `Sharp\IterableMethods` declares and the engine's `Sharp\Sequence` runs.
+    /// which `Sharp\Internal\IterableMethods` declares and the engine's `Sharp\Sequence` runs.
     pub(crate) fn is_lazy_operation(&self, call: &Expression) -> bool {
         matches!(
             self.artifacts.get_callees(call).next(),
             Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, _), .. })
-                if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\IterableMethods")
+                if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\IterableMethods")
         )
     }
 

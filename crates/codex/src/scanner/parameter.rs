@@ -2,6 +2,8 @@ use mago_allocator::Arena;
 use mago_names::binding::php_variable_name;
 use mago_names::scope::NamespaceScope;
 use mago_span::HasSpan;
+use mago_syntax::cst::Call;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Node;
@@ -94,6 +96,12 @@ where
 
     if let Some(default_value) = &parameter.default_value {
         metadata.flags |= MetadataFlags::HAS_DEFAULT;
+        // Spec section 27: as a default, the standard library's `Position.current()` is the caller's position.
+        if let Expression::Call(Call::Method(call)) = default_value.value
+            && context.resolved_names.is_current_position(call)
+        {
+            metadata.flags |= MetadataFlags::CALLER_POSITION;
+        }
         metadata.default_type =
             infer_with_constants(context, scope, default_value.value, classname, constants).map(|u| {
                 let mut type_metadata = TypeMetadata::new(u, default_value.span());

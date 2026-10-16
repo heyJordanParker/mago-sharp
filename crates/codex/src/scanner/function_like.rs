@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use mago_names::binding;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
+use mago_names::binding::takes_on_effects;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_phpdoc_syntax::cst::AssertPattern;
@@ -139,7 +140,16 @@ where
         .parameters
         .iter()
         .filter_map(|p| {
-            scan_function_like_parameter(p, Some(class_like_metadata.original_name), &type_context, context, scope)
+            let mut parameter = scan_function_like_parameter(
+                p,
+                Some(class_like_metadata.original_name),
+                &type_context,
+                context,
+                scope,
+            )?;
+            parameter.flags.set(MetadataFlags::TAKES_ON_EFFECTS, takes_on_effects(p));
+
+            Some(parameter)
         })
         .collect();
     // Spec section 13: a method marked `readonly` keeps `this` readonly, and so do `int hash()` and `string toString()`,

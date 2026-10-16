@@ -7,6 +7,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
+use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 
@@ -17,6 +18,7 @@ use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Identifier;
+use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
@@ -33,6 +35,8 @@ use crate::expression::binary::logical::merge_short_circuited_assignments;
 use crate::expression::constant_access::analyze_namespace_constant;
 use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_class_value_of_no_class;
+use crate::resolver::class_name::report_full_class_name;
+use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::property::resolve_method_value;
 use crate::resolver::static_property::StaticProperty;
@@ -57,10 +61,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
         A: Arena,
     {
         match self {
-            // As after an invalid call target, the read gets no type, so nothing reports again on what it reads.
+            // As after an invalid call target, the read is an error, so nothing reports again on what it reads.
             Access::Property(PropertyAccess {
                 object, property: ClassLikeMemberSelector::Identifier(name), ..
-            }) if report_full_name(context, object, Some(name)) => Ok(()),
+            }) if report_full_name(context, object, Some(name)) => {
+                artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+                Ok(())
+            }
             // `TItem.y` reads `y` on the class of the type argument the code runs with, any class `TItem`'s bound holds,
             // as a class value's member is read. The resolution reports a bound that holds a type that is no class.
             Access::Property(
@@ -221,12 +229,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
 
 /// Reports a full name in a PHP# file's code, as in `App.Shared.Money.of(1)`, which spec section 23 keeps in `import`
 /// lines. The binder reads the root of a chain of member names as a class, so the chain is a full name when its root
-/// names no class and the root with the names after it, read as one name, names a class. One file cannot tell
-/// `App.Status` from `Status.Active`, so the analyzer makes this refusal for the checker.
+/// names no class and the root with the names after it, read as one name, names a class, or a namespace written in two
+/// parts or more that holds a function or constant of the next name, as in `Vendor.Pdf.render(html)`. A root the
+/// file imports as a namespace starts the name with the namespace, as `Pdf.Document` after `import Vendor.Pdf;` does.
+/// One file cannot tell `App.Status` from `Status.Active`, so the analyzer makes this refusal for the checker.
 ///
-/// `object` is the chain before `last`, its last member name, which a method call does not pass. It runs at the
-/// chain's outermost member, which the analysis reaches first, and returns whether it reported, so the caller analyzes
-/// nothing inside the chain.
+/// `object` is the chain before `last`, its last member name or the method a call calls. It runs at the chain's
+/// outermost member, which the analysis reaches first, and returns whether it reported, so the caller analyzes nothing
+/// inside the chain.
 pub(crate) fn report_full_name<A>(
     context: &mut Context<'_, '_, A>,
     object: &Expression<'_>,
@@ -248,39 +258,113 @@ where
         object = property.object;
     }
 
-    let Expression::ConstantAccess(root) = object else {
-        return false;
+    // `new App.Shared.Money()` reads as the named constructor `Shared` of `App`, as `new Order.fromJson(json)` does,
+    // and the rest after it.
+    let (root, new) = match object {
+        Expression::ConstantAccess(root) if context.resolved_names.binding(&root.name) == Some(Binding::Class) => {
+            (&root.name, None)
+        }
+        // A `new`'s class is a class name with no binding.
+        Expression::Identifier(root) => (root, None),
+        Expression::Instantiation(
+            new @ Instantiation {
+                class: Expression::Identifier(root),
+                type_arguments: None,
+                constructor: Some(constructor),
+                argument_list: None,
+                initializer: None,
+                ..
+            },
+        ) => {
+            names.push(&constructor.name);
+            (root, Some(new))
+        }
+        _ => return false,
     };
 
-    if context.resolved_names.binding(&root.name) != Some(Binding::Class)
-        || context.resolved_names.is_imported(&root.name)
-        || context.codebase.class_like_exists(context.resolved_names.get(&root.name))
+    let resolved = context.resolved_names.get(root);
+    let reported = !context.codebase.class_like_exists(resolved) && report_full_name_in(context, root, &names);
+    // The semantic checks leave a `new` without arguments a chain reads through to this refusal, as
+    // `new Order.of.total`, when it is no full name.
+    if let Some(new) = new
+        && !reported
     {
-        return false;
-    }
-
-    let mut full_name = root.name.value().to_vec();
-    for name in names.iter().rev() {
-        full_name.push(b'\\');
-        full_name.extend_from_slice(name.value);
-        if !context.codebase.class_like_exists(&full_name) {
-            continue;
-        }
-
-        let class = BytesDisplay(name.value);
-        let full_name = String::from_utf8_lossy(&full_name).replace('\\', ".");
         context.collector.report_with_code(
-            IssueCode::NonExistentClassLike,
-            Issue::error(format!(
-                "Full names appear only in `import` lines: add `import {full_name};` and write `{class}`."
-            ))
-            .with_annotation(Annotation::primary(root.span().join(name.span)).with_message("Full name used here."))
-            .with_help(
-                "In code, `.` is always member access, so a class is written by the short name its import brings in.",
-            ),
+            IssueCode::NotSupportedYet,
+            Issue::error("This `new` without arguments is not supported yet in PHP#.")
+                .with_annotation(Annotation::primary(new.span()).with_message("Not supported yet."))
+                .with_note("PHP# creates an object with `new Class(arguments)`, parentheses included, or with an object initializer, as in `new Class { name: value }`."),
         );
 
         return true;
+    }
+
+    reported
+}
+
+/// Reports the chain `root` and the member `names` after it, innermost last, as [`report_full_name`] describes, when
+/// `root` names no class. Returns whether it reported.
+fn report_full_name_in<A>(
+    context: &mut Context<'_, '_, A>,
+    root: &Identifier<'_>,
+    names: &[&LocalIdentifier<'_>],
+) -> bool
+where
+    A: Arena,
+{
+    let resolved = context.resolved_names.get(root);
+
+    // A root the file doesn't import starts a full name, or a name relative to the file's namespace, as `Shop.Order`
+    // in `App` names `App.Shop.Order`.
+    let starts: Vec<Vec<u8>> = if context.resolved_names.is_imported(root) {
+        vec![resolved.to_vec()]
+    } else {
+        std::iter::once(root.value().to_vec())
+            .chain(context.scope.namespace_name().map(|namespace| [namespace, b"\\", root.value()].concat()))
+            .collect()
+    };
+
+    starts.into_iter().any(|start| report_full_name_from(context, root, start, names))
+}
+
+/// Reports the chain that `root` starts, read as one name from `start`, the full name `root` stands for, and the
+/// member `names` after it, innermost last, when it names a class-like or a member of a namespace written in two parts
+/// or more. Returns whether it reported.
+fn report_full_name_from<A>(
+    context: &mut Context<'_, '_, A>,
+    root: &Identifier<'_>,
+    start: Vec<u8>,
+    names: &[&LocalIdentifier<'_>],
+) -> bool
+where
+    A: Arena,
+{
+    let mut full_name = start;
+    // `written_parts` counts the parts of `full_name` the code writes: one in `Pdf.render` after `import Vendor.Pdf;`.
+    for (written_parts, (index, name)) in (1..).zip(names.iter().enumerate().rev()) {
+        let member = [full_name.as_slice(), b"\\", name.value].concat();
+        if written_parts > 1
+            && index == 0
+            && (context.codebase.function_exists(&member) || context.codebase.constant_exists(&member))
+        {
+            let namespace = String::from_utf8_lossy(&full_name).replace('\\', ".");
+            let written = display_sharp_member(&full_name, BytesDisplay(name.value));
+            context.collector.report_with_code(
+                IssueCode::NonExistentClassLike,
+                Issue::error(format!(
+                    "Full names appear only in `import` lines: add `import {namespace};` and write `{written}`."
+                ))
+                .with_annotation(Annotation::primary(root.span().join(name.span)).with_message("Full name used here."))
+                .with_help("In code, `.` is always member access, so a namespace is written by the last part its import brings in."),
+            );
+
+            return true;
+        }
+
+        full_name = member;
+        if context.codebase.class_like_exists(&full_name) {
+            return report_full_class_name(context, &full_name, root.span().join(name.span));
+        }
     }
 
     false
@@ -297,6 +381,11 @@ fn report_unknown_class_read<A>(
 ) where
     A: Arena,
 {
+    artifacts.set_expression_type(read, get_mixed());
+    if report_unknown_sharp_class(context, context.resolved_names.get(name), name.span()) {
+        return;
+    }
+
     let written = BytesDisplay(name.value());
     context.collector.report_with_code(
         IssueCode::NonExistentClassLike,
@@ -306,7 +395,6 @@ fn report_unknown_class_read<A>(
                 "Check the spelling of `{written}`, or import the class or the namespace whose member this reads."
             )),
     );
-    artifacts.set_expression_type(read, get_mixed());
 }
 
 /// Reports a PHP# member read or call whose member is a method on some classes the receiver can be and a property on

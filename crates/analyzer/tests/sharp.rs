@@ -45,11 +45,13 @@ use mago_names::CHANGING_COLLECTION_METHODS;
 use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
+use mago_php_version::PHPVersion;
 use mago_prelude::Prelude;
 use mago_reporting::Annotation;
 use mago_reporting::AnnotationKind;
 use mago_reporting::Issue;
 use mago_reporting::Level;
+use mago_semantics::SemanticsChecker;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Call;
@@ -340,7 +342,7 @@ fn the_analyzer_reads_the_dialect_from_the_program_not_the_file_name() {
 /// `@mutation-free`, which changes the collection.
 #[test]
 fn the_binder_knows_every_changing_collection_method() {
-    for class in ["Sharp\\ListMethods", "Sharp\\MapMethods", "Sharp\\SetMethods"] {
+    for class in ["Sharp\\Internal\\ListMethods", "Sharp\\Internal\\MapMethods", "Sharp\\Internal\\SetMethods"] {
         let metadata =
             PRELUDE.metadata.get_class_like(class.as_bytes()).expect("the collection stub is in the prelude");
         let mut changing: Vec<&str> = metadata
@@ -370,7 +372,7 @@ fn the_binder_knows_every_changing_collection_method() {
 #[test]
 fn every_inlined_collection_method_is_a_method_of_its_collection() {
     for (collection, method) in INLINED_COLLECTION_METHODS {
-        let class = format!("Sharp\\{collection}Methods");
+        let class = format!("Sharp\\Internal\\{collection}Methods");
 
         assert!(PRELUDE.metadata.get_method(class.as_bytes(), method.as_bytes()).is_some(), "{class} has no {method}");
     }
@@ -1255,6 +1257,9 @@ fn nullable_properties_with_accessor_bodies_have_the_issues_of_their_php_twins()
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
+/// `typeof(X)` of a class is its class name, as PHP's `X::class` is, so passing either where another class's name is
+/// expected reports the same. Of a missing class, PHP's `Missing::class` is still a string and reports where it is
+/// passed too, while a PHP# file's `typeof(Missing)` has no type, so it reports only that the class is missing.
 #[test]
 fn typeof_is_the_class_name_as_in_php() {
     let registry = "<?php\n\nnamespace Lib;\n\nfinal class Registry\n{\n    /** @param class-string<Calc> $class */\n    public static function keep(string $class): string\n    {\n        return $class;\n    }\n}\n";
@@ -1265,8 +1270,8 @@ fn typeof_is_the_class_name_as_in_php() {
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &others);
     let php_issues = issues(("src/Demo/Report.php", php), &others);
 
-    assert_eq!(sharp_issues, ["10:23 invalid-argument", "11:30 non-existent-class-like", "11:23 invalid-argument"]);
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    assert_eq!(sharp_issues, ["10:23 invalid-argument", "11:30 non-existent-class-like"]);
+    assert_eq!(php_issues, ["12:24 invalid-argument", "13:24 non-existent-class-like", "13:24 invalid-argument"]);
 }
 
 /// A static member written through its class name is checked as PHP checks `Class::$name`.
@@ -3781,6 +3786,21 @@ fn a_class_that_shares_its_full_name_with_a_namespace_is_an_error() {
             ),
         ),
         (php_store, vec![php_order], None),
+        // `mago compile` prints only `.sharp` files' errors, so the PHP# side of the clash reports it too.
+        (
+            order,
+            vec![php_store],
+            Some(
+                "3:14 name-already-in-use `App.Tenant.Store` is both a plain PHP class and a namespace: rename the class or the folder. | The plain PHP class is declared here.",
+            ),
+        ),
+        (
+            ("src/App/Tenant/Store/Shelf/Item.sharp", "namespace App.Tenant.Store.Shelf;\n\npublic class Item\n{\n}\n"),
+            vec![php_store],
+            Some(
+                "3:14 name-already-in-use `App.Tenant.Store` is both a plain PHP class and a namespace: rename the class or the folder. | The plain PHP class is declared here.",
+            ),
+        ),
         (
             ("src/App/Tenant/Store/Store.sharp", "namespace App.Tenant.Store;\n\npublic class Store\n{\n}\n"),
             vec![order],
@@ -4436,7 +4456,7 @@ fn sorted_by_a_key_of_two_types_that_never_match_is_refused_as_less_than_refuses
 #[test]
 fn sorted_by_an_any_key_reports_what_less_than_reports_on_two_any_values() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool a(Any left, Any right) => left < right;\n\n    public bool b(Any? left, Any? right) => left < right;\n\n    public List<Any> c(List<Any> values) => values.sortedBy(v => v);\n\n    public List<Any?> d(List<Any?> values) => values.sortedBy(v => v);\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Report\n{\n    public function a(mixed $left, mixed $right): bool\n    {\n        return $left < $right;\n    }\n\n    /**\n     * @param ListMethods<mixed> $values\n     *\n     * @return list<mixed>\n     */\n    public function c(ListMethods $values): array\n    {\n        return $values->sortedBy(fn (mixed $v): mixed => $v);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\n\nfinal class Report\n{\n    public function a(mixed $left, mixed $right): bool\n    {\n        return $left < $right;\n    }\n\n    /**\n     * @param ListMethods<mixed> $values\n     *\n     * @return list<mixed>\n     */\n    public function c(ListMethods $values): array\n    {\n        return $values->sortedBy(fn (mixed $v): mixed => $v);\n    }\n}\n";
     let mixed = |at: &str, side: &str| {
         format!(
             "{at} mixed-operand {side} operand in `<` comparison has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `<` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
@@ -5392,14 +5412,19 @@ fn a_data_case_is_a_type_of_its_own() {
         ["7:51 invalid-return-statement", "9:43 invalid-argument", "12:58 invalid-argument"]
     );
 
-    // A dotted type names a case, and never a class of another namespace.
+    // A dotted type names a case, and never a class of another namespace, which is a full name, spec section 23.
     let order = ("src/App/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order { }\n");
     let dotted = "namespace App;\n\nclass Till\n{\n    public bool open(Shop.Order order) => true;\n}\n";
     let messages: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Till.sharp", dotted), &[order])
         .into_iter()
         .map(|issue| format!("{} {}", located(dotted, &issue), issue.message))
         .collect();
-    assert_eq!(messages, ["5:22 non-existent-class-like `Shop.Order` is no case of an enum."]);
+    assert_eq!(
+        messages,
+        [
+            "5:22 non-existent-class-like Full names appear only in `import` lines: add `import App.Shop.Order;` and write `Order`."
+        ]
+    );
 
     // A plain case is an object, which a parameter's default cannot hold yet.
     let default =
@@ -5941,7 +5966,7 @@ fn an_arm_that_is_always_true_before_the_last_is_reported_with_the_arms_it_hides
 }
 
 /// A pattern that unpacks fields of what is no case of an enum with data reports that alone, and the `match` around it
-/// reports nothing more. A dotted name of a class reports only that it names no case, where its type is read.
+/// reports nothing more. A dotted name of a class reports only that it is a full name, where its type is read.
 #[test]
 fn a_case_pattern_on_no_case_reports_only_that() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void count(int? count)\n    {\n        match (count) {\n            1 => {},\n            Shape.Circle(radius) => {},\n            Shapes.Box(side) => {},\n            default => {},\n        }\n    }\n}\n";
@@ -5954,7 +5979,7 @@ fn a_case_pattern_on_no_case_reports_only_that() {
         messages,
         [
             "`Shape.Circle` is no case of an enum whose cases carry data, so it has no fields to unpack.",
-            "`Shapes.Box` is no case of an enum.",
+            "Full names appear only in `import` lines: add `import Demo.Shapes.Box;` and write `Box`.",
         ]
     );
 }
@@ -7375,8 +7400,8 @@ fn worded_with(
 }
 
 /// Spec section 23 keeps full names in `import` lines. A chain whose root names no class, but whose dotted start names
-/// one, is a full name, which only the codebase tells from a class and its member. The refused value has no type, as
-/// a call on a missing class has none, so returning it reports `Any?` as it does there.
+/// one, is a full name, which only the codebase tells from a class and its member. The refused value is an error, so
+/// returning it reports nothing more.
 #[test]
 fn a_full_name_inside_code_names_the_import_to_add() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        return App.Shared.Money.of(extra);\n    }\n}\n";
@@ -7385,12 +7410,9 @@ fn a_full_name_inside_code_names_the_import_to_add() {
 
     assert_eq!(
         messages(analyzed, &others),
-        [
-            "Full names appear only in `import` lines: add `import App.Shared.Money;` and write `Money`.",
-            "Could not infer a precise return type for method `Report.run`. Saw type `Any?`.",
-        ]
+        ["Full names appear only in `import` lines: add `import App.Shared.Money;` and write `Money`."]
     );
-    assert_eq!(issues(analyzed, &others), ["7:16 non-existent-class-like", "7:16 mixed-return-statement"]);
+    assert_eq!(issues(analyzed, &others), ["7:16 non-existent-class-like"]);
 }
 
 #[test]
@@ -7401,12 +7423,315 @@ fn a_member_read_through_a_full_name_names_the_import_to_add() {
 
     assert_eq!(
         messages(analyzed, &others),
-        [
-            "Full names appear only in `import` lines: add `import App.Shared.Money;` and write `Money`.",
-            "Could not infer a precise return type for method `Report.run`. Saw type `Any?`.",
-        ]
+        ["Full names appear only in `import` lines: add `import App.Shared.Money;` and write `Money`."]
     );
-    assert_eq!(issues(analyzed, &others), ["7:16 non-existent-class-like", "7:16 mixed-return-statement"]);
+    assert_eq!(issues(analyzed, &others), ["7:16 non-existent-class-like"]);
+}
+
+/// Spec section 23 keeps full names in `import` lines wherever code writes one: a type, a local's type, `new`,
+/// `nameof`, `typeof`, an attribute, `catch`, a class header, an `is` test, a `match` type pattern, a bound, an `on`
+/// clause, a read, a call or an `extern` through a library's namespace, and a class through an imported namespace, in
+/// two parts and in three. So is a name relative to the file's namespace, as `Shop.Order` for `App.Tenant.Shop.Order`.
+/// Each is the one error `mago compile` prints, which names the import to add and what to write, and a pattern's
+/// variable then has no type, so reading it reports nothing more.
+#[test]
+fn a_full_name_anywhere_in_code_names_the_import_to_add() {
+    const FAILURE: &str = "<?php\n\nnamespace App\\Shared;\n\nfinal class Failure extends \\Exception {}\n";
+    const PDF: &str = "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfunction render(string $html): string { return $html; }\n\nfinal class Document\n{\n    public static function blank(): self { return new self(); }\n}\n";
+    const BASE: &str = "<?php\n\nnamespace App\\Shared;\n\nclass Base {}\n";
+    const THING: &str = "<?php\n\nnamespace App;\n\nclass Thing {}\n";
+    const ORDER: &str = "<?php\n\nnamespace App\\Tenant\\Shop;\n\nfinal class Order\n{\n    public static function make(): self { return new self(); }\n}\n";
+    const PAID: &str = "namespace App.Shared;\n\npublic event Paid(int id);\n";
+    const PLACED: &str = "namespace App;\n\npublic event Placed(int id);\n";
+    let money = "Full names appear only in `import` lines: add `import App.Shared.Money;` and write `Money`.";
+    let thing = "Full names appear only in `import` lines: add `import App.Thing;` and write `Thing`.";
+    let order = "Full names appear only in `import` lines: add `import App.Tenant.Shop.Order;` and write `Order`.";
+    let document = "Full names appear only in `import` lines: add `import Vendor.Pdf.Document;` and write `Document`.";
+    let render = "Full names appear only in `import` lines: add `import Vendor.Pdf;` and write `Pdf.render`.";
+    let matched = |pattern: &str| -> &'static str {
+        Box::leak(
+            format!(
+                "    public int test(Object value) => match (value) {{\n        {pattern} => 1,\n        default => 0,\n    }};\n"
+            )
+            .into_boxed_str(),
+        )
+    };
+
+    let mut wrong = Vec::new();
+    for (head, member, message) in [
+        ("class Report", "    public Any make() => new App.Thing();\n", thing),
+        ("class Report", "    public bool test(Object value) => value is App.Shared.Money;\n", money),
+        ("class Report", "    public bool test(Object value) => value is App.Thing;\n", thing),
+        ("class Report", matched("App.Shared.Money money"), money),
+        ("class Report", matched("App.Thing thing"), thing),
+        (
+            "class Report",
+            "    public int test(Object value) => match (value) {\n        App.Shared.Money money => money.cents,\n        default => 0,\n    };\n",
+            money,
+        ),
+        (
+            "class Report",
+            "    public int test(Object value) => value is App.Shared.Money money ? money.cents : 0;\n",
+            money,
+        ),
+        ("class Report", "    public int test<T : App.Shared.Money>(T value) => 1;\n", money),
+        ("class Report", "    public int test<T : App.Thing>(T value) => 1;\n", thing),
+        (
+            "class Report",
+            "    public void refresh() on App.Shared.Paid { }\n",
+            "Full names appear only in `import` lines: add `import App.Shared.Paid;` and write `Paid`.",
+        ),
+        (
+            "class Report",
+            "    public void refresh() on App.Placed { }\n",
+            "Full names appear only in `import` lines: add `import App.Placed;` and write `Placed`.",
+        ),
+        ("class Report", "    public void take(Shop.Order order) { }\n", order),
+        ("class Report", "    public Any make() => Shop.Order.make();\n", order),
+        ("class Report", "    public Any create() => new Shop.Order();\n", order),
+        ("class Report", "    public void take(App.Shared.Money money) { }\n", money),
+        ("class Report", "    public App.Shared.Money? find() => null;\n", money),
+        ("class Report", "    public App.Shared.Money? last { get; set; } = null;\n", money),
+        ("class Report", "    public List<App.Shared.Money> all() => [];\n", money),
+        ("class Report", "    public void run()\n    {\n        App.Shared.Money? money = null;\n    }\n", money),
+        ("class Report", "    public Any make() => new App.Shared.Money();\n", money),
+        ("class Report", "    public string name() => nameof(App.Shared.Money.cents);\n", money),
+        ("class Report", "    public Any kind() => typeof(App.Shared.Money);\n", money),
+        ("class Report", "    public string kind() => typeof(App.Shared.Money).name;\n", money),
+        ("class Report", "    [App.Shared.Money]\n    public void run() { }\n", money),
+        (
+            "class Report",
+            "    public void run()\n    {\n        try { } catch (App.Shared.Failure e) { }\n    }\n",
+            "Full names appear only in `import` lines: add `import App.Shared.Failure;` and write `Failure`.",
+        ),
+        (
+            "class Report : App.Shared.Base",
+            "",
+            "Full names appear only in `import` lines: add `import App.Shared.Base;` and write `Base`.",
+        ),
+        (
+            "class Report",
+            "    public int dpi() => Vendor.Pdf.DEFAULT_DPI;\n",
+            "Full names appear only in `import` lines: add `import Vendor.Pdf;` and write `Pdf.DEFAULT_DPI`.",
+        ),
+        ("class Report", "    public string draw(string html) => Vendor.Pdf.render(html);\n", render),
+        ("extern Vendor.Pdf.render uses Files;\n\nclass Report", "", render),
+        ("import Vendor.Pdf;\n\nclass Report", "    public Any blank() => Pdf.Document.blank();\n", document),
+        ("import Vendor.Pdf;\n\nclass Report", "    public Any make() => new Pdf.Document();\n", document),
+    ] {
+        let code: &'static str =
+            Box::leak(format!("namespace App.Tenant;\n\n{head}\n{{\n{member}}}\n").into_boxed_str());
+        let others = [
+            ("src/App/Shared/Money.php", MONEY),
+            ("src/App/Shared/Failure.php", FAILURE),
+            ("src/App/Shared/Base.php", BASE),
+            ("src/Vendor/Pdf/Pdf.php", PDF),
+            ("src/App/Thing.php", THING),
+            ("src/App/Tenant/Shop/Order.php", ORDER),
+            ("src/App/Shared/Paid.sharp", PAID),
+            ("src/App/Placed.sharp", PLACED),
+        ];
+
+        let errors = compile_errors(("src/App/Tenant/Report.sharp", code), &others);
+        if errors != [message] {
+            wrong.push(format!("{member}{errors:#?}"));
+        }
+    }
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+
+    // A chain that reads through a `new` without arguments and is no full name is still refused once.
+    let through_new = "namespace App.Tenant;\n\nclass Report\n{\n    public Any make() => new Report.of.total;\n}\n";
+    assert_eq!(
+        compile_errors(("src/App/Tenant/Report.sharp", through_new), &[]),
+        ["This `new` without arguments is not supported yet in PHP#."]
+    );
+}
+
+/// The errors `mago compile` prints for `analyzed`, analyzed together with `others`: the semantic checks' first, then
+/// the analysis's.
+fn compile_errors(analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]) -> Vec<String> {
+    let arena = LocalArena::new();
+    let file = File::ephemeral(Cow::Borrowed(analyzed.0.as_bytes()), Cow::Borrowed(analyzed.1.as_bytes()));
+    let program = parse_file(&arena, &file);
+    let names = NameResolver::new(&arena).resolve(program);
+    let semantic_issues = SemanticsChecker::new(PHPVersion::PHP85).check(&file, program, &names);
+
+    semantic_issues
+        .into_iter()
+        .chain(analyze(&PLUGIN_REGISTRY, settings(), analyzed, others))
+        .filter(|issue| issue.level == Level::Error)
+        .map(|issue| issue.message)
+        .collect()
+}
+
+/// Spec section 23 names what a name without its import needs: a standard library class its file doesn't import, as
+/// `Math`, names the import, and a bare constant of a namespace the file imports names the read through it.
+#[test]
+fn a_name_without_its_import_names_the_import_or_the_namespace() {
+    const MATH: &str = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static int max(int a, int b) => a > b ? a : b;\n}\n";
+    const PDF: &str = "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n";
+    let others = [
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp", MATH),
+        ("src/Vendor/Pdf/Pdf.php", PDF),
+        ("src/App/Domain/Event.sharp", "namespace App.Domain;\n\npublic class Event\n{\n}\n"),
+        ("src/App/Domain/Match.sharp", "namespace App.Domain;\n\npublic class Match\n{\n}\n"),
+        ("src/App/Domain/Case.sharp", "namespace App.Domain;\n\npublic class Case\n{\n}\n"),
+        ("src/App/Domain/Required.sharp", "namespace App.Domain;\n\npublic class Required\n{\n}\n"),
+    ];
+    // A class named like a keyword is a name, spec section 2, so the file imports it, and the keyword is no advice.
+    let keyword_named = |class: &str| -> (&'static str, &'static str) {
+        (
+            Box::leak(
+                format!("namespace App;\n\nclass Report\n{{\n    public void run({class} value)\n    {{\n    }}\n}}\n")
+                    .into_boxed_str(),
+            ),
+            Box::leak(
+                format!(
+                    "`{class}` is not imported. | Used here without an import. | Add `import App.Domain.{class};` to the file."
+                )
+                .into_boxed_str(),
+            ),
+        )
+    };
+
+    for (code, message) in [
+        (
+            "namespace App;\n\nclass Report\n{\n    public int largest(int a, int b) => Math.max(a, b);\n}\n",
+            "`Math` is not imported. | Used here without an import. | Add `import Sharp.Math.Math;` to the file.",
+        ),
+        // Plain PHP extensions declare classes named `Event` too, so no one import is the advice.
+        (
+            keyword_named("Event").0,
+            "Cannot find type `Event`. | `Event` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+        ),
+        keyword_named("Match"),
+        keyword_named("Case"),
+        keyword_named("Required"),
+        (
+            "namespace App;\n\nclass Report\n{\n    public void run(Override value)\n    {\n    }\n}\n",
+            "`Override` is not imported. | Used here without an import. | Add `import Override;` to the file.",
+        ),
+        (
+            "namespace App;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public int dpi() => DEFAULT_DPI;\n}\n",
+            "Read the library's constant through its namespace: write `Pdf.DEFAULT_DPI`. | A bare name reads only this code's own constant.",
+        ),
+    ] {
+        let worded = worded(("src/App/Report.sharp", code), &others);
+
+        assert!(worded.first().is_some_and(|first| first.ends_with(message)), "{code}: {worded:?}");
+    }
+}
+
+/// A missing class that is no keyword in another case, no full name and the short name of no class the file could
+/// import keeps the error of the place that names it. So does a name the file imports, as `Log` after `import Log;`,
+/// and a class directly in `Sharp` that a newer standard library declares, which the file already names by default.
+#[test]
+fn a_missing_class_the_spec_says_nothing_about_keeps_the_error_of_its_place() {
+    const FRESH: &str = "namespace Sharp;\n\npublic static class Fresh\n{\n    public static int make() => 1;\n}\n";
+    const HIDDEN: &str = "namespace Sharp.Internal;\n\npublic class Hidden\n{\n}\n";
+    let others = [
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Fresh.sharp", FRESH),
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Internal/Hidden.sharp", HIDDEN),
+    ];
+
+    for (code, expected) in [
+        (
+            "namespace App;\n\n[Missing]\nclass Report\n{\n}\n",
+            vec!["Attribute class `Missing` not found or could not be autoloaded."],
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n    public int run()\n    {\n        try {\n            return 1;\n        } catch (Missing e) {\n            return 0;\n        }\n    }\n}\n",
+            vec![
+                "Attempting to catch an undefined class or interface: `Missing`.",
+                "None of the types specified in the `catch` declaration are valid catchable exceptions.",
+            ],
+        ),
+        (
+            "namespace App;\n\nimport Log;\n\nclass Report\n{\n    public void run(Log log)\n    {\n    }\n}\n",
+            vec!["Imported class, interface, trait, or enum `Log` does not exist.", "Cannot find type `Log`."],
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n    public void run(Fresh fresh)\n    {\n    }\n}\n",
+            vec!["Cannot find type `Fresh`."],
+        ),
+        // Only the standard library imports `Sharp.Internal`, spec section 15, so no import is the advice for one of
+        // its classes, as for the prelude's `ListMethods`.
+        (
+            "namespace App;\n\nclass Report\n{\n    public void run(Hidden hidden)\n    {\n    }\n}\n",
+            vec!["Cannot find type `Hidden`."],
+        ),
+    ] {
+        assert_eq!(messages(("src/App/Report.sharp", code), &others), expected, "{code}");
+    }
+}
+
+/// Spec section 23: the last part of an import is a class, or the namespace of a plain PHP library's functions and
+/// constants, whatever the use statement setting says. One function or constant, a namespace of classes only and a
+/// name that names nothing are each one error, and a capitalized last part never names PHP's function `log()`. A
+/// namespace of classes lists the classes to import, leaving out a module, which no code names, and a default name,
+/// which needs no import.
+#[test]
+fn an_import_names_a_class_or_a_namespace_of_functions_and_constants() {
+    const PDF: &str = "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfunction render(string $html): string { return $html; }\n";
+    const ENTITY: &str = "<?php\n\nnamespace App\\Shared\\Schema;\n\nclass Entity {}\n";
+    const COLUMN: &str = "<?php\n\nnamespace App\\Shared\\Schema;\n\nclass Column {}\n";
+    const SCHEMA_MODULE: &str = "namespace App.Shared.Schema;\n\nmodule\n{\n}\n";
+    let others = [
+        ("src/Vendor/Pdf/Pdf.php", PDF),
+        ("src/App/Shared/Money.php", MONEY),
+        ("src/App/Shared/Schema/Entity.php", ENTITY),
+        ("src/App/Shared/Schema/Column.php", COLUMN),
+        ("src/App/Shared/Schema/Module.sharp", SCHEMA_MODULE),
+    ];
+
+    for (import, expected) in [
+        ("App.Shared.Money", None),
+        ("Vendor.Pdf", None),
+        (
+            "Nowhere.Missing",
+            Some("non-existent-use-import Imported class, interface, trait, or enum `Nowhere.Missing` does not exist."),
+        ),
+        ("Log", Some("non-existent-use-import Imported class, interface, trait, or enum `Log` does not exist.")),
+        (
+            "App.Shared.Schema",
+            Some(
+                "class-namespace-import `App.Shared.Schema` holds classes only, and an import names a class or a namespace of functions: import the class, as in `import App.Shared.Schema.Column;` or `import App.Shared.Schema.Entity;`.",
+            ),
+        ),
+        (
+            "Sharp",
+            Some(
+                "class-namespace-import `Sharp` holds only default names, which every file names with no import: remove the import.",
+            ),
+        ),
+        (
+            "Vendor.Pdf.DEFAULT_DPI",
+            Some(
+                "constant-import An import names a class or a namespace, not a constant: import `Vendor.Pdf`, and read `Pdf.DEFAULT_DPI`.",
+            ),
+        ),
+        (
+            "Vendor.Pdf.render",
+            Some(
+                "function-import An import names a class or a namespace, not a function: import `Vendor.Pdf`, and call `Pdf.render(…)`.",
+            ),
+        ),
+        (
+            "PHP_EOL",
+            Some("constant-import An import names a class or a namespace, not a constant: read `global.PHP_EOL`."),
+        ),
+    ] {
+        let code: &'static str =
+            Box::leak(format!("namespace App;\n\nimport {import};\n\nclass Report\n{{\n}}\n").into_boxed_str());
+        let errors: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Report.sharp", code), &others)
+            .into_iter()
+            .filter(|issue| issue.level == Level::Error)
+            .map(|issue| format!("{} {}", issue.code.unwrap_or_default(), issue.message))
+            .collect();
+
+        assert_eq!(errors, expected.into_iter().collect::<Vec<_>>(), "{import}");
+    }
 }
 
 /// A root that names a class is a class whatever follows it, even when its name and the next one also name a class.
@@ -8738,7 +9063,7 @@ fn a_map_of_function_types_with_two_effects_is_accepted() {
 
 #[test]
 fn a_function_type_taking_a_function_type_with_an_effect_is_accepted() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    public Checkout(private Function<int(Function<int(int) uses Http>)> apply) { }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
 }
@@ -8786,7 +9111,7 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
         "src/App/Shop/Offers.php",
         "<?php\n\nnamespace App\\Shop;\n\nfinal class Plan\n{\n}\n\nfinal class Money\n{\n}\n\nfinal class Offer\n{\n}\n",
     );
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback = null;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers = [:];\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<Money(Offer)> priceOf, Function<Charge(Cart) uses Http> charge, Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n        this.apply = apply;\n    }\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer) uses Http> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback = null;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers = [:];\n    Function<int(Function<int(int) uses Http>) uses Http> apply;\n\n    public Checkout(Function<Money(Offer) uses Http> priceOf, Function<Charge(Cart) uses Http> charge, Function<int(Function<int(int) uses Http>) uses Http> apply)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n        this.apply = apply;\n    }\n}\n";
     let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, Plan> */\n    private array $cache = [];\n    /** @var \\Closure(Offer): Money */\n    private \\Closure $priceOf;\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers = [];\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n\n    /**\n     * @param \\Closure(Offer): Money $priceOf\n     * @param \\Closure(Cart): Charge $charge\n     * @param \\Closure(\\Closure(int): int): int $apply\n     */\n    public function __construct(\\Closure $priceOf, \\Closure $charge, \\Closure $apply)\n    {\n        $this->priceOf = $priceOf;\n        $this->charge = $charge;\n        $this->apply = $apply;\n    }\n}\n";
     let sharp_reader = "namespace App.Shop;\n\npublic class Receipt\n{\n    public static int size(Checkout checkout) => global.count(checkout.cache);\n}\n";
     let php_reader = "<?php\n\nnamespace App\\Shop;\n\nfinal class Receipt\n{\n    public static function size(Checkout $checkout): int { return count($checkout->cache); }\n}\n";
@@ -8799,8 +9124,8 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
             "8:39 unused-property",
             "9:57 unused-property",
             "5:23 unused-property",
-            "10:49 write-only-property",
-            "6:28 write-only-property",
+            "10:59 write-only-property",
+            "6:38 write-only-property",
             "7:38 write-only-property",
         ]
     );
@@ -8840,8 +9165,9 @@ fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() 
     );
 }
 
-/// Spec section 29: a function type without `uses` is pure, so it holds no function value with an effect, whether the
-/// value is assigned, passed or returned, and a function type that uses `Mail` holds none that uses `Http`.
+/// Spec section 29: a function type without `uses` is pure in a field, a local or a return type, so it holds no
+/// function value with an effect there, and a parameter whose function type uses `Mail` holds none that uses `Http`. A
+/// parameter whose function type states no effects takes on those of the value each call passes, so `apply` takes it.
 #[test]
 fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
     let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int)> rate;\n\n    public Pricing(Function<int(int) uses Http> fetch)\n    {\n        this.rate = fetch;\n        Function<int(int)> local = fetch;\n        Pricing.apply(fetch);\n        Pricing.mail(fetch);\n    }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static int mail(Function<int(int) uses Mail> step) => step(1);\n\n    public Function<int(int)> current(Function<int(int) uses Http> fetch) => fetch;\n\n    public int price() => this.rate(2);\n}\n";
@@ -8854,7 +9180,6 @@ fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
         [
             "9:21 invalid-property-assignment-value Invalid type for property `Pricing.rate`: expected `Function<int(int)>`, but got `Function<int(int) uses Http>`.",
             "10:36 invalid-local-assignment-value Invalid assignment to `local`: it is declared as `Function<int(int)>`.",
-            "11:23 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int)>`, but found `Function<int(int) uses Http>`.",
             "12:22 invalid-argument Invalid argument type for argument #1 of `Pricing.mail`: expected `Function<int(int) uses Mail>`, but found `Function<int(int) uses Http>`.",
             "19:78 invalid-return-statement Invalid return type for method `Pricing.current`: expected `Function<int(int)>`, but found `Function<int(int) uses Http>`.",
         ]
@@ -8865,7 +9190,7 @@ fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
 /// may be `null` possibly fits it.
 #[test]
 fn a_nullable_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
-    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int)>? step) => step == null ? 0 : step(1);\n\n    public int run(Function<int(int) uses Http> fetch, Function<int(int) uses Http>? maybe) => Pricing.apply(fetch) + Pricing.apply(maybe);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int) uses Mail>? step) => step == null ? 0 : step(1);\n\n    public int run(Function<int(int) uses Http> fetch, Function<int(int) uses Http>? maybe) => Pricing.apply(fetch) + Pricing.apply(maybe);\n}\n";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shop/Pricing.sharp", sharp), &[])
@@ -8873,8 +9198,8 @@ fn a_nullable_function_type_refuses_a_function_value_with_an_effect_it_does_not_
             .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
             .collect::<Vec<_>>(),
         [
-            "7:110 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int)>?`, but found `Function<int(int) uses Http>`.",
-            "7:133 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Pricing.apply`: expected `Function<int(int)>?`, but possibly received `Function<int(int) uses Http>?`.",
+            "7:110 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int) uses Mail>?`, but found `Function<int(int) uses Http>`.",
+            "7:133 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Pricing.apply`: expected `Function<int(int) uses Mail>?`, but possibly received `Function<int(int) uses Http>?`.",
         ]
     );
 }
@@ -8887,10 +9212,10 @@ fn a_function_type_holds_a_function_value_whose_effects_it_lists() {
     assert_eq!(issues(("src/App/Shop/Pricing.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// A pure function value has no effect, so every function type holds it.
+/// A pure function value, a lambda or a method value, has no effect, so every function type holds it.
 #[test]
 fn a_function_type_with_an_effect_holds_a_pure_function_value() {
-    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate;\n\n    public Pricing(Function<int(int)> fixed)\n    {\n        this.rate = fixed;\n    }\n\n    public static int apply(Function<int(int) uses Http> step) => step(1);\n\n    public int run(Function<int(int)> fixed) => Pricing.apply(fixed);\n\n    public int price() => this.rate(2);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate;\n\n    public Pricing()\n    {\n        this.rate = n => n;\n    }\n\n    public static int apply(Function<int(int) uses Http> step) => step(1);\n\n    public int run() => Pricing.apply(this.fixed) + Pricing.apply(n => n + 1);\n\n    public int fixed(int n) => n;\n\n    public int price() => this.rate(2);\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Pricing.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -8900,7 +9225,7 @@ fn a_function_type_with_an_effect_holds_a_pure_function_value() {
 #[test]
 fn a_function_value_keeps_its_parameter_collections_through_a_copy_a_template_and_a_list() {
     let pass = "<?php\n\nnamespace Lib;\n\nfinal class Pass\n{\n    /**\n     * @template T\n     * @param T $value\n     * @return T\n     */\n    public static function keep(mixed $value): mixed\n    {\n        return $value;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Pass;\n\nclass Counter\n{\n    public int run(Function<int(List<string>)> size)\n    {\n        let copy = size;\n        const kept = Pass.keep(size);\n        List<Function<int(List<string>)>> all = [size];\n        int total = copy([:]) + kept([:]);\n        for (const each of all) {\n            total += each([:]);\n        }\n        return total;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Pass;\n\nclass Counter\n{\n    public int run(Function<int(List<string>) uses Http> size)\n    {\n        let copy = size;\n        const kept = Pass.keep(size);\n        List<Function<int(List<string>) uses Http>> all = [size];\n        int total = copy([:]) + kept([:]);\n        for (const each of all) {\n            total += each([:]);\n        }\n        return total;\n    }\n}\n";
 
     let message = "invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.";
     assert_eq!(
@@ -9383,7 +9708,7 @@ fn a_search_needs_equality_on_the_element_type() {
 #[test]
 fn every_collection_counts_its_elements() {
     let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int total(List<int> sizes, Map<string, int> counts)\n    {\n        return sizes.count() + counts.count();\n    }\n\n    public void wrong(List<int> sizes)\n    {\n        if (sizes.count()) { }\n        sizes.count(1);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\nuse Sharp\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int> $sizes\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(ListMethods $sizes, MapMethods $counts): int\n    {\n        return $sizes->count() + $counts->count();\n    }\n\n    /**\n     * @param ListMethods<int> $sizes\n     */\n    public function wrong(ListMethods $sizes): void\n    {\n        $sizes->count(1);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int> $sizes\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(ListMethods $sizes, MapMethods $counts): int\n    {\n        return $sizes->count() + $counts->count();\n    }\n\n    /**\n     * @param ListMethods<int> $sizes\n     */\n    public function wrong(ListMethods $sizes): void\n    {\n        $sizes->count(1);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Shelf.sharp", sharp), &[]), ["12:13 invalid-operand", "13:21 too-many-arguments"]);
     assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["24:23 too-many-arguments"]);
@@ -9396,7 +9721,7 @@ fn every_collection_counts_its_elements() {
 #[test]
 fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_yet() {
     let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public bool any(Function<bool(int)> predicate) => true;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1) || items.contains(1)) {\n            return items.any(i => i > 0) ? 1 : 0;\n        }\n        return items.count();\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int>|list<int> $sizes\n     */\n    public function run(ListMethods|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int>|list<int> $sizes\n     */\n    public function run(ListMethods|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[]);
 
     assert_eq!(
@@ -9407,8 +9732,8 @@ fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_ye
     assert!(!codes(&self::issues(("src/Demo/Shelf.php", php), &[])).contains(&"not-supported-yet"));
 }
 
-/// The analyzer checks a collection method against `Sharp\ListMethods` or `Sharp\MapMethods`, and every message names
-/// the PHP# type the code wrote instead, as in "`add` doesn't exist on `Map<string, int>`".
+/// The analyzer checks a collection method against `Sharp\Internal\ListMethods` or `Sharp\Internal\MapMethods`, and
+/// every message names the PHP# type the code wrote instead, as in "`add` doesn't exist on `Map<string, int>`".
 #[test]
 fn a_collection_method_message_names_the_sharp_type() {
     let sharp = "namespace Demo;\n\nclass Order\n{\n    public void wrong(List<Line> lines, List<int> sizes, Map<string, int> counts)\n    {\n        lines.add(1);\n        sizes.getOrNull(\"a\");\n        counts.add(1);\n        sizes.delete(0);\n        counts.get(1.5);\n        sizes.getOrNull();\n        sizes.getOrNull(0, 1);\n        counts.has(1);\n        counts.remove(1);\n    }\n}\n\nclass Line\n{\n}\n";
@@ -9566,7 +9891,7 @@ fn a_changing_collection_method_writes_back_through_a_null_safe_property() {
 /// docblock calls its changing methods on a variable as on any other object.
 #[test]
 fn a_changing_collection_method_called_from_php_needs_no_place() {
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\nuse Sharp\\MapMethods;\nuse Sharp\\SetMethods;\n\nfinal class Shop\n{\n    /**\n     * @param ListMethods<int> $lines\n     * @param MapMethods<string, int> $counts\n     * @param SetMethods<int> $ids\n     */\n    public function change(ListMethods $lines, MapMethods $counts, SetMethods $ids): bool\n    {\n        $lines->add(1);\n        $counts->remove('a');\n\n        return $ids->add(1);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\nuse Sharp\\Internal\\MapMethods;\nuse Sharp\\Internal\\SetMethods;\n\nfinal class Shop\n{\n    /**\n     * @param ListMethods<int> $lines\n     * @param MapMethods<string, int> $counts\n     * @param SetMethods<int> $ids\n     */\n    public function change(ListMethods $lines, MapMethods $counts, SetMethods $ids): bool\n    {\n        $lines->add(1);\n        $counts->remove('a');\n\n        return $ids->add(1);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Shop.php", php), &[]), Vec::<String>::new());
 }
@@ -9677,12 +10002,12 @@ fn a_map_keyed_by_a_backed_enum_takes_exactly_the_enum_as_a_key() {
     );
 }
 
-/// `Sharp\MapMethods` declares the key of `get`, `has` and `remove` as `K`, which a `Map<Status, int>` fills with
-/// `Status`, so each takes the case. A `.php` call on `MapMethods<string, int>` takes its `K` the same way.
+/// `Sharp\Internal\MapMethods` declares the key of `get`, `has` and `remove` as `K`, which a `Map<Status, int>` fills
+/// with `Status`, so each takes the case. A `.php` call on `MapMethods<string, int>` takes its `K` the same way.
 #[test]
 fn map_get_has_and_remove_take_a_backed_enum_key_in_sharp_and_in_php() {
     let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int? lookup(Map<Status, int> counts, Status status)\n    {\n        counts.remove(status);\n        return counts.has(status) ? counts.get(status) : null;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\MapMethods;\n\nfinal class Tally\n{\n    /** @param MapMethods<string, int> $counts */\n    public function lookup(MapMethods $counts, string $name): ?int\n    {\n        return $counts->get($name);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Tally\n{\n    /** @param MapMethods<string, int> $counts */\n    public function lookup(MapMethods $counts, string $name): ?int\n    {\n        return $counts->get($name);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
     assert_eq!(issues(("src/Demo/Tally.php", php), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
@@ -10046,7 +10371,13 @@ fn a_class_parses_as_a_struct_does() {
 fn a_sharp_class_cannot_implement_the_struct_marker() {
     let sharp = "namespace Demo;\n\nimport Sharp.Struct;\n\nclass Fake : Struct\n{\n    public Fake() { }\n}\n";
 
-    assert_eq!(messages(("src/Demo/Fake.sharp", sharp), &[]), ["Class `Fake` cannot implement unknown type `Struct`"]);
+    assert_eq!(
+        messages(("src/Demo/Fake.sharp", sharp), &[]),
+        [
+            "Imported class, interface, trait, or enum `Sharp.Struct` does not exist.",
+            "Class `Fake` cannot implement unknown type `Struct`"
+        ]
+    );
 }
 
 /// Spec section 12 keys a `Map` by anything with `==` and `hash()`, so a class that declares `operator ==` with
@@ -10115,7 +10446,7 @@ fn a_group_key_is_checked_only_where_a_function_fills_the_key_parameter() {
 /// `array-key` bound there, as on master: a class or a backed enum key is refused at the call.
 #[test]
 fn a_php_caller_of_group_by_keys_the_array_by_an_array_key() {
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Line;\nuse Lib\\Status;\nuse Sharp\\ListMethods;\n\nfinal class Tally\n{\n    /** @param ListMethods<Line> $lines */\n    public function group(ListMethods $lines): int\n    {\n        $byLine = $lines->groupBy(fn (Line $line) => $line);\n        $byStatus = $lines->associateBy(fn (Line $line) => Status::Active);\n        $byName = $lines->groupBy(fn (Line $line) => 'all');\n\n        return count($byLine) + count($byStatus) + count($byName);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Line;\nuse Lib\\Status;\nuse Sharp\\Internal\\ListMethods;\n\nfinal class Tally\n{\n    /** @param ListMethods<Line> $lines */\n    public function group(ListMethods $lines): int\n    {\n        $byLine = $lines->groupBy(fn (Line $line) => $line);\n        $byStatus = $lines->associateBy(fn (Line $line) => Status::Active);\n        $byName = $lines->groupBy(fn (Line $line) => 'all');\n\n        return count($byLine) + count($byStatus) + count($byName);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.php", php), &[("src/Lib/Status.php", STATUS)]),
@@ -10376,8 +10707,8 @@ fn a_set_element_takes_what_a_map_key_takes() {
     );
 }
 
-/// A `Set` has the methods of `Sharp\SetMethods`, each typed by its elements: `add`, `remove` and `clear` change it,
-/// `filter` gives a `Set`, and `map` and `sortedBy` give a `List`.
+/// A `Set` has the methods of `Sharp\Internal\SetMethods`, each typed by its elements: `add`, `remove` and `clear`
+/// change it, `filter` gives a `Set`, and `map` and `sortedBy` give a `List`.
 #[test]
 fn set_methods_take_and_give_the_types_of_their_elements() {
     let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tags\n{\n    public int run(Set<string> tags, Set<Status> statuses)\n    {\n        bool added = tags.add(\"vip\");\n        bool removed = tags.remove(\"new\");\n        bool held = tags.contains(\"vip\") && statuses.contains(Status.Active);\n        List<string> listed = tags.toList();\n        Set<string> kept = tags.filter(tag => tag != \"x\");\n        List<int> sizes = tags.map(tag => global.strlen(tag));\n        bool lengthy = tags.any(tag => global.strlen(tag) > 3);\n        string first = tags.first(tag => tag != \"\");\n        List<Status> sorted = statuses.sortedBy(status => status.value);\n        statuses.add(Status.Closed);\n        statuses.remove(Status.Active);\n        tags.clear();\n        return tags.count() + tags.sumOf(tag => global.strlen(tag)) + listed.count() + kept.count() + sizes.count() + sorted.count() + (added && removed && held && lengthy ? 1 : 0) + global.strlen(first);\n    }\n\n    public void wrong(Set<string> tags, Set<Status> statuses)\n    {\n        tags.add(1);\n        statuses.add(\"active\");\n        List<int> kept = tags.filter(tag => tag != \"x\");\n        Set<int> sizes = tags.map(tag => global.strlen(tag));\n        tags.get(0);\n    }\n}\n";
@@ -10394,13 +10725,13 @@ fn set_methods_take_and_give_the_types_of_their_elements() {
     );
 }
 
-/// A message about a `Set` method names the `Set` type the code wrote, never `Sharp\SetMethods`, and a parameter's
-/// `Set` type reads as PHP# writes it. A `.php` call on `SetMethods<string>` names the receiver as `Set<string>` too,
-/// as one on `MapMethods` names a `Map`, and the argument by its PHP type.
+/// A message about a `Set` method names the `Set` type the code wrote, never `Sharp\Internal\SetMethods`, and a
+/// parameter's `Set` type reads as PHP# writes it. A `.php` call on `SetMethods<string>` names the receiver as
+/// `Set<string>` too, as one on `MapMethods` names a `Map`, and the argument by its PHP type.
 #[test]
 fn a_set_message_names_the_sharp_type() {
     let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public void wrong(Set<string> tags, Set<Status> statuses, Map<string, int> counts)\n    {\n        tags.add(1);\n        statuses.contains(\"active\");\n        tags.get(0);\n        this.mark(counts);\n    }\n\n    public void mark(Set<Status> statuses)\n    {\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\SetMethods;\n\nfinal class Tally\n{\n    /** @param SetMethods<string> $tags */\n    public function wrong(SetMethods $tags): void\n    {\n        $tags->add(1);\n        $tags->get(0);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\SetMethods;\n\nfinal class Tally\n{\n    /** @param SetMethods<string> $tags */\n    public function wrong(SetMethods $tags): void\n    {\n        $tags->add(1);\n        $tags->get(0);\n    }\n}\n";
 
     let issues =
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]);
@@ -10587,7 +10918,7 @@ fn a_list_literal_is_passed_where_a_set_is_expected_and_a_list_or_a_map_is_not()
 /// A list literal becomes a `Set` only in the body of the PHP# method or lambda that declares the parameter `Set`, so
 /// only a call of one takes a list literal there, each element of a variadic one too, and a lambda a local holds is
 /// one, while a `List` variable is refused everywhere. Neither
-/// `Sharp\ListMethods.add` of a `List<Set<string>>`, whose `Set` comes from its template, nor a call through a
+/// `Sharp\Internal\ListMethods.add` of a `List<Set<string>>`, whose `Set` comes from its template, nor a call through a
 /// `Function` value runs such a body, so each takes only a `Set`. A plain PHP caller still passes a list to a PHP#
 /// method.
 #[test]
@@ -10657,8 +10988,9 @@ fn an_iterable_has_no_index() {
     );
 }
 
-/// An `Iterable<T>` has the lazy operations of spec section 12, checked against `Sharp\IterableMethods<T>`: `filter`
-/// and `take` keep the element type, `map` takes the lambda's return type, and `toList` reads them into a `List<T>`.
+/// An `Iterable<T>` has the lazy operations of spec section 12, checked against `Sharp\Internal\IterableMethods<T>`:
+/// `filter` and `take` keep the element type, `map` takes the lambda's return type, and `toList` reads them into a
+/// `List<T>`.
 #[test]
 fn lazy_operations_on_an_iterable_type_their_results_by_the_elements() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Iterable<Order> orders, Iterable<Order>? maybe)\n    {\n        Iterable<Order> paid = orders.filter(o => o.paid);\n        Iterable<string> numbers = paid.map(o => o.number);\n        Iterable<string> first = numbers.take(100);\n        List<string> list = first.toList();\n        Iterable<int> wrongMap = paid.map(o => o.number);\n        List<int> wrongList = first.toList();\n        Iterable<Order>? kept = maybe?.filter(o => o.paid);\n        List<string> chain = orders.filter(o => o.paid).map(o => o.number).take(100).toList();\n        return global.count(list) + global.count(wrongList) + global.count(chain) + (kept == null ? 0 : 1) + Report.size(wrongMap);\n    }\n\n    private static int size(Iterable<int> values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; }, public string number { get; })\n    {\n    }\n}\n";
@@ -12814,7 +13146,7 @@ fn recording_type_arguments_leaves_the_issues_of_a_php_generic_call_unchanged() 
 /// of `TItem` passes as itself. The PHP twin, whose closures take and return any value, keeps Mago's issues.
 #[test]
 fn a_function_type_is_checked_by_its_type_parameters() {
-    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Function<TItem()> maker() => () => 1;\n\n    public Function<void(int)> taker(Function<void(TItem)> visit) => visit;\n\n    public Function<TItem(TItem)> same() => (TItem item) => item;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Function<TItem()> maker() => () => 1;\n\n    public Function<void(int) uses Http> taker(Function<void(TItem) uses Http> visit) => visit;\n\n    public Function<TItem(TItem)> same() => (TItem item) => item;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass Box\n{\n    /** @return \\Closure(): TItem */\n    public function maker(): \\Closure\n    {\n        return fn() => 1;\n    }\n\n    /**\n     * @param \\Closure(TItem): void $visit\n     * @return \\Closure(int): void\n     */\n    public function taker(\\Closure $visit): \\Closure\n    {\n        return $visit;\n    }\n\n    /** @return \\Closure(TItem): TItem */\n    public function same(): \\Closure\n    {\n        return static fn($item) => $item;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Box.php", php), &[]), Vec::<String>::new());
@@ -12822,7 +13154,7 @@ fn a_function_type_is_checked_by_its_type_parameters() {
         worded(("src/Demo/Box.sharp", sharp), &[]),
         [
             "5:41 invalid-return-statement Invalid return type for method `Box.maker`: expected `Function<TItem()>`, but found `Function<1()>`. | This has type `Function<1()>` | The type `Function<1()>` returned here is not compatible with the declared return type `Function<TItem()>`. | Change the return value to match `Function<TItem()>`, or update the method's return type declaration.",
-            "7:70 invalid-return-statement Invalid return type for method `Box.taker`: expected `Function<void(int)>`, but found `Function<void(TItem)>`. | This has type `Function<void(TItem)>` | The type `Function<void(TItem)>` returned here is not compatible with the declared return type `Function<void(int)>`. | Change the return value to match `Function<void(int)>`, or update the method's return type declaration.",
+            "7:90 invalid-return-statement Invalid return type for method `Box.taker`: expected `Function<void(int) uses Http>`, but found `Function<void(TItem) uses Http>`. | This has type `Function<void(TItem) uses Http>` | The type `Function<void(TItem) uses Http>` returned here is not compatible with the declared return type `Function<void(int) uses Http>`. | Change the return value to match `Function<void(int) uses Http>`, or update the method's return type declaration.",
         ]
     );
 }
@@ -13009,17 +13341,17 @@ fn a_property_of_a_generic_receiver_has_the_receivers_type_arguments() {
 /// refuses it, and a lambda that returns nothing is no `Function<TItem()>`. The PHP twin keeps Mago's issues.
 #[test]
 fn a_function_type_checks_its_any_parameters_and_its_any_return() {
-    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Function<void(Any?)> widen(Function<void(TItem)> visit) => visit;\n\n    public Function<Any()> sure(Function<TItem()> make) => make;\n\n    public Function<TItem()> empty() => () => { };\n\n    public Function<Any?()> loose(Function<TItem()> make) => make;\n\n    public Function<void(TItem)> kept(Function<void(TItem)> visit) => visit;\n}\n\npublic class Plain\n{\n    public Function<void(Any)> any(Function<void(int)> visit) => visit;\n\n    public Function<void(int)> narrow(Function<void(Any?)> visit) => visit;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Function<void(Any?) uses Http> widen(Function<void(TItem) uses Http> visit) => visit;\n\n    public Function<Any() uses Http> sure(Function<TItem() uses Http> make) => make;\n\n    public Function<TItem()> empty() => () => { };\n\n    public Function<Any?() uses Http> loose(Function<TItem() uses Http> make) => make;\n\n    public Function<void(TItem) uses Http> kept(Function<void(TItem) uses Http> visit) => visit;\n}\n\npublic class Plain\n{\n    public Function<void(Any) uses Http> any(Function<void(int) uses Http> visit) => visit;\n\n    public Function<void(int) uses Http> narrow(Function<void(Any?) uses Http> visit) => visit;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass Box\n{\n    /**\n     * @param \\Closure(TItem): void $visit\n     * @return \\Closure(mixed): void\n     */\n    public function widen(\\Closure $visit): \\Closure\n    {\n        return $visit;\n    }\n\n    /**\n     * @param \\Closure(): TItem $make\n     * @return \\Closure(): non-empty-mixed\n     */\n    public function sure(\\Closure $make): \\Closure\n    {\n        return $make;\n    }\n\n    /** @return \\Closure(): TItem */\n    public function empty(): \\Closure\n    {\n        return function (): void {\n        };\n    }\n\n    /**\n     * @param \\Closure(): TItem $make\n     * @return \\Closure(): mixed\n     */\n    public function loose(\\Closure $make): \\Closure\n    {\n        return $make;\n    }\n\n    /**\n     * @param \\Closure(TItem): void $visit\n     * @return \\Closure(TItem): void\n     */\n    public function kept(\\Closure $visit): \\Closure\n    {\n        return $visit;\n    }\n}\n\nclass Plain\n{\n    /**\n     * @param \\Closure(int): void $visit\n     * @return \\Closure(non-empty-mixed): void\n     */\n    public function any(\\Closure $visit): \\Closure\n    {\n        return $visit;\n    }\n\n    /**\n     * @param \\Closure(mixed): void $visit\n     * @return \\Closure(int): void\n     */\n    public function narrow(\\Closure $visit): \\Closure\n    {\n        return $visit;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Box.php", php), &[]), Vec::<String>::new());
     assert_eq!(
         issues(("src/Demo/Box.sharp", sharp), &[]),
         [
-            "5:71 invalid-return-statement",
-            "7:60 invalid-return-statement",
+            "5:91 invalid-return-statement",
+            "7:80 invalid-return-statement",
             "9:41 invalid-return-statement",
-            "18:66 invalid-return-statement",
+            "18:86 invalid-return-statement",
         ]
     );
 }
@@ -16485,13 +16817,14 @@ fn an_extern_target_that_names_nothing_is_a_non_existent_class_method_or_functio
     assert_eq!(
         issues(stub, &[STRIPE]),
         [
+            "4:8 non-existent-use-import",
             "6:8 non-existent-class-like",
             "7:8 non-existent-method",
             "8:8 non-existent-function",
             "9:14 non-existent-class-like"
         ]
     );
-    assert_eq!(messages(stub, &[STRIPE])[3], "Cannot find class, interface, enum, or type alias `Nowhere`.");
+    assert_eq!(messages(stub, &[STRIPE])[4], "Cannot find class, interface, enum, or type alias `Nowhere`.");
 
     // An imported namespace that names no class holds functions, spec section 23, so its missing member is a missing
     // function, as `global.nowhere` is.
@@ -16557,31 +16890,221 @@ fn a_uses_takes_a_foreign_class_and_refuses_any_other_class() {
     }
 }
 
-/// Spec section 29: a method names a function parameter in `uses`, with or without a body, as
-/// `charge(…) uses prepare => …` and `apply(Function<int(int)> f) uses f;` do. That name is no effect, so the effect
-/// check passes it, and a caller has no effect of that name.
+/// Spec section 29: a method takes on the effects of each function it is given, with nothing written, as Swift's
+/// `rethrows` does. A pure caller passing a pure lambda stays pure, a caller passing a lambda with `Http` has `Http`, a
+/// method that passes its parameter on to `map` carries it on, a nullable parameter takes them on too, a static and an
+/// instance method value give the call their method's effects, and a parameter whose type states its effects keeps them
+/// as a cap: it refuses a function with a wider effect.
 #[test]
-fn a_method_with_a_body_names_a_function_parameter_in_uses() {
-    let checkout = (
-        "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\npublic class Checkout\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
+fn a_method_takes_on_the_effects_of_each_function_it_is_given() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int()> f) => f();\n\n    public static List<int> each(List<int> prices, Function<int(int)> f) => prices.map(f);\n\n    public static int capped(Function<int() uses Http> f) => f();\n\n    public static int live() => global.fetch(1);\n\n    public int fetchOne() => global.fetch(1);\n\n    public int pure => Pricing.apply(() => 1) + Pricing.each([1], (int price) => price).count();\n\n    public int fetched => Pricing.apply(() => global.fetch(1));\n\n    public int fetchedEach => Pricing.each([1], (int price) => global.fetch(price)).count();\n\n    public int fetchedCapped => Pricing.capped(() => global.fetch(1));\n\n    public int clockCapped => Pricing.capped(() => global.now());\n\n    public int viaStatic => Pricing.apply(Pricing.live);\n\n    public int viaInstance => Pricing.apply(this.fetchOne);\n\n    public static int maybe(Function<int()>? f) => f == null ? 0 : f();\n\n    public int fetchedMaybe => Pricing.maybe(() => global.fetch(1));\n\n    law pureHolds(Pricing pricing) => pricing.pure > 0;\n\n    law fetchedRefused(Pricing pricing) => pricing.fetched > 0;\n\n    law eachRefused(Pricing pricing) => pricing.fetchedEach > 0;\n\n    law staticRefused(Pricing pricing) => pricing.viaStatic > 0;\n\n    law instanceRefused(Pricing pricing) => pricing.viaInstance > 0;\n\n    law maybeRefused(Pricing pricing) => pricing.fetchedMaybe > 0;\n}\n",
     );
 
-    assert_eq!(issues(checkout, &[]), Vec::<String>::new());
-
-    let doubler = (
-        "app/Shop/Doubler.sharp",
-        "namespace App.Shop;\n\npublic class Doubler\n{\n    public Doubler(private Mapper mapper) { }\n\n    public int twice => this.mapper.apply(x => x * 2);\n}\n",
+    assert_eq!(issues(pricing, &[FETCH, FETCH_STUB, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, FETCH, FETCH_STUB, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Pricing.sharp:35:44 impure-law: Law `fetchedRefused` reaches `Pricing.fetched`, which calls `global.fetch` with the effect `Http`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:37:41 impure-law: Law `eachRefused` reaches `Pricing.fetchedEach`, which calls `global.fetch` with the effect `Http`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:39:43 impure-law: Law `staticRefused` reaches `Pricing.live`, which calls `global.fetch` with the effect `Http`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:41:45 impure-law: Law `instanceRefused` reaches `Pricing.fetchOne`, which calls `global.fetch` with the effect `Http`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:43:42 impure-law: Law `maybeRefused` reaches `Pricing.fetchedMaybe`, which calls `global.fetch` with the effect `Http`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:23:46 invalid-argument: This lambda calls `global.now`, which has the effect `Clock`, so a `Function<int() uses Http>` cannot hold it.",
+        ]
     );
-    for declaration in [
-        "namespace App.Shop;\n\npublic interface Mapper\n{\n    int apply(Function<int(int)> f) uses f;\n}\n",
-        "namespace App.Shop;\n\npublic abstract class Mapper\n{\n    public abstract int apply(Function<int(int)>? f) uses f;\n}\n",
-    ] {
-        let mapper = ("app/Shop/Mapper.sharp", declaration);
+}
 
-        assert_eq!(issues(mapper, &[doubler]), Vec::<String>::new(), "{declaration}");
-        assert_eq!(effect_issues(&[doubler, mapper]), Vec::<String>::new(), "{declaration}");
-    }
+/// Spec section 29: a function parameter whose type states no effects takes on each caller's, so it runs only inside the
+/// call, as Swift's closure parameters do without `@escaping`. Storing it in a field, a collection or a new object,
+/// returning it, passing it where it may be kept, and a local or a lambda that holds it doing any of these are refused,
+/// each naming the type to take instead. Calling it, and passing it on to another function parameter, plain PHP's
+/// included, compile.
+#[test]
+fn a_function_parameter_whose_type_states_no_effects_never_escapes() {
+    let holder = (
+        "app/Shop/Holder.sharp",
+        "namespace App.Shop;\n\npublic class Holder\n{\n    public Holder(private Function<int() uses Http> body) { }\n}\n",
+    );
+    let keeper = (
+        "app/Shop/Keeper.sharp",
+        "namespace App.Shop;\n\nimport Lib.Runner;\n\npublic class Keeper\n{\n    private Function<int()> kept = () => 0;\n\n    private Function<int() uses Http>? spare = null;\n\n    private Function<int(Function<int()>)> handler = (Function<int()> g) => g();\n\n    private static Function<int()>? cached = null;\n\n    public void store(Function<int()> f) { this.kept = f; }\n\n    public void spared(Function<int()> f) => this.spare = f;\n\n    public void cache(Function<int()> f) { Keeper.cached = f; }\n\n    public int local(Function<int()> f)\n    {\n        const g = f;\n        Function<int()> h = () => 0;\n        h = () => g();\n        this.kept = h;\n        return g();\n    }\n\n    public List<Function<int()>> listed(Function<int()> f) => [f];\n\n    public void indexed(Map<string, Function<int()>> all, Function<int()> f) { all[\"a\"] = f; }\n\n    public void added(List<Function<int()>> all, Function<int()> f) => all.add(f);\n\n    public Holder held(Function<int()> f) => new Holder(f);\n\n    public Function<int()> returned(Function<int()> f) => f;\n\n    public Function<int()> either(Function<int()>? f) => f ?? (() => 0);\n\n    public Function<int()> wrapped(Function<int()> f) => () => f() + 1;\n\n    public Function<int()> wrappedBlock(Function<int()> f) => () => { return f() + 2; };\n\n    public int capped(Function<int()> f) => Keeper.capping(f);\n\n    public static int capping(Function<int() uses Http> g) => g();\n\n    public int handled(Function<int()> f) => this.handler(f);\n\n    public int valued(Function<int(Function<int()>)> run, Function<int()> f) => run(f);\n\n    public int called(Function<int()> f) => f() + Keeper.passing(f) + Keeper.passing(() => f()) + global.call_user_func(f) + Runner.run(f);\n\n    public static int passing(Function<int()> g) => g();\n\n    public Keeper chained(Function<int()> f) => this;\n\n    public int lambda(Function<int()> f)\n    {\n        const r = (Function<int()> g) => g();\n        return r(f);\n    }\n\n    public int run() => this.kept() + (this.spare?.() ?? 0) + (Keeper.cached?.() ?? 0);\n}\n",
+    );
+    let lib = (
+        "src/Lib/Lib.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Runner\n{\n    public static function run(\\Closure $body): int\n    {\n        return $body();\n    }\n}\n",
+    );
+    let stub = ("app/Stubs/Builtins.sharp", "namespace App.Stubs;\n\nextern global.call_user_func;\n");
+
+    assert_eq!(
+        worded(keeper, &[holder, lib, stub]),
+        [
+            ("15:56 invalid-property-assignment-value", "`f` can't be stored in a field", "Stored", "Function<int() uses …>"),
+            (
+                "17:59 invalid-property-assignment-value",
+                "`f` can't be stored in a field",
+                "Stored",
+                "Function<int() uses Http>?",
+            ),
+            ("19:60 invalid-property-assignment-value", "`f` can't be stored in a field", "Stored", "Function<int() uses …>"),
+            (
+                "26:21 invalid-property-assignment-value",
+                "This local can't be stored in a field: it holds `f`, a function parameter whose type states no effects.",
+                "Stored",
+                "Function<int() uses …>",
+            ),
+            ("30:64 invalid-array-element", "`f` can't be stored in a collection", "Stored", "Function<int() uses …>"),
+            ("32:91 invalid-array-element", "`f` can't be stored in a collection", "Stored", "Function<int() uses …>"),
+            (
+                "34:80 invalid-argument",
+                "`f` can't be passed to `List.add`, which may keep it",
+                "Passed",
+                "Function<int() uses …>",
+            ),
+            ("36:57 invalid-argument", "`f` can't be stored in a new object", "Passed", "Function<int() uses Http>"),
+            ("38:59 invalid-return-statement", "`f` can't be returned", "Returned", "Function<int() uses …>"),
+            ("40:58 invalid-return-statement", "`f` can't be returned", "Returned", "Function<int() uses …>?"),
+            (
+                "42:58 invalid-return-statement",
+                "This lambda can't be returned: it captures `f`, a function parameter whose type states no effects.",
+                "Returned",
+                "Function<int() uses …>",
+            ),
+            (
+                "44:63 invalid-return-statement",
+                "This lambda can't be returned: it captures `f`, a function parameter whose type states no effects.",
+                "Returned",
+                "Function<int() uses …>",
+            ),
+            (
+                "46:60 invalid-argument",
+                "`f` can't be passed to `Keeper.capping`, which may keep it",
+                "Passed",
+                "Function<int() uses Http>",
+            ),
+            (
+                "50:59 invalid-argument",
+                "`f` can't be passed to `Keeper.handler`, which may keep it",
+                "Passed",
+                "Function<int() uses …>",
+            ),
+            (
+                "52:85 invalid-argument",
+                "`f` can't be passed to a function value, which may keep it",
+                "Passed",
+                "Function<int() uses …>",
+            ),
+            (
+                "63:18 invalid-argument",
+                "`f` can't be passed to a function value, which may keep it",
+                "Passed",
+                "Function<int() uses …>",
+            ),
+        ]
+        .map(|(at, message, verb, take)| {
+            let message =
+                if message.ends_with('.') { message.to_owned() } else { format!("{message}: its type states no effects.") };
+            format!(
+                "{at} {message} | {verb} here. | A method takes on the effects of each function it is given, so that function runs only inside the method's call. | Take a `{take}`, whose type states the effects it may have."
+            )
+        })
+    );
+}
+
+/// Spec section 29: a gap in a collection literal, as in `[f, , f]`, holds no function, so the escape check refuses only
+/// each element that stores the parameter, beside the gap's own refusal.
+#[test]
+fn a_gap_in_a_collection_literal_holds_no_function_parameter() {
+    let keeper = (
+        "app/Shop/Keeper.sharp",
+        "namespace App.Shop;\n\npublic class Keeper\n{\n    public List<Function<int()>> gapped(Function<int()> f) => [f, , f];\n}\n",
+    );
+
+    assert_eq!(
+        worded(keeper, &[]).iter().map(|issue| issue.split(" | ").next().unwrap()).collect::<Vec<_>>(),
+        [
+            "5:67 invalid-array-element Missing array element: skipping elements is only allowed in list assignments (destructuring).",
+            "5:64 invalid-array-element `f` can't be stored in a collection: its type states no effects.",
+            "5:69 invalid-array-element `f` can't be stored in a collection: its type states no effects.",
+        ]
+    );
+}
+
+/// Spec section 29: a method has, at each call, its body's own effects plus the effects of each function passed to a
+/// function parameter whose type states none: a lambda's, a method value's method's, or a function value's type's. The
+/// function passed is not held to the parameter's type, a parameter passed on to another such parameter carries it on,
+/// and a method without a body carries it as one with a body does. A call of the parameter in the body adds nothing,
+/// since each caller adds what it passes.
+#[test]
+fn a_call_of_a_method_has_the_effects_of_each_function_passed_to_it() {
+    let mapper = (
+        "app/Shop/Mapper.sharp",
+        "namespace App.Shop;\n\npublic interface Mapper\n{\n    int apply(Function<int()> f);\n}\n",
+    );
+    let runner = ("app/Shop/Runner.sharp", "namespace App.Shop;\n\npublic interface Runner\n{\n    int go();\n}\n");
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing : Runner\n{\n    public Pricing(private Function<int() uses Clock> tick, private Mapper mapper) { }\n\n    public static int carried(Function<int()> body) => body();\n\n    public static int forwarded(Function<int()> body) => Pricing.carried(body);\n\n    public int stamp() => global.now();\n\n    public int go() => Pricing.carried(() => global.now());\n\n    public int pure => Pricing.carried(() => 1) + Pricing.forwarded(() => 2) + this.mapper.apply(() => 3);\n\n    public int viaLambda => Pricing.carried(() => global.now());\n\n    public int viaMethodValue => Pricing.carried(this.stamp);\n\n    public int viaFunctionValue => Pricing.carried(this.tick);\n\n    public int viaForwarded => Pricing.forwarded(() => global.now());\n\n    public int viaDeclaration => this.mapper.apply(() => global.now());\n\n    law pure(Pricing pricing) => pricing.pure > 0;\n\n    law lambda(Pricing pricing) => pricing.viaLambda > 0;\n\n    law methodValue(Pricing pricing) => pricing.viaMethodValue > 0;\n\n    law functionValue(Pricing pricing) => pricing.viaFunctionValue > 0;\n\n    law relayed(Pricing pricing) => pricing.viaForwarded > 0;\n\n    law declaration(Pricing pricing) => pricing.viaDeclaration > 0;\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[mapper, runner, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, mapper, runner, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Pricing.sharp:29:36 impure-law: Law `lambda` reaches `Pricing.viaLambda`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:31:41 impure-law: Law `methodValue` reaches `Pricing.stamp`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:33:43 impure-law: Law `functionValue` reaches `Pricing.viaFunctionValue`, which calls `this.tick` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:35:37 impure-law: Law `relayed` reaches `Pricing.viaForwarded`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:37:41 impure-law: Law `declaration` reaches `Pricing.viaDeclaration`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:13:46 incompatible-effects: `Pricing.go` calls `global.now`, which has the effect `Clock`, so the pure `Runner.go` cannot accept it.",
+        ]
+    );
+}
+
+/// A method value of a method without a body has the effects its `uses` lists wherever it runs, as a call of the
+/// method does: passed to a function parameter, or to plain PHP, which may run what it is given.
+#[test]
+fn a_method_value_of_a_method_without_a_body_has_its_uses_where_it_runs() {
+    let rates =
+        ("app/Shop/Rates.sharp", "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate() uses Clock;\n}\n");
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Rates rates) { }\n\n    public static int carried(Function<int()> body) => body();\n\n    public int carriedRate => Pricing.carried(this.rates.rate);\n\n    public int calledRate => global.call_user_func(this.rates.rate);\n\n    law viaUses(Pricing pricing) => pricing.carriedRate > 0;\n\n    law viaPlain(Pricing pricing) => pricing.calledRate > 0;\n}\n",
+    );
+    let stub = ("app/Stubs/Builtins.sharp", "namespace App.Stubs;\n\nextern global.call_user_func;\n");
+
+    assert_eq!(issues(pricing, &[rates, stub]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, rates, stub]),
+        [
+            "app/Shop/Pricing.sharp:13:37 impure-law: Law `viaUses` reaches `Pricing.carriedRate`, which calls `Rates.rate` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:15:38 impure-law: Law `viaPlain` reaches `Pricing.calledRate`, which calls `Rates.rate` with the effect `Clock`. Laws hold only over pure code.",
+        ]
+    );
+}
+
+/// A method value of plain PHP has the effects its `extern` declares wherever it runs, as a call of the method does:
+/// passed to a function parameter, or to plain PHP, which may run what it is given.
+#[test]
+fn a_plain_php_method_value_has_its_extern_s_effects_where_it_runs() {
+    let stub = (
+        "app/Stubs/Meter.sharp",
+        "namespace App.Stubs;\n\nimport Lib.Meter;\n\nextern Meter.read uses Clock;\nextern global.call_user_func;\n",
+    );
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\nimport Lib.Meter;\n\npublic class Pricing\n{\n    public Pricing(private Meter meter) { }\n\n    public static int carried(Function<int()> body) => body();\n\n    public int carriedRead => Pricing.carried(this.meter.read);\n\n    public int calledRead => global.call_user_func(this.meter.read);\n\n    law viaUses(Pricing pricing) => pricing.carriedRead > 0;\n\n    law viaPlain(Pricing pricing) => pricing.calledRead > 0;\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[METER, stub]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, METER, stub]),
+        [
+            "app/Shop/Pricing.sharp:15:37 impure-law: Law `viaUses` reaches `Pricing.carriedRead`, which calls `Meter.read` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:17:38 impure-law: Law `viaPlain` reaches `Pricing.calledRead`, which calls `Meter.read` with the effect `Clock`. Laws hold only over pure code.",
+        ]
+    );
 }
 
 /// A name in `uses` that is no effect is refused with the effects its file can name: the named standard effects in the
@@ -17198,7 +17721,7 @@ fn a_lambda_with_an_effect_stored_in_a_function_type_that_lists_it_passes() {
 fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_is_refused() {
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int live(int n) => global.fetch(n);\n\n    public int fixed(int n) => n;\n\n    public int run() => Pricing.apply(this.live) + Pricing.apply(this.fixed);\n}\n",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int) uses Mail> step) => step(1);\n\n    public int live(int n) => global.fetch(n);\n\n    public int fixed(int n) => n;\n\n    public int run() => Pricing.apply(this.live) + Pricing.apply(this.fixed);\n}\n",
     );
     let php = (
         "app/Shop/Pricing.php",
@@ -17210,7 +17733,7 @@ fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_i
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
         [
-            "app/Shop/Pricing.sharp:11:39 invalid-argument: `Pricing.live` calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+            "app/Shop/Pricing.sharp:11:39 invalid-argument: `Pricing.live` calls `global.fetch`, which has the effect `Http`, so a `Function<int(int) uses Mail>` cannot hold it."
         ]
     );
 }
@@ -17225,14 +17748,14 @@ fn a_method_value_of_a_method_without_a_body_is_held_to_its_uses() {
     );
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Rates rates) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.rates.rate) + Pricing.apply(this.rates.fixed);\n}\n",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Rates rates) { }\n\n    public static int apply(Function<int(int) uses Mail> step) => step(1);\n\n    public int run() => Pricing.apply(this.rates.rate) + Pricing.apply(this.rates.fixed);\n}\n",
     );
 
     assert_eq!(issues(pricing, &[rates]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing, rates]),
         [
-            "app/Shop/Pricing.sharp:9:39 invalid-argument: `Rates.rate` has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+            "app/Shop/Pricing.sharp:9:39 invalid-argument: `Rates.rate` has the effect `Http`, so a `Function<int(int) uses Mail>` cannot hold it."
         ]
     );
 }
@@ -17250,13 +17773,56 @@ fn a_method_value_of_a_prelude_method_is_pure() {
     assert_eq!(effect_issues(&[shelf]), Vec::<String>::new());
 }
 
+/// A static method value has its method's effects wherever it runs, as a method value read from an object has: passed
+/// to a function parameter, as `Scope.run(Job.ping)`, or to plain PHP, as `global.call_user_func(Job.ping)`. So a pure
+/// interface method refuses an implementation that runs one.
+#[test]
+fn a_static_method_value_has_its_method_s_effects_where_it_runs() {
+    let pinged = ("app/Shop/Pinged.sharp", "namespace App.Shop;\n\npublic event Pinged(int number);\n");
+    let runner = ("app/Shop/Runner.sharp", "namespace App.Shop;\n\npublic interface Runner\n{\n    string go();\n}\n");
+    let stub = ("app/Stubs/Builtins.sharp", "namespace App.Stubs;\n\nextern global.call_user_func;\n");
+    for (go, column) in [("Scope.run(Job.ping)", 37), ("global.call_user_func(Job.ping)", 49)] {
+        let code = format!(
+            "namespace App.Shop;\n\nimport Sharp.Scope;\n\npublic class Job : Runner\n{{\n    public static string ping()\n    {{\n        emit new Pinged(1);\n        return \"pinged\";\n    }}\n\n    public string go() => {go};\n}}\n"
+        );
+        let job = ("app/Shop/Job.sharp", Box::leak(code.into_boxed_str()) as &'static str);
+
+        assert_eq!(issues(job, &[pinged, runner, stub, SCOPE]), Vec::<String>::new(), "{go}");
+        assert_eq!(
+            effect_issues(&[job, pinged, runner, stub, SCOPE]),
+            [format!(
+                "app/Shop/Job.sharp:13:{column} incompatible-effects: `Job.go` reaches `Job.ping`, which emits `Pinged` with the effect `Events`, so the pure `Runner.go` cannot accept it."
+            )],
+            "{go}"
+        );
+    }
+}
+
+/// A method value of a `foreign` class has that class's effect wherever it runs, as a call of the method has, so a law
+/// that runs `environment.require` through a function parameter is impure.
+#[test]
+fn a_method_value_of_a_foreign_class_has_its_effect_where_it_runs() {
+    let shelf = (
+        "app/Shop/Shelf.sharp",
+        "namespace App.Shop;\n\npublic class Shelf\n{\n    public Shelf(private Environment environment) { }\n\n    public static string carried(Function<string(string)> body) => body(\"HOME\");\n\n    public string home => Shelf.carried(this.environment.require);\n\n    law reads(Shelf shelf) => shelf.home != \"\";\n}\n",
+    );
+
+    assert_eq!(issues(shelf, &[ENVIRONMENT]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[shelf, ENVIRONMENT]),
+        [
+            "app/Shop/Shelf.sharp:11:31 impure-law: Law `reads` reaches `Shelf.home`, which calls `Environment.require` with the effect `Environment`. Laws hold only over pure code.",
+        ]
+    );
+}
+
 /// A conditional may give either branch, so each lambda in it is held to the place's function type, whichever branch
 /// holds it and whatever the other branch holds.
 #[test]
 fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
     let branch = (
         "app/Shop/Branch.sharp",
-        "namespace App.Shop;\n\npublic class Branch\n{\n    private Function<int(int)> rate;\n\n    public Branch(bool live, Function<int(int)> fixed)\n    {\n        this.rate = live ? (int n) => global.fetch(n) : (int n) => n + 1;\n        this.rate = live ? (int n) => n + 2 : (int n) => global.fetch(n) + 3;\n        this.rate = live ? (int n) => global.fetch(n) + 4 : fixed;\n        this.rate = live ? fixed : (int n) => global.fetch(n) + 5;\n        this.rate = live ? (int n) => global.fetch(n) + 6 : (int n) => global.fetch(n) + 7;\n    }\n\n    public int price() => this.rate(2);\n}\n",
+        "namespace App.Shop;\n\npublic class Branch\n{\n    private Function<int(int)> rate;\n\n    public Branch(bool live)\n    {\n        this.rate = live ? (int n) => global.fetch(n) : (int n) => n + 1;\n        this.rate = live ? (int n) => n + 2 : (int n) => global.fetch(n) + 3;\n        this.rate = live ? (int n) => global.fetch(n) + 4 : this.fixed;\n        this.rate = live ? this.fixed : (int n) => global.fetch(n) + 5;\n        this.rate = live ? (int n) => global.fetch(n) + 6 : (int n) => global.fetch(n) + 7;\n    }\n\n    public int fixed(int n) => n;\n\n    public int price() => this.rate(2);\n}\n",
     );
 
     assert_eq!(issues(branch, &[FETCH, FETCH_STUB]), Vec::<String>::new());
@@ -17315,9 +17881,6 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect(
                 format!(
                     "app/Shop/Checkout.sharp:15:21 invalid-property-assignment-value: This lambda calls `Store.get`, which has no `extern` declaration, so a `Function<int(int) uses {name}>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`."
                 ),
-                format!(
-                    "app/Shop/Checkout.sharp:22:55 invalid-argument: `Client.get` has the effect `{name}`, so a `Function<int(int)>` cannot hold it."
-                ),
             ],
             "{name}"
         );
@@ -17343,16 +17906,16 @@ const SERVICES_STUB: (&str, &str) = (
 fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\nimport Sharp.Environment;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store, private Environment environment) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static string? read(Function<string?(string)> lookup) => lookup(\"HOME\");\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n\n    public string? home() => Pricing.read(this.environment.variable);\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\nimport Sharp.Environment;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store, private Environment environment) { }\n\n    public static int apply(Function<int(int) uses Mail> step) => step(1);\n\n    public static string? read(Function<string?(string) uses Mail> lookup) => lookup(\"HOME\");\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n\n    public string? home() => Pricing.read(this.environment.variable);\n}\n",
     );
 
     assert_eq!(issues(pricing, &[SERVICES, SERVICES_STUB, ENVIRONMENT]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing, SERVICES, SERVICES_STUB, ENVIRONMENT]),
         [
-            "app/Shop/Pricing.sharp:16:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
-            "app/Shop/Pricing.sharp:16:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int)>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`.",
-            "app/Shop/Pricing.sharp:18:43 invalid-argument: `Environment.variable` has the effect `Environment`, so a `Function<string?(string)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:16:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int) uses Mail>` cannot hold it.",
+            "app/Shop/Pricing.sharp:16:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int) uses Mail>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Pricing.sharp:18:43 invalid-argument: `Environment.variable` has the effect `Environment`, so a `Function<string?(string) uses Mail>` cannot hold it.",
         ]
     );
 }
@@ -17372,11 +17935,12 @@ fn a_plain_php_method_value_read_through_a_subclass_is_held_to_the_subclass_exte
     );
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed, private QuietChild quiet) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get) + Pricing.apply((this.feed.get));\n\n    public int viaLocal()\n    {\n        let step = this.feed.get;\n        return Pricing.apply(step);\n    }\n\n    public int price => this.feed.get(1);\n\n    public int stepped\n    {\n        get\n        {\n            let step = this.feed.get;\n            return step(1);\n        }\n    }\n\n    public int calm() => Pricing.apply(this.quiet.get) + Pricing.apply((this.quiet.get));\n\n    public int calmViaLocal()\n    {\n        let step = this.quiet.get;\n        return Pricing.apply(step);\n    }\n\n    public int quietly\n    {\n        get\n        {\n            let step = this.quiet.get;\n            return step(1);\n        }\n    }\n\n    law priced(Pricing pricing) => pricing.price > 0;\n\n    law stepping(Pricing pricing) => pricing.stepped > 0;\n\n    law quiets(Pricing pricing) => pricing.quietly > 0;\n}\n",
+        "namespace App.Shop;\n\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed, private QuietChild quiet) { }\n\n    public static int apply(Function<int(int) uses Mail> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get) + Pricing.apply((this.feed.get));\n\n    public int viaLocal()\n    {\n        let step = this.feed.get;\n        return Pricing.apply(step);\n    }\n\n    public int price => this.feed.get(1);\n\n    public int stepped\n    {\n        get\n        {\n            let step = this.feed.get;\n            return step(1);\n        }\n    }\n\n    public int calm() => Pricing.apply(this.quiet.get) + Pricing.apply((this.quiet.get));\n\n    public int calmViaLocal()\n    {\n        let step = this.quiet.get;\n        return Pricing.apply(step);\n    }\n\n    public int quietly\n    {\n        get\n        {\n            let step = this.quiet.get;\n            return step(1);\n        }\n    }\n\n    law priced(Pricing pricing) => pricing.price > 0;\n\n    law stepping(Pricing pricing) => pricing.stepped > 0;\n\n    law quiets(Pricing pricing) => pricing.quietly > 0;\n}\n",
     );
 
     assert_eq!(issues(pricing, &[feeds, stub]), Vec::<String>::new());
-    let message = "invalid-argument: `RemoteFeed.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.";
+    let message =
+        "invalid-argument: `RemoteFeed.get` has the effect `Http`, so a `Function<int(int) uses Mail>` cannot hold it.";
     assert_eq!(
         effect_issues(&[pricing, feeds, stub]),
         [
@@ -17896,7 +18460,7 @@ fn a_call_of_a_virtual_method_has_the_effects_of_its_overrides() {
     );
 }
 
-/// A collection method has the effects of the lambda passed to it, as `uses f` will declare, and the lambda is part of
+/// A collection method has the effects of the lambda passed to it, as a function parameter of a PHP# method takes them on, and the lambda is part of
 /// the law, so the error points into it.
 #[test]
 fn a_law_whose_list_map_lambda_calls_an_undeclared_function_is_refused() {
@@ -19401,6 +19965,32 @@ const EVENTS: (&str, &str) = (
     include_str!("../../../../composer/library/Sharp/Events.sharp"),
 );
 
+/// The standard library's `Scope`, as `sharp/composer/` ships it.
+const SCOPE: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Scope.sharp",
+    include_str!("../../../../composer/library/Sharp/Scope.sharp"),
+);
+
+/// Spec section 32: the standard library's `Scope` analyzes clean, `Scope.run` returns what its body returns with no
+/// cast, and has its body's effects, so a pure body keeps its caller pure and a body that reads the environment does
+/// not.
+#[test]
+fn scope_run_returns_what_its_body_returns_and_has_its_effects() {
+    let worker = (
+        "app/Jobs/Worker.sharp",
+        "namespace App.Jobs;\n\nimport Sharp.Scope;\n\npublic class Worker\n{\n    public Worker(private Environment environment) { }\n\n    public int counted => Scope.run(() => 1);\n\n    public string home => Scope.run(() => this.environment.require(\"HOME\"));\n\n    law pure(Worker worker) => worker.counted > 0;\n\n    law reads(Worker worker) => worker.home != \"\";\n}\n",
+    );
+
+    assert_eq!(worded(SCOPE, &[]), Vec::<String>::new());
+    assert_eq!(issues(worker, &[SCOPE, ENVIRONMENT]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[worker, SCOPE, ENVIRONMENT]),
+        [
+            "app/Jobs/Worker.sharp:15:33 impure-law: Law `reads` reaches `Worker.home`, which calls `Environment.require` with the effect `Environment`. Laws hold only over pure code.",
+        ]
+    );
+}
+
 /// A class whose `watch` starts a listener with `Events.on<TEvent>` for the type `listened`, and holds its handle.
 fn watching(listened: &str) -> (&'static str, &'static str) {
     let code = format!(
@@ -20533,5 +21123,44 @@ fn a_method_name_out_of_camel_case_is_a_warning_unless_a_parent_names_it() {
             "8:9 method-name-case Method name `Grand_Total` should be in camel case. | Named here. | Rename it `grandTotal`.",
             "21:16 method-name-case Method name `Total_In` should be in camel case. | Named here. | Rename it `totalIn`.",
         ]
+    );
+}
+
+/// Spec section 2: a keyword written in another case is an ordinary name, so where no such name exists the error
+/// suggests the keyword. A value reads as `TRUE` does, and a keyword before parentheses as `Return` does. Where a class
+/// of that name exists, the name is that class.
+#[test]
+fn a_keyword_in_another_case_that_names_nothing_suggests_the_keyword() {
+    let method = |body: &str| -> &'static str {
+        Box::leak(
+            format!("namespace Demo;\n\nclass Base\n{{\n}}\n\nclass Report : Base\n{{\n    public int total {{ get; set; }} = 0;\n\n    public Any run()\n    {{\n{body}    }}\n}}\n")
+                .into_boxed_str(),
+        )
+    };
+
+    for (body, message) in [
+        ("        return THIS.total;\n", "Write the keyword `this` in lowercase."),
+        ("        return THIS;\n", "Write the keyword `this` in lowercase."),
+        ("        return This.total;\n", "Write the keyword `this` in lowercase."),
+        ("        return SUPER.toString();\n", "Write the keyword `super` in lowercase."),
+        ("        return new SELF();\n", "Write the keyword `Self` with a capital S and the rest in lowercase."),
+        ("        return Typeof(Report);\n", "Write the keyword `typeof` in lowercase."),
+        ("        return Nameof(total);\n", "Write the keyword `nameof` in lowercase."),
+        ("        Exit(1);\n        return 1;\n", "Write the keyword `exit` in lowercase."),
+    ] {
+        let code = method(body);
+        let errors: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", code), &[])
+            .into_iter()
+            .filter(|issue| issue.level == Level::Error)
+            .map(|issue| issue.message)
+            .collect();
+
+        assert_eq!(errors.first().map(String::as_str), Some(message), "{code}: {errors:?}");
+    }
+
+    let this = "namespace Demo;\n\nclass This\n{\n    public static int count() => 1;\n}\n";
+    assert_eq!(
+        errors(("src/Demo/Report.sharp", method("        return This.count();\n")), &[("src/Demo/This.sharp", this)]),
+        Vec::<String>::new()
     );
 }

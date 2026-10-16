@@ -13,6 +13,7 @@ use crate::cst::cst::MethodBody;
 use crate::cst::cst::MethodExpressionBody;
 use crate::cst::cst::Modifier;
 use crate::cst::cst::NamedConstructor;
+use crate::cst::cst::NullableHint;
 use crate::cst::cst::On;
 use crate::cst::cst::Operator;
 use crate::cst::sequence::Sequence;
@@ -190,6 +191,22 @@ where
         let on = self.parse_optional_on()?.map(|on| &*self.arena.alloc(on));
         let after_on = self.parse_optional_readonly_marker()?;
         let uses = self.parse_optional_uses()?.map(|uses| &*self.arena.alloc(uses));
+        // Spec section 29: a method takes on the effects of each function it is given, so `uses` names no function
+        // parameter, as the old `apply(Function<int()> f) uses f` did.
+        for name in uses.iter().flat_map(|uses| uses.names.iter()) {
+            if parameter_list.parameters.iter().any(|parameter| {
+                parameter.variable.name == name.value
+                    && matches!(
+                        parameter.hint,
+                        Some(Hint::Function(_) | Hint::Nullable(NullableHint { hint: Hint::Function(_), .. }))
+                    )
+            }) {
+                self.errors.push(ParseError::FunctionParameterInUsesInSharp(
+                    String::from_utf8_lossy(name.value).into(),
+                    name.span,
+                ));
+            }
+        }
         let last = self.parse_optional_readonly_marker()?;
         // Spec section 13: `readonly` is the last clause, so one written before `on` or `uses` names that place.
         let misplaced = [
@@ -235,7 +252,8 @@ where
         }
     }
 
-    /// Parses an `on` clause when one starts here: `on`, which stays a name everywhere else, and the events it lists.
+    /// Parses an `on` clause when one starts here: `on`, which stays a name everywhere else, and the events it lists,
+    /// each a name, which the analyzer refuses as a full name when it is dotted.
     fn parse_optional_on(&mut self) -> Result<Option<On<'arena>>, ParseError> {
         if !self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"on") {
             return Ok(None);
@@ -245,7 +263,7 @@ where
         let mut events = self.new_vec();
         let mut commas = self.new_vec();
         loop {
-            events.push(self.parse_local_identifier()?);
+            events.push(self.parse_dotted_identifier()?);
 
             if let Some(T![","]) = self.stream.peek_kind(0)? {
                 commas.push(self.stream.consume()?);

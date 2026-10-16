@@ -23,6 +23,25 @@ where
         self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"foreign"
     }
 
+    /// Whether C#'s `partial` starts here, before a type's keyword or its other modifiers, as in `partial class Order`
+    /// or `partial static class Texts`. PHP# has no partial types, so the parser names it, and everywhere else
+    /// `partial` is a name.
+    pub(crate) fn is_at_partial(&mut self) -> Result<bool, ParseError> {
+        if !self.dialect.is_sharp()
+            || !self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"partial")
+        {
+            return Ok(false);
+        }
+
+        Ok(self.stream.lookahead(1)?.is_some_and(|next| {
+            matches!(next.kind, T!["class" | "interface" | "enum"])
+                || next.kind.is_modifier()
+                || (next.kind == T![Identifier] && matches!(next.value, b"struct" | b"sealed" | b"event"))
+                || self.is_internal(next)
+                || self.is_foreign(next)
+        }))
+    }
+
     /// Whether the token `offset` ahead is spec section 5's `internal`.
     fn is_internal_token_at(&mut self, offset: usize) -> Result<bool, ParseError> {
         Ok(self.stream.lookahead(offset)?.is_some_and(|token| self.is_internal(token)))
@@ -73,6 +92,13 @@ where
                 self.errors.push(ParseError::NamedReachInSharp(reach));
 
                 Modifier::Internal(internal)
+            }
+            // A class lives in one file, so `partial` names the rule, and the declaration parses on without it.
+            Some(T![Identifier]) if self.is_at_partial()? => {
+                let partial = self.stream.consume()?.span_for(self.stream.file_id());
+                self.errors.push(ParseError::PartialTypeInSharp(partial));
+
+                return self.parse_optional_modifier();
             }
             // A word before `(`, `)`, `,` or `=` is a name, as a call or an untyped lambda parameter, which
             // `parse_parameter` reads the same way.

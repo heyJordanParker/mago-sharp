@@ -32,6 +32,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::variable::read_variable;
+use crate::resolver::class_name::report_keyword_in_another_case;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::namespace_member;
 use mago_bytes::BytesDisplay;
@@ -107,6 +108,27 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
                     .with_annotation(Annotation::primary(self.span()).with_message("Reads PHP's root constant.")),
                 );
                 artifacts.set_expression_type(self, constant_type(context, global, unqualified_name));
+            } else if context.dialect.is_sharp()
+                && let Some((namespace, constant)) = context.imported_names.iter().find_map(|(imported, name)| {
+                    let full_name = namespace_member(*imported, unqualified_name);
+
+                    Some((*name, context.codebase.get_constant(full_name.as_bytes())?))
+                })
+            {
+                // Spec section 23: an imported library's constant is read through its namespace, as `Pdf.DEFAULT_DPI`.
+                context.collector.report_with_code(
+                    IssueCode::NonExistentConstant,
+                    Issue::error(format!(
+                        "Read the library's constant through its namespace: write `{namespace}.{written}`."
+                    ))
+                    .with_annotation(
+                        Annotation::primary(self.span())
+                            .with_message("A bare name reads only this code's own constant."),
+                    ),
+                );
+                artifacts.set_expression_type(self, constant_type(context, constant, unqualified_name));
+            } else if report_keyword_in_another_case(context, unqualified_name, self.span()) {
+                artifacts.set_expression_type(self, get_mixed());
             } else if context.dialect.is_sharp() {
                 context.collector.report_with_code(
                     IssueCode::NonExistentConstant,

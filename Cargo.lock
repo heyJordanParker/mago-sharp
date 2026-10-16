@@ -1513,6 +1513,7 @@ dependencies = [
  "mago-phpdoc-syntax",
  "mago-prelude",
  "mago-reporting",
+ "mago-semantics",
  "mago-span",
  "mago-syntax",
  "mago-syntax-core",

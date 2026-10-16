@@ -254,6 +254,15 @@ pub(crate) fn imports_by_default(scope: &NamespaceScope, name: Word) -> bool {
         && name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(b"Sharp"))
 }
 
+/// Whether the full name `name` is `Sharp\Internal`, the namespace of the engine's functions that only the standard
+/// library imports (spec section 15), or a name under it, compared ignoring case.
+pub(crate) fn is_sharp_internal(name: &[u8]) -> bool {
+    let internal = b"Sharp\\Internal";
+
+    name.get(..internal.len()).is_some_and(|root| root.eq_ignore_ascii_case(internal))
+        && matches!(name.get(internal.len()), None | Some(b'\\'))
+}
+
 /// Returns the property `name`, which the codebase keys with its `$`, as the analyzed file names it in prose: `total`
 /// in a `.sharp` file, and `$total` in PHP.
 #[inline]
@@ -362,9 +371,9 @@ where
     context.codebase.get_function(name.as_bytes()).map_or(name, |m| m.original_name)
 }
 
-/// Returns the PHP# collection type, as in `Map<string, int>`, that `object` stands for when it is `Sharp\ListMethods`,
-/// `Sharp\MapMethods`, `Sharp\SetMethods` or `Sharp\IterableMethods`. The analyzer checks a method call on a `List`,
-/// `Map`, `Set` or `Iterable` against those classes, and a message names the type the code wrote instead.
+/// Returns the PHP# collection type, as in `Map<string, int>`, that `object` stands for when it is one of the classes
+/// [`sharp_collection_name`] names. The analyzer checks a method call on a `List`, `Map`, `Set` or `Iterable` against
+/// those classes, and a message names the type the code wrote instead.
 #[must_use]
 pub(crate) fn display_sharp_collection<A>(context: &Context<'_, '_, A>, object: &TObject) -> Option<String>
 where
@@ -804,19 +813,19 @@ pub(crate) fn sharp_code_class_name(
     sharp_import_alias(codebase, imported_names, scope, name).unwrap_or_else(|| short_name(name))
 }
 
-/// Returns `List`, `Map`, `Set` or `Iterable` when `object` is `Sharp\ListMethods`, `Sharp\MapMethods`,
-/// `Sharp\SetMethods` or `Sharp\IterableMethods`.
+/// Returns `List`, `Map`, `Set` or `Iterable` when `object` is `Sharp\Internal\ListMethods`,
+/// `Sharp\Internal\MapMethods`, `Sharp\Internal\SetMethods` or `Sharp\Internal\IterableMethods`.
 #[must_use]
 pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
     let name = object.get_name()?;
 
-    if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\ListMethods") {
+    if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\ListMethods") {
         Some("List")
-    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\MapMethods") {
+    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\MapMethods") {
         Some("Map")
-    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\SetMethods") {
+    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\SetMethods") {
         Some("Set")
-    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\IterableMethods") {
+    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\IterableMethods") {
         Some("Iterable")
     } else {
         None

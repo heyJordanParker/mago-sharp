@@ -101,6 +101,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Binary<'arena> {
                     let class_name = context.resolved_names.get(identifier);
                     if !context.codebase.class_like_exists(class_name) {
                         report_non_existent_class_like(context, identifier.span(), word(class_name));
+
+                        // A PHP# test of no class narrows to no type, so nothing that reads the value reports again.
+                        if context.dialect.is_sharp() {
+                            artifacts.record_tested_type(self.rhs, TUnion::from_atomic(TAtomic::Error));
+                            artifacts.set_expression_type(self, get_bool());
+
+                            return Ok(());
+                        }
                     }
                 }
 

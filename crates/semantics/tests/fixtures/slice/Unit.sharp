@@ -1,0 +1,9 @@
+namespace App.Tenant;
+
+final class Unit : Square
+{
+    public override int sides()
+    {
+        return super.sides();
+    }
+}

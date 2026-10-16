@@ -1,0 +1,8 @@
+namespace App.Tenant;
+
+abstract class Shape
+{
+    public abstract float area();
+
+    protected abstract string name(int digits);
+}

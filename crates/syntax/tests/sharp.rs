@@ -1255,6 +1255,30 @@ fn effects_after_a_function_type_are_a_parse_error_that_names_the_written_form()
     }
 }
 
+/// Spec section 23: an import never carries `uses`, because a library's effect lives in its one `extern`. The clause
+/// is one error that says so, and the parse goes on after it, with or without `as`.
+#[test]
+fn effects_on_an_import_are_a_parse_error_that_names_extern() {
+    for code in [
+        "import Vendor.Pdf uses Files;\n\nclass Report\n{\n}\n",
+        "import Vendor.Pdf as Pdf uses Files, Http;\n\nclass Report\n{\n}\n",
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{code}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            Issue::from(error).message,
+            "An import never carries `uses`: declare the library's effect once, with `extern`.",
+            "{code}"
+        );
+        assert!(source(code, error).starts_with("uses Files"), "{code}: {}", source(code, error));
+        assert!(program.statements.iter().any(|statement| matches!(statement, Statement::Class(_))), "{code}");
+    }
+}
+
 /// `uses` names effects only right after a function type's parameter types, so it stays a name everywhere else, even
 /// right after a function type.
 #[test]
@@ -2620,6 +2644,99 @@ fn foreach_is_a_php_syntax_error() {
     assert_eq!(messages, ["`foreach` is PHP syntax: PHP# loops over a collection with `for … of`"]);
 }
 
+/// Spec section 27: a `.sharp` file starts in code, so an opening tag is one error, and the file parses on.
+#[test]
+fn an_opening_tag_is_a_php_syntax_error() {
+    const CODE: &str = "<?php\nnamespace App;\n\nclass Report\n{\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/App/Report.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(
+        errors,
+        [("`<?php` is PHP syntax: a `.sharp` file has no opening tag, so delete it".to_owned(), "<?php")]
+    );
+    assert!(matches!(program.statements.get(1), Some(Statement::Namespace(_))), "{:#?}", program.statements);
+}
+
+/// Each other PHP tag is one error that names it, and the file parses on: a short opening tag, an echo tag and a
+/// closing tag, which a `.sharp` file lexes as `?` and `>` because they close a nullable type argument there.
+#[test]
+fn every_php_tag_is_a_php_syntax_error() {
+    for (code, message, tag) in [
+        (
+            "<?\nnamespace App;\n\nclass Report\n{\n}\n",
+            "`<?` is PHP syntax: a `.sharp` file has no opening tag, so delete it",
+            "<?",
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n}\n<?= 1;\n",
+            "`<?=` is PHP syntax: a `.sharp` file has no tags, and writes output with `global.printf`",
+            "<?=",
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n}\n?>\n",
+            "`?>` is PHP syntax: a `.sharp` file has no closing tag, so delete it",
+            "?>",
+        ),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/App/Report.sharp", code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        assert_eq!(errors, [(message.to_owned(), tag)], "{code}");
+    }
+
+    // `<?` before a type is PHP's nullable type, and `?>` ends a nullable type argument.
+    let arena = LocalArena::new();
+    let nullable = "namespace App;\n\nclass Report\n{\n    List<?int> a = [];\n    List<int?> b = [];\n}\n";
+    let program = parse(&arena, "src/App/Report.sharp", nullable);
+    let errors: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
+    assert_eq!(errors, ["`?` before a type is PHP syntax: PHP# writes it after the type, as in `int?`"]);
+}
+
+/// Spec section 27: a class lives in one file, so C#'s `partial` before a type is one error, and the type parses on.
+#[test]
+fn a_partial_type_is_an_error() {
+    for code in [
+        "namespace App;\n\npublic partial class Report { }\n",
+        "namespace App;\n\npartial class Report { }\n",
+        "namespace App;\n\n[Searchable]\npartial class Report { }\n",
+        "namespace App;\n\npartial static class Report { }\n",
+        "namespace App;\n\npublic partial struct Report { }\n",
+        "namespace App;\n\npartial interface Report { }\n",
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/App/Report.sharp", code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        assert_eq!(
+            errors,
+            [("PHP# has no partial classes: a class lives in one file.".to_owned(), "partial")],
+            "{code}"
+        );
+    }
+
+    // Everywhere else `partial` is a name.
+    let arena = LocalArena::new();
+    let local = "namespace App;\n\nclass Report\n{\n    void run()\n    {\n        const partial = 1;\n    }\n}\n";
+    assert!(parse(&arena, "src/App/Report.sharp", local).errors.is_empty());
+}
+
+/// Spec section 27: an editor may save a `.sharp` file with a UTF-8 byte order mark, which is no code.
+#[test]
+fn a_byte_order_mark_is_skipped() {
+    const CODE: &str = "\u{FEFF}namespace App;\n\nclass Report\n{\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/App/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    assert!(matches!(program.statements.first(), Some(Statement::Namespace(_))), "{:#?}", program.statements);
+}
+
 #[test]
 fn a_php_for_loop_has_no_declaration() {
     let arena = LocalArena::new();
@@ -3051,8 +3168,9 @@ fn a_php_keyword_reads_as_its_construct_only_where_the_construct_follows() {
 /// PHP#'s keywords are lowercase. A PHP# keyword written in another case reads as the keyword, with one error each,
 /// wherever its construct follows and the name could not stand, as rustc's `eat_keyword_case` reads `Fn`: at a
 /// statement's or an expression's head, after a `try` or an `if` statement's body, where only the keyword can stand,
-/// and among a declaration's modifiers. A PHP keyword PHP# doesn't use reads as its construct, whose own error names
-/// the PHP# form, and a word that can be a name stays one.
+/// among a declaration's modifiers, before a file's type, as `is` or `as` after a value, and as `case` in an enum. A
+/// PHP keyword PHP# doesn't use reads as its construct, whose own error names the PHP# form, and a word that can be a
+/// name stays one, as `Case` does in a class.
 #[test]
 fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() {
     let method = |body: &str| -> &'static str {
@@ -3090,6 +3208,15 @@ fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() 
         ("public Interface Drawable\n{\n}\n", &["interface"]),
         ("Import Lib.Calc;\n\nclass Report\n{\n}\n", &["import"]),
         ("Namespace App;\n\nclass Report\n{\n}\n", &["namespace"]),
+        (method("        return value IS int;\n"), &["is"]),
+        (method("        return value Is int n && n > 0;\n"), &["is"]),
+        (method("        return value AS int;\n"), &["as"]),
+        (method("        return value As Report ?? value;\n"), &["as"]),
+        ("public enum Suit\n{\n    Case Hearts;\n    CASE Spades = 2;\n}\n", &["case", "case"]),
+        ("public enum Result\n{\n    Case Ok(int value);\n}\n", &["case"]),
+        ("Public class Report\n{\n}\n", &["public"]),
+        ("Public Static class Report\n{\n}\n", &["public", "static"]),
+        ("public Struct Point\n{\n    public Point(public int x { get; }) { }\n}\n", &["struct"]),
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/Report.sharp", code);
@@ -3123,6 +3250,7 @@ fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() 
         ("class Report\n{\n    private Static items;\n\n    public Static(int x) { }\n}\n", "Static", 2),
         ("class Report\n{\n    public Struct shape { get; set; }\n}\n", "Struct", 1),
         ("class Report\n{\n    public Class kind { get; set; }\n}\n", "Class", 1),
+        ("class Report\n{\n    Case kind;\n}\n", "Case", 1),
         ("class Lazy\n{\n    public static Lazy operator +(Lazy a, Lazy b) { return a; }\n}\n", "Lazy", 4),
     ] {
         let arena = LocalArena::new();
@@ -6105,6 +6233,25 @@ fn readonly_before_another_clause_is_an_error_that_names_the_last_place() {
         "{:#?}",
         class_members(program)
     );
+}
+
+/// Spec section 29: a method takes on the effects of each function it is given, with nothing written, so a function
+/// parameter in `uses`, nullable or not, with or without a body, is an error at its name that says to delete it. An
+/// effect, and a parameter that is no function, are other names, which semantics checks.
+#[test]
+fn a_function_parameter_in_uses_is_an_error_that_says_to_delete_it() {
+    const CODE: &str = "class Pricing\n{\n    public int apply(Function<int()> f) uses f => f();\n    public int maybe(Function<int()>? g, int n) uses Http, g, n;\n    public int plain(int n) uses n, Http;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Pricing.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    let message = |name: &str| {
+        format!(
+            "`{name}` is a function parameter, and a method takes on the effects of each function it is given, so `uses` names no parameter: delete it."
+        )
+    };
+    assert_eq!(errors, [(message("f"), "f"), (message("g"), "g")]);
 }
 
 /// Before `class` or another modifier, `readonly` stays a modifier, and the checker refuses it there. In plain PHP it

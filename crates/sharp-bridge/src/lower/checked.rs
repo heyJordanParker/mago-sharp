@@ -154,7 +154,8 @@ pub enum Refusal<'program> {
 ///
 /// # Errors
 ///
-/// Returns the parser's errors, or else the error-level issues.
+/// Returns the parser's errors, or else the error-level issues. A program whose only parse errors are keywords in
+/// another case returns its error-level issues, which hold those parse errors.
 #[allow(clippy::too_many_arguments)]
 pub fn check<'program>(
     file: &'program File,
@@ -166,11 +167,14 @@ pub fn check<'program>(
     inline_forms: &'program InlineForms,
     issues: &[Issue],
 ) -> Result<CheckedProgram<'program>, Refusal<'program>> {
-    if !program.errors.is_empty() {
+    let errors: Vec<Issue> = issues.iter().filter(|issue| issue.level == Level::Error).cloned().collect();
+    // A keyword in another case reads as the keyword, so the checks ran on the tree of the lowercase keyword and their
+    // errors, the parse error's included, all stand, spec section 2.
+    let whole = program.errors.iter().all(|error| matches!(error, ParseError::MiscasedKeywordInSharp(..)));
+    if !program.errors.is_empty() && (!whole || errors.is_empty()) {
         return Err(Refusal::Parse(program.errors));
     }
 
-    let errors: Vec<Issue> = issues.iter().filter(|issue| issue.level == Level::Error).cloned().collect();
     if !errors.is_empty() {
         return Err(Refusal::Compile(errors));
     }
@@ -223,5 +227,42 @@ mod tests {
         assert!(
             matches!(&refusal, Err(Refusal::Compile(errors)) if errors.len() == 1 && errors[0].message == "an error")
         );
+    }
+
+    /// Spec section 2: a keyword in another case reads as the keyword, so its file is refused with every error the
+    /// checks reported, its own included, and with the parse error alone when the checks reported none.
+    #[test]
+    fn a_program_whose_only_parse_errors_are_miscased_keywords_is_refused_with_every_error() {
+        let file = file("class Report\n{\n    public void run()\n    {\n        Return;\n    }\n}\n");
+        let arena = LocalArena::new();
+        let program = parse_file_with_dialect(&arena, &file, Dialect::Sharp, ParserSettings::default());
+        let (artifacts, codebase, forms) = (AnalysisArtifacts::new(), CodebaseMetadata::new(), InlineForms::default());
+        let effects = Effects::solve(&codebase, &[]);
+        let issues =
+            [Issue::error("Write the keyword `return` in lowercase."), Issue::error("Write `true` in lowercase.")];
+
+        let reported = check(
+            &file,
+            program,
+            NameResolver::new(&arena).resolve(program),
+            &artifacts,
+            &codebase,
+            &effects,
+            &forms,
+            &issues,
+        );
+        let unreported = check(
+            &file,
+            program,
+            NameResolver::new(&arena).resolve(program),
+            &artifacts,
+            &codebase,
+            &effects,
+            &forms,
+            &[],
+        );
+
+        assert!(matches!(&reported, Err(Refusal::Compile(errors)) if errors.len() == 2));
+        assert!(matches!(unreported, Err(Refusal::Parse(errors)) if errors.len() == 1));
     }
 }

@@ -1,0 +1,5 @@
+namespace App.Tenant;
+
+final class Entry : Record, Sized
+{
+}
