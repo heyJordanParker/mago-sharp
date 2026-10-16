@@ -931,8 +931,9 @@ where
     }
 
     /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the
-    /// effects its `extern` declares. The class that declares the constructor decides, whatever class `new` names, and
-    /// the class `new` names decides when no class declares one. A named constructor is the class's own, spec section
+    /// effects of the `extern` of the class `new` names, which an error names as `new` does, or its nearest plain PHP
+    /// parent when PHP# declares it. The class that declares the constructor decides between the two, and the class
+    /// `new` names decides when no class declares one. A named constructor is the class's own, spec section
     /// 9.1, and its body runs on the object its `: this(…)` creates.
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
@@ -973,7 +974,13 @@ where
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
         } else if !is_prelude_stub(class.name) {
             let declaration = extern_of(codebase, class.name, constructor);
-            self.plain_php(declaration, span, (declaring.original_name, empty_word()));
+            // Only plain PHP takes an `extern`, so a PHP# class's error names its nearest plain PHP parent.
+            let named = std::iter::successors(Some(class), |class| {
+                class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+            })
+            .find(|class| !class.flags.is_sharp())
+            .unwrap_or(declaring);
+            self.plain_php(declaration, span, (named.original_name, empty_word()));
         }
     }
 

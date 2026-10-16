@@ -16820,6 +16820,35 @@ fn an_object_a_declared_call_returns_carries_its_effect() {
     );
 }
 
+/// The standard library's declarations of PHP's built-in functions and exception classes, as `sharp/bin/builtins`
+/// writes them.
+const BUILTINS: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Builtins.sharp",
+    include_str!("../../../../composer/library/Sharp/Builtins.sharp"),
+);
+
+/// Spec section 29: every PHP built-in exception class comes declared pure, so pure code may create and throw one, in
+/// the root namespace or another. Without the declaration the refusal names the class `new` names, not the class that
+/// declares its constructor.
+#[test]
+fn creating_a_built_in_exception_is_pure() {
+    let gauge = (
+        "app/Shop/Gauge.sharp",
+        "namespace App.Shop;\n\nimport JsonException;\nimport Random.RandomException;\nimport ValueError;\n\npublic class Gauge\n{\n    public int first(List<int> values) => values.count() > 0 ? values[0] : throw new ValueError(\"empty\");\n\n    public int seeded(int seed) => seed > 0 ? seed : throw new RandomException(\"no seed\");\n\n    public int parsed(string text) => text != \"\" ? 1 : throw new JsonException(\"blank\");\n\n    law first(Gauge gauge) => gauge.first([1]) == 1;\n\n    law seeded(Gauge gauge) => gauge.seeded(1) == 1;\n\n    law parsed(Gauge gauge) => gauge.parsed(\"1\") == 1;\n}\n",
+    );
+
+    assert_eq!(issues(gauge, &[BUILTINS]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[gauge, BUILTINS]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[gauge]),
+        [
+            "app/Shop/Gauge.sharp:9:82 impure-law: Law `first` calls `ValueError`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern ValueError;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Gauge.sharp:11:60 impure-law: Law `seeded` calls `RandomException`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern RandomException;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Gauge.sharp:13:62 impure-law: Law `parsed` calls `JsonException`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern JsonException;` when it has no effect, or name its effects after `uses`.",
+        ]
+    );
+}
+
 /// A call of a method without a body has the effects its `uses` lists, which every implementation is held to, so a
 /// law reading a getter that calls it through an interface is refused naming them.
 #[test]
