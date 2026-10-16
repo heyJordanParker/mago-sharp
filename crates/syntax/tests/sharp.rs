@@ -1255,6 +1255,30 @@ fn effects_after_a_function_type_are_a_parse_error_that_names_the_written_form()
     }
 }
 
+/// Spec section 23: an import never carries `uses`, because a library's effect lives in its one `extern`. The clause
+/// is one error that says so, and the parse goes on after it, with or without `as`.
+#[test]
+fn effects_on_an_import_are_a_parse_error_that_names_extern() {
+    for code in [
+        "import Vendor.Pdf uses Files;\n\nclass Report\n{\n}\n",
+        "import Vendor.Pdf as Pdf uses Files, Http;\n\nclass Report\n{\n}\n",
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{code}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            Issue::from(error).message,
+            "An import never carries `uses`: declare the library's effect once, with `extern`.",
+            "{code}"
+        );
+        assert!(source(code, error).starts_with("uses Files"), "{code}: {}", source(code, error));
+        assert!(program.statements.iter().any(|statement| matches!(statement, Statement::Class(_))), "{code}");
+    }
+}
+
 /// `uses` names effects only right after a function type's parameter types, so it stays a name everywhere else, even
 /// right after a function type.
 #[test]
@@ -3144,8 +3168,9 @@ fn a_php_keyword_reads_as_its_construct_only_where_the_construct_follows() {
 /// PHP#'s keywords are lowercase. A PHP# keyword written in another case reads as the keyword, with one error each,
 /// wherever its construct follows and the name could not stand, as rustc's `eat_keyword_case` reads `Fn`: at a
 /// statement's or an expression's head, after a `try` or an `if` statement's body, where only the keyword can stand,
-/// and among a declaration's modifiers. A PHP keyword PHP# doesn't use reads as its construct, whose own error names
-/// the PHP# form, and a word that can be a name stays one.
+/// among a declaration's modifiers, before a file's type, as `is` or `as` after a value, and as `case` in an enum. A
+/// PHP keyword PHP# doesn't use reads as its construct, whose own error names the PHP# form, and a word that can be a
+/// name stays one, as `Case` does in a class.
 #[test]
 fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() {
     let method = |body: &str| -> &'static str {
@@ -3183,6 +3208,15 @@ fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() 
         ("public Interface Drawable\n{\n}\n", &["interface"]),
         ("Import Lib.Calc;\n\nclass Report\n{\n}\n", &["import"]),
         ("Namespace App;\n\nclass Report\n{\n}\n", &["namespace"]),
+        (method("        return value IS int;\n"), &["is"]),
+        (method("        return value Is int n && n > 0;\n"), &["is"]),
+        (method("        return value AS int;\n"), &["as"]),
+        (method("        return value As Report ?? value;\n"), &["as"]),
+        ("public enum Suit\n{\n    Case Hearts;\n    CASE Spades = 2;\n}\n", &["case", "case"]),
+        ("public enum Result\n{\n    Case Ok(int value);\n}\n", &["case"]),
+        ("Public class Report\n{\n}\n", &["public"]),
+        ("Public Static class Report\n{\n}\n", &["public", "static"]),
+        ("public Struct Point\n{\n    public Point(public int x { get; }) { }\n}\n", &["struct"]),
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/Report.sharp", code);
@@ -3216,6 +3250,7 @@ fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() 
         ("class Report\n{\n    private Static items;\n\n    public Static(int x) { }\n}\n", "Static", 2),
         ("class Report\n{\n    public Struct shape { get; set; }\n}\n", "Struct", 1),
         ("class Report\n{\n    public Class kind { get; set; }\n}\n", "Class", 1),
+        ("class Report\n{\n    Case kind;\n}\n", "Case", 1),
         ("class Lazy\n{\n    public static Lazy operator +(Lazy a, Lazy b) { return a; }\n}\n", "Lazy", 4),
     ] {
         let arena = LocalArena::new();

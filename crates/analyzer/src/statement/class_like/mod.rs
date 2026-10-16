@@ -84,6 +84,7 @@ use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_statics;
 use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
+use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::extension::class_member;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
@@ -226,6 +227,49 @@ fn report_class_like_named_as_a_namespace<A>(
         .with_annotation(
             Annotation::secondary(inside.name_span.unwrap_or(inside.span))
                 .with_message(format!("`{inside_name}` is in the namespace `{full_name}`.")),
+        ),
+    );
+}
+
+/// Refuses a PHP# class-like whose namespace, or a namespace above it, is the full name of a plain PHP class-like:
+/// spec section 23 counts plain PHP classes the checker sees. The plain PHP file reports the clash as well, but
+/// `mago compile` prints only `.sharp` files' errors, so the PHP# file reports it too.
+fn report_namespace_named_as_a_plain_php_class_like<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    name_span: Span,
+) where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+
+    let name = class_like_metadata.original_name.as_bytes();
+    let Some(plain) = name
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\\')
+        .filter_map(|(end, _)| context.codebase.get_class_like(&name[..end]))
+        .find(|namespace| !namespace.flags.is_sharp())
+    else {
+        return;
+    };
+
+    let namespace = plain.original_name.to_string().replace('\\', ".");
+    let kind = plain.kind.as_str();
+    context.collector.report_with_code(
+        IssueCode::NameAlreadyInUse,
+        Issue::error(format!(
+            "`{namespace}` is both a plain PHP {kind} and a namespace: rename the {kind} or the folder."
+        ))
+        .with_annotation(Annotation::primary(name_span).with_message(format!(
+            "`{}` is in the namespace `{namespace}`.",
+            class_like_metadata.original_name.to_string().replace('\\', ".")
+        )))
+        .with_annotation(
+            Annotation::secondary(plain.name_span.unwrap_or(plain.span))
+                .with_message(format!("The plain PHP {kind} is declared here.")),
         ),
     );
 }
@@ -1166,6 +1210,11 @@ where
 
     context.prepare_class_initializers(class_like_metadata)?;
     report_class_like_named_as_a_namespace(context, class_like_metadata, name_span.unwrap_or(declaration_span));
+    report_namespace_named_as_a_plain_php_class_like(
+        context,
+        class_like_metadata,
+        name_span.unwrap_or(declaration_span),
+    );
 
     let name = display_class_like_name(context, class_like_metadata.original_name);
 
@@ -2079,7 +2128,7 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                 implemented_metadata,
                 checked_signatures,
             );
-        } else {
+        } else if !report_unknown_sharp_class(context, implemented_type_str, implemented_type.span()) {
             let implemented_name = BytesDisplay(implemented_type.value());
             let (note, help) = if is_struct {
                 ("A struct's header lists the interfaces it implements.", "Check the interface's name and its import.")

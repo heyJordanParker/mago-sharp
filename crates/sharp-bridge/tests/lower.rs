@@ -343,10 +343,15 @@ fn method_with(signature: &str, body: &str) -> String {
     method_in("Report", signature, body)
 }
 
-/// A file declaring a method with `signature` and `body` in the class `header`. Its body starts on line 9.
+/// A file declaring a method with `signature` and `body` in the class `header`. Its body starts on line 9. It imports
+/// `Lib.Calc` when it names `Calc`, and the test declares the class in its library. Spec section 23 refuses an import
+/// that names nothing, so a file that names no `Calc` holds a blank line in its place.
 fn method_in(header: &str, signature: &str, body: &str) -> String {
+    let import =
+        if [header, signature, body].iter().any(|part| part.contains("Calc")) { "import Lib.Calc;" } else { "" };
+
     format!(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass {header}\n{{\n    public {signature}\n    {{\n{body}    }}\n}}\n"
+        "namespace App.Tenant;\n\n{import}\n\nclass {header}\n{{\n    public {signature}\n    {{\n{body}    }}\n}}\n"
     )
 }
 
@@ -777,7 +782,10 @@ fn every_line_is_the_line_the_zend_scanner_counts() {
 /// The `use` is not lowered: every class name in the tree is fully qualified.
 #[test]
 fn a_file_declares_strict_types_then_its_namespace_and_classes() {
-    let lowered = Lowered::new("namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n}\n");
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n}\n",
+        &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")],
+    );
 
     assert_eq!(
         lowered.tree(),
@@ -8080,9 +8088,9 @@ const ORDER: (&str, &str) = (
 /// return \Sharp\Sequence::from($orders)->filter(fn ($o) => $o->paid)->map(fn ($o) => $o->number)->take(100)->toList();
 /// ```
 ///
-/// A call of a lazy operation of `Iterable<T>`, spec section 12, runs the method `Sharp\IterableMethods` declares on
-/// the engine's `Sharp\Sequence`. A chain reads its receiver through one `\Sharp\Sequence::from`, and each later
-/// operation calls the `Sequence` the one before it gave.
+/// A call of a lazy operation of `Iterable<T>`, spec section 12, runs the method `Sharp\Internal\IterableMethods`
+/// declares on the engine's `Sharp\Sequence`. A chain reads its receiver through one `\Sharp\Sequence::from`, and each
+/// later operation calls the `Sequence` the one before it gave.
 #[test]
 fn a_lazy_chain_is_one_sequence_from_its_receiver_and_each_operation_on_it() {
     assert_eq!(
@@ -25395,12 +25403,7 @@ const SIZE: &str = "namespace App;\n\npublic struct Size\n{\n    public int widt
 fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
     assert_eq!(
         Lowered::with(
-            &method_in(
-                "Report",
-                "Size copies(Size size, int depth)",
-                "        Size made = new Size { width: 2, depth: 1 };\n        return size with { depth };\n"
-            )
-            .replace("import Lib.Calc;", "import App.Size;"),
+            "namespace App.Tenant;\n\nimport App.Size;\n\nclass Report\n{\n    public Size copies(Size size, int depth)\n    {\n        Size made = new Size { width: 2, depth: 1 };\n        return size with { depth };\n    }\n}\n",
             &[("src/App/Size.sharp", SIZE)]
         )
         .declared("copies"),

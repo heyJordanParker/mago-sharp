@@ -45,6 +45,7 @@ use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPostfix;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::error::ParseError;
 use mago_syntax::walker::Walker;
 
 use crate::internal::context::Context;
@@ -438,5 +439,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
 /// the file, so it is the one error to fix first.
 #[inline]
 fn checks_slice(context: &Context<'_, '_, '_>) -> bool {
-    context.program.dialect.is_sharp() && context.program.errors.is_empty()
+    // A keyword in another case reads as the keyword, so the tree is the tree of the lowercase keyword, spec section 2.
+    context.program.dialect.is_sharp()
+        && context.program.errors.iter().all(|error| matches!(error, ParseError::MiscasedKeywordInSharp(..)))
 }

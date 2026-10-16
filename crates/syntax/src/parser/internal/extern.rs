@@ -1,9 +1,7 @@
 use mago_allocator::prelude::*;
 
 use crate::T;
-use crate::cst::cst::DottedIdentifier;
 use crate::cst::cst::Extern;
-use crate::cst::cst::Identifier;
 use crate::cst::cst::Uses;
 use crate::cst::sequence::TokenSeparatedSequence;
 use crate::error::ParseError;
@@ -28,32 +26,12 @@ where
         Ok(Extern {
             r#extern,
             event,
-            target: self.parse_extern_target()?,
+            // The target is a bare name or `Class.member`. A longer one is a full name, which the analyzer refuses with
+            // the import to add, spec section 23.
+            target: self.parse_dotted_identifier()?,
             uses: self.parse_optional_uses()?,
             terminator: self.parse_terminator()?,
         })
-    }
-
-    /// A `.` joins the class and its member only when it touches both, as in a dotted name.
-    fn parse_extern_target(&mut self) -> Result<Identifier<'arena>, ParseError> {
-        let class = self.parse_local_identifier()?;
-
-        let (Some(dot), Some(member)) = (self.stream.lookahead(0)?, self.stream.lookahead(1)?) else {
-            return Ok(Identifier::Local(class));
-        };
-        if dot.kind != T!["."]
-            || !member.kind.is_identifier_maybe_reserved()
-            || dot.start != class.span.end
-            || member.start.offset != dot.start.offset + 1
-        {
-            return Ok(Identifier::Local(class));
-        }
-
-        self.stream.consume()?;
-        let member = self.parse_local_identifier()?;
-        let value = [class.value, b".", member.value].concat();
-
-        Ok(Identifier::Dotted(DottedIdentifier { span: class.span.join(member.span), value: self.bytes(&value) }))
     }
 
     /// Parses a `uses` clause when one starts here: `uses`, which stays a name everywhere else, and its effects.

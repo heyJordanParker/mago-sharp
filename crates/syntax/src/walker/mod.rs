@@ -1459,7 +1459,7 @@ generate_ast_walker! {
     'arena On as on => {
         walker.walk_keyword(&on.on, context);
         for event in &on.events {
-            walker.walk_local_identifier(event, context);
+            walker.walk_identifier(event, context);
         }
     }
 

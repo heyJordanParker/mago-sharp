@@ -55,6 +55,7 @@ use crate::expression::instantiation::bare_generic_class;
 use crate::resolver::class_name::class_value_classes;
 use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
+use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::property::DeclaredPropertyKind;
@@ -1479,27 +1480,33 @@ where
 }
 
 /// The class whose methods a PHP# collection has, as spec section 12 writes them: a `List<T>` is called as
-/// `Sharp\ListMethods<T>`, a `Map<K, V>` as `Sharp\MapMethods<K, V>` and a `Set<T>` as `Sharp\SetMethods<T>`, so each
-/// method is typed by the elements. A PHP# element type is never narrower than `int` or `string`, so a literal the
-/// analyzer knows widens to it.
+/// `Sharp\Internal\ListMethods<T>`, a `Map<K, V>` as `Sharp\Internal\MapMethods<K, V>` and a `Set<T>` as
+/// `Sharp\Internal\SetMethods<T>`, so each method is typed by the elements. A PHP# element type is never narrower than
+/// `int` or `string`, so a literal the analyzer knows widens to it.
 fn get_collection_methods(array: &TArray, codebase: &CodebaseMetadata) -> TObject {
     let (mut key, mut value) = get_array_parameters(array, codebase);
     key.widen_scalars();
     value.widen_scalars();
     TObject::Named(match array {
-        TArray::List(_) => TNamedObject::new_with_type_parameters(word("Sharp\\ListMethods"), Some(vec![value])),
-        TArray::Keyed(_) => TNamedObject::new_with_type_parameters(word("Sharp\\MapMethods"), Some(vec![key, value])),
-        TArray::Set(_) => TNamedObject::new_with_type_parameters(word("Sharp\\SetMethods"), Some(vec![value])),
+        TArray::List(_) => {
+            TNamedObject::new_with_type_parameters(word("Sharp\\Internal\\ListMethods"), Some(vec![value]))
+        }
+        TArray::Keyed(_) => {
+            TNamedObject::new_with_type_parameters(word("Sharp\\Internal\\MapMethods"), Some(vec![key, value]))
+        }
+        TArray::Set(_) => {
+            TNamedObject::new_with_type_parameters(word("Sharp\\Internal\\SetMethods"), Some(vec![value]))
+        }
     })
 }
 
 /// The class whose lazy operations a PHP# `Iterable<T>` has, spec section 12: it is called as
-/// `Sharp\IterableMethods<T>`, typed by its elements as a `List<T>` is.
+/// `Sharp\Internal\IterableMethods<T>`, typed by its elements as a `List<T>` is.
 fn get_iterable_methods(iterable: &TIterable) -> TObject {
     let mut value = iterable.get_value_type().clone();
     value.widen_scalars();
 
-    TObject::Named(TNamedObject::new_with_type_parameters(word("Sharp\\IterableMethods"), Some(vec![value])))
+    TObject::Named(TNamedObject::new_with_type_parameters(word("Sharp\\Internal\\IterableMethods"), Some(vec![value])))
 }
 
 /// Reports a method called with `->`, or `.` in PHP#, on `object`, whose type `object_type` holds `null`, unless the
@@ -1607,6 +1614,13 @@ pub(crate) fn report_non_existent_method<A>(
         return;
     }
 
+    // A call on a name that names no class, as `SUPER.toString()` or `Math.floor(x)`, is the class's error.
+    if !context.codebase.class_like_exists(classname.as_bytes())
+        && report_unknown_sharp_class(context, classname.as_bytes(), obj_span)
+    {
+        return;
+    }
+
     let method_name = display_method_name(context, classname, method_name);
     let classname = display_class_like_name(context, classname);
     let issue = if context.dialect.is_sharp() {
@@ -1631,8 +1645,8 @@ pub(crate) fn report_non_existent_method<A>(
 }
 
 /// Reports a method a PHP# `List`, `Map`, `Set` or `Iterable` does not have, naming the collection type the code wrote
-/// and the methods `classname`, its `Sharp\ListMethods`, `Sharp\MapMethods`, `Sharp\SetMethods` or
-/// `Sharp\IterableMethods`, gives it.
+/// and the methods `classname`, its `Sharp\Internal\ListMethods`, `Sharp\Internal\MapMethods`,
+/// `Sharp\Internal\SetMethods` or `Sharp\Internal\IterableMethods`, gives it.
 fn report_non_existent_collection_method<A>(
     context: &mut Context<'_, '_, A>,
     obj_span: Span,

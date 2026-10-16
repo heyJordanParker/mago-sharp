@@ -1,5 +1,6 @@
 use mago_allocator::prelude::*;
 use mago_database::file::HasFileId;
+use mago_span::HasSpan;
 
 use crate::T;
 use crate::cst::cst::MaybeTypedUseItem;
@@ -34,6 +35,11 @@ where
         let import = self.expect_any_keyword()?;
         let start = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?.start;
         let item = UseItem { name: self.parse_dotted_identifier()?, alias: self.parse_optional_use_item_alias()? };
+        // A library's effect lives in its one `extern`, spec section 23, so `uses` on an import is one error and the
+        // parse goes on after it.
+        if let Some(misplaced) = self.parse_optional_uses()? {
+            self.errors.push(ParseError::UsesOnImportInSharp(misplaced.span()));
+        }
 
         Ok(Use {
             r#use: import,

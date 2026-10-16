@@ -128,6 +128,10 @@ where
             return Ok(false);
         }
 
+        if self.stream.peek_kind(1)? == Some(T!["."]) {
+            return self.is_at_dotted_typed_local();
+        }
+
         let name = match self.stream.lookahead(1)? {
             Some(question_mark)
                 if question_mark.kind == T!["?"]
@@ -145,6 +149,35 @@ where
             }
             _ => Ok(false),
         }
+    }
+
+    /// Returns `true` when names joined by `.`, an optional `?` written right after them, a local's name and `=`
+    /// follow: a case type, as in `PaymentResult.Paid paid = …;`, or a full name the analyzer refuses, spec section 23.
+    /// It reads past the token buffer, because the name can be longer than the buffer holds.
+    fn is_at_dotted_typed_local(&self) -> Result<bool, ParseError> {
+        let mut tokens = self.stream.peek_tokens();
+        let Some(mut last) = tokens.next().transpose()? else {
+            return Ok(false);
+        };
+        let mut next = tokens.next().transpose()?;
+        while let Some(dot) = next
+            && dot.kind == T!["."]
+        {
+            match tokens.next().transpose()? {
+                Some(part) if part.kind.is_identifier_maybe_reserved() => last = part,
+                _ => return Ok(false),
+            }
+            next = tokens.next().transpose()?;
+        }
+        if let Some(question_mark) = next
+            && question_mark.kind == T!["?"]
+            && question_mark.start.offset == last.start.offset + last.value.len() as u32
+        {
+            next = tokens.next().transpose()?;
+        }
+
+        Ok(next.is_some_and(|name| name.kind.is_identifier_maybe_reserved())
+            && tokens.next().transpose()?.is_some_and(|equals| equals.kind == T!["="]))
     }
 
     /// Returns `true` when the union type at the head of the stream is followed by a local's name and `=`. A type

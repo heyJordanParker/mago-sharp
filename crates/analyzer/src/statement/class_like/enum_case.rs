@@ -21,6 +21,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::resolver::class_name::report_full_class_name;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::function_like::FunctionLikeBody;
@@ -91,7 +92,7 @@ where
 
 /// Refuses a dotted type in a PHP# file that names no case of an enum whose cases carry data, spec section 20, as
 /// `Shop.Order` for the class `App.Shop.Order`: PHP# writes a class by its short name, and its full name only in an
-/// `import` line. A name that names no class at all has its own issue where the type is read.
+/// `import` line, spec section 23. A name that names no class at all has its own issue where the type is read.
 pub(crate) fn report_dotted_types<A>(program: &Program<'_>, context: &mut Context<'_, '_, A>)
 where
     A: Arena,
@@ -107,17 +108,7 @@ where
             continue;
         }
 
-        context.collector.report_with_code(
-            IssueCode::NonExistentClassLike,
-            Issue::error(format!("`{}` is no case of an enum.", BytesDisplay(node.value())))
-                .with_annotation(Annotation::primary(node.span()).with_message("Written here."))
-                .with_note("A dotted type names a case of an enum whose cases carry data, as `PaymentResult.Paid`.")
-                .with_help(format!(
-                    "Import `{}` and write `{}`.",
-                    display_class_like_name(context, class.original_name),
-                    BytesDisplay(node.value().rsplit(|&byte| byte == b'.').next().unwrap_or_default()),
-                )),
-        );
+        report_full_class_name(context, class.original_name.as_bytes(), node.span());
     }
 }
 

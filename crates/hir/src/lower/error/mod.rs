@@ -15,10 +15,11 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         ParseError::UnexpectedEndOfFile(..) => ErrorKind::UnexpectedEndOfFile,
         // PHP syntax in a PHP# file, such as a `fn` lambda, a PHP# parameter or field without its type, `in` in a PHP#
         // loop, PHP# syntax not supported yet, an escape a PHP# template refuses, an operator symbol a class cannot
-        // declare, effects after a function type's `>`, a module member that is no law, a computed property's body after
-        // a parameter, anything but `super(…)` or `this(…)` after a constructor's `:`, a body after an event, a type
-        // declared inside another, `partial` before a type, type parameters on a named constructor, a keyword in another
-        // case, a class cast, or a name after a pattern without a type, is a token the PHP# grammar does not expect there.
+        // declare, effects after a function type's `>` or on an import, a module member that is no law, a computed
+        // property's body after a parameter, anything but `super(…)` or `this(…)` after a constructor's `:`, a body
+        // after an event, a type declared inside another, `partial` before a type, type parameters on a named
+        // constructor, a keyword in another case, a class cast, or a name after a pattern without a type, is a token the
+        // PHP# grammar does not expect there.
         ParseError::UnexpectedToken(..)
         | ParseError::PhpSyntaxInSharp(..)
         | ParseError::ClassNameConstantInSharp(..)
@@ -35,6 +36,7 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         | ParseError::InvalidTemplateEscapeInSharp(..)
         | ParseError::UndeclarableOperatorInSharp(..)
         | ParseError::UsesAfterFunctionTypeInSharp(..)
+        | ParseError::UsesOnImportInSharp(..)
         | ParseError::ReadonlyNotLastInSharp(..)
         | ParseError::OtherMemberInSharpModule(..)
         | ParseError::ComputedParameterInSharp(..)

@@ -51,8 +51,8 @@ where
     }
 
     if context.dialect.is_sharp()
-        && (is_method(&invocation.target, b"Sharp\\SetMethods", b"filter")
-            || is_method(&invocation.target, b"Sharp\\ListMethods", b"toSet"))
+        && (is_method(&invocation.target, b"Sharp\\Internal\\SetMethods", b"filter")
+            || is_method(&invocation.target, b"Sharp\\Internal\\ListMethods", b"toSet"))
     {
         return Ok(fetch_set_return_type(context, invocation, template_result, parameters));
     }
@@ -181,8 +181,8 @@ where
 }
 
 /// Gives a PHP# `Set<T>`'s `filter` and a `List<T>`'s `toSet` their type `Set<T>`. A docblock writes no `Set`, so
-/// `Sharp\SetMethods::filter` and `Sharp\ListMethods::toSet` declare an array of the elements, and the call holds them
-/// as a `Set`.
+/// `Sharp\Internal\SetMethods::filter` and `Sharp\Internal\ListMethods::toSet` declare an array of the elements, and
+/// the call holds them as a `Set`.
 fn fetch_set_return_type<A>(
     context: &Context<'_, '_, A>,
     invocation: &Invocation<'_, '_, '_>,
@@ -208,7 +208,7 @@ pub(crate) fn keys_a_map_by_its_function(target: &InvocationTarget<'_>) -> bool 
 
 /// Whether `target` is the method `method` of a PHP# `List`, `Map` or `Set`.
 fn is_collection_method(target: &InvocationTarget<'_>, method: &[u8]) -> bool {
-    [b"Sharp\\ListMethods".as_slice(), b"Sharp\\MapMethods", b"Sharp\\SetMethods"]
+    [b"Sharp\\Internal\\ListMethods".as_slice(), b"Sharp\\Internal\\MapMethods", b"Sharp\\Internal\\SetMethods"]
         .into_iter()
         .any(|class| is_method(target, class, method))
 }

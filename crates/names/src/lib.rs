@@ -26,6 +26,7 @@ pub mod resolver;
 pub mod scope;
 
 mod internal;
+mod sharp_classes;
 
 /// The methods of a PHP# `List`, `Map` or `Set` that change it.
 ///
@@ -50,27 +51,28 @@ pub const INLINED_COLLECTION_METHODS: [(&str, &str); 8] = [
     ("List", "toSet"),
 ];
 
-/// The class-likes directly in `Sharp` that a bare name in a `.sharp` file names by default, spec section 23, and that
-/// a class-like of the file's namespace can win over: the standard library's ten effect classes and `Events`, the
-/// effect of `emit` (spec section 29), then `Position`, `Key` and `Result` (spec section 31).
-pub(crate) fn shadowable_default_classes() -> impl Iterator<Item = &'static str> {
-    [
-        "Sharp\\Database",
-        "Sharp\\Http",
-        "Sharp\\Files",
-        "Sharp\\Console",
-        "Sharp\\Process",
-        "Sharp\\Clock",
-        "Sharp\\Random",
-        "Sharp\\Cache",
-        "Sharp\\Mail",
-        "Sharp\\Environment",
-        "Sharp\\Events",
-        "Sharp\\Position",
-        "Sharp\\Key",
-        "Sharp\\Result",
-    ]
-    .into_iter()
+/// The standard effects that are names and no class, spec section 29, in the spec's order. As `Events` is, each is an
+/// effect only an `extern` gives plain PHP.
+pub const NAMED_EFFECTS: [&str; 9] = [
+    "Sharp\\Database",
+    "Sharp\\Http",
+    "Sharp\\Files",
+    "Sharp\\Console",
+    "Sharp\\Process",
+    "Sharp\\Clock",
+    "Sharp\\Random",
+    "Sharp\\Cache",
+    "Sharp\\Mail",
+];
+
+/// The names directly in `Sharp` that a bare name in a `.sharp` file names by default, spec section 23, and that a
+/// class-like of the file's namespace can win over: the [named effects](NAMED_EFFECTS), then every class-like the
+/// standard library or the prelude declares directly in `Sharp`, but the [fixed one](fixed_default_class).
+pub(crate) fn default_classes() -> impl Iterator<Item = &'static str> {
+    NAMED_EFFECTS
+        .into_iter()
+        .chain(sharp_classes::SHARP_CLASSES)
+        .filter(|class| fixed_default_class(&class.as_bytes()[b"Sharp\\".len()..]).is_none())
 }
 
 /// The default class-like that a bare name in a `.sharp` file always names, whatever the file imports or declares or
@@ -80,20 +82,16 @@ pub(crate) fn fixed_default_class(name: &[u8]) -> Option<&'static [u8]> {
     (name == b"Error").then_some(b"Sharp\\Error".as_slice())
 }
 
-/// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`. PHP
-/// reserves `Int`, `Float`, `Bool`, `List` and `Class` as class names, so no other class-like has them. A lowercase
-/// `int` is the built-in type, so the name is compared exactly.
+/// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`. A
+/// lowercase `int` is the built-in type, so the name is compared exactly.
 pub(crate) fn default_class(name: &[u8]) -> Option<&'static [u8]> {
-    shadowable_default_classes()
-        .chain(["Sharp\\Int", "Sharp\\Float", "Sharp\\Bool", "Sharp\\List", "Sharp\\Class"])
-        .find(|class| class.as_bytes()[b"Sharp\\".len()..] == *name)
-        .map(str::as_bytes)
+    default_classes().find(|class| class.as_bytes()[b"Sharp\\".len()..] == *name).map(str::as_bytes)
 }
 
 /// Whether a class-like whose short name is `name` wins over a default class-like in its namespace, compared ignoring
 /// case as PHP compares class names.
 pub(crate) fn shadows_a_default_class(name: &[u8]) -> bool {
-    shadowable_default_classes().any(|class| class.as_bytes()[b"Sharp\\".len()..].eq_ignore_ascii_case(name))
+    default_classes().any(|class| class.as_bytes()[b"Sharp\\".len()..].eq_ignore_ascii_case(name))
 }
 
 /// The last segment of the full name `name`, as a PHP# import writes it.
