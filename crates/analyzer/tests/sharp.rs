@@ -14258,6 +14258,18 @@ fn a_generic_call_takes_the_type_argument_an_argument_fixes() {
     );
 }
 
+/// Spec section 11: a type argument a generic call fixes from a value is a type PHP# writes, as C#, Kotlin and Swift have
+/// no literal types and TypeScript widens the literal it infers, so the object it creates fits the declared type its
+/// class's type parameter is invariant in: `int` for `5`, `List<int>` for `[1, 2]`, `Map<string, int>` for `["k": 1]`,
+/// `bool` for `true`, the enum for its case, and `int` for the key of a list a plain PHP `iterable<TKey, TValue>` takes.
+#[test]
+fn a_type_argument_fixed_from_a_value_is_a_type_php_sharp_writes() {
+    let library = "<?php\n\nnamespace Lib;\n\n/**\n * @template TKey of array-key\n * @template TValue\n */\nclass Bag\n{\n    /**\n     * @template TMakeKey of array-key\n     * @template TMakeValue\n     * @param iterable<TMakeKey, TMakeValue> $items\n     * @return static<TMakeKey, TMakeValue>\n     */\n    public static function make(iterable $items): static\n    {\n        return new static();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Bag;\n\npublic enum Status\n{\n    case Paid;\n}\n\npublic class Box<T>\n{\n    public T? held { get; set; } = null;\n}\n\npublic class Report\n{\n    public static Box<TItem> of<TItem>(TItem item) => new Box<TItem>();\n\n    public Box<int> counted() => Report.of(5);\n\n    public Box<List<int>> listed() => Report.of([1, 2]);\n\n    public Box<Map<string, int>> mapped() => Report.of([\"k\": 1]);\n\n    public Box<bool> flagged() => Report.of(true);\n\n    public Box<Status> cased() => Report.of(Status.Paid);\n\n    public Bag<int, Report> made() => Bag.make([new Report()]);\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Bag.php", library)]), Vec::<String>::new());
+}
+
 /// Spec section 11: the declared type a generic call's result goes into fixes the type arguments nothing else fixes, as
 /// Swift infers a generic parameter from the contextual type of the result. The declared type is a typed local's, a
 /// property's, a nullable one too, a return type, from a `return` and from an expression body, and a parameter's, the

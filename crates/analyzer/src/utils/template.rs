@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use foldhash::HashMap;
 use foldhash::fast::RandomState;
 use indexmap::IndexMap;
@@ -14,17 +16,24 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::r#enum::TEnum;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::combiner::combine;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::variance::Variance;
@@ -703,4 +712,40 @@ where
             if widens { "out" } else { "in" }
         )),
     }
+}
+
+/// The type argument PHP# takes from a value of type `union`, a type PHP# writes, as C#, Kotlin and Swift have no
+/// literal types and TypeScript widens the literal it infers: each scalar its general type, as `int` for `5` or for a
+/// list's key, each enum case its enum, and each array, and each array inside one, the `List`, `Map` or `Set` of its
+/// key and value types, as `List<int>` for `[1, 2]` and `Map<string, int>` for `["k": 1]`.
+pub(crate) fn written_type_argument(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    let mut type_argument = written_type(union, codebase);
+    type_argument.widen_scalars();
+
+    TUnion::from_vec(combine(type_argument.types.into_owned(), codebase, CombinerOptions::default()))
+}
+
+/// `union` with each enum case in it as its enum, and each array as the `List`, `Map` or `Set` of its key and value
+/// types, the arrays inside one too.
+fn written_type(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    TUnion::from_vec(
+        union
+            .types
+            .iter()
+            .map(|atomic| match atomic {
+                TAtomic::Array(array) => {
+                    let (key, value) = get_array_parameters(array, codebase);
+                    let value = Arc::new(written_type(&value, codebase));
+
+                    TAtomic::Array(match array {
+                        TArray::List(_) => TArray::List(TList::new(value)),
+                        TArray::Keyed(_) => TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(key), value)),
+                        TArray::Set(_) => TArray::Set(value),
+                    })
+                }
+                TAtomic::Object(TObject::Enum(r#enum)) => TAtomic::Object(TObject::Enum(TEnum::new(r#enum.name))),
+                atomic => atomic.clone(),
+            })
+            .collect(),
+    )
 }
