@@ -18088,7 +18088,7 @@ fn a_foreign_object_is_created_only_in_a_module_binding() {
         "app/Cache/Factory.sharp",
         "namespace App.Cache;\n\npublic class Factory\n{\n    public RedisStore make() => new RedisStore();\n\n    public RedisStore fake()\n    {\n        const make = () => new FakeStore();\n        return make();\n    }\n}\n",
     );
-    let help = "A `foreign` object reaches code only through constructors. | Take it as a constructor parameter, and create it in a module binding.";
+    let help = "A module binding decides how often a `foreign` object is created. | Take it as a constructor or method parameter, and create it in a module binding.";
 
     assert_eq!(
         worded(factory, &[store, fake]),
@@ -18113,8 +18113,8 @@ fn a_foreign_object_is_created_only_in_a_module_binding() {
     assert_eq!(worded(php, &[store]), Vec::<String>::new());
 }
 
-/// Spec section 29: a `foreign` object reaches code only through constructors, so a static field holds none, alone or
-/// inside a collection. A static field written without its type holds nothing the check can name, so only the parser
+/// Spec section 29: a static outlives the module binding that creates a `foreign` object, so a static field holds none,
+/// alone or inside a collection. A static field written without its type holds nothing the check can name, so only the parser
 /// reports it. `App.Cache.Cache` shares its short name with the standard library's `Cache`, so a message names it in
 /// full.
 #[test]
@@ -18133,7 +18133,7 @@ fn a_static_field_holding_a_foreign_object_is_refused() {
         assert_eq!(
             worded(("app/Cache/Cache.sharp", cache), &[store]),
             [format!(
-                "5:{column} foreign-in-static {message} | A `foreign` object reaches code only through constructors, so no static holds one. | Take the `RedisStore` as a constructor parameter instead."
+                "5:{column} foreign-in-static {message} | A module binding decides how often a `foreign` object is created, and a static outlives every binding, so no static holds one. | Take the `RedisStore` as a constructor or method parameter instead."
             )],
             "{field}"
         );
@@ -18159,6 +18159,57 @@ fn a_static_field_holding_a_foreign_object_is_refused() {
     );
 }
 
+/// Spec section 29: a `foreign` object is an ordinary type in a parameter and a return value. A method that calls one
+/// it takes has its effect, as when it calls one it holds, so a pure interface method's implementation that calls a
+/// `Clock` parameter is refused. A caller that uses a returned one has the effect at that call. A static still holds
+/// none.
+#[test]
+fn a_foreign_object_is_an_ordinary_parameter_and_return_type() {
+    let date = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Date.sharp",
+        include_str!("../../../../composer/library/Sharp/Time/Date.sharp"),
+    );
+    let stamp = (
+        "app/Shop/Stamp.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Time.Date;\n\npublic class Stamp\n{\n    public Stamp(private Clock clock) { }\n\n    public string stampedWith(Clock clock) => Date.format(clock.now(), \"Y-m-d\");\n\n    public Clock held() => this.clock;\n\n    public int later(Stamp other) => other.held().now() + 1;\n}\n",
+    );
+
+    assert_eq!(issues(stamp, &[date]), Vec::<String>::new());
+    let (codebase, summaries) = summarized(&[stamp, date, BUILTINS]);
+    let effects = Effects::solve(&codebase, &summaries);
+    let method = |name: &[u8]| {
+        FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Stamp"), ascii_lowercase_word(name))
+    };
+    assert_eq!(effects.function_effects(&method(b"stampedWith")), Some(vec![word("Sharp\\Clock")]), "a parameter");
+    assert_eq!(effects.function_effects(&method(b"later")), Some(vec![word("Sharp\\Clock")]), "a returned one");
+
+    let stamps = (
+        "app/Shop/Stamps.sharp",
+        "namespace App.Shop;\n\npublic interface Stamps\n{\n    int stamped(Clock clock);\n}\n",
+    );
+    let stamper = (
+        "app/Shop/Stamper.sharp",
+        "namespace App.Shop;\n\npublic class Stamper : Stamps\n{\n    public int stamped(Clock clock) => clock.now();\n}\n",
+    );
+    assert_eq!(
+        effect_issues(&[stamps, stamper]),
+        [
+            "app/Shop/Stamper.sharp:5:40 incompatible-effects: `Stamper.stamped` calls `Clock.now`, which has the effect `Clock`, so the pure `Stamps.stamped` cannot accept it."
+        ],
+        "a pure interface method"
+    );
+
+    let kept = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept\n{\n    public static Clock? clock = null;\n}\n",
+    );
+    assert!(
+        issues(kept, &[]).iter().any(|issue| issue.ends_with(" foreign-in-static")),
+        "a static: {:?}",
+        issues(kept, &[])
+    );
+}
+
 /// Spec section 29: no static holds a `foreign` object, so a write of one into a static whose declared type is wider,
 /// such as `Any?`, a `List<Any>` or an interface the class implements, is refused at the value, as a changing
 /// collection method on a static is.
@@ -18167,7 +18218,7 @@ fn a_foreign_object_written_into_a_static_is_refused() {
     let store = ("app/Cache/Store.sharp", "namespace App.Cache;\n\npublic interface Store\n{\n}\n");
     let redis =
         ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore : Store\n{\n}\n");
-    let message = "foreign-in-static `App.Cache.Cache.loose` is static, so it cannot hold a `RedisStore`. | A `foreign` object reaches code only through constructors, so no static holds one. | Take the `RedisStore` as a constructor parameter instead.";
+    let message = "foreign-in-static `App.Cache.Cache.loose` is static, so it cannot hold a `RedisStore`. | A module binding decides how often a `foreign` object is created, and a static outlives every binding, so no static holds one. | Take the `RedisStore` as a constructor or method parameter instead.";
 
     for (field, write, column) in [
         ("public static Any? loose = null;", "Cache.loose = this.store;", 40),
@@ -18200,7 +18251,7 @@ fn a_foreign_object_behind_a_type_parameter_or_a_type_argument_is_refused_in_a_s
     let shelf = ("app/Cache/Shelf.sharp", "namespace App.Cache;\n\npublic class Shelf<TItem>\n{\n}\n");
     let refused = |property: &str, column: usize| {
         vec![format!(
-            "5:{column} foreign-in-static `App.Cache.Cache.{property}` is static, so it cannot hold a `RedisStore`. | A `foreign` object reaches code only through constructors, so no static holds one. | Take the `RedisStore` as a constructor parameter instead."
+            "5:{column} foreign-in-static `App.Cache.Cache.{property}` is static, so it cannot hold a `RedisStore`. | A module binding decides how often a `foreign` object is created, and a static outlives every binding, so no static holds one. | Take the `RedisStore` as a constructor or method parameter instead."
         )]
     };
 

@@ -505,8 +505,8 @@ impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker 
     }
 }
 
-/// Spec section 29: a `foreign` object reaches code only through constructors, so a static property of `class` holds
-/// none, alone or inside a collection.
+/// Spec section 29: a module binding's lifetime decides how often a `foreign` object is created, and a static outlives
+/// every binding, so a static property of `class` holds none, alone or inside a collection.
 pub(crate) fn check_foreign_statics<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
 where
     A: Arena,
@@ -578,7 +578,9 @@ fn report_foreign_in_static<A>(
         IssueCode::ForeignInStatic,
         Issue::error(format!("`{property_name}` is static, so it cannot hold a `{held}`."))
             .with_annotation(Annotation::primary(span))
-            .with_note("A `foreign` object reaches code only through constructors, so no static holds one.")
-            .with_help(format!("Take the `{held}` as a constructor parameter instead.")),
+            .with_note(
+                "A module binding decides how often a `foreign` object is created, and a static outlives every binding, so no static holds one.",
+            )
+            .with_help(format!("Take the `{held}` as a constructor or method parameter instead.")),
     );
 }

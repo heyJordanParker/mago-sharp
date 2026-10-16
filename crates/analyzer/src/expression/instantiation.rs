@@ -309,8 +309,8 @@ fn check_foreign_outside_module<A>(
         IssueCode::ForeignOutsideModule,
         Issue::error(format!("`{class}` is {what}, so only a module binding creates it."))
             .with_annotation(Annotation::primary(class_span))
-            .with_note("A `foreign` object reaches code only through constructors.")
-            .with_help("Take it as a constructor parameter, and create it in a module binding."),
+            .with_note("A module binding decides how often a `foreign` object is created.")
+            .with_help("Take it as a constructor or method parameter, and create it in a module binding."),
     );
 }
 
