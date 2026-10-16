@@ -718,8 +718,8 @@ impl<'analysis> Types<'analysis> {
 
     /// The name of the call `call` when plain PHP may give its result, which no PHP# code checked: a function value's
     /// call, which may run a plain PHP closure, a PHP# interface method's, which a plain PHP class may implement, as
-    /// `App\Source::read`, and the engine's collection method given a function value, which stores what the function
-    /// returns, as `map` of `numbers.map(f)`.
+    /// `App\Source::read`, and a method with no PHP# body given a function value, as `map` of `numbers.map(f)`: the
+    /// engine runs the function and keeps what it returns, which no PHP# return check tested.
     fn unchecked_result_call(&self, call: &Expression) -> Option<String> {
         let Expression::Call(invocation) = call else {
             return None;
@@ -738,22 +738,15 @@ impl<'analysis> Types<'analysis> {
         if class.flags.is_sharp() && class.kind.is_interface() {
             return Some(format!("{}::{}", class.original_name, method.original_name));
         }
-        let takes_function_value = || {
-            invocation.get_argument_list().arguments.iter().any(|argument| {
-                !matches!(argument.value(), Expression::ArrowFunction(_) | Expression::Closure(_))
-                    && self
-                        .artifacts
-                        .get_expression_type(argument.value())
-                        .is_some_and(|r#type| r#type.types.iter().all(|atomic| matches!(atomic, TAtomic::Callable(_))))
-            })
-        };
+        let takes_function_value = invocation.get_argument_list().arguments.iter().any(|argument| {
+            !matches!(argument.value(), Expression::ArrowFunction(_) | Expression::Closure(_))
+                && self
+                    .artifacts
+                    .get_expression_type(argument.value())
+                    .is_some_and(|r#type| r#type.types.iter().all(|atomic| matches!(atomic, TAtomic::Callable(_))))
+        });
 
-        let is_collection_method =
-            ["Sharp\\ListMethods", "Sharp\\MapMethods", "Sharp\\SetMethods", "Sharp\\IterableMethods"]
-                .iter()
-                .any(|methods| class.name.as_bytes().eq_ignore_ascii_case(methods.as_bytes()));
-
-        (is_collection_method && takes_function_value()).then(|| method.original_name.to_string())
+        (!method.flags.is_user_defined() && takes_function_value).then(|| method.original_name.to_string())
     }
 
     /// The name of the function value the call `call` runs: the local of `f(2)` and `f?.(2)`, or the property of
