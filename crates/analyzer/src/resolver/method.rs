@@ -1559,7 +1559,7 @@ where
     if context.dialect.is_sharp() {
         context
             .collector
-            .report_with_code(IssueCode::AmbiguousObjectMethodAccess, object_has_no_members(obj_span, selector_span));
+            .report_with_code(IssueCode::AmbiguousObjectMethodAccess, object_member_issue(obj_span, selector_span));
 
         return;
     }
@@ -1576,7 +1576,7 @@ where
 }
 
 /// The PHP# error for a member of an `Object` at `selector_span`, read or called on the value at `object_span`.
-pub(crate) fn object_has_no_members(object_span: Span, selector_span: Span) -> Issue {
+pub(crate) fn object_member_issue(object_span: Span, selector_span: Span) -> Issue {
     Issue::error("An `Object` has no members: check its type with `is` first.")
         .with_annotation(Annotation::primary(selector_span).with_message("A member of an `Object`."))
         .with_annotation(Annotation::secondary(object_span).with_message("This is an `Object`."))

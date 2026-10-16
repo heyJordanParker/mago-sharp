@@ -941,14 +941,23 @@ fn refusal(
                     _ => None,
                 })
                 .collect();
-            // An unchecked `Any?` compares with a collection by value, and can't tell an instance's identity from
-            // its value, spec section 24.
-            let unchecked = lhs.iter().all(|comparand| *comparand == Comparand::Any)
-                || rhs.iter().all(|comparand| *comparand == Comparand::Any);
-            if unchecked && has(Comparand::Instance) {
-                Some(Refusal::UncheckedObject)
-            } else if unchecked && has(Comparand::Collection) {
+            // An unchecked `Any?` can't tell an instance's identity from its value, spec section 24, and compares with
+            // a collection by value, element by element, as two collections of the other side's type compare.
+            let unchecked = if lhs.iter().all(|comparand| *comparand == Comparand::Any) {
+                Some(rhs_type)
+            } else if rhs.iter().all(|comparand| *comparand == Comparand::Any) {
+                Some(lhs_type)
+            } else {
                 None
+            };
+            if unchecked.is_some() && has(Comparand::Instance) {
+                Some(Refusal::UncheckedObject)
+            } else if let Some(collection) = unchecked
+                && has(Comparand::Collection)
+            {
+                // A `Set`'s elements have `==` and `hash()` already, so only a `List`'s or a `Map`'s are checked.
+                collection_parts(collection, codebase)
+                    .and_then(|_| collection_refusal(operator, collection, collection, codebase, visiting))
             } else if has(Comparand::Collection) {
                 collection_refusal(operator, lhs_type, rhs_type, codebase, visiting)
             } else if let Some(&name) = structs.first()
@@ -1120,16 +1129,26 @@ pub(crate) fn report_sharp_refusal<A>(
             )
         }
         Refusal::StructProperty => (IssueCode::InvalidOperand, struct_property_issue(context, lhs_type, rhs_type)),
-        Refusal::CollectionElement => (
-            IssueCode::InvalidOperand,
-            Issue::error(format!(
-                "`{op}` compares `{lhs_name}` with `{rhs_name}` element by element, and {}.",
-                element_reason(context, operator, lhs_type, rhs_type)
-            ))
-            .with_note(
-                "Two lists are equal when their elements are, in order, and two maps when they hold equal values under the same keys.",
-            ),
-        ),
+        Refusal::CollectionElement => {
+            // An unchecked `Any?` compares as a collection of the other side's type.
+            let (lhs_type, rhs_type) = match (lhs_type.is_mixed(), rhs_type.is_mixed()) {
+                (true, _) => (rhs_type, rhs_type),
+                (_, true) => (lhs_type, lhs_type),
+                _ => (lhs_type, rhs_type),
+            };
+            let (lhs_name, rhs_name) = (display_operand(context, lhs_type), display_operand(context, rhs_type));
+
+            (
+                IssueCode::InvalidOperand,
+                Issue::error(format!(
+                    "`{op}` compares `{lhs_name}` with `{rhs_name}` element by element, and {}.",
+                    element_reason(context, operator, lhs_type, rhs_type)
+                ))
+                .with_note(
+                    "Two lists are equal when their elements are, in order, and two maps when they hold equal values under the same keys.",
+                ),
+            )
+        }
         Refusal::Collection => (
             IssueCode::NotSupportedYet,
             Issue::error(format!(

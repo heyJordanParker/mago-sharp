@@ -7660,6 +7660,17 @@ fn an_unchecked_any_compares_with_a_string_or_a_number_but_not_with_another_valu
     let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public bool same(Any? value, Any? other, Inbox inbox)\n    {\n        const a = value == \"1\";\n        const b = value != 2;\n        const c = 1.5 == value;\n        const d = value == other;\n        const e = value == inbox;\n        return a && b && c && d && e;\n    }\n}\n";
     let values = "namespace Demo;\n\nclass Values\n{\n    public List<bool> same(Any? value, List<int> numbers, Map<string, int> counts, Set<int> seen, Suit suit, Point point, Inbox inbox)\n    {\n        return [value == true, value == numbers, counts != value, value == seen, value == suit, value == point, value === inbox, inbox !== value];\n    }\n}\n\nenum Suit\n{\n    case Hearts;\n}\n\nstruct Point\n{\n    public Point(public int x { get; }) { }\n}\n\nclass Inbox\n{\n}\n";
     assert_eq!(issues(("src/Demo/Values.sharp", values), &[]), Vec::<String>::new());
+    // A collection's elements compare by their own `==`, so a list of a class without one is refused as two such lists are.
+    let passes = "namespace Demo;\n\nclass Passes\n{\n    public List<bool> same(Any? value, List<Pass> list, Map<string, Pass> map, List<Pass> other)\n    {\n        return [value == list, map != value, list == other];\n    }\n}\n\nclass Pass\n{\n}\n";
+    let refused = "invalid-operand `==` compares `List<Pass>` with `List<Pass>` element by element, and `Pass` declares no `operator ==`. | ";
+    assert_eq!(
+        refusals(("src/Demo/Passes.sharp", passes), &[]),
+        [
+            format!("7:17 {refused}"),
+            "7:32 invalid-operand `!=` compares `Map<string, Pass>` with `Map<string, Pass>` element by element, and `Pass` declares no `operator ==`. | ".to_owned(),
+            format!("7:46 {refused}"),
+        ]
+    );
     assert_eq!(
         refusals(("src/Demo/Inbox.sharp", sharp), &[])[2],
         "11:19 invalid-operand `value` is unchecked: is it the same object as `inbox`, or an equal value? Check it with `is` first. | Write `value === inbox` to test for the same object."
