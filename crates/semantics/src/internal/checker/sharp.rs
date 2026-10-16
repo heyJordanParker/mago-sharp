@@ -103,6 +103,8 @@ use mago_syntax::cst::Terminator;
 use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::TryFinallyClause;
 use mago_syntax::cst::TypeOf;
+use mago_syntax::cst::TypeParameter;
+use mago_syntax::cst::TypeParameterBound;
 use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPostfix;
@@ -172,8 +174,9 @@ const OBJECT: &[u8] = b"Object";
 ///   `<out TItem : DatabaseEntity & Shareable, TKey>`. A name is `T`, or `T` and an uppercase ASCII letter, as in
 ///   `TItem`, and any other name is an error, as C# names them. A list that declares a name twice is an error. `in` and
 ///   `out` on a method's type parameter are errors, because only a class or an interface declares variance, spec
-///   section 11.1. A bound is `Object`, a class or an interface, a generic class type, as in `Comparable<TItem>`, or
-///   several classes and interfaces joined with `&`, and any other bound is an error. A type parameter is in scope in its class's or interface's
+///   section 11.1. A bound is `Object`, a class or an interface, a generic class type, as in `Comparable<TItem>`,
+///   several classes and interfaces joined with `&`, or another type parameter alone, as in `<TSub : T>`, and any
+///   other bound is an error. A type parameter is in scope in its class's or interface's
 ///   whole declaration, its header included, and in its method's signature and body, as the binder decides. A
 ///   constant uses none of its class's type parameters, because every `Box<…>` shares it. A static field, property or
 ///   method uses them, because each type argument has its own, as `Box<int>.count` reaches it. The analyzer checks
@@ -781,8 +784,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             let message = if matches!(bound.hint, Hint::Union(_)) {
                 "A bound can't be a union: join several bounds with `&`."
+            } else if joins_type_parameter(&bound.hint, context) {
+                "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."
             } else {
-                "A bound is `Object`, a class or an interface, as in `<TItem : DatabaseEntity>`."
+                "A bound is `Object`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
             };
             context.report(
                 Issue::error(message)
@@ -4138,11 +4143,23 @@ fn report_static_member_use(span: Span, refusal: String, context: &mut Context<'
 }
 
 /// Reports each type parameter of a list whose name is not `T`, or `T` and an uppercase letter, as C# names them, a
-/// name the list declares twice, and `in` or `out` on a method's, because only a class or an interface declares
-/// variance, spec section 11.1.
+/// name the list declares twice, a bound that leads back to its type parameter, as C# refuses a circular constraint
+/// (CS0454), and `in` or `out` on a method's, because only a class or an interface declares variance, spec section
+/// 11.1.
 fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut Context<'_, '_, '_>) {
     for (index, parameter) in list.parameters.iter().enumerate() {
         let name = parameter.name.value;
+        if let Some(bound) = &parameter.bound
+            && bounds_itself(list, parameter)
+        {
+            context.report(
+                Issue::error(format!(
+                    "A type parameter can't bound itself: the bound of `{0}` leads back to `{0}`.",
+                    BytesDisplay(name)
+                ))
+                .with_annotation(Annotation::primary(bound.hint.span()).with_message("Bound written here.")),
+            );
+        }
         if !matches!(name, [b'T'] | [b'T', b'A'..=b'Z', ..]) {
             context.report(
                 Issue::error("A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.")
@@ -4173,9 +4190,50 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
     }
 }
 
-/// Whether a type parameter's bound is `Object`, a class or an interface, a generic class type, or several of them
-/// joined with `&`, as spec section 11 writes it. Mago's own check of an intersection refuses `Object` in one.
+/// Whether the bound of `parameter` names it, through the bounds of the other type parameters of `list` it names, as
+/// `<T : T>` and `<TA : TB, TB : TA>` do.
+fn bounds_itself(list: &TypeParameterList, parameter: &TypeParameter) -> bool {
+    let mut current = parameter;
+    for _ in 0..list.parameters.len() {
+        let Some(TypeParameterBound { hint: Hint::Identifier(Identifier::Local(bound)), .. }) = &current.bound else {
+            return false;
+        };
+        if bound.value == parameter.name.value {
+            return true;
+        }
+        let Some(next) = list.parameters.iter().find(|other| other.name.value == bound.value) else {
+            return false;
+        };
+        current = next;
+    }
+
+    false
+}
+
+/// Whether a type parameter's bound is another type parameter, as in `<TSub : T>`, or a bound that joins others, as
+/// spec section 11 writes it.
 fn is_slice_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
+    is_type_parameter_bound(hint, context) || is_joining_bound(hint, context)
+}
+
+/// Whether `hint` is a type parameter, a bound that stands alone, as Java's `<U extends T>` does.
+fn is_type_parameter_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
+    matches!(hint, Hint::Identifier(name @ Identifier::Local(_)) if context.names.is_type_parameter(name))
+}
+
+/// Whether `hint` joins a type parameter with other bounds by `&`, as in `<TL : Order & TA>`.
+fn joins_type_parameter(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
+    match hint {
+        Hint::Intersection(intersection) => {
+            joins_type_parameter(intersection.left, context) || joins_type_parameter(intersection.right, context)
+        }
+        hint => is_type_parameter_bound(hint, context),
+    }
+}
+
+/// Whether `hint` is `Object`, a class or an interface, a generic class type, or several of them joined with `&`.
+/// Mago's own check of an intersection refuses `Object` in one.
+fn is_joining_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
     match hint {
         Hint::Object(object) => object.value == OBJECT,
         Hint::Identifier(name @ Identifier::Local(_)) => !context.names.is_type_parameter(name),
@@ -4183,7 +4241,7 @@ fn is_slice_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
             built_in_generic_arity(generic.name.value).is_none() && !context.names.is_type_parameter(&generic.name)
         }
         Hint::Intersection(intersection) => {
-            is_slice_bound(intersection.left, context) && is_slice_bound(intersection.right, context)
+            is_joining_bound(intersection.left, context) && is_joining_bound(intersection.right, context)
         }
         _ => false,
     }
@@ -5078,7 +5136,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# header names each base class and interface by its short name, as in `: DatabaseEntity, Linkable`, and a generic one with its type arguments, as in `: PaginatedList<Order>`."
         }
         Place::TypeParameter => {
-            "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
+            "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
         }
         Place::Event => {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."

@@ -11668,6 +11668,24 @@ fn a_type_new_a_type_test_and_a_static_member_name_the_type_arguments_of_a_gener
     );
 }
 
+/// A bound may name another type parameter, spec section 11, as C#'s `where TSub : T` and Java's and TypeScript's
+/// `<U extends T>` allow: a method's on its class's, a method's on an earlier one of its own, and a class's on an
+/// earlier one of its own. A value of the bounded type parameter goes where the type parameter it names goes, through
+/// a chain of them too, and a type argument outside the bound is refused where the type argument is fixed.
+#[test]
+fn a_bound_that_names_another_type_parameter_holds_values_of_that_type_parameter() {
+    let sharp = "namespace Demo;\n\npublic class Animal\n{\n}\n\npublic class Dog : Animal\n{\n}\n\npublic class Cat : Animal\n{\n}\n\npublic class Pen<T : Animal>\n{\n    public List<T> kept { get; set; } = [];\n\n    public void add<TSub : T>(TSub item)\n    {\n        this.kept.add(item);\n    }\n\n    public T widened<TSub : T, TLeaf : TSub>(TLeaf leaf) => leaf;\n}\n\npublic class Pair<T, TSub : T>\n{\n    public required Pair(public T whole { get; }, public TSub part { get; }) { }\n\n    public T either(bool first) => first ? this.whole : this.part;\n}\n\npublic class Pick\n{\n    public static T narrowest<T, TSub : T>(T whole, TSub part) => part;\n}\n\npublic class Run\n{\n    public static void run()\n    {\n        Pen<Animal> animals = new Pen<Animal>();\n        animals.add(new Dog());\n        Pen<Dog> dogs = new Pen<Dog>();\n        dogs.add(new Cat());\n        Pair<Animal, Dog> fine = new Pair<Animal, Dog>(new Cat(), new Dog());\n        Pair<Dog, Animal> wrong = new Pair<Dog, Animal>(new Dog(), new Animal());\n        Animal picked = Pick.narrowest(new Animal(), new Dog());\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Pen.sharp", sharp), &[]),
+        [
+            "`Cat` does not satisfy the bound `Dog` of type parameter `TSub`.",
+            "Type argument `Animal` does not satisfy `Pair`'s `TSub`.",
+            "Type argument `Animal` does not satisfy `Pair`'s `TSub`.",
+        ]
+    );
+}
+
 /// A PHP# type names the type arguments of a plain PHP `@template` class too, spec section 11, as TypeScript and Kotlin
 /// require them: a property's, a parameter's, a return type, a typed local's, one nested in a `List`, and a type argument
 /// a call writes, each reported once with the type parameters to write. A type parameter with a default needs none. A

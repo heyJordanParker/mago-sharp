@@ -4866,29 +4866,52 @@ fn in_or_out_is_an_error_only_on_a_method_type_parameter() {
     );
 }
 
-/// A bound is `Object`, a class or an interface, a generic class type, or several classes and interfaces joined with
-/// `&`, spec section 11. `Object` holds any object, as C#'s `where T : class` and TypeScript's `T extends object` do,
-/// and joins no other bound, as mago's own check of an intersection says. A union of classes names `&`, which joins
-/// several bounds.
+/// A bound is `Object`, a class or an interface, a generic class type, several classes and interfaces joined with
+/// `&`, or another type parameter, spec section 11. `Object` holds any object, as C#'s `where T : class` and
+/// TypeScript's `T extends object` do, and joins no other bound, as mago's own check of an intersection says. A type
+/// parameter stands alone too, as Java's `<U extends T>` does. A union of classes names `&`, which joins several
+/// bounds.
 #[test]
-fn a_bound_that_is_not_object_a_class_an_interface_or_a_generic_class_type_is_an_error() {
+fn a_bound_that_is_not_object_a_class_an_interface_a_generic_class_type_or_a_type_parameter_is_an_error() {
     let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable, TM : Object>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n    public void j<TN : object>() { }\n    public void k<TO : Object & Shareable>() { }\n    public void l<TP : Object?>() { }\n    public void m<TQ : Object>(TQ value) { }\n}\n";
 
     assert_eq!(
         issues(code),
         (5..=16)
+            .filter(|line| *line != 12)
             .map(|line| match line {
                 8 => "8:24 A bound can't be a union: join several bounds with `&`.".to_owned(),
+                13 => "13:24 A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."
+                    .to_owned(),
                 15 => "15:24 Type `Object` cannot be part of an intersection.".to_owned(),
                 line => format!(
-                    "{line}:24 A bound is `Object`, a class or an interface, as in `<TItem : DatabaseEntity>`."
+                    "{line}:24 A bound is `Object`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
                 ),
             })
             .collect::<Vec<_>>()
     );
     assert!(check("src/Report.sharp", code).iter().filter(|issue| issue.message.starts_with("A bound")).all(|issue| issue
         .notes
-        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+}
+
+/// A type parameter's bound never leads back to it, directly or through the bounds of the others in its list, as C#
+/// refuses a circular constraint (CS0454). Each type parameter on the cycle is reported. A chain that ends, and one that
+/// reaches a cycle it is not on, are bounds like any other.
+#[test]
+fn a_type_parameter_whose_bound_leads_back_to_it_is_an_error() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TA : TA>\n{\n    public void a<TB : TC, TC : TB>() { }\n    public void b<TD : TE, TE : TF, TF : Order>() { }\n    public void c<TG : TH, TH : TI, TI : TH>() { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:23 A type parameter can't bound itself: the bound of `TA` leads back to `TA`.",
+            "5:24 A type parameter can't bound itself: the bound of `TB` leads back to `TB`.",
+            "5:33 A type parameter can't bound itself: the bound of `TC` leads back to `TC`.",
+            "7:33 A type parameter can't bound itself: the bound of `TH` leads back to `TH`.",
+            "7:42 A type parameter can't bound itself: the bound of `TI` leads back to `TI`.",
+        ]
+    );
 }
 
 /// A bound's type arguments are a parameter's types, so a `void` among them is refused as one, alone or joined with
