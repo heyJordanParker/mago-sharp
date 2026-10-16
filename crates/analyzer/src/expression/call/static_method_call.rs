@@ -1,10 +1,11 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::ttype::SharpType;
 use mago_codex::ttype::atomic::TAtomic;
-use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -314,14 +315,26 @@ where
     if encodes_json
         && let Some(argument) = call.argument_list.arguments.first()
         && let Some(value) = artifacts.get_expression_type(argument.value())
-        && let Some(key) = json_key_without_text(context, value)
+        && let Some(key) = invalid_json_key(context, value, &mut Vec::new())
     {
-        let key = display_class_like_name(context, key);
+        let (message, help) = match key {
+            InvalidJsonKey::Class(class) => {
+                let class = display_class_like_name(context, class);
+                (
+                    format!("`Json.encode` writes each `Map` key as JSON text, and `{class}` has no `toString()`."),
+                    format!("Declare `public string toString()` on `{class}`, or encode a `Map` keyed by text."),
+                )
+            }
+            InvalidJsonKey::Scalar(scalar) => (
+                format!("`Json.encode` writes each `Map` key as JSON text, and a `{scalar}` key has none."),
+                "Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
+            ),
+        };
         context.collector.report_with_code(
             IssueCode::InvalidJsonKey,
-            Issue::error(format!("`Json.encode` writes each `Map` key as JSON text, and `{key}` has no `toString()`."))
+            Issue::error(message)
                 .with_annotation(Annotation::primary(argument.span()).with_message("Encoded here."))
-                .with_help(format!("Declare `public string toString()` on `{key}`, or encode a `Map` keyed by text.")),
+                .with_help(help),
         );
     }
 
@@ -350,30 +363,59 @@ where
     Ok(())
 }
 
-/// The class of the first object key in `value` that has no JSON text, spec section 10: a `Map` anywhere in it, a
-/// `List`'s elements and a `Map`'s values included, keyed by an object that is neither a backed enum nor declares
-/// `toString()`. An `int` and a `string` key are their own text, and an `Any` is decided where it runs.
-fn json_key_without_text<A>(context: &Context<'_, '_, A>, value: &TUnion) -> Option<Word>
+/// A `Map` key `Json.encode` can't write as JSON text.
+enum InvalidJsonKey {
+    /// A class, a struct or a pure enum that declares no `toString()`.
+    Class(Word),
+    /// A `float` or a `bool`.
+    Scalar(&'static str),
+}
+
+/// The first `Map` key in `value` that has no JSON text, spec section 10, wherever `value` holds it: in a collection's
+/// elements, keys and values, and in the properties of a PHP# struct or class, `visiting` the classes it is inside. A
+/// key has text exactly where the engine's `sharp_table_json_key` gives it: an `int`, a `string`, a backed enum case,
+/// or an object with `toString()`. An `Any` is decided where it runs.
+fn invalid_json_key<A>(context: &Context<'_, '_, A>, value: &TUnion, visiting: &mut Vec<Word>) -> Option<InvalidJsonKey>
 where
     A: Arena,
 {
-    value.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Array(TArray::List(list)) => json_key_without_text(context, &list.element_type),
-        TAtomic::Array(TArray::Keyed(keyed)) => keyed.parameters.as_ref().and_then(|(key, value)| {
-            key.types
-                .iter()
-                .find_map(|key| match key {
-                    TAtomic::Object(TObject::Named(named)) => {
-                        let class = context.codebase.get_class_like(named.name.as_bytes())?;
-                        let has_text = class.enum_type.is_some()
-                            || context.codebase.get_method(named.name.as_bytes(), b"tostring").is_some();
+    let codebase = context.codebase;
+    value.types.iter().find_map(|atomic| match get_sharp_type(atomic)? {
+        SharpType::List(element) | SharpType::Set(element) | SharpType::Iterable(element) => {
+            invalid_json_key(context, element, visiting)
+        }
+        SharpType::Map(key, value) => key
+            .types
+            .iter()
+            .find_map(|key| match get_sharp_type(key)? {
+                SharpType::Float => Some(InvalidJsonKey::Scalar("float")),
+                SharpType::Bool => Some(InvalidJsonKey::Scalar("bool")),
+                SharpType::Enum(name) | SharpType::Class(name, _) => {
+                    let class = codebase.get_class_like(name.as_bytes())?;
+                    let has_text = class.enum_type.is_some()
+                        || codebase.get_method(name.as_bytes(), b"tostring").is_some()
+                        || codebase.get_method(name.as_bytes(), b"__tostring").is_some();
 
-                        (!has_text).then_some(named.name)
-                    }
-                    _ => None,
-                })
-                .or_else(|| json_key_without_text(context, value))
-        }),
+                    (!has_text).then_some(InvalidJsonKey::Class(class.name))
+                }
+                _ => None,
+            })
+            .or_else(|| invalid_json_key(context, key, visiting))
+            .or_else(|| invalid_json_key(context, value, visiting)),
+        SharpType::Class(name, _) if !visiting.contains(&name) => {
+            let class = codebase.get_class_like(name.as_bytes()).filter(|class| class.flags.is_sharp())?;
+            visiting.push(name);
+            let invalid = class.properties.values().filter(|property| property.read_visibility.is_public()).find_map(
+                |property| {
+                    let r#type = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?;
+
+                    invalid_json_key(context, &r#type.type_union, visiting)
+                },
+            );
+            visiting.pop();
+
+            invalid
+        }
         _ => None,
     })
 }

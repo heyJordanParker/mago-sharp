@@ -19067,12 +19067,13 @@ const JSON: (&str, &str) = (
 fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
     let shapes = (
         "app/Shop/Shapes.sharp",
-        "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n\npublic struct Tag\n{\n    public Tag(public string name { get; }) { }\n\n    public string toString() => this.name;\n}\n",
+        "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n\npublic struct Tag\n{\n    public Tag(public string name { get; }) { }\n\n    public string toString() => this.name;\n}\n\npublic struct Board\n{\n    public Board(public Map<Point, int> counts { get; }) { }\n}\n\npublic enum Plain\n{\n    case Low;\n}\n\npublic enum Coded : string\n{\n    case Low = \"low\";\n}\n",
     );
     let report = (
         "app/Shop/Report.sharp",
-        "namespace App.Shop;\n\nimport Sharp.Json.Json;\n\npublic class Report\n{\n    public static void run(Map<Point, int> points, Map<Tag, int> tags, List<Map<Point, int>> nested, Map<string, Point> values, Map<int, string> numbered, Any? raw)\n    {\n        Report.keep(Json.encode(tags));\n        Report.keep(Json.encode(values));\n        Report.keep(Json.encode(numbered));\n        Report.keep(Json.encode(raw));\n        Report.keep(Json.encode(points));\n        Report.keep(Json.encode(nested));\n    }\n\n    public static void keep(string json)\n    {\n    }\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Json.Json;\n\npublic class Report\n{\n    public static void run(Map<Point, int> points, Map<Tag, int> tags, List<Map<Point, int>> nested, Map<string, Point> values, Map<int, string> numbered, Any? raw, Board board, Map<float, int> floats, Map<Plain, int> plains, Map<bool, int> flags, Map<Coded, int> coded)\n    {\n        Report.keep(Json.encode(tags));\n        Report.keep(Json.encode(values));\n        Report.keep(Json.encode(numbered));\n        Report.keep(Json.encode(raw));\n        Report.keep(Json.encode(points));\n        Report.keep(Json.encode(nested));\n        Report.keep(Json.encode(board));\n        Report.keep(Json.encode(floats));\n        Report.keep(Json.encode(plains));\n        Report.keep(Json.encode(flags));\n        Report.keep(Json.encode(coded));\n    }\n\n    public static void keep(string json)\n    {\n    }\n}\n",
     );
+    let point = "invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.";
     let bare = (
         "app/Shop/Bare.sharp",
         "namespace App.Shop;\n\npublic class Bare\n{\n    public static string run(Any? value) => json_encode(value);\n}\n",
@@ -19082,8 +19083,12 @@ fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
     assert_eq!(
         refusals(report, &[JSON, shapes]),
         [
-            "13:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.",
-            "14:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.",
+            format!("13:33 {point}"),
+            format!("14:33 {point}"),
+            format!("15:33 {point}"),
+            "16:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and a `float` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
+            "17:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Plain` has no `toString()`. | Declare `public string toString()` on `Plain`, or encode a `Map` keyed by text.".to_owned(),
+            "18:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and a `bool` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
         ]
     );
     assert_eq!(
