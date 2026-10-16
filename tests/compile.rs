@@ -2711,10 +2711,45 @@ fn a_law_reaching_a_member_lean_reserves_is_refused() {
 }
 
 #[test]
-fn a_law_reaching_a_collection_is_refused() {
+fn a_law_reaching_a_map_is_refused() {
     assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(List<int> items) => true;\n}\n",
+        "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(Map<string, int> items) => true;\n}\n",
         "Law sized reaches a collection in Shape.sized. A law cannot reason about this use of a collection.",
+    );
+}
+
+/// A `List` is Lean's `List`, and its `map`, `filter` and `count` are Lean's `List.map`, `List.filter` and
+/// `List.length`, so Mago proves a law over them with the proof it creates.
+#[test]
+fn compile_proves_a_law_over_map_filter_and_count() {
+    let directory = lawful_project(&[(
+        "app/Shared/Basket.sharp",
+        "namespace App.Shared;\n\npublic class Basket\n{\n    public static List<bool> flags(List<int> items) => items.map(x => x > 0);\n\n    public static List<int> positives(List<int> items) => items.filter(x => x > 0);\n\n    law flagsKeepCount(List<int> items) => Basket.flags(items).count() == items.count();\n\n    law positivesDropTheRest(int unused) => Basket.positives([1, -2, 3]) == [1, 3];\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Basket.sharp").exists());
+}
+
+/// A law reaches only `map`, `filter` and `count` of a `List`, so any other method of one is refused by its name.
+#[test]
+fn a_law_reaching_another_list_method_is_refused_by_name() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static bool known(List<int> items) => items.contains(3);\n\n    law knows(List<int> items) => Shape.known(items);\n}\n",
+        "Law knows reaches the List method contains in Shape.known. A law cannot reason about this use of a collection.",
+    );
+}
+
+/// `map` and `filter` take a pure function, so a lambda whose body can throw, as `x * 2` throws on overflow, is
+/// refused.
+#[test]
+fn a_law_reaching_a_lambda_that_can_throw_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static List<int> doubled(List<int> items) => items.map(x => x * 2);\n\n    law same(List<int> items) => Shape.doubled(items).count() == items.count();\n}\n",
+        "Law same reaches a lambda whose body can throw in Shape.doubled. A law cannot reason about this lambda.",
     );
 }
 
