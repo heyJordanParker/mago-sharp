@@ -13,6 +13,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
+use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::mixed::TMixed;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -277,15 +278,33 @@ where
     let mut missing: HashSet<(Word, Word)> = HashSet::default();
     if let Some(object_type) = artifacts.get_expression_type(object) {
         // A PHP# collection is called as every collection its place is declared as, whatever it holds, so a method
-        // resolves on each of them, and a collection that lacks it is reported once.
-        let declared = (context.dialect.is_sharp()
-            && object_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))))
-        .then(|| get_declared_collection(context, block_context, artifacts, object))
-        .flatten();
+        // resolves on each of them, and a collection that lacks it is reported once. A place declared `Iterable<T>` has
+        // only the lazy operations, spec section 12, whatever value it was last given: a `List`, or a plain PHP class
+        // with its own methods.
+        let declared_iterable = context
+            .dialect
+            .is_sharp()
+            .then(|| get_declared_type(context, block_context, artifacts, object))
+            .flatten()
+            .and_then(|declared| declared.types.iter().find(|atomic| matches!(atomic, TAtomic::Iterable(_))).cloned());
+        let declared = match declared_iterable {
+            Some(iterable) => Some(TUnion::from_atomic(iterable)),
+            None => (context.dialect.is_sharp()
+                && object_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))))
+            .then(|| get_declared_collection(context, block_context, artifacts, object))
+            .flatten(),
+        };
+        let replaced = |atomic: &TAtomic| match &declared {
+            Some(declared) if declared.types.iter().any(|atomic| matches!(atomic, TAtomic::Iterable(_))) => {
+                !atomic.is_null()
+            }
+            Some(_) => matches!(atomic, TAtomic::Array(_)),
+            None => false,
+        };
         let mut object_atomics = object_type
             .types
             .iter()
-            .filter(|atomic| declared.is_none() || !matches!(atomic, TAtomic::Array(_)))
+            .filter(|atomic| !replaced(atomic))
             .chain(declared.iter().flat_map(|declared| declared.types.iter()))
             .map(|atomic| (atomic, atomic))
             .collect::<Vec<_>>();
@@ -325,6 +344,10 @@ where
                     }
 
                     collection_methods = get_collection_methods(array, context.codebase);
+                    &collection_methods
+                }
+                TAtomic::Iterable(iterable) if context.dialect.is_sharp() => {
+                    collection_methods = get_iterable_methods(iterable);
                     &collection_methods
                 }
                 _ => {
@@ -416,7 +439,10 @@ where
                                         selector.span(),
                                         classname,
                                         &collection,
-                                        method_name,
+                                        match selector {
+                                            ClassLikeMemberSelector::Identifier(written) => word(written.value),
+                                            _ => method_name,
+                                        },
                                     );
 
                                     result.has_invalid_target = true;
@@ -1467,6 +1493,15 @@ fn get_collection_methods(array: &TArray, codebase: &CodebaseMetadata) -> TObjec
     })
 }
 
+/// The class whose lazy operations a PHP# `Iterable<T>` has, spec section 12: it is called as
+/// `Sharp\IterableMethods<T>`, typed by its elements as a `List<T>` is.
+fn get_iterable_methods(iterable: &TIterable) -> TObject {
+    let mut value = iterable.get_value_type().clone();
+    value.widen_scalars();
+
+    TObject::Named(TNamedObject::new_with_type_parameters(word("Sharp\\IterableMethods"), Some(vec![value])))
+}
+
 /// Reports a method called with `->`, or `.` in PHP#, on `object`, whose type `object_type` holds `null`, unless the
 /// type says its `null` is expected or came from an earlier `?->`. Returns whether it reported.
 fn report_method_access_on_null<A>(
@@ -1577,8 +1612,9 @@ pub(crate) fn report_non_existent_method<A>(
     context.collector.report_with_code(IssueCode::NonExistentMethod, issue);
 }
 
-/// Reports a method a PHP# `List`, `Map` or `Set` does not have, naming the collection type the code wrote and the
-/// methods `classname`, its `Sharp\ListMethods`, `Sharp\MapMethods` or `Sharp\SetMethods`, gives it.
+/// Reports a method a PHP# `List`, `Map`, `Set` or `Iterable` does not have, naming the collection type the code wrote
+/// and the methods `classname`, its `Sharp\ListMethods`, `Sharp\MapMethods`, `Sharp\SetMethods` or
+/// `Sharp\IterableMethods`, gives it.
 fn report_non_existent_collection_method<A>(
     context: &mut Context<'_, '_, A>,
     obj_span: Span,
@@ -1592,9 +1628,16 @@ fn report_non_existent_collection_method<A>(
     let mut methods = context
         .codebase
         .get_class_like(classname.as_bytes())
-        .map(|metadata| metadata.methods.iter().map(|method| format!("`{method}`")).collect::<Vec<_>>())
+        .map(|metadata| {
+            metadata
+                .methods
+                .iter()
+                .map(|method| format!("`{}`", display_method_name(context, classname, *method)))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     methods.sort();
+    let article = if collection.starts_with("Iterable") { "An" } else { "A" };
 
     context.collector.report_with_code(
         IssueCode::NonExistentMethod,
@@ -1603,7 +1646,7 @@ fn report_non_existent_collection_method<A>(
             .with_annotation(
                 Annotation::secondary(obj_span).with_message(format!("This expression has type `{collection}`")),
             )
-            .with_help(format!("A `{collection}` has the methods {}.", methods.join(", "))),
+            .with_help(format!("{article} `{collection}` has the methods {}.", methods.join(", "))),
     );
 }
 

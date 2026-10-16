@@ -2182,10 +2182,10 @@ pub(crate) fn collection_key_error(key_id: &str, in_set: bool, span: Span) -> Is
     };
 
     Issue::error(format!(
-        "{rule} is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `operator ==`, and `{key_id}` is none of them."
+        "{rule} is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `{key_id}` is none of them."
     ))
     .with_annotation(Annotation::primary(span).with_message(held))
     .with_help(format!(
-        "{fix} an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, or a class that declares `public static bool operator ==` with `public int hash()`."
+        "{fix} an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`."
     ))
 }

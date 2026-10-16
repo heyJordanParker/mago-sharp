@@ -44,6 +44,9 @@ pub struct State {
     /// The class-like whose members the parser reads, as a message names it: `A class`, `An interface`, `An enum`,
     /// `A trait` or `A module`.
     pub members_of: &'static str,
+    /// The name of the class-like whose members the parser reads, which its constructor writes, or `None` for an
+    /// anonymous class, a module and an extension.
+    pub members_name: Option<std::boxed::Box<[u8]>>,
     /// The type parameter names of the class whose members the parser reads, as `T` or `TKey, TValue`, or `None` when
     /// it declares none.
     pub type_parameters_of: Option<std::boxed::Box<str>>,

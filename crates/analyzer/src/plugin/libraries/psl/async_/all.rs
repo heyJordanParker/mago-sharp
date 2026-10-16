@@ -69,6 +69,7 @@ pub(super) fn unwrap_awaitable_array(array: &TArray, context: &ProviderContext<'
             }),
             known_count: list.known_count,
             non_empty: list.non_empty,
+            tuple_names: list.tuple_names.clone(),
             known_elements: if let Some(known_elements) = &list.known_elements {
                 let mut new_elements = BTreeMap::new();
                 for (index, (possibly_undefined, element_type)) in known_elements {

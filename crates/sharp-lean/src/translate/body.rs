@@ -32,6 +32,7 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Literal;
+use mago_syntax::cst::LocalTarget;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::NullSafePropertyAccess;
@@ -193,12 +194,17 @@ impl<'body, 'program> Body<'body, 'program> {
                 self.lines.push(format!("return {value}"));
             }
             Statement::LocalDeclaration(local) => {
+                let LocalTarget::Name(name) = &local.target else {
+                    self.unmodeled(statement.span(), "an unpacked tuple".to_owned(), issues::NOT_TRANSLATED);
+
+                    return;
+                };
                 let value = self.value(local.value);
                 if self.checked.types().expression_type(local.value).is_nullable() {
-                    self.nullable_locals.insert(local.name.span.start.offset);
+                    self.nullable_locals.insert(name.span.start.offset);
                 }
                 let keyword = if local.is_const() { "let" } else { "let mut" };
-                self.lines.push(format!("{keyword} {} := {value}", names::identifier(local.name.value)));
+                self.lines.push(format!("{keyword} {} := {value}", names::identifier(name.value)));
             }
             Statement::Expression(statement) => match statement.expression {
                 Expression::Assignment(assignment) => self.assignment(assignment),

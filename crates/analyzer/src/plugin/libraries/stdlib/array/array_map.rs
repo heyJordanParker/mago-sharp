@@ -145,6 +145,7 @@ impl FunctionReturnTypeProvider for ArrayMapProvider {
                     known_elements: Some(new_elements),
                     known_count: list.known_count,
                     non_empty: list.non_empty,
+                    tuple_names: None,
                 };
 
                 Some(wrap_atomic(TAtomic::Array(TArray::List(result))))
@@ -270,6 +271,7 @@ fn zip_input_arrays(
         known_elements: None,
         known_count: None,
         non_empty: all_inputs_non_empty,
+        tuple_names: None,
     }))))
 }
 

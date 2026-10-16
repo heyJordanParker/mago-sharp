@@ -34,6 +34,8 @@ use mago_names::ResolvedNames;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
+use mago_syntax::cst::Argument;
+use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
@@ -118,7 +120,7 @@ impl<'analysis> Types<'analysis> {
 
     /// What the PHP of a pattern depends on, as the analysis answered it.
     pub(crate) fn pattern_names(&self) -> CodebasePatternNames<'_, 'analysis> {
-        CodebasePatternNames { names: &self.names, codebase: self.codebase }
+        CodebasePatternNames { names: &self.names, codebase: self.codebase, artifacts: self.artifacts }
     }
 
     /// The type the analysis gave `expression`.
@@ -130,6 +132,28 @@ impl<'analysis> Types<'analysis> {
                 expression.span()
             )
         })
+    }
+
+    /// Whether the collection `expression` may hold a `Map`, whose element a loop reads as its entry, spec section 17.
+    pub(crate) fn holds_map(&self, expression: &Expression) -> bool {
+        self.expression_type(expression).types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
+    }
+
+    /// The position of the element `access` reads by its name in the tuple its object holds, spec section 30, or `None`
+    /// when the object holds no tuple. The checker refuses a name the tuple does not write.
+    pub(crate) fn tuple_element_index(&self, access: &PropertyAccess) -> Option<usize> {
+        let ClassLikeMemberSelector::Identifier(name) = &access.property else {
+            unreachable!("check_slice refuses the member name `{}`", access.property);
+        };
+        // A class a static member is read on has no type.
+        let TAtomic::Array(TArray::List(list)) = self.artifacts.get_expression_type(access.object)?.types.first()?
+        else {
+            return None;
+        };
+
+        list.tuple_elements()?
+            .iter()
+            .position(|(_, element)| element.is_some_and(|element| element.as_bytes() == name.value))
     }
 
     /// The declaration the fully qualified class name `class` resolves to.
@@ -491,6 +515,18 @@ impl<'analysis> Types<'analysis> {
         self.function_type(&function, &parameters, result)
     }
 
+    /// The type text of the result of the method `class::method`, as [`FunctionType::result`] writes it.
+    pub(crate) fn method_result(&self, class: &[u8], method: &[u8]) -> Option<String> {
+        let Some(metadata) = self.codebase.get_method(class, method) else {
+            unreachable!(
+                "the codebase holds every method a PHP# file declares, not {}",
+                String::from_utf8_lossy(method)
+            );
+        };
+
+        self.result_text(metadata.return_type_metadata.as_ref().map(|r#type| &r#type.type_union))
+    }
+
     /// The [`FunctionType`] of the PHP# function `function`, with `parameters` and `result`.
     fn function_type(
         &self,
@@ -498,7 +534,17 @@ impl<'analysis> Types<'analysis> {
         parameters: &[Option<&TUnion>],
         result: Option<&TUnion>,
     ) -> FunctionType {
-        FunctionType { name: function.as_string(), text: self.function_type_text(function, parameters, result) }
+        FunctionType {
+            name: function.as_string(),
+            text: self.function_type_text(function, parameters, result),
+            result: self.result_text(result),
+        }
+    }
+
+    /// The type text of `result`, each class's type parameter as `$i` and the function's own as `#i`, or `None` when it
+    /// is missing or PHP# can't write it.
+    fn result_text(&self, result: Option<&TUnion>) -> Option<String> {
+        result.filter(|result| is_written_in_sharp(result)).map(|result| text(result, self.codebase, Parameter::Index))
     }
 
     /// The type text `Function<R(P1, P2) uses E1, E2>` of the PHP# function `function`, with `parameters` and `result`,
@@ -571,6 +617,73 @@ impl<'analysis> Types<'analysis> {
     /// spec section 12 lets in, wherever it goes next. A collection's elements are tested only in the result of the
     /// project's own plain PHP: PHP's internal functions and the prelude's stubs have types the engine guarantees.
     pub(crate) fn call_check(&self, call: &Expression) -> Option<(String, String)> {
+        let (name, metadata) = self.plain_php_call(call)?;
+        let text = self.checked_text(self.artifacts.get_expression_type(call)?, metadata.flags.is_user_defined())?;
+
+        Some((text, name))
+    }
+
+    /// The check a call into plain PHP takes where its result, an object of a plain PHP class that is a `Traversable`,
+    /// as a generator, an `IteratorAggregate` or Laravel's `LazyCollection` is, enters a place of the type `declared`
+    /// that holds an `Iterable<T>`: `declared`'s text, whose `Iterable<T>` checks each element as it is read, spec
+    /// section 12, and the call's name. Until it is held as an `Iterable<T>`, the result keeps its own class and
+    /// methods, so [`Self::call_check`] gives the call alone no check.
+    pub(crate) fn lazy_call_check(&self, call: &Expression, declared: &TUnion) -> Option<(String, String)> {
+        let (name, _) = self.plain_php_call(call)?;
+        let is_lazy_source = |atomic: &TAtomic| match atomic {
+            TAtomic::Object(TObject::Named(object)) => {
+                self.codebase.get_class_like(object.name.as_bytes()).is_some_and(|class| !class.flags.is_sharp())
+                    && self.codebase.is_instance_of(object.name.as_bytes(), b"Traversable")
+            }
+            atomic => atomic.is_null(),
+        };
+        let holds_iterable = declared.types.iter().any(|atomic| {
+            matches!(atomic, TAtomic::Iterable(iterable) if iterable.holds_map_entries && !iterable.get_value_type().is_mixed())
+        });
+        let result = self.artifacts.get_expression_type(call)?;
+
+        (holds_iterable && result.types.iter().all(is_lazy_source) && is_written_in_sharp(declared))
+            .then(|| (text(declared, self.codebase, Parameter::Index), name))
+    }
+
+    /// The check each positional argument of `list` takes where it enters an `Iterable<T>` parameter of the PHP#
+    /// function, method or constructor `callee`, as [`Self::lazy_call_check`] says. The engine checks the arguments of a
+    /// call from plain PHP only, so a call from PHP# checks a lazy source where it passes one.
+    pub(crate) fn lazy_argument_checks(
+        &self,
+        callee: &FunctionLikeMetadata,
+        list: &ArgumentList,
+    ) -> Vec<Option<(String, String)>> {
+        list.arguments
+            .iter()
+            .zip(&callee.parameters)
+            .map(|(argument, parameter)| match argument {
+                Argument::Positional(positional) if positional.ellipsis.is_none() => {
+                    self.lazy_call_check(positional.value, &parameter.type_metadata.as_ref()?.type_union)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The PHP# function or method the checker resolved `call` to.
+    pub(crate) fn sharp_callee(&self, call: &Expression) -> Option<&'analysis FunctionLikeMetadata> {
+        let mut callees = self.artifacts.get_callees(call);
+        let (Some(CallTarget::FunctionLike { callee, .. }), None) = (callees.next(), callees.next()) else {
+            return None;
+        };
+
+        self.codebase.get_function_like(callee).filter(|metadata| metadata.flags.is_sharp())
+    }
+
+    /// The constructor `new` runs for the fully qualified class name `class` when PHP# declares it.
+    pub(crate) fn sharp_constructor(&self, class: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
+        self.codebase.get_declaring_method(class, b"__construct").filter(|metadata| metadata.flags.is_sharp())
+    }
+
+    /// The name PHP's return check gives `call`, as `Lib\Pager::orders()`, and the metadata of the plain PHP function or
+    /// method the checker resolved it to.
+    fn plain_php_call(&self, call: &Expression) -> Option<(String, &'analysis FunctionLikeMetadata)> {
         let (callee, metadata) = self.artifacts.get_callees(call).find_map(|target| match target {
             CallTarget::FunctionLike { callee, .. } | CallTarget::MagicMethod { callee, .. } => self
                 .codebase
@@ -579,7 +692,6 @@ impl<'analysis> Types<'analysis> {
                 .map(|metadata| (callee, metadata)),
             CallTarget::Property { .. } => None,
         })?;
-        let text = self.checked_text(self.artifacts.get_expression_type(call)?, metadata.flags.is_user_defined())?;
         let name = match callee {
             FunctionLikeIdentifier::Method(class, _) => {
                 let class = self.codebase.get_class_like(class.as_bytes()).map_or(*class, |class| class.original_name);
@@ -588,7 +700,7 @@ impl<'analysis> Types<'analysis> {
             _ => metadata.original_name.to_string(),
         };
 
-        Some((text, format!("{name}()")))
+        Some((format!("{name}()"), metadata))
     }
 
     /// The type text the property `property` of the fully qualified class name `class` checks a value from plain PHP
@@ -667,6 +779,8 @@ impl<'analysis> Types<'analysis> {
                     constrains(element)
                 }
                 Some(SharpType::Map(key, value)) => constrains(key) || constrains(value),
+                // PHP's `array` type checks neither a tuple's length nor its elements.
+                Some(SharpType::Tuple(_)) => true,
                 _ => false,
             })
             || r#type.types.iter().any(|atomic| match atomic {
@@ -998,6 +1112,28 @@ impl<'analysis> Types<'analysis> {
         Some((collection, method.as_bytes().to_ascii_lowercase()))
     }
 
+    /// Whether the method call `call`, null-safe or not, runs a `Map` method that leaves its receiver as it is, which
+    /// `Sharp\MapMethods` declares mutation-free.
+    pub(crate) fn reads_map(&self, call: &Expression) -> bool {
+        let Some(("Map", method)) = self.collection_method(call) else {
+            return false;
+        };
+
+        self.codebase
+            .get_method(b"Sharp\\MapMethods", &method)
+            .is_some_and(|metadata| metadata.flags.is_mutation_free())
+    }
+
+    /// Whether the method call `call`, null-safe or not, runs a lazy operation of a PHP# `Iterable<T>`, spec section 12,
+    /// which `Sharp\IterableMethods` declares and the engine's `Sharp\Sequence` runs.
+    pub(crate) fn is_lazy_operation(&self, call: &Expression) -> bool {
+        matches!(
+            self.artifacts.get_callees(call).next(),
+            Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, _), .. })
+                if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\IterableMethods")
+        )
+    }
+
     /// The plain PHP function the method call `call` runs, as `Pdf.render(html)` and `global.now()` call one, spec
     /// section 23, with the name its declaration writes. None for a call of a method.
     pub(crate) fn namespace_function(&self, call: &Expression) -> Option<Word> {
@@ -1269,6 +1405,9 @@ pub(crate) struct FunctionType {
     pub(crate) name: String,
     /// Its type text, `Function<R(P1, P2) uses E1, E2>`, or `None` when no function type can say its type.
     pub(crate) text: Option<String>,
+    /// The type text of its result, which a generator's elements and a map stage's are read from whatever it calls,
+    /// spec section 12, or `None` when PHP# can't write it.
+    pub(crate) result: Option<String>,
 }
 
 /// A parameter of plain PHP code a call runs, which a `Map` or a `Set` crosses into: a declared function's, method's or
@@ -1338,7 +1477,8 @@ enum Parameter {
 }
 
 /// `r#type` in the one PHP# spelling the engine parses, the type text of php-sharp's decision 72: a class by its full
-/// dotted name as it is declared, the built-in types, `List<T>`, `Map<K, V>`, `Set<T>`, `Iterable<T>`, `Class<T>`,
+/// dotted name as it is declared, the built-in types, `List<T>`, `Map<K, V>`, `Set<T>`, `Iterable<T>`, a tuple as
+/// `[A, B]`, `Class<T>`,
 /// `Function<R(P1, P2)>`, a type parameter as `Any?`, `T?`, `(A|B)?`, `A & B`, and an intersection in parentheses
 /// inside a union or a nullable type, `(A & B)|C` and `(A & B)?`. Union and intersection members are sorted by their
 /// text, and a space comes only after a comma and around `&`.
@@ -1429,6 +1569,10 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
         SharpType::Set(element_type) => format!("Set<{}>", type_text(element_type)),
         SharpType::Map(key, value) => format!("Map<{}>", list(&mut [key, value].into_iter())),
         SharpType::Iterable(value) => format!("Iterable<{}>", type_text(value)),
+        // A tuple's element names are the checker's, so the engine reads only its element types.
+        SharpType::Tuple(tuple) => {
+            format!("[{}]", list(&mut tuple.tuple_elements().into_iter().flatten().map(|(element, _)| element)))
+        }
         SharpType::Parameter(generic) => {
             parameter_text(generic.parameter_name, generic.defining_entity, &|| type_text(&generic.constraint))
         }

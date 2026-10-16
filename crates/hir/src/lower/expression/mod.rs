@@ -443,6 +443,7 @@ where
                 YieldKind::Pair(key, value)
             }
             cst::Yield::From(from) => YieldKind::From(self.arena.alloc(self.lower_expression(from.iterator))),
+            cst::Yield::Spread(spread) => YieldKind::From(self.arena.alloc(self.lower_expression(spread.iterator))),
         };
 
         self.arena.alloc(Yield { span: r#yield.span(), kind })

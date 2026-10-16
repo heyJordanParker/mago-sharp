@@ -37,6 +37,7 @@ use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Is;
 use mago_syntax::cst::LocalDeclaration;
+use mago_syntax::cst::LocalTarget;
 use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PropertyAccess;
@@ -1103,7 +1104,16 @@ where
         declaration: &'ast LocalDeclaration<'arena>,
         recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
     ) {
-        recorder.store(declaration.name.span, declaration.value);
+        match &declaration.target {
+            LocalTarget::Name(name) => recorder.store(name.span, declaration.value),
+            // Each local an unpack declares holds a part of the value, as a loop variable holds a part of its source.
+            LocalTarget::Unpack(unpack) => {
+                let roots = recorder.stored_roots(declaration.value);
+                for name in unpack.names.iter() {
+                    recorder.bind(name.span, roots.clone());
+                }
+            }
+        }
     }
 
     fn walk_in_for_of(&self, for_of: &'ast ForOf<'arena>, recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>) {

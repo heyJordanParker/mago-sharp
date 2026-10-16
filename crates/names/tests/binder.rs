@@ -214,6 +214,18 @@ fn the_class_in_nameof_resolves_like_any_class_name() {
 }
 
 #[test]
+fn a_yielded_value_and_a_yielded_spread_bind_their_names_as_any_value_does() {
+    const CODE: &str = "namespace App.Tenant.Store;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield ...pending;\n        yield latest;\n        yield Store.first();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(binding(&names, CODE, "pending", 1), Some(local(CODE, "pending", 0, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "latest", 1), Some(local(CODE, "latest", 0, LocalKind::Parameter)));
+    assert_eq!(resolved(&names, CODE, "Store", 1), b"App\\Tenant\\Store\\Store");
+    assert!(names.binding_errors().is_empty(), "{:#?}", names.binding_errors());
+}
+
+#[test]
 fn a_typed_local_binds_like_let_or_const_and_its_type_resolves() {
     const CODE: &str = "namespace App.Tenant.Store;\n\nimport App.Shared.Money;\n\nclass Report\n{\n    public int total()\n    {\n        Money? found = null;\n        const int base = 2;\n        found = null;\n        return base;\n    }\n}\n";
     let arena = LocalArena::new();

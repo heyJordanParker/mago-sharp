@@ -5,6 +5,7 @@ use crate::cst::cst::UnaryPrefixOperator;
 use crate::cst::cst::Yield;
 use crate::cst::cst::YieldFrom;
 use crate::cst::cst::YieldPair;
+use crate::cst::cst::YieldSpread;
 use crate::cst::cst::YieldValue;
 use crate::error::ParseError;
 use crate::parser::Parser;
@@ -21,10 +22,26 @@ where
             return Ok(Yield::Value(YieldValue { r#yield, value: None }));
         };
 
-        if T!["from"] == next.kind {
+        // A `.sharp` file reads `from` as a name, spec section 2, so PHP's `yield from other` is that name before an
+        // expression, which the checker refuses by naming `yield ...other`.
+        let is_from = T!["from"] == next.kind
+            || (self.dialect.is_sharp()
+                && next.kind == T![Identifier]
+                && next.value == b"from"
+                && self.stream.lookahead(1)?.is_some_and(|after| Self::is_at_start_of_expression(after.kind)));
+        if is_from {
             return Ok(Yield::From(YieldFrom {
                 r#yield,
-                from: self.expect_keyword(T!["from"])?,
+                from: self.expect_any_keyword()?,
+                iterator: self.arena.alloc(self.parse_expression_with_precedence(Precedence::YieldFrom)?),
+            }));
+        }
+
+        // `yield ...other` produces every element of `other`, spec section 12, as PHP's `yield from other` does.
+        if self.dialect.is_sharp() && T!["..."] == next.kind {
+            return Ok(Yield::Spread(YieldSpread {
+                r#yield,
+                ellipsis: self.stream.eat_span(T!["..."])?,
                 iterator: self.arena.alloc(self.parse_expression_with_precedence(Precedence::YieldFrom)?),
             }));
         }

@@ -8,6 +8,7 @@ use crate::cst::cst::EnumBackingTypeHint;
 use crate::cst::cst::Hint;
 use crate::cst::cst::Inheritance;
 use crate::cst::cst::Interface;
+use crate::cst::cst::LocalIdentifier;
 use crate::cst::cst::Modifier;
 use crate::cst::cst::Statement;
 use crate::cst::cst::Trait;
@@ -32,13 +33,15 @@ where
     A: Arena,
 {
     /// A class-like's members up to its `}`. A member that fails to parse is reported and skipped, so the rest still
-    /// parse. `members_of` names the owner in the messages, as `A class` or `An enum`, and `type_parameters_of` the
-    /// type parameters it declares, as `T` or `TKey, TValue`.
+    /// parse. `members_of` names the owner in the messages, as `A class` or `An enum`, `name` is its name, `None` for
+    /// an anonymous class, and `type_parameters_of` the type parameters it declares, as `T` or `TKey, TValue`.
     pub(crate) fn parse_class_like_members(
         &mut self,
         members_of: &'static str,
+        name: Option<&LocalIdentifier<'arena>>,
         type_parameters_of: Option<std::boxed::Box<str>>,
     ) -> Result<Sequence<'arena, ClassLikeMember<'arena>>, ParseError> {
+        let members_name = name.map(|name| std::boxed::Box::<[u8]>::from(name.value));
         let mut members = self.new_vec();
         loop {
             if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
@@ -47,6 +50,7 @@ where
 
             let position_before = self.stream.current_position();
             self.state.members_of = members_of;
+            self.state.members_name.clone_from(&members_name);
             self.state.type_parameters_of.clone_from(&type_parameters_of);
             match self.parse_classlike_member() {
                 Ok(member) => members.push(member),
@@ -147,7 +151,7 @@ where
             extends: self.parse_optional_extends()?,
             inheritance: self.parse_optional_inheritance()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: self.parse_class_like_members("An interface", type_parameter_names)?,
+            members: self.parse_class_like_members("An interface", Some(&name), type_parameter_names)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -181,7 +185,7 @@ where
             implements: self.parse_optional_implements()?,
             inheritance: self.parse_optional_inheritance()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: self.parse_class_like_members("A class", type_parameter_names)?,
+            members: self.parse_class_like_members("A class", Some(&name), type_parameter_names)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -196,7 +200,7 @@ where
             extends: self.parse_optional_extends()?,
             implements: self.parse_optional_implements()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: self.parse_class_like_members("A class", None)?,
+            members: self.parse_class_like_members("A class", None, None)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -213,13 +217,16 @@ where
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
     ) -> Result<Trait<'arena>, ParseError> {
+        let r#trait = self.expect_keyword(T!["trait"])?;
+        let name = self.parse_local_identifier()?;
+
         Ok(Trait {
             attribute_lists: attributes,
             modifiers,
-            r#trait: self.expect_keyword(T!["trait"])?,
-            name: self.parse_local_identifier()?,
+            r#trait,
+            name,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: self.parse_class_like_members("A trait", None)?,
+            members: self.parse_class_like_members("A trait", Some(&name), None)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -249,7 +256,7 @@ where
             inheritance,
             implements: self.parse_optional_implements()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: self.parse_class_like_members("An enum", None)?,
+            members: self.parse_class_like_members("An enum", Some(&name), None)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }

@@ -33,6 +33,7 @@ where
         {
             let position_before = self.stream.current_position();
             self.state.members_of = "An extension";
+            self.state.members_name = None;
             match self.parse_classlike_member() {
                 Ok(member) => members.push(member),
                 Err(error) => self.errors.push(error),

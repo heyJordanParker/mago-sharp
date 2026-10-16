@@ -37,10 +37,10 @@ impl Fingerprintable for ForOf<'_> {
         self.keyword.fingerprint_with_hasher(hasher, resolved_names, options);
         match &self.target {
             ForOfTarget::Value(value) => value.fingerprint_with_hasher(hasher, resolved_names, options),
-            ForOfTarget::KeyValue(target) => {
-                "key_value".hash(hasher);
-                target.key.fingerprint_with_hasher(hasher, resolved_names, options);
-                target.value.fingerprint_with_hasher(hasher, resolved_names, options);
+            ForOfTarget::Unpack(target) => {
+                "unpack".hash(hasher);
+                target.first.fingerprint_with_hasher(hasher, resolved_names, options);
+                target.second.fingerprint_with_hasher(hasher, resolved_names, options);
             }
         }
         self.expression.fingerprint_with_hasher(hasher, resolved_names, options);

@@ -92,8 +92,8 @@ use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
 use crate::cst::cst::ForColonDelimitedBody;
 use crate::cst::cst::ForOf;
-use crate::cst::cst::ForOfKeyValueTarget;
 use crate::cst::cst::ForOfTarget;
+use crate::cst::cst::ForOfUnpackTarget;
 use crate::cst::cst::ForOfVariable;
 use crate::cst::cst::Foreach;
 use crate::cst::cst::ForeachBody;
@@ -155,6 +155,8 @@ use crate::cst::cst::LiteralString;
 use crate::cst::cst::LiteralStringPart;
 use crate::cst::cst::LocalDeclaration;
 use crate::cst::cst::LocalIdentifier;
+use crate::cst::cst::LocalTarget;
+use crate::cst::cst::LocalUnpack;
 use crate::cst::cst::MagicConstant;
 use crate::cst::cst::Match;
 use crate::cst::cst::MatchArm;
@@ -264,6 +266,8 @@ use crate::cst::cst::TraitUseSpecification;
 use crate::cst::cst::Try;
 use crate::cst::cst::TryCatchClause;
 use crate::cst::cst::TryFinallyClause;
+use crate::cst::cst::TupleElementHint;
+use crate::cst::cst::TupleHint;
 use crate::cst::cst::TypeArgumentList;
 use crate::cst::cst::TypeOf;
 use crate::cst::cst::TypeParameter;
@@ -296,6 +300,7 @@ use crate::cst::cst::With;
 use crate::cst::cst::Yield;
 use crate::cst::cst::YieldFrom;
 use crate::cst::cst::YieldPair;
+use crate::cst::cst::YieldSpread;
 use crate::cst::cst::YieldValue;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord, Display, EnumCount, EnumIter, EnumString)]
@@ -498,8 +503,8 @@ pub enum NodeKind {
     ForBody,
     ForColonDelimitedBody,
     ForOf,
-    ForOfKeyValueTarget,
     ForOfTarget,
+    ForOfUnpackTarget,
     ForOfVariable,
     While,
     WhileBody,
@@ -537,6 +542,7 @@ pub enum NodeKind {
     Yield,
     YieldFrom,
     YieldPair,
+    YieldSpread,
     YieldValue,
     Statement,
     ExpressionStatement,
@@ -559,6 +565,8 @@ pub enum NodeKind {
     NullableHint,
     GenericHint,
     FunctionHint,
+    TupleHint,
+    TupleElementHint,
     ReadonlyHint,
     TypeArgumentList,
     TypeParameterList,
@@ -568,6 +576,8 @@ pub enum NodeKind {
     UnionHint,
     Unset,
     LocalDeclaration,
+    LocalTarget,
+    LocalUnpack,
     Is,
     As,
     Pattern,
@@ -794,8 +804,8 @@ pub enum Node<'ast, 'arena> {
     ForBody(&'ast ForBody<'arena>),
     ForColonDelimitedBody(&'ast ForColonDelimitedBody<'arena>),
     ForOf(&'ast ForOf<'arena>),
-    ForOfKeyValueTarget(&'ast ForOfKeyValueTarget<'arena>),
     ForOfTarget(&'ast ForOfTarget<'arena>),
+    ForOfUnpackTarget(&'ast ForOfUnpackTarget<'arena>),
     ForOfVariable(&'ast ForOfVariable<'arena>),
     While(&'ast While<'arena>),
     WhileBody(&'ast WhileBody<'arena>),
@@ -833,6 +843,7 @@ pub enum Node<'ast, 'arena> {
     Yield(&'ast Yield<'arena>),
     YieldFrom(&'ast YieldFrom<'arena>),
     YieldPair(&'ast YieldPair<'arena>),
+    YieldSpread(&'ast YieldSpread<'arena>),
     YieldValue(&'ast YieldValue<'arena>),
     Statement(&'ast Statement<'arena>),
     ExpressionStatement(&'ast ExpressionStatement<'arena>),
@@ -855,6 +866,8 @@ pub enum Node<'ast, 'arena> {
     NullableHint(&'ast NullableHint<'arena>),
     GenericHint(&'ast GenericHint<'arena>),
     FunctionHint(&'ast FunctionHint<'arena>),
+    TupleHint(&'ast TupleHint<'arena>),
+    TupleElementHint(&'ast TupleElementHint<'arena>),
     ReadonlyHint(&'ast ReadonlyHint<'arena>),
     TypeArgumentList(&'ast TypeArgumentList<'arena>),
     TypeParameterList(&'ast TypeParameterList<'arena>),
@@ -864,6 +877,8 @@ pub enum Node<'ast, 'arena> {
     UnionHint(&'ast UnionHint<'arena>),
     Unset(&'ast Unset<'arena>),
     LocalDeclaration(&'ast LocalDeclaration<'arena>),
+    LocalTarget(&'ast LocalTarget<'arena>),
+    LocalUnpack(&'ast LocalUnpack<'arena>),
     Is(&'ast Is<'arena>),
     As(&'ast As<'arena>),
     Pattern(&'ast Pattern<'arena>),
@@ -1185,7 +1200,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::ForBody(_) => NodeKind::ForBody,
             Self::ForColonDelimitedBody(_) => NodeKind::ForColonDelimitedBody,
             Self::ForOf(_) => NodeKind::ForOf,
-            Self::ForOfKeyValueTarget(_) => NodeKind::ForOfKeyValueTarget,
+            Self::ForOfUnpackTarget(_) => NodeKind::ForOfUnpackTarget,
             Self::ForOfTarget(_) => NodeKind::ForOfTarget,
             Self::ForOfVariable(_) => NodeKind::ForOfVariable,
             Self::While(_) => NodeKind::While,
@@ -1224,6 +1239,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Yield(_) => NodeKind::Yield,
             Self::YieldFrom(_) => NodeKind::YieldFrom,
             Self::YieldPair(_) => NodeKind::YieldPair,
+            Self::YieldSpread(_) => NodeKind::YieldSpread,
             Self::YieldValue(_) => NodeKind::YieldValue,
             Self::Statement(_) => NodeKind::Statement,
             Self::ExpressionStatement(_) => NodeKind::ExpressionStatement,
@@ -1247,6 +1263,8 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::NullableHint(_) => NodeKind::NullableHint,
             Self::GenericHint(_) => NodeKind::GenericHint,
             Self::FunctionHint(_) => NodeKind::FunctionHint,
+            Self::TupleHint(_) => NodeKind::TupleHint,
+            Self::TupleElementHint(_) => NodeKind::TupleElementHint,
             Self::ReadonlyHint(_) => NodeKind::ReadonlyHint,
             Self::TypeArgumentList(_) => NodeKind::TypeArgumentList,
             Self::TypeParameterList(_) => NodeKind::TypeParameterList,
@@ -1256,6 +1274,8 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::UnionHint(_) => NodeKind::UnionHint,
             Self::Unset(_) => NodeKind::Unset,
             Self::LocalDeclaration(_) => NodeKind::LocalDeclaration,
+            Self::LocalTarget(_) => NodeKind::LocalTarget,
+            Self::LocalUnpack(_) => NodeKind::LocalUnpack,
             Self::Is(_) => NodeKind::Is,
             Self::As(_) => NodeKind::As,
             Self::Pattern(_) => NodeKind::Pattern,
@@ -2698,13 +2718,13 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Expression(node.expression));
                 f(Node::Statement(node.body));
             }
-            Node::ForOfKeyValueTarget(node) => {
-                f(Node::ForOfVariable(&node.key));
-                f(Node::ForOfVariable(&node.value));
+            Node::ForOfUnpackTarget(node) => {
+                f(Node::ForOfVariable(&node.first));
+                f(Node::ForOfVariable(&node.second));
             }
             Node::ForOfTarget(node) => match node {
                 ForOfTarget::Value(value) => f(Node::ForOfVariable(value)),
-                ForOfTarget::KeyValue(key_value) => f(Node::ForOfKeyValueTarget(key_value)),
+                ForOfTarget::Unpack(unpack) => f(Node::ForOfUnpackTarget(unpack)),
             },
             Node::ForOfVariable(node) => {
                 if let Some(hint) = node.hint {
@@ -2930,6 +2950,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Yield::Value(node) => Node::YieldValue(node),
                 Yield::Pair(node) => Node::YieldPair(node),
                 Yield::From(node) => Node::YieldFrom(node),
+                Yield::Spread(node) => Node::YieldSpread(node),
             }),
             Node::YieldFrom(node) => {
                 f(Node::Keyword(&node.r#yield));
@@ -2940,6 +2961,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Keyword(&node.r#yield));
                 f(Node::Expression(node.key));
                 f(Node::Expression(node.value));
+            }
+            Node::YieldSpread(node) => {
+                f(Node::Keyword(&node.r#yield));
+                f(Node::Expression(node.iterator));
             }
             Node::YieldValue(node) => {
                 f(Node::Keyword(&node.r#yield));
@@ -3073,8 +3098,20 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Hint::Iterable(local_identifier) => f(Node::LocalIdentifier(local_identifier)),
                 Hint::Generic(generic_hint) => f(Node::GenericHint(generic_hint)),
                 Hint::Function(function_hint) => f(Node::FunctionHint(function_hint)),
+                Hint::Tuple(tuple_hint) => f(Node::TupleHint(tuple_hint)),
                 Hint::Readonly(readonly_hint) => f(Node::ReadonlyHint(readonly_hint)),
             },
+            Node::TupleHint(node) => {
+                for element in node.elements.iter() {
+                    f(Node::TupleElementHint(element));
+                }
+            }
+            Node::TupleElementHint(node) => {
+                f(Node::Hint(&node.hint));
+                if let Some(name) = &node.name {
+                    f(Node::LocalIdentifier(name));
+                }
+            }
             Node::GenericHint(node) => {
                 f(Node::LocalIdentifier(&node.name));
                 f(Node::TypeArgumentList(&node.type_arguments));
@@ -3138,9 +3175,18 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 if let Some(hint) = &node.hint {
                     f(Node::Hint(hint));
                 }
-                f(Node::LocalIdentifier(&node.name));
+                f(Node::LocalTarget(&node.target));
                 f(Node::Expression(node.value));
                 f(Node::Terminator(&node.terminator));
+            }
+            Node::LocalTarget(node) => match node {
+                LocalTarget::Name(name) => f(Node::LocalIdentifier(name)),
+                LocalTarget::Unpack(unpack) => f(Node::LocalUnpack(unpack)),
+            },
+            Node::LocalUnpack(node) => {
+                for name in node.names.iter() {
+                    f(Node::LocalIdentifier(name));
+                }
             }
             Node::DirectVariable(_) => {}
             Node::IndirectVariable(node) => f(Node::Expression(node.expression)),
@@ -3395,7 +3441,7 @@ impl HasSpan for Node<'_, '_> {
             Self::ForBody(node) => node.span(),
             Self::ForColonDelimitedBody(node) => node.span(),
             Self::ForOf(node) => node.span(),
-            Self::ForOfKeyValueTarget(node) => node.span(),
+            Self::ForOfUnpackTarget(node) => node.span(),
             Self::ForOfTarget(node) => node.span(),
             Self::ForOfVariable(node) => node.span(),
             Self::While(node) => node.span(),
@@ -3434,6 +3480,7 @@ impl HasSpan for Node<'_, '_> {
             Self::Yield(node) => node.span(),
             Self::YieldFrom(node) => node.span(),
             Self::YieldPair(node) => node.span(),
+            Self::YieldSpread(node) => node.span(),
             Self::YieldValue(node) => node.span(),
             Self::Statement(node) => node.span(),
             Self::ExpressionStatement(node) => node.span(),
@@ -3457,6 +3504,8 @@ impl HasSpan for Node<'_, '_> {
             Self::NullableHint(node) => node.span(),
             Self::GenericHint(node) => node.span(),
             Self::FunctionHint(node) => node.span(),
+            Self::TupleHint(node) => node.span(),
+            Self::TupleElementHint(node) => node.span(),
             Self::ReadonlyHint(node) => node.span(),
             Self::TypeArgumentList(node) => node.span(),
             Self::TypeParameterList(node) => node.span(),
@@ -3466,6 +3515,8 @@ impl HasSpan for Node<'_, '_> {
             Self::UnionHint(node) => node.span(),
             Self::Unset(node) => node.span(),
             Self::LocalDeclaration(node) => node.span(),
+            Self::LocalTarget(node) => node.span(),
+            Self::LocalUnpack(node) => node.span(),
             Self::Is(node) => node.span(),
             Self::As(node) => node.span(),
             Self::Pattern(node) => node.span(),

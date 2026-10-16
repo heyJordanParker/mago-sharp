@@ -35,6 +35,7 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_arraykey;
 use mago_codex::ttype::get_iterable_parameters;
 use mago_codex::ttype::get_literal_string;
+use mago_codex::ttype::get_map_entry;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_non_empty_string;
@@ -1645,11 +1646,12 @@ where
     if context.dialect.is_sharp()
         && let Some(key) = foreach.target.key()
     {
+        // `[a, b]` unpacks a two-element tuple, spec section 30, so it reads a `List` or a `Set` of them.
         let keyless = |atomic: &TAtomic| match atomic {
-            TAtomic::Array(TArray::List(_)) => {
+            TAtomic::Array(TArray::List(list)) if unpacked_pair(&list.element_type).is_none() => {
                 Some(("List", "Loop over `list.entries()` to read each index with its value."))
             }
-            TAtomic::Array(TArray::Set(_)) => {
+            TAtomic::Array(TArray::Set(element)) if unpacked_pair(element).is_none() => {
                 Some(("Set", "Loop over the elements alone, as in `for (const x of set)`."))
             }
             _ => None,
@@ -1682,6 +1684,11 @@ where
                 }
 
                 let (k, v) = get_array_parameters(array, context.codebase);
+                let (k, v) = if context.dialect.is_sharp() {
+                    sharp_loop_parts(matches!(array, TArray::Keyed(_)), foreach.target.key().is_some(), k, v)
+                } else {
+                    (k, v)
+                };
 
                 key_type = Some(add_optional_union_type(k, key_type.as_ref(), context.codebase));
                 value_type = Some(add_optional_union_type(v, value_type.as_ref(), context.codebase));
@@ -1690,17 +1697,14 @@ where
                 has_valid_iterable_type = true;
                 always_enters_loop = false;
 
-                key_type = Some(add_optional_union_type(
-                    iterable.key_type.as_ref().clone(),
-                    key_type.as_ref(),
-                    context.codebase,
-                ));
-
-                value_type = Some(add_optional_union_type(
-                    iterable.value_type.as_ref().clone(),
-                    value_type.as_ref(),
-                    context.codebase,
-                ));
+                let (k, v) = (iterable.key_type.as_ref().clone(), iterable.value_type.as_ref().clone());
+                let (k, v) = if context.dialect.is_sharp() {
+                    sharp_loop_parts(false, foreach.target.key().is_some(), k, v)
+                } else {
+                    (k, v)
+                };
+                key_type = Some(add_optional_union_type(k, key_type.as_ref(), context.codebase));
+                value_type = Some(add_optional_union_type(v, value_type.as_ref(), context.codebase));
             }
             TAtomic::Object(object) => {
                 let (obj_key_type, obj_value_type) = match object {
@@ -1894,6 +1898,31 @@ where
     // every atomic in the iterator type is iterable; no diagnostic needed
 
     Ok((always_enters_loop, key_type.unwrap_or_else(get_mixed), value_type.unwrap_or_else(get_mixed)))
+}
+
+/// The key and value a PHP# `for … of` reads from a collection whose PHP key is `key` and whose PHP value is `value`.
+/// A loop variable is each element, and a `Map`'s element is its entry, the tuple `[TKey, TValue]`, spec sections 17
+/// and 30. `[a, b]` unpacks a two-element tuple, so it reads a `Map`'s key and value, and the two parts of each
+/// element of any other collection of two-element tuples.
+fn sharp_loop_parts(is_map: bool, unpacks: bool, key: TUnion, value: TUnion) -> (TUnion, TUnion) {
+    match (is_map, unpacks) {
+        (true, true) => (key, value),
+        (true, false) => (key.clone(), get_map_entry(key, value)),
+        (false, true) => unpacked_pair(&value).unwrap_or((key, value)),
+        (false, false) => (key, value),
+    }
+}
+
+/// The two element types of `value` when it is a two-element tuple, spec section 30.
+fn unpacked_pair(value: &TUnion) -> Option<(TUnion, TUnion)> {
+    let TAtomic::Array(TArray::List(list)) = (value.is_single()).then(|| value.get_single())? else {
+        return None;
+    };
+    let [(first, _), (second, _)] = list.tuple_elements()?[..] else {
+        return None;
+    };
+
+    Some((first.clone(), second.clone()))
 }
 
 fn combine_loop_types(
