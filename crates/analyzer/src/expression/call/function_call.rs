@@ -1,9 +1,11 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::expander::contains_parameter_variable;
 use mago_codex::ttype::get_mixed;
@@ -47,7 +49,9 @@ use crate::plugin::hook::NamedCall;
 use crate::resolver::extension::is_imported_by_default;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::utils::expression::get_bare_name_variable_id;
+use crate::utils::names::article;
 use crate::utils::names::display_atomic;
+use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
@@ -679,6 +683,80 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("mysqli_rollback", Replacement::Members(&[("Sharp\\Database", "rollback")])),
 ];
 
+/// Each PHP built-in class the standard library replaces, spec section 29, with the standard library members to write
+/// in place of creating one. A static member comes before an effect class's, which names the object it is called on.
+const WRAPPED_CLASSES: &[(&str, &[(&str, &str)])] = &[
+    ("PDO", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
+    ("PDOStatement", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
+    ("mysqli", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
+    ("SQLite3", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
+    ("DateTime", &[("Sharp\\Time\\Date", "parse"), ("Sharp\\Clock", "now")]),
+    ("DateTimeImmutable", &[("Sharp\\Time\\Date", "parse"), ("Sharp\\Clock", "now")]),
+    ("DateTimeZone", &[("Sharp\\Time\\Date", "format")]),
+    ("DateInterval", &[("Sharp\\Time\\Duration", "ofSeconds"), ("Sharp\\Time\\Duration", "ofMilliseconds")]),
+    ("CurlHandle", &[("Sharp\\Http", "send")]),
+    ("CurlMultiHandle", &[("Sharp\\Http", "send")]),
+    ("SplFileObject", &[("Sharp\\Files", "read"), ("Sharp\\Files", "readLines")]),
+    ("SplFileInfo", &[("Sharp\\Files", "exists"), ("Sharp\\Files", "size"), ("Sharp\\Files", "lastModified")]),
+    ("DirectoryIterator", &[("Sharp\\Files", "list")]),
+    ("FilesystemIterator", &[("Sharp\\Files", "list")]),
+    ("RecursiveDirectoryIterator", &[("Sharp\\Files", "list")]),
+    ("Random\\Randomizer", &[("Sharp\\Random", "nextInt")]),
+];
+
+/// Spec section 29: a `.sharp` file outside the standard library may name a class [`WRAPPED_CLASSES`] lists, but not
+/// create one, with `new` or a static factory, which is a static method that returns the class. The refusal names the
+/// members to write instead, and the code references each of them, so a change to one reaches it.
+pub(crate) fn report_wrapped_class<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    class: &ClassLikeMetadata,
+    factory: Option<&FunctionLikeMetadata>,
+    span: Span,
+) where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || context.source_file.is_standard_library {
+        return;
+    }
+    let Some((_, members)) =
+        WRAPPED_CLASSES.iter().find(|(wrapped, _)| wrapped.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()))
+    else {
+        return;
+    };
+    if let Some(method) = factory
+        && !method.return_type_metadata.as_ref().is_some_and(|returned| {
+            returned.type_union.types.iter().any(|atomic| {
+                matches!(atomic, TAtomic::Object(TObject::Named(named))
+                    if named.name.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()))
+            })
+        })
+    {
+        return;
+    }
+    for (member_class, method) in *members {
+        artifacts.symbol_references.add_reference_to_class_member(
+            &block_context.scope,
+            (ascii_lowercase_word(member_class.as_bytes()), ascii_lowercase_word(method.as_bytes())),
+            false,
+        );
+    }
+    let Some(form) = member_form(context, members, None) else {
+        return;
+    };
+    let name = display_class_like_name(context, class.original_name);
+
+    context.collector.report_with_code(
+        IssueCode::WrappedClass,
+        Issue::error(format!(
+            "Creating {} `{name}` is wrapped by the standard library: write {form}",
+            article(&name.to_string())
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Created here.")),
+    );
+}
+
 /// Spec section 23: PHP# calls a plain PHP function through its namespace, so a bare call of one is refused with the
 /// form to write: the replacement [`REPLACEMENTS`] gives it, or the call through its namespace, `global.strlen(…)` or
 /// `Pdf.render(…)`. A member the codebase lacks is never named, and the call references each member its replacement
@@ -923,11 +1001,13 @@ mod tests {
 
     use super::REPLACEMENTS;
     use super::Replacement;
+    use super::WRAPPED_CLASSES;
     use crate::code::IssueCode;
     use crate::test_analysis;
 
-    /// A bare call names the standard library members its row of [`REPLACEMENTS`] lists, and `member_form` drops a
-    /// member the codebase lacks. So every listed member must be one the library declares, or the checker would name
+    /// A bare call names the standard library members its row of [`REPLACEMENTS`] lists, creating a class names those
+    /// of its row of [`WRAPPED_CLASSES`], and `member_form` drops a member the codebase lacks. So every listed member
+    /// must be one the library declares, or the checker would name
     /// less than its table says. The library is `sharp/composer/library`, beside this tree's `sharp/mago`. The test's
     /// walk of the library and its failure message run only when the library changes shape, so coverage leaves it out.
     #[test]
@@ -959,6 +1039,7 @@ mod tests {
                 Replacement::Members(members) => members.iter().map(|member| (*function, *member)).collect(),
                 Replacement::Syntax(_) => Vec::new(),
             })
+            .chain(WRAPPED_CLASSES.iter().flat_map(|(class, members)| members.iter().map(|member| (*class, *member))))
             .filter(|(_, (class, method))| {
                 codebase
                     .get_class_like(class.as_bytes())

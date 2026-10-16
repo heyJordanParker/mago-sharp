@@ -16926,6 +16926,66 @@ fn creating_a_built_in_exception_is_pure() {
     );
 }
 
+/// Spec section 29: a PHP built-in class the standard library replaces may be imported and named, to hold, pass, return
+/// and read what a library gives. Only creating one is refused, with `new` or a static factory, naming the member to
+/// write instead. The standard library itself creates them.
+#[test]
+fn a_class_the_standard_library_replaces_may_be_named_and_only_creating_one_is_refused() {
+    let calendar = (
+        "vendor/lib/src/Calendar.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Calendar\n{\n    public static function today(): \\DateTimeImmutable\n    {\n        return new \\DateTimeImmutable();\n    }\n}\n",
+    );
+    let date = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Date.sharp",
+        include_str!("../../../../composer/library/Sharp/Time/Date.sharp"),
+    );
+    let named = (
+        "app/Shop/Stamp.sharp",
+        "namespace App.Shop;\n\nimport DateTimeImmutable;\nimport Lib.Calendar;\n\npublic class Stamp\n{\n    public DateTimeImmutable today() => Calendar.today();\n\n    public string year(DateTimeImmutable moment) => moment.format(\"Y\");\n}\n",
+    );
+
+    assert_eq!(issues(named, &[calendar, date]), Vec::<String>::new());
+
+    for (row, analyzed, message) in [
+        (
+            "new DateTimeImmutable()",
+            (
+                "app/Shop/Stamp.sharp",
+                "namespace App.Shop;\n\nimport DateTimeImmutable;\n\npublic class Stamp\n{\n    public DateTimeImmutable now() => new DateTimeImmutable();\n}\n",
+            ),
+            "Creating a `DateTimeImmutable` is wrapped by the standard library: write `Date.parse(…)` or `clock.now()` on the `Clock` your constructor takes. Add `import Sharp.Time.Date;` to the file.",
+        ),
+        (
+            "a static factory",
+            (
+                "app/Shop/Stamp.sharp",
+                "namespace App.Shop;\n\nimport DateTimeImmutable;\n\npublic class Stamp\n{\n    public DateTimeImmutable? at(string text) => DateTimeImmutable.createFromFormat(\"Y-m-d\", text) ?: null;\n}\n",
+            ),
+            "Creating a `DateTimeImmutable` is wrapped by the standard library: write `Date.parse(…)` or `clock.now()` on the `Clock` your constructor takes. Add `import Sharp.Time.Date;` to the file.",
+        ),
+        (
+            "new PDO(…)",
+            (
+                "app/Shop/Ledger.sharp",
+                "namespace App.Shop;\n\nimport PDO;\n\npublic class Ledger\n{\n    public PDO open() => new PDO(\"sqlite::memory:\");\n}\n",
+            ),
+            "Creating a `PDO` is wrapped by the standard library: write `database.query(…)` or `database.execute(…)` on the `Database` your constructor takes.",
+        ),
+        (
+            "a static factory that returns static",
+            (
+                "app/Shop/Ledger.sharp",
+                "namespace App.Shop;\n\nimport PDO;\n\npublic class Ledger\n{\n    public PDO open() => PDO.connect(\"sqlite::memory:\");\n}\n",
+            ),
+            "Creating a `PDO` is wrapped by the standard library: write `database.query(…)` or `database.execute(…)` on the `Database` your constructor takes.",
+        ),
+    ] {
+        let found = issues(analyzed, &[date]);
+        assert!(matches!(found.as_slice(), [only] if only.ends_with(" wrapped-class")), "{row}: {found:?}");
+        assert_eq!(messages(analyzed, &[date]), [message], "{row}");
+    }
+}
+
 /// The standard exceptions a bare name names are the exception classes in PHP's root namespace that `Builtins.sharp`
 /// declares: each one it declares with no import.
 #[test]

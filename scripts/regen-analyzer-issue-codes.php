@@ -358,6 +358,7 @@ final class AnalyzerCodeModuleGenerator
         'reserved-name-outside-library',
         'internal-outside-library',
         'wrapped-function',
+        'wrapped-class',
         'replaced-by-syntax',
         'bare-function-call',
         'function-import',
