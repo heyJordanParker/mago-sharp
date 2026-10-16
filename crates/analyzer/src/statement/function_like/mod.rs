@@ -273,7 +273,8 @@ where
     parameter_types
 }
 
-/// The result type a lambda takes from the callable types it is written for, as its parameters take theirs.
+/// The result type a lambda takes from the callable types it is written for, as its parameters take theirs. A `void`
+/// result gives its body no declared type, as a `void` method's body gets none.
 fn closure_result_type<A>(context: &Context<'_, '_, A>, expected: &TUnion) -> Option<TUnion>
 where
     A: Arena,
@@ -285,6 +286,7 @@ where
             TAtomic::Callable(TCallable::Signature(signature)) => signature.get_return_type(),
             _ => None,
         })
+        .filter(|result| !result.is_void())
         .fold(None, |joined, result| {
             Some(match joined {
                 Some(joined) => add_union_type(joined, result, context.codebase, CombinerOptions::default()),
