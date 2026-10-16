@@ -2409,11 +2409,11 @@ fn a_static_lazy_property_keeps_its_value_for_a_singleton_s_lifetime() {
 /// static only a constant default, so an initial value that isn't constant, or that reads another static, which PHP's
 /// constant expression can't, runs in the class's hidden method `#statics`, `[20]` being
 /// `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`, which the engine runs once each request, when the request first builds the
-/// class's statics.
+/// class's statics. One that reads a constant, `Report.MOST`, stays PHP's default.
 #[test]
 fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_statics_are_built() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int size { get; } = 3;\n    public static Calc calc { get; } = new Calc(1);\n    private static string name = global.trim(\" a \");\n    private static int next = Report.size + 1;\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int size { get; } = 3;\n    public static Calc calc { get; } = new Calc(1);\n    private static string name = global.trim(\" a \");\n    private static int next = Report.size + 1;\n    private static int most = Report.MOST + 1;\n    const int MOST = 9;\n}\n",
         &[CALC_CLASS],
     );
 
@@ -2431,7 +2431,7 @@ fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_static
               NAMESPACE
                 ZVAL "App\\Tenant"
                 null
-              CLASS "Report" @5-11
+              CLASS "Report" @5-13
                 null
                 null
                 STMT_LIST
@@ -2471,6 +2471,27 @@ fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_static
                         null
                         null
                     null
+                  PROP_GROUP [32788]
+                    ZVAL [1] "int"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "most"
+                        BINARY_OP [1]
+                          CLASS_CONST
+                            ZVAL "App\\Tenant\\Report"
+                            ZVAL "MOST"
+                          ZVAL 1
+                        null
+                        null
+                    null
+                  CLASS_CONST_GROUP [4]
+                    CLASS_CONST_DECL
+                      CONST_ELEM
+                        ZVAL "MOST"
+                        ZVAL 9
+                        null
+                    null
+                    ZVAL [1] "int"
                   METHOD [20] "#statics" @8-8
                     PARAM_LIST
                     null

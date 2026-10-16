@@ -7,6 +7,7 @@ use mago_span::Span;
 use crate::cst::cst::access::PropertyAccess;
 use crate::cst::cst::attribute::AttributeList;
 use crate::cst::cst::block::Block;
+use crate::cst::cst::class_like::member::ClassLikeMemberSelector;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
 use crate::cst::cst::identifier::LocalIdentifier;
@@ -350,8 +351,10 @@ impl<'arena> Property<'arena> {
     }
 
     /// Returns `true` when a PHP# static member's initial value runs once, when a request first uses its class's
-    /// statics, instead of being PHP's default: a value that is not a constant expression, or one that reads a member
-    /// of a class, `Class.name`, which may be another static member, which PHP's constant expression can't read.
+    /// statics, instead of being PHP's default: a value that is not a constant expression, or one that reads a static
+    /// member of a class, `Class.name`, which PHP's constant expression can't read. PHP# names a property or method in
+    /// camel case, and a constant or enum case with a capital (spec section 24), so `Class.count` reads a static
+    /// member and `Order.Ascending` an enum case.
     #[must_use]
     pub fn initial_value_runs_after_class(&self) -> bool {
         self.modifiers().contains_static()
@@ -364,14 +367,17 @@ impl<'arena> Property<'arena> {
     }
 }
 
-/// Finds `Class.name` or `Counter<T>.name` in an initial value, for [`Property::initial_value_runs_after_class`].
+/// Finds a static member read, `Class.name` or `Counter<T>.name`, in an initial value, for
+/// [`Property::initial_value_runs_after_class`].
 struct ClassMemberRead {
     found: bool,
 }
 
 impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for ClassMemberRead {
     fn walk_in_property_access(&mut self, access: &'ast PropertyAccess<'arena>, _context: &mut ()) {
-        self.found |= matches!(access.object, Expression::ConstantAccess(_) | Expression::GenericClass(_));
+        self.found |= matches!(access.object, Expression::ConstantAccess(_) | Expression::GenericClass(_))
+            && matches!(&access.property, ClassLikeMemberSelector::Identifier(name)
+                if name.value.first().is_some_and(u8::is_ascii_lowercase));
     }
 }
 

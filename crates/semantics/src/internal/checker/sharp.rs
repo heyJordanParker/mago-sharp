@@ -1150,7 +1150,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ComputedProperty(_), FieldOrProperty) => Some(FieldOrProperty),
         (Node::Block(_) | Node::PropertyHookConcreteExpressionBody(_), FieldOrProperty | Parameter) => Some(Body),
         // A constant initial value is the member's default, which PHP evaluates as a constant expression. A static
-        // member's that reads `Class.name` runs as code, as `Property::initial_value_runs_after_class` decides.
+        // member's that reads a static member, `Class.name`, runs as code, as `Property::initial_value_runs_after_class`
+        // decides.
         (Node::Expression(value), FieldOrProperty) => {
             let uses_this = report_this_in_initial_value(node, context);
             let place = if !uses_this
