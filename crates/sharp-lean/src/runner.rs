@@ -180,7 +180,7 @@ fn answer(output: Output) -> io::Result<Vec<u8>> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let message: Vec<&str> = stderr.lines().filter(|line| !line.starts_with(JUDGING)).collect();
     let failure = if library::stopped(output.status) {
-        format!("ran past {} processor seconds, the limit Mago sets on each Lean process", library::processor_seconds())
+        format!("ran past {} processor seconds, the limit the checker sets on each Lean process", library::processor_seconds())
     } else {
         format!("failed with {}", output.status)
     };

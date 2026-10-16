@@ -15223,7 +15223,7 @@ fn an_inline_docblock_in_a_sharp_file_traces_and_asserts_nothing() {
     assert_eq!(
         docblock(("src/Demo/Order.php", php)),
         [
-            "9:26 psalm-trace Trace: Type of `$count` is `int|null` | Type is: `int|null` | Spotted a `@psalm-trace` tag! While this works for compatibility, Mago has a more powerful way to inspect types. | For more flexible debugging, try using `Mago\\inspect()` directly in your code. It can inspect any expression, not just variables (e.g., `Mago\\inspect($foo->bar());`).",
+            "9:26 psalm-trace Trace: Type of `$count` is `int|null` | Type is: `int|null` | Spotted a `@psalm-trace` tag! While this works for compatibility, the checker has a more powerful way to inspect types. | For more flexible debugging, try using `Mago\\inspect()` directly in your code. It can inspect any expression, not just variables (e.g., `Mago\\inspect($foo->bar());`).",
             "11:18 docblock-type-mismatch Docblock type mismatch for variable `$total`. | This docblock asserts the type should be `string`, but it was previously defined as `int(1)`. | The type of the variable defined in the docblock does not match the previously defined type. | Change the docblock type to match `int(1)`, or update the variable definition to a compatible type `string`.",
         ]
     );
@@ -19978,7 +19978,7 @@ fn a_readonly_value_calls_no_plain_php_method() {
             "7:15 missing-readonly-marker render cannot call order.save: order is readonly. | save is a plain PHP method of Model, which PHP# does not check.",
             "8:15 missing-readonly-marker render cannot call order.touch: order is readonly. | touch is a plain PHP method of Model, which PHP# does not check.",
             "9:15 missing-readonly-marker render cannot call order.publish: order is readonly. | publish is a plain PHP method of Model, which PHP# does not check.",
-            "9:15 non-documented-method Ambiguous method call to `publish` on class `Order`. | This method is not explicitly defined | On an object of type `Order` | While this call might be handled by `__call()` or `__callStatic()`, Mago cannot verify its arguments or return type without a corresponding `@method` docblock tag. | To enable full analysis, add a `@method` tag to the docblock of the `Order` class. For example: `/** @method returnType publish(argType $argName) */`",
+            "9:15 non-documented-method Ambiguous method call to `publish` on class `Order`. | This method is not explicitly defined | On an object of type `Order` | While this call might be handled by `__call()` or `__callStatic()`, the checker cannot verify its arguments or return type without a corresponding `@method` docblock tag. | To enable full analysis, add a `@method` tag to the docblock of the `Order` class. For example: `/** @method returnType publish(argType $argName) */`",
         ]
     );
 }

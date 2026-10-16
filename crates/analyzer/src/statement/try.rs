@@ -692,7 +692,7 @@ where
                 "To be caught, a type must be a defined class or interface that implements the `Throwable` interface. This can occur if specified types are undefined, are enums/traits, are primitive types, or are classes/interfaces that do not implement `Throwable`."
             )
             .with_note(
-                "For analysis purposes, if no valid types were found, Mago might internally default to treating this as `catch (\\Throwable $e)` for subsequent control flow analysis."
+                "For analysis purposes, if no valid types were found, the checker might internally default to treating this as `catch (\\Throwable $e)` for subsequent control flow analysis."
             ),
         );
 

@@ -439,7 +439,7 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
 
     fs::rename(&staging, &library).map_err(|error| {
         io::Error::other(format!(
-            "Mago could not move the Lean runtime library from {} to {}: {error}",
+            "The checker could not move the Lean runtime library from {} to {}: {error}",
             staging.display(),
             library.display()
         ))
@@ -466,7 +466,7 @@ pub(crate) fn install() -> io::Result<Option<Lake>> {
     let cache = cache_root()?;
 
     install_from(&url, archive, &cache).map(Some).map_err(|error| {
-        io::Error::other(format!("Mago could not install Lean into {}: {error}", cache.join("elan").display()))
+        io::Error::other(format!("The checker could not install Lean into {}: {error}", cache.join("elan").display()))
     })
 }
 
@@ -626,7 +626,7 @@ fn cache_root() -> io::Result<PathBuf> {
         return Ok(PathBuf::from(local).join("mago"));
     }
 
-    let home = std::env::home_dir().ok_or_else(|| io::Error::other("Mago's cache folder needs a home folder"))?;
+    let home = std::env::home_dir().ok_or_else(|| io::Error::other("The checker's cache folder needs a home folder"))?;
 
     Ok(if cfg!(target_os = "macos") { home.join("Library/Caches/mago") } else { home.join(".cache/mago") })
 }
