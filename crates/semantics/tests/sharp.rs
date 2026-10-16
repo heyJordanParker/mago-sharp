@@ -3537,19 +3537,13 @@ fn a_get_only_nullable_property_without_an_initial_value_is_in_the_slice() {
 }
 
 /// Spec section 6: a get-only static is set once, by its initial value, which runs once when a request first uses its
-/// class's statics when it isn't constant, as any static's does. A generic class's statics start as a copy of constant initial values
-/// for each type argument, so one that runs as code is not supported yet there.
+/// class's statics when it isn't constant, as any static's does. A generic class's runs once for each type argument,
+/// when its statics are first used, spec section 11.
 #[test]
 fn a_static_member_takes_any_initial_value_and_is_get_only_or_settable() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n}\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:23 Give `id` an initial value: no constructor sets a static.",
-            "15:32 A static member of a generic class with an initial value that runs as code is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), ["7:23 Give `id` an initial value: no constructor sets a static."]);
 }
 
 #[test]
@@ -3874,18 +3868,12 @@ fn an_initial_value_on_a_property_whose_set_has_a_body_is_in_the_slice() {
 }
 
 /// Decision 3: a static property takes accessor bodies, observers and a computed body, as an instance property does,
-/// except in a generic class, whose statics are entries of one table that runs no accessors.
+/// in a generic class too, whose type arguments each have their own, spec section 11.
 #[test]
-fn a_static_property_takes_accessors_except_in_a_generic_class() {
+fn a_static_property_takes_accessors() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int b { get; set; didSet => Report.a = 1; } = 0;\n    public static int c => Report.a + 1;\n}\n\nclass Box<T>\n{\n    public static int a { get; set => field = value; } = 0;\n    public static int c => 1;\n    public static int d { get; set; } = 0;\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "12:23 A static property with accessors in a generic class is not supported yet in PHP#.",
-            "13:23 A static property with accessors in a generic class is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// Spec section 6.1: `init` sets a property while its object is created, and no object creates a static property.

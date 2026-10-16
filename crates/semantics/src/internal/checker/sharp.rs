@@ -366,10 +366,11 @@ const OBJECT: &[u8] = b"Object";
 ///   CS8780, except under the `not` that starts the pattern of `is`. `not` beside `or` is an error that names both
 ///   readings, as decision 045 decides, and `!x is T`, which reads as `(!x) is T`, is an error that writes
 ///   `x is not T`, as decision 044 decides. A list pattern has one rest.
-/// - What reads a type argument while the code runs, which R3 compiles, is not supported yet: a type parameter in a
+/// - What reads a type argument while the code runs, which R3 compiles, passes this check: a type parameter in a
 ///   pattern, a `match` arm, `as` or a catch clause, `typeof` and `new` of a type parameter, a static member reached
-///   through a type parameter, as in `TItem.make()` and `TItem.LIMIT`, and any type with type arguments in a pattern or
-///   `as`, as in `value is List<int>`, `value as PaginatedList<Order>` and `value is Class<Order>`.
+///   through a type parameter, as in `TItem.make()` and `TItem.LIMIT`, and a type with type arguments in a pattern or
+///   `as`, as in `value is List<int>`. The analyzer refuses what no test can read, as a plain PHP class's type
+///   arguments. A named constructor through a type parameter, as in `new TItem.from(…)`, is not supported yet.
 /// - Casts: `(int)`, `(float)` and `(string)` in a method body, as spec section 24 writes them. PHP's other casts and
 ///   its cast aliases, such as `(bool)` and `(integer)`, are errors. A cast is lowercase only, so the lexer reads
 ///   `(Int)` as the class `Int` in parentheses, as in `typeof(Int)`.
@@ -1043,7 +1044,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                     let variable = property.first_variable();
                     check_declared_name(variable.name, variable.span, context);
                     report_static_without_initial_value(property, context);
-                    report_generic_static(property, context);
 
                     Some(FieldOrProperty)
                 }
@@ -2990,49 +2990,6 @@ fn report_parameter_accessor_bodies(
             .with_annotation(Annotation::primary(body.span()).with_message(annotation)),
         );
     }
-}
-
-/// Reports a static member of a generic class whose initial value runs as code, or that runs accessors. Each type
-/// argument's statics are an entry of one hidden table, spec section 11, which starts as a copy of constant initial
-/// values, and the engine runs no code on that first use and gives the entry no accessors.
-fn report_generic_static(property: &Property, context: &mut Context<'_, '_, '_>) {
-    if !property.modifiers().contains_static()
-        || enclosing_class(context.program, property.span()).is_none_or(|class| class.type_parameters.is_none())
-    {
-        return;
-    }
-
-    let runs_accessors = match property {
-        Property::Computed(_) => true,
-        Property::Hooked(hooked) => {
-            hooked.hook_list.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
-        }
-        Property::Plain(_) => false,
-    };
-    let refused = if runs_accessors {
-        Some((
-            property.first_variable().span,
-            "A static property with accessors in a generic class is not supported yet in PHP#.",
-        ))
-    } else if property.initial_value_runs_after_class()
-        && let Some(value) = property.initial_value()
-    {
-        Some((
-            value.span(),
-            "A static member of a generic class with an initial value that runs as code is not supported yet in PHP#.",
-        ))
-    } else {
-        None
-    };
-    let Some((span, message)) = refused else {
-        return;
-    };
-
-    context.report(
-        Issue::error(message)
-            .with_annotation(Annotation::primary(span).with_message("Not supported yet."))
-            .with_note("Each type argument's statics are an entry of one table, which starts as a copy of constant initial values, and the engine runs no code on that first use."),
-    );
 }
 
 /// Reports a static field or a static property with storage that has no initial value, spec section 6. No constructor

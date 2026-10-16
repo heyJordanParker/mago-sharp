@@ -12469,6 +12469,19 @@ fn a_default_body_keeps_a_bound_that_names_the_interfaces_type_parameter() {
     );
 }
 
+/// Spec section 11: a generic class's type parameter is in scope in every body of the class, so a property's initial
+/// value and its accessor bodies, static or not, name it in a type as a method's body does. `wrong` shows `T` is the
+/// type parameter there, not a class the checker can't find.
+#[test]
+fn a_property_names_its_class_type_parameters_in_its_initial_value_and_accessors() {
+    let sharp = "namespace Demo;\n\npublic class Holder<T>\n{\n    public static int total { get; set; } = 0;\n\n    public static List<T> fresh { get; } = Holder<T>.made();\n\n    public static int shared => Holder<T>.total;\n\n    public static int watched { get; set; didSet => Holder<T>.total += 1; } = 0;\n\n    public List<T> items { get; set; } = [];\n\n    public int counted => Holder<T>.total;\n\n    public List<T> listed\n    {\n        get\n        {\n            List<T> held = this.items;\n            return held;\n        }\n    }\n\n    public static List<T> wrong => [1];\n\n    public static List<T> made() => [];\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Holder.sharp", sharp), &[]),
+        ["Property hook `Holder.wrong.get` returns `List<int>` but property is typed as `List<T>`."]
+    );
+}
+
 /// An override that declares type parameters declares one for each of the method it overrides, as C# requires, so one
 /// that declares more or fewer, or declares any over a method with none, is refused with the count to declare. One that
 /// declares none keeps its own types, as `PlainRepository.count` does.
