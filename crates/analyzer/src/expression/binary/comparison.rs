@@ -6,6 +6,7 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
+use mago_codex::misc::GenericParent;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::scalar::TScalar;
@@ -15,6 +16,8 @@ use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_true;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::php_operator_name;
 use mago_reporting::Annotation;
@@ -42,6 +45,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::ancestor_type_arguments;
 use crate::expression::binary::utils::analyze_operator_call;
 use crate::expression::binary::utils::are_definitely_loosely_equal;
 use crate::expression::binary::utils::are_definitely_not_identical;
@@ -945,7 +949,7 @@ fn refusal(
 
                 if !same {
                     Some(Refusal::DifferentTypes)
-                } else if struct_property_refusal(name, codebase, visiting).is_some() {
+                } else if struct_property_refusal(name, None, codebase, visiting).is_some() {
                     Some(Refusal::StructProperty)
                 } else {
                     None
@@ -967,7 +971,11 @@ fn refusal(
                 lhs.iter()
                     .chain(&rhs)
                     .find_map(|comparand| match comparand {
-                        Comparand::Enum(name) => struct_property_refusal(*name, codebase, visiting),
+                        Comparand::Enum(name) => {
+                            let type_arguments = enum_type_arguments(*name, [lhs_type, rhs_type], codebase);
+
+                            struct_property_refusal(*name, type_arguments.as_deref(), codebase, visiting)
+                        }
                         _ => None,
                     })
                     .map(|_| Refusal::StructProperty)
@@ -1336,10 +1344,12 @@ pub(crate) fn check_element_equality<A>(
 
 /// The first property of the struct `name`, in declaration order, or field of a case of the enum `name`, that its own
 /// `==` cannot compare with another of its type, with why, spec sections 10 and 20: a struct or a case compares by
-/// value only when each of its properties does. `visiting` holds the structs and enums being checked, so one that
-/// holds itself, as in `Node? next`, compares by the rest.
+/// value only when each of its properties does. A field of a generic enum's case reads the enum's `type_arguments`, as
+/// `Ok`'s `value` is an `int` in a `Result<int, PaymentError>`, spec section 31. `visiting` holds the structs and enums
+/// being checked, so one that holds itself, as in `Node? next`, compares by the rest.
 fn struct_property_refusal<'codebase>(
     name: Word,
+    type_arguments: Option<&[TUnion]>,
     codebase: &'codebase CodebaseMetadata,
     visiting: &mut Vec<Word>,
 ) -> Option<(&'codebase PropertyMetadata, Option<Refusal>)> {
@@ -1351,7 +1361,8 @@ fn struct_property_refusal<'codebase>(
     visiting.push(class.name);
 
     let refused = properties.into_iter().find_map(|property| {
-        let r#type = &property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?.type_union;
+        let declared = &property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?.type_union;
+        let r#type = &with_type_arguments(declared, class.name, type_arguments, codebase);
         // `==` on two `Any` values compiles, and compares by value only a string, a number or an enum case.
         if comparands(r#type, codebase).contains(&Comparand::Any) {
             return Some((property, None));
@@ -1365,6 +1376,47 @@ fn struct_property_refusal<'codebase>(
     refused
 }
 
+/// The type arguments a value of one of `unions` gives the generic enum `name`, as a `Result<int, PaymentError>.Ok`
+/// gives `Result` `int` and `PaymentError`, spec section 31. None for an enum without type parameters.
+fn enum_type_arguments<'union>(
+    name: Word,
+    unions: impl IntoIterator<Item = &'union TUnion>,
+    codebase: &CodebaseMetadata,
+) -> Option<Vec<TUnion>> {
+    let r#enum = codebase.get_class_like(name.as_bytes())?;
+
+    unions
+        .into_iter()
+        .flat_map(|union| union.types.iter())
+        .find_map(|atomic| ancestor_type_arguments(codebase, atomic, r#enum))
+}
+
+/// `declared`, the type of a field of a case of `name`, a generic enum or one of its cases, with the enum's
+/// `type_arguments` for its type parameters, which every case declares in the enum's order. `declared` itself without
+/// them.
+fn with_type_arguments(
+    declared: &TUnion,
+    name: Word,
+    type_arguments: Option<&[TUnion]>,
+    codebase: &CodebaseMetadata,
+) -> TUnion {
+    let Some((type_arguments, class)) = type_arguments.zip(codebase.get_class_like(name.as_bytes())) else {
+        return declared.clone();
+    };
+    let r#enum = data_enum(codebase, class).and_then(|r#enum| codebase.get_class_like(r#enum.as_bytes()));
+    let entities = r#enum
+        .into_iter()
+        .flat_map(|r#enum| std::iter::once(r#enum.name).chain(r#enum.permitted_inheritors.iter().flatten().copied()));
+    let mut template_result = TemplateResult::default();
+    for entity in entities {
+        for (template, argument) in class.template_types.keys().zip(type_arguments) {
+            template_result.add_lower_bound(*template, GenericParent::ClassLike(entity), argument.clone());
+        }
+    }
+
+    inferred_type_replacer::replace(declared, &template_result, codebase)
+}
+
 /// The issue that refuses `==` on the struct or the enum one of `lhs_type` and `rhs_type` holds, naming the first
 /// property or field its own `==` cannot compare, as "`RenewRequest` can't compare by value: `plan` is a `Plan`, which
 /// declares no `operator ==`." A function has no equality, as "`Spot` can't be compared: `onMove` is a function."
@@ -1373,14 +1425,16 @@ where
     A: Arena,
 {
     let codebase = context.codebase;
-    let Some((name, property, reason)) =
+    let Some((name, property, reason, type_arguments)) =
         comparands(lhs_type, codebase).into_iter().chain(comparands(rhs_type, codebase)).find_map(|comparand| {
             let (Comparand::Struct(name) | Comparand::Enum(name)) = comparand else {
                 return None;
             };
-            let (property, reason) = struct_property_refusal(name, codebase, &mut Vec::new())?;
+            let type_arguments = enum_type_arguments(name, [lhs_type, rhs_type], codebase);
+            let (property, reason) =
+                struct_property_refusal(name, type_arguments.as_deref(), codebase, &mut Vec::new())?;
 
-            Some((name, property, reason))
+            Some((name, property, reason, type_arguments))
         })
     else {
         unreachable!("`==` is refused for a struct's property only when one of its properties cannot compare");
@@ -1402,8 +1456,9 @@ where
         )
         .with_note(format!("A function value has no equality, so a {value} that holds one has none."));
     }
-    let r#type = declared
-        .map_or_else(|| "Any?".to_owned(), |r#type| display_operand(context, &r#type.type_union.to_non_nullable()));
+    let shown =
+        declared.map(|r#type| with_type_arguments(&r#type.type_union, name, type_arguments.as_deref(), codebase));
+    let r#type = shown.map_or_else(|| "Any?".to_owned(), |r#type| display_operand(context, &r#type.to_non_nullable()));
     let article = article(&r#type);
     let why = match reason {
         Some(Refusal::Instance) => "which declares no `operator ==`",

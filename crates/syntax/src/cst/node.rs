@@ -211,6 +211,7 @@ use crate::cst::cst::PlaceholderArgument;
 use crate::cst::cst::PlainProperty;
 use crate::cst::cst::PositionalArgument;
 use crate::cst::cst::PrintConstruct;
+use crate::cst::cst::Propagate;
 use crate::cst::cst::PropertiesPattern;
 use crate::cst::cst::Property;
 use crate::cst::cst::PropertyAbstractItem;
@@ -560,6 +561,7 @@ pub enum NodeKind {
     Terminator,
     Throw,
     Leave,
+    Propagate,
     Hint,
     IntersectionHint,
     NullableHint,
@@ -861,6 +863,7 @@ pub enum Node<'ast, 'arena> {
     Terminator(&'ast Terminator<'arena>),
     Throw(&'ast Throw<'arena>),
     Leave(&'ast Leave<'arena>),
+    Propagate(&'ast Propagate<'arena>),
     Hint(&'ast Hint<'arena>),
     IntersectionHint(&'ast IntersectionHint<'arena>),
     NullableHint(&'ast NullableHint<'arena>),
@@ -1258,6 +1261,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Terminator(_) => NodeKind::Terminator,
             Self::Throw(_) => NodeKind::Throw,
             Self::Leave(_) => NodeKind::Leave,
+            Self::Propagate(_) => NodeKind::Propagate,
             Self::Hint(_) => NodeKind::Hint,
             Self::IntersectionHint(_) => NodeKind::IntersectionHint,
             Self::NullableHint(_) => NodeKind::NullableHint,
@@ -1926,6 +1930,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 }
                 f(Node::Keyword(&node.r#enum));
                 f(Node::LocalIdentifier(&node.name));
+                for item in node.type_parameters.iter() {
+                    f(Node::TypeParameterList(item));
+                }
                 for item in node.backing_type_hint.iter() {
                     f(Node::EnumBackingTypeHint(item));
                 }
@@ -2377,6 +2384,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     Expression::Construct(node) => Node::Construct(node),
                     Expression::Throw(node) => Node::Throw(node),
                     Expression::Leave(node) => Node::Leave(node),
+                    Expression::Propagate(node) => Node::Propagate(node),
                     Expression::Clone(node) => Node::Clone(node),
                     Expression::Call(node) => Node::Call(node),
                     Expression::PartialApplication(node) => Node::PartialApplication(node),
@@ -3071,6 +3079,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Leave::Continue(r#continue) => f(Node::Continue(r#continue)),
                 Leave::Break(r#break) => f(Node::Break(r#break)),
             },
+            Node::Propagate(node) => {
+                f(Node::Keyword(&node.r#try));
+                f(Node::Expression(node.value));
+            }
             Node::Hint(node) => match &node {
                 Hint::Identifier(identifier) => f(Node::Identifier(identifier)),
                 Hint::Parenthesized(parenthesized_hint) => {
@@ -3115,6 +3127,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::GenericHint(node) => {
                 f(Node::LocalIdentifier(&node.name));
                 f(Node::TypeArgumentList(&node.type_arguments));
+                if let Some(case) = &node.case {
+                    f(Node::LocalIdentifier(case));
+                }
             }
             Node::TypeArgumentList(node) => {
                 for argument in node.arguments.iter() {
@@ -3499,6 +3514,7 @@ impl HasSpan for Node<'_, '_> {
             Self::Terminator(node) => node.span(),
             Self::Throw(node) => node.span(),
             Self::Leave(node) => node.span(),
+            Self::Propagate(node) => node.span(),
             Self::Hint(node) => node.span(),
             Self::IntersectionHint(node) => node.span(),
             Self::NullableHint(node) => node.span(),

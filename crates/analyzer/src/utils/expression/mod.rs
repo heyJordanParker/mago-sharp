@@ -78,6 +78,7 @@ pub(crate) const fn expression_has_observable_side_effect(expression: &Expressio
         Expression::Assignment(_)
         | Expression::Throw(_)
         | Expression::Leave(_)
+        | Expression::Propagate(_)
         | Expression::Yield(_)
         | Expression::Clone(_) => true,
         Expression::UnaryPrefix(u) => {

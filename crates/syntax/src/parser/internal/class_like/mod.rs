@@ -245,6 +245,8 @@ where
     ) -> Result<Enum<'arena>, ParseError> {
         let r#enum = self.expect_keyword(T!["enum"])?;
         let name = self.parse_local_identifier()?;
+        let type_parameters = self.parse_optional_type_parameter_list()?;
+        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
         let (backing_type_hint, inheritance) = self.parse_enum_header()?;
 
         Ok(Enum {
@@ -252,11 +254,12 @@ where
             modifiers,
             r#enum,
             name,
+            type_parameters,
             backing_type_hint,
             inheritance,
             implements: self.parse_optional_implements()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: self.parse_class_like_members("An enum", Some(&name), None)?,
+            members: self.parse_class_like_members("An enum", Some(&name), type_parameter_names)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }

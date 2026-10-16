@@ -1060,6 +1060,19 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
                     context,
                 );
             }
+            // Spec section 22: a PHP# enum declares no stored property, and a computed one holds nothing, so the engine
+            // gives it to every enum.
+            ClassLikeMember::Property(property @ Property::Computed(_))
+                if context.program.dialect.is_sharp() && !property.modifiers().contains_static() => {}
+            ClassLikeMember::Property(property) if context.program.dialect.is_sharp() => {
+                context.report(
+                    Issue::error(format!(
+                        "Enum `{enum_name}` declares no stored or static property: a computed property, as in `public string label => …;`, is allowed."
+                    ))
+                    .with_annotation(Annotation::primary(property.span()).with_message("Declared here."))
+                    .with_note("Each case is one value, and a computed property reads it on each access."),
+                );
+            }
             ClassLikeMember::Property(property) => {
                 context.report(
                     Issue::error(format!("Enum `{enum_name}` cannot have properties."))

@@ -1,9 +1,12 @@
+use std::hash::Hash;
+
 use crate::FingerprintOptions;
 use crate::Fingerprintable;
 use mago_names::ResolvedNames;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Leave;
 use mago_syntax::cst::Parenthesized;
+use mago_syntax::cst::Propagate;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
 impl Fingerprintable for Expression<'_> {
@@ -43,6 +46,7 @@ impl Fingerprintable for Expression<'_> {
             Expression::Leave(Leave::Return(node)) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Leave(Leave::Continue(node)) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Leave(Leave::Break(node)) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Propagate(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Clone(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Call(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
             Expression::Access(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
@@ -82,6 +86,21 @@ impl Fingerprintable for Parenthesized<'_> {
         H: std::hash::Hasher,
     {
         self.expression.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for Propagate<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "try".hash(hasher);
+        self.value.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }
 

@@ -406,8 +406,9 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The type arguments the static property access `access` reads a generic PHP# class's own statics with, spec
-    /// section 11, as the checker found them, written as [`Self::type_arguments`] writes those of a `new`. None for a
-    /// static property of any other class.
+    /// section 11, or the read of a plain case of a generic enum gives the case, whose object is one of its statics,
+    /// spec section 31, as the checker found them, written as [`Self::type_arguments`] writes those of a `new`. None
+    /// for a static property of any other class or any other case.
     pub(crate) fn statics_type_arguments(&self, access: &impl HasSpan) -> Option<String> {
         let span = access.span();
         let arguments = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?;
@@ -709,8 +710,13 @@ impl<'analysis> Types<'analysis> {
     /// property's visibility.
     pub(crate) fn property_check(&self, class: &[u8], property: &[u8]) -> Option<String> {
         let metadata = self.codebase.get_property(class, &[b"$", property].concat())?;
+        let r#type = &metadata.type_metadata.as_ref()?.type_union;
 
-        self.checked_text(&metadata.type_metadata.as_ref()?.type_union, true)
+        // A property of a PHP enum, which only PHP# declares, a computed one, carries its type text always, which tells
+        // the engine the enum may hold it, spec section 31.
+        let is_enum = self.codebase.get_class_like(class).is_some_and(|class| class.kind.is_enum());
+
+        self.checked_text(r#type, true).or_else(|| is_enum.then(|| type_text(r#type, self.codebase)))
     }
 
     /// `r#type` as the type text an entry check tests a value from plain PHP against, when part of it is a PHP# class

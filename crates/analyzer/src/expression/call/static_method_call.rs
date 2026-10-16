@@ -24,6 +24,7 @@ use crate::expression::call::method_call::analyze_undocumented_method_return_typ
 use crate::expression::call::method_call::prepare_unresolved_method_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
+use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -140,6 +141,8 @@ where
     // of `Counter<Order>` does, spec section 11, and so does a call through a `Class<Counter<Order>>`. `Orders.track(order)`
     // runs it with the type arguments `Orders`'s header gives `Counter`.
     let generic_class = generic_class_type(artifacts, call.class).cloned();
+    // `Holder.of(5)` fixes `Holder`'s type arguments as the method's own, ahead of them, spec section 11.
+    let fixes_class_type_arguments = generic_class.is_none() && bare_generic_class(context, call.class).is_some();
 
     let mut invocation_targets = vec![];
     let mut class_type_arguments = None;
@@ -147,7 +150,7 @@ where
         if let Some(generic_class) = &generic_class {
             resolved_method.static_class_type = StaticClassType::Object(TObject::Named(generic_class.clone()));
         }
-        if context.dialect.is_sharp() && resolved_method.is_static {
+        if context.dialect.is_sharp() && resolved_method.is_static && !fixes_class_type_arguments {
             class_type_arguments = static_member_type_arguments(
                 context,
                 resolved_method.classname,

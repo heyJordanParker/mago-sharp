@@ -487,6 +487,9 @@ fn expression_control_flows<'arena>(expression: &'arena Expression<'arena>, cont
             Leave::Continue(r#continue) => controls.push(ControlFlow::Continue(r#continue)),
             Leave::Break(r#break) => controls.push(ControlFlow::Break(r#break)),
         },
+        Expression::Propagate(propagate) => {
+            expression_control_flows(propagate.value, controls);
+        }
         Expression::Clone(clone) => {
             expression_control_flows(clone.object, controls);
         }

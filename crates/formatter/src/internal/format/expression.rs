@@ -205,8 +205,14 @@ where
                 Expression::MagicConstant(c) => c.format(f),
                 Expression::Pipe(p) => p.format(f),
                 Expression::Error(_) => Document::empty(),
-                Expression::Is(_) | Expression::As(_) | Expression::PatternMatch(_) | Expression::Leave(_) => {
-                    unreachable!("`mago format` skips PHP# files, the only ones with patterns and `?? return`")
+                Expression::Is(_)
+                | Expression::As(_)
+                | Expression::PatternMatch(_)
+                | Expression::Leave(_)
+                | Expression::Propagate(_) => {
+                    unreachable!(
+                        "`mago format` skips PHP# files, the only ones with patterns, `?? return` and `try` values"
+                    )
                 }
                 #[allow(clippy::unreachable)]
                 Expression::Parenthesized(_) => unreachable!("Parenthesized expressions are handled separately"),

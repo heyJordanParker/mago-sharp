@@ -37,6 +37,7 @@ use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::Parenthesized;
 use crate::cst::cst::PartialApplication;
 use crate::cst::cst::Pipe;
+use crate::cst::cst::Propagate;
 use crate::cst::cst::PropertyAccess;
 use crate::cst::cst::Return;
 use crate::cst::cst::StaticMethodCall;
@@ -371,6 +372,12 @@ where
             (T!["new"], Some(kind)) if kind.is_modifier() => Expression::AnonymousClass(self.parse_anonymous_class()?),
             (T!["new"], _) => Expression::Instantiation(self.parse_instantiation()?),
             (T!["throw"], _) => Expression::Throw(self.parse_throw()?),
+            // `try gateway.charge(cart)`, spec section 31: a prefix operator at `!`'s precedence, so a member access or
+            // a call after it belongs to its value.
+            (T!["try"], _) if self.dialect.is_sharp() => Expression::Propagate(Propagate {
+                r#try: self.expect_keyword(T!["try"])?,
+                value: self.parse_expression_with_precedence(Precedence::Unary)?,
+            }),
             (T!["yield"], _) => Expression::Yield(self.parse_yield()?),
             (T!["\""] | T!["<<<"] | T!["`"], ..) => Expression::CompositeString(self.parse_string()?),
             (T!["("], _) => Expression::Parenthesized(Parenthesized {

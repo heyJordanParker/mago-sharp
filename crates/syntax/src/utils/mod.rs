@@ -318,6 +318,7 @@ pub fn expression_has_yield(expression: &Expression) -> bool {
         },
         Expression::Throw(throw) => expression_has_yield(throw.exception),
         Expression::Leave(Leave::Return(r#return)) => r#return.value.is_some_and(expression_has_yield),
+        Expression::Propagate(propagate) => expression_has_yield(propagate.value),
         Expression::Clone(clone) => expression_has_yield(clone.object),
         Expression::Call(call) => match call {
             Call::Function(FunctionCall { function, argument_list })

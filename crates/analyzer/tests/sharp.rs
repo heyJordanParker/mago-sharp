@@ -3894,7 +3894,7 @@ fn class_of_a_value_is_a_class_value_of_its_type() {
         messages(("src/Demo/Badge.sharp", sharp), &others),
         [
             "Invalid return type for method `Badge.wrong`: expected `int`, but found `Class<Badge>`.",
-            "`5` does not satisfy the bound `Object` of type parameter `T`."
+            "`int` does not satisfy the bound `Object` of type parameter `T`."
         ]
     );
 }
@@ -12016,9 +12016,9 @@ fn an_override_that_changes_a_bound_names_the_bound() {
 /// A type, `new`, a type test and a static member name the type arguments of a generic PHP# class, spec section 11, as
 /// C# refuses a generic type without them (CS0305): a property's, a parameter's, a return type and a typed local's,
 /// `new` of a class with one or two type parameters, `is`, `as`, a `match` arm and `catch` of a class declared in
-/// another file, and a static property read, write, compound write, increment and collection call and a static call,
-/// each reported once and read as the bounds, so nothing reports again on what they read. Each type argument has its
-/// own statics, so a bare `Counter.count` names none. A constant, `Counter<Order>.count` and a subclass whose header
+/// another file, and a static property read, write, compound write, increment and collection call, each reported once
+/// and read as the bounds, so nothing reports again on what they read, and a static call that nothing fixes the type
+/// argument of. Each type argument has its own statics, so a bare `Counter.count` names none. A constant, `Counter<Order>.count` and a subclass whose header
 /// gives the type argument need none. `Self` names its class's own type parameters, and a class without type parameters
 /// takes none. A refused `as Box` or `new Box()` reports nothing again where a `Box<int>` goes, whether returned or
 /// passed to `this(…)`. The plain PHP twins keep Mago's issues.
@@ -12076,7 +12076,7 @@ fn a_type_new_a_type_test_and_a_static_member_name_the_type_arguments_of_a_gener
             format!("10:9 missing-template-parameter {}", one("Counter")),
             format!("11:9 missing-template-parameter {}", one("Counter")),
             format!("12:9 missing-template-parameter {}", one("Counter")),
-            format!("13:9 missing-template-parameter {}", one("Counter")),
+            "13:9 missing-template-parameter Nothing fixes the type argument `TItem` of the call to `Counter.reset`. | `Counter.reset` is called here | A generic method call takes its type arguments from its arguments, from the ones it writes and from the declared type its result goes into. | Write the type argument on the class.".to_owned(),
         ]
     );
 }
@@ -13101,7 +13101,7 @@ fn an_object_bound_takes_any_object_and_nothing_else() {
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes), CLASS_MEMBERS, legacy]),
         [
-            "12:21 template-constraint-violation `1` does not satisfy the bound `Object` of type parameter `TValue`. | This argument has type `1`, which is not compatible with the required bound `Object`. | Type parameter `TValue` is bounded by `Object`. | Ensure the argument's type satisfies the bound.",
+            "12:21 template-constraint-violation `int` does not satisfy the bound `Object` of type parameter `TValue`. | This argument has type `int`, which is not compatible with the required bound `Object`. | Type parameter `TValue` is bounded by `Object`. | Ensure the argument's type satisfies the bound.",
             "13:20 template-constraint-violation Type argument `int` does not satisfy `Report.keep<TValue>`'s `TValue`. | `int` is supplied for `TValue` here... | ...but `TValue` is bounded by `Object`. | Supply a type contained by `Object`.",
             "18:60 template-constraint-violation Type argument `int` does not satisfy `ClassMembers.attributes<TAttribute>`'s `TAttribute`. | `int` is supplied for `TAttribute` here... | ...but `TAttribute` is bounded by `Object`. | Supply a type contained by `Object`.",
         ]
@@ -19830,5 +19830,204 @@ fn a_pattern_reads_no_local_and_names_the_when_that_compares_it() {
             "19:53 replaced-by-syntax `code` is a parameter: compare its value in `when`, as in `string n when n == code`. | ",
             "21:13 replaced-by-syntax `extra` is a parameter: compare its value in `when`, as in `int n when n == extra`. | ",
         ]
+    );
+}
+
+/// The standard library's `Result` and `Error`, spec section 31, as a project reads them from `vendor/`.
+const RESULT_LIBRARY: [(&str, &str); 2] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Result.sharp",
+        "namespace Sharp;\n\npublic enum Result<T, TError : Error>\n{\n    case Ok(T value);\n    case Err(TError error);\n}\n",
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Error.sharp",
+        "namespace Sharp;\n\npublic interface Error { string message { get; } }\n",
+    ),
+];
+
+/// The failure type and the gateway the section 31 tests share.
+const PAYMENTS: [(&str, &str); 3] = [
+    (
+        "src/App/PaymentError.sharp",
+        "namespace App;\n\npublic enum PaymentError : Error\n{\n    case Declined(string reason);\n    case Expired;\n\n    public string message => match (this) {\n        PaymentError.Declined(string reason) => reason,\n        PaymentError.Expired => \"expired\",\n    };\n}\n",
+    ),
+    (
+        "src/App/Gateway.sharp",
+        "namespace App;\n\npublic class Gateway\n{\n    public Result<Order, PaymentError> charge() => Result.Err(PaymentError.Expired);\n}\n",
+    ),
+    ("src/App/Order.sharp", "namespace App;\n\npublic class Order\n{\n    public int total { get; set; } = 5;\n}\n"),
+];
+
+/// The section 31 tests' other files: the standard library's `Result` and `Error`, then `PAYMENTS`.
+fn payments() -> Vec<(&'static str, &'static str)> {
+    RESULT_LIBRARY.iter().chain(&PAYMENTS).copied().collect()
+}
+
+/// Spec section 31: `try` gives the `Ok` value, and on `Err` the method returns an `Err` holding the same error. It is a
+/// prefix operator, so a member read binds tighter, and it stands anywhere an expression can.
+#[test]
+fn try_gives_the_ok_value_and_returns_the_failure() {
+    let code = "namespace App;\n\nclass Checkout\n{\n    public Checkout(private Gateway gateway) { }\n\n    public Result<int, PaymentError> local()\n    {\n        const order = try this.gateway.charge();\n        return Result.Ok(order.total);\n    }\n\n    public Result<int, PaymentError> member() => Result.Ok((try this.gateway.charge()).total);\n\n    public Result<string, PaymentError> argument() => Result.Ok(global.strval((try this.gateway.charge()).total));\n\n    public Result<Order, Error> wider() => Result.Ok(try this.gateway.charge());\n\n    public Result<string, PaymentError> wrong() => Result.Ok(try this.gateway.charge());\n}\n";
+
+    assert_eq!(issues(("src/App/Checkout.sharp", code), &payments()), ["19:52 invalid-return-statement"]);
+    assert_eq!(
+        messages(("src/App/Checkout.sharp", code), &payments()),
+        [
+            "Invalid return type for method `Checkout.wrong`: expected `Result<string, PaymentError>`, but found `Result<Order, PaymentError>.Ok`."
+        ]
+    );
+}
+
+/// Spec section 31: `try` takes a `Result`, in a function that returns a `Result` whose error type holds the operand's,
+/// and a lambda's result type is the one the function type it is written for gives.
+#[test]
+fn try_takes_a_result_in_a_function_that_returns_one() {
+    let code = "namespace App;\n\nenum Lost : Error\n{\n    case Gone;\n\n    public string message => \"lost\";\n}\n\nclass Checkout\n{\n    public Checkout(private Gateway gateway) { }\n\n    public Result<int, PaymentError> number() => Result.Ok(try 5);\n\n    public Order plain() => try this.gateway.charge();\n\n    public Result<Order, Lost> other() => Result.Ok(try this.gateway.charge());\n\n    public Function<Result<Order, PaymentError>()> typed() => () => Result.Ok(try this.gateway.charge());\n\n    public Function<Order()> untyped() => () => try this.gateway.charge();\n\n    public Any loose() => () => Result.Ok(try this.gateway.charge());\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Checkout.sharp", code), &payments()),
+        [
+            "14:64 invalid-operand",
+            "16:29 invalid-return-statement",
+            "18:57 invalid-return-statement",
+            "22:49 invalid-return-statement",
+            "24:43 invalid-return-statement",
+            "24:33 missing-template-parameter",
+        ]
+    );
+    assert_eq!(
+        messages(("src/App/Checkout.sharp", code), &payments()),
+        [
+            "`try` takes a `Result`, and this is `5`.",
+            "`try` returns its failure, so its function returns a `Result`, and this one returns `Order`.",
+            "`try` returns a `PaymentError` failure, and its function's `Result<Order, Lost>` holds a `Lost`.",
+            "`try` returns its failure, so its function returns a `Result`, and this one returns `Order`.",
+            "`try` returns its failure from the lambda, and no function type gives the lambda's result type.",
+            "Nothing fixes the type argument `TError` of the call to `Result.Ok`.",
+        ]
+    );
+}
+
+/// Spec section 31: `try` returns its failure from a method, so in a computed property, which is no method, it is
+/// refused. An operand of either case of `Result` gives the `Ok` value of both, and an operand or a result type already
+/// refused reports nothing more.
+#[test]
+fn try_returns_only_from_a_method_and_reads_either_case() {
+    let code = "namespace App;\n\nclass Checkout\n{\n    public Checkout(private Gateway gateway) { }\n\n    public int total => (try this.gateway.charge()).total;\n\n    public Result<int, PaymentError> either(bool paid, Result<int, PaymentError>.Ok ok, Result<int, PaymentError>.Err err) => Result.Ok(try (paid ? ok : err));\n\n    public Result<int, PaymentError> unknown(Missing value) => Result.Ok(try value);\n\n    public Result<Unknown, PaymentError> unknownResult() => Result.Ok(try this.gateway.charge());\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Checkout.sharp", code), &payments()),
+        [
+            "`try` returns its failure from the method it is in, and it stands in no method here.",
+            "Cannot find type `Missing`.",
+            "Cannot find type `Unknown`.",
+        ]
+    );
+}
+
+/// Spec sections 11 and 31: a static call on a generic class fixes the class's type arguments as a generic method
+/// call fixes its own, from the arguments and the declared type its result goes into. One that nothing fixes names
+/// them, and a static property names them always.
+#[test]
+fn a_static_call_on_a_generic_class_fixes_its_type_arguments() {
+    let holder = "namespace App;\n\npublic class Holder<T>\n{\n    public static int count { get; set; } = 0;\n\n    public required Holder(public T value { get; }) { }\n\n    public static Holder<T> of(T value) => new Holder<T>(value);\n\n    public static Holder<T> empty() => throw new global.LogicException();\n\n    public static Holder<U> make<U>(U value) => new Holder<U>(value);\n}\n";
+    let code = "namespace App;\n\nclass Uses\n{\n    public Holder<int> argument() => Holder.of(5);\n\n    public Holder<int> own() => Holder<string>.make(5);\n\n    public Holder<int> declared() => Holder.empty();\n\n    public Holder<int> written() => Holder<int>.empty();\n\n    public int local()\n    {\n        const holder = Holder.of(5);\n        return holder.value;\n    }\n\n    public void unfixed()\n    {\n        const holder = Holder.empty();\n    }\n\n    public int count() => Holder.count;\n\n    public Holder<string> wrong() => Holder.of(5);\n}\n";
+
+    let files = [("src/App/Holder.sharp", holder)];
+
+    assert_eq!(
+        issues(("src/App/Uses.sharp", code), &files),
+        ["21:24 missing-template-parameter", "24:27 missing-template-parameter", "26:38 invalid-return-statement"]
+    );
+    assert_eq!(
+        messages(("src/App/Uses.sharp", code), &files),
+        [
+            "Nothing fixes the type argument `T` of the call to `Holder.empty`.",
+            "`Holder` needs its type argument.",
+            "Holder<int> cannot be used as Holder<string>.",
+        ]
+    );
+}
+
+/// Spec section 31: a case of `Result` takes its type arguments from the declared type, the method's result type or
+/// the class it is written on, and a case type writes them on the enum, as in `Result<Order, PaymentError>.Ok`.
+#[test]
+fn a_case_of_a_generic_enum_takes_its_type_arguments_from_the_declared_type() {
+    let code = "namespace App;\n\nclass Charges\n{\n    public Result<Order, PaymentError> declined() => Result.Err(PaymentError.Declined(\"card expired\"));\n\n    public Result<Order, PaymentError> paid()\n    {\n        return Result.Ok(new Order());\n    }\n\n    public Result<int, PaymentError> written() => Result<int, PaymentError>.Ok(5);\n\n    public Order value(Result<Order, PaymentError>.Ok ok) => ok.value;\n\n    public void unfixed()\n    {\n        const result = Result.Ok(5);\n    }\n}\n";
+
+    assert_eq!(issues(("src/App/Charges.sharp", code), &payments()), ["18:24 missing-template-parameter"]);
+    assert_eq!(
+        messages(("src/App/Charges.sharp", code), &payments()),
+        ["Nothing fixes the type argument `TError` of the call to `Result.Ok`."]
+    );
+}
+
+/// Spec section 31: a plain case of a generic enum takes its type arguments from the ones it writes, as
+/// `Lookup<int>.Missing`, or from the declared type it goes into, so `Lookup<int>.Missing` is no `Lookup<string>`. A read
+/// that has neither is refused.
+#[test]
+fn a_plain_case_of_a_generic_enum_takes_its_type_arguments_from_the_declared_type() {
+    let lookup = (
+        "src/App/Lookup.sharp",
+        "namespace App;\n\npublic enum Lookup<T>\n{\n    case Found(T value);\n    case Missing;\n}\n",
+    );
+    let code = "namespace App;\n\nclass Reads\n{\n    public Lookup<int> missing() => Lookup.Missing;\n\n    public Lookup<int> written() => Lookup<int>.Missing;\n\n    public Lookup<string> mismatched() => Lookup<int>.Missing;\n\n    public void unfixed()\n    {\n        const lookup = Lookup.Missing;\n    }\n\n    public void optional()\n    {\n        Lookup<int>? lookup = Lookup.Missing;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Reads.sharp", code), &[lookup]),
+        ["9:43 invalid-return-statement", "13:24 missing-template-parameter"]
+    );
+    assert_eq!(
+        messages(("src/App/Reads.sharp", code), &[lookup]),
+        [
+            "Invalid return type for method `Reads.mismatched`: expected `Lookup<string>`, but found `Lookup<int>.Missing`.",
+            "Nothing fixes the type argument `T` of `Lookup<T>.Missing`.",
+        ]
+    );
+}
+
+/// Spec section 31: `match`, `is` and the exhaustive-case check work on `Result` as on any enum with data. A case
+/// pattern takes the subject's type arguments, so `Result.Ok(Order order)` holds every `Ok` of a
+/// `Result<Order, PaymentError>`.
+#[test]
+fn match_and_is_on_a_result_take_the_subjects_type_arguments() {
+    let code = "namespace App;\n\nclass Reads\n{\n    public string describe(Result<Order, PaymentError> result) => match (result) {\n        Result.Ok(Order order) => \"paid\",\n        Result.Err(PaymentError error) => error.message,\n    };\n\n    public string missing(Result<Order, PaymentError> result) => match (result) {\n        Result.Ok(Order order) => \"paid\",\n    };\n\n    public string failure(Result<Order, PaymentError> result) => result is Result.Err e ? e.error.message : \"paid\";\n\n    public int total(Result<Order, PaymentError> result) => result is Result.Ok(Order order) ? order.total : 0;\n}\n";
+
+    assert_eq!(issues(("src/App/Reads.sharp", code), &payments()), ["10:66 match-not-exhaustive"]);
+    assert_eq!(messages(("src/App/Reads.sharp", code), &payments()), ["This `match` misses `Result.Err`."]);
+}
+
+/// Spec sections 20 and 31: two cases of `Result` are `==` when they are the same case with equal fields, so
+/// `Result<int, PaymentError>` has `==` and `Result<Order, PaymentError>` has none, as `Order` declares none. The
+/// error type is `Error`'s.
+#[test]
+fn a_result_compares_by_its_fields_and_its_error_type_is_an_error() {
+    let code = "namespace App;\n\nclass Compares\n{\n    public bool same() => Result<int, PaymentError>.Ok(5) == Result<int, PaymentError>.Ok(5);\n\n    public bool orders(Result<Order, PaymentError> a, Result<Order, PaymentError> b) => a == b;\n\n    public void bound(Result<Order, string> result) { }\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Compares.sharp", code), &payments()),
+        ["7:89 invalid-operand", "9:23 template-constraint-violation"]
+    );
+    assert_eq!(
+        messages(("src/App/Compares.sharp", code), &payments()),
+        [
+            "`Result` can't compare by value: `value` is an `Order`, which declares no `operator ==`.",
+            "Type argument `string` does not satisfy `Result`'s `TError`.",
+        ]
+    );
+}
+
+/// Spec section 31: in a `.sharp` file `Error` always names the standard library's interface, whatever class of that
+/// name the namespace holds, so one handler renders any failure, and a bug is caught as `Throwable`, never `Error`.
+#[test]
+fn error_names_the_standard_library_interface() {
+    let code = "namespace App;\n\nclass Errors\n{\n    public string render(Error error) => error.message;\n\n    public string payment(PaymentError error) => this.render(error);\n\n    public void guarded()\n    {\n        try {\n            global.error_log(\"x\");\n        } catch (Error failure) {\n        }\n    }\n}\n";
+    let mut files = payments();
+    files.push(("src/App/Error.sharp", "namespace App;\n\npublic class Error\n{\n}\n"));
+
+    assert_eq!(issues(("src/App/Errors.sharp", code), &files), ["13:18 invalid-catch-type"]);
+    assert_eq!(
+        messages(("src/App/Errors.sharp", code), &files),
+        ["`Error` is PHP#'s interface of the failures a method returns, and no exception is one."]
     );
 }

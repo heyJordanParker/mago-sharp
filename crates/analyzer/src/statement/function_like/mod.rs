@@ -272,6 +272,21 @@ where
     parameter_types
 }
 
+/// The result type the function types of `expected` give a PHP# lambda written for one of them, joined across them.
+pub fn lambda_result_type<A>(context: &Context<'_, '_, A>, expected: &TUnion) -> Option<TUnion>
+where
+    A: Arena,
+{
+    expected
+        .types
+        .iter()
+        .filter_map(|atomic| match atomic {
+            TAtomic::Callable(TCallable::Signature(signature)) => signature.get_return_type().cloned(),
+            _ => None,
+        })
+        .reduce(|joined, result| add_union_type(joined, &result, context.codebase, CombinerOptions::default()))
+}
+
 /// Gives `expression` the declared type `expected` its value goes into, such as a typed local's or property's, or a
 /// return type, as a call gives an argument its parameter's type. Spec section 14.2: a PHP# lambda takes its parameter
 /// types from it. A member read takes them too, because a method value of a generic method infers its type arguments
@@ -479,7 +494,11 @@ where
             }
             FunctionLikeBody::Expression(value) => {
                 let return_type = function_like_metadata.return_type_metadata.as_ref();
-                expect_type(context, &mut artifacts, value, return_type.map(|return_type| &return_type.type_union));
+                // A lambda's value goes into the result type its function type gives, spec section 14.2.
+                let expected = return_type
+                    .map(|return_type| &return_type.type_union)
+                    .or(block_context.lambda_result_type.as_ref());
+                expect_type(context, &mut artifacts, value, expected);
                 if let Some(return_type) = return_type {
                     check_sharp_literal_kind(context, value, &return_type.type_union);
                 }

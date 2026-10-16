@@ -99,7 +99,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
 
         let inferred_return_type = if let Some(return_value) = self.value.as_ref() {
             let return_type = block_context.scope.get_function_like().and_then(body_return_type);
-            expect_type(context, artifacts, return_value, return_type.map(|return_type| &return_type.type_union));
+            // A lambda's value goes into the result type its function type gives, spec section 14.2.
+            let expected =
+                return_type.map(|return_type| &return_type.type_union).or(block_context.lambda_result_type.as_ref());
+            expect_type(context, artifacts, return_value, expected);
             if let Some(return_type) = return_type {
                 check_sharp_literal_kind(context, return_value, &return_type.type_union);
             }

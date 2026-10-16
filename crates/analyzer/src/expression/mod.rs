@@ -9,11 +9,13 @@ use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::r#enum::TEnum;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::combine_union_types;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -25,6 +27,7 @@ use mago_codex::ttype::get_mixed_list;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_null;
+use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::get_true;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
@@ -54,6 +57,7 @@ use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PatternMatchPatternArm;
+use mago_syntax::cst::Propagate;
 use mago_syntax::cst::PropertiesPattern;
 use mago_syntax::cst::RestPattern;
 use mago_syntax::cst::Statement;
@@ -66,6 +70,7 @@ use mago_syntax::utils::pattern::has_type_test;
 use mago_syntax::walker::Walker;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
+use mago_word::WordMap;
 use mago_word::WordSet;
 use mago_word::word;
 
@@ -87,6 +92,8 @@ use crate::reconciler::reconcile_keyed_types;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::override_attribute;
+use crate::statement::function_like::body_return_type;
+use crate::statement::function_like::known_type_or_error;
 use crate::statement::get_type_from_hint;
 use crate::statement::report_erased_type_test;
 use crate::statement::report_hint_type_arguments;
@@ -99,6 +106,7 @@ use crate::utils::names::display_enum_case;
 use crate::utils::names::display_member;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_sharp_type;
+use crate::utils::names::display_type;
 use crate::utils::quoted_source;
 
 pub mod access;
@@ -253,6 +261,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                     artifacts.set_expression_type(&self, get_never());
 
                     Ok(())
+                }
+                Expression::Propagate(propagate) => {
+                    analyze_propagate(self, propagate, context, block_context, artifacts)
                 }
                 Expression::Clone(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Error(_)
@@ -435,8 +446,29 @@ where
     }
 
     let tests_function_type = hints.iter().any(|hint| names_function_type(hint));
+    let subject_enums = generic_subject_enums(node, &hints, context, block_context, artifacts)?;
     let mut is_refused = false;
     for hint in hints {
+        // Spec section 31: a case of a generic enum takes the subject's type arguments, as `Result.Err e` takes a
+        // `Result<Order, PaymentError>`'s, so it writes none, and the test reads them.
+        let case_type = match hint {
+            Hint::Identifier(name) => {
+                context.codebase.get_class_like(context.resolved_names.get(name)).and_then(|case| {
+                    let r#enum = case.direct_parent_class.filter(|_| case.flags.is_enum_case_class())?;
+                    let arguments = subject_enums.get(&r#enum)?;
+
+                    Some(TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(
+                        case.original_name,
+                        Some(arguments.clone()),
+                    )))))
+                })
+            }
+            _ => None,
+        };
+        if let Some(case_type) = case_type {
+            artifacts.record_tested_type(hint, case_type);
+            continue;
+        }
         is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint);
         is_refused |= report_erased_type_test(context, hint);
 
@@ -1360,6 +1392,220 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Parenthesized<'arena> {
 
         Ok(())
     }
+}
+
+/// The generic enums the value a pattern of `node` tests gives type arguments, with them, as a
+/// `Result<Order, PaymentError>` gives `Result` `Order` and `PaymentError`, so a case pattern of one takes them, spec
+/// section 31. The value is typed in a copy of the block, as the analysis of the PHP types it again, when `hints` name a
+/// case of a generic enum.
+fn generic_subject_enums<'ctx, 'arena, A>(
+    node: Node<'_, 'arena>,
+    hints: &[&Hint<'_>],
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<WordMap<Vec<TUnion>>, AnalysisError>
+where
+    A: Arena,
+{
+    let names_generic_case = hints.iter().any(|hint| {
+        matches!(hint, Hint::Identifier(name) if context
+            .codebase
+            .get_class_like(context.resolved_names.get(name))
+            .is_some_and(|case| case.flags.is_enum_case_class() && !case.template_types.is_empty()))
+    });
+    if !names_generic_case {
+        return Ok(WordMap::default());
+    }
+
+    let subject = tested_value(node);
+    let mut typing = block_context.clone();
+    let (typed, _) = context.record(|context| subject.analyze(context, &mut typing, artifacts));
+    typed?;
+    let subject_type = artifacts.get_expression_type(subject).cloned().unwrap_or_else(get_mixed);
+
+    let codebase = context.codebase;
+    let mut enums = WordMap::default();
+    for atomic in subject_type.types.iter() {
+        // A case's enum is its parent, and an enum is its own.
+        if let TAtomic::Object(TObject::Named(object)) = atomic
+            && let Some(class) = codebase.get_class_like(object.name.as_bytes())
+            && let r#enum = class.direct_parent_class.filter(|_| class.flags.is_enum_case_class()).unwrap_or(class.name)
+            && let Some(r#enum) = codebase.get_class_like(r#enum.as_bytes())
+            && let Some(arguments) = ancestor_type_arguments(codebase, atomic, r#enum)
+        {
+            enums.entry(r#enum.name).or_insert(arguments);
+        }
+    }
+
+    Ok(enums)
+}
+
+/// Analyzes `try result`, spec section 31. `result` is a `Result`, and the expression gives its `Ok` value. On `Err`
+/// the function it is in returns an `Err` holding the same error, so that function returns a `Result` whose error type
+/// holds `result`'s. The type arguments of the function's `Result`, which the returned `Err` takes, are recorded at the
+/// expression, as those of a generic `new` are, and the `Err` joins the types the function returns.
+fn analyze_propagate<'ctx, 'arena, A>(
+    expression: &Expression<'arena>,
+    propagate: &Propagate<'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    propagate.value.analyze(context, block_context, artifacts)?;
+    let refused = TUnion::from_atomic(TAtomic::Error);
+    let operand = artifacts.get_expression_type(propagate.value).cloned().unwrap_or_else(get_mixed);
+    if is_refused_type(&operand) {
+        artifacts.set_expression_type(expression, refused);
+
+        return Ok(());
+    }
+    let Some([value, error]) = result_type_arguments(context.codebase, &operand) else {
+        context.collector.report_with_code(
+            IssueCode::InvalidOperand,
+            Issue::error(format!("`try` takes a `Result`, and this is `{}`.", display_type(context, &operand)))
+                .with_annotation(Annotation::primary(propagate.value.span()).with_message("Not a `Result`."))
+                .with_help("Call `try` on a value of type `Result<T, TError>`, as in `try gateway.charge(cart)`."),
+        );
+        artifacts.set_expression_type(expression, refused);
+
+        return Ok(());
+    };
+    // A `try` that can't return its failure is refused, so its value takes no other check.
+    artifacts.set_expression_type(expression, refused);
+
+    // A lambda's result type is the one the function type it is written for gives, spec section 14.2.
+    let function =
+        block_context.scope.get_function_like().filter(|_| block_context.scope.get_property_hook().is_none());
+    let in_lambda = function
+        .is_some_and(|function| matches!(function.kind, FunctionLikeKind::Closure | FunctionLikeKind::ArrowFunction));
+    let declared = if in_lambda {
+        block_context.lambda_result_type.clone().map(|result| (result, None))
+    } else {
+        function.and_then(body_return_type).map(|result| (result.type_union.clone(), Some(result.span)))
+    };
+    let Some((returned, declared_at)) = declared else {
+        let (message, help) = if in_lambda {
+            (
+                "`try` returns its failure from the lambda, and no function type gives the lambda's result type.",
+                "Give the lambda a declared type, as in `Function<Result<Order, PaymentError>(Cart)> charge = (cart) => …`.",
+            )
+        } else {
+            (
+                "`try` returns its failure from the method it is in, and it stands in no method here.",
+                "Read the `Result` with `match`, as in `match (result) { Result.Ok(Order order) => …, … }`.",
+            )
+        };
+        context.collector.report_with_code(
+            IssueCode::InvalidReturnStatement,
+            Issue::error(message)
+                .with_annotation(Annotation::primary(propagate.r#try.span).with_message("Returns its failure here."))
+                .with_help(help),
+        );
+
+        return Ok(());
+    };
+    let returned = known_type_or_error(returned);
+    if is_refused_type(&returned) {
+        return Ok(());
+    }
+    let declared_annotation =
+        declared_at.map(|span| Annotation::secondary(span).with_message("The result type it returns into."));
+    let Some([returned_value, returned_error]) = result_type_arguments(context.codebase, &returned) else {
+        context.collector.report_with_code(
+            IssueCode::InvalidReturnStatement,
+            Issue::error(format!(
+                "`try` returns its failure, so its function returns a `Result`, and this one returns `{}`.",
+                display_type(context, &returned)
+            ))
+            .with_annotation(Annotation::primary(propagate.r#try.span).with_message("Returns its failure here."))
+            .with_annotations(declared_annotation),
+        );
+
+        return Ok(());
+    };
+    artifacts.set_expression_type(expression, value);
+    if !union_comparator::is_contained_by(
+        context.codebase,
+        &error,
+        &returned_error,
+        false,
+        false,
+        false,
+        &mut ComparisonResult::for_dialect(context.dialect),
+    ) {
+        context.collector.report_with_code(
+            IssueCode::InvalidReturnStatement,
+            Issue::error(format!(
+                "`try` returns a `{}` failure, and its function's `{}` holds a `{}`.",
+                display_type(context, &error),
+                display_type(context, &returned),
+                display_type(context, &returned_error),
+            ))
+            .with_annotation(Annotation::primary(propagate.value.span()).with_message("Fails with this error type."))
+            .with_annotations(declared_annotation),
+        );
+
+        return Ok(());
+    }
+
+    let span = expression.span();
+    let type_arguments = vec![returned_value, returned_error];
+    let err = TNamedObject::new_with_type_parameters(word(RESULT_ERR), Some(type_arguments.clone()));
+    artifacts.inferred_return_types.push(Rc::new(TUnion::from_atomic(TAtomic::Object(TObject::Named(err)))));
+    artifacts.inferred_type_arguments.insert((span.start.offset, span.end.offset), type_arguments);
+
+    Ok(())
+}
+
+/// The standard library's `Result`, spec section 31, and its failure case.
+const RESULT: &str = "Sharp\\Result";
+const RESULT_ERR: &str = "Sharp\\Result\\Err";
+
+/// The type arguments `union` gives `Result<T, TError>`, spec section 31, when each of its types is a `Result` or one
+/// of its cases, joined across them.
+pub(crate) fn result_type_arguments(codebase: &CodebaseMetadata, union: &TUnion) -> Option<[TUnion; 2]> {
+    let result = codebase.get_class_like(RESULT.as_bytes())?;
+    let mut joined: Option<[TUnion; 2]> = None;
+    for atomic in union.types.iter() {
+        let found: [TUnion; 2] = ancestor_type_arguments(codebase, atomic, result)?.try_into().ok()?;
+        joined = Some(match joined {
+            None => found,
+            Some([value, error]) => [
+                combine_union_types(&value, &found[0], codebase, CombinerOptions::default()),
+                combine_union_types(&error, &found[1], codebase, CombinerOptions::default()),
+            ],
+        });
+    }
+
+    joined
+}
+
+/// The type arguments the value of type `atomic` gives the generic class `ancestor` when it is one of its objects, as
+/// a `Result<int, PaymentError>.Ok` gives `Result` `int` and `PaymentError`, spec section 31. None for any other value,
+/// and for an `ancestor` without type parameters.
+pub(crate) fn ancestor_type_arguments(
+    codebase: &CodebaseMetadata,
+    atomic: &TAtomic,
+    ancestor: &ClassLikeMetadata,
+) -> Option<Vec<TUnion>> {
+    let TAtomic::Object(TObject::Named(object)) = atomic else {
+        return None;
+    };
+    let class = codebase.get_class_like(object.name.as_bytes())?;
+    let is_generic_object =
+        !ancestor.template_types.is_empty() && codebase.is_instance_of(class.name.as_bytes(), ancestor.name.as_bytes());
+
+    is_generic_object
+        .then(|| {
+            ancestor.template_types.keys().map(|template| {
+                get_specialized_template_type(codebase, *template, ancestor.name, class, object.get_type_parameters())
+            })
+        })?
+        .collect()
 }
 
 /// Whether an error already refuses `expression`. `check_slice` refuses it when it failed to parse, it is `!x is T`, it

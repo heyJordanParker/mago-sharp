@@ -265,6 +265,7 @@ enum NodeKind: string
     case Terminator = 'Terminator';
     case Throw = 'Throw';
     case Leave = 'Leave';
+    case Propagate = 'Propagate';
     case Hint = 'Hint';
     case IntersectionHint = 'IntersectionHint';
     case NullableHint = 'NullableHint';
