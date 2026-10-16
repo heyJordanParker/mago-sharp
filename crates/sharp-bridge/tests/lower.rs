@@ -15814,6 +15814,17 @@ fn a_position_current_default_takes_the_position_of_the_php_sharp_call() {
     assert_eq!(positions(&lowered), ["5:66 App.Reports.logSlow", "9:9 App.Reports.run", "10:42 App.Reports.run"]);
 }
 
+/// A call that spreads a list passes the caller's position unless the list may hold a `Position`, as a `List<Any>`
+/// may, since the list may fill the parameter and PHP refuses a named argument it already filled.
+#[test]
+fn a_spread_that_cannot_fill_the_position_takes_the_position_of_the_call() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Reports\n{\n    public static void logSlow(string message, Position caller = Position.current()) { }\n\n    public void run(List<Any> anything)\n    {\n        Reports.logSlow(...[\"slow query\"]);\n        Reports.logSlow(\"any\", ...anything);\n    }\n}\n",
+    );
+
+    assert_eq!(positions(&lowered), ["5:66 App.Reports.logSlow", "9:9 App.Reports.run"]);
+}
+
 /// ```php
 /// public function __construct(\Sharp\Position $made = new \Sharp\Position(__FILE__, 5, 33, 'App.Note.Note')) {}
 /// public function seen(int $times, \Sharp\Position $where = new \Sharp\Position(__FILE__, 7, 49, 'App.Note.seen')): int {}

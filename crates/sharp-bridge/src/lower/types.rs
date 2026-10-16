@@ -693,17 +693,14 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// Whether the list the spread `spread` spreads may hold a value of `parameter`'s type, and so may fill it, as a
-    /// list of `Any` or of the parameter's own type does. A spread of anything but a `List` or a `Map` may fill any.
+    /// list of `Any` or of the parameter's own type does. Only a `List` spreads into a call, spec section 7.
     pub(crate) fn spread_can_fill(&self, spread: &Expression, parameter: &FunctionLikeParameterMetadata) -> bool {
-        let spread = self.expression_type(spread);
-        let Some(r#type) = parameter.type_metadata.as_ref().map(|metadata| &metadata.type_union) else {
-            return true;
+        let Some(metadata) = &parameter.type_metadata else {
+            unreachable!("semantics refuses a PHP# parameter without a type");
         };
-        if !spread.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_))) {
-            return true;
-        }
+        let elements = self.element_type(self.expression_type(spread));
 
-        can_expression_types_be_identical(self.codebase, &self.element_type(spread), r#type, false, false)
+        can_expression_types_be_identical(self.codebase, &elements, &metadata.type_union, false, false)
     }
 
     /// The method `method` of the fully qualified class name `class` runs, where it declares it or inherits it, when
@@ -1182,18 +1179,19 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The type of the elements a value of `r#type` holds, the `T` of a `List<T>`, leaving out `null`. The caller asks
-    /// only about a value the checker typed as a collection.
+    /// only about a value the checker typed as a collection: a collection method's receiver, an operand of a
+    /// collection's `==`, or a spread.
     pub(crate) fn element_type(&self, r#type: &TUnion) -> TUnion {
         let mut element_type = None;
         for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
             let TAtomic::Array(array) = atomic else {
-                unreachable!("the checker runs a collection method only on a collection, not on {atomic:?}");
+                unreachable!("the checker types the value as a collection, not as {atomic:?}");
             };
             let (_, value) = get_array_parameters(array, self.codebase);
             element_type = Some(add_optional_union_type(value, element_type.as_ref(), self.codebase));
         }
 
-        element_type.unwrap_or_else(|| unreachable!("a collection method's receiver is a collection"))
+        element_type.unwrap_or_else(|| unreachable!("the checker types the value as a collection"))
     }
 
     /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the collection method the analyzer checked
