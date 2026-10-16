@@ -3605,11 +3605,11 @@ fn a_get_only_nullable_property_without_an_initial_value_is_in_the_slice() {
 }
 
 /// Spec section 6: a get-only static is set once, by its initial value, which runs once when a request first uses its
-/// class's statics when it isn't constant, as any static's does. A generic class's runs once for each type argument,
-/// when its statics are first used, spec section 11.
+/// class's statics when it isn't constant, as any static's does, or when it reads another static. A generic class's
+/// runs once for each type argument, when its statics are first used, spec section 11.
 #[test]
 fn a_static_member_takes_any_initial_value_and_is_get_only_or_settable() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n}\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n    public static int next { get; } = Report.size + 1;\n}\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n    private static int next = Box<T>.count + 1;\n}\n";
 
     assert_eq!(issues(code), ["7:23 Give `id` an initial value: no constructor sets a static."]);
 }

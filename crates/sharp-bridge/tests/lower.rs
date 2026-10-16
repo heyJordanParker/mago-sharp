@@ -2393,20 +2393,27 @@ fn a_static_lazy_property_keeps_its_value_for_a_singleton_s_lifetime() {
 ///     public private(set) static int $size = 3;
 ///     public private(set) static \Lib\Calc $calc;
 ///     private static string $name;
+///     private static int $next;
 ///
-///     private static function #statics(): void { self::$calc = new \Lib\Calc(1); self::$name = trim(' a '); }
+///     private static function #statics(): void
+///     {
+///         self::$calc = new \Lib\Calc(1);
+///         self::$name = trim(' a ');
+///         self::$next = \App\Tenant\Report::$size + 1;
+///     }
 /// }
 /// ```
 ///
 /// Spec section 6: PHP has no `readonly` static, so a get-only static is `private(set)`, `[4113]` being
 /// `ZEND_ACC_PRIVATE_SET | ZEND_ACC_STATIC | ZEND_ACC_PUBLIC`, and the analyzer refuses every write of it. PHP gives a
-/// static only a constant default, so an initial value that isn't constant runs in the class's hidden method
-/// `#statics`, `[20]` being `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`, which the engine runs once each request, when the
-/// request first builds the class's statics.
+/// static only a constant default, so an initial value that isn't constant, or that reads another static, which PHP's
+/// constant expression can't, runs in the class's hidden method `#statics`, `[20]` being
+/// `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`, which the engine runs once each request, when the request first builds the
+/// class's statics.
 #[test]
 fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_statics_are_built() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int size { get; } = 3;\n    public static Calc calc { get; } = new Calc(1);\n    private static string name = global.trim(\" a \");\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int size { get; } = 3;\n    public static Calc calc { get; } = new Calc(1);\n    private static string name = global.trim(\" a \");\n    private static int next = Report.size + 1;\n}\n",
         &[CALC_CLASS],
     );
 
@@ -2424,7 +2431,7 @@ fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_static
               NAMESPACE
                 ZVAL "App\\Tenant"
                 null
-              CLASS "Report" @5-10
+              CLASS "Report" @5-11
                 null
                 null
                 STMT_LIST
@@ -2455,6 +2462,15 @@ fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_static
                         null
                         null
                     null
+                  PROP_GROUP [32788]
+                    ZVAL [1] "int"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "next"
+                        null
+                        null
+                        null
+                    null
                   METHOD [20] "#statics" @8-8
                     PARAM_LIST
                     null
@@ -2475,6 +2491,15 @@ fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_static
                           ZVAL "trim"
                           ARG_LIST
                             ZVAL " a "
+                      ASSIGN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "next"
+                        BINARY_OP [1]
+                          STATIC_PROP
+                            ZVAL "App\\Tenant\\Report"
+                            ZVAL "size"
+                          ZVAL 1
                     ZVAL [1] "void"
                     null
                 null
