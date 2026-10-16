@@ -2268,14 +2268,20 @@ mod tests {
         let alone = vec![store.clone()];
         let beside = vec![store, receipts.clone()];
         let php = vec![php_store.clone(), php_order.clone()];
+        let receipts_alone = vec![php_order.clone(), receipts.clone()];
         let php_beside = vec![php_store, php_order, receipts];
         let refused = "app/Tenant/Store.sharp: `App.Tenant.Store` is both a class and a namespace: rename the class or the folder.";
         let php_refused = "app/Tenant/Store.php: `App\\Tenant\\Store` is both a class and a namespace: rename the class or the folder.";
+        let sharp_refused = "app/Tenant/Store/Receipts.sharp: `App.Tenant.Store` is both a plain PHP class and a namespace: rename the class or the folder.";
 
         for diff in [false, true] {
-            for (before, after, expected) in
-                [(&alone, &beside, vec![refused]), (&beside, &alone, vec![]), (&php, &php_beside, vec![php_refused])]
-            {
+            for (before, after, expected) in [
+                (&alone, &beside, vec![refused]),
+                (&beside, &alone, vec![]),
+                (&php, &php_beside, vec![php_refused, sharp_refused]),
+                (&receipts_alone, &php_beside, vec![php_refused, sharp_refused]),
+                (&php_beside, &receipts_alone, vec![]),
+            ] {
                 let (base, edited) = (shop_project(before), shop_project(after));
 
                 let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });

@@ -59,6 +59,13 @@ where
             self.errors.push(ParseError::NotSupportedYetInSharp("An attribute target", target.join(colon)));
         }
 
-        Ok(Attribute { name: self.parse_identifier()?, argument_list: self.parse_optional_partial_argument_list()? })
+        // A dotted name is a full name, which the analyzer refuses with the import to add, spec section 23.
+        let name = if self.dialect.is_sharp() && self.stream.peek_kind(1)? == Some(T!["."]) {
+            self.parse_dotted_identifier()?
+        } else {
+            self.parse_identifier()?
+        };
+
+        Ok(Attribute { name, argument_list: self.parse_optional_partial_argument_list()? })
     }
 }

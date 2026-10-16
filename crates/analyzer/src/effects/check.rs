@@ -16,6 +16,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::union::TUnion;
+use mago_names::NAMED_EFFECTS;
 use mago_names::binding::Binding;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
@@ -61,7 +62,6 @@ use crate::effects::Body;
 use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
-use crate::effects::NAMED_EFFECTS;
 use crate::effects::Runs;
 use crate::effects::events;
 use crate::effects::is_effect;
@@ -336,6 +336,24 @@ pub(crate) fn check_extern<A>(context: &mut Context<'_, '_, A>, r#extern: &Exter
 where
     A: Arena,
 {
+    // An `extern` names `Class.member` or `Namespace.function`, so a target of three parts or more is a full name,
+    // which spec section 23 keeps in `import` lines, as `Vendor.Pdf.render`.
+    let target = r#extern.target.value();
+    if let Some(member_dot) = target.iter().rposition(|byte| *byte == b'.')
+        && let Some(owner_dot) = target[..member_dot].iter().rposition(|byte| *byte == b'.')
+    {
+        let (import, written) = (BytesDisplay(&target[..member_dot]), BytesDisplay(&target[owner_dot + 1..]));
+        context.collector.report_with_code(
+            IssueCode::NonExistentClassLike,
+            Issue::error(format!(
+                "Full names appear only in `import` lines: add `import {import};` and write `{written}`."
+            ))
+            .with_annotation(Annotation::primary(r#extern.target.span()).with_message("Full name used here.")),
+        );
+
+        return;
+    }
+
     let span = r#extern.span();
     let Some((declarations, own)) = context.codebase.externs.values().find_map(|declarations| {
         declarations.iter().find(|declaration| declaration.span == span).map(|own| (declarations, own))

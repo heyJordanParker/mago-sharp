@@ -33,6 +33,7 @@ use crate::invocation::InvocationTarget;
 use crate::invocation::MethodInvocationKind;
 use crate::invocation::MethodTargetContext;
 use crate::invocation::analyzer::analyze_invocation;
+use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::utils::names::display_class_like_name;
 use crate::visibility::check_method_visibility;
 
@@ -131,15 +132,17 @@ where
         };
 
         let Some(metadata) = context.codebase.get_class_like(attribute_name_bytes) else {
-            context.collector.report_with_code(
-                IssueCode::NonExistentAttributeClass,
-                Issue::error(format!("Attribute class `{attribute_name}` not found or could not be autoloaded."))
-                .with_annotation(
-                    Annotation::primary(attribute.name.span()).with_message(format!("Unknown attribute class `{attribute_name}`")),
-                )
-                .with_note("Attributes must be classes that are defined, correctly namespaced, and autoloadable. Ensure the class exists and is accessible.")
-                .with_help("Verify the attribute class name, its namespace, and your autoloader configuration. Make sure the class is defined."),
-            );
+            if !report_unknown_sharp_class(context, attribute_name_bytes, attribute.name.span()) {
+                context.collector.report_with_code(
+                    IssueCode::NonExistentAttributeClass,
+                    Issue::error(format!("Attribute class `{attribute_name}` not found or could not be autoloaded."))
+                    .with_annotation(
+                        Annotation::primary(attribute.name.span()).with_message(format!("Unknown attribute class `{attribute_name}`")),
+                    )
+                    .with_note("Attributes must be classes that are defined, correctly namespaced, and autoloadable. Ensure the class exists and is accessible.")
+                    .with_help("Verify the attribute class name, its namespace, and your autoloader configuration. Make sure the class is defined."),
+                );
+            }
 
             analyze_attribute_argument_expressions(attribute, context, block_context, artifacts)?;
             continue;

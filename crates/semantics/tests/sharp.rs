@@ -779,6 +779,27 @@ fn true_false_or_null_written_in_another_case_is_one_error() {
     }
 }
 
+/// Spec section 2: a keyword in another case reads as the keyword with one parse error, so the file's tree is the tree
+/// of the lowercase keyword, and the file's other PHP# errors are still reported, as `keyword-case` writes both.
+#[test]
+fn a_keyword_in_another_case_leaves_the_files_other_errors_reported() {
+    let code = method("        const shipped = TRUE;\n        $total = 1;\n        Return;\n")
+        .replace("public int run", "public void run");
+    let arena = LocalArena::new();
+    let file = File::ephemeral(Cow::Borrowed(b"src/Report.sharp"), Cow::Owned(code.into_bytes()));
+    let program = parse_file(&arena, &file);
+    let names = NameResolver::new(&arena).resolve(program);
+    let parse_errors: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
+    let semantic_issues: Vec<String> = SemanticsChecker::new(PHPVersion::new(8, 4, 0))
+        .check(&file, program, &names)
+        .into_iter()
+        .map(|issue| issue.message)
+        .collect();
+
+    assert_eq!(parse_errors, ["Write the keyword `return` in lowercase."]);
+    assert_eq!(semantic_issues, ["Write `true` in lowercase.", "PHP# variables have no `$`: write `total`."]);
+}
+
 /// PHP reserves `X::class` for a class's name, so a constant named `class` in any case fails when PHP loads the file.
 #[test]
 fn a_constant_named_class_is_an_error() {
@@ -4671,6 +4692,17 @@ fn new_outside_the_slice_is_not_supported_yet() {
     let code = leak(method("        const other = new class {};\n        return 1;\n"));
 
     assert_eq!(issues(code), ["7:23 This expression is not supported yet in PHP#."]);
+}
+
+/// A named constructor without arguments is refused, but one a member chain reads through, as the `new App.Shop` of
+/// `new App.Shop.Order()`, is left to the analyzer, which alone tells a full name from a member, spec section 23.
+#[test]
+fn a_new_without_arguments_is_refused_unless_a_member_chain_reads_through_it() {
+    let code = leak(method(
+        "        const bare = new Report.of;\n        const chained = new App.Shop.Order();\n        const read = new App.Shop.total;\n        return 1;\n",
+    ));
+
+    assert_eq!(issues(code), ["7:22 This `new` without arguments is not supported yet in PHP#."]);
 }
 
 /// `new (type)(…)` creates an object from a class value, with or without type arguments, spec section 25. It calls
