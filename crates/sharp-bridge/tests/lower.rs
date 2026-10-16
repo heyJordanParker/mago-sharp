@@ -3988,7 +3988,8 @@ fn a_generic_class_keeps_the_initial_values_of_its_static_fields_in_one_hidden_s
 ///     return \Sharp\Internal\keep('App\Tally<' . /* the text of "#0" */ . '>::once',
 ///         static function () use (/* the type arguments */) { return /* the class value of "#0" */; });
 /// }
-/// \App\Tally::{'doubled#get'}(/* type args "App.Order" */);
+/// \App\Tally::{'doubled#set'}(${'value#1'} = 3, /* type args "App.Order" */) ?? ${'value#1'};
+/// return \App\Tally::{'doubled#get'}(/* type args "App.Order" */);
 /// ```
 ///
 /// Spec section 11: each type argument of a generic class has its own statics. The class's hidden `#entry` takes the
@@ -3999,7 +4000,7 @@ fn a_generic_class_keeps_the_initial_values_of_its_static_fields_in_one_hidden_s
 #[test]
 fn a_generic_class_runs_its_statics_initial_values_and_accessors_with_its_type_arguments() {
     let lowered = Lowered::new(
-        "namespace App;\n\nclass Order\n{\n}\n\nclass Tally<T : Order>\n{\n    public static List<T> made { get; } = Tally<T>.fresh();\n\n    public static int doubled { get => field * 2; set => field = value; } = 1;\n\n    public static lazy Class<T> once => typeof(T);\n\n    public static List<T> fresh() => [];\n}\n\nclass Report\n{\n    public static int run() => Tally<Order>.doubled;\n}\n",
+        "namespace App;\n\nclass Order\n{\n}\n\nclass Tally<T : Order>\n{\n    public static List<T> made { get; } = Tally<T>.fresh();\n\n    public static int doubled { get => field * 2; set => field = value; } = 1;\n\n    public static lazy Class<T> once => typeof(T);\n\n    public static List<T> fresh() => [];\n}\n\nclass Report\n{\n    public static int run()\n    {\n        Tally<Order>.doubled = 3;\n        return Tally<Order>.doubled;\n    }\n}\n",
     );
 
     assert_eq!(
@@ -4137,6 +4138,20 @@ fn a_generic_class_runs_its_statics_initial_values_and_accessors_with_its_type_a
         lowered.body(),
         indoc! {r##"
             STMT_LIST
+              COALESCE
+                STATIC_CALL
+                  ZVAL "App\\Tally"
+                  ZVAL "doubled#set"
+                  ARG_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "value#1"
+                      ZVAL 3
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "App.Order"
+                VAR
+                  ZVAL "value#1"
               RETURN
                 STATIC_CALL
                   ZVAL "App\\Tally"
