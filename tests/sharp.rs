@@ -1566,9 +1566,9 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
 }
 
 /// Spec section 23 reads a plain PHP constant through its namespace, so `mago compile` writes a file that reads
-/// `global.PHP_EOL`, `global.STDERR` and a library's constant. A read that reaches no constant is refused with status
-/// 1, never a panic: a function read without a call, a root constant that does not exist, and a name that is no class
-/// and no namespace.
+/// `global.PHP_EOL`, `global.STDERR` and a library's constant. A function read without a call is the function's value,
+/// spec section 14.3, which compiles. A read that reaches neither is refused with status 1, never a panic: a root
+/// constant that does not exist, and a name that is no class and no namespace.
 #[test]
 fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches_none() {
     let directory = tempfile::tempdir().unwrap();
@@ -1591,7 +1591,7 @@ fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches
     assert_eq!(output.status.code(), Some(0), "{printed}");
     assert!(root.join(".sharp/app/Shop/Reads.sharpc").exists());
 
-    for read in ["global.strlen", "global.NOPE", "Pdf.render", "Nope.render"] {
+    for (read, status) in [("global.strlen", 0), ("Pdf.render", 0), ("global.NOPE", 1), ("Nope.render", 1)] {
         write(
             root,
             "app/Shop/Reads.sharp",
@@ -1603,7 +1603,7 @@ fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches
         let output = run(root, "compile", &[]);
         let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
-        assert_eq!(output.status.code(), Some(1), "{read}: {printed}");
+        assert_eq!(output.status.code(), Some(status), "{read}: {printed}");
     }
 }
 

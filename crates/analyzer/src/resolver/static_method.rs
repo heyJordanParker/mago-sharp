@@ -18,6 +18,7 @@ use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::wrap_atomic;
+use mago_names::binding::php_variable_name;
 use mago_php_version::feature::Feature;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -43,6 +44,7 @@ use crate::resolver::method::report_non_existent_method;
 use crate::resolver::method::report_possibly_missing_magic_call;
 use crate::resolver::method::resolve_forwarded_call;
 use crate::resolver::selector::resolve_member_selector;
+use crate::resolver::static_property::resolve_called_static_property;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_method_name;
@@ -103,6 +105,25 @@ where
             continue;
         }
         for method_name in &method_names {
+            // A PHP# call through a class of a static property holding a function runs it.
+            if let Some(classname) = resolved_classname.fqcn
+                && let ClassLikeMemberSelector::Identifier(name) = method_selector
+                && !context.codebase.method_exists(classname.as_bytes(), method_name.as_bytes())
+                && let Some(property) = resolve_called_static_property(
+                    context,
+                    block_context,
+                    artifacts,
+                    class_expr,
+                    classname,
+                    php_variable_name(name.value),
+                    name.span,
+                    access_span,
+                )
+            {
+                result.called_properties.push(property);
+                continue;
+            }
+
             let resolved_methods = resolve_method_from_classname(
                 context,
                 block_context,

@@ -51,6 +51,7 @@ use crate::plugin::hook::NamedCall;
 use crate::plugin::hook::StaticCall;
 use crate::reconciler::assertion_reconciler;
 use crate::utils::names::display_function_like_identifier;
+use crate::utils::quoted_source;
 
 pub mod function_call;
 pub mod method_call;
@@ -120,85 +121,130 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
     where
         A: Arena,
     {
-        match self {
-            Call::Function(call) => match NamedCall::from_call(context.resolved_names, context.codebase, self) {
-                Some(named_call) => function_call::analyze_with_function_call_hooks(
-                    context,
-                    block_context,
-                    artifacts,
-                    &named_call,
-                    |context, block_context, artifacts| call.analyze(context, block_context, artifacts),
-                ),
-                None => call.analyze(context, block_context, artifacts),
-            },
-            // As a call with an invalid target, it is an error, and only its arguments are analyzed.
-            Call::Method(call)
-                if report_full_name(
-                    context,
-                    call.object,
-                    match &call.method {
-                        ClassLikeMemberSelector::Identifier(method) => Some(method),
-                        _ => None,
-                    },
-                ) =>
-            {
-                call.argument_list.analyze(context, block_context, artifacts)?;
-                artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+        analyze_call(self, context, block_context, artifacts)?;
+        report_void_result_used(context, block_context, artifacts, self);
 
-                Ok(())
-            }
-            // PHP# calls a plain PHP function through its namespace, `Pdf.render(html)` or `global.now()`.
-            Call::Method(call)
-                if context.dialect.is_sharp()
-                    && let Some(named_call) = NamedCall::from_call(context.resolved_names, context.codebase, self) =>
-            {
-                function_call::analyze_with_function_call_hooks(
-                    context,
-                    block_context,
-                    artifacts,
-                    &named_call,
-                    |context, block_context, artifacts| {
-                        function_call::analyze_namespace_function_call(
-                            context,
-                            block_context,
-                            artifacts,
-                            call,
-                            named_call.name,
-                        )
-                    },
-                )
-            }
-            // PHP# writes the static call `Class::m()` as `Class.m()`, with a bare name the binder bound to a class.
-            Call::Method(call)
-                if context.dialect.is_sharp()
-                    && let Some(static_call) = StaticCall::from_method_call(call, context.resolved_names) =>
-            {
-                static_method_call::analyze_static_method_call(
-                    context,
-                    block_context,
-                    artifacts,
-                    static_call,
-                    call.type_arguments.as_ref(),
-                    false,
-                )
-            }
-            Call::Method(call) => {
-                call.analyze(context, block_context, artifacts)?;
-                report_member_of_mixed_kinds(context, artifacts, call.object, &call.method, true);
+        Ok(())
+    }
+}
 
-                Ok(())
-            }
-            Call::NullSafeFunction(call) => {
-                function_call::analyze_null_safe_function_call(context, block_context, artifacts, call)
-            }
-            Call::NullSafeMethod(call) => {
-                call.analyze(context, block_context, artifacts)?;
-                report_member_of_mixed_kinds(context, artifacts, call.object, &call.method, true);
+/// Refuses the result of a call that returns nothing where code uses it as a value, as an argument, an assigned value,
+/// an element or an operand, as C# and Java refuse it: a `void` method or function value gives no value, spec section
+/// 14.1.
+fn report_void_result_used<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+    call: &Call<'_>,
+) where
+    A: Arena,
+{
+    if !context.dialect.is_sharp()
+        || !block_context.flags.inside_general_use()
+        || !artifacts.get_expression_type(call).is_some_and(|result| result.is_void())
+    {
+        return;
+    }
 
-                Ok(())
-            }
-            Call::StaticMethod(call) => call.analyze(context, block_context, artifacts),
+    let written = quoted_source(context, call.span());
+    context.collector.report_with_code(
+        IssueCode::NoValue,
+        Issue::error(format!(
+            "`{written}` returns nothing, so it has no value to use: call it as a statement of its own."
+        ))
+        .with_annotation(Annotation::primary(call.span()).with_message("Used as a value here.")),
+    );
+}
+
+/// Analyzes `expression` by the kind of call it is.
+fn analyze_call<'ctx, 'arena, A>(
+    expression: &Call<'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    match expression {
+        Call::Function(call) => match NamedCall::from_call(context.resolved_names, context.codebase, expression) {
+            Some(named_call) => function_call::analyze_with_function_call_hooks(
+                context,
+                block_context,
+                artifacts,
+                &named_call,
+                |context, block_context, artifacts| call.analyze(context, block_context, artifacts),
+            ),
+            None => call.analyze(context, block_context, artifacts),
+        },
+        // As a call with an invalid target, it is an error, and only its arguments are analyzed.
+        Call::Method(call)
+            if report_full_name(
+                context,
+                call.object,
+                match &call.method {
+                    ClassLikeMemberSelector::Identifier(method) => Some(method),
+                    _ => None,
+                },
+            ) =>
+        {
+            call.argument_list.analyze(context, block_context, artifacts)?;
+            artifacts.set_expression_type(expression, TUnion::from_atomic(TAtomic::Error));
+
+            Ok(())
         }
+        // PHP# calls a plain PHP function through its namespace, `Pdf.render(html)` or `global.now()`.
+        Call::Method(call)
+            if context.dialect.is_sharp()
+                && let Some(named_call) =
+                    NamedCall::from_call(context.resolved_names, context.codebase, expression) =>
+        {
+            function_call::analyze_with_function_call_hooks(
+                context,
+                block_context,
+                artifacts,
+                &named_call,
+                |context, block_context, artifacts| {
+                    function_call::analyze_namespace_function_call(
+                        context,
+                        block_context,
+                        artifacts,
+                        call,
+                        named_call.name,
+                    )
+                },
+            )
+        }
+        // PHP# writes the static call `Class::m()` as `Class.m()`, with a bare name the binder bound to a class.
+        Call::Method(call)
+            if context.dialect.is_sharp()
+                && let Some(static_call) = StaticCall::from_method_call(call, context.resolved_names) =>
+        {
+            static_method_call::analyze_static_method_call(
+                context,
+                block_context,
+                artifacts,
+                static_call,
+                call.type_arguments.as_ref(),
+                false,
+            )
+        }
+        Call::Method(call) => {
+            call.analyze(context, block_context, artifacts)?;
+            report_member_of_mixed_kinds(context, artifacts, call.object, &call.method, true);
+
+            Ok(())
+        }
+        Call::NullSafeFunction(call) => {
+            function_call::analyze_null_safe_function_call(context, block_context, artifacts, call)
+        }
+        Call::NullSafeMethod(call) => {
+            call.analyze(context, block_context, artifacts)?;
+            report_member_of_mixed_kinds(context, artifacts, call.object, &call.method, true);
+
+            Ok(())
+        }
+        Call::StaticMethod(call) => call.analyze(context, block_context, artifacts),
     }
 }
 

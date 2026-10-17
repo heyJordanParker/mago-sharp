@@ -56,6 +56,7 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::sharp_code_class_name;
+use crate::utils::quoted_source;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
     fn analyze<'ctx, A>(
@@ -272,8 +273,19 @@ where
 
     if !function.as_bytes().eq_ignore_ascii_case(b"die") {
         analyze(context, block_context, artifacts)?;
-        if let Some(metadata) = metadata {
-            report_replaced_global_call(context, block_context, artifacts, metadata, &call.argument_list, call.span());
+        // A call of a function the standard library replaces is refused once, naming the member to write, whatever
+        // the function takes by reference.
+        if let Some(metadata) = metadata
+            && !report_replaced_global_call(
+                context,
+                block_context,
+                artifacts,
+                metadata,
+                &call.argument_list,
+                call.span(),
+            )
+        {
+            report_argument_by_reference(context, call, function, metadata);
         }
 
         return Ok(());
@@ -293,6 +305,61 @@ where
     );
 
     Ok(())
+}
+
+/// Refuses a PHP# call that gives a plain PHP function an argument it takes by reference, as `global.sort(numbers)`,
+/// which would change `numbers`: PHP# passes every argument by value. The message writes the standard library method
+/// that does the work where there is one. The standard library alone passes one, as only it imports `Sharp.Internal`,
+/// to give its methods, as `Regex.match`, the results PHP gives only that way.
+fn report_argument_by_reference<A>(
+    context: &mut Context<'_, '_, A>,
+    call: &MethodCall<'_>,
+    function: Word,
+    metadata: &FunctionLikeMetadata,
+) where
+    A: Arena,
+{
+    if context.source_file.is_standard_library {
+        return;
+    }
+
+    let parameters = &metadata.parameters;
+    let Some(argument) = call.argument_list.arguments.iter().enumerate().find_map(|(index, argument)| {
+        let parameter = match argument {
+            Argument::Named(named) => parameters
+                .iter()
+                .find(|parameter| parameter.name.0.as_bytes().strip_prefix(b"$") == Some(named.name.value)),
+            Argument::Positional(_) => {
+                parameters.get(index).or_else(|| parameters.last().filter(|last| last.flags.is_variadic()))
+            }
+        }?;
+
+        parameter.flags.is_by_reference().then(|| argument.value())
+    }) else {
+        return;
+    };
+
+    let written = quoted_source(context, call.object.span().join(call.method.span()));
+    let given = quoted_source(context, argument.span());
+    let name = function.as_bytes().rsplit(|byte| *byte == b'\\').next().unwrap_or_default().to_ascii_lowercase();
+    let fix = match name.as_slice() {
+        b"array_push" => Some(format!("{given}.add(…)")),
+        b"array_unshift" => Some(format!("{given}.insert(0, …)")),
+        b"sort" | b"rsort" | b"usort" => Some(format!("{given} = {given}.sortedBy(…)")),
+        _ => None,
+    };
+    let message = match fix {
+        Some(fix) => format!(
+            "`{written}` changes the variable it is given, and PHP# passes every argument by value: write `{fix}`."
+        ),
+        None => format!(
+            "`{written}` changes the variable it is given, and PHP# passes every argument by value, so `{given}` can't go there."
+        ),
+    };
+    context.collector.report_with_code(
+        IssueCode::InvalidPassByReference,
+        Issue::error(message).with_annotation(Annotation::primary(argument.span()).with_message("Passed by value.")),
+    );
 }
 
 pub(super) fn resolve_targets<'ctx, 'arena, A>(
@@ -418,7 +485,13 @@ where
         if let Some(callable) = cast_atomic_to_callable(atomic, context.codebase, Some(template_result)) {
             match callable.as_ref() {
                 TCallable::Signature(callable_signature) => {
+                    // An extension method's value takes the method's arguments after its receiver, spec section 14.3,
+                    // so its own signature checks the call.
                     if let Some(id) = callable_signature.get_source()
+                        && !context
+                            .codebase
+                            .get_function_like(&id)
+                            .is_some_and(|metadata| metadata.flags.is_extension_method())
                         && let Some(target) = get_function_like_target(
                             context,
                             id,
@@ -462,6 +535,24 @@ where
                 span,
                 source: None,
             });
+        } else if context.dialect.is_sharp() {
+            // Spec sections 14.1 and 14.4: any expression that gives a function is called, and one that may be null is
+            // called with `?.(…)`.
+            let written = quoted_source(context, span);
+            let message = if atomic.is_null() && expression_type.types.iter().any(|other| !other.is_null()) {
+                format!("`{written}` may be null: call it as `{written}?.(…)`.")
+            } else {
+                format!(
+                    "Only a function value is called with `(…)`, and `{written}` is `{}`.",
+                    display_atomic(context, atomic)
+                )
+            };
+            context.collector.report_with_code(
+                IssueCode::InvalidCallable,
+                Issue::error(message).with_annotation(Annotation::primary(span).with_message("Called here.")),
+            );
+
+            encountered_invalid_targets = true;
         } else {
             let type_name = display_atomic(context, atomic);
 
@@ -832,7 +923,7 @@ pub(crate) fn report_bare_function_call<A>(
 
 /// Spec sections 8 and 23: a call through `global` of a function the standard library replaces is refused as its bare
 /// call is, so PHP# code never reaches around the library. A function PHP# syntax replaces keeps its `global.` call,
-/// and so does the standard library, whose members are made of those calls.
+/// and so does the standard library, whose members are made of those calls. Returns whether it reported one.
 fn report_replaced_global_call<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -840,16 +931,20 @@ fn report_replaced_global_call<A>(
     function: &FunctionLikeMetadata,
     arguments: &ArgumentList<'_>,
     span: Span,
-) where
+) -> bool
+where
     A: Arena,
 {
-    if let Some((code, message)) = replaced_global_refusal(context, block_context, artifacts, function, Some(arguments))
-    {
-        context.collector.report_with_code(
-            code,
-            Issue::error(message).with_annotation(Annotation::primary(span).with_message("Called here.")),
-        );
-    }
+    let Some((code, message)) = replaced_global_refusal(context, block_context, artifacts, function, Some(arguments))
+    else {
+        return false;
+    };
+    context.collector.report_with_code(
+        code,
+        Issue::error(message).with_annotation(Annotation::primary(span).with_message("Called here.")),
+    );
+
+    true
 }
 
 /// Spec sections 8 and 23: a read through `global` of a function the standard library replaces, as a value, as in

@@ -88,6 +88,7 @@ use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::Operator;
+use mago_syntax::cst::PartialApplication;
 use mago_syntax::cst::PartialArgument;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatch;
@@ -667,6 +668,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(File)
         }
+        // Spec section 14.1: one name covers every function type, so PHP's `Closure`, like `callable`, is no PHP# type.
+        (Node::UseItem(item), File) if item.name.value().strip_prefix(b"\\").unwrap_or(item.name.value()) == b"Closure" => {
+            report_removed(
+                item.name.span(),
+                b"Closure",
+                "write `Function<R(P)>`.",
+                "A function type names its return and parameter types, as in `Function<Money(Offer)>`, and plain PHP's closures arrive as function values.",
+                context,
+            );
+
+            Some(File)
+        }
 
         (
             Node::Program(_)
@@ -1182,14 +1195,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // A computed property's expression runs on each read, as a method body does.
         (Node::ComputedProperty(_), FieldOrProperty) => Some(FieldOrProperty),
         (Node::Block(_) | Node::PropertyHookConcreteExpressionBody(_), FieldOrProperty | Parameter) => Some(Body),
-        // A constant initial value is the member's default, which PHP evaluates as a constant expression. A static
-        // member's that reads a static member, `Class.name`, runs as code, as `Property::initial_value_runs_after_class`
-        // decides.
+        // A constant initial value is the member's default, which PHP evaluates as a constant expression. One that
+        // reads a static member, `Class.name`, runs as code, as `Property::initial_value_runs_as_code` decides.
         (Node::Expression(value), FieldOrProperty) => {
             let uses_this = report_this_in_initial_value(node, context);
             let place = if !uses_this
                 && value.is_constant(&context.version, false)
-                && !is_static_initial_value_run_as_code(value, context)
+                && !is_initial_value_run_as_code(value, context)
             {
                 Constant
             } else {
@@ -1264,7 +1276,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // A function type's parts are checked as a parameter's type is, so its return type may be `void`, which
         // `is_slice_type` refuses for its parameters, and `Self` in it is an error, because `Self` is a method's return
         // type only.
-        (Node::FunctionHint(_), FieldOrProperty | Method | Parameter | Body) => Some(Parameter),
+        (Node::FunctionHint(function), FieldOrProperty | Method | Parameter | Body) => {
+            for void in function.parameters.iter().filter(|parameter| matches!(parameter, Hint::Void(_))) {
+                context.report(
+                    Issue::error(
+                        "A function type takes no `void` parameter: `void` is only a return type, and `Function<int()>` takes nothing.",
+                    )
+                    .with_annotation(Annotation::primary(void.span()).with_message("Written here.")),
+                );
+            }
+
+            Some(Parameter)
+        }
         // A tuple's element types are checked as a parameter's type is, so `Self` in one is an error.
         (Node::TupleHint(tuple), FieldOrProperty | Method | Signature | Parameter | Body) => check_tuple(tuple, context),
         (Node::TupleElementHint(_), Parameter) => Some(Parameter),
@@ -1406,10 +1429,16 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::FunctionLikeParameter(parameter), Method | Signature | Lambda)
             if let Some(ampersand) = parameter.ampersand =>
         {
+            let instead = if place == Lambda {
+                "return the new value, or let the lambda change a variable it captures."
+            } else {
+                "return the new value."
+            };
+
             report_refusal(
-                Issue::error("A by-reference parameter is not supported yet in PHP#.")
-                    .with_annotation(Annotation::primary(ampersand).with_message("Not supported yet."))
-                    .with_note("The engine passes every PHP# argument by value."),
+                Issue::error(format!("PHP# has no by-reference parameter: {instead}"))
+                    .with_annotation(Annotation::primary(ampersand).with_message("Written here."))
+                    .with_note("Every PHP# argument is passed by value."),
                 parameter.span(),
                 Parameter,
                 context,
@@ -1948,11 +1977,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // Spec section 14.2: a lambda is a bare arrow, after one name or a parenthesized parameter list, and its body
         // is an expression or a block. The parser reads it into an arrow function or a closure without a keyword.
         (Node::Expression(Expression::ArrowFunction(_) | Expression::Closure(_)), Body) => Some(Body),
-        (Node::ArrowFunction(_) | Node::Closure(_), Body) => {
-            check_lambda_captures(node, context);
-
-            Some(Lambda)
-        }
+        (Node::ArrowFunction(_) | Node::Closure(_), Body) => Some(Lambda),
         (Node::FunctionLikeParameterList(_), Lambda) => Some(Lambda),
         (Node::Block(_), Lambda) => Some(Body),
         (Node::Expression(_), Lambda) => enter(node, Body, context),
@@ -2160,6 +2185,23 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 && matches!(context.names.binding(name), None | Some(Binding::Local(_))) =>
         {
             Some(FunctionCall)
+        }
+        // Spec section 14: any other expression that gives a function is called the same way, as `steps[0](1)` and
+        // `this.make()(1)`, and as `f?.(x)` calls it.
+        (Node::Expression(Expression::Call(Call::Function(function_call))), Body)
+        | (Node::Call(Call::Function(function_call)), Body)
+        | (Node::FunctionCall(function_call), Body)
+            if !matches!(function_call.function, Expression::Identifier(_)) =>
+        {
+            Some(Body)
+        }
+        // Spec section 14.3: a method named without parentheses is a function value, which PHP writes `Str::slug(...)`.
+        (Node::Expression(Expression::PartialApplication(application)), Body)
+            if application.is_first_class_callable() =>
+        {
+            report_first_class_callable(application, context);
+
+            None
         }
         (
             Node::Call(Call::Function(_))
@@ -4076,8 +4118,8 @@ fn is_key_hint(hint: &Hint) -> bool {
 /// Whether the slice has a type: the built-in types of spec section 24, or a class or a type parameter written by its
 /// short name, or a case of an enum written through the enum, as `PaymentResult.Paid` of spec section 20, or a
 /// nullable type, or `List<T>`, `Map<TKey, TValue>` or `Set<T>` of spec section 12, `Class<T>` of section 25 or a class
-/// with type arguments of section 11, or a function type of spec section 14.1 without a `void` parameter, whose inner
-/// types the walk checks next, refusing a `void` type argument and a wrong count of them as such. The analyzer checks a
+/// with type arguments of section 11, or a function type of spec section 14.1, whose inner types the walk checks next,
+/// refusing a `void` type argument or parameter and a wrong count of type arguments as such. The analyzer checks a
 /// generic class's arity and refuses a dotted type that names no case.
 fn is_slice_type(hint: &Hint) -> bool {
     match hint {
@@ -4090,8 +4132,7 @@ fn is_slice_type(hint: &Hint) -> bool {
         | Hint::Nullable(_) => true,
         Hint::Mixed(any) => any.value == ANY,
         Hint::Object(object) => object.value == OBJECT,
-        Hint::Generic(_) | Hint::Tuple(_) => true,
-        Hint::Function(function) => !function.parameters.iter().any(|parameter| matches!(parameter, Hint::Void(_))),
+        Hint::Generic(_) | Hint::Tuple(_) | Hint::Function(_) => true,
         _ => false,
     }
 }
@@ -5063,6 +5104,20 @@ fn report_removed(span: Span, form: &[u8], instead: &str, note: &str, context: &
         Issue::error(format!("PHP# has no `{}`: {instead}", BytesDisplay(form)))
             .with_annotation(Annotation::primary(span).with_message("Written here."))
             .with_note(note),
+    );
+}
+
+/// Reports PHP's first-class callable `Order.total(...)`, which PHP# writes as the method value `Order.total`, spec
+/// section 14.3, naming the method value as the file writes it.
+fn report_first_class_callable(application: &PartialApplication, context: &mut Context<'_, '_, '_>) {
+    let span = application.span();
+    let written = context.get_code_snippet(span);
+    let callee_length = (application.get_argument_list().span().start.offset - span.start.offset) as usize;
+    let callee = String::from_utf8_lossy(written[..callee_length].trim_ascii_end()).into_owned();
+
+    context.report(
+        Issue::error(format!("PHP# writes a method value without `(...)`: `{callee}`."))
+            .with_annotation(Annotation::primary(span).with_message("Written here.")),
     );
 }
 
@@ -6464,44 +6519,6 @@ fn check_iterator_returns(method: &Method, context: &mut Context<'_, '_, '_>) {
     }
 }
 
-/// Refuses a lambda that captures a loop variable that code changes. Spec section 3 gives each loop pass its own
-/// variable, and a lambda captures the variable itself, so the engine would capture a changing one by reference, and
-/// every pass's lambda would share the one PHP variable the loop reuses.
-fn check_lambda_captures(lambda: Node<'_, '_>, context: &mut Context<'_, '_, '_>) {
-    let captures = context.names.captures(&lambda.span()).to_vec();
-    for (_, local) in captures {
-        if !context.names.is_written(&local) || !is_loop_variable(context.program, &local) {
-            continue;
-        }
-
-        let uses = lambda.filter_map(|node| match node {
-            Node::ConstantAccess(access) if context.names.binding(&access.name) == Some(Binding::Local(local)) => {
-                Some(access.span())
-            }
-            _ => None,
-        });
-        report_not_supported(
-            uses.first().copied().unwrap_or_else(|| lambda.span()),
-            "capture of a loop variable that changes",
-            "Each loop pass has its own loop variable, which the engine cannot give a lambda yet when code changes it. Copy it into a `const` in the loop body, and capture that.",
-            context,
-        );
-    }
-}
-
-/// Whether `local` is the counter a `for` declares or a variable a `for … of` declares.
-fn is_loop_variable(program: &Program, local: &Local) -> bool {
-    let declares = |node: &Node<'_, '_>| match node {
-        Node::For(r#for) => {
-            r#for.declaration.as_ref().is_some_and(|declaration| declaration.target.span() == local.declaration)
-        }
-        Node::ForOf(for_of) => for_of.target.names().into_iter().any(|name| name.span == local.declaration),
-        _ => false,
-    };
-
-    !Node::Program(program).filter_map(|node| declares(node).then_some(())).is_empty()
-}
-
 /// Whether `name` is a constant, or a static field or property, of `class`.
 fn is_static_member(class: ClassLike, name: &[u8]) -> bool {
     is_static_property(class, name)
@@ -6559,14 +6576,15 @@ fn enclosing_class<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> 
     declarations.classes.into_iter().find(|class| class.span.contains(&span.start))
 }
 
-/// Whether `value` is the initial value of a static member that runs as code once the class is built, which
-/// `Property::initial_value_runs_after_class` decides for the checker, the analyzer and the engine alike.
-fn is_static_initial_value_run_as_code(value: &Expression, context: &Context<'_, '_, '_>) -> bool {
+/// Whether `value` is the initial value of a member that runs as code, a static member's once the class is built and
+/// an instance member's in the constructor, which `Property::initial_value_runs_as_code` decides for the checker, the
+/// analyzer and the engine alike.
+fn is_initial_value_run_as_code(value: &Expression, context: &Context<'_, '_, '_>) -> bool {
     enclosing_class(context.program, value.span()).is_some_and(|class| {
         class.members.iter().any(|member| {
             matches!(member, ClassLikeMember::Property(property)
                 if property.initial_value().is_some_and(|initial_value| initial_value.span() == value.span())
-                    && property.initial_value_runs_after_class())
+                    && property.initial_value_runs_as_code())
         })
     })
 }

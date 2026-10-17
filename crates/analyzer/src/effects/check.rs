@@ -160,7 +160,14 @@ pub(crate) fn function_values_must_fit_their_types(
             let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
-            let method = || format!("`{}`", display_sharp_member(class_name(name.0), name.1));
+            // A plain PHP function's value has no class, spec section 14.3.
+            let method = || {
+                if name.0.is_empty() {
+                    format!("`{}`", written_function(name.1, &code_class_name).0)
+                } else {
+                    format!("`{}`", display_sharp_member(class_name(name.0), name.1))
+                }
+            };
             let reason = match (&value.runs, impurity.effect) {
                 (Runs::Body(Body::Lambda(_)), _) => {
                     format!("This lambda {}", impurity.describe(&class_name, &effect_name))
@@ -366,18 +373,10 @@ fn impure(
 
     match impurity.effect {
         Some(Effect::Unknown(Some((class, member)))) => {
-            // A plain PHP function is declared through its namespace, spec section 23: `global.trim`, which the cause
-            // already writes, or `Pdf.render` after `import Vendor.Pdf;`.
             let (target, import) = if class.is_empty() {
-                match member.as_bytes().iter().rposition(|byte| *byte == b'\\') {
-                    Some(separator) => {
-                        let namespace = word(&member.as_bytes()[..separator]);
-                        let function = String::from_utf8_lossy(&member.as_bytes()[separator + 1..]);
+                let (target, namespace) = written_function(member, code_class_name);
 
-                        (format!("{}.{function}", code_class_name(namespace)), missing_import(namespace))
-                    }
-                    None => (member.to_string(), None),
-                }
+                (target, namespace.and_then(missing_import))
             } else {
                 (code_class_name(class), missing_import(class))
             };
@@ -412,6 +411,21 @@ fn impure(
             ))
         }
         _ => issue,
+    }
+}
+
+/// The plain PHP function `function`, as the cause of a call of it names it, written as the code names it through its
+/// namespace, spec section 23: `global.trim`, which the cause already writes, or `Pdf.render` after
+/// `import Vendor.Pdf;`, with the namespace a function outside the root namespace is named through.
+fn written_function(function: Word, code_class_name: &dyn Fn(Word) -> String) -> (String, Option<Word>) {
+    match function.as_bytes().iter().rposition(|byte| *byte == b'\\') {
+        Some(separator) => {
+            let namespace = word(&function.as_bytes()[..separator]);
+            let name = String::from_utf8_lossy(&function.as_bytes()[separator + 1..]);
+
+            (format!("{}.{name}", code_class_name(namespace)), Some(namespace))
+        }
+        None => (function.to_string(), None),
     }
 }
 

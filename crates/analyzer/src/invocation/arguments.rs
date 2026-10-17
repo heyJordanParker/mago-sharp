@@ -51,6 +51,7 @@ use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
+use crate::utils::with_function_fit_message;
 use crate::utils::with_set_conversion_help;
 
 /// The part of `union` that may share a value with another type. A PHP# type parameter and its class type, as `TItem`
@@ -107,7 +108,7 @@ where
         || format!("argument #{}", argument_offset + 1),
         |name| format!("parameter `{}`", display_variable_name(context, name.0.as_bytes())),
     );
-    let target_kind = invocation_target.guess_kind();
+    let target_kind = invocation_target.guess_kind(context);
     let target = invocation_target.guess_name(context);
     let input = display_type(context, input_type);
     let key = display_type(context, &key_type);
@@ -199,7 +200,7 @@ where
     if requires_referenceable_argument(invocation_target, referenced_parameter)
         && !is_argument_referenceable(argument_expression, &argument_type, context.resolved_names)
     {
-        let target_kind_str = invocation_target.guess_kind();
+        let target_kind_str = invocation_target.guess_kind(context);
         let target_name_str = invocation_target.guess_name(context);
         let parameter_label = invocation_target.get_effective_parameter_name(argument_offset).map_or_else(
             || format!("#{}", argument_offset + 1),
@@ -242,7 +243,7 @@ pub fn verify_argument_type<'arena, A>(
 where
     A: Arena,
 {
-    let target_kind_str = invocation_target.guess_kind();
+    let target_kind_str = invocation_target.guess_kind(context);
     let effective_parameter_name = invocation_target.get_effective_parameter_name(argument_offset);
     let argument_label = effective_parameter_name.map_or_else(
         || format!("argument #{}", argument_offset + 1),
@@ -485,7 +486,7 @@ where
         let types_can_be_identical = (!parameter_requires_closure || input_can_be_closure)
             && shareable_part(input_type, is_sharp).zip(shareable_part(parameter_type, is_sharp)).is_some_and(
                 |(input_type, parameter_type)| {
-                    can_argument_be_identical(context.codebase, &input_type, &parameter_type)
+                    can_argument_be_identical(context.codebase, &input_type, &parameter_type, is_sharp)
                 },
             );
 
@@ -550,6 +551,7 @@ where
         issue = issue.with_note(type_diff);
     }
     let issue = with_set_conversion_help(context, Some(input_expression), (parameter_type, input_type), issue);
+    let issue = with_function_fit_message(context, Some(input_expression), (parameter_type, input_type), issue);
 
     let (kind, issue) =
         explain_blocked_substitution(context, input_type, parameter_type, IssueCode::InvalidArgument, (kind, issue));
@@ -560,8 +562,13 @@ where
 
 /// Whether an argument of `input_type` can hold a value of `parameter_type`. A function value whose type lists an
 /// effect a function type does not list never holds a value of that function type, as assigning or returning it
-/// reports.
-fn can_argument_be_identical(codebase: &CodebaseMetadata, input_type: &TUnion, parameter_type: &TUnion) -> bool {
+/// reports. In PHP#, `is_sharp`, neither does one with fewer parameters than the function type, spec section 14.1.
+fn can_argument_be_identical(
+    codebase: &CodebaseMetadata,
+    input_type: &TUnion,
+    parameter_type: &TUnion,
+    is_sharp: bool,
+) -> bool {
     input_type.types.iter().any(|input| {
         let parameter_parts: Vec<TAtomic> = parameter_type
             .types
@@ -571,6 +578,7 @@ fn can_argument_be_identical(codebase: &CodebaseMetadata, input_type: &TUnion, p
                     (input, parameter),
                     (TAtomic::Callable(TCallable::Signature(input)), TAtomic::Callable(TCallable::Signature(parameter)))
                         if input.has_effect_outside(parameter)
+                            || (is_sharp && parameter.takes_more_parameters_than(input))
                 )
             })
             .cloned()

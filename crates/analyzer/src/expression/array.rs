@@ -59,6 +59,7 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::function_like::collection_key_error;
+use crate::statement::function_like::expect_type;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_atomic;
@@ -291,6 +292,21 @@ where
         known_int_offset: true,
     };
 
+    // Spec section 14.2: each element of a collection literal takes the element type its collection type declares, as C#
+    // types a collection initializer's elements, so a lambda in it takes its parameter types from it.
+    let element_type = artifacts.get_expected_type(&expression_span).and_then(|expected| {
+        expected
+            .types
+            .iter()
+            .filter_map(|atomic| match atomic {
+                TAtomic::Array(collection) => Some(get_array_parameters(collection, context.codebase).1),
+                _ => None,
+            })
+            .reduce(|first, other| {
+                combine_union_types(&first, &other, context.codebase, context.settings.combiner_options())
+            })
+    });
+
     for element in elements {
         let (item_key_value, key_type, item_is_list_item, value) = match element {
             ArrayElement::KeyValue(key_value_array_element) => {
@@ -463,6 +479,7 @@ where
 
         let was_inside_general_use = block_context.flags.inside_general_use();
         block_context.flags.set_inside_general_use(true);
+        expect_type(context, artifacts, value, element_type.as_ref());
         value.analyze(context, block_context, artifacts)?;
         block_context.flags.set_inside_general_use(was_inside_general_use);
 

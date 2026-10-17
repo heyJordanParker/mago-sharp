@@ -299,7 +299,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Block(block) => {
                     analyze_statements(block.statements.as_slice(), context, block_context, artifacts)
                 }
-                Statement::Expression(expression) => expression.expression.analyze(context, block_context, artifacts),
+                // A statement's value is never used, even in a block that is itself part of a value.
+                Statement::Expression(expression) => {
+                    let was_inside_general_use = block_context.flags.inside_general_use();
+                    block_context.flags.set_inside_general_use(false);
+                    let analyzed = expression.expression.analyze(context, block_context, artifacts);
+                    block_context.flags.set_inside_general_use(was_inside_general_use);
+
+                    analyzed
+                }
                 Statement::LocalDeclaration(local_declaration) => {
                     local_declaration.analyze(context, block_context, artifacts)
                 }

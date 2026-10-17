@@ -246,6 +246,7 @@ where
     {
         match extension {
             Extension::Member(method) => result.extension = Some(method),
+            Extension::Value(_) => unreachable!("a call reaches an extension member, never its value"),
             Extension::Refused => result.has_invalid_target = true,
         }
         if object_type.is_nullable() && !is_null_safe {
@@ -282,37 +283,8 @@ where
 
     let mut missing: HashSet<(Word, Word)> = HashSet::default();
     if let Some(object_type) = artifacts.get_expression_type(object) {
-        // A PHP# collection is called as every collection its place is declared as, whatever it holds, so a method
-        // resolves on each of them, and a collection that lacks it is reported once. A place declared `Iterable<T>` has
-        // only the lazy operations, spec section 12, whatever value it was last given: a `List`, or a plain PHP class
-        // with its own methods.
-        let declared_iterable = context
-            .dialect
-            .is_sharp()
-            .then(|| get_declared_type(context, block_context, artifacts, object))
-            .flatten()
-            .and_then(|declared| declared.types.iter().find(|atomic| matches!(atomic, TAtomic::Iterable(_))).cloned());
-        let declared = match declared_iterable {
-            Some(iterable) => Some(TUnion::from_atomic(iterable)),
-            None => (context.dialect.is_sharp()
-                && object_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))))
-            .then(|| get_declared_collection(context, block_context, artifacts, object))
-            .flatten(),
-        };
-        let replaced = |atomic: &TAtomic| match &declared {
-            Some(declared) if declared.types.iter().any(|atomic| matches!(atomic, TAtomic::Iterable(_))) => {
-                !atomic.is_null()
-            }
-            Some(_) => matches!(atomic, TAtomic::Array(_)),
-            None => false,
-        };
-        let mut object_atomics = object_type
-            .types
-            .iter()
-            .filter(|atomic| !replaced(atomic))
-            .chain(declared.iter().flat_map(|declared| declared.types.iter()))
-            .map(|atomic| (atomic, atomic))
-            .collect::<Vec<_>>();
+        let receivers = get_receiver_atomics(context, block_context, artifacts, object, object_type);
+        let mut object_atomics = receivers.iter().map(|atomic| (atomic, atomic)).collect::<Vec<_>>();
 
         while let Some((object_atomic, written_atomic)) = object_atomics.pop() {
             if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = object_atomic {
@@ -1508,6 +1480,81 @@ where
         }
         _ => None,
     }
+}
+
+/// The types a method of the value `object`, of type `object_type`, resolves on. A PHP# collection is called as every
+/// collection its place is declared as, whatever it holds, so a method resolves on each of them, and a collection
+/// that lacks it is reported once. A place declared `Iterable<T>` has only the lazy operations, spec section 12,
+/// whatever value it was last given: a `List`, or a plain PHP class with its own methods.
+fn get_receiver_atomics<'arena, A>(
+    context: &Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+    object: &Expression<'arena>,
+    object_type: &TUnion,
+) -> Vec<TAtomic>
+where
+    A: Arena,
+{
+    let declared_iterable = context
+        .dialect
+        .is_sharp()
+        .then(|| get_declared_type(context, block_context, artifacts, object))
+        .flatten()
+        .and_then(|declared| declared.types.iter().find(|atomic| matches!(atomic, TAtomic::Iterable(_))).cloned());
+    let declared = match declared_iterable {
+        Some(iterable) => Some(TUnion::from_atomic(iterable)),
+        None => (context.dialect.is_sharp()
+            && object_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))))
+        .then(|| get_declared_collection(context, block_context, artifacts, object))
+        .flatten(),
+    };
+    let replaced = |atomic: &TAtomic| match &declared {
+        Some(declared) if declared.types.iter().any(|atomic| matches!(atomic, TAtomic::Iterable(_))) => {
+            !atomic.is_null()
+        }
+        Some(_) => matches!(atomic, TAtomic::Array(_)),
+        None => false,
+    };
+
+    object_type
+        .types
+        .iter()
+        .filter(|atomic| !replaced(atomic))
+        .chain(declared.iter().flat_map(|declared| declared.types.iter()))
+        .cloned()
+        .collect()
+}
+
+/// The classes whose methods the PHP# value `object` has, spec section 12, one for each collection its methods
+/// resolve on, as [`get_receiver_atomics`] finds them. None unless every type of it but `null` is a `List`, `Map`, `Set`
+/// or `Iterable`. A tuple's members are its named elements, spec section 30, so a tuple has none.
+pub(crate) fn get_receiver_collections<'arena, A>(
+    context: &Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+    object: &Expression<'arena>,
+) -> Option<Vec<TObject>>
+where
+    A: Arena,
+{
+    let object_type = artifacts.get_expression_type(object)?;
+    let is_tuple =
+        |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_elements().is_some());
+    if object_type.types.iter().any(is_tuple) {
+        return None;
+    }
+
+    get_receiver_atomics(context, block_context, artifacts, object, object_type)
+        .iter()
+        .filter(|atomic| !atomic.is_null())
+        .map(|atomic| match atomic {
+            TAtomic::Array(array) if !array.is_empty() => Some(get_collection_methods(array, context.codebase)),
+            TAtomic::Iterable(iterable) => Some(get_iterable_methods(iterable)),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .filter(|collections| !collections.is_empty())
 }
 
 /// The class whose methods a PHP# collection has, as spec section 12 writes them: a `List<T>` is called as

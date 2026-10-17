@@ -51,6 +51,11 @@ pub(crate) fn is_contained_by(
         return false;
     }
 
+    // Spec section 14.1: a PHP# function fits a function type only with every parameter a call through the type passes.
+    if atomic_comparison_result.sharp_rules && container_signature.takes_more_parameters_than(&input_signature) {
+        return false;
+    }
+
     let container_params = container_signature.get_parameters();
     let input_params = input_signature.get_parameters();
     let input_has_variadic = input_params.last().is_some_and(|p| p.is_variadic());
@@ -89,7 +94,12 @@ pub(crate) fn is_contained_by(
             continue;
         };
 
-        if container_parameter_type.is_mixed() && !atomic_comparison_result.sharp_rules {
+        // A PHP# function type's `Any?` parameter passes any value, so only a function that takes any fits it. A plain
+        // PHP `callable` or `\Closure` that declares no signature takes `mixed ...`, which PHP# never writes, so it
+        // takes any function, as it does in PHP.
+        if container_parameter_type.is_mixed()
+            && (!atomic_comparison_result.sharp_rules || container_parameter.is_variadic())
+        {
             continue;
         }
 

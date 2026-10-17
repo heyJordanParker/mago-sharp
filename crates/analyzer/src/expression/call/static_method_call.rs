@@ -23,6 +23,7 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::function_call::report_wrapped_class;
+use crate::expression::call::method_call::add_called_property_targets;
 use crate::expression::call::method_call::analyze_undocumented_method_return_type;
 use crate::expression::call::method_call::prepare_unresolved_method_targets;
 use crate::expression::call::record_external_method_call;
@@ -245,6 +246,27 @@ where
             &mut invocation_targets,
         )?;
     }
+
+    // A static property the read refused, as a private one read from outside, runs nothing, so the call reports
+    // nothing more, as a refused class's call does.
+    if invocation_targets.is_empty()
+        && !method_resolution.called_properties.is_empty()
+        && method_resolution.called_properties.iter().all(|property| is_refused_type(&property.property_type))
+    {
+        artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));
+
+        return Ok(());
+    }
+    method_resolution.has_invalid_target |= add_called_property_targets(
+        context,
+        block_context,
+        artifacts,
+        std::mem::take(&mut method_resolution.called_properties),
+        &mut method_resolution.template_result,
+        call.span,
+        call.class.span().join(call.method.span()),
+        &mut invocation_targets,
+    );
 
     let has_resolved_methods = !invocation_targets.is_empty();
     let starts_a_listener = context.dialect.is_sharp()

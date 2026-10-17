@@ -737,7 +737,7 @@ where
     let mut assigned_parameters_by_position = HashMap::default();
     let mut filled_parameter_offsets: HashSet<usize> = HashSet::default();
 
-    let target_kind_str = invocation.target.guess_kind();
+    let target_kind_str = invocation.target.guess_kind(context);
     let mut has_too_many_arguments = false;
     let mut has_named_argument_anomaly = false;
     let mut last_argument_offset: isize = -1;
@@ -1425,7 +1425,7 @@ where
                 IssueCode::TooManyArguments,
                 Issue::error(format!(
                     "Cannot unpack arguments into {} `{}` which expects no arguments.",
-                    invocation.target.guess_kind(),
+                    invocation.target.guess_kind(context),
                     invocation.target.guess_name(context)
                 ))
                 .with_annotation(

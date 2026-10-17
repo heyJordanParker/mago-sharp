@@ -61,6 +61,7 @@ use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
+use crate::utils::with_function_fit_message;
 use crate::utils::with_set_conversion_help;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
@@ -636,6 +637,12 @@ pub fn handle_return_value<'ctx, A>(
             issue = issue.with_note(type_diff);
         }
         let issue = with_set_conversion_help(
+            context,
+            Some(return_value),
+            (&expected_return_type, &inferred_return_type),
+            issue,
+        );
+        let issue = with_function_fit_message(
             context,
             Some(return_value),
             (&expected_return_type, &inferred_return_type),

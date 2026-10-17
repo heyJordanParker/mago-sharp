@@ -851,12 +851,17 @@ fn a_typed_for_counter_takes_only_values_of_its_written_type() {
     );
 }
 
+/// The standard library alone passes a plain PHP function an argument by reference, and a write that can never fit
+/// the local's written type is refused there.
 #[test]
 fn a_by_reference_write_that_can_never_fit_the_written_type_of_a_local_is_reported() {
-    let sharp = "namespace Demo;\n\nclass Response\n{\n    public static List<string> line()\n    {\n        string file = \"\";\n        List<string> line = [];\n        global.headers_sent(file, line);\n        return line;\n    }\n}\n";
+    let sharp = "namespace Sharp;\n\nclass Response\n{\n    public static List<string> line()\n    {\n        string file = \"\";\n        List<string> line = [];\n        global.headers_sent(file, line);\n        return line;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Response\n{\n    /** @return list<string> */\n    public static function line(): array\n    {\n        $file = '';\n        $line = [];\n        headers_sent($file, $line);\n        return $line;\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Response.sharp", sharp), &[]), ["9:35 invalid-local-assignment-value"]);
+    assert_eq!(
+        issues(("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Response.sharp", sharp), &[]),
+        ["9:35 invalid-local-assignment-value"]
+    );
     assert_eq!(issues(("src/Demo/Response.php", php), &[]), ["13:16 invalid-return-statement"]);
 }
 
@@ -2484,8 +2489,9 @@ fn a_plain_php_constant_is_read_through_its_namespace() {
 }
 
 /// A `Name.member` read that reaches no constant is refused for what it names: `global.NOPE` and `Pdf.NOPE` name no
-/// constant, and the note names the namespace that lacks it. `global.strlen` and `Pdf.render` are functions the code
-/// calls, and `Nope` names no class and no namespace. The checker accepted each before, and the compile panicked on it.
+/// constant, and the note names the namespace that lacks it. `global.strlen` and `Pdf.render` are functions, so each
+/// read is the function's value, spec section 14.3, and `Nope` names no class and no namespace. The checker accepted
+/// each refused read before, and the compile panicked on it.
 #[test]
 fn a_read_through_a_name_that_reaches_no_constant_is_refused() {
     let pdf = (
@@ -2501,8 +2507,6 @@ fn a_read_through_a_name_that_reaches_no_constant_is_refused() {
         refusals(sharp, &[pdf]),
         [
             "7:37 non-existent-constant Undefined constant: `global.NOPE`. | Check `NOPE` for typos.",
-            "8:36 non-existent-constant `global.strlen` is a plain PHP function, not a constant: call it, as in `global.strlen(…)`. | ",
-            "9:36 non-existent-constant `Pdf.render` is a plain PHP function, not a constant: call it, as in `Pdf.render(…)`. | ",
             "10:34 non-existent-class-like `Nope` names no class, and no namespace this file imports. | Check the spelling of `Nope`, or import the class or the namespace whose member this reads.",
             "11:33 non-existent-constant Undefined constant: `Pdf.NOPE`. | Check `NOPE` for typos.",
         ]
@@ -2614,7 +2618,12 @@ fn a_bare_call_of_a_plain_php_function_names_the_call_to_write() {
         let function = &call[..call.find('(').expect("a call")];
         let expected =
             format!("5:{column} wrapped-function `{function}` is wrapped by the standard library: write {form}. | ");
-        let found = refusals(("src/Demo/Report.sharp", collection), &[]);
+        // A refused call still checks its arguments against PHP's signature, as `array_any`'s callback of two
+        // parameters, so only the refusal is compared.
+        let found: Vec<String> = refusals(("src/Demo/Report.sharp", collection), &[])
+            .into_iter()
+            .filter(|refusal| refusal.contains(" wrapped-function "))
+            .collect();
         if found != [expected] {
             differing.push(format!("{call}: {found:?}"));
         }
@@ -2687,7 +2696,7 @@ fn a_global_call_of_a_function_the_library_replaces_names_the_member_to_write() 
 
 /// Spec sections 8 and 23: a function the standard library replaces, read through `global` as a value, names the
 /// member to write, as its call does, and the value is refused once, so the call it is given to reports nothing more.
-/// A function with no member, and one PHP# syntax replaces, are called through `global` instead.
+/// A function with no member, and one PHP# syntax replaces, are function values, spec section 14.3.
 #[test]
 fn a_replaced_function_read_as_a_value_names_the_member_to_write() {
     let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
@@ -2700,8 +2709,6 @@ fn a_replaced_function_read_as_a_value_names_the_member_to_write() {
         [
             format!("5:73 wrapped-function `trim` is wrapped by the standard library: write `x.trim()`. | {lambda}"),
             format!("6:36 wrapped-function `count` is wrapped by the standard library: write `x.count()`. | {lambda}"),
-            "7:37 non-existent-constant `global.strlen` is a plain PHP function, not a constant: call it, as in `global.strlen(…)`. | ".to_owned(),
-            "8:34 non-existent-constant `global.strval` is a plain PHP function, not a constant: call it, as in `global.strval(…)`. | ".to_owned(),
         ]
     );
 }
@@ -5046,6 +5053,40 @@ fn a_lambda_passed_to_php_takes_its_parameter_types_from_the_php_signature_as_in
     assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/Report.php", php), &[("src/Lib/Numbers.php", numbers)])));
 }
 
+/// A wrong call of a function value names the function value as the code writes it, never PHP's `Closure`.
+#[test]
+fn a_wrong_call_of_a_function_value_names_the_function_value() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private Function<int(int)> scale = (int n) => n;\n    private static Function<int(int)> round = (int n) => n;\n\n    public int run(Function<int(int)> f)\n    {\n        return f(\"x\") + f() + this.scale(\"x\") + Report.round();\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "Invalid argument type for argument #1 of `f`: expected `int`, but found `string`.",
+            "Too few arguments provided for function value `f`.",
+            "Invalid argument type for argument #1 of `this.scale`: expected `int`, but found `string`.",
+            "Too few arguments provided for function value `Report.round`.",
+        ]
+    );
+}
+
+/// Spec section 14.1: a `Closure` that plain PHP returns arrives as a function value of the type its declaration gives,
+/// as a plain PHP array arrives as a `List`: it is called, held and passed as one.
+#[test]
+fn a_closure_plain_php_returns_arrives_as_a_function_value() {
+    let legacy = "<?php\n\nnamespace Lib;\n\nfinal class Legacy\n{\n    /**\n     * @return \\Closure(int): int\n     */\n    public static function typed(): \\Closure\n    {\n        return fn (int $x): int => $x * 2;\n    }\n\n    public static function doubler(): \\Closure\n    {\n        return fn ($x) => $x * 2;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Legacy;\n\nclass Report\n{\n    public int run(List<int> numbers)\n    {\n        Function<int(int)> held = Legacy.typed();\n        const typed = Legacy.typed();\n        const doubled = numbers.map(Legacy.typed());\n        Function<int(int)> untyped = Legacy.doubler();\n        return held(1) + typed(2) + doubled.count() + Legacy.typed()(3) + untyped(4);\n    }\n\n    public int wrong()\n    {\n        Function<string(string)> held = Legacy.typed();\n        return Legacy.typed()(\"x\");\n    }\n}\n";
+    let others = [("src/Lib/Legacy.php", legacy)];
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &others),
+        ["12:38 invalid-local-assignment-value", "18:41 invalid-local-assignment-value", "19:31 invalid-argument"]
+    );
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &others)[2],
+        "Invalid argument type for argument #1 of `Legacy.typed()`: expected `int`, but found `string`."
+    );
+}
+
 #[test]
 fn a_function_type_takes_lambdas_and_calls() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    private Function<int(int)> scale;\n\n    public Report(int factor)\n    {\n        this.scale = n => n * factor;\n    }\n\n    public Function<bool(int)> above(int floor) => n => n > floor;\n\n    public int run(int extra)\n    {\n        const scale = this.scale;\n        const check = this.above(extra);\n        Function<int(int)> twice = n => n * 2;\n        return check(twice(scale(extra))) ? 1 : 0;\n    }\n}\n";
@@ -5081,6 +5122,80 @@ fn a_method_value_passed_to_a_collection_method_types_its_result() {
     assert_eq!(codes(&issues(("src/Demo/Report.sharp", sharp), &[])), ["invalid-local-assignment-value"]);
 }
 
+/// Spec section 14.3: a method named without parentheses is a function value, whatever it is a method of: a `List`,
+/// `Map` or `Set` method that leaves the collection as it is, an extension method of the standard library or of an
+/// import, and a plain PHP function. Each value has its method's function type without the receiver.
+#[test]
+fn a_method_value_of_a_collection_an_extension_or_a_plain_php_function_has_its_function_type() {
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\nclass Report\n{\n    public int run(List<int> numbers, List<int> allowed, Map<string, int> prices, Set<int> seen, List<string> names, string title)\n    {\n        List<int> kept = numbers.filter(allowed.contains);\n        List<string> priced = names.filter(prices.has);\n        List<int> met = numbers.filter(seen.contains);\n        Function<int()> size = allowed.count;\n        Function<string()> tidy = title.trim;\n        Function<string(string)> slug = title.slug;\n        List<string> upper = names.map(global.strtoupper);\n        Function<int(string)> length = global.strlen;\n        Function<int(int)> wrongList = allowed.contains;\n        Function<int()> wrongExtension = title.trim;\n        Function<string(int)> wrongImported = title.slug;\n        Function<string(string)> wrongFunction = global.strlen;\n        const trimmed = title.trim;\n        const slugged = title.slug;\n        string wrongCall = slugged(1);\n        return kept.count() + priced.count() + met.count() + size() + global.strlen(tidy()) + global.strlen(slug(\"-\")) + upper.count() + length(\"x\") + global.strlen(trimmed()) + global.strlen(slugged(\"-\")) + global.strlen(wrongCall);\n    }\n\n    public int more(List<int> numbers, List<string> names, List<int>? maybe, Iterable<int> lazy, string title)\n    {\n        Function<int(int)> firstOr = numbers.firstOr;\n        Function<string(string)> wrongFirst = numbers.firstOr;\n        Function<int(int)> same = global.same_value;\n        Function<string(int)> wrongSame = global.same_value;\n        Function<Iterable<int>(int)> take = lazy.take;\n        const maybeHas = maybe.contains;\n        const total = names.total;\n        title.slug = \"x\";\n        const nope = numbers.missing;\n        return firstOr(1) + same(1) + take(1).toList().count();\n    }\n}\n";
+    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
+    let rows = "namespace Demo;\n\npublic static class Rows\n{\n    extension<T>(List<T> items)\n    {\n        public T firstOr(T fallback) => items.count() > 0 ? items[0] : fallback;\n    }\n\n    extension<T : Order>(List<T> orders)\n    {\n        public int total() => orders.count();\n    }\n}\n";
+    let same = "<?php\n\n/**\n * @template T\n *\n * @param T $value\n *\n * @return T\n */\nfunction same_value(mixed $value): mixed\n{\n    return $value;\n}\n";
+    let extensions = [
+        ("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS),
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text),
+        ("src/Demo/Rows.sharp", rows),
+        ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n"),
+        ("src/functions.php", same),
+    ];
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &extensions),
+        [
+            "17:40 invalid-local-assignment-value",
+            "18:42 invalid-local-assignment-value",
+            "19:47 invalid-local-assignment-value",
+            "20:50 invalid-local-assignment-value",
+            "23:36 invalid-argument",
+            "30:47 invalid-local-assignment-value",
+            "32:43 invalid-local-assignment-value",
+            "34:26 possibly-null-property-access",
+            "35:29 non-existent-method",
+            "35:15 impossible-assignment",
+            "36:15 invalid-property-write",
+            "37:30 invalid-property-access",
+        ]
+    );
+    let messages = messages(("src/Demo/Report.sharp", sharp), &extensions);
+    assert_eq!(messages[4], "Invalid argument type for argument #1 of `slugged`: expected `string`, but found `int`.");
+    assert_eq!(messages[8], "`string` is outside `T`'s bound `Order`, so `List<string>` has no `total`.");
+    assert_eq!(
+        messages[10],
+        "`slug` is a method an extension adds: it is called or read as a function value, never written."
+    );
+}
+
+/// Spec section 14.3 with section 12: a method value holds the collection as it was when the value was made, so a
+/// method that changes the collection would change only that copy. As in Swift, which refuses a value of a `mutating`
+/// method, it is refused, with the lambda that changes the collection itself.
+#[test]
+fn a_method_value_of_a_collection_method_that_changes_the_collection_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> allowed, Map<string, int> prices, Set<int> seen)\n    {\n        const add = allowed.add;\n        const insert = allowed.insert;\n        const remove = prices.remove;\n        const clear = seen.clear;\n        const kept = allowed.contains;\n        return kept(1) ? 1 : 0;\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "7:21 invalid-property-access: `allowed.add` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `value => allowed.add(value)`.",
+            "8:24 invalid-property-access: `allowed.insert` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `(index, value) => allowed.insert(index, value)`.",
+            "9:24 invalid-property-access: `prices.remove` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `key => prices.remove(key)`.",
+            "10:23 invalid-property-access: `seen.clear` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `() => seen.clear()`.",
+        ],
+    );
+}
+
+/// A plain PHP call that unpacks arguments into a function that takes none is refused, naming the function as PHP
+/// names it.
+#[test]
+fn unpacked_arguments_into_a_plain_php_function_that_takes_none_are_too_many() {
+    let php = "<?php\n\nnamespace Demo;\n\nfunction none(): void\n{\n}\n\nfunction run(array $values): void\n{\n    none(...$values);\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/run.php", php), &[]),
+        ["Cannot unpack arguments into function `Demo\\none` which expects no arguments."]
+    );
+}
+
 /// A lambda passed to a collection method is checked against the element type, as any argument is.
 #[test]
 fn a_collection_method_refuses_a_lambda_of_another_element_type() {
@@ -5109,6 +5224,209 @@ fn a_call_of_a_property_holding_a_function_is_checked_against_its_function_type(
 
     assert_eq!(php_issues, ["invalid-argument", "invalid-argument"]);
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &others), ["16:53 invalid-argument", "16:74 invalid-argument"]);
+}
+
+/// Spec section 14.3 calls a static field or property that holds a function as a static method, `Rates.round(x)`,
+/// when the class has no static method of that name, through the class and inside it, and checks the call against
+/// its function type. A generic class's static property holds the function of the type arguments the call writes, a
+/// call that writes none is refused, and a private one is read only inside its class.
+#[test]
+fn a_call_of_a_static_property_holding_a_function_is_checked_against_its_function_type() {
+    let rates = "namespace Demo;\n\nclass Rates\n{\n    private static Function<int(int)> round = (int amount) => amount - 1;\n    public static Function<int(int)> scale { get; set; } = (int amount) => amount * 2;\n\n    public static int run(int extra) => Rates.round(extra) + Rates.scale(extra);\n}\n";
+    let holder = "namespace Demo;\n\nclass Holder<T>\n{\n    public static Function<T(T)> step { get; set; } = (T value) => value;\n}\n";
+    let caller = "namespace Demo;\n\nclass Caller\n{\n    public int run() => Holder<int>.step(5) + Rates.scale(1);\n\n    public int wrong() => Holder<int>.step(\"x\") + Rates.round(1);\n\n    public Any? bare() => Holder.step(5);\n}\n";
+
+    let others = [("src/Demo/Rates.sharp", rates), ("src/Demo/Holder.sharp", holder)];
+
+    assert_eq!(
+        issues(("src/Demo/Caller.sharp", caller), &others),
+        ["7:44 invalid-argument", "7:57 invalid-property-read", "9:27 missing-template-parameter"]
+    );
+    assert_eq!(
+        messages(("src/Demo/Caller.sharp", caller), &others)[..2],
+        [
+            "Invalid argument type for argument #1 of `Holder<int>.step`: expected `int`, but found `string`.",
+            "Cannot read private property `Rates.round`.",
+        ]
+    );
+}
+
+#[test]
+fn a_call_of_a_static_property_holding_a_function_is_checked_inside_its_class() {
+    let sharp = "namespace Demo;\n\nclass Rates\n{\n    private static Function<int(int)> round = (int amount) => amount - 1;\n    public static Function<int(int)> scale { get; set; } = (int amount) => amount * 2;\n\n    public static int run(int extra) => Rates.round(extra) + Rates.scale(extra);\n\n    public static int wrong() => Rates.round(\"x\") + Rates.scale();\n}\n";
+
+    assert_eq!(issues(("src/Demo/Rates.sharp", sharp), &[]), ["10:46 invalid-argument", "10:64 too-few-arguments"]);
+}
+
+/// Spec section 14.2: a lambda's parameter types may be left out only where something gives them, a function type
+/// or the method the lambda is passed to, as C#'s CS8917 refuses a lambda whose delegate type nothing infers. A `List`
+/// or `Map` literal gives each element the element type its collection type declares, at any depth, as C# types a
+/// collection initializer's elements.
+#[test]
+fn a_lambda_parameter_nothing_types_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private Function<int(int)> step = n => n + 1;\n    private List<Function<int(int)>> list = [n => n + 1];\n    private Map<string, Function<int(int)>> named = [\"negate\": n => -n];\n\n    public static int sum(List<Function<int(int)>> steps) => steps.count();\n\n    public int run(List<int> numbers, int extra)\n    {\n        const identity = x => x;\n        Any held = y => y;\n        const first = (a, b) => a;\n        Function<int(int)> typed = n => n + 1;\n        const kept = numbers.filter(n => n > extra);\n        const written = (int n) => n;\n        List<Any> made = [identity, first, held];\n        List<Function<int(int)>> steps = [n => n + 1, n => n * 2];\n        List<List<Function<int(int)>>> nested = [[n => n - 1]];\n        List<Function<int(int)>>|List<Function<int(float)>> either = [n => 1];\n        return typed(1) + kept.count() + written(1) + made.count() + this.step(1) + steps.count() + nested.count() + Report.sum([n => n * 3]) + this.list.count() + this.named.count() + either.count();\n    }\n}\n";
+
+    assert_eq!(
+        codes(&issues(("src/Demo/Report.sharp", sharp), &[])),
+        ["missing-parameter-type", "missing-parameter-type", "missing-parameter-type", "missing-parameter-type"]
+    );
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[])[0],
+        "Nothing gives the parameter `x` a type here: write it, as in `(int x) => …`, or give the lambda a function type."
+    );
+
+    // A plain PHP `callable` or `\Closure` parameter passes each parameter an `Any?`, as its signature says, spec
+    // section 24's rule for an untyped plain PHP value.
+    let runner = "<?php\n\nnamespace Demo;\n\nfinal class Runner\n{\n    public static function any(callable $step): void\n    {\n    }\n\n    public static function closure(\\Closure $step): void\n    {\n    }\n}\n";
+    let caller = "namespace Demo;\n\nclass Caller\n{\n    public void run()\n    {\n        Runner.any(x => x);\n        Runner.closure(y => y);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Caller.sharp", caller), &[("src/Demo/Runner.php", runner)]), Vec::<String>::new());
+}
+
+/// Spec section 14.1: a lambda fits a function type with as many parameters as the type has, as in C#, Kotlin, Swift
+/// and Java, and a lambda for a type that returns `void` gives no value: its expression body is a call or a change,
+/// and its block body returns none, as C#'s CS8030 refuses, though a lambda in it returns for itself. A call of a
+/// `void` function gives no value to use. Each refusal says which rule it breaks, in a field, a local, an argument and
+/// a method value alike.
+#[test]
+fn a_lambda_fits_a_function_type_only_with_its_parameters_and_its_void() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int total = 0;\n    private Function<int(int, int)> held = (int a) => a;\n    private Function<void(int)> sink = (int n) => n * 2;\n    private Function<int(int, int)> pair = Report.one;\n\n    public static int apply(Function<int(int, int)> step) => step(1, 2);\n\n    public static void each(Function<void(int)> step) { step(1); }\n\n    public static int one(int a) => a;\n\n    public void run()\n    {\n        Report.apply((int a) => a);\n        Report.apply(() => 1);\n        Report.apply((int a, int b) => a + b);\n        Report.each(n => n + 1);\n        Report.each(n => this.add(n));\n        Report.each(n => { this.total += n; });\n        Report.each(n => this.total = n);\n        Function<int(int, int)> local = (int a) => a;\n        Function<void(int)> quiet = n => n;\n        local(1, 2);\n        quiet(1);\n        this.held(1, 2);\n        this.sink(1);\n        Runner.attempt(1, () => { this.total += 1; });\n        Report.each(n => { return n; });\n        Report.each(n => { if (n > 0) { return n; } });\n        Report.each(n => { const f = () => n; f(); });\n        Report.each(n => n > 1 ? this.add(n) : this.add(0));\n        Function<int(int, int)> method = Report.one;\n        List<Any?> seen = [];\n        seen.add(this.add(1));\n        Any? kept = quiet(2);\n        const picked = this.total > 0 ? this.add(1) : this.add(2);\n        this.pair(1, 2);\n        Report.each(n => { if (n > 0) { return; } this.add(n); });\n        Report.each(n => -n);\n    }\n\n    private void add(int n) { this.total += n; }\n}\n";
+    // A plain PHP `callable` takes any function, so a call through it passes no parameter a lambda must take.
+    let runner = "<?php\n\nnamespace Demo;\n\nfinal class Runner\n{\n    public static function attempt(int $line, callable $statement): void\n    {\n        $statement();\n    }\n}\n";
+    assert_messages(
+        sharp,
+        &[("src/Demo/Runner.php", runner)],
+        &[
+            "6:44 invalid-property-default-value: `Function<int(int, int)>` takes 2 parameters, and this lambda takes 1.",
+            "7:51 invalid-return-statement: This lambda gives a value, and `Function<void(int)>` returns nothing: remove the value, or give the function type a return type.",
+            "8:44 invalid-property-default-value: `Function<int(int, int)>` takes 2 parameters, and `Report.one` takes 1.",
+            "18:22 invalid-argument: `Function<int(int, int)>` takes 2 parameters, and this lambda takes 1.",
+            "19:22 invalid-argument: `Function<int(int, int)>` takes 2 parameters, and this lambda takes 0.",
+            "21:26 invalid-return-statement: This lambda gives a value, and `Function<void(int)>` returns nothing: remove the value, or give the function type a return type.",
+            "25:41 invalid-local-assignment-value: `Function<int(int, int)>` takes 2 parameters, and this lambda takes 1.",
+            "26:42 invalid-return-statement: This lambda gives a value, and `Function<void(int)>` returns nothing: remove the value, or give the function type a return type.",
+            "32:35 invalid-return-statement: This lambda gives a value, and `Function<void(int)>` returns nothing: remove the value, or give the function type a return type.",
+            "33:48 invalid-return-statement: This lambda gives a value, and `Function<void(int)>` returns nothing: remove the value, or give the function type a return type.",
+            "35:26 invalid-return-statement: A conditional gives a value, and `Function<void(int)>` returns nothing: choose with `if` in a block body, as in `{ if (…) { … } else { … } }`.",
+            "36:42 invalid-local-assignment-value: `Function<int(int, int)>` takes 2 parameters, and `Report.one` takes 1.",
+            "38:18 no-value: `this.add(1)` returns nothing, so it has no value to use: call it as a statement of its own.",
+            "39:21 no-value: `quiet(2)` returns nothing, so it has no value to use: call it as a statement of its own.",
+            "40:41 no-value: `this.add(1)` returns nothing, so it has no value to use: call it as a statement of its own.",
+            "40:55 no-value: `this.add(2)` returns nothing, so it has no value to use: call it as a statement of its own.",
+            "43:26 invalid-return-statement: This lambda gives a value, and `Function<void(int)>` returns nothing: remove the value, or give the function type a return type.",
+        ],
+    );
+}
+
+/// Spec section 14.3 with Jordan's rule that PHP# code never reasons about PHP underneath: a plain PHP function that
+/// changes the variable an argument names is no function value, since PHP# passes every argument by value, and neither
+/// is one that reads the variables of the code that calls it, which PHP runs only when the call names it. A direct call
+/// that would change a PHP# variable is refused too, with the standard library method that does the work where one does.
+/// A function the standard library replaces, as `array_push` and `shuffle`, is refused once, with the member to write,
+/// as every `global.` call of it is.
+#[test]
+fn a_plain_php_function_that_changes_or_reads_the_callers_variables_is_no_function_value() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> numbers, string text)\n    {\n        const sort = global.sort;\n        const pack = global.compact;\n        const args = global.func_get_args;\n        const vars = global.extract;\n        global.sort(numbers);\n        global.array_push(numbers, 4);\n        global.shuffle(numbers);\n        global.preg_match(\"/a/\", text, numbers);\n        global.array_unshift(numbers, 0);\n        global.usort(callback: (a, b) => 0, array: numbers);\n        return global.preg_match(\"/a/\", text) ?: 0;\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "7:22 invalid-pass-by-reference: `global.sort` changes the variable it is given, and PHP# passes every argument by value, so it is no function value.",
+            "8:22 invalid-callable: `global.compact` reads the variables of the code that calls it, so it is no function value.",
+            "9:22 invalid-callable: `global.func_get_args` reads the variables of the code that calls it, so it is no function value.",
+            "10:22 invalid-callable: `global.extract` reads the variables of the code that calls it, so it is no function value.",
+            "11:21 invalid-pass-by-reference: `global.sort` changes the variable it is given, and PHP# passes every argument by value: write `numbers = numbers.sortedBy(…)`.",
+            "12:9 wrapped-function: `array_push` is wrapped by the standard library: write `numbers.add(…)`.",
+            "13:9 wrapped-function: `shuffle` is wrapped by the standard library: write `random.shuffle(…)` on the `Random` your constructor takes.",
+            "14:40 invalid-pass-by-reference: `global.preg_match` changes the variable it is given, and PHP# passes every argument by value, so `numbers` can't go there.",
+            "15:30 invalid-pass-by-reference: `global.array_unshift` changes the variable it is given, and PHP# passes every argument by value: write `numbers.insert(0, …)`.",
+            "16:52 invalid-pass-by-reference: `global.usort` changes the variable it is given, and PHP# passes every argument by value: write `numbers = numbers.sortedBy(…)`.",
+        ],
+    );
+}
+
+/// Spec sections 14.1 and 14.4 in PHP#'s words: a value that is no function is not called, a function that may be null
+/// is called with `?.(…)`, and PHP's `Closure` is no type, imported or not.
+#[test]
+fn a_call_of_no_function_and_a_closure_type_are_refused_in_php_sharp_words() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private Function<int(int)>? maybe = null;\n\n    public int take(Closure f) => 1;\n\n    public int global(global.Closure f) => 1;\n\n    public void run()\n    {\n        (5)(1);\n        this.maybe(5);\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "7:21 non-existent-class-like: PHP# has no `Closure`: write `Function<R(P)>`.",
+            "9:23 non-existent-class-like: PHP# has no `Closure`: write `Function<R(P)>`.",
+            "13:9 invalid-callable: Only a function value is called with `(…)`, and `(5)` is `5`.",
+            "14:9 invalid-callable: `this.maybe` may be null: call it as `this.maybe?.(…)`.",
+        ],
+    );
+}
+
+/// A plain PHP library that takes a callback with no docblock takes any PHP# function value, as PHP does, in a
+/// `callable` or `\Closure` parameter or a `?\Closure` static property. A function plain PHP gives as a `callable`
+/// may be a function's name or an array, and one it gives as an untyped `\Closure` declares no types, so neither is a
+/// typed function value, and the refusal says why.
+#[test]
+fn a_function_value_crosses_plain_php_callbacks_that_declare_no_types() {
+    let callbacks = "<?php\n\nnamespace Lib;\n\nfinal class Callbacks\n{\n    public static ?\\Closure $handler = null;\n\n    public static function apply(callable $step, int $value): int\n    {\n        return $step($value);\n    }\n\n    public static function applyClosure(\\Closure $step, int $value): int\n    {\n        return $step($value);\n    }\n\n    /** @return callable(int): int */\n    public static function named(): callable\n    {\n        return 'abs';\n    }\n\n    public static function untyped(): \\Closure\n    {\n        return fn ($value) => $value;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Callbacks;\n\nclass Report\n{\n    public int plus(int value) => value + 1;\n\n    public int run(List<int> allowed)\n    {\n        Callbacks.handler = (int n) => n * 7;\n        Callbacks.handler = this.plus;\n        return Callbacks.apply(this.plus, 3) + Callbacks.applyClosure(global.abs, -4) + Callbacks.apply((int n) => n, 1);\n    }\n\n    public int wrong()\n    {\n        Function<int(int)> named = Callbacks.named();\n        Function<int(int)> untyped = Callbacks.untyped();\n        return named(1) + untyped(2);\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[("src/Lib/Callbacks.php", callbacks)],
+        &[
+            "18:36 invalid-local-assignment-value: `Callbacks.named()` gives a plain PHP `callable`, which may be a function's name or an array, so it is no `Function<int(int)>`.",
+            "19:38 invalid-local-assignment-value: `Callbacks.untyped()` gives a function whose types plain PHP doesn't declare, so it is no `Function<int(int)>`: hold it with `const`, and check what each call gives.",
+        ],
+    );
+}
+
+/// A read of an extension method the file doesn't import is told so where the code reads it, not where it calls it.
+#[test]
+fn a_read_of_an_extension_the_file_does_not_import_is_annotated_as_a_read() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(string title)\n    {\n        const slug = title.slug;\n    }\n}\n";
+    let found = analyze(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Demo/Report.sharp", sharp),
+        &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS)],
+    );
+    let annotations: Vec<Option<&str>> = found
+        .iter()
+        .flat_map(|issue| issue.annotations.iter().map(|annotation| annotation.message.as_deref()))
+        .collect();
+
+    assert_eq!(annotations, [Some("Read here.")]);
+}
+
+/// Spec section 14.3: `this.discount(…)` always has one meaning, so a class may not declare a field, a property or a
+/// method named like a method, field or property it inherits and can see, from a PHP# class or a plain PHP one, at any
+/// depth. A private member of an ancestor is no member the class sees.
+#[test]
+fn a_member_named_as_an_inherited_member_is_an_error() {
+    let base = "<?php\n\nnamespace Lib;\n\nclass Base\n{\n    public string $label = \"\";\n    private string $secret = \"\";\n\n    public function shout(): string\n    {\n        return \"\";\n    }\n\n    private function hidden(): string\n    {\n        return \"\";\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Base;\n\npublic class Pricing\n{\n    public int discount(int amount) => amount;\n    protected Function<int(int)> markdown = (int amount) => amount;\n    public int rebate(int amount) => this.secretRate(amount);\n    private int secretRate(int amount) => amount;\n}\n\npublic class Sale : Pricing\n{\n    protected Function<int(int)> discount = (int amount) => amount - 1;\n    public int markdown(int amount) => amount;\n    protected Function<int(int)> secretRate = (int amount) => amount;\n}\n\npublic class Clearance : Sale\n{\n    public int rebate { get; } = 0;\n}\n\npublic class Banner : Base\n{\n    public string label() => \"\";\n    protected Function<string()> shout = () => \"\";\n    public string secret() => \"\";\n    protected Function<string()> hidden = () => \"\";\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Pricing.sharp", sharp), &[("src/Lib/Base.php", base)]),
+        [
+            "15:34 name-already-in-use",
+            "16:16 name-already-in-use",
+            "22:16 name-already-in-use",
+            "27:19 name-already-in-use",
+            "28:34 name-already-in-use"
+        ]
+    );
+    assert_eq!(
+        messages(("src/Demo/Pricing.sharp", sharp), &[("src/Lib/Base.php", base)])[0],
+        "`Sale` declares the field `discount` and inherits the method `discount` from `Pricing`, so `x.discount(…)` could run either. Rename one of them."
+    );
+    assert_eq!(
+        messages(("src/Demo/Pricing.sharp", sharp), &[("src/Lib/Base.php", base)])[2],
+        "`Clearance` declares the property `rebate` and inherits the method `rebate` from `Pricing`, so `x.rebate(…)` could run either. Rename one of them."
+    );
 }
 
 #[test]
@@ -6579,8 +6897,8 @@ fn php_calls_an_extension_member_as_the_static_method_it_runs_as() {
 }
 
 /// Spec section 26: a file that imports an extension's class calls its methods and reads its computed properties as
-/// members of the receiver, checked against the static methods they run as. A method is called and a computed
-/// property is read, never written.
+/// members of the receiver, checked against the static methods they run as. A method is called, or read as its
+/// function value, spec section 14.3, and a computed property is read, never written.
 #[test]
 fn an_imported_extension_is_a_member_of_its_receiver() {
     let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\npublic class Catalog\n{\n    public string handle(string title) => title.slug(\"-\");\n    public bool empty(string title) => title.isBlank;\n    public int count(string title) => title.slug(\"-\");\n    public string wrong(string title) => title.slug(1);\n    public bool none(string title) => title.isBlank(\"-\");\n    public string bare(string title) => title.slug;\n    public void write(string title)\n    {\n        title.isBlank = true;\n    }\n    public string few(string title) => title.slug();\n}\n";
@@ -6593,7 +6911,7 @@ fn an_imported_extension_is_a_member_of_its_receiver() {
             "10:53 invalid-argument: Invalid argument type for argument #2 of `TextExtensions.slug`: expected `string`, but found `int`.",
             "11:45 non-existent-method: `isBlank` is a computed property of `string`, not a method: read it without `(…)`.",
             "11:39 mixed-return-statement: Could not infer a precise return type for method `Catalog.none`. Saw type `Any?`.",
-            "12:47 non-existent-property: `slug` is a method of `string`, not a computed property: call it as `slug(…)`.",
+            "12:41 invalid-return-statement: Invalid return type for method `Catalog.bare`: expected `string`, but found `Function<string(string)>`.",
             "15:15 invalid-property-write: `isBlank` is a computed property an extension adds: it is read, never written.",
             "17:40 too-few-arguments: Too few arguments provided for method `TextExtensions.slug`.",
         ],
@@ -10128,7 +10446,7 @@ fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
             "12:27 invalid-argument `Map<Status, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Status`.",
             "12:53 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.documented`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
             "12:84 invalid-argument `Map<Spot, int>` can't be passed to the parameter `array` of function `global.array_sum`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "12:187 invalid-argument `Map<Spot, int>` can't be passed to the argument #1 of closure `Closure`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "12:187 invalid-argument `Map<Spot, int>` can't be passed to the argument #1 of function value `counter`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
             "12:227 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Sink.keyed`: expected `iterable<string, int>`, but possibly received `Map<Status, int>`.",
             "12:248 invalid-argument `Map<float, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `float`.",
         ]
@@ -10522,7 +10840,12 @@ fn a_group_key_is_checked_only_where_a_function_fills_the_key_parameter() {
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[]),
-        ["7:38 invalid-argument", "8:42 invalid-named-argument", "9:47 template-constraint-violation"]
+        [
+            "7:38 invalid-argument",
+            "8:52 missing-parameter-type",
+            "8:42 invalid-named-argument",
+            "9:47 template-constraint-violation"
+        ]
     );
 }
 
@@ -10679,7 +11002,12 @@ fn a_map_has_no_entries_delete_or_filter_values_method() {
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
-        ["9:16 non-existent-method", "10:16 non-existent-method", "11:16 non-existent-method"]
+        [
+            "9:16 non-existent-method",
+            "10:16 non-existent-method",
+            "11:16 non-existent-method",
+            "11:29 missing-parameter-type"
+        ]
     );
 }
 
@@ -11724,7 +12052,7 @@ fn a_type_argument_report_names_type_arguments_and_short_class_names() {
             "7:29 excess-template-parameter Too many type arguments for `PaginatedList`: expected 1, but found 2. | `PaginatedList` is applied here. | `PaginatedList` declares 1 type parameter.",
             "9:58 excess-template-parameter Too many type arguments for `Store.count`: expected 0, but found 1. | `Store.count` is applied here. | `Store.count` declares 0 type parameters.",
             "13:46 missing-template-parameter Too few type arguments for `Report.pair`: expected at least 2, but found 1. | `Report.pair` is applied here. | `Report.pair` declares 2 type parameters.",
-            "22:35 excess-template-parameter Too many type arguments for `Closure`: expected 0, but found 1. | `Closure` is applied here. | `Closure` declares 0 type parameters.",
+            "22:35 excess-template-parameter Too many type arguments for `this.twice`: expected 0, but found 1. | `this.twice` is applied here. | `this.twice` declares 0 type parameters.",
         ]
     );
 }
@@ -12577,9 +12905,11 @@ fn a_type_test_of_a_collection_narrows_to_its_element_types() {
 /// narrows the variable it binds in the body, a collection's type arguments included.
 #[test]
 fn a_type_test_in_a_while_condition_narrows_the_variable_in_the_body() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static List<string> lines(List<Any?> source)\n    {\n        List<string> lines = [];\n        while (global.array_shift(source) is string line) {\n            lines.add(line);\n        }\n\n        return lines;\n    }\n\n    public static List<Map<string, int>> rows(List<Any?> source)\n    {\n        List<Map<string, int>> rows = [];\n        while (global.array_shift(source) is Map<string, int> row) {\n            rows.add(row);\n        }\n\n        return rows;\n    }\n}\n";
+    // `Source.next` gives an `Any?`, as `global.array_shift` would, which PHP# refuses since it changes its argument.
+    let source = "<?php\n\nnamespace Demo;\n\nfinal class Source\n{\n    public static function next(): mixed\n    {\n        return null;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static List<string> lines()\n    {\n        List<string> lines = [];\n        while (Source.next() is string line) {\n            lines.add(line);\n        }\n\n        return lines;\n    }\n\n    public static List<Map<string, int>> rows()\n    {\n        List<Map<string, int>> rows = [];\n        while (Source.next() is Map<string, int> row) {\n            rows.add(row);\n        }\n\n        return rows;\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Source.php", source)]), Vec::<String>::new());
 }
 
 /// `is`, `as` and a `match` arm of `Any` or of a union test the type written while the code runs, so the value they
@@ -13122,18 +13452,19 @@ fn a_call_a_magic_method_serves_records_the_magic_method_and_the_called_name() {
 /// `\Closure`, so the lowering calls the function the property holds.
 #[test]
 fn a_call_of_a_property_holding_a_function_records_the_property() {
-    let sharp = "namespace Demo;\n\nimport Lib.Order;\n\nclass Report\n{\n    private Function<int(int)> scale;\n\n    public Report()\n    {\n        this.scale = n => n * 2;\n    }\n\n    public int run(Order order, int extra)\n    {\n        return this.scale(extra) + order.handler(extra);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Order;\n\nclass Report\n{\n    private Function<int(int)> scale;\n    private static Function<int(int)> shared = (int n) => n;\n\n    public Report()\n    {\n        this.scale = n => n * 2;\n    }\n\n    public int run(Order order, int extra)\n    {\n        return this.scale(extra) + order.handler(extra) + Report.shared(extra);\n    }\n}\n";
     let library = "<?php namespace Lib; final class Order { /** @var \\Closure(int): int */ public \\Closure $handler; public function __construct() { $this->handler = fn (int $n): int => $n; } }";
 
     assert_eq!(
         recorded_callees(
             ("src/Demo/Report.sharp", sharp),
             &[("src/Lib/Order.php", library)],
-            &["this.scale(extra)", "order.handler(extra)"]
+            &["this.scale(extra)", "order.handler(extra)", "Report.shared(extra)"]
         ),
         [
             [r#"Property { class: "demo\\report", property: "$scale" }"#],
-            [r#"Property { class: "lib\\order", property: "$handler" }"#]
+            [r#"Property { class: "lib\\order", property: "$handler" }"#],
+            [r#"Property { class: "demo\\report", property: "$shared" }"#]
         ]
     );
 }
@@ -17249,6 +17580,36 @@ fn a_plain_php_method_value_has_its_extern_s_effects_where_it_runs() {
         [
             "app/Shop/Pricing.sharp:15:37 impure-law: Law `viaUses` reaches `Pricing.carriedRead`, which calls `Meter.read` with the effect `Clock`. Laws hold only over pure code.",
             "app/Shop/Pricing.sharp:17:38 impure-law: Law `viaPlain` reaches `Pricing.calledRead`, which calls `Meter.read` with the effect `Clock`. Laws hold only over pure code.",
+        ]
+    );
+}
+
+/// Spec section 14.3: a plain PHP function's value has the effects its `extern` declares wherever it runs, as a call of
+/// the function does, and an extension method's value has the effects of its body, passed to a function parameter, to
+/// a collection method, or to plain PHP. A function with no `extern` is refused where a function type lists effects.
+#[test]
+fn a_function_or_extension_method_value_has_its_effects_where_it_runs() {
+    let stub = (
+        "app/Stubs/Text.sharp",
+        "namespace App.Stubs;\n\nextern global.strtoupper uses Clock;\nextern global.call_user_func;\nextern global.time uses Clock;\n",
+    );
+    let stamps = (
+        "app/Shop/Stamps.sharp",
+        "namespace App.Shop;\n\npublic static class Stamps\n{\n    extension(string text)\n    {\n        public string stamped(string tail) => text + tail + `${global.time()}`;\n    }\n}\n",
+    );
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public static string carried(Function<string(string)> body) => body(\"a\");\n\n    public static string mailed(Function<string(string) uses Mail> body) => body(\"a\");\n\n    public string viaParameter => Pricing.carried(global.strtoupper);\n\n    public string viaPlain => global.call_user_func(global.strtoupper, \"a\");\n\n    public int viaCollection => [\"a\"].map(\"b\".stamped).count();\n\n    public string held => Pricing.mailed(global.strtolower);\n\n    law parameter(Pricing pricing) => pricing.viaParameter != \"\";\n\n    law plain(Pricing pricing) => pricing.viaPlain != \"\";\n\n    law collection(Pricing pricing) => pricing.viaCollection > 0;\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[stamps, stub]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, stamps, stub]),
+        [
+            "app/Shop/Pricing.sharp:17:39 impure-law: Law `parameter` reaches `Pricing.viaParameter`, which calls `global.strtoupper` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:19:35 impure-law: Law `plain` reaches `Pricing.viaPlain`, which calls `global.strtoupper` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:21:40 impure-law: Law `collection` reaches `Stamps.stamped`, which calls `global.time` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:15:42 invalid-argument: `global.strtolower` has no `extern` declaration, so a `Function<string(string) uses Mail>` cannot hold it. Help: Declare its effect in a .sharp file, such as `extern global.strtolower uses Mail;`.",
         ]
     );
 }
