@@ -403,7 +403,7 @@ where
     A: Arena,
 {
     let Some(receiver) = metadata.parameters.first().and_then(|receiver| receiver.get_type_metadata()) else {
-        return metadata.original_name.to_string();
+        unreachable!("a call reaches an extension member only when its receiver has a type the value fits");
     };
     let extended = match receiver.type_union.types.as_ref() {
         [atomic] => match get_sharp_type(atomic) {

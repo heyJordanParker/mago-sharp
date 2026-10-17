@@ -9,7 +9,6 @@ use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
-use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -18,6 +17,7 @@ use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::mixed::TMixed;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander;
@@ -26,7 +26,6 @@ use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
-use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
@@ -1638,13 +1637,13 @@ where
 
 /// `string`, `int`, `float` or `bool`, the PHP# type `atomic` is, when it is one of them.
 fn scalar_name(atomic: &TAtomic) -> Option<&'static str> {
-    match get_sharp_type(atomic)? {
-        SharpType::String => Some("string"),
-        SharpType::Int => Some("int"),
-        SharpType::Float => Some("float"),
-        SharpType::Bool => Some("bool"),
-        _ => None,
-    }
+    Some(match atomic {
+        TAtomic::Scalar(TScalar::String(_)) => "string",
+        TAtomic::Scalar(TScalar::Integer(_)) => "int",
+        TAtomic::Scalar(TScalar::Float(_)) => "float",
+        TAtomic::Scalar(TScalar::Bool(_)) => "bool",
+        _ => return None,
+    })
 }
 
 /// Reports a method a PHP# `string`, `int`, `float` or `bool`, named `scalar`, does not have, naming the extension

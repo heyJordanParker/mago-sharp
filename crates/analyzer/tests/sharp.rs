@@ -7255,8 +7255,8 @@ fn a_call_of_a_function_an_extension_replaces_names_the_member_on_the_argument_i
 #[test]
 fn an_issue_on_an_extension_call_names_the_member_on_its_type_and_counts_the_arguments_written() {
     let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public bool contains(string other) => global.str_contains(text, other);\n\n        public string replace(string old, string @new) => global.str_replace(old, @new, text);\n    }\n}\n";
-    let rows = "namespace Demo;\n\npublic static class Rows\n{\n    extension<TItem>(List<TItem> items)\n    {\n        public int countFrom(int start) => start + items.count();\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public bool held(string name) => name.contains(1);\n    public string swapped(string name) => name.replace(\"a\", 2);\n    public string trimmed(string name) => name.trim(1);\n    public string half(string name) => name.replace(\"a\");\n    public int first(List<int> numbers) => numbers.countFrom(\"a\");\n}\n";
+    let rows = "namespace Demo;\n\npublic static class Rows\n{\n    extension<TItem>(List<TItem> items)\n    {\n        public int countFrom(int start) => start + items.count();\n    }\n\n    extension<TItem>(Set<TItem> items)\n    {\n        public int setFrom(int start) => start + items.count();\n    }\n\n    extension<TKey, TValue>(Map<TKey, TValue> entries)\n    {\n        public int mapFrom(int start) => start + entries.count();\n    }\n\n    extension<TItem>(Iterable<TItem> items)\n    {\n        public int lazyFrom(int start) => start;\n    }\n\n    extension(int|string key)\n    {\n        public int keyFrom(int start) => start;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public bool held(string name) => name.contains(1);\n    public string swapped(string name) => name.replace(\"a\", 2);\n    public string trimmed(string name) => name.trim(1);\n    public string half(string name) => name.replace(\"a\");\n    public int first(List<int> numbers) => numbers.countFrom(\"a\");\n    public int tagged(Set<int> tags) => tags.setFrom(\"a\");\n    public int stocked(Map<string, int> stock) => stock.mapFrom(\"a\");\n    public int lazy(Iterable<int> items) => items.lazyFrom(\"a\");\n    public int keyed(int key) => key.keyFrom(\"a\");\n}\n";
 
     assert_messages(
         sharp,
@@ -7270,6 +7270,10 @@ fn an_issue_on_an_extension_call_names_the_member_on_its_type_and_counts_the_arg
             "7:53 too-many-arguments: Too many arguments provided for method `string.trim`.",
             "8:40 too-few-arguments: Too few arguments provided for method `string.replace`.",
             "9:62 invalid-argument: Invalid argument type for argument #1 of `List.countFrom`: expected `int`, but found `string`.",
+            "10:54 invalid-argument: Invalid argument type for argument #1 of `Set.setFrom`: expected `int`, but found `string`.",
+            "11:65 invalid-argument: Invalid argument type for argument #1 of `Map.mapFrom`: expected `int`, but found `string`.",
+            "12:60 invalid-argument: Invalid argument type for argument #1 of `Iterable.lazyFrom`: expected `int`, but found `string`.",
+            "13:46 invalid-argument: Invalid argument type for argument #1 of `int|string.keyFrom`: expected `int`, but found `string`.",
         ],
     );
 }
@@ -7279,7 +7283,7 @@ fn an_issue_on_an_extension_call_names_the_member_on_its_type_and_counts_the_arg
 #[test]
 fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has() {
     let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public bool contains(string other) => global.str_contains(text, other);\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public int compared(string name) => name.shuffled(\"a\");\n    public int counted(int n) => n.missing();\n    public bool flipped(bool flag) => flag.negate();\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public int compared(string name) => name.shuffled(\"a\");\n    public int counted(int n) => n.missing();\n    public float rounded(float x) => x.round();\n    public bool flipped(bool flag) => flag.negate();\n}\n";
 
     assert_eq!(
         refusals(
@@ -7289,7 +7293,8 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
         [
             "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `contains`, `trim`.",
             "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has no methods.",
-            "7:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
+            "7:40 non-existent-method Method `round` does not exist on `float`. | A `float` has no methods.",
+            "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
         ]
     );
 }
