@@ -11,6 +11,7 @@ use std::sync::Arc;
 use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
@@ -43,6 +44,9 @@ pub(crate) enum Effect {
     /// an empty member for a constructor. A call of a plain PHP property holding a function has none, because an
     /// `extern` declares a class's members, not the code a property holds.
     Unknown(Option<(Word, Word)>),
+    /// The effect `effect` of a call into a plain PHP class without an `extern`, which the class carries because `by`,
+    /// a call an `extern` declares, returns it: a full class name and a member, or an empty class and a function.
+    Carried { effect: Word, by: (Word, Word) },
     /// An `emit`, spec section 15, which has the effect `Sharp\Events` whatever its listeners do. Its cause is the
     /// event's class and an empty member.
     Emit,
@@ -64,8 +68,8 @@ pub(crate) type Roots = BTreeSet<Changed>;
 
 /// A PHP# body: a method by its lowercase class and method names, an accessor by its lowercase class, its
 /// property's PHP name (`$total`) and `get` or `set`, a lambda by the name its function value's `source` gives it, or
-/// an initial value that is not constant, which runs in the constructor, by its lowercase class and its property's PHP
-/// name.
+/// an initial value that is not constant, which runs in the constructor, or a static's on the first use of its class's
+/// statics, by its lowercase class and its property's PHP name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Body {
     Method(Word, Word),
@@ -190,6 +194,18 @@ impl Impurity {
             (None, Some(Effect::Foreign(effect))) => {
                 format!("calls `{cause}`, which has the effect `{}`", effect_name(effect))
             }
+            (None, Some(Effect::Carried { effect, by })) => {
+                format!(
+                    "calls `{cause}`, which has the effect `{}` {}",
+                    effect_name(effect),
+                    self.carried_by(by, class_name)
+                )
+            }
+            (Some(body), Some(Effect::Carried { effect, by })) => format!(
+                "reaches `{body}`, which calls `{cause}` with the effect `{}` {}",
+                effect_name(effect),
+                self.carried_by(by, class_name)
+            ),
             (None, Some(Effect::Unknown(_))) => format!("calls `{cause}`, which has no `extern` declaration"),
             (None, Some(Effect::Emit)) => {
                 format!("emits `{cause}`, which has the effect `{}`", effect_name(events()))
@@ -206,6 +222,12 @@ impl Impurity {
             }
             (Some(body), None) => format!("reaches `{body}`, which changes `{cause}`"),
         }
+    }
+
+    /// Where a carried effect comes from, as "that `Desk.open` declares for the `Session` it returns", for the class of
+    /// the cause, which the declared call `by` returns.
+    pub(crate) fn carried_by(&self, by: (Word, Word), class_name: &dyn Fn(Word) -> String) -> String {
+        format!("that `{}` declares for the `{}` it returns", written(by, class_name), class_name(self.cause.0))
     }
 }
 
@@ -395,16 +417,18 @@ impl Effects {
     }
 
     /// The files whose PHP# bodies a call in each file reaches, an override a call can run included, so an edit of
-    /// one can change the effects of the calling file's functions. A method is in its file, and an accessor in its
-    /// class's.
+    /// one can change the effects of the calling file's functions. A method is in its file, and an accessor and a
+    /// static's initial value in its class's.
     #[must_use]
     pub fn callee_files(&self, codebase: &CodebaseMetadata) -> HashMap<FileId, HashSet<FileId>> {
         let file_of = |body: Body| match body {
             Body::Method(class, method) => {
                 codebase.get_method(class.as_bytes(), method.as_bytes()).map(|method| method.span.file_id)
             }
-            Body::Accessor(class, _, _) => codebase.get_class_like(class.as_bytes()).map(|class| class.span.file_id),
-            Body::InitialValue(..) | Body::Lambda(_) => unreachable!("a call reaches a method or an accessor"),
+            Body::Accessor(class, _, _) | Body::InitialValue(class, _) => {
+                codebase.get_class_like(class.as_bytes()).map(|class| class.span.file_id)
+            }
+            Body::Lambda(_) => unreachable!("a call reaches a method, an accessor or a static's initial value"),
         };
 
         let mut files: HashMap<FileId, HashSet<FileId>> = HashMap::default();
@@ -461,7 +485,7 @@ impl Effects {
         let mut effects = Vec::new();
         for (item, _) in &self.solved[*self.index.get(&body)?] {
             let effect = match item {
-                Item::Effect(Effect::Foreign(effect)) => *effect,
+                Item::Effect(Effect::Foreign(effect) | Effect::Carried { effect, .. }) => *effect,
                 Item::Effect(Effect::Emit) => events(),
                 Item::Effect(Effect::Unknown(_)) => return None,
                 Item::Changed(_) => continue,
@@ -648,7 +672,7 @@ impl Effects {
 /// does not name `Sharp\Events`.
 fn is_outside(effect: Effect, allowed: &[Word]) -> bool {
     let named = match effect {
-        Effect::Foreign(effect) => effect,
+        Effect::Foreign(effect) | Effect::Carried { effect, .. } => effect,
         Effect::Emit => events(),
         Effect::Unknown(_) => return true,
     };
@@ -665,7 +689,7 @@ fn events() -> Word {
 /// it carries the implementation's effects: `Sharp\Dispatcher::dispatch`, which the engine calls with the listeners of
 /// every event (spec section 15), and `Sharp\Behavior`'s `get` and `set`, which run as the accessors of a property
 /// that names the behavior (spec section 6.4).
-fn accepts_any_effect(class: Word, method: Word) -> bool {
+pub(crate) fn accepts_any_effect(class: Word, method: Word) -> bool {
     let (class, method) = (class.as_bytes(), method.as_bytes());
 
     (class.eq_ignore_ascii_case(b"Sharp\\Dispatcher") && method.eq_ignore_ascii_case(b"dispatch"))
@@ -680,36 +704,50 @@ fn is_effect(codebase: &CodebaseMetadata, name: &[u8]) -> bool {
         || codebase.get_class_like(name).is_some_and(|class| class.flags.is_foreign())
 }
 
+/// An effect a plain PHP class carries, with the declared call that returns the class: a full class name and a member,
+/// or an empty class and a function.
+type CarriedEffect = (Word, (Word, Word));
+
 /// The effects each plain PHP class carries because a call an `extern` declares returns it, spec section 29, by the
 /// class's lowercase name: the effects of every such call, and through a chain, those of every class whose method
-/// returns it, as `Builder.where(): static` keeps the builder's. A call into the class finds no `extern`, so it reads
-/// these in place of an unknown effect, and an `extern` on the class wins because its calls are never unknown.
-fn carried_effects(codebase: &CodebaseMetadata) -> HashMap<Word, Vec<Word>> {
-    let mut carried: HashMap<Word, Vec<Word>> = HashMap::default();
-    let mut pending: Vec<(Vec<&FunctionLikeMetadata>, Vec<Word>)> = Vec::new();
+/// returns it, as `Builder.where(): static` keeps the builder's, each with the declared call that starts its chain. A
+/// call into the class finds no `extern`, so it reads these in place of an unknown effect, and an `extern` on the class
+/// wins because its calls are never unknown.
+fn carried_effects(codebase: &CodebaseMetadata) -> HashMap<Word, Vec<CarriedEffect>> {
+    let mut carried: HashMap<Word, Vec<CarriedEffect>> = HashMap::default();
+    let mut pending: Vec<(&FunctionLikeMetadata, Vec<CarriedEffect>)> = Vec::new();
     for declaration in codebase.externs.values().filter_map(|declarations| declarations.first()) {
         let (class, member) = declaration.target;
-        let returning = if class.is_empty() {
-            codebase.get_function(member.as_bytes()).into_iter().collect()
+        let returning: Vec<(Word, &FunctionLikeMetadata)> = if class.is_empty() {
+            codebase.get_function(member.as_bytes()).map(|function| (empty_word(), function)).into_iter().collect()
         } else if member.is_empty() {
             methods_of(codebase, class)
         } else {
-            codebase.get_declaring_method(class.as_bytes(), member.as_bytes()).into_iter().collect()
+            let declaring = codebase.get_declaring_method_identifier(&MethodIdentifier::new(class, member));
+            codebase
+                .get_method_by_id(&declaring)
+                .map(|method| (declaring.get_class_name(), method))
+                .into_iter()
+                .collect()
         };
-        pending.push((returning, declaration.effects.clone()));
+        for (class, function) in returning {
+            let by = (class, function.original_name);
+            pending.push((function, declaration.effects.iter().map(|effect| (*effect, by)).collect()));
+        }
     }
 
-    while let Some((returning, effects)) = pending.pop() {
-        for returned in returning.iter().flat_map(|function| returned_classes(function)) {
+    while let Some((function, effects)) = pending.pop() {
+        for returned in returned_classes(function) {
             let known = carried.entry(returned).or_default();
             let before = known.len();
-            for effect in &effects {
-                if !known.contains(effect) {
-                    known.push(*effect);
+            for (effect, by) in &effects {
+                if !known.iter().any(|(known, _)| known == effect) {
+                    known.push((*effect, *by));
                 }
             }
             if known.len() != before {
-                pending.push((methods_of(codebase, returned), known.clone()));
+                let known = known.clone();
+                pending.extend(methods_of(codebase, returned).into_iter().map(|(_, method)| (method, known.clone())));
             }
         }
     }
@@ -717,18 +755,24 @@ fn carried_effects(codebase: &CodebaseMetadata) -> HashMap<Word, Vec<Word>> {
     carried
 }
 
-/// Every method a call through `class` can reach: its own, the ones it inherits, and the ones its docblock gives it.
-fn methods_of(codebase: &CodebaseMetadata, class: Word) -> Vec<&FunctionLikeMetadata> {
+/// Every method a call through `class` can reach, with the class that declares it: its own, the ones it inherits,
+/// and the ones its docblock gives it.
+fn methods_of(codebase: &CodebaseMetadata, class: Word) -> Vec<(Word, &FunctionLikeMetadata)> {
     codebase
         .get_class_like(class.as_bytes())
         .into_iter()
         .flat_map(|metadata| {
-            metadata.declaring_method_ids.values().filter_map(|method| codebase.get_method_by_id(method)).chain(
-                metadata
-                    .pseudo_methods
-                    .iter()
-                    .filter_map(|method| codebase.get_method(class.as_bytes(), method.as_bytes())),
-            )
+            metadata
+                .declaring_method_ids
+                .values()
+                .filter_map(|method| codebase.get_method_by_id(method).map(|found| (method.get_class_name(), found)))
+                .chain(
+                    metadata
+                        .pseudo_methods
+                        .iter()
+                        .filter_map(|method| codebase.get_method(class.as_bytes(), method.as_bytes()))
+                        .map(|found| (metadata.original_name, found)),
+                )
         })
         .collect()
 }
@@ -747,11 +791,11 @@ fn returned_classes(function: &FunctionLikeMetadata) -> impl Iterator<Item = Wor
 }
 
 /// `effect`, or the effects its class carries when it is an unknown call into a class a declared call returns.
-fn carried_through(effect: Effect, carried: &HashMap<Word, Vec<Word>>) -> Vec<Effect> {
+fn carried_through(effect: Effect, carried: &HashMap<Word, Vec<CarriedEffect>>) -> Vec<Effect> {
     match effect {
         Effect::Unknown(Some((class, _))) if !class.is_empty() => {
             match carried.get(&ascii_lowercase_word(class.as_bytes())) {
-                Some(effects) => effects.iter().map(|effect| Effect::Foreign(*effect)).collect(),
+                Some(effects) => effects.iter().map(|&(effect, by)| Effect::Carried { effect, by }).collect(),
                 None => vec![effect],
             }
         }
@@ -761,7 +805,7 @@ fn carried_through(effect: Effect, carried: &HashMap<Word, Vec<Word>>) -> Vec<Ef
 
 /// A body's own effects and changes, in source order, an effect before a change at the same place, with an unknown call
 /// into a class a declared call returns read as the effects it carries.
-fn own_items(summary: &EffectSummary, carried: &HashMap<Word, Vec<Word>>) -> Vec<(Item, Origin)> {
+fn own_items(summary: &EffectSummary, carried: &HashMap<Word, Vec<CarriedEffect>>) -> Vec<(Item, Origin)> {
     let mut items: Vec<(Item, Origin)> = Vec::new();
     let effects = summary.effects.iter().flat_map(|(effect, span, cause)| {
         carried_through(*effect, carried).into_iter().map(move |effect| (Item::Effect(effect), *span, *cause))

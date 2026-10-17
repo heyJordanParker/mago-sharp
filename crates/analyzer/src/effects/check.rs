@@ -62,6 +62,7 @@ use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
 use crate::effects::Runs;
+use crate::effects::accepts_any_effect;
 use crate::effects::events;
 use crate::effects::is_effect;
 use crate::effects::summary::parameter_index;
@@ -123,10 +124,13 @@ pub(crate) fn laws_must_be_pure(
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
 
+            // A change has no effect, so its law is refused for the change, spec section 28.
+            let holds = if impurity.effect.is_some() { "pure code" } else { "code that changes nothing" };
+
             impure(
                 IssueCode::ImpureLaw,
                 format!(
-                    "Law `{member}` {}. Laws hold only over pure code.",
+                    "Law `{member}` {}. Laws hold only over {holds}.",
                     impurity.describe(&class_name, &effect_name)
                 ),
                 impurity.span,
@@ -165,6 +169,12 @@ pub(crate) fn function_values_must_fit_their_types(
                 (Runs::Foreign { .. }, Some(Effect::Foreign(effect))) => {
                     format!("{} has the effect `{}`", method(), effect_name(effect))
                 }
+                (Runs::Foreign { .. }, Some(Effect::Carried { effect, by })) => format!(
+                    "{} has the effect `{}` {}",
+                    method(),
+                    effect_name(effect),
+                    impurity.carried_by(by, &class_name)
+                ),
                 (Runs::Foreign { .. }, _) => format!("{} has no `extern` declaration", method()),
             };
             let body = if matches!(value.runs, Runs::Body(Body::Lambda(_))) { "lambda" } else { "method" };
@@ -231,6 +241,70 @@ pub(crate) fn implementations_must_fit_their_declarations(
             )
         })
         .collect()
+}
+
+/// Spec section 29: a declaration without a body is held to what each declaration it overrides allows, as an
+/// implementation is, so a sub-interface may narrow its parent's `uses` but never widen it. The refusal names the
+/// first ancestor whose declaration the `uses` goes past.
+pub(crate) fn check_declaration_uses<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    method: &Method<'_>,
+) where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let Some(own) = codebase.get_method(class.name.as_bytes(), method.name.value) else {
+        return;
+    };
+    let wider = class.all_parent_classes.iter().chain(&class.all_parent_interfaces).find_map(|ancestor| {
+        if accepts_any_effect(*ancestor, own.name) {
+            return None;
+        }
+        let declaration = codebase.get_method(ancestor.as_bytes(), method.name.value).filter(|declaration| {
+            declaration.flags.is_sharp()
+                && declaration.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
+        })?;
+        let wider: Vec<Word> = own
+            .uses
+            .iter()
+            .filter(|effect| {
+                !declaration.uses.iter().any(|allowed| allowed.as_bytes().eq_ignore_ascii_case(effect.as_bytes()))
+            })
+            .copied()
+            .collect();
+
+        (!wider.is_empty()).then_some((*ancestor, declaration, wider))
+    });
+    let Some((ancestor, declaration, wider)) = wider else {
+        return;
+    };
+
+    let class_name =
+        |class| sharp_class_like_name(codebase, &context.imported_names, &context.short_name_counts, class);
+    let effect_name = |effect| sharp_effect_name(codebase, &context.imported_names, &context.short_name_counts, effect);
+    let declared = display_sharp_member(
+        class_name(codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |ancestor| ancestor.original_name)),
+        declaration.original_name,
+    );
+    let allowed: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
+    let allows = if allowed.is_empty() {
+        format!("the pure `{declared}`")
+    } else {
+        format!("`uses {}` on `{declared}`", allowed.join(", "))
+    };
+    let wider: Vec<String> = wider.iter().map(|effect| format!("`{}`", effect_name(*effect))).collect();
+
+    context.collector.report_with_code(
+        IssueCode::IncompatibleEffects,
+        Issue::error(format!(
+            "`{}` uses {}, so {allows} cannot accept it.",
+            display_sharp_member(class_name(class.original_name), own.original_name),
+            wider.join(", "),
+        ))
+        .with_annotation(Annotation::primary(method.name.span).with_message("Declared here."))
+        .with_annotation(Annotation::secondary(declaration.name_span.unwrap_or(declaration.span))),
+    );
 }
 
 /// Spec section 13: through a readonly value only methods marked `readonly` run, so a call of an unmarked one is an
@@ -323,6 +397,17 @@ fn impure(
                 format!("Declare its effect in a .sharp file, such as `extern {target} uses {};`.{import}", allowed.join(", "))
             })
         }
+        Some(Effect::Carried { .. }) => {
+            let class = impurity.cause.0;
+            let import = missing_import(class).map(|import| format!(" {import}")).unwrap_or_default();
+            let uses = if allowed.is_empty() { String::new() } else { format!(" uses {}", allowed.join(", ")) };
+
+            issue.with_help(format!(
+                "An `extern` on `{}` overrides the effects it carries: write `extern {}{uses};` in a .sharp file.{import}",
+                class_name(class),
+                code_class_name(class)
+            ))
+        }
         Some(Effect::Unknown(None)) => {
             let (class, property) = impurity.cause;
             let class = class_name(class);
@@ -370,9 +455,17 @@ where
     if let Some(first) = declarations.first()
         && first.span != span
     {
+        let message = match (first.is_standard_library, first.effects.as_slice()) {
+            (false, _) => format!("`{written}` already has an `extern` declaration."),
+            (true, []) => format!("`{written}` is already declared pure by the standard library: delete this line."),
+            (true, effects) => format!(
+                "`{written}` is already declared by the standard library, with `uses {}`: delete this line.",
+                effects.iter().map(short_name).collect::<Vec<_>>().join(", ")
+            ),
+        };
         context.collector.report_with_code(
             IssueCode::DuplicateExtern,
-            Issue::error(format!("`{written}` already has an `extern` declaration."))
+            Issue::error(message)
                 .with_annotation(Annotation::primary(span))
                 .with_annotation(Annotation::secondary(first.span).with_message("First declared here.")),
         );

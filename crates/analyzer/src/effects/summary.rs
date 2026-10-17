@@ -612,14 +612,46 @@ where
         for callee in self.accessors(object, property, b"get") {
             self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments: Vec::new() });
         }
+
+        if let Expression::ConstantAccess(class) = object.unparenthesized()
+            && self.context.resolved_names.binding(&class.name) == Some(Binding::Class)
+            && let ClassLikeMemberSelector::Identifier(name) = property
+        {
+            self.use_statics(word(self.context.resolved_names.get(&class.name)), name.value, span);
+        }
     }
 
-    /// A member read without `this.` runs its `get` accessor as `this.member` does.
+    /// Records a use of `property` through `class` when it is a static: the first use of the statics of the class that
+    /// declares it runs each of their initial values that is not constant, spec section 6, so it has their effects.
+    fn use_statics(&mut self, class: Word, property: &[u8], span: Span) {
+        let codebase = self.codebase();
+        let property = php_variable_name(property);
+        let Some(declaring) = codebase
+            .get_class_like(class.as_bytes())
+            .and_then(|class| class.declaring_property_ids.get(&property))
+            .and_then(|declaring| codebase.get_class_like(declaring.as_bytes()))
+            .filter(|declaring| declaring.properties.get(&property).is_some_and(|used| used.flags.is_static()))
+        else {
+            return;
+        };
+
+        for (name, static_property) in &declaring.properties {
+            if static_property.flags.is_static() && static_property.flags.has_runtime_initial_value() {
+                let callee = Body::InitialValue(declaring.name, *name);
+                self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
+            }
+        }
+    }
+
+    /// A member read without `this.` runs its `get` accessor as `this.member` does, and a static's uses its class's
+    /// statics as `Class.member` does.
     fn read_member(&mut self, name: &ConstantAccess<'arena>) {
-        if self.context.resolved_names.binding(&name.name) == Some(Binding::Member)
-            && let Some(callee) = self.accessor(self.class, name.name.value(), b"get")
-        {
-            let span = name.span();
+        if self.context.resolved_names.binding(&name.name) != Some(Binding::Member) {
+            return;
+        }
+
+        let span = name.span();
+        if let Some(callee) = self.accessor(self.class, name.name.value(), b"get") {
             self.summary.calls.push(Call {
                 callee,
                 span,
@@ -627,6 +659,7 @@ where
                 arguments: Vec::new(),
             });
         }
+        self.use_statics(self.class, name.name.value(), span);
     }
 
     /// The roots of each argument, by the index of the parameter it binds.
@@ -908,8 +941,8 @@ where
             return;
         }
 
-        // A collection method takes on the effects of each function it is given above, as a PHP# method does, and
-        // plain PHP may run any function it is given.
+        // `passed_functions` already took on the functions a collection method is given, as a PHP# method's, and plain
+        // PHP may run any function it is given.
         if is_prelude_stub(declaring_class) {
             self.prelude_stub_call(metadata, span, receiver);
         } else {
@@ -919,9 +952,9 @@ where
         }
     }
 
-    /// Records each function a call of a PHP# method passes to a function parameter whose type states no effects, spec
-    /// section 29, since the call takes on that function's effects. The method may run it on its receiver, with the roots `receiver`,
-    /// and on anything it is given, with the roots `roots` by parameter.
+    /// Records each function a call passes to a function parameter that takes on its effects, spec section 29: one
+    /// whose type states no effects, of a PHP# method or of a collection method. The method may run it on its receiver,
+    /// with the roots `receiver`, and on anything it is given, with the roots `roots` by parameter.
     fn passed_functions(
         &mut self,
         arguments: &'ast ArgumentList<'arena>,

@@ -2001,7 +2001,9 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 /// `protected set`, and `willSet` before and `didSet` after the write. Prefix `++` and `--` give the value written and
 /// postfix `--` the value read, `??=` writes only when the read is null, and `+=` on a string appends. A static's
 /// initial value fills its storage, spec section 6.2: a constant one is its default, and any other a write of the
-/// storage in `#statics`, which runs when a request first builds the class's statics, so it runs no observer.
+/// storage in `#statics`, which runs when a request first builds the class's statics, so it runs no observer. `run`
+/// uses the statics, so it has the effects of `global.strval(1)`, which no `extern` declares here, and no function
+/// type names it.
 #[test]
 fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_methods() {
     let lowered = Lowered::new(
@@ -2279,7 +2281,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                           ZVAL "value#1"
                     SHARP_TYPE_ARGS
                       ZVAL [1] "void"
-                      ZVAL "Function<void()>"
+                      ZVAL "void"
                     null
                   METHOD [20] "#statics" @6-6
                     PARAM_LIST

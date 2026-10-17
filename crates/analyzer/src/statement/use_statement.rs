@@ -89,7 +89,6 @@ pub(crate) fn check_sharp_import<A>(context: &mut Context<'_, '_, A>, name: &Ide
 where
     A: Arena,
 {
-    // A standard effect that is a name and no class, as `Sharp.Mail`, is imported to rename it, spec section 29.
     let fqn = php_name(name);
     if context.codebase.class_like_exists(&fqn) || holds_function_or_constant(context.codebase, &fqn) {
         return;

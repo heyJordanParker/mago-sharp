@@ -2539,19 +2539,20 @@ fn a_local_or_parameter_named_after_a_superglobal_is_an_error() {
 }
 
 /// Spec section 29 removes every superglobal, written with `$` or bare as in `_SERVER["HTTP_HOST"]`. Only `_ENV` names
-/// `Environment`.
+/// `Environment`, and `GLOBALS`, which holds no request data, names a parameter.
 #[test]
 fn a_superglobal_with_or_without_dollar_is_an_error_that_names_a_request() {
     let code = leak(method(
         "        Store.keep(GLOBALS[\"a\"], $GLOBALS);\n        Store.keep(_SERVER[\"a\"], $_SERVER);\n        Store.keep(_GET[\"a\"], $_GET);\n        Store.keep(_POST[\"a\"], $_POST);\n        Store.keep(_FILES[\"a\"], $_FILES);\n        Store.keep(_COOKIE[\"a\"], $_COOKIE);\n        Store.keep(_SESSION[\"a\"], $_SESSION);\n        Store.keep(_REQUEST[\"a\"], $_REQUEST);\n        Store.keep(_ENV[\"a\"], $_ENV);\n        return extra;\n",
     ));
     let message = "PHP# has no superglobals; take a Request";
+    let globals = "PHP# has no global variables; take the value as a constructor or method parameter";
 
     assert_eq!(
         issues(code),
         [
-            format!("7:20 {message}"),
-            format!("7:34 {message}"),
+            format!("7:20 {globals}"),
+            format!("7:34 {globals}"),
             format!("8:20 {message}"),
             format!("8:34 {message}"),
             format!("9:20 {message}"),
@@ -2659,7 +2660,7 @@ fn a_superglobal_or_a_double_underscore_name_before_a_member_is_an_error() {
         issues(code),
         [
             format!("7:20 {superglobal}"),
-            format!("8:20 {superglobal}"),
+            "8:20 PHP# has no global variables; take the value as a constructor or method parameter".to_owned(),
             format!("9:9 {superglobal}"),
             format!("10:9 {superglobal}"),
             format!("11:20 {magic}"),

@@ -276,9 +276,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     }
 }
 
-/// Reports a PHP# `new` that leaves a required property unset, spec sections 6.1 and 10. The object initializer names
-/// every required property the constructor that runs does not assign: the main constructor, or a named constructor
-/// together with the main constructor it runs first.
 /// Spec section 29: a `foreign` object is created in a module binding, and nowhere else, so a `.sharp` file's `new` of
 /// a class that is `foreign`, or extends one, is refused outside a binding's expression, a lambda in it included.
 fn check_foreign_outside_module<A>(
@@ -324,6 +321,9 @@ fn check_foreign_outside_module<A>(
     );
 }
 
+/// Reports a PHP# `new` that leaves a required property unset, spec sections 6.1 and 10. The object initializer names
+/// every required property the constructor that runs does not assign: the main constructor, or a named constructor
+/// together with the main constructor it runs first.
 fn check_required_properties<A>(
     context: &mut Context<'_, '_, A>,
     class: Word,

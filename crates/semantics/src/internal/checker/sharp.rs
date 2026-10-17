@@ -1816,7 +1816,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         | (Node::Expression(expression @ Expression::ArrayAccess(_)), Constant)
             if let Some(span) = superglobal_span(expression, context) =>
         {
-            report_superglobal(span, reads_the_environment(expression), context);
+            report_superglobal(span, expression, reads_the_environment(expression), context);
 
             None
         }
@@ -1824,7 +1824,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             if reads_the_environment(expression)
                 && let Some(span) = superglobal_span(expression, context) =>
         {
-            report_superglobal(span, true, context);
+            report_superglobal(span, expression, true, context);
 
             None
         }
@@ -5227,12 +5227,6 @@ fn check_declared_name(name: &[u8], span: Span, kind: &str, case: NameCase, cont
 /// Whether a superglobal read reads the process environment or the command-line arguments, which spec section 29 gives
 /// `Environment`: `_ENV` through any index, and `_SERVER`'s `"argv"` or `"argc"`.
 fn reads_the_environment(expression: &Expression) -> bool {
-    let names = |expression: &Expression, superglobal: &[u8]| match expression {
-        Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(local) }) => local.value == superglobal,
-        Expression::Variable(Variable::Direct(direct)) => direct.name.strip_prefix(b"$") == Some(superglobal),
-        _ => false,
-    };
-
     match expression {
         Expression::ArrayAccess(access) => {
             let argument = matches!(
@@ -5240,30 +5234,44 @@ fn reads_the_environment(expression: &Expression) -> bool {
                 Expression::Literal(Literal::String(LiteralString { value: Some(b"argv" | b"argc"), .. }))
             );
 
-            (argument && names(access.array, b"_SERVER")) || reads_the_environment(access.array)
+            (argument && names_superglobal(access.array, b"_SERVER")) || reads_the_environment(access.array)
         }
-        expression => names(expression, b"_ENV"),
+        expression => names_superglobal(expression, b"_ENV"),
+    }
+}
+
+/// Whether `expression` is the superglobal `superglobal`, written with `$` or bare.
+fn names_superglobal(expression: &Expression, superglobal: &[u8]) -> bool {
+    match expression {
+        Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(local) }) => local.value == superglobal,
+        Expression::Variable(Variable::Direct(direct)) => direct.name.strip_prefix(b"$") == Some(superglobal),
+        _ => false,
     }
 }
 
 /// Reports a PHP superglobal, written with `$` or bare, which spec section 29 removes, naming `Environment` for a read
-/// of the environment or the arguments and a request for anything else.
-fn report_superglobal(span: Span, environment_read: bool, context: &mut Context<'_, '_, '_>) {
+/// of the environment or the arguments, a parameter for `GLOBALS`, which holds global variables PHP# has none of, and
+/// a request for anything else.
+fn report_superglobal(span: Span, expression: &Expression, environment_read: bool, context: &mut Context<'_, '_, '_>) {
     let (environment, after) = standard_class("Environment", context);
-    let replacement = if environment_read {
+    let mut superglobal = expression;
+    while let Expression::ArrayAccess(access) = superglobal {
+        superglobal = access.array;
+    }
+    let message = if environment_read {
         let article = if environment.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" };
 
-        format!("{article} {environment}{after}")
+        format!("PHP# has no superglobals; take {article} {environment}{after}")
+    } else if names_superglobal(superglobal, b"GLOBALS") {
+        "PHP# has no global variables; take the value as a constructor or method parameter".to_owned()
     } else {
-        "a Request".to_owned()
+        "PHP# has no superglobals; take a Request".to_owned()
     };
 
     context.report(
-        Issue::error(format!("PHP# has no superglobals; take {replacement}"))
-            .with_annotation(Annotation::primary(span).with_message("Written here."))
-            .with_note(format!(
-                "Request data arrives as an object, such as a framework's `Request`, and the process environment as `{environment}`{after}."
-            )),
+        Issue::error(message).with_annotation(Annotation::primary(span).with_message("Written here.")).with_note(format!(
+            "Request data arrives as an object, such as a framework's `Request`, and the process environment as `{environment}`{after}."
+        )),
     );
 }
 

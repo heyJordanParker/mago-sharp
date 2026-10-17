@@ -50,7 +50,6 @@ use crate::resolver::class_name::report_keyword_in_another_case;
 use crate::resolver::extension::is_imported_by_default;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::utils::expression::get_bare_name_variable_id;
-use crate::utils::names::article;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
@@ -527,7 +526,9 @@ enum Replacement {
 }
 
 /// Each plain PHP function PHP# replaces, with its replacement. A row that names a standard library member lands in
-/// the change that ships the member, and a test holds every row to the library.
+/// the change that ships the member, and a test holds every row to the library. A name that ends in `*` is a family,
+/// every function whose name it begins, as `curl_*`, and a row of the function's whole name wins over it. A member named
+/// `__construct` is its class's constructor.
 const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("is_string", Replacement::Syntax("`{x} is string`")),
     ("is_int", Replacement::Syntax("`{x} is int`")),
@@ -665,14 +666,18 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("stat", Replacement::Members(&[("Sharp\\Files", "lastModified")])),
     ("tempnam", Replacement::Members(&[("Sharp\\Files", "temporaryFile")])),
     ("sys_get_temp_dir", Replacement::Members(&[("Sharp\\Files", "temporaryFile")])),
-    ("curl_init", Replacement::Members(&[("Sharp\\Http", "send")])),
-    ("curl_setopt", Replacement::Members(&[("Sharp\\Http", "send")])),
-    ("curl_setopt_array", Replacement::Members(&[("Sharp\\Http", "send")])),
-    ("curl_exec", Replacement::Members(&[("Sharp\\Http", "send")])),
-    ("curl_getinfo", Replacement::Members(&[("Sharp\\Http", "send")])),
-    ("curl_close", Replacement::Members(&[("Sharp\\Http", "send")])),
-    ("curl_multi_init", Replacement::Members(&[("Sharp\\Http", "send")])),
-    ("curl_multi_exec", Replacement::Members(&[("Sharp\\Http", "send")])),
+    ("fopen", Replacement::Members(&[("Sharp\\Files", "readLinesLazily"), ("Sharp\\Files", "append")])),
+    ("fread", Replacement::Members(&[("Sharp\\Files", "read"), ("Sharp\\Files", "readLinesLazily")])),
+    ("fclose", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
+    ("feof", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
+    ("fseek", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
+    ("ftell", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
+    ("rewind", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
+    ("flock", Replacement::Members(&[("Sharp\\Files", "write"), ("Sharp\\Files", "append")])),
+    ("ftruncate", Replacement::Members(&[("Sharp\\Files", "write"), ("Sharp\\Files", "append")])),
+    ("fflush", Replacement::Members(&[("Sharp\\Files", "write"), ("Sharp\\Files", "append")])),
+    ("tmpfile", Replacement::Members(&[("Sharp\\Files", "temporaryFile")])),
+    ("curl_*", Replacement::Members(&[("Sharp\\Http", "send")])),
     ("fsockopen", Replacement::Members(&[("Sharp\\Http", "send")])),
     ("stream_socket_client", Replacement::Members(&[("Sharp\\Http", "send")])),
     ("mail", Replacement::Members(&[("Sharp\\Mail", "send")])),
@@ -694,6 +699,37 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("mysqli_autocommit", Replacement::Members(&[("Sharp\\Database", "beginTransaction")])),
     ("mysqli_commit", Replacement::Members(&[("Sharp\\Database", "commit")])),
     ("mysqli_rollback", Replacement::Members(&[("Sharp\\Database", "rollback")])),
+    ("mysqli_connect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
+    ("mysqli_real_connect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
+    ("mysqli_init", Replacement::Members(&[("Sharp\\Database", "__construct")])),
+    ("mysqli_*", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
+    ("pg_connect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
+    ("pg_pconnect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
+    ("pg_fetch_all", Replacement::Members(&[("Sharp\\Database", "query")])),
+    ("pg_fetch_all_columns", Replacement::Members(&[("Sharp\\Database", "query")])),
+    ("pg_select", Replacement::Members(&[("Sharp\\Database", "query")])),
+    ("pg_fetch_assoc", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("pg_fetch_array", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("pg_fetch_row", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("pg_fetch_object", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("pg_fetch_result", Replacement::Members(&[("Sharp\\Database", "scalar")])),
+    ("pg_affected_rows", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("pg_cmdtuples", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("pg_insert", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("pg_update", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("pg_delete", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("pg_*", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
+    ("apcu_fetch", Replacement::Members(&[("Sharp\\Cache", "get")])),
+    ("apcu_exists", Replacement::Members(&[("Sharp\\Cache", "get")])),
+    ("apcu_key_info", Replacement::Members(&[("Sharp\\Cache", "get")])),
+    ("apcu_store", Replacement::Members(&[("Sharp\\Cache", "set")])),
+    ("apcu_add", Replacement::Members(&[("Sharp\\Cache", "set")])),
+    ("apcu_delete", Replacement::Members(&[("Sharp\\Cache", "remove")])),
+    ("apcu_entry", Replacement::Members(&[("Sharp\\Cache", "getOrCreate")])),
+    ("apcu_*", Replacement::Members(&[("Sharp\\Cache", "get"), ("Sharp\\Cache", "set"), ("Sharp\\Cache", "remove")])),
+    ("putenv", Replacement::Members(&[("Sharp\\Environment", "setVariable")])),
+    ("mt_srand", Replacement::Members(&[("Sharp\\Random", "__construct")])),
+    ("srand", Replacement::Members(&[("Sharp\\Random", "__construct")])),
 ];
 
 /// Each PHP built-in class the standard library replaces, spec section 29, with the standard library members to write
@@ -761,11 +797,8 @@ pub(crate) fn report_wrapped_class<A>(
 
     context.collector.report_with_code(
         IssueCode::WrappedClass,
-        Issue::error(format!(
-            "Creating {} `{name}` is wrapped by the standard library{form}",
-            article(&name.to_string())
-        ))
-        .with_annotation(Annotation::primary(span).with_message("Created here.")),
+        Issue::error(format!("Create no `{name}`{form}"))
+            .with_annotation(Annotation::primary(span).with_message("Created here.")),
     );
 }
 
@@ -784,9 +817,16 @@ pub(crate) fn report_bare_function_call<A>(
     A: Arena,
 {
     let name = function.original_name;
+    let named = |replaced: &[u8]| replaced.eq_ignore_ascii_case(name.as_bytes());
+    let in_family = |replaced: &str| {
+        replaced.strip_suffix('*').is_some_and(|family| {
+            name.as_bytes().get(..family.len()).is_some_and(|start| start.eq_ignore_ascii_case(family.as_bytes()))
+        })
+    };
     let replacement = REPLACEMENTS
         .iter()
-        .find(|(replaced, _)| replaced.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+        .find(|(replaced, _)| named(replaced.as_bytes()))
+        .or_else(|| REPLACEMENTS.iter().find(|(replaced, _)| in_family(replaced)))
         .map(|(_, replacement)| replacement);
     if let Some(Replacement::Members(members)) = replacement {
         for (class, method) in *members {
@@ -849,6 +889,12 @@ where
                 (import, format!("`{receiver}.{name}`"))
             } else if method.flags.is_extension_method() {
                 (import, format!("`{receiver}.{name}({})`", arguments(1)))
+            } else if method.method_metadata.as_ref().is_some_and(|metadata| metadata.is_constructor) {
+                // A `foreign` object is created only in a module binding, spec section 32.
+                let class_name = sharp_code_class_name(codebase, &context.imported_names, &context.scope, class.name);
+                let place = if class.flags.is_foreign() { " in a module binding" } else { "" };
+
+                (Some(class.original_name), format!("`new {class_name}({})`{place}", arguments(0)))
             } else if method.method_metadata.as_ref().is_none_or(|metadata| metadata.is_static) {
                 (Some(class.original_name), format!("`{}(…)`", display_code_member(context, class.original_name, name)))
             } else {

@@ -72,6 +72,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
     {
         let method = MethodParts::of_method(self);
         check_method_name(self, context, block_context);
+        if context.dialect.is_sharp()
+            && self.is_abstract()
+            && let Some(class) = block_context.scope.get_class_like()
+        {
+            crate::effects::check::check_declaration_uses(context, class, self);
+        }
 
         analyze_method(&method, self.initializer.as_ref(), word(self.name.value), context, block_context, artifacts)
             .map(|_| ())

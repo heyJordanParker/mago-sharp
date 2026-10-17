@@ -2584,6 +2584,45 @@ fn a_bare_call_of_a_plain_php_function_names_the_call_to_write() {
     assert_eq!(issues(("src/Demo/Report.php", php), &others), Vec::<String>::new());
 }
 
+/// Spec section 29: each family of functions an effect class replaces names its member. Every `curl_*` function names
+/// `Http.send`, the `pg_*` and `mysqli_*` families name `Database`, APCu names `Cache`, `putenv` names `Environment`,
+/// `mt_srand` a seeded `Random`, and the file-handle functions name `Files`. A function its family's row does not name
+/// takes the family's members, and a constructor is written as the `new` a module binding makes.
+#[test]
+fn each_function_an_effect_class_replaces_names_its_member() {
+    let calls = (
+        "app/Shop/Calls.sharp",
+        "namespace App.Shop;\n\npublic class Calls\n{\n    public static void run(Any? x)\n    {\n        curl_reset(x);\n        curl_init();\n        pg_connect(\"host\");\n        pg_query(x, \"sql\");\n        pg_version();\n        mysqli_ping(x);\n        mysqli_fetch_assoc(x);\n        apcu_fetch(\"k\");\n        apcu_store(\"k\", 1);\n        apcu_clear_cache();\n        putenv(\"A=1\");\n        mt_srand(1);\n        fopen(\"f\", \"r\");\n        fclose(x);\n        tmpfile();\n    }\n}\n",
+    );
+
+    let refused: Vec<String> = refusals(calls, &[])
+        .into_iter()
+        .filter(|refusal| refusal.contains(" wrapped-function "))
+        .map(|refusal| refusal.trim_end_matches(" | ").to_owned())
+        .collect();
+    let database = "write `database.query(…)` or `database.execute(…)` on the `Database` your constructor takes.";
+    assert_eq!(
+        refused,
+        [
+            "7:9 wrapped-function `curl_reset` is wrapped by the standard library: write `http.send(…)` on the `Http` your constructor takes.".to_owned(),
+            "8:9 wrapped-function `curl_init` is wrapped by the standard library: write `http.send(…)` on the `Http` your constructor takes.".to_owned(),
+            "9:9 wrapped-function `pg_connect` is wrapped by the standard library: write `new Database(…)` in a module binding.".to_owned(),
+            format!("10:9 wrapped-function `pg_query` is wrapped by the standard library: {database}"),
+            format!("11:9 wrapped-function `pg_version` is wrapped by the standard library: {database}"),
+            format!("12:9 wrapped-function `mysqli_ping` is wrapped by the standard library: {database}"),
+            "13:9 wrapped-function `mysqli_fetch_assoc` is wrapped by the standard library: write `database.queryFirst(…)` on the `Database` your constructor takes.".to_owned(),
+            "14:9 wrapped-function `apcu_fetch` is wrapped by the standard library: write `cache.get(…)` on the `Cache` your constructor takes.".to_owned(),
+            "15:9 wrapped-function `apcu_store` is wrapped by the standard library: write `cache.set(…)` on the `Cache` your constructor takes.".to_owned(),
+            "16:9 wrapped-function `apcu_clear_cache` is wrapped by the standard library: write `cache.get(…)`, `cache.set(…)` or `cache.remove(…)` on the `Cache` your constructor takes.".to_owned(),
+            "17:9 wrapped-function `putenv` is wrapped by the standard library: write `environment.setVariable(…)` on the `Environment` your constructor takes.".to_owned(),
+            "18:9 wrapped-function `mt_srand` is wrapped by the standard library: write `new Random(…)` in a module binding.".to_owned(),
+            "19:9 wrapped-function `fopen` is wrapped by the standard library: write `files.readLinesLazily(…)` or `files.append(…)` on the `Files` your constructor takes.".to_owned(),
+            "20:9 wrapped-function `fclose` is wrapped by the standard library: write `files.readLinesLazily(…)` on the `Files` your constructor takes.".to_owned(),
+            "21:9 wrapped-function `tmpfile` is wrapped by the standard library: write `files.temporaryFile()` on the `Files` your constructor takes.".to_owned(),
+        ]
+    );
+}
+
 /// Spec section 23: an import names a class, or the namespace of a plain PHP library's functions, never one function.
 /// A `.php` file imports a function with `use function`.
 #[test]
@@ -16663,6 +16702,29 @@ fn a_second_extern_of_a_target_in_another_file_is_refused_on_the_second() {
     );
 }
 
+/// The standard library's `extern` of a target is always its first declaration, so a project's own one is refused on
+/// the project's line, whichever file name sorts first, and the message names the library's declaration.
+#[test]
+fn a_project_s_extern_of_what_the_standard_library_declares_is_refused_on_the_project_s_line() {
+    let stubs = (
+        "app/Stubs/Exceptions.sharp",
+        "namespace App.Stubs;\n\nimport LogicException;\n\nextern LogicException;\nextern global.hrtime uses Clock;\n",
+    );
+
+    let refused: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), stubs, &[BUILTINS])
+        .iter()
+        .map(|issue| format!("{} {}", located(stubs.1, issue), issue.message))
+        .collect();
+    assert_eq!(
+        refused,
+        [
+            "5:1 duplicate-extern `LogicException` is already declared pure by the standard library: delete this line.",
+            "6:1 duplicate-extern `global.hrtime` is already declared by the standard library, with `uses Clock`: delete this line.",
+        ]
+    );
+    assert_eq!(analyze(&PLUGIN_REGISTRY, settings(), BUILTINS, &[stubs]).len(), 0);
+}
+
 /// Spec section 23: a rename changes the name, not what is imported, so an `extern` written with the new name declares
 /// the same class and section 29's one-declaration rule counts it once.
 #[test]
@@ -17402,6 +17464,45 @@ const FETCH: (&str, &str) = ("src/fetch.php", "<?php\n\nfunction fetch(int $id):
 
 const FETCH_STUB: (&str, &str) = ("app/Stubs/Fetch.sharp", "namespace App.Stubs;\n\nextern global.fetch uses Http;\n");
 
+/// Spec section 29: a declaration without a body is held to what each declaration it overrides allows, as an
+/// implementation is, so a sub-interface may narrow its parent's `uses` but never widen it. The refusal is at the
+/// declaration.
+#[test]
+fn a_declaration_has_only_the_effects_the_declaration_it_overrides_allows() {
+    let fetcher = (
+        "app/Shop/Fetcher.sharp",
+        "namespace App.Shop;\n\npublic interface Fetcher\n{\n    int fetch() uses Http, Clock;\n}\n",
+    );
+    let pinger = ("app/Shop/Pinger.sharp", "namespace App.Shop;\n\npublic interface Pinger\n{\n    int ping();\n}\n");
+    let wide = (
+        "app/Shop/WideFetcher.sharp",
+        "namespace App.Shop;\n\npublic interface WideFetcher : Fetcher, Pinger\n{\n    int fetch() uses Http, Clock, Files;\n\n    int ping() uses Http;\n}\n",
+    );
+    let narrow = (
+        "app/Shop/NarrowFetcher.sharp",
+        "namespace App.Shop;\n\npublic interface NarrowFetcher : Fetcher\n{\n    int fetch() uses Http;\n}\n",
+    );
+    let base = (
+        "app/Shop/Source.sharp",
+        "namespace App.Shop;\n\npublic abstract class Source : Fetcher\n{\n    public abstract int fetch() uses Mail;\n}\n",
+    );
+
+    assert_eq!(
+        refusals(wide, &[fetcher, pinger]),
+        [
+            "5:9 incompatible-effects `WideFetcher.fetch` uses `Files`, so `uses Http, Clock` on `Fetcher.fetch` cannot accept it. | ",
+            "7:9 incompatible-effects `WideFetcher.ping` uses `Http`, so the pure `Pinger.ping` cannot accept it. | ",
+        ]
+    );
+    assert_eq!(refusals(narrow, &[fetcher]), Vec::<String>::new());
+    assert_eq!(
+        refusals(base, &[fetcher]),
+        [
+            "5:25 incompatible-effects `Source.fetch` uses `Mail`, so `uses Http, Clock` on `Fetcher.fetch` cannot accept it. | "
+        ]
+    );
+}
+
 /// Spec section 29: a method without a body is pure unless it says `uses`, and every implementation is held to what
 /// the declaration allows, an interface's or an abstract class's. The refusal is at the call that has the effect.
 #[test]
@@ -17570,7 +17671,8 @@ fn an_object_a_declared_call_returns_carries_its_effect() {
             "app/Shop/DeskSender.sharp:12:26 incompatible-effects: `DeskSender.open` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Opens.open` cannot accept it.",
         ]
     );
-    // `Desk` returns a `Session` with `Mail`, and `Client` one with `Http`, so every `Session` has both.
+    // `Desk` returns a `Session` with `Mail`, and `Client` one with `Http`, so every `Session` has both. The message
+    // names the declared call a carried effect comes from, and the help the `extern` on the class that overrides it.
     assert_eq!(
         effect_issues(&[
             client_sender,
@@ -17583,11 +17685,11 @@ fn an_object_a_declared_call_returns_carries_its_effect() {
             desk
         ]),
         [
-            "app/Shop/ClientSender.sharp:10:27 incompatible-effects: `ClientSender.chain` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.chain` cannot accept it.",
-            "app/Shop/ClientSender.sharp:15:9 incompatible-effects: `ClientSender.local` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.local` cannot accept it.",
-            "app/Shop/ClientSender.sharp:18:27 incompatible-effects: `ClientSender.field` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.field` cannot accept it.",
-            "app/Shop/ClientSender.sharp:20:26 incompatible-effects: `ClientSender.next` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.next` cannot accept it.",
-            "app/Shop/DeskSender.sharp:12:26 incompatible-effects: `DeskSender.open` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Opens.open` cannot accept it.",
+            "app/Shop/ClientSender.sharp:10:27 incompatible-effects: `ClientSender.chain` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Sender.chain` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
+            "app/Shop/ClientSender.sharp:15:9 incompatible-effects: `ClientSender.local` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Sender.local` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
+            "app/Shop/ClientSender.sharp:18:27 incompatible-effects: `ClientSender.field` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Sender.field` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
+            "app/Shop/ClientSender.sharp:20:26 incompatible-effects: `ClientSender.next` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Sender.next` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
+            "app/Shop/DeskSender.sharp:12:26 incompatible-effects: `DeskSender.open` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Opens.open` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file. Add `import Lib.Session;` to the file.",
         ]
     );
 }
@@ -17621,6 +17723,34 @@ fn creating_a_built_in_exception_is_pure() {
     );
 }
 
+/// Spec section 29: a date is a value once created, so the standard library declares `DateTimeImmutable` pure, but
+/// each member that can read the clock is declared `uses Clock`: `modify`, the constructor and `createFromFormat`,
+/// whose text may say "now". Reading a date it is given keeps a method pure.
+#[test]
+fn a_date_member_that_can_read_the_clock_has_the_effect_clock() {
+    let reading = (
+        "app/Shop/Reading.sharp",
+        "namespace App.Shop;\n\nimport DateTimeImmutable;\n\npublic interface Reading\n{\n    int moved(DateTimeImmutable given);\n\n    int made();\n\n    int read(DateTimeImmutable given);\n}\n",
+    );
+    let stamped = (
+        "app/Shop/Stamped.sharp",
+        "namespace App.Shop;\n\nimport DateTimeImmutable;\n\npublic class Stamped : DateTimeImmutable\n{\n    public Stamped() : super(\"now\") { }\n}\n",
+    );
+    let pure = (
+        "app/Shop/PureReading.sharp",
+        "namespace App.Shop;\n\nimport DateTimeImmutable;\n\npublic class PureReading : Reading\n{\n    public int moved(DateTimeImmutable given) => given.modify(\"now\").getTimestamp();\n\n    public int made() => new Stamped().getTimestamp();\n\n    public int read(DateTimeImmutable given) => given.getTimestamp();\n}\n",
+    );
+
+    assert_eq!(issues(pure, &[reading, stamped, BUILTINS]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pure, reading, stamped, BUILTINS]),
+        [
+            "app/Shop/PureReading.sharp:7:50 incompatible-effects: `PureReading.moved` calls `DateTimeImmutable.modify`, which has the effect `Clock`, so the pure `Reading.moved` cannot accept it.",
+            "app/Shop/PureReading.sharp:9:26 incompatible-effects: `PureReading.made` reaches `Stamped.Stamped`, which calls `DateTimeImmutable.__construct` with the effect `Clock`, so the pure `Reading.made` cannot accept it.",
+        ]
+    );
+}
+
 /// Spec section 29: a PHP built-in class the standard library replaces may be imported and named, to hold, pass, return
 /// and read what a library gives. Only creating one is refused, with `new` or a static factory, naming the member to
 /// write instead. The standard library itself creates them.
@@ -17648,7 +17778,7 @@ fn a_class_the_standard_library_replaces_may_be_named_and_only_creating_one_is_r
                 "app/Shop/Stamp.sharp",
                 "namespace App.Shop;\n\nimport DateTimeImmutable;\n\npublic class Stamp\n{\n    public DateTimeImmutable now() => new DateTimeImmutable();\n}\n",
             ),
-            "Creating a `DateTimeImmutable` is wrapped by the standard library: write `Date.parse(…)` or `clock.now()` on the `Clock` your constructor takes. Add `import Sharp.Time.Date;` to the file.",
+            "Create no `DateTimeImmutable`: write `Date.parse(…)` or `clock.now()` on the `Clock` your constructor takes. Add `import Sharp.Time.Date;` to the file.",
         ),
         (
             "a static factory",
@@ -17656,7 +17786,7 @@ fn a_class_the_standard_library_replaces_may_be_named_and_only_creating_one_is_r
                 "app/Shop/Stamp.sharp",
                 "namespace App.Shop;\n\nimport DateTimeImmutable;\n\npublic class Stamp\n{\n    public DateTimeImmutable? at(string text) => DateTimeImmutable.createFromFormat(\"Y-m-d\", text) ?: null;\n}\n",
             ),
-            "Creating a `DateTimeImmutable` is wrapped by the standard library: write `Date.parse(…)` or `clock.now()` on the `Clock` your constructor takes. Add `import Sharp.Time.Date;` to the file.",
+            "Create no `DateTimeImmutable`: write `Date.parse(…)` or `clock.now()` on the `Clock` your constructor takes. Add `import Sharp.Time.Date;` to the file.",
         ),
         (
             "new PDO(…)",
@@ -17664,7 +17794,7 @@ fn a_class_the_standard_library_replaces_may_be_named_and_only_creating_one_is_r
                 "app/Shop/Ledger.sharp",
                 "namespace App.Shop;\n\nimport PDO;\n\npublic class Ledger\n{\n    public PDO open() => new PDO(\"sqlite::memory:\");\n}\n",
             ),
-            "Creating a `PDO` is wrapped by the standard library: write `database.query(…)` or `database.execute(…)` on the `Database` your constructor takes.",
+            "Create no `PDO`: write `database.query(…)` or `database.execute(…)` on the `Database` your constructor takes.",
         ),
         (
             "a static factory that returns static",
@@ -17672,7 +17802,7 @@ fn a_class_the_standard_library_replaces_may_be_named_and_only_creating_one_is_r
                 "app/Shop/Ledger.sharp",
                 "namespace App.Shop;\n\nimport PDO;\n\npublic class Ledger\n{\n    public PDO open() => PDO.connect(\"sqlite::memory:\");\n}\n",
             ),
-            "Creating a `PDO` is wrapped by the standard library: write `database.query(…)` or `database.execute(…)` on the `Database` your constructor takes.",
+            "Create no `PDO`: write `database.query(…)` or `database.execute(…)` on the `Database` your constructor takes.",
         ),
     ] {
         let found = issues(analyzed, &[date]);
@@ -17682,7 +17812,7 @@ fn a_class_the_standard_library_replaces_may_be_named_and_only_creating_one_is_r
 }
 
 /// The standard exceptions a bare name names are the exception classes in PHP's root namespace that `Builtins.sharp`
-/// declares: each one it declares with no import.
+/// declares: each class it declares with no import, which is no function and no member.
 #[test]
 fn the_standard_exceptions_are_the_root_exception_classes_the_standard_library_declares() {
     let imported: HashSet<&str> = BUILTINS
@@ -17695,7 +17825,7 @@ fn the_standard_exceptions_are_the_root_exception_classes_the_standard_library_d
         .1
         .lines()
         .filter_map(|line| line.strip_prefix("extern ")?.strip_suffix(';'))
-        .filter(|name| !name.starts_with("global.") && !imported.contains(name))
+        .filter(|name| !name.contains('.') && !imported.contains(name))
         .collect();
     root.sort_unstable();
     let mut standard = STANDARD_EXCEPTIONS.to_vec();
@@ -18340,7 +18470,36 @@ fn a_static_property_s_reads_and_writes_carry_its_accessors_effects() {
         effect_issues(&[stamp, CLOCK_STUB, NOW]),
         [
             "app/Shop/Stamp.sharp:8:27 impure-law: Law `read` reaches `Stamp.now`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
-            "app/Shop/Stamp.sharp:10:30 impure-law: Law `written` reaches `Stamp.mark`, which changes `Stamp.last`. Laws hold only over pure code.",
+            "app/Shop/Stamp.sharp:10:30 impure-law: Law `written` reaches `Stamp.mark`, which changes `Stamp.last`. Laws hold only over code that changes nothing.",
+        ]
+    );
+}
+
+/// Spec section 6: a static's initial value that is not constant runs once, when the app first uses its class's
+/// statics, so a use of any static of the class has the effects of those initial values. A class whose statics all
+/// start constant gives a use none.
+#[test]
+fn a_use_of_a_class_s_statics_has_the_effects_of_their_initial_values() {
+    let started = (
+        "app/Shop/Started.sharp",
+        "namespace App.Shop;\n\npublic class Started\n{\n    public static int at { get; } = global.now();\n\n    public static int size { get; } = 3;\n\n    public static int doubled() => size * 2;\n}\n",
+    );
+    let fixed = (
+        "app/Shop/Fixed.sharp",
+        "namespace App.Shop;\n\npublic class Fixed\n{\n    public static int size { get; } = 3;\n}\n",
+    );
+    let reader = (
+        "app/Shop/Reader.sharp",
+        "namespace App.Shop;\n\npublic class Reader\n{\n    law read(int size) => Started.at > size;\n\n    law other(int size) => Started.size > size;\n\n    law constant(int size) => Fixed.size > size;\n\n    law inside(int size) => Started.doubled() > size;\n}\n",
+    );
+
+    assert_eq!(issues(reader, &[started, fixed, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[reader, started, fixed, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Reader.sharp:5:27 impure-law: Law `read` reaches `Started.at`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Reader.sharp:7:28 impure-law: Law `other` reaches `Started.at`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Reader.sharp:11:29 impure-law: Law `inside` reaches `Started.at`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code.",
         ]
     );
 }
@@ -18999,7 +19158,7 @@ fn a_pure_method_may_change_its_object_and_its_arguments() {
     assert_eq!(
         effect_issues(&[law, tally]),
         [
-            "app/Shop/Counted.sharp:11:31 impure-law: Law `grows` reaches `Counted.bumped`, which changes `tally.count`. Laws hold only over pure code."
+            "app/Shop/Counted.sharp:11:31 impure-law: Law `grows` reaches `Counted.bumped`, which changes `tally.count`. Laws hold only over code that changes nothing."
         ],
         "a law"
     );
@@ -19091,8 +19250,8 @@ fn a_recursive_pair_of_methods_solves_without_looping() {
 }
 
 /// Spec section 21: a function type lists the effects of each body its function calls, in any file, so an edit of one
-/// can change it. `callee_files` gives the file of each method a call reaches, every override it can run, and each
-/// accessor's class, but never the calling file itself. A change of state is no effect, so the type lists none for it.
+/// can change it. `callee_files` gives the file of each method a call reaches, every override it can run, each
+/// accessor's class and the class of each static whose initial value a use runs, but never the calling file itself. A change of state is no effect, so the type lists none for it.
 #[test]
 fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
     let base = (
@@ -19107,11 +19266,15 @@ fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
         "app/Shop/Stock.sharp",
         "namespace App.Shop;\n\npublic class Stock\n{\n    public int count { get => 2; }\n}\n",
     );
+    let opened = (
+        "app/Shop/Opened.sharp",
+        "namespace App.Shop;\n\npublic class Opened\n{\n    public static int at { get; } = 3 + global.strlen(\"a\");\n}\n",
+    );
     let till = (
         "app/Shop/Till.sharp",
-        "namespace App.Shop;\n\npublic class Till\n{\n    private int rung = 0;\n\n    public int ring(Base item, Stock stock) => item.price() + stock.count + this.add();\n\n    public int add()\n    {\n        this.rung += 1;\n        return this.rung;\n    }\n}\n",
+        "namespace App.Shop;\n\npublic class Till\n{\n    private int rung = 0;\n\n    public int ring(Base item, Stock stock) => item.price() + stock.count + this.add() + Opened.at;\n\n    public int add()\n    {\n        this.rung += 1;\n        return this.rung;\n    }\n}\n",
     );
-    let (codebase, summaries) = summarized(&[base, sale, stock, till, CLOCK_STUB, NOW]);
+    let (codebase, summaries) = summarized(&[base, sale, stock, opened, till, CLOCK_STUB, NOW, BUILTINS]);
     let effects = Effects::solve(&codebase, &summaries);
     let file = |class: &[u8]| codebase.get_class_like(class).expect("the class is declared").span.file_id;
     let method = |name: &[u8]| {
@@ -19121,7 +19284,16 @@ fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
     let callee_files = effects.callee_files(&codebase);
     assert_eq!(
         callee_files.get(&file(b"App\\Shop\\Till")),
-        Some(&[file(b"App\\Shop\\Base"), file(b"App\\Shop\\Sale"), file(b"App\\Shop\\Stock")].into_iter().collect())
+        Some(
+            &[
+                file(b"App\\Shop\\Base"),
+                file(b"App\\Shop\\Sale"),
+                file(b"App\\Shop\\Stock"),
+                file(b"App\\Shop\\Opened")
+            ]
+            .into_iter()
+            .collect()
+        )
     );
     assert_eq!(callee_files.get(&file(b"App\\Shop\\Sale")), None);
     assert_eq!(effects.function_effects(&method(b"add")), Some(Vec::new()));
