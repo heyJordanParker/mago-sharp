@@ -186,11 +186,12 @@ pub(crate) fn record_function_values<A>(
 
     let codebase = context.codebase;
     for atomic in value.types.iter() {
-        // A method value of plain PHP has a signature PHP wrote, which lists no effects.
+        // A method or function value of plain PHP has a signature PHP wrote, which lists no effects.
         let source = match atomic {
-            TAtomic::Callable(TCallable::Signature(signature)) => signature
-                .source
-                .filter(|source| signature.effects.is_some() || matches!(source, FunctionLikeIdentifier::Method(..))),
+            TAtomic::Callable(TCallable::Signature(signature)) => signature.source.filter(|source| {
+                signature.effects.is_some()
+                    || matches!(source, FunctionLikeIdentifier::Method(..) | FunctionLikeIdentifier::Function(_))
+            }),
             TAtomic::Callable(TCallable::Alias(identifier)) => Some(*identifier),
             _ => None,
         };
@@ -199,7 +200,8 @@ pub(crate) fn record_function_values<A>(
             Some(FunctionLikeIdentifier::Method(class, method)) => {
                 method_value_runs(codebase, class, method.as_bytes())
             }
-            Some(FunctionLikeIdentifier::Function(_)) | None => None,
+            Some(FunctionLikeIdentifier::Function(function)) => Some(function_value_runs(codebase, function)),
+            None => None,
         };
         let Some(runs) = runs else {
             continue;
@@ -238,6 +240,14 @@ fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: &[u8]) ->
     } else {
         Runs::Foreign { callee, effects: plain_php_effects(extern_of(codebase, class, lowercase_method), callee) }
     })
+}
+
+/// What a value of the plain PHP function `function` runs wherever it is called, spec section 14.3: the effects its
+/// `extern` declares, as a call of the function has them.
+fn function_value_runs(codebase: &CodebaseMetadata, function: Word) -> Runs {
+    let (callee, declaration) = function_extern(codebase, function);
+
+    Runs::Foreign { callee, effects: plain_php_effects(declaration, callee) }
 }
 
 /// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
@@ -612,14 +622,46 @@ where
         for callee in self.accessors(object, property, b"get") {
             self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments: Vec::new() });
         }
+
+        if let Expression::ConstantAccess(class) = object.unparenthesized()
+            && self.context.resolved_names.binding(&class.name) == Some(Binding::Class)
+            && let ClassLikeMemberSelector::Identifier(name) = property
+        {
+            self.use_statics(word(self.context.resolved_names.get(&class.name)), name.value, span);
+        }
     }
 
-    /// A member read without `this.` runs its `get` accessor as `this.member` does.
+    /// Records a use of `property` through `class` when it is a static: the first use of the statics of the class that
+    /// declares it runs each of their initial values that is not constant, spec section 6, so it has their effects.
+    fn use_statics(&mut self, class: Word, property: &[u8], span: Span) {
+        let codebase = self.codebase();
+        let property = php_variable_name(property);
+        let Some(declaring) = codebase
+            .get_class_like(class.as_bytes())
+            .and_then(|class| class.declaring_property_ids.get(&property))
+            .and_then(|declaring| codebase.get_class_like(declaring.as_bytes()))
+            .filter(|declaring| declaring.properties.get(&property).is_some_and(|used| used.flags.is_static()))
+        else {
+            return;
+        };
+
+        for (name, static_property) in &declaring.properties {
+            if static_property.flags.is_static() && static_property.flags.has_runtime_initial_value() {
+                let callee = Body::InitialValue(declaring.name, *name);
+                self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
+            }
+        }
+    }
+
+    /// A member read without `this.` runs its `get` accessor as `this.member` does, and a static's uses its class's
+    /// statics as `Class.member` does.
     fn read_member(&mut self, name: &ConstantAccess<'arena>) {
-        if self.context.resolved_names.binding(&name.name) == Some(Binding::Member)
-            && let Some(callee) = self.accessor(self.class, name.name.value(), b"get")
-        {
-            let span = name.span();
+        if self.context.resolved_names.binding(&name.name) != Some(Binding::Member) {
+            return;
+        }
+
+        let span = name.span();
+        if let Some(callee) = self.accessor(self.class, name.name.value(), b"get") {
             self.summary.calls.push(Call {
                 callee,
                 span,
@@ -627,6 +669,7 @@ where
                 arguments: Vec::new(),
             });
         }
+        self.use_statics(self.class, name.name.value(), span);
     }
 
     /// The roots of each argument, by the index of the parameter it binds.
@@ -773,19 +816,8 @@ where
         for target in targets {
             match *target {
                 CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function_name), .. } => {
-                    let name = self
-                        .codebase()
-                        .get_function(function_name.as_bytes())
-                        .map_or(function_name, |metadata| metadata.original_name);
-                    // A function of PHP's root namespace is named as the file calls it, `global.now`, spec section 23.
-                    let cause = if name.as_bytes().contains(&b'\\') {
-                        name
-                    } else {
-                        word([b"global.", name.as_bytes()].concat())
-                    };
-                    let declaration =
-                        extern_of(self.codebase(), empty_word(), ascii_lowercase_word(function_name.as_bytes()));
-                    self.plain_php(declaration, span, (empty_word(), cause));
+                    let (cause, declaration) = function_extern(self.codebase(), function_name);
+                    self.plain_php(declaration, span, cause);
                     self.callbacks(arguments);
                 }
                 CallTarget::FunctionLike {
@@ -908,18 +940,20 @@ where
             return;
         }
 
+        // `passed_functions` already took on the functions a collection method is given, as a PHP# method's, and plain
+        // PHP may run any function it is given.
         if is_prelude_stub(declaring_class) {
-            self.prelude_stub_call(metadata, span, receiver, arguments);
+            self.prelude_stub_call(metadata, span, receiver);
         } else {
             let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
+            self.callbacks(arguments);
         }
-        self.callbacks(arguments);
     }
 
-    /// Records each function a call of a PHP# method passes to a function parameter whose type states no effects, spec
-    /// section 29, since the call takes on that function's effects. The method may run it on its receiver, with the roots `receiver`,
-    /// and on anything it is given, with the roots `roots` by parameter.
+    /// Records each function a call passes to a function parameter that takes on its effects, spec section 29: one
+    /// whose type states no effects, of a PHP# method or of a collection method. The method may run it on its receiver,
+    /// with the roots `receiver`, and on anything it is given, with the roots `roots` by parameter.
     fn passed_functions(
         &mut self,
         arguments: &'ast ArgumentList<'arena>,
@@ -972,8 +1006,9 @@ where
     }
 
     /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the
-    /// effects its `extern` declares. The class that declares the constructor decides, whatever class `new` names, and
-    /// the class `new` names decides when no class declares one. A named constructor is the class's own, spec section
+    /// effects of the `extern` of the class `new` names, which an error names as `new` does, or its nearest plain PHP
+    /// parent when PHP# declares it. The class that declares the constructor decides between the two, and the class
+    /// `new` names decides when no class declares one. A named constructor is the class's own, spec section
     /// 9.1, and its body runs on the object its `: this(…)` creates.
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
@@ -1014,7 +1049,13 @@ where
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: roots });
         } else if !is_prelude_stub(class.name) {
             let declaration = extern_of(codebase, class.name, constructor);
-            self.plain_php(declaration, span, (declaring.original_name, empty_word()));
+            // Only plain PHP takes an `extern`, so a PHP# class's error names its nearest plain PHP parent.
+            let named = std::iter::successors(Some(class), |class| {
+                class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+            })
+            .find(|class| !class.flags.is_sharp())
+            .unwrap_or(declaring);
+            self.plain_php(declaration, span, (named.original_name, empty_word()));
         }
     }
 
@@ -1035,25 +1076,15 @@ where
         }
     }
 
+    /// Records a call of a prelude stub, such as `List.add`, which changes its receiver unless the stub is free of
+    /// mutation.
     // Deleted once the standard library's `.sharp` sources replace the prelude stubs (php-sharp issue #60).
     fn prelude_stub_call(
         &mut self,
         metadata: &FunctionLikeMetadata,
         span: Span,
         receiver: Option<&'ast Expression<'arena>>,
-        arguments: &'ast ArgumentList<'arena>,
     ) {
-        // A function passed to the stub runs on the receiver's elements, as a function parameter of a PHP# method does.
-        let elements = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
-        for argument in &arguments.arguments {
-            let value = argument.value();
-            if let Some(lambda) = self.lambda(value) {
-                self.inline(lambda, |_| elements.clone());
-            } else {
-                self.method_value(value, span, &elements);
-            }
-        }
-
         if !metadata.flags.is_mutation_free()
             && let Some(receiver) = receiver
         {
@@ -1061,16 +1092,17 @@ where
         }
     }
 
-    /// A method value, such as `this.label` or `Job.ping`, passed to a call that runs it on `elements`: a call of each
-    /// method its type names the analysis resolved it to, with the object it is read from as the receiver, which has
-    /// the effects a call of the method has.
+    /// A method or function value, such as `this.label`, `Job.ping` or `global.trim`, passed to a call that runs it on
+    /// `elements`: a call of each method or function its type names the analysis resolved it to, with the object it is
+    /// read from as the receiver, which has the effects a call of it has. An extension method takes that object as its
+    /// first argument, spec section 26.
     fn method_value(&mut self, value: &'ast Expression<'arena>, span: Span, elements: &Roots) {
         let receiver = match value.unparenthesized() {
             Expression::Access(Access::Property(access)) => self.roots(access.object),
             _ => Roots::new(),
         };
         let codebase = self.codebase();
-        let runs: Vec<(Runs, usize)> = self
+        let runs: Vec<(Runs, &FunctionLikeMetadata)> = self
             .artifacts
             .get_expression_type(value)
             .into_iter()
@@ -1081,15 +1113,26 @@ where
                     ..
                 })) => Some((
                     method_value_runs(codebase, *class, method.as_bytes())?,
-                    codebase.get_declaring_method(class.as_bytes(), method.as_bytes())?.parameters.len(),
+                    codebase.get_declaring_method(class.as_bytes(), method.as_bytes())?,
                 )),
+                TAtomic::Callable(TCallable::Signature(TCallableSignature {
+                    source: Some(FunctionLikeIdentifier::Function(function)),
+                    ..
+                })) => Some((function_value_runs(codebase, *function), codebase.get_function(function.as_bytes())?)),
                 _ => None,
             })
             .collect();
-        for (runs, parameters) in runs {
+        for (runs, metadata) in runs {
             match runs {
+                Runs::Body(callee) if metadata.flags.is_extension_method() => {
+                    let others = metadata.parameters.len().saturating_sub(1);
+                    let arguments = std::iter::once(receiver.clone())
+                        .chain(std::iter::repeat_n(elements.clone(), others))
+                        .collect();
+                    self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
+                }
                 Runs::Body(callee) => {
-                    let arguments = vec![elements.clone(); parameters];
+                    let arguments = vec![elements.clone(); metadata.parameters.len()];
                     self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments });
                 }
                 Runs::Foreign { callee, effects } => {
@@ -1280,6 +1323,16 @@ where
     ) {
         recorder.write(unary.operand, unary.span(), None);
     }
+}
+
+/// The plain PHP function `function` as the cause of its effects, with no class and the name the file calls it by, as
+/// `global.now` names one of PHP's root namespace, spec section 23, and the `extern` declaration a call of it falls
+/// under.
+fn function_extern(codebase: &CodebaseMetadata, function: Word) -> ((Word, Word), Option<&ExternMetadata>) {
+    let name = codebase.get_function(function.as_bytes()).map_or(function, |metadata| metadata.original_name);
+    let cause = if name.as_bytes().contains(&b'\\') { name } else { word([b"global.", name.as_bytes()].concat()) };
+
+    ((empty_word(), cause), extern_of(codebase, empty_word(), ascii_lowercase_word(function.as_bytes())))
 }
 
 /// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)

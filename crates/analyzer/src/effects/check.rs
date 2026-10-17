@@ -16,7 +16,6 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::union::TUnion;
-use mago_names::NAMED_EFFECTS;
 use mago_names::binding::Binding;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
@@ -64,6 +63,7 @@ use crate::effects::Effects;
 use crate::effects::Impurity;
 use crate::effects::Runs;
 use crate::effects::events;
+use crate::effects::holding_declaration;
 use crate::effects::is_effect;
 use crate::effects::summary::parameter_index;
 use crate::statement::function_like::FunctionLikeBody;
@@ -124,15 +124,19 @@ pub(crate) fn laws_must_be_pure(
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
 
+            // A change has no effect, so its law is refused for the change, spec section 28.
+            let holds = if impurity.effect.is_some() { "pure code" } else { "code that changes nothing" };
+
             impure(
                 IssueCode::ImpureLaw,
                 format!(
-                    "Law `{member}` {}. Laws hold only over pure code.",
+                    "Law `{member}` {}. Laws hold only over {holds}.",
                     impurity.describe(&class_name, &effect_name)
                 ),
                 impurity.span,
                 "law",
                 &impurity,
+                &[],
                 &class_name,
                 &code_class_name,
                 &missing_import,
@@ -156,7 +160,14 @@ pub(crate) fn function_values_must_fit_their_types(
             let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
-            let method = || format!("`{}`", display_sharp_member(class_name(name.0), name.1));
+            // A plain PHP function's value has no class, spec section 14.3.
+            let method = || {
+                if name.0.is_empty() {
+                    format!("`{}`", written_function(name.1, &code_class_name).0)
+                } else {
+                    format!("`{}`", display_sharp_member(class_name(name.0), name.1))
+                }
+            };
             let reason = match (&value.runs, impurity.effect) {
                 (Runs::Body(Body::Lambda(_)), _) => {
                     format!("This lambda {}", impurity.describe(&class_name, &effect_name))
@@ -165,9 +176,16 @@ pub(crate) fn function_values_must_fit_their_types(
                 (Runs::Foreign { .. }, Some(Effect::Foreign(effect))) => {
                     format!("{} has the effect `{}`", method(), effect_name(effect))
                 }
+                (Runs::Foreign { .. }, Some(Effect::Carried { effect, by })) => format!(
+                    "{} has the effect `{}` {}",
+                    method(),
+                    effect_name(effect),
+                    impurity.carried_by(by, &class_name)
+                ),
                 (Runs::Foreign { .. }, _) => format!("{} has no `extern` declaration", method()),
             };
             let body = if matches!(value.runs, Runs::Body(Body::Lambda(_))) { "lambda" } else { "method" };
+            let allowed: Vec<String> = value.allowed.iter().map(|effect| effect_name(*effect)).collect();
 
             let issue = impure(
                 value.code,
@@ -175,6 +193,7 @@ pub(crate) fn function_values_must_fit_their_types(
                 value.span,
                 body,
                 &impurity,
+                &allowed,
                 &class_name,
                 &code_class_name,
                 &missing_import,
@@ -205,13 +224,8 @@ pub(crate) fn implementations_must_fit_their_declarations(
             let ancestor =
                 codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |ancestor| ancestor.original_name);
             let declared = display_sharp_member(class_name(ancestor), declaration.original_name);
-            let allows = if declaration.uses.is_empty() {
-                format!("the pure `{declared}`")
-            } else {
-                let uses: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
-
-                format!("`uses {}` on `{declared}`", uses.join(", "))
-            };
+            let uses: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
+            let allows = allows(&declared, &uses);
 
             impure(
                 IssueCode::IncompatibleEffects,
@@ -223,12 +237,75 @@ pub(crate) fn implementations_must_fit_their_declarations(
                 impurity.span,
                 "method",
                 &impurity,
+                &uses,
                 &class_name,
                 &code_class_name,
                 &missing_import,
             )
         })
         .collect()
+}
+
+/// What the declaration `declared` with the effects `uses` allows, as a message names it: "the pure `Pinger.ping`" or
+/// "`uses Http, Clock` on `Fetcher.fetch`".
+fn allows(declared: &str, uses: &[String]) -> String {
+    if uses.is_empty() {
+        format!("the pure `{declared}`")
+    } else {
+        format!("`uses {}` on `{declared}`", uses.join(", "))
+    }
+}
+
+/// Spec section 29: a declaration without a body is held to what each declaration it overrides allows, as an
+/// implementation is, so a sub-interface may narrow its parent's `uses` but never widen it. The refusal names the
+/// first ancestor whose declaration the `uses` goes past, at `name_span`, the name of `own`.
+pub(crate) fn check_declaration_uses<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    own: &FunctionLikeMetadata,
+    name_span: Span,
+) where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let wider = class.all_parent_classes.iter().chain(&class.all_parent_interfaces).find_map(|ancestor| {
+        let declaration = holding_declaration(codebase, *ancestor, own.name)?;
+        let wider: Vec<Word> = own
+            .uses
+            .iter()
+            .filter(|effect| {
+                !declaration.uses.iter().any(|allowed| allowed.as_bytes().eq_ignore_ascii_case(effect.as_bytes()))
+            })
+            .copied()
+            .collect();
+
+        (!wider.is_empty()).then_some((*ancestor, declaration, wider))
+    });
+    let Some((ancestor, declaration, wider)) = wider else {
+        return;
+    };
+
+    let class_name =
+        |class| sharp_class_like_name(codebase, &context.imported_names, &context.short_name_counts, class);
+    let effect_name = |effect| sharp_effect_name(codebase, &context.imported_names, &context.short_name_counts, effect);
+    let declared = display_sharp_member(
+        class_name(codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |ancestor| ancestor.original_name)),
+        declaration.original_name,
+    );
+    let allowed: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
+    let allows = allows(&declared, &allowed);
+    let wider: Vec<String> = wider.iter().map(|effect| format!("`{}`", effect_name(*effect))).collect();
+
+    context.collector.report_with_code(
+        IssueCode::IncompatibleEffects,
+        Issue::error(format!(
+            "`{}` uses {}, so {allows} cannot accept it.",
+            display_sharp_member(class_name(class.original_name), own.original_name),
+            wider.join(", "),
+        ))
+        .with_annotation(Annotation::primary(name_span).with_message("Declared here."))
+        .with_annotation(Annotation::secondary(declaration.name_span.unwrap_or(declaration.span))),
+    );
 }
 
 /// Spec section 13: through a readonly value only methods marked `readonly` run, so a call of an unmarked one is an
@@ -276,9 +353,10 @@ pub(crate) fn readonly_values_call_readonly_methods(
 }
 
 /// The error at `span` on the `impurity` of the `body` it refuses, a getter, a law, a lambda or a method, with the
-/// `extern` to write when the callee has none, or how to call a plain PHP property's code from outside `body`.
-/// `class_name` names each class in prose, `code_class_name` names it in the `extern`, and `missing_import` names the
-/// import the `extern` needs when the body's file doesn't bind its class.
+/// `extern` to write when the callee has none, or how to call a plain PHP property's code from outside `body`. The
+/// `extern` names the callee's class, or its function, and the effects `allowed` lists, as the place's `uses` names
+/// them. `class_name` names each class in prose, `code_class_name` names it in the `extern`, and `missing_import`
+/// names the import the `extern` needs when the body's file doesn't bind its class.
 #[allow(clippy::too_many_arguments)]
 fn impure(
     code: IssueCode,
@@ -286,6 +364,7 @@ fn impure(
     span: Span,
     body: &str,
     impurity: &Impurity,
+    allowed: &[String],
     class_name: &dyn Fn(Word) -> String,
     code_class_name: &dyn Fn(Word) -> String,
     missing_import: &dyn Fn(Word) -> Option<String>,
@@ -294,28 +373,32 @@ fn impure(
 
     match impurity.effect {
         Some(Effect::Unknown(Some((class, member)))) => {
-            // A plain PHP function is declared through its namespace, spec section 23: `global.trim`, which the cause
-            // already writes, or `Pdf.render` after `import Vendor.Pdf;`.
             let (target, import) = if class.is_empty() {
-                match member.as_bytes().iter().rposition(|byte| *byte == b'\\') {
-                    Some(separator) => {
-                        let namespace = word(&member.as_bytes()[..separator]);
-                        let function = String::from_utf8_lossy(&member.as_bytes()[separator + 1..]);
+                let (target, namespace) = written_function(member, code_class_name);
 
-                        (format!("{}.{function}", code_class_name(namespace)), missing_import(namespace))
-                    }
-                    None => (member.to_string(), None),
-                }
+                (target, namespace.and_then(missing_import))
             } else {
-                let name = code_class_name(class);
-                let target = if member.is_empty() { name } else { display_sharp_member(&name, member) };
-
-                (target, missing_import(class))
+                (code_class_name(class), missing_import(class))
             };
             let import = import.map(|import| format!(" {import}")).unwrap_or_default();
 
+            issue.with_help(if allowed.is_empty() {
+                format!(
+                    "Declare it in a .sharp file: `extern {target};` when it has no effect, or name its effects after `uses`.{import}"
+                )
+            } else {
+                format!("Declare its effect in a .sharp file, such as `extern {target} uses {};`.{import}", allowed.join(", "))
+            })
+        }
+        Some(Effect::Carried { .. }) => {
+            let class = impurity.cause.0;
+            let import = missing_import(class).map(|import| format!(" {import}")).unwrap_or_default();
+            let uses = if allowed.is_empty() { String::new() } else { format!(" uses {}", allowed.join(", ")) };
+
             issue.with_help(format!(
-                "Declare it in a .sharp file: `extern {target};` when it has no effect, or name its effects after `uses`.{import}"
+                "An `extern` on `{}` overrides the effects it carries: write `extern {}{uses};` in a .sharp file.{import}",
+                class_name(class),
+                code_class_name(class)
             ))
         }
         Some(Effect::Unknown(None)) => {
@@ -328,6 +411,21 @@ fn impure(
             ))
         }
         _ => issue,
+    }
+}
+
+/// The plain PHP function `function`, as the cause of a call of it names it, written as the code names it through its
+/// namespace, spec section 23: `global.trim`, which the cause already writes, or `Pdf.render` after
+/// `import Vendor.Pdf;`, with the namespace a function outside the root namespace is named through.
+fn written_function(function: Word, code_class_name: &dyn Fn(Word) -> String) -> (String, Option<Word>) {
+    match function.as_bytes().iter().rposition(|byte| *byte == b'\\') {
+        Some(separator) => {
+            let namespace = word(&function.as_bytes()[..separator]);
+            let name = String::from_utf8_lossy(&function.as_bytes()[separator + 1..]);
+
+            (format!("{}.{name}", code_class_name(namespace)), Some(namespace))
+        }
+        None => (function.to_string(), None),
     }
 }
 
@@ -365,9 +463,17 @@ where
     if let Some(first) = declarations.first()
         && first.span != span
     {
+        let message = match (first.is_standard_library, first.effects.as_slice()) {
+            (false, _) => format!("`{written}` already has an `extern` declaration."),
+            (true, []) => format!("`{written}` is already declared pure by the standard library: delete this line."),
+            (true, effects) => format!(
+                "`{written}` is already declared by the standard library, with `uses {}`: delete this line.",
+                effects.iter().map(short_name).collect::<Vec<_>>().join(", ")
+            ),
+        };
         context.collector.report_with_code(
             IssueCode::DuplicateExtern,
-            Issue::error(format!("`{written}` already has an `extern` declaration."))
+            Issue::error(message)
                 .with_annotation(Annotation::primary(span))
                 .with_annotation(Annotation::secondary(first.span).with_message("First declared here.")),
         );
@@ -487,7 +593,7 @@ pub(crate) fn check_uses<A>(
         for class in &nameable {
             artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, class.name, false);
         }
-        let mut foreign: Vec<String> = nameable
+        let mut effects: Vec<String> = nameable
             .into_iter()
             .filter(|class| class.flags.is_foreign())
             .map(|class| {
@@ -499,19 +605,18 @@ pub(crate) fn check_uses<A>(
                 )
             })
             .collect();
-        foreign.sort_unstable();
-        let effects: Vec<String> = NAMED_EFFECTS.iter().map(short_name).chain(foreign).collect();
+        effects.sort_unstable();
+        effects.push(short_name(events()));
 
         context.collector.report_with_code(
             IssueCode::InvalidEffect,
             Issue::error(format!(
-                "`{}` is not an effect: `uses` takes {}, {} or a `foreign` class.",
+                "`{}` is not an effect: `uses` takes {} or a `foreign` class.",
                 String::from_utf8_lossy(name.value),
                 effects.join(", "),
-                short_name(events()),
             ))
             .with_annotation(Annotation::primary(name.span).with_message("Written here."))
-            .with_note("An effect is a standard effect, a `foreign` class, or `Events`, the effect of `emit`."),
+            .with_note("An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`."),
         );
     }
 }
@@ -546,8 +651,8 @@ impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker 
     }
 }
 
-/// Spec section 29: a `foreign` object reaches code only through constructors, so a static property of `class` holds
-/// none, alone or inside a collection.
+/// Spec section 29: a module binding's lifetime decides how often a `foreign` object is created, and a static outlives
+/// every binding, so a static property of `class` holds none, alone or inside a collection.
 pub(crate) fn check_foreign_statics<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
 where
     A: Arena,
@@ -619,8 +724,10 @@ fn report_foreign_in_static<A>(
         IssueCode::ForeignInStatic,
         Issue::error(format!("`{property_name}` is static, so it cannot hold a `{held}`."))
             .with_annotation(Annotation::primary(span))
-            .with_note("A `foreign` object reaches code only through constructors, so no static holds one.")
-            .with_help(format!("Take the `{held}` as a constructor parameter instead.")),
+            .with_note(
+                "A module binding decides how often a `foreign` object is created, and a static outlives every binding, so no static holds one.",
+            )
+            .with_help(format!("Take the `{held}` as a constructor or method parameter instead.")),
     );
 }
 

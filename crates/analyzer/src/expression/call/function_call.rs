@@ -1,9 +1,11 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::expander::contains_parameter_variable;
 use mago_codex::ttype::get_mixed;
@@ -49,10 +51,12 @@ use crate::resolver::extension::is_imported_by_default;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::display_atomic;
+use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
 use crate::utils::names::sharp_code_class_name;
+use crate::utils::quoted_source;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
     fn analyze<'ctx, A>(
@@ -235,6 +239,7 @@ where
     );
     if let Some(metadata) = target.as_ref().and_then(InvocationTarget::get_function_like_metadata) {
         check_function_use(context, block_context, metadata, function, call.method.span());
+        report_argument_by_reference(context, call, function, metadata);
     }
 
     let analyze = |context: &mut Context<'ctx, 'arena, A>| {
@@ -276,6 +281,61 @@ where
     Ok(())
 }
 
+/// Refuses a PHP# call that gives a plain PHP function an argument it takes by reference, as `global.sort(numbers)`,
+/// which would change `numbers`: PHP# passes every argument by value. The message writes the standard library method
+/// that does the work where there is one. The standard library alone passes one, as only it imports `Sharp.Internal`,
+/// to give its methods, as `Regex.match`, the results PHP gives only that way.
+fn report_argument_by_reference<A>(
+    context: &mut Context<'_, '_, A>,
+    call: &MethodCall<'_>,
+    function: Word,
+    metadata: &FunctionLikeMetadata,
+) where
+    A: Arena,
+{
+    if context.source_file.is_standard_library {
+        return;
+    }
+
+    let parameters = &metadata.parameters;
+    let Some(argument) = call.argument_list.arguments.iter().enumerate().find_map(|(index, argument)| {
+        let parameter = match argument {
+            Argument::Named(named) => parameters
+                .iter()
+                .find(|parameter| parameter.name.0.as_bytes().strip_prefix(b"$") == Some(named.name.value)),
+            Argument::Positional(_) => {
+                parameters.get(index).or_else(|| parameters.last().filter(|last| last.flags.is_variadic()))
+            }
+        }?;
+
+        parameter.flags.is_by_reference().then(|| argument.value())
+    }) else {
+        return;
+    };
+
+    let written = quoted_source(context, call.object.span().join(call.method.span()));
+    let given = quoted_source(context, argument.span());
+    let name = function.as_bytes().rsplit(|byte| *byte == b'\\').next().unwrap_or_default().to_ascii_lowercase();
+    let fix = match name.as_slice() {
+        b"array_push" => Some(format!("{given}.add(…)")),
+        b"array_unshift" => Some(format!("{given}.insert(0, …)")),
+        b"sort" | b"rsort" | b"usort" => Some(format!("{given} = {given}.sortedBy(…)")),
+        _ => None,
+    };
+    let message = match fix {
+        Some(fix) => format!(
+            "`{written}` changes the variable it is given, and PHP# passes every argument by value: write `{fix}`."
+        ),
+        None => format!(
+            "`{written}` changes the variable it is given, and PHP# passes every argument by value, so `{given}` can't go there."
+        ),
+    };
+    context.collector.report_with_code(
+        IssueCode::InvalidPassByReference,
+        Issue::error(message).with_annotation(Annotation::primary(argument.span()).with_message("Passed by value.")),
+    );
+}
+
 /// The refusal of `global.exit(status)` or `global.die(…)` in a `.sharp` file: `die` in every form, and `exit` with a
 /// status that can hold a string, print their message and exit with status 0, which reports success. Any other status
 /// that is not an `int` is refused for the `int` it must be.
@@ -291,7 +351,7 @@ where
 {
     let status_type = status.and_then(|status| artifacts.get_expression_type(status));
     let message = || {
-        Issue::error("PHP# has no `die`: write the message to STDERR, then `global.exit(1)`.").with_note(
+        Issue::error("PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`.").with_note(
             "`global.die(\"…\")` and `global.exit(\"…\")` print the message and exit with status 0, which reports success.",
         )
     };
@@ -444,7 +504,13 @@ where
         if let Some(callable) = cast_atomic_to_callable(atomic, context.codebase, Some(template_result)) {
             match callable.as_ref() {
                 TCallable::Signature(callable_signature) => {
+                    // An extension method's value takes the method's arguments after its receiver, spec section 14.3,
+                    // so its own signature checks the call.
                     if let Some(id) = callable_signature.get_source()
+                        && !context
+                            .codebase
+                            .get_function_like(&id)
+                            .is_some_and(|metadata| metadata.flags.is_extension_method())
                         && let Some(target) = get_function_like_target(
                             context,
                             id,
@@ -488,6 +554,24 @@ where
                 span,
                 source: None,
             });
+        } else if context.dialect.is_sharp() {
+            // Spec sections 14.1 and 14.4: any expression that gives a function is called, and one that may be null is
+            // called with `?.(…)`.
+            let written = quoted_source(context, span);
+            let message = if atomic.is_null() && expression_type.types.iter().any(|other| !other.is_null()) {
+                format!("`{written}` may be null: call it as `{written}?.(…)`.")
+            } else {
+                format!(
+                    "Only a function value is called with `(…)`, and `{written}` is `{}`.",
+                    display_atomic(context, atomic)
+                )
+            };
+            context.collector.report_with_code(
+                IssueCode::InvalidCallable,
+                Issue::error(message).with_annotation(Annotation::primary(span).with_message("Called here.")),
+            );
+
+            encountered_invalid_targets = true;
         } else {
             let type_name = display_atomic(context, atomic);
 
@@ -513,7 +597,8 @@ where
 
 /// What a `.sharp` file writes in place of a plain PHP function that PHP# replaces, decision 076.
 enum Replacement {
-    /// The standard library's static methods that do the function's work, each by its class and name.
+    /// The standard library's methods that do the function's work, each by its class and name: a static method, an
+    /// extension member, or a member of an effect class.
     Members(&'static [(&'static str, &'static str)]),
     /// The PHP# syntax for it: `is` (spec section 21), `(string)` and `/` on two ints (section 24), a spread literal
     /// (section 12) or `for … of` (section 17). `{x}` stands for the call's first argument, `{a}` and `{b}` for its
@@ -522,7 +607,9 @@ enum Replacement {
 }
 
 /// Each plain PHP function PHP# replaces, with its replacement. A row that names a standard library member lands in
-/// the change that ships the member, and a test holds every row to the library.
+/// the change that ships the member, and a test holds every row to the library. A name that ends in `*` is a family,
+/// every function whose name it begins, as `curl_*`, and a row of the function's whole name wins over it. A member named
+/// `__construct` is its class's constructor.
 const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("is_string", Replacement::Syntax("`{x} is string`")),
     ("is_int", Replacement::Syntax("`{x} is int`")),
@@ -600,7 +687,201 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("gmdate", Replacement::Members(&[("Sharp\\Time\\Date", "format")])),
     ("strtotime", Replacement::Members(&[("Sharp\\Time\\Date", "parse")])),
     ("timezone_identifiers_list", Replacement::Members(&[("Sharp\\Time\\TimeZone", "names")])),
+    ("getenv", Replacement::Members(&[("Sharp\\Environment", "variable")])),
+    ("getcwd", Replacement::Members(&[("Sharp\\Environment", "currentDirectory")])),
+    ("chdir", Replacement::Members(&[("Sharp\\Environment", "changeDirectory")])),
+    ("time", Replacement::Members(&[("Sharp\\Clock", "now")])),
+    ("gettimeofday", Replacement::Members(&[("Sharp\\Clock", "now")])),
+    ("hrtime", Replacement::Members(&[("Sharp\\Clock", "timestamp")])),
+    ("microtime", Replacement::Members(&[("Sharp\\Clock", "timestamp")])),
+    ("sleep", Replacement::Members(&[("Sharp\\Clock", "sleep")])),
+    ("usleep", Replacement::Members(&[("Sharp\\Clock", "sleep")])),
+    ("time_nanosleep", Replacement::Members(&[("Sharp\\Clock", "sleep")])),
+    ("time_sleep_until", Replacement::Members(&[("Sharp\\Clock", "sleep")])),
+    ("random_int", Replacement::Members(&[("Sharp\\Random", "nextInt")])),
+    ("rand", Replacement::Members(&[("Sharp\\Random", "nextInt")])),
+    ("mt_rand", Replacement::Members(&[("Sharp\\Random", "nextInt")])),
+    ("lcg_value", Replacement::Members(&[("Sharp\\Random", "nextFloat")])),
+    ("random_bytes", Replacement::Members(&[("Sharp\\Random", "nextBytes")])),
+    ("shuffle", Replacement::Members(&[("Sharp\\Random", "shuffle")])),
+    ("str_shuffle", Replacement::Members(&[("Sharp\\Random", "shuffle")])),
+    ("array_rand", Replacement::Members(&[("Sharp\\Random", "pick")])),
+    ("printf", Replacement::Members(&[("Sharp\\Console", "write")])),
+    ("vprintf", Replacement::Members(&[("Sharp\\Console", "write")])),
+    ("print_r", Replacement::Members(&[("Sharp\\Console", "write")])),
+    ("var_dump", Replacement::Members(&[("Sharp\\Console", "write")])),
+    ("fwrite", Replacement::Members(&[("Sharp\\Console", "write"), ("Sharp\\Console", "writeError")])),
+    ("fputs", Replacement::Members(&[("Sharp\\Console", "write"), ("Sharp\\Console", "writeError")])),
+    ("fprintf", Replacement::Members(&[("Sharp\\Console", "write"), ("Sharp\\Console", "writeError")])),
+    ("readline", Replacement::Members(&[("Sharp\\Console", "readLine")])),
+    ("fgets", Replacement::Members(&[("Sharp\\Console", "readLine")])),
+    ("exit", Replacement::Members(&[("Sharp\\Process", "exit")])),
+    ("getmypid", Replacement::Members(&[("Sharp\\Process", "id")])),
+    ("exec", Replacement::Members(&[("Sharp\\Process", "run")])),
+    ("shell_exec", Replacement::Members(&[("Sharp\\Process", "run")])),
+    ("system", Replacement::Members(&[("Sharp\\Process", "run")])),
+    ("passthru", Replacement::Members(&[("Sharp\\Process", "run")])),
+    ("proc_open", Replacement::Members(&[("Sharp\\Process", "run")])),
+    ("popen", Replacement::Members(&[("Sharp\\Process", "run")])),
+    ("file_get_contents", Replacement::Members(&[("Sharp\\Files", "read")])),
+    ("readfile", Replacement::Members(&[("Sharp\\Files", "read")])),
+    ("file", Replacement::Members(&[("Sharp\\Files", "readLines")])),
+    ("file_put_contents", Replacement::Members(&[("Sharp\\Files", "write"), ("Sharp\\Files", "append")])),
+    ("file_exists", Replacement::Members(&[("Sharp\\Files", "exists")])),
+    ("is_file", Replacement::Members(&[("Sharp\\Files", "exists")])),
+    ("is_readable", Replacement::Members(&[("Sharp\\Files", "exists")])),
+    ("is_dir", Replacement::Members(&[("Sharp\\Files", "isDirectory")])),
+    ("unlink", Replacement::Members(&[("Sharp\\Files", "delete")])),
+    ("copy", Replacement::Members(&[("Sharp\\Files", "copy")])),
+    ("rename", Replacement::Members(&[("Sharp\\Files", "move")])),
+    ("scandir", Replacement::Members(&[("Sharp\\Files", "list")])),
+    ("glob", Replacement::Members(&[("Sharp\\Files", "list")])),
+    ("opendir", Replacement::Members(&[("Sharp\\Files", "list")])),
+    ("readdir", Replacement::Members(&[("Sharp\\Files", "list")])),
+    ("mkdir", Replacement::Members(&[("Sharp\\Files", "createDirectory")])),
+    ("rmdir", Replacement::Members(&[("Sharp\\Files", "deleteDirectory")])),
+    ("filesize", Replacement::Members(&[("Sharp\\Files", "size")])),
+    ("filemtime", Replacement::Members(&[("Sharp\\Files", "lastModified")])),
+    ("filectime", Replacement::Members(&[("Sharp\\Files", "lastModified")])),
+    ("fileatime", Replacement::Members(&[("Sharp\\Files", "lastModified")])),
+    ("stat", Replacement::Members(&[("Sharp\\Files", "lastModified")])),
+    ("tempnam", Replacement::Members(&[("Sharp\\Files", "temporaryFile")])),
+    ("sys_get_temp_dir", Replacement::Members(&[("Sharp\\Files", "temporaryFile")])),
+    ("fopen", Replacement::Members(&[("Sharp\\Files", "readLinesLazily"), ("Sharp\\Files", "append")])),
+    ("fread", Replacement::Members(&[("Sharp\\Files", "read"), ("Sharp\\Files", "readLinesLazily")])),
+    ("fclose", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
+    ("feof", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
+    ("fseek", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
+    ("ftell", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
+    ("rewind", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
+    ("flock", Replacement::Members(&[("Sharp\\Files", "write"), ("Sharp\\Files", "append")])),
+    ("ftruncate", Replacement::Members(&[("Sharp\\Files", "write"), ("Sharp\\Files", "append")])),
+    ("fflush", Replacement::Members(&[("Sharp\\Files", "write"), ("Sharp\\Files", "append")])),
+    ("tmpfile", Replacement::Members(&[("Sharp\\Files", "temporaryFile")])),
+    ("curl_*", Replacement::Members(&[("Sharp\\Http", "send")])),
+    ("fsockopen", Replacement::Members(&[("Sharp\\Http", "send")])),
+    ("stream_socket_client", Replacement::Members(&[("Sharp\\Http", "send")])),
+    ("mail", Replacement::Members(&[("Sharp\\Mail", "send")])),
+    ("mb_send_mail", Replacement::Members(&[("Sharp\\Mail", "send")])),
+    ("mysqli_query", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
+    ("mysqli_real_query", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
+    ("mysqli_multi_query", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("mysqli_execute_query", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
+    ("mysqli_prepare", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
+    ("mysqli_stmt_execute", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
+    ("mysqli_fetch_all", Replacement::Members(&[("Sharp\\Database", "query")])),
+    ("mysqli_fetch_assoc", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("mysqli_fetch_array", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("mysqli_fetch_row", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("mysqli_fetch_object", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("mysqli_fetch_column", Replacement::Members(&[("Sharp\\Database", "scalar")])),
+    ("mysqli_affected_rows", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("mysqli_begin_transaction", Replacement::Members(&[("Sharp\\Database", "beginTransaction")])),
+    ("mysqli_autocommit", Replacement::Members(&[("Sharp\\Database", "beginTransaction")])),
+    ("mysqli_commit", Replacement::Members(&[("Sharp\\Database", "commit")])),
+    ("mysqli_rollback", Replacement::Members(&[("Sharp\\Database", "rollback")])),
+    ("mysqli_connect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
+    ("mysqli_real_connect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
+    ("mysqli_init", Replacement::Members(&[("Sharp\\Database", "__construct")])),
+    ("mysqli_*", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
+    ("pg_connect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
+    ("pg_pconnect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
+    ("pg_fetch_all", Replacement::Members(&[("Sharp\\Database", "query")])),
+    ("pg_fetch_all_columns", Replacement::Members(&[("Sharp\\Database", "query")])),
+    ("pg_select", Replacement::Members(&[("Sharp\\Database", "query")])),
+    ("pg_fetch_assoc", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("pg_fetch_array", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("pg_fetch_row", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("pg_fetch_object", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
+    ("pg_fetch_result", Replacement::Members(&[("Sharp\\Database", "scalar")])),
+    ("pg_affected_rows", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("pg_cmdtuples", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("pg_insert", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("pg_update", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("pg_delete", Replacement::Members(&[("Sharp\\Database", "execute")])),
+    ("pg_*", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
+    ("apcu_fetch", Replacement::Members(&[("Sharp\\Cache", "get")])),
+    ("apcu_exists", Replacement::Members(&[("Sharp\\Cache", "get")])),
+    ("apcu_key_info", Replacement::Members(&[("Sharp\\Cache", "get")])),
+    ("apcu_store", Replacement::Members(&[("Sharp\\Cache", "set")])),
+    ("apcu_add", Replacement::Members(&[("Sharp\\Cache", "set")])),
+    ("apcu_delete", Replacement::Members(&[("Sharp\\Cache", "remove")])),
+    ("apcu_entry", Replacement::Members(&[("Sharp\\Cache", "getOrCreate")])),
+    ("apcu_*", Replacement::Members(&[("Sharp\\Cache", "get"), ("Sharp\\Cache", "set"), ("Sharp\\Cache", "remove")])),
+    ("putenv", Replacement::Members(&[("Sharp\\Environment", "setVariable")])),
+    ("mt_srand", Replacement::Members(&[("Sharp\\Random", "__construct")])),
+    ("srand", Replacement::Members(&[("Sharp\\Random", "__construct")])),
 ];
+
+/// Each PHP built-in class the standard library replaces, spec section 29, with the standard library members to write
+/// in place of creating one. A static member comes before an effect class's, which names the object it is called on.
+const WRAPPED_CLASSES: &[(&str, &[(&str, &str)])] = &[
+    ("PDO", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
+    ("PDOStatement", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
+    ("mysqli", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
+    ("SQLite3", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
+    ("DateTime", &[("Sharp\\Time\\Date", "parse"), ("Sharp\\Clock", "now")]),
+    ("DateTimeImmutable", &[("Sharp\\Time\\Date", "parse"), ("Sharp\\Clock", "now")]),
+    ("DateTimeZone", &[("Sharp\\Time\\Date", "format")]),
+    ("DateInterval", &[("Sharp\\Time\\Duration", "ofSeconds"), ("Sharp\\Time\\Duration", "ofMilliseconds")]),
+    ("CurlHandle", &[("Sharp\\Http", "send")]),
+    ("CurlMultiHandle", &[("Sharp\\Http", "send")]),
+    ("SplFileObject", &[("Sharp\\Files", "read"), ("Sharp\\Files", "readLines")]),
+    ("SplFileInfo", &[("Sharp\\Files", "exists"), ("Sharp\\Files", "size"), ("Sharp\\Files", "lastModified")]),
+    ("DirectoryIterator", &[("Sharp\\Files", "list")]),
+    ("FilesystemIterator", &[("Sharp\\Files", "list")]),
+    ("RecursiveDirectoryIterator", &[("Sharp\\Files", "list")]),
+    ("Random\\Randomizer", &[("Sharp\\Random", "nextInt")]),
+];
+
+/// Spec section 29: a `.sharp` file outside the standard library may name a class [`WRAPPED_CLASSES`] lists, but not
+/// create one, with `new` or a static factory, which is a static method that returns the class. The refusal names the
+/// members to write instead, and the code references each of them, so a change to one reaches it.
+pub(crate) fn report_wrapped_class<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    class: &ClassLikeMetadata,
+    factory: Option<&FunctionLikeMetadata>,
+    span: Span,
+) where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || context.source_file.is_standard_library {
+        return;
+    }
+    let Some((_, members)) =
+        WRAPPED_CLASSES.iter().find(|(wrapped, _)| wrapped.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()))
+    else {
+        return;
+    };
+    if let Some(method) = factory
+        && !method.return_type_metadata.as_ref().is_some_and(|returned| {
+            returned.type_union.types.iter().any(|atomic| {
+                matches!(atomic, TAtomic::Object(TObject::Named(named))
+                    if named.name.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()))
+            })
+        })
+    {
+        return;
+    }
+    for (member_class, method) in *members {
+        artifacts.symbol_references.add_reference_to_class_member(
+            &block_context.scope,
+            (ascii_lowercase_word(member_class.as_bytes()), ascii_lowercase_word(method.as_bytes())),
+            false,
+        );
+    }
+    // A project without the standard library has no member to name, and creating one is refused all the same.
+    let form = member_form(context, members, None).map_or_else(|| ".".to_owned(), |form| format!(": write {form}"));
+    let name = display_class_like_name(context, class.original_name);
+
+    context.collector.report_with_code(
+        IssueCode::WrappedClass,
+        Issue::error(format!("Create no `{name}`{form}"))
+            .with_annotation(Annotation::primary(span).with_message("Created here.")),
+    );
+}
 
 /// Spec section 23: PHP# calls a plain PHP function through its namespace, so a bare call of one is refused with the
 /// form to write: the replacement [`REPLACEMENTS`] gives it, or the call through its namespace, `global.strlen(…)` or
@@ -617,9 +898,16 @@ pub(crate) fn report_bare_function_call<A>(
     A: Arena,
 {
     let name = function.original_name;
+    let named = |replaced: &[u8]| replaced.eq_ignore_ascii_case(name.as_bytes());
+    let in_family = |replaced: &str| {
+        replaced.strip_suffix('*').is_some_and(|family| {
+            name.as_bytes().get(..family.len()).is_some_and(|start| start.eq_ignore_ascii_case(family.as_bytes()))
+        })
+    };
     let replacement = REPLACEMENTS
         .iter()
-        .find(|(replaced, _)| replaced.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+        .find(|(replaced, _)| named(replaced.as_bytes()))
+        .or_else(|| REPLACEMENTS.iter().find(|(replaced, _)| in_family(replaced)))
         .map(|(_, replacement)| replacement);
     if let Some(Replacement::Members(members)) = replacement {
         for (class, method) in *members {
@@ -653,7 +941,8 @@ pub(crate) fn report_bare_function_call<A>(
 
 /// The standard library members `members` names, as a `.sharp` file writes them, with the imports the file lacks. An
 /// extension's member, spec section 26, is written on the call's first argument from `arguments`, and needs an import
-/// only where the file lacks its extensions by default. None when the codebase declares none of them.
+/// only where the file lacks its extensions by default. An effect class's member, spec section 29, is written on the
+/// object of that class a constructor takes, as in `clock.now()`. None when the codebase declares none of them.
 fn member_form<A>(
     context: &Context<'_, '_, A>,
     members: &[(&str, &str)],
@@ -667,6 +956,7 @@ where
         .and_then(|arguments| arguments.arguments.first())
         .and_then(|argument| argument_text(context, argument))
         .unwrap_or_else(|| "x".to_owned());
+    let mut taken: Vec<String> = Vec::new();
     let (classes, methods): (Vec<Option<Word>>, Vec<String>) = members
         .iter()
         .filter_map(|(class, method)| {
@@ -674,24 +964,47 @@ where
             let method = codebase.get_method(class.name.as_bytes(), method.as_bytes())?;
             let name = method.original_name;
             let import = (!is_imported_by_default(context, class.name, method)).then_some(class.original_name);
+            let arguments = |taken_first: usize| if method.parameters.len() > taken_first { "…" } else { "" };
 
             Some(if method.flags.is_extension_property() {
                 (import, format!("`{receiver}.{name}`"))
             } else if method.flags.is_extension_method() {
-                let arguments = if method.parameters.len() > 1 { "…" } else { "" };
+                (import, format!("`{receiver}.{name}({})`", arguments(1)))
+            } else if method.method_metadata.as_ref().is_some_and(|metadata| metadata.is_constructor) {
+                // A `foreign` object is created only in a module binding, spec section 32.
+                let class_name = sharp_code_class_name(codebase, &context.imported_names, &context.scope, class.name);
+                let place = if class.flags.is_foreign() { " in a module binding" } else { "" };
 
-                (import, format!("`{receiver}.{name}({arguments})`"))
-            } else {
+                (Some(class.original_name), format!("`new {class_name}({})`{place}", arguments(0)))
+            } else if method.method_metadata.as_ref().is_none_or(|metadata| metadata.is_static) {
                 (Some(class.original_name), format!("`{}(…)`", display_code_member(context, class.original_name, name)))
+            } else {
+                let class_name = sharp_code_class_name(codebase, &context.imported_names, &context.scope, class.name);
+                let object = lower_first(class_name.rsplit('.').next().unwrap_or_default());
+                let held = format!("`{class_name}`");
+                if !taken.contains(&held) {
+                    taken.push(held);
+                }
+
+                (Some(class.original_name), format!("`{object}.{name}({})`", arguments(0)))
             })
         })
         .unzip();
     let classes: Vec<Word> = classes.into_iter().flatten().collect();
     let (last, others) = methods.split_last()?;
     let methods = if others.is_empty() { last.clone() } else { format!("{} or {last}", others.join(", ")) };
+    let taken =
+        if taken.is_empty() { String::new() } else { format!(" on the {} your constructor takes", taken.join(" or ")) };
     let imports = display_missing_imports(context, classes).map(|imports| format!(" {imports}")).unwrap_or_default();
 
-    Some(format!("{methods}.{imports}"))
+    Some(format!("{methods}{taken}.{imports}"))
+}
+
+/// `name` with its first letter in lowercase, the name PHP# code gives a local or a parameter of the class `name`.
+fn lower_first(name: &str) -> String {
+    let mut letters = name.chars();
+
+    letters.next().map(|first| first.to_lowercase().chain(letters).collect()).unwrap_or_default()
 }
 
 /// The PHP# syntax `form` with each argument that is a name or a member read written into it.
@@ -827,11 +1140,13 @@ mod tests {
 
     use super::REPLACEMENTS;
     use super::Replacement;
+    use super::WRAPPED_CLASSES;
     use crate::code::IssueCode;
     use crate::test_analysis;
 
-    /// A bare call names the standard library members its row of [`REPLACEMENTS`] lists, and `member_form` drops a
-    /// member the codebase lacks. So every listed member must be one the library declares, or the checker would name
+    /// A bare call names the standard library members its row of [`REPLACEMENTS`] lists, creating a class names those
+    /// of its row of [`WRAPPED_CLASSES`], and `member_form` drops a member the codebase lacks. So every listed member
+    /// must be one the library declares, or the checker would name
     /// less than its table says. The library is `sharp/composer/library`, beside this tree's `sharp/mago`. The test's
     /// walk of the library and its failure message run only when the library changes shape, so coverage leaves it out.
     #[test]
@@ -863,6 +1178,7 @@ mod tests {
                 Replacement::Members(members) => members.iter().map(|member| (*function, *member)).collect(),
                 Replacement::Syntax(_) => Vec::new(),
             })
+            .chain(WRAPPED_CLASSES.iter().flat_map(|(class, members)| members.iter().map(|member| (*class, *member))))
             .filter(|(_, (class, method))| {
                 codebase
                     .get_class_like(class.as_bytes())

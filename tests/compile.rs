@@ -946,10 +946,10 @@ fn compile_reports_the_proof_of_a_deleted_law() {
 #[test]
 fn compile_reports_missing_lean_on_each_file_that_needs_lean_and_whose_compiled_file_is_not_current() {
     let missing = if cfg!(target_env = "musl") {
-        "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. This musl build of Mago can't install Lean, because Lean has no musl build. On glibc Linux, Mago's glibc build installs Lean itself.".to_owned()
+        "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. This musl build of the checker can't install Lean, because Lean has no musl build. On glibc Linux, the checker's glibc build installs Lean itself.".to_owned()
     } else {
         format!(
-            "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. Mago could not install Lean into {}: File exists (os error 17). Run vendor/bin/mago compile again to retry.",
+            "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. The checker could not install Lean into {}: File exists (os error 17). Run vendor/bin/mago compile again to retry.",
             unwritable_cache().join("mago/elan").display()
         )
     };
@@ -1169,7 +1169,7 @@ fn compile_proves_spec_section_28_s_state_machine_law_with_a_class_as_its_event(
     );
 }
 
-/// A law never calls an interface's method, which Mago does not translate to Lean, even when every implementation is
+/// A law never calls an interface's method, which a law cannot reason about, even when every implementation is
 /// pure as spec section 29 holds `Card.amount` to. A call through `?.` is refused too.
 #[test]
 fn a_law_that_calls_an_interface_method_is_refused() {
@@ -1192,7 +1192,7 @@ fn a_law_that_calls_an_interface_method_is_refused() {
         let root = directory.path();
         let expected: Vec<String> = calls
             .iter()
-            .map(|at| format!("{file}:{at}:error - unmodeled-construct: Law {law}. Mago does not translate interface methods to Lean, because the implementation that runs is chosen at run time."))
+            .map(|at| format!("{file}:{at}:error - unmodeled-construct: Law {law}. A law cannot reason about an interface method, because the implementation that runs is chosen at run time."))
             .collect();
 
         let output = compile_without_lean(root);
@@ -1766,13 +1766,13 @@ fn a_lean_file_under_a_root_lean_or_mago_owns_is_refused_and_every_other_rule_ru
     let inside = "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\", \"Code\\\\Evil\\\\\": \"app/Evil/\"}}}\n";
     let owned = |owner: &str, root: &str, file: &str| {
         format!(
-            "`{owner}` is a name Lean or Mago keeps, so Lean files under the `{root}` root, such as {file}, can't be built. Move them under one of your own namespaces"
+            "`{owner}` is a name Lean or the checker keeps, so Lean files under the `{root}` root, such as {file}, can't be built. Move them under one of your own namespaces"
         )
     };
     let code = owned("Code", "Code\\Evil\\", "code-evil/Names.lean");
     let std = owned("Std", "Std\\Evil\\", "std-evil/Names.lean");
     let lower = "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\", \"code\\\\\": \"code/\"}}}\n";
-    let lower_code = "`code` names the same folder as `Code` on a disk that ignores case, and `Code` is a name Lean or Mago keeps, so Lean files under the `code\\` root, such as code/App/Tenant/Store/Module.lean, can't be built. Move them under one of your own namespaces";
+    let lower_code = "`code` names the same folder as `Code` on a disk that ignores case, and `Code` is a name Lean or the checker keeps, so Lean files under the `code\\` root, such as code/App/Tenant/Store/Module.lean, can't be built. Move them under one of your own namespaces";
     let lower_names = "import Code\nopen Sharp\n\ndef legacy : Namespace := App.Shared\n";
     let via_lower = "import Code.App.Tenant.Store.Module\nimport code.App.Tenant.Store.Module\nopen Sharp\n\n@[rule] def lower : Rule := .neverImports legacy\n";
     let names = "import Sharp.Lean.Facts\nopen Sharp\n\ndef Code.Evil.Names.neverImports (forbidden : String) : Rule :=\n  .imports fun _ i => Rule.breaks (.imports fun ns j => under j.name ns) forbidden {} (.import { i with namespace_ := forbidden })\n";
@@ -2392,7 +2392,7 @@ fn looping(steps: u64) -> String {
 #[test]
 fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other_rule_runs() {
     compile_succeeds(lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]).path());
-    let stopped = "it ran past 30 processor seconds, the limit Mago sets on each Lean process";
+    let stopped = "it ran past 30 processor seconds, the limit the checker sets on each Lean process";
     let waited = "it waited 40 seconds without finishing";
     let store_breaks = "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule importsOnly in app/Tenant/Store/Module.lean.";
     let refused = |file: &str, rule: &str, why: &str| {
@@ -2688,7 +2688,7 @@ fn assert_unmodeled_beside(source: &str, others: &[(&str, &str)], message: &str)
 fn a_law_reaching_a_float_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int cents { get; }) { }\n    public float ratio() => this.cents / 2.0;\n\n    law ratioBelowOne(Shape p) => p.ratio() < 100.0;\n}\n",
-        "Law ratioBelowOne reaches a float in Shape.ratio. Lean cannot prove facts about float arithmetic; use int.",
+        "Law ratioBelowOne reaches a float in Shape.ratio. A law cannot reason about float arithmetic, which rounds; use int.",
     );
 }
 
@@ -2696,7 +2696,7 @@ fn a_law_reaching_a_float_is_refused() {
 fn a_law_reaching_an_overridable_method_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public virtual int sides() => 3;\n\n    law hasSides(Shape s) => s.sides() > 0;\n}\n",
-        "Law hasSides reaches a call to the overridable method Shape.sides in Shape.hasSides. Lean cannot see which implementation runs.",
+        "Law hasSides reaches a call to the overridable method Shape.sides in Shape.hasSides. A law cannot know which implementation runs.",
     );
 }
 
@@ -2704,7 +2704,7 @@ fn a_law_reaching_an_overridable_method_is_refused() {
 fn a_law_testing_the_identity_of_objects_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    law same(Shape a, Shape b) => a === b;\n}\n",
-        "Law same reaches the identity test `===` in Shape.same. Classes keep no identity in Lean.",
+        "Law same reaches the identity test `===` in Shape.same. A law sees an object as its values, so it has no identity to compare.",
     );
 }
 
@@ -2728,15 +2728,50 @@ fn a_law_reaching_a_type_test_is_refused() {
 fn a_law_reaching_a_member_lean_reserves_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public int rec() => 1;\n\n    law one(Shape s) => s.rec() == 1;\n}\n",
-        "Law one reaches the method Shape.rec in Shape.rec. Lean declares a member of that name for every structure and inductive.",
+        "Law one reaches the method Shape.rec in Shape.rec. A `.lean` proof file gives every class a member of that name, so a law cannot reach a member that has it.",
     );
 }
 
 #[test]
-fn a_law_reaching_a_collection_is_refused() {
+fn a_law_reaching_a_map_is_refused() {
     assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(List<int> items) => true;\n}\n",
-        "Law sized reaches a collection in Shape.sized. Mago does not translate collections to Lean.",
+        "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(Map<string, int> items) => true;\n}\n",
+        "Law sized reaches a collection in Shape.sized. A law cannot reason about this use of a collection.",
+    );
+}
+
+/// A `List` is Lean's `List`, and its `map`, `filter` and `count` are Lean's `List.map`, `List.filter` and
+/// `List.length`, so Mago proves a law over them with the proof it creates.
+#[test]
+fn compile_proves_a_law_over_map_filter_and_count() {
+    let directory = lawful_project(&[(
+        "app/Shared/Basket.sharp",
+        "namespace App.Shared;\n\npublic class Basket\n{\n    public static List<bool> flags(List<int> items) => items.map(x => x > 0);\n\n    public static List<int> positives(List<int> items) => items.filter(x => x > 0);\n\n    law flagsKeepCount(List<int> items) => Basket.flags(items).count() == items.count();\n\n    law positivesDropTheRest(int unused) => Basket.positives([1, -2, 3]) == [1, 3];\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Basket.sharp").exists());
+}
+
+/// A law reaches only `map`, `filter` and `count` of a `List`, so any other method of one is refused by its name.
+#[test]
+fn a_law_reaching_another_list_method_is_refused_by_name() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static bool known(List<int> items) => items.contains(3);\n\n    law knows(List<int> items) => Shape.known(items);\n}\n",
+        "Law knows reaches the List method contains in Shape.known. A law cannot reason about this use of a collection.",
+    );
+}
+
+/// `map` and `filter` take a pure function, so a lambda whose body can throw, as `x * 2` throws on overflow, is
+/// refused.
+#[test]
+fn a_law_reaching_a_lambda_that_can_throw_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static List<int> doubled(List<int> items) => items.map(x => x * 2);\n\n    law same(List<int> items) => Shape.doubled(items).count() == items.count();\n}\n",
+        "Law same reaches a lambda whose body can throw in Shape.doubled. A law cannot reason about this lambda.",
     );
 }
 
@@ -2744,7 +2779,7 @@ fn a_law_reaching_a_collection_is_refused() {
 fn a_law_reaching_a_loop_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static int sum(int n)\n    {\n        let total = 0;\n        for (let i = 0; i < n; i++) {\n            total += i;\n        }\n        return total;\n    }\n\n    law summed(int n) => Shape.sum(n) >= 0;\n}\n",
-        "Law summed reaches a loop in Shape.sum. Mago does not translate loops to Lean.",
+        "Law summed reaches a loop in Shape.sum. A law cannot reason about a loop.",
     );
 }
 
@@ -2752,7 +2787,7 @@ fn a_law_reaching_a_loop_is_refused() {
 fn a_law_reaching_a_recursion_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static int down(int n) => n <= 0 ? 0 : Shape.down(n - 1);\n\n    law reachesZero(int n) => Shape.down(n) == 0;\n}\n",
-        "Law reachesZero reaches a recursion in Shape.down. Mago does not translate recursion to Lean.",
+        "Law reachesZero reaches a recursion in Shape.down. A law cannot reason about recursion.",
     );
 }
 
@@ -2760,7 +2795,7 @@ fn a_law_reaching_a_recursion_is_refused() {
 fn a_law_reaching_a_lambda_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static int next(int a)\n    {\n        const step = (int x) => x + 1;\n        return step(a);\n    }\n\n    law grows(int a) => Shape.next(a) != a;\n}\n",
-        "Law grows reaches a lambda in Shape.next. Mago does not translate lambdas to Lean.",
+        "Law grows reaches a lambda in Shape.next. A law cannot reason about this lambda.",
     );
 }
 
@@ -2769,7 +2804,7 @@ fn a_law_reaching_an_inherited_class_is_refused() {
     assert_unmodeled_beside(
         "namespace App.Shared;\n\npublic class Shape : Base\n{\n    law any(Shape s) => true;\n}\n",
         &[("app/Shared/Base.sharp", "namespace App.Shared;\n\npublic class Base\n{\n}\n")],
-        "Law any reaches the class Shape, which extends Base in Shape. Mago does not translate inheritance to Lean.",
+        "Law any reaches the class Shape, which extends Base in Shape. A law cannot reason about inheritance.",
     );
 }
 
@@ -2777,7 +2812,7 @@ fn a_law_reaching_an_inherited_class_is_refused() {
 fn a_law_reaching_a_named_constructor_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n    public Shape.triangle() : this(3) { }\n\n    law threeSides(int unused) => new Shape.triangle().sides == 3;\n}\n",
-        "Law threeSides reaches the named constructor Shape.triangle in Shape.threeSides. Mago does not translate constructor bodies to Lean.",
+        "Law threeSides reaches the named constructor Shape.triangle in Shape.threeSides. A law cannot reason about a constructor's body.",
     );
 }
 
@@ -2789,6 +2824,6 @@ fn a_law_reaching_an_extension_member_lean_cannot_see_is_refused() {
             "app/Shared/ShapeMath.sharp",
             "namespace App.Shared;\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int sum()\n        {\n            let total = 0;\n            for (let i = 0; i < shape.sides; i++) {\n                total += i;\n            }\n            return total;\n        }\n    }\n}\n",
         )],
-        "Law summed reaches a loop in ShapeMath.sum. Mago does not translate loops to Lean.",
+        "Law summed reaches a loop in ShapeMath.sum. A law cannot reason about a loop.",
     );
 }

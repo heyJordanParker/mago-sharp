@@ -124,6 +124,13 @@ namespace Random {
 
         public function getBytes(int $length): string {}
 
+        /**
+         * @template T
+         *
+         * @param array<array-key, T> $array
+         *
+         * @return list<T>
+         */
         public function shuffleArray(array $array): array {}
 
         public function shuffleBytes(string $bytes): string {}

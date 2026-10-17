@@ -1625,6 +1625,7 @@ where
 
     if context.dialect.is_sharp() && class_like_metadata.flags.is_sharp() {
         report_statics_named_like_class_members(context, members);
+        report_members_named_like_inherited_members(context, class_like_metadata);
     }
 
     // Check trait constant overrides AFTER constants have been analyzed
@@ -1684,6 +1685,66 @@ where
             IssueCode::NameAlreadyInUse,
             Issue::error(format!(
                 "`type.{name}` on a class value reaches `Class`'s member `{member}`, never this static. Rename it."
+            ))
+            .with_annotation(Annotation::primary(span).with_message("Declared here.")),
+        );
+    }
+}
+
+/// Reports each member of the PHP# class `class` named like a member of the other kind that it inherits and can see,
+/// spec section 14.3: `x.discount(…)` runs a method `discount` or the function a field or property `discount` holds, so
+/// a class has one or the other, from a PHP# ancestor or a plain PHP one. An ancestor's private member is not among
+/// the members the class inherits, and two members of one body are the semantics check's. Names compare ignoring case, as PHP calls a
+/// method.
+fn report_members_named_like_inherited_members<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    let is_own = |declaring: Word| declaring.as_bytes().eq_ignore_ascii_case(class.name.as_bytes());
+
+    let mut clashes = vec![];
+    for (property_name, &property_class) in &class.declaring_property_ids {
+        let name = property_name.as_bytes().strip_prefix(b"$").unwrap_or(property_name.as_bytes());
+        let Some(method_id) = class.declaring_method_ids.get(&ascii_lowercase_word(name)) else {
+            continue;
+        };
+        let method_class = method_id.get_class_name();
+        if is_own(method_class) == is_own(property_class) {
+            continue;
+        }
+        let Some(declaring) = context.codebase.get_class_like(property_class.as_bytes()) else {
+            unreachable!("the class that declares a property the class inherits is in the codebase");
+        };
+        let (Some(method), Some(property)) =
+            (context.codebase.get_method_by_id(method_id), declaring.properties.get(property_name))
+        else {
+            unreachable!("the class that declares a member has it");
+        };
+
+        // A plain PHP property without hooks is storage, as a PHP# field is.
+        let is_field = property.flags.is_field() || (!declaring.flags.is_sharp() && property.hooks.is_empty());
+        let property_kind = if is_field { "field" } else { "property" };
+        let (span, declared, inherited, ancestor) = if is_own(method_class) {
+            (method.name_span, "method", property_kind, property_class)
+        } else {
+            (property.name_span, property_kind, "method", method_class)
+        };
+        // The class's own member is in its file, so it has a name.
+        let span = span.unwrap_or(class.span);
+
+        clashes.push((span, declared, inherited, ancestor, BytesDisplay(name).to_string()));
+    }
+
+    clashes.sort_by_key(|(span, ..)| span.start.offset);
+    for (span, declared, inherited, ancestor, name) in clashes {
+        let class_name = display_class_like_name(context, class.original_name);
+        let ancestor =
+            context.codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |metadata| metadata.original_name);
+        let ancestor = display_class_like_name(context, ancestor);
+        context.collector.report_with_code(
+            IssueCode::NameAlreadyInUse,
+            Issue::error(format!(
+                "`{class_name}` declares the {declared} `{name}` and inherits the {inherited} `{name}` from `{ancestor}`, so `x.{name}(…)` could run either. Rename one of them."
             ))
             .with_annotation(Annotation::primary(span).with_message("Declared here.")),
         );
@@ -1775,7 +1836,7 @@ fn check_class_like_extends<'ctx, 'arena, A>(
                 IssueCode::NonExistentClassLike,
                 Issue::error(format!("{using_kind_capitalized} `{using_name}` cannot extend unknown type `{extended_name}`"))
                     .with_annotation(Annotation::primary(extended_type.span()).with_message("This type could not be found"))
-                    .with_note("Mago could not find a definition for this class, interface, or trait.")
+                    .with_note("The checker could not find a definition for this class, interface, or trait.")
                     .with_help("Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable."),
             );
             continue;
@@ -2138,7 +2199,7 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                 ("A struct's header lists the interfaces it implements.", "Check the interface's name and its import.")
             } else {
                 (
-                    "Mago could not find a definition for this interface. The `implements` keyword is for interfaces only.",
+                    "The checker could not find a definition for this interface. The `implements` keyword is for interfaces only.",
                     "Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable.",
                 )
             };
@@ -2186,7 +2247,7 @@ fn check_class_like_use<'ctx, 'arena, A>(
                 IssueCode::NonExistentClassLike,
                 Issue::error(format!("{using_kind_capitalized} `{using_name}` cannot use unknown type `{used_name}`"))
                     .with_annotation(Annotation::primary(used_type.span()).with_message("This type could not be found"))
-                    .with_note("Mago could not find a definition for this trait. The `use` keyword is for traits only.")
+                    .with_note("The checker could not find a definition for this trait. The `use` keyword is for traits only.")
                     .with_help("Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable."),
             );
 

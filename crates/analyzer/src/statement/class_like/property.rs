@@ -70,6 +70,7 @@ use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::report_int_for_float;
+use crate::utils::with_function_fit_message;
 use crate::visibility::is_visible_from_scope;
 use crate::visibility::reaches_internal;
 
@@ -83,9 +84,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Property<'arena> {
     where
         A: Arena,
     {
-        // A static member's initial value that reads `Class.name` runs as code, though PHP would read it as a constant
-        // expression, as `Property::initial_value_runs_after_class` decides for the checker and the engine too.
-        let runs_as_code = self.initial_value_runs_after_class();
+        // An initial value that reads `Class.name` runs as code, though PHP would read it as a constant expression, as
+        // `Property::initial_value_runs_as_code` decides for the checker and the engine too.
+        let runs_as_code = self.initial_value_runs_as_code();
         match self {
             Property::Plain(plain) => analyze_plain_property(plain, runs_as_code, context, block_context, artifacts),
             Property::Hooked(hooked) => {
@@ -138,6 +139,28 @@ fn analyze_default_value<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    let declared = block_context.scope.get_class_like().and_then(|class_metadata| {
+        let declared_type_metadata =
+            class_metadata.properties.get(&php_variable_name(variable_name))?.type_metadata.as_ref()?;
+        let mut declared_type = declared_type_metadata.type_union.clone();
+        expand_union(
+            context.codebase,
+            &mut declared_type,
+            &TypeExpansionOptions {
+                self_class: Some(class_metadata.original_name),
+                static_class_type: StaticClassType::Name(class_metadata.original_name),
+                ..Default::default()
+            },
+        );
+        if class_metadata.flags.is_sharp() {
+            declared_type = known_type_or_error(declared_type);
+        }
+
+        Some((class_metadata, declared_type_metadata, declared_type))
+    });
+
+    // Spec section 14.2: a lambda takes its parameter types from the property's type, as from a typed local's.
+    expect_type(context, artifacts, value, declared.as_ref().map(|(_, _, declared_type)| declared_type));
     let is_constant = !runs_as_code && value.is_constant(&context.settings.version, false);
     if is_constant {
         block_context.in_constant_expression(|block_context| value.analyze(context, block_context, artifacts))?;
@@ -149,10 +172,7 @@ where
     // are checked too.
     let is_sharp = context.dialect.is_sharp();
 
-    if let Some(class_metadata) = block_context.scope.get_class_like()
-        && let Some(property_metadata) = class_metadata.properties.get(&php_variable_name(variable_name))
-        && let Some(declared_type_metadata) = property_metadata.type_metadata.as_ref()
-    {
+    if let Some((class_metadata, declared_type_metadata, declared_type)) = declared {
         check_sharp_literal_kind(context, Some(block_context), artifacts, value, &declared_type_metadata.type_union);
 
         if (is_sharp
@@ -161,19 +181,6 @@ where
             && let Some(value_type) = artifacts.get_expression_type(value).cloned()
             && !value_type.is_never()
         {
-            let mut declared_type = declared_type_metadata.type_union.clone();
-            expand_union(
-                context.codebase,
-                &mut declared_type,
-                &TypeExpansionOptions {
-                    self_class: Some(class_metadata.original_name),
-                    static_class_type: StaticClassType::Name(class_metadata.original_name),
-                    ..Default::default()
-                },
-            );
-            if class_metadata.flags.is_sharp() {
-                declared_type = known_type_or_error(declared_type);
-            }
             let value_type = get_set_literal_type(context, artifacts, value, &declared_type).unwrap_or(value_type);
 
             let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
@@ -215,6 +222,7 @@ where
                     )
                     .with_note("A property's default value must be assignable to the property's declared type.")
                     .with_help("Change the default value to match the declared type, or update the property type to accept the default.");
+                let issue = with_function_fit_message(context, Some(value), (&declared_type, &value_type), issue);
 
                 context.collector.report_with_code(IssueCode::InvalidPropertyDefaultValue, issue);
             }

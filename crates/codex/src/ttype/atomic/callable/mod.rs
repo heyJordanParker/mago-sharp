@@ -134,6 +134,17 @@ impl TCallableSignature {
         &self.parameters
     }
 
+    /// Spec section 14.1: whether the function `given` takes fewer parameters than every call through this function type
+    /// passes, as C#, Kotlin, Swift and Java refuse. A call passes each parameter of this type that is neither optional
+    /// nor variadic, as a plain PHP `callable` has, and a variadic last parameter of `given` takes any number.
+    #[must_use]
+    pub fn takes_more_parameters_than(&self, given: &TCallableSignature) -> bool {
+        let passed =
+            self.parameters.iter().filter(|parameter| !parameter.is_variadic() && !parameter.has_default()).count();
+
+        !given.parameters.last().is_some_and(TCallableParameter::is_variadic) && given.parameters.len() < passed
+    }
+
     /// Returns a mutable slice of the callable parameters.
     #[inline]
     pub fn get_parameters_mut(&mut self) -> &mut [TCallableParameter] {

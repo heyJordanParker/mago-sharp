@@ -14,6 +14,7 @@ use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
@@ -57,6 +58,7 @@ use mago_word::concat_word;
 use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -66,6 +68,7 @@ use crate::expression::with::CREATED_OBJECT_PREFIX;
 use crate::expression::with::is_set_by_with;
 use crate::external::PropertyAccessKind;
 use crate::invocation::infer_parameter_templates_from_argument;
+use crate::invocation::infer_unfixed_templates;
 use crate::invocation::rename_trait_objects;
 use crate::resolver::class_name::class_value_classes;
 use crate::resolver::class_name::holds_no_class;
@@ -73,6 +76,7 @@ use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::method::check_call_through_readonly;
+use crate::resolver::method::get_receiver_collections;
 use crate::resolver::method::object_member_issue;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
@@ -188,11 +192,73 @@ where
                 );
             }
             Extension::Member(method) => result.extension = Some(method),
+            Extension::Value(_) if for_assignment => {
+                result.has_error_path = true;
+                context.collector.report_with_code(
+                    IssueCode::InvalidPropertyWrite,
+                    Issue::error(format!(
+                        "`{}` is a method an extension adds: it is called or read as a function value, never written.",
+                        String::from_utf8_lossy(name.value)
+                    ))
+                    .with_annotation(Annotation::primary(name.span()).with_message("Written here.")),
+                );
+            }
+            Extension::Value(method) => {
+                let read = object_expression.span().join(name.span());
+                let property_type =
+                    resolve_extension_value(context, artifacts, method, &object_type.to_non_nullable(), read);
+                artifacts.record_call_target(
+                    read,
+                    CallTarget::FunctionLike {
+                        callee: FunctionLikeIdentifier::Method(method.get_class_name(), method.get_method_name()),
+                        class: None,
+                    },
+                );
+                result.encountered_null = is_null_safe && object_type.is_nullable();
+                result.properties.push(ResolvedProperty {
+                    property_span: None,
+                    property_name: concat_word!("$", name.value),
+                    declaring_class_id: None,
+                    property_type,
+                    is_magic: false,
+                    read_type: None,
+                });
+            }
             Extension::Refused => result.has_error_path = true,
         }
         if object_type.is_nullable() && !is_null_safe && !object_type.has_nullsafe_null() {
             report_access_on_null(context, block_context, object_expression.span(), operator_span, false, false);
         }
+
+        return Ok(result);
+    }
+
+    if context.dialect.is_sharp()
+        && !for_assignment
+        && let ClassLikeMemberSelector::Identifier(name) = property_selector
+        && let Some(collections) = get_receiver_collections(context, block_context, artifacts, object_expression)
+        && let Some(property_type) = resolve_collection_method_value(
+            context,
+            block_context,
+            artifacts,
+            &collections,
+            object_expression,
+            name,
+            operator_span,
+        )
+    {
+        result.encountered_null = object_type.is_nullable();
+        if object_type.is_nullable() && !is_null_safe && !object_type.has_nullsafe_null() {
+            report_access_on_null(context, block_context, object_expression.span(), operator_span, false, false);
+        }
+        result.properties.push(ResolvedProperty {
+            property_span: None,
+            property_name: concat_word!("$", name.value),
+            declaring_class_id: None,
+            property_type,
+            is_magic: false,
+            read_type: None,
+        });
 
         return Ok(result);
     }
@@ -2139,15 +2205,218 @@ where
     }
 
     let method_name = display_sharp_member(display_class_like_name(context, class_name), method_metadata.original_name);
+    let template_result = unfixed_type_arguments(method_metadata);
 
-    Some(fix_type_arguments(context, artifacts, value, method_metadata, &method_name, read_span))
+    Some(fix_type_arguments(context, artifacts, value, method_metadata, &method_name, read_span, template_result))
+}
+
+/// Spec section 14.3: the value a read without `(…)` gives of the method `name` of a `List`, `Map`, `Set` or
+/// `Iterable`, on each of `collections`, the classes [`get_receiver_collections`] finds for the receiver `object`,
+/// typed as [`resolve_method_value`] types a method's value. None when one of them has no such method. The value holds
+/// the collection as it was when it was read, spec section 12, so a method that changes the collection would change
+/// only that copy, and it is refused, as Swift refuses the value of a `mutating` method, with the lambda that changes
+/// the collection itself. The read records the method it reads for the lowering.
+#[allow(clippy::too_many_arguments)]
+fn resolve_collection_method_value<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    collections: &[TObject],
+    object: &Expression<'_>,
+    name: &LocalIdentifier<'_>,
+    access_span: Span,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let method_name = ascii_lowercase_word(name.value);
+    let methods = collections
+        .iter()
+        .map(|collection| {
+            let class = collection.get_name()?;
+
+            Some((class, codebase.get_method(class.as_bytes(), method_name.as_bytes())?))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let read_span = object.span().join(name.span());
+
+    if let Some((_, changing)) = methods.iter().find(|(_, metadata)| !metadata.flags.is_mutation_free()) {
+        let written = quoted_source(context, read_span);
+        let parameters: Vec<String> = changing
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.0.as_str_lossy().trim_start_matches('$').to_owned())
+            .collect();
+        let lambda_parameters = if let [parameter] = parameters.as_slice() {
+            parameter.clone()
+        } else {
+            format!("({})", parameters.join(", "))
+        };
+        context.collector.report_with_code(
+            IssueCode::InvalidPropertyAccess,
+            Issue::error(format!(
+                "`{written}` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `{lambda_parameters} => {written}({})`.",
+                parameters.join(", ")
+            ))
+            .with_annotation(Annotation::primary(read_span).with_message("Read as a value here.")),
+        );
+
+        return Some(TUnion::from_atomic(TAtomic::Error));
+    }
+
+    let mut value: Option<TUnion> = None;
+    for (collection, (class, _)) in collections.iter().zip(&methods) {
+        artifacts.record_call_target(
+            read_span,
+            CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(*class, method_name), class: None },
+        );
+        let method_value = resolve_method_value(
+            context,
+            block_context,
+            artifacts,
+            collection,
+            None,
+            word(name.value),
+            access_span,
+            read_span,
+        )
+        .unwrap_or_else(|| unreachable!("a PHP# read of a method the collection's class declares is its value"));
+        value = Some(add_optional_union_type(method_value, value.as_ref(), context.codebase));
+    }
+
+    value
+}
+
+/// Spec section 14.3: the value a read without `(…)` at `read_span` gives of the extension method `extension` on a
+/// receiver of type `receiver`, spec section 26: the closure of the static method it runs as, without its first
+/// parameter, the receiver. The type parameters of the extension's block take what the receiver gives them, as a call
+/// infers them, and the method's own take theirs from the function type the read goes into, as
+/// [`fix_type_arguments`] fixes a generic method's.
+pub(crate) fn resolve_extension_value<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    extension: MethodIdentifier,
+    receiver: &TUnion,
+    read_span: Span,
+) -> TUnion
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let class = extension.get_class_name();
+    let Some(metadata) = codebase.get_method_by_id(&extension) else {
+        unreachable!("an extension is a method of its class");
+    };
+    let mut signature = get_signature_of_function_like_metadata(
+        &FunctionLikeIdentifier::Method(class, extension.get_method_name()),
+        metadata,
+        codebase,
+        &TypeExpansionOptions::default(),
+    );
+    signature.is_closure = true;
+    signature.parameters = signature.parameters.into_iter().skip(1).collect();
+    let value = TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature)));
+    if metadata.template_types.is_empty() {
+        return value;
+    }
+
+    let mut template_result = unfixed_type_arguments(metadata);
+    let receiver_parameter = metadata
+        .parameters
+        .first()
+        .and_then(|parameter| parameter.get_type_metadata())
+        .map_or_else(get_mixed, |parameter| parameter.type_union.clone());
+    infer_unfixed_templates(context, &receiver_parameter, receiver, &mut template_result);
+    let method_name = display_sharp_member(display_class_like_name(context, class), metadata.original_name);
+
+    fix_type_arguments(context, artifacts, value, metadata, &method_name, read_span, template_result)
+}
+
+/// The plain PHP functions that read the variables of the code that calls them, which PHP refuses to call through a
+/// value, as its `zend_forbid_dynamic_call` guards them.
+const READS_CALLER_VARIABLES: [&[u8]; 6] =
+    [b"compact", b"extract", b"get_defined_vars", b"func_get_args", b"func_get_arg", b"func_num_args"];
+
+/// Spec section 14.3: the value a read without `(…)` at `read_span`, written `written`, gives of the plain PHP function
+/// `function` of the full name `name`, as `global.strtoupper` does: the closure PHP's `strtoupper(...)` makes, typed
+/// by the function's signature, with the type arguments of a `@template` function from the function type the read goes
+/// into, as [`fix_type_arguments`] fixes a generic method's. A function that changes a variable it is given, as
+/// `global.sort` does, is no value, since PHP# passes every argument by value, and neither is one that reads the
+/// variables of the code that calls it, as `global.compact` does, which PHP runs only when it is named in the call.
+pub(crate) fn resolve_function_value<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    name: Word,
+    function: &FunctionLikeMetadata,
+    written: &str,
+    read_span: Span,
+) -> TUnion
+where
+    A: Arena,
+{
+    artifacts.symbol_references.add_reference_to_symbol(
+        &block_context.scope,
+        ascii_lowercase_word(name.as_bytes()),
+        false,
+    );
+    // `extract` both reads the caller's variables and takes its array by reference, and the first is what it is for.
+    let refusal = if READS_CALLER_VARIABLES.iter().any(|reader| name.as_bytes().eq_ignore_ascii_case(reader)) {
+        Some((
+            IssueCode::InvalidCallable,
+            format!("`{written}` reads the variables of the code that calls it, so it is no function value."),
+        ))
+    } else if function.parameters.iter().any(|parameter| parameter.flags.is_by_reference()) {
+        Some((
+            IssueCode::InvalidPassByReference,
+            format!(
+                "`{written}` changes the variable it is given, and PHP# passes every argument by value, so it is no function value."
+            ),
+        ))
+    } else {
+        None
+    };
+    if let Some((code, message)) = refusal {
+        context.collector.report_with_code(
+            code,
+            Issue::error(message).with_annotation(Annotation::primary(read_span).with_message("Read as a value here.")),
+        );
+
+        return TUnion::from_atomic(TAtomic::Error);
+    }
+
+    let mut signature = get_signature_of_function_like_metadata(
+        &FunctionLikeIdentifier::Function(name),
+        function,
+        context.codebase,
+        &TypeExpansionOptions::default(),
+    );
+    signature.is_closure = true;
+    let value = TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature)));
+    if function.template_types.is_empty() {
+        return value;
+    }
+
+    let template_result = unfixed_type_arguments(function);
+
+    fix_type_arguments(context, artifacts, value, function, written, read_span, template_result)
+}
+
+/// The type arguments of the generic `method` before anything fixes them: each type parameter with its bound.
+fn unfixed_type_arguments(method: &FunctionLikeMetadata) -> TemplateResult {
+    TemplateResult::new(
+        method.template_types.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
+        HashMap::default(),
+    )
 }
 
 /// Spec section 14.3: a generic method's `value`, one closure signature, takes its type arguments from the parameter
-/// types of the function type the read at `span` goes into, as C#'s method group conversion does. Returns `value` with
-/// them. A PHP# method's are recorded at `span` for the lowering, and one nothing fixes is refused, as C#'s CS0411,
-/// while one a parameter type fixes outside its bound is left to the bound's own issue. A plain PHP method's
-/// `@template` types never reach the engine, so its value stays PHP's first-class callable, and none is recorded.
+/// types of the function type the read at `span` goes into, as C#'s method group conversion does, after those
+/// `template_result` already holds. Returns `value` with them. A PHP# method's are recorded at `span` for the
+/// lowering, and one nothing fixes is refused, as C#'s CS0411, while one a parameter type fixes outside its bound is
+/// left to the bound's own issue. A plain PHP method's `@template` types never reach the engine, so its value stays
+/// PHP's first-class callable, and none is recorded.
 fn fix_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -2155,15 +2424,12 @@ fn fix_type_arguments<A>(
     method: &FunctionLikeMetadata,
     method_name: &str,
     span: Span,
+    mut template_result: TemplateResult,
 ) -> TUnion
 where
     A: Arena,
 {
     let templates = &method.template_types;
-    let mut template_result = TemplateResult::new(
-        templates.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
-        HashMap::default(),
-    );
     let mut violated_templates = WordSet::default();
     if let Some(function_type) =
         artifacts.get_expected_type(&span).map(|expected| closure_parameter_types(context, expected))
@@ -2309,7 +2575,7 @@ pub(super) fn report_non_documented_property<A>(
             Annotation::secondary(obj_span).with_message(format!("On an object of type `{classname}`")),
         )
         .with_note(
-            format!("While this {access_type} might be handled by `{magic_method}()`, Mago cannot determine its type without a corresponding `@property` docblock tag."),
+            format!("While this {access_type} might be handled by `{magic_method}()`, the checker cannot determine its type without a corresponding `@property` docblock tag."),
         )
         .with_help(format!(
             "To enable type checking, add a `@property`, `@property-read`, or `@property-write` tag to the docblock of the `{classname}` class. For example: `/** @property string {property_name} */`",

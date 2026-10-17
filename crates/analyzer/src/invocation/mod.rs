@@ -242,6 +242,14 @@ impl<'ctx> InvocationTarget<'ctx> {
             return format!("{collection}.{method_name}");
         }
 
+        // A PHP# function value is named as the code writes it, as `f` or `this.scale`, spec section 14, an extension
+        // method's value too.
+        if context.dialect.is_sharp()
+            && let InvocationTarget::Callable { span, .. } = self
+        {
+            return crate::utils::quoted_source(context, *span);
+        }
+
         self.get_function_like_identifier()
             .map(|identifier| crate::utils::names::display_function_like_identifier(context, identifier))
             .unwrap_or_else(
@@ -251,14 +259,21 @@ impl<'ctx> InvocationTarget<'ctx> {
             )
     }
 
-    /// Guesses the kind of the callable target (e.g., "function", "method", "closure", "callable").
-    pub fn guess_kind(&self) -> &'static str {
+    /// Guesses the kind of the callable target (e.g., "function", "method", "closure", "callable"). In PHP#, a lambda
+    /// is a "lambda" and any other function held as a value a "function value", spec section 14.
+    pub fn guess_kind<A>(&self, context: &Context<'_, '_, A>) -> &'static str
+    where
+        A: Arena,
+    {
+        let is_sharp = context.dialect.is_sharp();
         match self.get_function_like_identifier() {
             Some(identifier) => match identifier {
                 FunctionLikeIdentifier::Function(_) => "function",
                 FunctionLikeIdentifier::Method(_, _) => "method",
+                FunctionLikeIdentifier::Closure(_) if is_sharp => "lambda",
                 FunctionLikeIdentifier::Closure(_) => "closure",
             },
+            None if is_sharp => "function value",
             None => {
                 if self.is_non_closure_callable() {
                     "callable"

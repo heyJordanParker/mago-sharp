@@ -284,11 +284,9 @@ where
         true,
     );
 
-    let was_inside_general_use = else_block_context.flags.inside_general_use();
-    else_block_context.flags.set_inside_general_use(true);
+    // The `else` arm is used as the `then` arm is, where the conditional's value is.
     expect_type(context, artifacts, r#else, expected.as_ref());
     r#else.analyze(context, &mut else_block_context, artifacts)?;
-    else_block_context.flags.set_inside_general_use(was_inside_general_use);
 
     let if_assigned_variables = if_block_context.assigned_variable_ids.keys().copied().collect::<WordSet>();
     let else_assigned_variables = else_block_context.assigned_variable_ids.keys().copied().collect::<WordSet>();

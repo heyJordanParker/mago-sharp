@@ -53,10 +53,23 @@ where
     fn parse_parameter(&mut self, typed: bool) -> Result<FunctionLikeParameter<'arena>, ParseError> {
         let attribute_lists = self.parse_attribute_list_sequence()?;
         let modifiers = self.parse_modifier_sequence()?;
-        let hint = self.parse_optional_type_hint()?;
+        let mut hint = self.parse_optional_type_hint()?;
+
+        // In PHP#, `int &value` reads as the intersection `int & value` until the parameter ends there: it is the type
+        // `int` and the parameter `value` by reference, which the checker refuses in PHP#'s words.
+        let mut reference = None;
+        if let Some(Hint::Intersection(intersection)) = &hint
+            && let Hint::Identifier(Identifier::Local(name)) = intersection.right
+            && self.dialect.is_sharp()
+            && matches!(self.stream.peek_kind(0)?, Some(T![","] | T![")"] | T!["="]))
+        {
+            reference = Some((intersection.ampersand, DirectVariable { span: name.span, name: name.value }));
+            hint = Some(intersection.left.clone());
+        }
 
         // In PHP#, a bare name before `,`, `)` or `=` is a parameter written without its type: it is the name.
         let untyped = match &hint {
+            _ if reference.is_some() => None,
             Some(Hint::Identifier(Identifier::Local(name)))
                 if self.dialect.is_sharp()
                     && matches!(self.stream.peek_kind(0)?, Some(T![","] | T![")"] | T!["="])) =>
@@ -71,10 +84,14 @@ where
         };
 
         let hint = if untyped.is_some() { None } else { hint };
-        let ampersand = if self.stream.is_at(T!["&"])? { Some(self.stream.eat_span(T!["&"])?) } else { None };
+        let ampersand = match reference {
+            Some((ampersand, _)) => Some(ampersand),
+            None if self.stream.is_at(T!["&"])? => Some(self.stream.eat_span(T!["&"])?),
+            None => None,
+        };
         let ellipsis = if self.stream.is_at(T!["..."])? { Some(self.stream.eat_span(T!["..."])?) } else { None };
         // A keyword PHP# reserves reads as the name too, so the checker refuses it with a message that names it.
-        let variable = match untyped {
+        let variable = match untyped.or(reference.map(|(_, variable)| variable)) {
             Some(variable) => variable,
             None if self.dialect.is_sharp()
                 && self.stream.peek_kind(0)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) =>

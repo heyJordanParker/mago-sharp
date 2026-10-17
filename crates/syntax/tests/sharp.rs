@@ -406,12 +406,32 @@ fn a_method_with_a_long_return_type_parses() {
     assert_eq!(source(CODE, method.return_type_hint.as_ref().expect("a return type")), "int|string|null");
 }
 
+/// `int &count` reads as the intersection `int & count` until the parameter ends there: it is the type `int` and the
+/// parameter `count` by reference, which the checker refuses in PHP#'s words. A bound `A & B` stays an intersection.
 #[test]
-fn a_by_reference_parameter_is_a_parse_error() {
+fn a_typed_by_reference_parameter_is_its_type_and_its_ampersand() {
+    const CODE: &str = "class Report\n{\n    public void fill(int &count, Order & Shareable item) {}\n}\n";
     let arena = LocalArena::new();
-    let program = parse(&arena, "src/Report.sharp", "class Report\n{\n    public void fill(int &count) {}\n}\n");
+    let program = parse(&arena, "src/Report.sharp", CODE);
 
-    assert!(!program.errors.is_empty(), "expected a parse error");
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(ClassLikeMember::Method(method)) = class_members(program).first() else {
+        panic!("expected a method, got {:#?}", class_members(program));
+    };
+    let parameters: Vec<(&str, &str, bool)> = method
+        .parameter_list
+        .parameters
+        .iter()
+        .map(|parameter| {
+            (
+                source(CODE, parameter.hint.as_ref().expect("a type")),
+                source(CODE, &parameter.variable),
+                parameter.ampersand.is_some(),
+            )
+        })
+        .collect();
+
+    assert_eq!(parameters, [("int", "count", true), ("Order & Shareable", "item", false)]);
 }
 
 #[test]

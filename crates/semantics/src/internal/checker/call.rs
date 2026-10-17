@@ -38,17 +38,22 @@ pub fn check_call(call: &Call, context: &mut Context<'_, '_, '_>) {
 /// Checks for closures being immediately invoked without wrapping parentheses,
 /// e.g. `function(){}()`.
 ///
-/// PHP requires these to be wrapped: `(function(){})()`.
+/// PHP requires these to be wrapped: `(function(){})()`. A PHP# lambda is called where it is written in parentheses too,
+/// spec section 14.1.
 fn check_for_closure_invocation_without_parentheses(function: &Expression<'_>, context: &mut Context<'_, '_, '_>) {
     if let Expression::Closure(closure) = function {
-        let issue = Issue::error("Immediately invoked closure must be wrapped in parentheses.").with_annotation(
-            Annotation::primary(closure.span()).with_message("Closure is invoked here without wrapping parentheses."),
-        );
-
         context.report(if context.program.dialect.is_sharp() {
-            issue
+            Issue::error(
+                "Write the lambda in parentheses to call it where it is written, as in `((int a) => a + 1)(2)`.",
+            )
+            .with_annotation(Annotation::primary(closure.span()).with_message("Called here without parentheses."))
         } else {
-            issue.with_help("Wrap the closure in parentheses before invoking it, e.g. `(function() { ... })()`.")
+            Issue::error("Immediately invoked closure must be wrapped in parentheses.")
+                .with_annotation(
+                    Annotation::primary(closure.span())
+                        .with_message("Closure is invoked here without wrapping parentheses."),
+                )
+                .with_help("Wrap the closure in parentheses before invoking it, e.g. `(function() { ... })()`.")
         });
     }
 }

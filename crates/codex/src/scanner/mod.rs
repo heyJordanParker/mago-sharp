@@ -607,6 +607,7 @@ where
 
         self.codebase.externs.entry(target).or_default().push(ExternMetadata {
             file: word(&context.file.name),
+            is_standard_library: context.file.is_standard_library,
             span: r#extern.span(),
             target,
             effects,

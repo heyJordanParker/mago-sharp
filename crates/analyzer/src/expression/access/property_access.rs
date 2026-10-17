@@ -127,6 +127,9 @@ where
         is_null_safe,
         false, // `for_assignment`
     )?;
+    // A read the analysis records what it runs for, a method value the lowering writes from that, spec section 14.3, is
+    // resolved again at each read, so no later read takes its type from this one.
+    let property_access_id = property_access_id.filter(|_| artifacts.get_callees(&span).next().is_none());
 
     if let Some(extension) = resolution_result.extension {
         return analyze_extension_access(

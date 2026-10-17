@@ -78,6 +78,7 @@ use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::StaticCall;
+use crate::resolver::method::CalledProperty;
 use crate::resolver::method::UndocumentedMethod;
 use crate::resolver::method::UnresolvedMethod;
 use crate::resolver::method::get_declared_collection;
@@ -490,22 +491,16 @@ where
         )?;
     }
 
-    for property in std::mem::take(&mut method_resolution.called_properties) {
-        artifacts.symbol_references.add_reference_for_property_read(
-            &block_context.scope,
-            property.declaring_class,
-            property.property_name,
-        );
-        artifacts.record_call_target(
-            span,
-            CallTarget::Property { class: property.declaring_class, property: property.property_name },
-        );
-
-        let (targets, has_invalid_target) =
-            resolve_callable_targets(context, &property.property_type, span, &mut method_resolution.template_result);
-        invocation_targets.extend(targets);
-        method_resolution.has_invalid_target |= has_invalid_target;
-    }
+    method_resolution.has_invalid_target |= add_called_property_targets(
+        context,
+        block_context,
+        artifacts,
+        std::mem::take(&mut method_resolution.called_properties),
+        &mut method_resolution.template_result,
+        span,
+        object.span().join(selector.span()),
+        &mut invocation_targets,
+    );
 
     let has_resolved_methods = !invocation_targets.is_empty();
 
@@ -788,6 +783,42 @@ where
             Ok(None)
         }
     }
+}
+
+/// Adds the functions the `called_properties` hold to `invocation_targets`, spec section 14: the call at `span` reads
+/// each property, written at `callee` as `this.scale`, and runs what it holds. Answers whether one holds no function.
+pub(super) fn add_called_property_targets<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    called_properties: Vec<CalledProperty>,
+    template_result: &mut TemplateResult,
+    span: Span,
+    callee: Span,
+    invocation_targets: &mut Vec<InvocationTarget<'ctx>>,
+) -> bool
+where
+    A: Arena,
+{
+    let mut has_invalid_targets = false;
+    for property in called_properties {
+        artifacts.symbol_references.add_reference_for_property_read(
+            &block_context.scope,
+            property.declaring_class,
+            property.property_name,
+        );
+        artifacts.record_call_target(
+            span,
+            CallTarget::Property { class: property.declaring_class, property: property.property_name },
+        );
+
+        let (targets, has_invalid_target) =
+            resolve_callable_targets(context, &property.property_type, callee, template_result);
+        invocation_targets.extend(targets);
+        has_invalid_targets |= has_invalid_target;
+    }
+
+    has_invalid_targets
 }
 
 /// Gives external callable-signature providers an opportunity to establish

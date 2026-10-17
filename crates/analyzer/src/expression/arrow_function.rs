@@ -18,6 +18,8 @@ use crate::statement::function_like::capture_lambda_locals;
 use crate::statement::function_like::closure_parameter_types;
 use crate::statement::function_like::merge_captured_references;
 use crate::statement::function_like::receiver_class;
+use crate::statement::function_like::report_untyped_lambda_parameters;
+use crate::statement::function_like::report_value_for_void;
 use crate::statement::function_like::resolve_closure_like_type;
 use crate::statement::function_like::unused_parameter;
 use crate::utils::expression::variable::get_variables_referenced_in_expression;
@@ -129,6 +131,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrowFunction<'arena> {
 
         let inferred_parameter_types =
             artifacts.get_expected_type(self).map(|expected| closure_parameter_types(context, expected));
+        report_untyped_lambda_parameters(context, &self.parameter_list, inferred_parameter_types.as_ref());
+        if let Some(expected) = artifacts.get_expected_type(self) {
+            report_value_for_void(context, expected, self.expression);
+        }
         let inner_artifacts = analyze_function_like(
             context,
             artifacts,

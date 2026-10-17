@@ -28,6 +28,7 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::template::variance::Variance;
@@ -41,7 +42,6 @@ use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
-use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Inheritance;
@@ -791,24 +791,26 @@ impl<'analysis> Types<'analysis> {
         (!method.flags.is_user_defined() && takes_function_value).then(|| method.original_name.to_string())
     }
 
-    /// The name of the function value the call `call` runs: the local of `f(2)` and `f?.(2)`, or the property of
-    /// `holder.onTotal(2)`. None for a call of a function or a method.
+    /// The name of the function value the call `call` runs, as the file writes it: the local of `f(2)` and `f?.(2)`,
+    /// the expression of `steps[0](2)` and `this.make()?.(2)`, or the property of `holder.onTotal(2)`. None for a call
+    /// of a function or a method.
     fn function_value_name(&self, call: &Expression) -> Option<String> {
         match call {
-            // The parser reads the name before `?.(` as a constant, which a local of that name is.
             Expression::Call(
-                Call::Function(FunctionCall { function: function @ Expression::Identifier(local), .. })
-                | Call::NullSafeFunction(NullSafeFunctionCall {
-                    function: function @ Expression::ConstantAccess(ConstantAccess { name: local }),
-                    ..
-                }),
+                Call::Function(FunctionCall { function, .. })
+                | Call::NullSafeFunction(NullSafeFunctionCall { function, .. }),
             ) => self
                 .artifacts
                 .get_expression_type(function)
                 .is_some_and(|r#type| {
                     r#type.types.iter().all(|atomic| matches!(atomic, TAtomic::Callable(_) | TAtomic::Null))
                 })
-                .then(|| String::from_utf8_lossy(local.value()).into_owned()),
+                .then(|| {
+                    let span = function.span();
+                    let written = &self.file.contents[span.start.offset as usize..span.end.offset as usize];
+
+                    String::from_utf8_lossy(written).into_owned()
+                }),
             _ => self.artifacts.get_callees(call).find_map(|target| match target {
                 CallTarget::Property { property, .. } => {
                     let property = property.as_bytes();
@@ -1067,6 +1069,88 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
+    /// Whether the read `access` is the value of the extension method it reaches, spec section 14.3, which the analysis
+    /// resolved as it resolves a call, and not a computed property.
+    pub(crate) fn is_extension_method_value(&self, access: &Expression) -> bool {
+        matches!(access, Expression::Access(_))
+            && matches!(
+                self.artifacts.get_callees(access).next(),
+                Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. })
+                    if self.codebase.get_method(class.as_bytes(), method.as_bytes())
+                        .is_some_and(|metadata| metadata.flags.is_extension_method())
+            )
+    }
+
+    /// The type of the first parameter of the function the method value `value` is, as the checker typed it. None for a
+    /// function that takes none.
+    pub(crate) fn value_parameter_type(&self, value: &Expression) -> Option<TUnion> {
+        let Some(TAtomic::Callable(TCallable::Signature(signature))) =
+            self.expression_type(value).types.iter().find(|atomic| atomic.is_callable())
+        else {
+            unreachable!("the analysis types a method value as its signature, not the value at {:?}", value.span());
+        };
+
+        Some(signature.get_parameters().first()?.get_type_signature().cloned().unwrap_or_else(get_mixed))
+    }
+
+    /// The parameters of the function the method value `value` is, as the checker typed it, each named as the method
+    /// it runs names it, without an extension method's receiver. A plain PHP library that reads a callback's
+    /// parameters sees them, as it sees a first-class callable's.
+    pub(crate) fn value_parameters(&self, value: &Expression) -> Vec<ValueParameter> {
+        let Some(TAtomic::Callable(TCallable::Signature(signature))) =
+            self.expression_type(value).types.iter().find(|atomic| atomic.is_callable())
+        else {
+            unreachable!("the analysis types a method value as its signature, not the value at {:?}", value.span());
+        };
+        let names: Vec<&[u8]> = signature
+            .get_source()
+            .and_then(|source| self.codebase.get_function_like(&source))
+            .map(|method| {
+                let receiver = usize::from(method.flags.is_extension_method());
+                method
+                    .parameters
+                    .iter()
+                    .skip(receiver)
+                    .map(|parameter| {
+                        let name = parameter.name.0.as_bytes();
+
+                        name.strip_prefix(b"$").unwrap_or(name)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        signature
+            .get_parameters()
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                let name =
+                    names.get(index).map_or_else(|| format!("argument{index}").into_bytes(), |name| name.to_vec());
+                ValueParameter {
+                    // The value's own closure holds the receiver as `$receiver`.
+                    name: if name == b"receiver" { b"receiver#1".to_vec() } else { name },
+                    r#type: parameter.get_type_signature().cloned().unwrap_or_else(get_mixed),
+                    variadic: parameter.is_variadic(),
+                    optional: parameter.has_default(),
+                }
+            })
+            .collect()
+    }
+
+    /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as
+    /// `global.strtoupper` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
+    pub(crate) fn function_value(&self, read: &Expression) -> Option<Word> {
+        match self.artifacts.get_callees(read).next() {
+            Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function), .. })
+                if matches!(read, Expression::Access(_)) =>
+            {
+                Some(*function)
+            }
+            _ => None,
+        }
+    }
+
     /// The inline form of the standard library method `declaration` names, if it has one.
     pub(crate) fn inline_form(&self, declaration: &Declaration) -> Option<&'analysis InlineForm> {
         if !matches!(declaration.kind, DeclarationKind::Method { .. } | DeclarationKind::StaticMethod) {
@@ -1222,7 +1306,8 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the collection method the analyzer checked
-    /// the method call `call` against, null-safe or not: a method of `Sharp\Internal\ListMethods`,
+    /// the method call `call` against, null-safe or not, or that the read `call` gives the value of, spec section
+    /// 14.3: a method of `Sharp\Internal\ListMethods`,
     /// `Sharp\Internal\MapMethods` or `Sharp\Internal\SetMethods`. None for a call of any other method.
     pub(crate) fn collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>)> {
         let mut callees = self.artifacts.get_callees(call);
@@ -1320,13 +1405,13 @@ impl<'analysis> Types<'analysis> {
         plain_parameters(owner, self.codebase.get_function_like(callee))
     }
 
-    /// The parameters of the plain PHP closure a local holds, which the call `local(…)` runs, as the signature of the
-    /// local's type gives them, as [`Self::call_parameters`] gives a call's. None for a function value whose signature
-    /// PHP# wrote, which takes the object, and for a local of any other type, such as an object whose `__invoke` the
-    /// call runs, which [`Self::call_parameters`] finds.
-    pub(crate) fn closure_parameters(&self, local: &Expression) -> Option<Vec<PlainParameter<'analysis>>> {
+    /// The parameters of the plain PHP closure the expression `function` gives, which the call `function(…)` runs, as
+    /// the signature of its type gives them, as [`Self::call_parameters`] gives a call's. None for a function value
+    /// whose signature PHP# wrote, which takes the object, and for a value of any other type, such as an object whose
+    /// `__invoke` the call runs, which [`Self::call_parameters`] finds.
+    pub(crate) fn closure_parameters(&self, function: &Expression) -> Option<Vec<PlainParameter<'analysis>>> {
         let [TAtomic::Callable(TCallable::Signature(signature))] =
-            self.artifacts.get_expression_type(local)?.types.as_ref()
+            self.artifacts.get_expression_type(function)?.types.as_ref()
         else {
             return None;
         };
@@ -1640,6 +1725,14 @@ impl<'analysis> PlainParameter<'analysis> {
             Self::Callable(parameter) => parameter.is_by_reference(),
         }
     }
+}
+
+/// A parameter of the function a method value is, as [`Types::value_parameters`] gives it.
+pub(crate) struct ValueParameter {
+    pub(crate) name: Vec<u8>,
+    pub(crate) r#type: TUnion,
+    pub(crate) variadic: bool,
+    pub(crate) optional: bool,
 }
 
 /// The kind of member every class a receiver can be declares, which the checker requires to be one kind. Its details,

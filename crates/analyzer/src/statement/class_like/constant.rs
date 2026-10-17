@@ -82,7 +82,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
                             Annotation::primary(self.value.span())
                                 .with_message("This initializer could not be evaluated"),
                         )
-                        .with_note("Mago could not determine a value for this constant from its initializer."),
+                        .with_note("The checker could not determine a value for this constant from its initializer."),
                 );
             } else if let Some(declared_type_metadata) = constant_metadata.type_metadata.as_ref()
                 && let Some(value_type) = artifacts.get_expression_type(&self.value)
