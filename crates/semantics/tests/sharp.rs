@@ -3145,7 +3145,7 @@ fn a_promoted_member_follows_the_rules_of_the_same_declaration_in_the_class_body
         [
             "5:30 A PHP# property needs a `get` accessor.",
             "5:63 The `set` accessor of a PHP# property must be narrower than the property.",
-            "5:98 Declare `c` in the class body to give it an accessor body: a member declared on a constructor parameter takes access levels and attributes only.",
+            "5:90 The property `c` has no storage for its initial value: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
         ]
     );
 }
@@ -3189,23 +3189,18 @@ fn a_parameter_cannot_be_lazy() {
     );
 }
 
-/// Spec section 9: a member declared on a constructor parameter takes access levels and attributes only, so each
-/// accessor body is an error, an expression body or a block, on `get`, `set` or `init`. Access levels stay.
+/// Spec section 9: a member declared on a constructor parameter is a property like one in the class body: accessor
+/// bodies on `get`, `set` and `init`, observers, behaviors and a default after them. `via` keeps its rules, and
+/// `required` adds nothing to a parameter every call passes.
 #[test]
-fn an_accessor_body_on_a_constructor_parameter_is_an_error() {
-    let code = "namespace App.Tenant;\n\nclass Ledger\n{\n    public Ledger(\n        public string name { get; set => field = value.trim(); },\n        public int count { get => field; private set; },\n        public string code { get; init { field = value; } },\n        public int total { get; private set; },\n    ) {}\n}\n";
-    let message = |name: &str| {
-        format!(
-            "Declare `{name}` in the class body to give it an accessor body: a member declared on a constructor parameter takes access levels and attributes only."
-        )
-    };
+fn a_parameter_property_takes_every_body_property_feature() {
+    let code = "namespace App.Tenant;\n\nclass Ledger\n{\n    public Ledger(\n        public required string kind { get; },\n        public int count { get => field; private set; },\n        public string code { get; init { field = value; } },\n        public int total { get; set; didSet { } },\n        public string slug { get; } via Trimmed,\n        public string name { get; set => field = value.trim(); } = \"\",\n        public string label { get; set; } via Trimmed = \"x\",\n    ) {}\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            format!("6:39 {}", message("name")),
-            format!("7:32 {}", message("count")),
-            format!("8:40 {}", message("code"))
+            "6:16 A constructor parameter is required unless it has a default: remove `required`.",
+            "10:37 `via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
         ]
     );
 }
@@ -4077,8 +4072,8 @@ fn via_goes_on_an_instance_auto_property_with_get_and_set() {
 
 /// Spec section 6.2: `willSet` and `didSet` each take a body and need `set`, as they run inside it on each write.
 /// `willSet` cannot change or stop the write, so it neither writes `value` nor returns, and a `set` body cannot return
-/// before `didSet`, nor `didSet` return a value. `field` in `willSet` reads the value the write replaces.
-/// A member declared on a constructor parameter takes no observer, as section 9 says.
+/// before `didSet`, nor `didSet` return a value. `field` in `willSet` reads the value the write replaces. A member
+/// declared on a constructor parameter takes observers too, as section 9 says.
 #[test]
 fn observers_take_a_body_beside_set_and_cannot_change_or_stop_the_write() {
     let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public string name { get; set; willSet => this.log(value); didSet { this.log(field); } } = \"\";\n    public int count { get; set { if (value < 0) { return; } field = value; } didSet => this.log(\"count\"); } = 0;\n    public int total { get; willSet => this.log(\"total\"); } = 0;\n    public int size { get; init; didSet => this.log(\"size\"); }\n    public int rank { get; set; willSet { value = 2; value++; return; } } = 0;\n    public int level { get; set; willSet => this.log(field); didSet; } = 0;\n    public int depth { get; set; didSet { return 1; } } = 0;\n\n    public Report(public string title { get; set; didSet => this.log(value); }) { }\n\n    private void log(Any? text) { }\n}\n";
@@ -4094,7 +4089,6 @@ fn observers_take_a_body_beside_set_and_cannot_change_or_stop_the_write() {
             "9:54 `willSet` cannot change `value`: the write after it stores `value` as written.",
             "10:62 This accessor is not supported yet in PHP#.",
             "11:50 `didSet` must not return a value.",
-            "13:58 Declare `title` in the class body to give it `didSet`: a member declared on a constructor parameter takes access levels and attributes only.",
         ]
     );
 }

@@ -2,6 +2,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 
 use crate::cst::cst::attribute::AttributeList;
+use crate::cst::cst::class_like::property::PropertyBehaviorList;
 use crate::cst::cst::class_like::property::PropertyHookList;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::modifier::Modifier;
@@ -33,6 +34,9 @@ pub struct FunctionLikeParameter<'arena> {
     pub variable: DirectVariable<'arena>,
     pub default_value: Option<FunctionLikeParameterDefaultValue<'arena>>,
     pub hooks: Option<PropertyHookList<'arena>>,
+    /// The behaviors a PHP# constructor parameter's property runs its `get` and `set` through, after its accessors,
+    /// as a property in the class body takes them, spec sections 6.4 and 9.
+    pub behaviors: Option<PropertyBehaviorList<'arena>>,
 }
 
 /// Represents the default value of a function-like parameter.
@@ -79,10 +83,17 @@ impl HasSpan for FunctionLikeParameterList<'_> {
 
 impl HasSpan for FunctionLikeParameter<'_> {
     fn span(&self) -> Span {
-        let right = self.hooks.as_ref().map_or_else(
-            || self.default_value.as_ref().map_or_else(|| self.variable.span(), HasSpan::span),
-            HasSpan::span,
-        );
+        // The part written last: PHP writes the default before the hooks, and PHP# after the accessors and behaviors.
+        let right = [
+            Some(self.variable.span()),
+            self.default_value.as_ref().map(HasSpan::span),
+            self.hooks.as_ref().map(HasSpan::span),
+            self.behaviors.as_ref().map(HasSpan::span),
+        ]
+        .into_iter()
+        .flatten()
+        .max_by_key(|span| span.end.offset)
+        .unwrap_or_else(|| self.variable.span());
 
         if let Some(attribute) = self.attribute_lists.first() {
             return Span::between(attribute.span(), right);

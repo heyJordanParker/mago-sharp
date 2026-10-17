@@ -236,26 +236,33 @@ where
         Ok(Some(PropertyBehaviorList { via, behaviors: TokenSeparatedSequence::new(behaviors, commas), semicolon }))
     }
 
-    /// Skips a `via` clause on the constructor parameter `name`, which section 9 refuses, and reports it once where it
-    /// starts. A comma also ends the parameter, so a behavior there is a name followed by `,` or `)`.
-    pub(crate) fn skip_parameter_behaviors(&mut self, name: &[u8]) -> Result<(), ParseError> {
+    /// Parses a PHP# constructor parameter's behaviors after its accessors, spec sections 6.4 and 9: `via` and types
+    /// separated by commas. A comma also ends the parameter, so a later behavior is a name followed by `,`, `)` or the
+    /// `=` of the parameter's default, since no parameter is a name alone.
+    pub(crate) fn parse_optional_parameter_behavior_list(
+        &mut self,
+    ) -> Result<Option<PropertyBehaviorList<'arena>>, ParseError> {
         if !self.is_at_via()? {
-            return Ok(());
+            return Ok(None);
         }
 
         let via = self.stream.consume_span()?;
-        let name = String::from_utf8_lossy(name).into();
-        self.errors.push(ParseError::BehaviorParameterInSharp(name, via));
-        self.parse_local_identifier()?;
+        let mut behaviors = self.new_vec();
+        let mut commas = self.new_vec();
+        behaviors.push(self.parse_type_hint()?);
         while self.stream.is_at(T![","])?
             && self.stream.peek_kind(1)? == Some(T![Identifier])
-            && matches!(self.stream.peek_kind(2)?, Some(T![","] | T![")"]))
+            && matches!(self.stream.peek_kind(2)?, Some(T![","] | T![")"] | T!["="]))
         {
-            self.stream.consume()?;
-            self.parse_local_identifier()?;
+            commas.push(self.stream.consume()?);
+            behaviors.push(self.parse_type_hint()?);
         }
 
-        Ok(())
+        Ok(Some(PropertyBehaviorList {
+            via,
+            behaviors: TokenSeparatedSequence::new(behaviors, commas),
+            semicolon: None,
+        }))
     }
 
     pub(crate) fn parse_optional_property_hook_list(&mut self) -> Result<Option<PropertyHookList<'arena>>, ParseError> {

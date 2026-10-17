@@ -1364,6 +1364,10 @@ generate_ast_walker! {
         if let Some(hooks) = &function_like_parameter.hooks {
             walker.walk_property_hook_list(hooks, context);
         }
+
+        for behavior in function_like_parameter.behaviors.iter().flat_map(|behaviors| behaviors.behaviors.iter()) {
+            walker.walk_hint(behavior, context);
+        }
     }
 
     'arena FunctionLikeParameterDefaultValue as function_like_parameter_default_value => {

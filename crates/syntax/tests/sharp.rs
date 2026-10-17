@@ -7,6 +7,7 @@ use mago_database::file::File;
 use mago_php_version::PHPVersion;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::*;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::error::ParseError;
@@ -472,18 +473,47 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required` on a method is spec syntax outside the slice, and `via` on a constructor parameter is section 9's error.
-/// Each one is a single error where it starts, and the class around it still parses.
+/// Spec section 9: a constructor parameter's property takes its accessors, then its behaviors, then its default, as a
+/// property in the class body does. A behavior after a comma is a name followed by `,`, `)` or `=`, so the next
+/// parameter still parses.
+#[test]
+fn a_parameter_default_follows_its_accessors_and_behaviors() {
+    let code = "class Report\n{\n    public Report(public string raw { get; } = \"\", public int id { get; set; } via Tracked, Logged = 1, int other) {}\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", code);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Class(class)) = program.statements.first() else {
+        panic!("expected a class, got {:#?}", program.statements);
+    };
+    let Some(ClassLikeMember::Method(constructor)) = class.members.first() else {
+        panic!("expected the constructor");
+    };
+    let parameters: Vec<_> = constructor.parameter_list.parameters.iter().collect();
+    let written = |span: Span| &code[span.start.offset as usize..span.end.offset as usize];
+
+    assert_eq!(parameters.len(), 3);
+    assert_eq!(parameters[0].default_value.as_ref().map(|default| written(default.value.span())), Some("\"\""));
+    assert_eq!(
+        parameters[1]
+            .behaviors
+            .iter()
+            .flat_map(|list| list.behaviors.iter())
+            .map(|hint| written(hint.span()))
+            .collect::<Vec<_>>(),
+        ["Tracked", "Logged"]
+    );
+    assert_eq!(parameters[1].default_value.as_ref().map(|default| written(default.value.span())), Some("1"));
+    assert_eq!(written(parameters[2].variable.span()), "other");
+}
+
+/// `required` on a method is spec syntax outside the slice: a single error where it starts, and the class around it
+/// still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
-    for (member, message, start) in [
-        ("public required int count() { return 1; }", "`required` is not supported yet in PHP#.", "required"),
-        (
-            "public Report(public int id { get; } via Tracked, int other) {}",
-            "Declare `id` in the class body to give it `via`: a member declared on a constructor parameter takes access levels and attributes only.",
-            "via",
-        ),
-    ] {
+    for (member, message, start) in
+        [("public required int count() { return 1; }", "`required` is not supported yet in PHP#.", "required")]
+    {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
             format!("class Report\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),

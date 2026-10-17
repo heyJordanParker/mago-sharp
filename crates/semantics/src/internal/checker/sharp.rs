@@ -1157,7 +1157,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 report_no_storage(variable, initial_value.value.span(), context);
             }
             if let Some(behaviors) = &property.behaviors {
-                check_behaviors(property, behaviors, context);
+                check_behaviors(&property.modifiers, &property.hook_list, property.span(), behaviors, context);
             }
 
             Some(FieldOrProperty)
@@ -1414,12 +1414,20 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 context,
             )
         }
+        // Spec section 9: a member declared on a constructor parameter is a property like one in the class body, with
+        // storage the argument goes into.
         (Node::FunctionLikeParameter(parameter), Method | Signature | Lambda) => {
             if let Some(accessors) = &parameter.hooks
                 && parameter.modifiers.contains_visibility()
             {
                 check_accessors(&parameter.modifiers, accessors, &parameter.variable, context);
-                report_parameter_accessor_bodies(parameter, accessors, context);
+                check_accessor_bodies(accessors, parameter.variable.name, context);
+                if !context.names.has_storage(accessors) {
+                    report_no_storage(&parameter.variable, parameter.variable.span, context);
+                }
+                if let Some(behaviors) = &parameter.behaviors {
+                    check_behaviors(&parameter.modifiers, accessors, parameter.span(), behaviors, context);
+                }
             }
 
             Some(Parameter)
@@ -1453,6 +1461,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::Hint(hint), FieldOrProperty | Method | Signature | Parameter | Body) if is_slice_type(hint) => {
             Some(place)
+        }
+        // Spec section 9: every call passes a constructor parameter without a default, so `required` adds nothing.
+        (Node::Modifier(modifier @ Modifier::Required(_)), Parameter) => {
+            context.report(
+                Issue::error("A constructor parameter is required unless it has a default: remove `required`.")
+                    .with_annotation(Annotation::primary(modifier.span()).with_message("Written here.")),
+            );
+
+            None
         }
         // Spec section 7: `never` is a method's return type, which `type_written_another_way` refuses elsewhere, and
         // PHP's own check reports `never?` and `never` in a union.
@@ -3060,34 +3077,6 @@ fn several_names(span: Span, kind: &str) -> Issue {
         .with_annotation(Annotation::primary(span).with_message("Several names here."))
 }
 
-/// Reports each accessor body of a member declared on a constructor parameter. Spec section 9: such a member takes
-/// access levels and attributes only, and an accessor body goes on a member in the class body. So every member a
-/// parameter declares has storage for the constructor to set.
-fn report_parameter_accessor_bodies(
-    parameter: &FunctionLikeParameter,
-    accessors: &PropertyHookList,
-    context: &mut Context<'_, '_, '_>,
-) {
-    for accessor in &accessors.hooks {
-        let PropertyHookBody::Concrete(body) = &accessor.body else {
-            continue;
-        };
-
-        let (given, annotation) = if accessor.is_observer() {
-            (format!("`{}`", BytesDisplay(accessor.name.value)), "An observer on a parameter.")
-        } else {
-            ("an accessor body".to_owned(), "An accessor body on a parameter.")
-        };
-        context.report(
-            Issue::error(format!(
-                "Declare `{}` in the class body to give it {given}: a member declared on a constructor parameter takes access levels and attributes only.",
-                BytesDisplay(parameter.variable.name)
-            ))
-            .with_annotation(Annotation::primary(body.span()).with_message(annotation)),
-        );
-    }
-}
-
 /// Reports a static field or a static property with storage that has no initial value, spec section 6. No constructor
 /// sets a static, so it would be read before anything set it, and a `T?` one has no implicit `null` either.
 fn report_static_without_initial_value(property: &Property, context: &mut Context<'_, '_, '_>) {
@@ -3262,8 +3251,15 @@ fn is_slice_accessor(accessor: &PropertyHook) -> bool {
 
 /// Spec section 6.4: a behavior runs around a property's storage, once per object, so `via` goes on an instance
 /// auto-property with `get; set;` and no accessor body, which a class declares, never an interface. Each behavior is
-/// a class PHP# creates with `new`, so it names one, with its type arguments when it is generic.
-fn check_behaviors(property: &HookedProperty, behaviors: &PropertyBehaviorList, context: &mut Context<'_, '_, '_>) {
+/// a class PHP# creates with `new`, so it names one, with its type arguments when it is generic. The property, at
+/// `span`, is declared in the class body or on a constructor parameter, with `modifiers` and `accessors`.
+fn check_behaviors(
+    modifiers: &Sequence<Modifier>,
+    accessors: &PropertyHookList,
+    span: Span,
+    behaviors: &PropertyBehaviorList,
+    context: &mut Context<'_, '_, '_>,
+) {
     for behavior in behaviors.behaviors.iter() {
         let names_class = match behavior {
             Hint::Identifier(_) => true,
@@ -3281,18 +3277,18 @@ fn check_behaviors(property: &HookedProperty, behaviors: &PropertyBehaviorList, 
         }
     }
 
-    let accessors = &property.hook_list.hooks;
+    let accessors = &accessors.hooks;
     let is_auto = |name: &[u8]| {
         accessors
             .iter()
             .any(|accessor| accessor.name.value == name && matches!(accessor.body, PropertyHookBody::Abstract(_)))
     };
-    let refusal = if is_in_interface(context.program, property.span()) || property.modifiers.contains_abstract() {
+    let refusal = if is_in_interface(context.program, span) || modifiers.contains_abstract() {
         Some((
             "A property without storage takes no `via`: the class that stores the property names its behaviors.",
             None,
         ))
-    } else if property.modifiers.contains_static() {
+    } else if modifiers.contains_static() {
         Some(("A static property takes no `via`: each object keeps its own behaviors.", None))
     } else if accessors.len() != 2 || !is_auto(b"get") || !is_auto(b"set") {
         Some((

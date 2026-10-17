@@ -98,6 +98,7 @@ where
                 variable,
                 default_value: None,
                 hooks: None,
+                behaviors: None,
             };
 
             FunctionLikeParameterList {

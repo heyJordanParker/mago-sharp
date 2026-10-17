@@ -23054,7 +23054,7 @@ const KEY: (&str, &str) = (
 #[test]
 fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_constructor() {
     let lowered = Lowered::with(
-        "namespace App;\n\nimport Sharp.Key;\n\npublic struct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public int seats = 1 { get; }) { }\n\n    public string note { get; init; } = \"\";\n\n    public string? owner { get; init; }\n}\n",
+        "namespace App;\n\nimport Sharp.Key;\n\npublic struct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public int seats { get; } = 1) { }\n\n    public string note { get; init; } = \"\";\n\n    public string? owner { get; init; }\n}\n",
         &[KEY],
     );
 
@@ -25597,7 +25597,7 @@ fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
 /// static class, and a class or a struct that declares its own `parse` get neither method.
 #[test]
 fn a_class_parses_as_a_struct_does() {
-    let members = "Ticket([Key(\"ticket_id\")] public int id { get; }, public int seats = 1 { get; }) { }\n\n    public string note { get; init; } = \"\";\n}\n";
+    let members = "Ticket([Key(\"ticket_id\")] public int id { get; }, public int seats { get; } = 1) { }\n\n    public string note { get; init; } = \"\";\n}\n";
     let lowered = |kind: &str| {
         Lowered::with(
             &format!("namespace App;\n\nimport Sharp.Key;\n\npublic {kind} Ticket\n{{\n    public {members}"),

@@ -1625,11 +1625,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     has_constructor = true;
                     let promoted =
                         || method.parameter_list.parameters.iter().filter(|parameter| parameter.is_promoted_property());
-                    self.promoted_beside =
-                        promoted().any(|parameter| collection_hint(parameter.hint.as_ref()).is_some());
+                    self.promoted_beside = promoted().any(|parameter| {
+                        collection_hint(parameter.hint.as_ref()).is_some() || runs_its_accessors(parameter)
+                    });
                     if self.promoted_beside {
                         for parameter in promoted() {
                             members.push(self.promoted_property(parameter));
+                            if let Some(behaviors) = &parameter.behaviors {
+                                members.extend(self.behavior_slots(&parameter.variable, behaviors));
+                            }
                         }
                     }
                     let constructor =
@@ -1731,6 +1735,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 ClassLikeMember::Property(Property::Hooked(property)) => {
                     if let Some(behaviors) = &property.behaviors {
                         statements.extend(self.behavior_creations(property.item.variable(), behaviors));
+                    }
+                }
+                ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => {
+                    for parameter in method.parameter_list.parameters.iter() {
+                        if let Some(behaviors) =
+                            parameter.behaviors.as_ref().filter(|_| parameter.is_promoted_property())
+                        {
+                            statements.extend(self.behavior_creations(&parameter.variable, behaviors));
+                        }
                     }
                 }
                 ClassLikeMember::Property(Property::Computed(computed))
@@ -3195,20 +3208,26 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
     }
 
-    /// The property a promoted parameter declares, with the visibility, accessors and attributes it is written with
-    /// and no default. PHP sets a promoted property from the argument before the constructor's body runs, and a
-    /// get-only one only once, so a constructor that promotes a `Map` or a `Set` declares each property it promotes
-    /// this way, in its written order, and sets the `Map` or `Set` one to the object of the argument.
+    /// The property a promoted parameter declares, with the visibility, accessors, accessor bodies, observers,
+    /// behaviors and attributes it is written with, and no default. PHP sets a promoted property from the argument
+    /// before the constructor's body runs, and a get-only one only once, so a constructor that promotes a `Map` or a
+    /// `Set`, or a property whose writes run through its accessors, declares each property it promotes this way, in its
+    /// written order, and sets each from its argument once the behaviors exist, spec section 9: the `Map` or `Set` one
+    /// to the object of the argument, and each other through its `set`.
     fn promoted_property(&mut self, parameter: &FunctionLikeParameter) -> u32 {
         let Some(hint) = &parameter.hint else {
             unreachable!("semantics refuses a method parameter without a type");
+        };
+        let hooks = match (&parameter.hooks, &parameter.behaviors) {
+            (Some(accessors), Some(behaviors)) => self.behavior_hooks(&parameter.variable, accessors, behaviors),
+            (accessors, _) => self.hooks(&parameter.variable, accessors.as_ref(), Some(hint)),
         };
         let line = self.line(parameter.variable.span);
         let hint = self.hint(hint);
         let hint = self.property_hint(hint, parameter.variable.name, line);
         let name = self.string(0, line, parameter.variable.name);
         let flags = self.member_flags(parameter);
-        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, NULL]);
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
         let crossing = self.crossing_attribute(parameter.hint.as_ref());
         let attributes = self.attributes(&parameter.attribute_lists, None, crossing);
@@ -6362,6 +6381,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     {
         let mut statements = Vec::new();
         for parameter in parameters {
+            if self.promoted_beside
+                && parameter.is_promoted_property()
+                && let Some(behaviors) = &parameter.behaviors
+            {
+                statements.extend(self.behavior_creations(&parameter.variable, behaviors));
+            }
             let Some(r#type) = self.crossing_type(parameter) else {
                 statements.extend(self.map_entries_parameter(parameter));
                 if self.promoted_beside && parameter.is_promoted_property() {
@@ -8114,6 +8139,15 @@ fn holds_entries(r#type: &TUnion) -> bool {
         }
         _ => false,
     })
+}
+
+/// Whether the property a constructor parameter declares runs its writes through its accessors: an accessor body, an
+/// observer or a behavior, spec section 9, which the constructor's write of the argument runs.
+fn runs_its_accessors(parameter: &FunctionLikeParameter) -> bool {
+    parameter.behaviors.is_some()
+        || parameter.hooks.as_ref().is_some_and(|accessors| {
+            accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
+        })
 }
 
 /// Whether `hint`, a parameter's or a property's type, is a `Map` or a `Set`, which plain PHP gives as a PHP array, as

@@ -70,30 +70,44 @@ where
             _ => None,
         };
 
+        let hint = if untyped.is_some() { None } else { hint };
+        let ampersand = if self.stream.is_at(T!["&"])? { Some(self.stream.eat_span(T!["&"])?) } else { None };
+        let ellipsis = if self.stream.is_at(T!["..."])? { Some(self.stream.eat_span(T!["..."])?) } else { None };
+        // A keyword PHP# reserves reads as the name too, so the checker refuses it with a message that names it.
+        let variable = match untyped {
+            Some(variable) => variable,
+            None if self.dialect.is_sharp()
+                && self.stream.peek_kind(0)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) =>
+            {
+                let name = self.parse_local_identifier()?;
+
+                DirectVariable { span: name.span, name: name.value }
+            }
+            None => self.parse_direct_variable()?,
+        };
+        // PHP writes a promoted property's default before its hooks, and PHP# writes it last, after the accessors
+        // and the behaviors, as a property in the class body does, spec section 9.
+        let (default_value, hooks, behaviors) = if self.dialect.is_sharp() {
+            let hooks = self.parse_optional_property_hook_list()?;
+            let behaviors = if hooks.is_some() { self.parse_optional_parameter_behavior_list()? } else { None };
+
+            (self.parse_optional_function_like_parameter_default_value()?, hooks, behaviors)
+        } else {
+            let default_value = self.parse_optional_function_like_parameter_default_value()?;
+
+            (default_value, self.parse_optional_property_hook_list()?, None)
+        };
         let parameter = FunctionLikeParameter {
             attribute_lists,
             modifiers,
-            hint: if untyped.is_some() { None } else { hint },
-            ampersand: if self.stream.is_at(T!["&"])? { Some(self.stream.eat_span(T!["&"])?) } else { None },
-            ellipsis: if self.stream.is_at(T!["..."])? { Some(self.stream.eat_span(T!["..."])?) } else { None },
-            // A keyword PHP# reserves reads as the name too, so the checker refuses it with a message that names it.
-            variable: match untyped {
-                Some(variable) => variable,
-                None if self.dialect.is_sharp()
-                    && self.stream.peek_kind(0)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) =>
-                {
-                    let name = self.parse_local_identifier()?;
-
-                    DirectVariable { span: name.span, name: name.value }
-                }
-                None => self.parse_direct_variable()?,
-            },
-            default_value: self.parse_optional_function_like_parameter_default_value()?,
-            hooks: self.parse_optional_property_hook_list()?,
+            hint,
+            ampersand,
+            ellipsis,
+            variable,
+            default_value,
+            hooks,
+            behaviors,
         };
-        if parameter.hooks.is_some() {
-            self.skip_parameter_behaviors(parameter.variable.name)?;
-        }
 
         // A computed property's body, as in `public string slug => "x"`, is skipped whole, so the class parses on.
         if self.dialect.is_sharp() && self.stream.is_at(T!["=>"])? {

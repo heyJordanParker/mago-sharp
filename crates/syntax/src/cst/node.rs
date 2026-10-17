@@ -2530,6 +2530,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 if let Some(hooks) = &node.hooks {
                     f(Node::PropertyHookList(hooks));
                 }
+                for behavior in node.behaviors.iter().flat_map(|behaviors| behaviors.behaviors.iter()) {
+                    f(Node::Hint(behavior));
+                }
             }
             Node::FunctionLikeParameterDefaultValue(node) => f(Node::Expression(node.value)),
             Node::FunctionLikeReturnTypeHint(hint) => f(Node::Hint(&hint.hint)),
