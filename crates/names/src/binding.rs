@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use mago_allocator::Arena;
 use mago_span::HasSpan;
 use mago_span::Span;
@@ -55,6 +57,17 @@ pub fn takes_on_effects(parameter: &FunctionLikeParameter<'_>) -> bool {
         Some(Hint::Nullable(NullableHint { hint: Hint::Function(function), .. })) => function.uses.is_none(),
         _ => false,
     }
+}
+
+/// The superglobals PHP gives every function, which spec section 29 removes from PHP#.
+pub const SUPERGLOBALS: [&[u8]; 9] =
+    [b"GLOBALS", b"_SERVER", b"_GET", b"_POST", b"_FILES", b"_COOKIE", b"_SESSION", b"_REQUEST", b"_ENV"];
+
+/// Returns the name of the PHP variable the PHP# local or parameter `name` runs as: `name` itself, or `@` before a
+/// superglobal's name, as `@this` is written, which PHP code never writes, so the local never reads or replaces PHP's.
+#[must_use]
+pub fn php_local_name(name: &[u8]) -> Cow<'_, [u8]> {
+    if SUPERGLOBALS.contains(&name) { Cow::Owned([b"@", name].concat()) } else { Cow::Borrowed(name) }
 }
 
 /// Returns the PHP variable a PHP# local, parameter or `this` runs as: `total` runs as `$total`.

@@ -556,18 +556,16 @@ fn a_catch_type_that_is_not_a_class_reports_only_the_php_error() {
     );
 }
 
+/// A bare `this` is a keyword, and a superglobal's name is a name like any other.
 #[test]
-fn a_catch_variable_named_this_or_a_superglobal_is_an_error() {
+fn a_catch_variable_named_this_is_an_error_and_one_named_as_a_superglobal_is_a_name() {
     let code = leak(method(
         "        try {\n        } catch (Missing this) {\n        } catch (Broken _GET) {\n        }\n        return extra;\n",
     ));
 
     assert_eq!(
         issues(code),
-        [
-            "8:26 `this` is a keyword; write `@this`.",
-            "9:25 `_GET` is the name of a PHP superglobal: rename this catch variable.",
-        ]
+        ["8:26 `this` is a keyword; write `@this`.", "9:25 Catch variable name `_GET` should be in camel case.",]
     );
 }
 
@@ -735,18 +733,16 @@ fn a_const_loop_variable_cannot_be_assigned_and_is_out_of_scope_after_its_loop()
     );
 }
 
+/// A bare `this` is a keyword, and a superglobal's name is a name like any other.
 #[test]
-fn a_loop_variable_named_this_or_a_superglobal_is_an_error() {
+fn a_loop_variable_named_this_is_an_error_and_one_named_as_a_superglobal_is_a_name() {
     let code = leak(method(
         "        for (const this of Store.values()) {\n        }\n        for (const [_GET, value] of Store.values()) {\n        }\n        return extra;\n",
     ));
 
     assert_eq!(
         issues(code),
-        [
-            "7:20 `this` is a keyword; write `@this`.",
-            "9:21 `_GET` is the name of a PHP superglobal: rename this loop variable.",
-        ]
+        ["7:20 `this` is a keyword; write `@this`.", "9:21 Loop variable name `_GET` should be in camel case.",]
     );
 }
 
@@ -2518,16 +2514,15 @@ fn an_interface_named_like_a_reserved_class_name_is_an_error() {
     assert_eq!(issues(code), ["3:11 Cannot use `Mixed` as a class name: it is reserved."]);
 }
 
+/// A local or a parameter named as one of PHP's superglobals is a name like any other, which the bridge runs under a
+/// PHP name of its own, so only its case is checked.
 #[test]
-fn a_local_or_parameter_named_after_a_superglobal_is_an_error() {
+fn a_local_or_parameter_named_after_a_superglobal_is_a_name_like_any_other() {
     let code = leak(method("        let _GET = 1;\n        return _GET;\n").replace("int extra", "int GLOBALS"));
 
     assert_eq!(
         issues(code),
-        [
-            "5:24 `GLOBALS` is the name of a PHP superglobal: rename this parameter.",
-            "7:13 `_GET` is the name of a PHP superglobal: rename this local.",
-        ]
+        ["5:24 Parameter name `GLOBALS` should be in camel case.", "7:13 Local name `_GET` should be in camel case."]
     );
 }
 

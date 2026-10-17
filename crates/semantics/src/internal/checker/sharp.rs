@@ -14,6 +14,7 @@ use mago_names::binding::BindingError;
 use mago_names::binding::Local;
 use mago_names::binding::LocalKind;
 use mago_names::binding::MethodParts;
+use mago_names::binding::SUPERGLOBALS;
 use mago_names::binding::php_method_name;
 use mago_names::binding::php_operator_name;
 use mago_names::scope::php_name;
@@ -145,11 +146,6 @@ use mago_syntax_core::utils::is_start_of_identifier;
 use crate::internal::checker::class_like::check_law_parameters;
 use crate::internal::consts::RESERVED_CLASS_NAMES;
 use crate::internal::context::Context;
-
-/// The PHP superglobals, which spec section 29 removes. A PHP# local or parameter of one of these names would read or
-/// replace it.
-const SUPERGLOBALS: [&[u8]; 9] =
-    [b"GLOBALS", b"_SERVER", b"_GET", b"_POST", b"_FILES", b"_COOKIE", b"_SESSION", b"_REQUEST", b"_ENV"];
 
 /// How PHP# writes PHP's `mixed`. The parser reads both as `Hint::Mixed`, and only `Any` is PHP#.
 const ANY: &[u8] = b"Any";
@@ -6070,14 +6066,6 @@ fn check_local_name(name: &[u8], span: Span, kind: &str, context: &mut Context<'
         context.report(
             Issue::error(format!("`{name}` is a keyword; write `@{name}`."))
                 .with_annotation(Annotation::primary(span).with_message("Declared here.")),
-        );
-    } else if SUPERGLOBALS.contains(&name) {
-        let name = BytesDisplay(name);
-
-        context.report(
-            Issue::error(format!("`{name}` is the name of a PHP superglobal: rename this {kind}."))
-                .with_annotation(Annotation::primary(span).with_message("Declared here."))
-                .with_note(format!("A PHP# {kind} runs as a PHP variable of the same name, which would be `${name}`.")),
         );
     } else {
         let mut kind = kind.to_owned();

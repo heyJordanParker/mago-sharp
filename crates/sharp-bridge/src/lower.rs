@@ -24,6 +24,8 @@ use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
 use mago_names::binding::LocalKind;
+use mago_names::binding::SUPERGLOBALS;
+use mago_names::binding::php_local_name;
 use mago_names::binding::php_method_name;
 use mago_names::binding::php_operator_name;
 use mago_names::scope::php_name;
@@ -1626,8 +1628,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     has_constructor = true;
                     let promoted =
                         || method.parameter_list.parameters.iter().filter(|parameter| parameter.is_promoted_property());
+                    // A superglobal's name runs hidden as a parameter, and stays its own as the property.
                     self.promoted_beside = promoted().any(|parameter| {
-                        collection_hint(parameter.hint.as_ref()).is_some() || runs_its_accessors(parameter)
+                        collection_hint(parameter.hint.as_ref()).is_some()
+                            || runs_its_accessors(parameter)
+                            || SUPERGLOBALS.contains(&parameter.variable.name)
                     });
                     if self.promoted_beside {
                         for parameter in promoted() {
@@ -2808,7 +2813,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut arguments = vec![self.variable(constructor.body.span(), b"this#1")];
         for parameter in &constructor.parameter_list.parameters {
             let parameter_line = self.line(parameter);
-            let name = self.string(0, parameter_line, parameter.variable.name);
+            let name = self.local_name(0, parameter_line, parameter.variable.name);
             let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
             closure_parameters.push(self.node(
                 SHARP_AST_PARAM,
@@ -3151,7 +3156,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             _ => hint,
         };
         let line = self.line(parameter.variable.span);
-        let name = self.string(0, line, parameter.variable.name);
+        let name = self.local_name(0, line, parameter.variable.name);
         let default = parameter.default_value.as_ref().map_or(NULL, |default| self.default_value(default.value));
         let (member_flags, hint) = if parameter.is_promoted_property() && !self.promoted_beside {
             (self.member_flags(parameter), self.property_hint(hint, parameter.variable.name, line))
@@ -4567,8 +4572,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         let line = self.nodes[classes[0] as usize].line;
         let classes = self.node(SHARP_AST_NAME_LIST, 0, line, &classes);
-        let variable =
-            clause.variable.as_ref().map_or(NULL, |variable| self.string(0, self.line(variable.span), variable.name));
+        let variable = clause
+            .variable
+            .as_ref()
+            .map_or(NULL, |variable| self.local_name(0, self.line(variable.span), variable.name));
         let block = self.block(&clause.block);
 
         self.node(SHARP_AST_CATCH, 0, line, &[classes, variable, block])
@@ -6290,7 +6297,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut uses = Vec::new();
         for &(name, local) in self.names.captures(&lambda) {
             let attr = if self.names.is_written(&local) { ZEND_BIND_REF } else { 0 };
-            uses.push(self.string(attr, line, name));
+            uses.push(self.local_name(attr, line, name));
         }
         if captures_type_arguments {
             uses.push(self.string(0, line, TYPE_ARGUMENTS));
@@ -7180,9 +7187,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     fn variable(&mut self, span: Span, name: &[u8]) -> u32 {
         let line = self.line(span);
-        let name = self.string(0, line, name);
+        let name = self.local_name(0, line, name);
 
         self.node(SHARP_AST_VAR, 0, line, &[name])
+    }
+
+    /// The name of the PHP variable the PHP# local or parameter `name` runs as, with `attr`, as a parameter, a `use`
+    /// of a closure or a `catch` clause writes it: a superglobal's name runs hidden, [`php_local_name`].
+    fn local_name(&mut self, attr: u32, line: u32, name: &[u8]) -> u32 {
+        self.string(attr, line, &php_local_name(name))
     }
 
     /// `Class.m()` is a static call on the class's full name, `super.m()` one on `parent`, and `Self.m()` one on
@@ -7815,9 +7828,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_UNPACK, 0, self.nodes[value as usize].line, &[value])
     }
 
+    /// A named argument, `name: value`. Only a PHP# parameter can have a superglobal's name, which runs hidden, so its
+    /// label does too.
     fn named_argument(&mut self, argument: &NamedArgument) -> u32 {
         let line = self.line(argument.name.span);
-        let name = self.string(0, line, argument.name.value);
+        let name = self.local_name(0, line, argument.name.value);
         let value = self.expression(argument.value);
 
         self.node(SHARP_AST_NAMED_ARG, 0, line, &[name, value])

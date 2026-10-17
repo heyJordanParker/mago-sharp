@@ -17072,6 +17072,42 @@ fn a_name_written_with_at_runs_as_the_variable_of_its_word() {
 }
 
 /// ```php
+/// ${'@_GET'} = ${'@GLOBALS'};
+/// return $this->run(GLOBALS: ${'@_GET'});
+/// ```
+///
+/// A local or a parameter named as one of PHP's superglobals runs as `@` before its name, which PHP code never writes,
+/// so it never reads or replaces PHP's, and a named argument reaches it by that name.
+#[test]
+fn a_local_named_as_a_superglobal_runs_under_a_hidden_name() {
+    assert_eq!(
+        body_in(
+            "int run(int GLOBALS)",
+            "        const _GET = GLOBALS;\n        return this.run(GLOBALS: _GET);\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "@_GET"
+                VAR
+                  ZVAL "@GLOBALS"
+              RETURN
+                METHOD_CALL
+                  VAR
+                    ZVAL "this"
+                  ZVAL "run"
+                  ARG_LIST
+                    NAMED_ARG
+                      ZVAL "@GLOBALS"
+                      VAR
+                        ZVAL "@_GET"
+        "#}
+    );
+}
+
+/// ```php
 /// $cents = (int)($extra * 1.5); return (string)(float)$cents;
 /// ```
 ///
