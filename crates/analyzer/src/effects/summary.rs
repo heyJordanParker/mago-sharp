@@ -12,6 +12,7 @@ use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_names::binding::Local;
@@ -65,6 +66,7 @@ use crate::effects::Roots;
 use crate::effects::Runs;
 use crate::effects::member_of_foreign_class;
 use crate::statement::function_like::FunctionLikeBody;
+use crate::utils::names::display_function_holder;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_prelude_stub;
 
@@ -151,12 +153,14 @@ pub(crate) fn record_behaviors<A>(
 /// Records each lambda and method value `value` holds where a `.sharp` file gives it the place of type `declared` at
 /// `span`, when `declared`'s function types list effects. Only the solve knows the effects of the body such a value
 /// runs, so it holds the value to the effects every one of those types lists, and refuses it with `code`, the code a
-/// value of the wrong type gets in that place.
+/// value of the wrong type gets in that place, naming `declared` as `display` writes it. A collection holds each of its
+/// elements in its element type, so a value's elements are held to the place's, at any depth.
 pub(crate) fn record_function_values<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
     value: &TUnion,
     declared: &TUnion,
+    display: fn(&Context<'_, '_, A>, &TUnion) -> String,
     span: Span,
     code: IssueCode,
 ) where
@@ -164,6 +168,26 @@ pub(crate) fn record_function_values<A>(
 {
     if !context.dialect.is_sharp() {
         return;
+    }
+
+    let codebase = context.codebase;
+    let elements = |union: &TUnion| -> Vec<TUnion> {
+        union
+            .types
+            .iter()
+            .filter_map(|atomic| match atomic {
+                TAtomic::Array(collection) => Some(get_array_parameters(collection, codebase).1),
+                _ => None,
+            })
+            .collect()
+    };
+    let declared_elements = elements(declared);
+    if !declared_elements.is_empty() {
+        for element in elements(value) {
+            for declared_element in &declared_elements {
+                record_function_values(context, artifacts, &element, declared_element, display_sharp_type, span, code);
+            }
+        }
     }
 
     let mut allowed: Option<Vec<Word>> = None;
@@ -184,7 +208,6 @@ pub(crate) fn record_function_values<A>(
         return;
     };
 
-    let codebase = context.codebase;
     for atomic in value.types.iter() {
         // A method or function value of plain PHP has a signature PHP wrote, which lists no effects.
         let source = match atomic {
@@ -211,7 +234,7 @@ pub(crate) fn record_function_values<A>(
             runs,
             allowed: allowed.clone(),
             span,
-            declared: display_sharp_type(context, declared),
+            holder: display_function_holder(declared, &|union| display(context, union)),
             code,
         });
     }

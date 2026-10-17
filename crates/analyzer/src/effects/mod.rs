@@ -97,8 +97,8 @@ pub(crate) struct FunctionValue {
     /// The effects the place's function type lists, by full class name.
     pub(crate) allowed: Vec<Word>,
     pub(crate) span: Span,
-    /// The place's type as the value's file writes it, such as `Function<int(int)>`.
-    pub(crate) declared: String,
+    /// What cannot hold the value, with each type as the value's file writes it, such as "a pure `Function<int(int)>`".
+    pub(crate) holder: String,
     /// The code a value of the wrong type gets in this place, such as `invalid-argument`.
     pub(crate) code: IssueCode,
 }

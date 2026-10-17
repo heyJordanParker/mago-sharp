@@ -504,6 +504,48 @@ pub(crate) fn display_sharp_type<A>(context: &Context<'_, '_, A>, union: &TUnion
 where
     A: Arena,
 {
+    display_sharp_union(context, union, false)
+}
+
+/// Returns `union` as a PHP# parameter writes it: as [`display_sharp_type`] does, with a pure function type written
+/// `Function<int(int) uses none>`, since a parameter's function type without `uses` takes on each caller's effects,
+/// spec section 29.
+#[must_use]
+pub(crate) fn display_sharp_parameter_type<A>(context: &Context<'_, '_, A>, union: &TUnion) -> String
+where
+    A: Arena,
+{
+    display_sharp_union(context, union, true)
+}
+
+/// Spec section 29: what a message says cannot hold a function value with an effect `declared`'s function type does
+/// not list, with each type as `display` writes it: "a pure `Function<int(int)>`", "a `Function<int(int) uses Http>`",
+/// or, for a union, "the pure `Function<int(int)>` of `int|Function<int(int)>`".
+#[must_use]
+pub(crate) fn display_function_holder(declared: &TUnion, display: &dyn Fn(&TUnion) -> String) -> String {
+    let function = declared.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Callable(TCallable::Signature(signature)) => {
+            signature.effects.as_ref().map(|effects| (atomic, effects.is_empty()))
+        }
+        _ => None,
+    });
+    let pure = if function.is_some_and(|(_, pure)| pure) { "pure " } else { "" };
+    let members = declared.types.iter().filter(|atomic| !atomic.is_null()).count();
+
+    match function {
+        Some((function, _)) if members > 1 => {
+            format!("the {pure}`{}` of `{}`", display(&TUnion::from_atomic(function.clone())), display(declared))
+        }
+        _ => format!("a {pure}`{}`", display(declared)),
+    }
+}
+
+/// Returns `union` as [`display_sharp_type`] does, with each pure function type of its own written `uses none` when
+/// `parameter` holds, as [`display_sharp_parameter_type`] writes it.
+fn display_sharp_union<A>(context: &Context<'_, '_, A>, union: &TUnion, parameter: bool) -> String
+where
+    A: Arena,
+{
     if let Some(TAtomic::Mixed(mixed)) = union.types.iter().find(|atomic| atomic.is_mixed()) {
         return if mixed.is_truthy() || mixed.is_non_null() { "Any" } else { "Any?" }.to_owned();
     }
@@ -512,7 +554,7 @@ where
     for atomic in union.types.iter().filter(|atomic| !atomic.is_null()) {
         let written = match atomic {
             TAtomic::Scalar(TScalar::ArrayKey) => vec!["int".to_owned(), "string".to_owned()],
-            atomic => vec![display_sharp_atomic(context, atomic)],
+            atomic => vec![display_sharp_atomic(context, atomic, parameter)],
         };
         for part in written {
             if !parts.contains(&part) {
@@ -529,7 +571,7 @@ where
     }
 }
 
-fn display_sharp_atomic<A>(context: &Context<'_, '_, A>, atomic: &TAtomic) -> String
+fn display_sharp_atomic<A>(context: &Context<'_, '_, A>, atomic: &TAtomic, parameter: bool) -> String
 where
     A: Arena,
 {
@@ -624,7 +666,11 @@ where
                     sharp_effect_name(context.codebase, &context.imported_names, &context.short_name_counts, *effect)
                 })
                 .collect();
-            let uses = if effects.is_empty() { String::new() } else { format!(" uses {}", effects.join(", ")) };
+            let uses = match (effects.is_empty(), parameter && signature.effects.is_some()) {
+                (false, _) => format!(" uses {}", effects.join(", ")),
+                (true, true) => " uses none".to_owned(),
+                (true, false) => String::new(),
+            };
 
             format!("Function<{}({}){uses}>", written(signature.get_return_type()), parameters.join(", "))
         }
@@ -659,7 +705,11 @@ where
 
     match atomic.get_intersection_types() {
         Some(intersection_types) if !intersection_types.is_empty() => std::iter::once(written)
-            .chain(intersection_types.iter().map(|intersection_type| display_sharp_atomic(context, intersection_type)))
+            .chain(
+                intersection_types
+                    .iter()
+                    .map(|intersection_type| display_sharp_atomic(context, intersection_type, parameter)),
+            )
             .collect::<Vec<_>>()
             .join(" & "),
         _ => written,

@@ -21,6 +21,8 @@ use mago_codex::misc::GenericParent;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
@@ -101,6 +103,7 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_sharp_accessor;
+use crate::utils::names::display_sharp_parameter_type;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::sharp_method_declaration;
@@ -4044,7 +4047,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
     child_class: &'ctx ClassLikeMetadata,
     parent_class: &'ctx ClassLikeMetadata,
     method_name: Word,
-    parent_method: &FunctionLikeMetadata,
+    child_method: &FunctionLikeMetadata,
     incompatibility: SignatureCompatibilityIssue,
     primary_span: Span,
 ) where
@@ -4077,7 +4080,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
     }
 
     let (child_display, parent_display) = if context.dialect.is_sharp() {
-        let method_name = parent_method.original_name;
+        let method_name = child_method.original_name;
 
         (display_sharp_member(child_name, method_name), display_sharp_member(parent_name, method_name))
     } else {
@@ -4130,7 +4133,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
         }
         SignatureCompatibilityIssue::ReadonlyDropped => {
             let relation = if parent_class.kind.is_interface() { "implements" } else { "overrides" };
-            let declaration = sharp_method_declaration(context, parent_method);
+            let declaration = sharp_method_declaration(context, child_method);
             context.collector.report_with_code(
                 IssueCode::IncompatibleReadonlyModifier,
                 Issue::error(format!(
@@ -4138,7 +4141,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                 ))
                 .with_annotation(Annotation::primary(primary_span))
                 .with_annotation(
-                    Annotation::secondary(parent_method.name_span.unwrap_or(parent_method.span))
+                    Annotation::secondary(child_method.name_span.unwrap_or(child_method.span))
                         .with_message("Declared `readonly` here."),
                 )
                 .with_note("A call through a readonly value runs any override, so every override keeps `this` readonly."),
@@ -4208,7 +4211,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
         }
         SignatureCompatibilityIssue::MissingVariadicParameter { parameter_index } => {
             // PHP# writes the names without `$`, and only a PHP# file reports this.
-            let param_name = parent_method
+            let param_name = child_method
                 .parameters
                 .get(parameter_index)
                 .map_or_else(|| word("unknown"), |p| word(mago_bytes::trim_start_byte(p.name.0.as_bytes(), b'$')));
@@ -4233,7 +4236,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
             );
         }
         SignatureCompatibilityIssue::IncompatibleParameterType { parameter_index, child_type, parent_type } => {
-            let param_name = parent_method.parameters.get(parameter_index).map_or_else(
+            let param_name = child_method.parameters.get(parameter_index).map_or_else(
                 || word("unknown"),
                 |p| {
                     if context.dialect.is_sharp() {
@@ -4245,6 +4248,13 @@ fn report_signature_compatibility_issue<'ctx, A>(
             );
             let child_type = display_type(context, &child_type);
             let parent_type = display_type(context, &parent_type);
+            let note = if context.dialect.is_sharp() {
+                format!(
+                    "A call through `{parent_name}` may pass `{param_name}` any `{parent_type}`, so `{child_display}` must take every `{parent_type}` too."
+                )
+            } else {
+                "Parameter types must be contravariant: child must accept equal or wider types than parent.".to_owned()
+            };
 
             context.collector.report_with_code(
                 IssueCode::IncompatibleParameterType,
@@ -4261,8 +4271,70 @@ fn report_signature_compatibility_issue<'ctx, A>(
                 .with_annotation(
                     Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
                 )
-                .with_note("Parameter types must be contravariant: child must accept equal or wider types than parent.")
+                .with_note(note)
                 .with_help("Change the parameter type to be compatible with the parent method."),
+            );
+        }
+        SignatureCompatibilityIssue::TakesOnEffectsDropped { parameter_index, child_type } => {
+            let Some(child_parameter) = child_method.parameters.get(parameter_index) else {
+                unreachable!("the signature check found this parameter on the override");
+            };
+            // The overridden parameter as its own class declares it, before a type argument fills its type parameters.
+            let Some(parent_parameter) = context
+                .codebase
+                .get_declaring_method(parent_class.name.as_bytes(), method_name.as_bytes())
+                .and_then(|parent_method| parent_method.parameters.get(parameter_index))
+            else {
+                unreachable!("the signature check found this parameter on the method its class declares");
+            };
+            let parent_parameter_name = mago_bytes::trim_start_byte(parent_parameter.name.0.as_bytes(), b'$');
+            let parent_parameter_name = String::from_utf8_lossy(parent_parameter_name);
+            let effects = child_type.types.iter().find_map(|atomic| match atomic {
+                TAtomic::Callable(TCallable::Signature(signature)) => signature.effects.clone(),
+                _ => None,
+            });
+            let with_effects = |union: &TUnion, effects: Option<Vec<Word>>| {
+                TUnion::from_vec(
+                    union
+                        .types
+                        .iter()
+                        .map(|atomic| match atomic {
+                            TAtomic::Callable(TCallable::Signature(signature)) => {
+                                TAtomic::Callable(TCallable::Signature(TCallableSignature {
+                                    effects: effects.clone(),
+                                    ..signature.clone()
+                                }))
+                            }
+                            atomic => atomic.clone(),
+                        })
+                        .collect(),
+                )
+            };
+            let written = display_sharp_parameter_type(context, &child_type);
+            let taking = display_sharp_type(context, &with_effects(&child_type, Some(Vec::new())));
+            let method = child_method.original_name;
+            let keep = format!("a `{taking}` here and call it only inside `{method}`.");
+            // A PHP# developer can't change a plain PHP declaration, so only the override can.
+            let help = match parent_parameter.type_metadata.as_ref() {
+                Some(declared) if parent_class.flags.is_sharp() => {
+                    let stated = display_sharp_parameter_type(context, &with_effects(&declared.type_union, effects));
+
+                    format!(
+                        "State the effects on `{parent_display}`'s `{parent_parameter_name}`, as `{stated}`, so every implementation may keep it, or take {keep}"
+                    )
+                }
+                _ => format!("Take {keep}"),
+            };
+
+            context.collector.report_with_code(
+                IssueCode::IncompatibleParameterType,
+                Issue::error(format!(
+                    "`{child_display}` can't take a `{written}`: `{parent_display}`'s `{parent_parameter_name}` takes on each caller's effects, so a call through `{parent_name}` may pass a function with any effect."
+                ))
+                .with_annotation(Annotation::primary(
+                    child_parameter.type_metadata.as_ref().map_or(child_parameter.span, |declared| declared.span),
+                ))
+                .with_help(help),
             );
         }
         SignatureCompatibilityIssue::ErasedParameterNarrowed {
@@ -4272,7 +4344,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
             bound,
             ..
         } => {
-            let parameter = parent_method.parameters.get(parameter_index);
+            let parameter = child_method.parameters.get(parameter_index);
             let param_name = parameter
                 .map_or_else(|| word("unknown"), |p| word(mago_bytes::trim_start_byte(p.name.0.as_bytes(), b'$')));
             let span = parameter
@@ -4282,7 +4354,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
             let child_type = method_signature::display_erased(&child_type, context);
             let parent_type = method_signature::display_erased(&parent_type, context);
             let (child_method, parent_method) = if context.dialect.is_sharp() {
-                let method_name = parent_method.original_name;
+                let method_name = child_method.original_name;
 
                 (display_sharp_member(child_name, method_name), display_sharp_member(parent_name, method_name))
             } else {

@@ -13,6 +13,7 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner::CombinerOptions;
@@ -33,6 +34,8 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Expression;
 use mago_syntax::dialect::Dialect;
+use mago_word::Word;
+use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -47,11 +50,17 @@ use crate::statement::function_like::rejected_nullable_parameter::writes_null;
 use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
 use crate::utils::int_refused_for_float;
+use crate::utils::names::and_list;
 use crate::utils::names::display_atomic;
+use crate::utils::names::display_function_holder;
 use crate::utils::names::display_nullable_type;
+use crate::utils::names::display_sharp_parameter_type;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::names::sharp_effect_name;
+use crate::utils::quoted_source;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
 use crate::utils::with_function_fit_message;
@@ -433,6 +442,34 @@ where
         return false;
     }
 
+    // Spec section 29: a function value whose type fits but for its effects is refused for those effects, as a lambda
+    // is, with the parameter's type as it is written.
+    if context.dialect.is_sharp()
+        && let Some(outside) = effects_outside(context.codebase, input_type, parameter_type)
+    {
+        let parameter = invocation_target.get_parameter(adjust_offset_for_variadic(invocation_target, argument_offset));
+        let display = display_for_parameter(parameter);
+        let effects: Vec<Word> = outside
+            .into_iter()
+            .map(|effect| {
+                word(sharp_effect_name(context.codebase, &context.imported_names, &context.short_name_counts, effect))
+            })
+            .collect();
+        let has = if effects.len() == 1 { "the effect" } else { "the effects" };
+        let holder = display_function_holder(parameter_type, &|union| display(context, union));
+        context.collector.report_with_code(
+            IssueCode::InvalidArgument,
+            Issue::error(format!(
+                "`{}` has {has} {}, so {holder} cannot hold it.",
+                quoted_source(context, input_expression.span()),
+                and_list(&effects)
+            ))
+            .with_annotation(Annotation::primary(input_expression.span())),
+        );
+
+        return false;
+    }
+
     let target_name_str = invocation_target.guess_name(context);
     let input_type_str = display_value_type(context, input_type, parameter_type);
     let parameter_type_str = display_type(context, parameter_type);
@@ -619,6 +656,74 @@ fn can_argument_be_identical(
                 false,
             )
     })
+}
+
+/// The effects a function value of `input_type` has that a function type of `parameter_type` does not list, when they
+/// are all that keep the value from `parameter_type`, spec section 29.
+fn effects_outside(codebase: &CodebaseMetadata, input_type: &TUnion, parameter_type: &TUnion) -> Option<Vec<Word>> {
+    let lists = |atomic: &TAtomic| match atomic {
+        TAtomic::Callable(TCallable::Signature(signature)) => signature.effects.clone(),
+        _ => None,
+    };
+    let allowed: Vec<Vec<Word>> = parameter_type.types.iter().filter_map(lists).collect();
+    let mut outside: Vec<Word> = Vec::new();
+    for effect in input_type.types.iter().filter_map(lists).flatten() {
+        let listed = allowed
+            .iter()
+            .all(|effects| effects.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes())));
+        if !listed && !outside.contains(&effect) {
+            outside.push(effect);
+        }
+    }
+    if allowed.is_empty() || outside.is_empty() {
+        return None;
+    }
+
+    // The value's type with no effect list, as a plain PHP function's, fits every function type's effects.
+    let without_effects = TUnion::from_vec(
+        input_type
+            .types
+            .iter()
+            .map(|atomic| match atomic {
+                TAtomic::Callable(TCallable::Signature(signature)) => {
+                    TAtomic::Callable(TCallable::Signature(TCallableSignature { effects: None, ..signature.clone() }))
+                }
+                atomic => atomic.clone(),
+            })
+            .collect(),
+    );
+
+    is_contained_by(
+        codebase,
+        &without_effects,
+        parameter_type,
+        true,
+        true,
+        false,
+        &mut ComparisonResult::for_dialect(Dialect::Sharp),
+    )
+    .then_some(outside)
+}
+
+/// How a message writes the type of `parameter`, spec section 29: a PHP# parameter that writes a function type writes
+/// a pure one with `uses none`, since one without `uses` takes on each caller's effects, and a constructor parameter
+/// that declares a field writes it as the field does, pure without `uses`. A parameter written as a type parameter, as
+/// `List.add`'s `T item`, takes the type its type argument writes.
+pub(super) fn display_for_parameter<A>(
+    parameter: Option<InvocationTargetParameter<'_>>,
+) -> fn(&Context<'_, '_, A>, &TUnion) -> String
+where
+    A: Arena,
+{
+    match parameter {
+        Some(InvocationTargetParameter::FunctionLike(metadata))
+            if !metadata.flags.is_promoted_property()
+                && metadata.type_metadata.as_ref().is_some_and(|declared| declared.type_union.has_callable()) =>
+        {
+            display_sharp_parameter_type
+        }
+        _ => display_sharp_type,
+    }
 }
 
 /// Whether a parameter declared `declared_type` is written `Set<T>` or `Set<T>?`, the parameters the lowering converts.
