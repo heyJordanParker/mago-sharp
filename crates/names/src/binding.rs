@@ -63,8 +63,10 @@ pub fn takes_on_effects(parameter: &FunctionLikeParameter<'_>) -> bool {
 pub const SUPERGLOBALS: [&[u8]; 9] =
     [b"GLOBALS", b"_SERVER", b"_GET", b"_POST", b"_FILES", b"_COOKIE", b"_SESSION", b"_REQUEST", b"_ENV"];
 
-/// Returns the name of the PHP variable the PHP# local or parameter `name` runs as: `name` itself, or `@` before a
-/// superglobal's name, as `@this` is written, which PHP code never writes, so the local never reads or replaces PHP's.
+/// Returns the name of the PHP variable the PHP# local or parameter `name` runs as.
+///
+/// That is `name` itself, or `@` before a superglobal's name, as `@this` is written, which PHP code never writes, so the
+/// local never reads or replaces PHP's.
 #[must_use]
 pub fn php_local_name(name: &[u8]) -> Cow<'_, [u8]> {
     if SUPERGLOBALS.contains(&name) { Cow::Owned([b"@", name].concat()) } else { Cow::Borrowed(name) }
