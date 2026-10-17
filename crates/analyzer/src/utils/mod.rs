@@ -9,6 +9,7 @@ use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
+use mago_reporting::AnnotationKind;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
@@ -138,6 +139,85 @@ where
             .with_help(format!("A `List` is not a `Set`: write `{}.toSet()`.", quoted_source(context, value.span()))),
         _ => issue,
     }
+}
+
+/// Gives `issue`, the refusal of `value` of the type `given` where the function type `declared` goes, the message that
+/// says why a function value does not fit it, spec section 14.1:
+///
+/// - too few parameters, as in C#, Kotlin and Swift: "`Function<int(int, int)>` takes 2 parameters, and this lambda
+///   takes 1.",
+/// - a function plain PHP returns with no types declared, as an untyped `\Closure`, which arrives as `Any?` arrives,
+/// - a plain PHP `callable`, which may be a function's name or an array.
+pub fn with_function_fit_message<A>(
+    context: &Context<'_, '_, A>,
+    value: Option<&Expression<'_>>,
+    (declared, given): (&TUnion, &TUnion),
+    mut issue: Issue,
+) -> Issue
+where
+    A: Arena,
+{
+    let (Some(value), [TAtomic::Callable(TCallable::Signature(declared_signature))]) = (value, declared.types.as_ref())
+    else {
+        return issue;
+    };
+    if !context.dialect.is_sharp() {
+        return issue;
+    }
+
+    let function_type = names::display_type(context, declared);
+    let written = quoted_source(context, value.span());
+    let (message, annotation) = match given.types.as_ref() {
+        [TAtomic::Callable(TCallable::Signature(given_signature))]
+            if declared_signature.takes_more_parameters_than(given_signature) =>
+        {
+            let passed = declared_signature
+                .get_parameters()
+                .iter()
+                .filter(|parameter| !parameter.is_variadic() && !parameter.has_default())
+                .count();
+            let taken = given_signature.get_parameters().len();
+            let function = match value.unparenthesized() {
+                Expression::Closure(_) | Expression::ArrowFunction(_) => "this lambda".to_owned(),
+                _ => format!("`{written}`"),
+            };
+
+            (
+                format!(
+                    "`{function_type}` takes {passed} parameter{}, and {function} takes {taken}.",
+                    if passed == 1 { "" } else { "s" }
+                ),
+                format!("Takes {taken}."),
+            )
+        }
+        [TAtomic::Callable(TCallable::Signature(given_signature))] if !given_signature.is_closure() => (
+            format!(
+                "`{written}` gives a plain PHP `callable`, which may be a function's name or an array, so it is no `{function_type}`."
+            ),
+            "A plain PHP `callable`.".to_owned(),
+        ),
+        // A `mixed ...` parameter is what plain PHP's `\Closure` declares with no docblock, and PHP# never writes one.
+        [TAtomic::Callable(TCallable::Signature(given_signature))]
+            if given_signature.get_parameters().iter().any(|parameter| {
+                parameter.is_variadic() && parameter.get_type_signature().is_some_and(TUnion::is_mixed)
+            }) =>
+        {
+            (
+                format!(
+                    "`{written}` gives a function whose types plain PHP doesn't declare, so it is no `{function_type}`: hold it with `const`, and check what each call gives."
+                ),
+                "Its types are not declared.".to_owned(),
+            )
+        }
+        _ => return issue,
+    };
+    issue.message = message;
+    for primary in issue.annotations.iter_mut().filter(|annotation| matches!(annotation.kind, AnnotationKind::Primary))
+    {
+        primary.message = Some(annotation.clone());
+    }
+
+    issue
 }
 
 /// Reports `value`, a PHP# value of the type `given` that would lose a readonly where the type `declared` goes, spec

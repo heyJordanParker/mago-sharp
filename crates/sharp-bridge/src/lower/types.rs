@@ -1067,6 +1067,51 @@ impl<'analysis> Types<'analysis> {
         Some(signature.get_parameters().first()?.get_type_signature().cloned().unwrap_or_else(get_mixed))
     }
 
+    /// The parameters of the function the method value `value` is, as the checker typed it, each named as the method
+    /// it runs names it, without an extension method's receiver. A plain PHP library that reads a callback's
+    /// parameters sees them, as it sees a first-class callable's.
+    pub(crate) fn value_parameters(&self, value: &Expression) -> Vec<ValueParameter> {
+        let Some(TAtomic::Callable(TCallable::Signature(signature))) =
+            self.expression_type(value).types.iter().find(|atomic| atomic.is_callable())
+        else {
+            unreachable!("the analysis types a method value as its signature, not the value at {:?}", value.span());
+        };
+        let names: Vec<&[u8]> = signature
+            .get_source()
+            .and_then(|source| self.codebase.get_function_like(&source))
+            .map(|method| {
+                let receiver = usize::from(method.flags.is_extension_method());
+                method
+                    .parameters
+                    .iter()
+                    .skip(receiver)
+                    .map(|parameter| {
+                        let name = parameter.name.0.as_bytes();
+
+                        name.strip_prefix(b"$").unwrap_or(name)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        signature
+            .get_parameters()
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                let name =
+                    names.get(index).map_or_else(|| format!("argument{index}").into_bytes(), |name| name.to_vec());
+                ValueParameter {
+                    // The value's own closure holds the receiver as `$receiver`.
+                    name: if name == b"receiver" { b"receiver#1".to_vec() } else { name },
+                    r#type: parameter.get_type_signature().cloned().unwrap_or_else(get_mixed),
+                    variadic: parameter.is_variadic(),
+                    optional: parameter.has_default(),
+                }
+            })
+            .collect()
+    }
+
     /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as
     /// `global.strtoupper` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
     pub(crate) fn function_value(&self, read: &Expression) -> Option<Word> {
@@ -1605,6 +1650,14 @@ impl<'analysis> PlainParameter<'analysis> {
             Self::Callable(parameter) => parameter.is_by_reference(),
         }
     }
+}
+
+/// A parameter of the function a method value is, as [`Types::value_parameters`] gives it.
+pub(crate) struct ValueParameter {
+    pub(crate) name: Vec<u8>,
+    pub(crate) r#type: TUnion,
+    pub(crate) variadic: bool,
+    pub(crate) optional: bool,
 }
 
 /// The kind of member every class a receiver can be declares, which the checker requires to be one kind. Its details,

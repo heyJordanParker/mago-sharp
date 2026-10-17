@@ -18,6 +18,7 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::union::TUnion;
 use mago_names::INLINED_COLLECTION_METHODS;
@@ -4349,6 +4350,43 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// section 3 gives each loop pass its own local, and PHP reuses one variable, so a local in a loop body that a
     /// lambda captures by reference is `{ unset($local); $local = value; }`, and the lambda of each pass keeps its own.
     fn local(&mut self, local: &LocalDeclaration) -> u32 {
+        let assignment = self.local_assignment(local);
+        match self.fresh_locals(local) {
+            Some(unset) => self.node(SHARP_AST_STMT_LIST, 0, self.line(local), &[unset, assignment]),
+            None => assignment,
+        }
+    }
+
+    /// The `unset` statement that gives a local declared in a loop a fresh variable on each pass, or none when the
+    /// local is outside a loop or no lambda captures it by reference.
+    fn fresh_locals(&mut self, local: &LocalDeclaration) -> Option<u32> {
+        if self.loop_depth == 0 {
+            return None;
+        }
+        let line = self.line(local);
+        let captured: Vec<&LocalIdentifier> = local
+            .target
+            .names()
+            .into_iter()
+            .filter(|name| self.by_reference.contains(&name.span.start.offset))
+            .collect();
+        if captured.is_empty() {
+            return None;
+        }
+
+        let unsets: Vec<u32> = captured
+            .into_iter()
+            .map(|name| {
+                let variable = self.variable(name.span, name.value);
+
+                self.node(SHARP_AST_UNSET, 0, line, &[variable])
+            })
+            .collect();
+
+        Some(self.node(SHARP_AST_STMT_LIST, 0, line, &unsets))
+    }
+
+    fn local_assignment(&mut self, local: &LocalDeclaration) -> u32 {
         let line = self.line(local);
         let target = match &local.target {
             LocalTarget::Name(name) => self.variable(name.span, name.value),
@@ -4378,43 +4416,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if let Some(declared) = declared {
             self.local_types.insert(local.target.span().start.offset, declared);
         }
-        let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[target, value]);
-        if self.loop_depth == 0 {
-            return assignment;
-        }
-        let captured: Vec<&LocalIdentifier> = local
-            .target
-            .names()
-            .into_iter()
-            .filter(|name| self.by_reference.contains(&name.span.start.offset))
-            .collect();
-        if captured.is_empty() {
-            return assignment;
-        }
-
-        let unsets: Vec<u32> = captured
-            .into_iter()
-            .map(|name| {
-                let variable = self.variable(name.span, name.value);
-
-                self.node(SHARP_AST_UNSET, 0, line, &[variable])
-            })
-            .collect();
-        let unset = self.node(SHARP_AST_STMT_LIST, 0, line, &unsets);
-
-        self.node(SHARP_AST_STMT_LIST, 0, line, &[unset, assignment])
+        self.node(SHARP_AST_ASSIGN, 0, line, &[target, value])
     }
 
     /// Each part of the header is an `EXPR_LIST`, or null when it is empty. A `let` or `const` counter is the
-    /// first part.
+    /// first part. A header takes only expressions, so the `unset` that gives a captured counter of a `for` inside a
+    /// loop its fresh variable runs as a statement before the `for`: `{ unset($j); } for ($j = 0; …) …`.
     fn r#for(&mut self, r#for: &For) -> u32 {
         let ForBody::Statement(body) = &r#for.body else {
             unreachable!("check_slice refuses a colon-delimited `for`");
         };
 
         let mut initializations = Vec::new();
+        let mut fresh = None;
         if let Some(declaration) = &r#for.declaration {
-            initializations.push(self.local(declaration));
+            fresh = self.fresh_locals(declaration);
+            initializations.push(self.local_assignment(declaration));
         }
         for initialization in &r#for.initializations {
             initializations.push(self.expression(initialization));
@@ -4434,8 +4451,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(r#for);
         let body =
             if captured.is_empty() { self.loop_body(body) } else { self.fresh_counter_body(line, body, &captured) };
-
-        self.node(SHARP_AST_FOR, 0, line, &[initializations, conditions, increments, body])
+        let r#for = self.node(SHARP_AST_FOR, 0, line, &[initializations, conditions, increments, body]);
+        match fresh {
+            Some(unset) => self.node(SHARP_AST_STMT_LIST, 0, line, &[unset, r#for]),
+            None => r#for,
+        }
     }
 
     /// The body of a `for` whose counters a lambda captures by reference. Spec section 3 gives each pass its own
@@ -5934,10 +5954,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The function value `value` reads of a member of `target` that no first-class callable of PHP reaches, spec
-    /// section 14.3: `(function ($receiver) { return function (...$arguments) use ($receiver) { return <call>; };
-    /// })($target)`, where `call` writes the member's call on `$receiver` with the arguments it is given,
-    /// `...$arguments` and then the `type_arguments` the checker found, if any. `target` is read once, where the value
-    /// is read, and a collection is copied there, as PHP copies an array into a parameter. Type arguments that name the
+    /// section 14.3: `(function ($receiver) { return function (string $tail) use ($receiver) { return <call>; };
+    /// })($target)`, where `call` writes the member's call on `$receiver` with the arguments it is given and then the
+    /// `type_arguments` the checker found, if any. The inner closure takes the value's parameters, each named and typed
+    /// as the method takes it, as [`Self::parameter_type`] writes the type, and gathers those from the first that has a
+    /// default into `...$arguments`, as the method gives each its default. `target` is read once, where the value is
+    /// read, and a collection is copied there, as PHP copies an array into a parameter. Type arguments that name the
     /// method's own hidden local have both closures capture it.
     fn receiver_closure(
         &mut self,
@@ -5948,8 +5970,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     ) -> u32 {
         let line = self.line(value);
         let names_method_type_arguments = type_arguments.is_some_and(|type_arguments| type_arguments.contains('#'));
-        let arguments = self.variable(value.span(), b"arguments");
-        let mut values = vec![self.node(SHARP_AST_UNPACK, 0, line, &[arguments])];
+        let mut parameters = self.types.value_parameters(value);
+        if let Some(gathered) = parameters.iter().position(|parameter| parameter.variadic || parameter.optional) {
+            parameters.truncate(gathered + 1);
+            let rest = &mut parameters[gathered];
+            if !rest.variadic {
+                rest.name = b"arguments".to_vec();
+                rest.r#type = get_mixed();
+                rest.variadic = true;
+            }
+        }
+        let mut declared = Vec::new();
+        let mut values = Vec::new();
+        for parameter in &parameters {
+            let hint = self.parameter_type(line, &parameter.r#type);
+            let variable = self.variable(value.span(), &parameter.name);
+            let flags = if parameter.variadic { ZEND_PARAM_VARIADIC } else { 0 };
+            values.push(if parameter.variadic { self.node(SHARP_AST_UNPACK, 0, line, &[variable]) } else { variable });
+            declared.push((parameter.name.as_slice(), flags, hint));
+        }
         if let Some(type_arguments) = type_arguments {
             let text = self.type_text(line, type_arguments);
             values.push(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text]));
@@ -5957,22 +5996,58 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let receiver = self.variable(value.span(), b"receiver");
         let body = call(self, receiver, &values);
 
-        self.receiver_closure_of(
-            value,
-            target,
-            &[(b"arguments", ZEND_PARAM_VARIADIC)],
-            names_method_type_arguments,
-            body,
-        )
+        self.receiver_closure_of(value, target, &declared, names_method_type_arguments, body)
+    }
+
+    /// The type PHP writes for a parameter of the PHP# type `r#type`, so a plain PHP library that reads a callback's
+    /// parameter types sees them: `int`, `float`, `bool`, `string`, a class, or `\Closure` for a function type, and
+    /// unions and `?` of those. A type with any other part, such as a collection, which runs as an array or an object,
+    /// or `Any`, gets none, as a lambda's parameter that writes no type gets none.
+    fn parameter_type(&mut self, line: u32, r#type: &TUnion) -> u32 {
+        let mut types: Vec<PhpType> = Vec::new();
+        for atomic in r#type.types.iter() {
+            let php_type = match atomic {
+                TAtomic::Null => continue,
+                TAtomic::Scalar(TScalar::Integer(_)) => PhpType::Named(b"int"),
+                TAtomic::Scalar(TScalar::Float(_)) => PhpType::Named(b"float"),
+                TAtomic::Scalar(TScalar::Bool(_)) => PhpType::Named(b"bool"),
+                TAtomic::Scalar(TScalar::String(_)) => PhpType::Named(b"string"),
+                TAtomic::Object(TObject::Named(object)) => PhpType::Classes(vec![object.name.as_bytes()]),
+                TAtomic::Callable(_) => PhpType::Classes(vec![b"Closure"]),
+                _ => return NULL,
+            };
+            if !types.iter().any(|kept| kept.holds(&php_type)) {
+                types.push(php_type);
+            }
+        }
+
+        let mut nodes: Vec<u32> = types.iter().map(|php_type| self.php_type(php_type, line)).collect();
+        match nodes.as_slice() {
+            [] => NULL,
+            [single] if !r#type.has_null() => *single,
+            [single] => {
+                self.nodes[*single as usize].attr |= ZEND_TYPE_NULLABLE;
+
+                *single
+            }
+            _ => {
+                if r#type.has_null() {
+                    nodes.push(self.string(ZEND_NAME_NOT_FQ, line, b"null"));
+                }
+
+                self.node(SHARP_AST_TYPE_UNION, 0, line, &nodes)
+            }
+        }
     }
 
     /// The function value `value` reads that runs `body` on the hidden `$receiver`, `target` read once where the value
-    /// is read, as [`Self::receiver_closure`] writes it, with `parameters` and their flags for the inner closure's own.
+    /// is read, as [`Self::receiver_closure`] writes it, with `parameters`, their flags and their types for the inner
+    /// closure's own.
     fn receiver_closure_of(
         &mut self,
         value: &Expression,
         target: u32,
-        parameters: &[(&[u8], u32)],
+        parameters: &[(&[u8], u32, u32)],
         names_method_type_arguments: bool,
         body: u32,
     ) -> u32 {
@@ -5981,26 +6056,26 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             if names_method_type_arguments { &[b"receiver", TYPE_ARGUMENTS] } else { &[b"receiver"] };
         let caller = self.returning_closure(value, parameters, captured, body);
         let captured: &[&[u8]] = if names_method_type_arguments { &[TYPE_ARGUMENTS] } else { &[] };
-        let reader = self.returning_closure(value, &[(b"receiver", 0)], captured, caller);
+        let reader = self.returning_closure(value, &[(b"receiver", 0, NULL)], captured, caller);
         let target = self.node(SHARP_AST_ARG_LIST, 0, line, &[target]);
 
         self.node(SHARP_AST_CALL, 0, line, &[reader, target])
     }
 
-    /// A `CLOSURE` the lowering writes, with `parameters` and their flags, that captures each local of `captured` by
-    /// value and returns `value`.
+    /// A `CLOSURE` the lowering writes, with `parameters`, their flags and their types, that captures each local of
+    /// `captured` by value and returns `value`.
     fn returning_closure(
         &mut self,
         span: impl HasSpan,
-        parameters: &[(&[u8], u32)],
+        parameters: &[(&[u8], u32, u32)],
         captured: &[&[u8]],
         value: u32,
     ) -> u32 {
         let line = self.line(&span);
         let mut lowered = Vec::new();
-        for (parameter, flags) in parameters {
+        for (parameter, flags, hint) in parameters {
             let name = self.string(0, line, parameter);
-            lowered.push(self.node(SHARP_AST_PARAM, *flags, line, &[NULL, name, NULL, NULL, NULL, NULL]));
+            lowered.push(self.node(SHARP_AST_PARAM, *flags, line, &[*hint, name, NULL, NULL, NULL, NULL]));
         }
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &lowered);
         let mut uses = Vec::new();
@@ -6806,12 +6881,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let target = self.expression(receiver);
         if let Some((collection_name, method, _)) = self.php_collection_method(value) {
             let parameter_type = self.types.value_parameter_type(value);
+            let parameters: Vec<(&[u8], u32, u32)> = match &parameter_type {
+                Some(r#type) => vec![(b"value", 0, self.parameter_type(line, r#type))],
+                None => vec![],
+            };
             let element = parameter_type.as_ref().map(|r#type| Side::Hidden {
                 span: value.span(),
                 name: b"value".to_vec(),
                 r#type,
             });
-            let parameters: &[(&[u8], u32)] = if element.is_some() { &[(b"value", 0)] } else { &[] };
             let mut collection = CollectionReceiver::Hidden(value.span());
             let body = self.inlined_collection_method(
                 value.span(),
@@ -6822,7 +6900,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             );
             self.release_collection(collection);
 
-            return self.receiver_closure_of(value, target, parameters, false, body);
+            return self.receiver_closure_of(value, target, &parameters, false, body);
         }
 
         let (Expression::Access(Access::Property(PropertyAccess { property, .. }))

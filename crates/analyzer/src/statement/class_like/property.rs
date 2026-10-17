@@ -69,6 +69,7 @@ use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::report_int_for_float;
+use crate::utils::with_function_fit_message;
 use crate::visibility::is_visible_from_scope;
 use crate::visibility::reaches_internal;
 
@@ -82,9 +83,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Property<'arena> {
     where
         A: Arena,
     {
-        // A static member's initial value that reads `Class.name` runs as code, though PHP would read it as a constant
-        // expression, as `Property::initial_value_runs_after_class` decides for the checker and the engine too.
-        let runs_as_code = self.initial_value_runs_after_class();
+        // An initial value that reads `Class.name` runs as code, though PHP would read it as a constant expression, as
+        // `Property::initial_value_runs_as_code` decides for the checker and the engine too.
+        let runs_as_code = self.initial_value_runs_as_code();
         match self {
             Property::Plain(plain) => analyze_plain_property(plain, runs_as_code, context, block_context, artifacts),
             Property::Hooked(hooked) => {
@@ -220,6 +221,7 @@ where
                     )
                     .with_note("A property's default value must be assignable to the property's declared type.")
                     .with_help("Change the default value to match the declared type, or update the property type to accept the default.");
+                let issue = with_function_fit_message(context, Some(value), (&declared_type, &value_type), issue);
 
                 context.collector.report_with_code(IssueCode::InvalidPropertyDefaultValue, issue);
             }

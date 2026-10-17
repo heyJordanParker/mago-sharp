@@ -2330,10 +2330,17 @@ where
     fix_type_arguments(context, artifacts, value, metadata, &method_name, read_span, template_result)
 }
 
+/// The plain PHP functions that read the variables of the code that calls them, which PHP refuses to call through a
+/// value, as its `zend_forbid_dynamic_call` guards them.
+const READS_CALLER_VARIABLES: [&[u8]; 6] =
+    [b"compact", b"extract", b"get_defined_vars", b"func_get_args", b"func_get_arg", b"func_num_args"];
+
 /// Spec section 14.3: the value a read without `(…)` at `read_span`, written `written`, gives of the plain PHP function
 /// `function` of the full name `name`, as `global.strtoupper` does: the closure PHP's `strtoupper(...)` makes, typed
 /// by the function's signature, with the type arguments of a `@template` function from the function type the read goes
-/// into, as [`fix_type_arguments`] fixes a generic method's.
+/// into, as [`fix_type_arguments`] fixes a generic method's. A function that changes a variable it is given, as
+/// `global.sort` does, is no value, since PHP# passes every argument by value, and neither is one that reads the
+/// variables of the code that calls it, as `global.compact` does, which PHP runs only when it is named in the call.
 pub(crate) fn resolve_function_value<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -2351,6 +2358,31 @@ where
         ascii_lowercase_word(name.as_bytes()),
         false,
     );
+    // `extract` both reads the caller's variables and takes its array by reference, and the first is what it is for.
+    let refusal = if READS_CALLER_VARIABLES.iter().any(|reader| name.as_bytes().eq_ignore_ascii_case(reader)) {
+        Some((
+            IssueCode::InvalidCallable,
+            format!("`{written}` reads the variables of the code that calls it, so it is no function value."),
+        ))
+    } else if function.parameters.iter().any(|parameter| parameter.flags.is_by_reference()) {
+        Some((
+            IssueCode::InvalidPassByReference,
+            format!(
+                "`{written}` changes the variable it is given, and PHP# passes every argument by value, so it is no function value."
+            ),
+        ))
+    } else {
+        None
+    };
+    if let Some((code, message)) = refusal {
+        context.collector.report_with_code(
+            code,
+            Issue::error(message).with_annotation(Annotation::primary(read_span).with_message("Read as a value here.")),
+        );
+
+        return TUnion::from_atomic(TAtomic::Error);
+    }
+
     let mut signature = get_signature_of_function_like_metadata(
         &FunctionLikeIdentifier::Function(name),
         function,

@@ -242,9 +242,10 @@ impl<'ctx> InvocationTarget<'ctx> {
             return format!("{collection}.{method_name}");
         }
 
-        // A PHP# function value is named as the code writes it, as `f` or `this.scale`, spec section 14.
+        // A PHP# function value is named as the code writes it, as `f` or `this.scale`, spec section 14, an extension
+        // method's value too.
         if context.dialect.is_sharp()
-            && let InvocationTarget::Callable { source: None, span, .. } = self
+            && let InvocationTarget::Callable { span, .. } = self
         {
             return crate::utils::quoted_source(context, *span);
         }

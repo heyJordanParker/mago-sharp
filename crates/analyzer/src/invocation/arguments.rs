@@ -51,6 +51,7 @@ use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
+use crate::utils::with_function_fit_message;
 use crate::utils::with_set_conversion_help;
 
 /// The part of `union` that may share a value with another type. A PHP# type parameter and its class type, as `TItem`
@@ -550,6 +551,7 @@ where
         issue = issue.with_note(type_diff);
     }
     let issue = with_set_conversion_help(context, Some(input_expression), (parameter_type, input_type), issue);
+    let issue = with_function_fit_message(context, Some(input_expression), (parameter_type, input_type), issue);
 
     let (kind, issue) =
         explain_blocked_substitution(context, input_type, parameter_type, IssueCode::InvalidArgument, (kind, issue));

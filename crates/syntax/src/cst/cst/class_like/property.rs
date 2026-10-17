@@ -329,15 +329,16 @@ impl<'arena> Property<'arena> {
     }
 
     /// Returns `true` when a PHP# instance property's initial value runs at the start of the constructor instead of
-    /// being PHP's default: a value that is not a constant expression, any value of a property that runs as
-    /// `readonly`, which takes no default, or any value of a property with behaviors, whose `set` processes it (spec
-    /// section 6.4). A static member's runs once, when a request first uses its class's statics.
+    /// being PHP's default: a value that is not a constant expression or that reads a static member, `Class.name`, as
+    /// a method value `Item.doubled` does, any value of a property that runs as `readonly`, which takes no default, or
+    /// any value of a property with behaviors, whose `set` processes it (spec section 6.4). A static member's runs
+    /// once, when a request first uses its class's statics.
     #[must_use]
     pub fn initial_value_runs_in_constructor(&self) -> bool {
         !self.modifiers().contains_static()
             && self.initial_value().is_some_and(|value| {
                 matches!(self, Property::Hooked(hooked) if hooked.hook_list.is_readonly() || hooked.behaviors.is_some())
-                    || !value.is_constant(&PHPVersion::PHP85, false)
+                    || runs_as_code(value)
             })
     }
 
@@ -357,18 +358,26 @@ impl<'arena> Property<'arena> {
     /// member and `Order.Ascending` an enum case.
     #[must_use]
     pub fn initial_value_runs_after_class(&self) -> bool {
-        self.modifiers().contains_static()
-            && self.initial_value().is_some_and(|value| {
-                let mut read = ClassMemberRead { found: false };
-                walk_expression_mut(&mut read, value, &mut ());
+        self.modifiers().contains_static() && self.initial_value_runs_as_code()
+    }
 
-                read.found || !value.is_constant(&PHPVersion::PHP85, false)
-            })
+    /// Returns `true` when a PHP# member's initial value runs as code rather than as PHP's constant expression: it is
+    /// not constant, or it reads a static member of a class, `Class.name`, which PHP's constant expression can't read.
+    #[must_use]
+    pub fn initial_value_runs_as_code(&self) -> bool {
+        self.initial_value().is_some_and(runs_as_code)
     }
 }
 
+fn runs_as_code(value: &Expression<'_>) -> bool {
+    let mut read = ClassMemberRead { found: false };
+    walk_expression_mut(&mut read, value, &mut ());
+
+    read.found || !value.is_constant(&PHPVersion::PHP85, false)
+}
+
 /// Finds a static member read, `Class.name` or `Counter<T>.name`, in an initial value, for
-/// [`Property::initial_value_runs_after_class`].
+/// [`Property::initial_value_runs_as_code`].
 struct ClassMemberRead {
     found: bool,
 }

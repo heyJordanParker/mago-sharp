@@ -14835,15 +14835,16 @@ fn a_method_value_through_an_intersection_bound_is_the_method_one_of_its_classes
 
 /// ```php
 /// return (function ($receiver) {
-///     return function (...$arguments) use ($receiver) {
-///         return $receiver->box(...$arguments, <App.Order>);
+///     return function (\Lib\Order $item) use ($receiver) {
+///         return $receiver->box($item, <Lib.Order>);
 ///     };
 /// })($this);
 /// ```
 ///
 /// A method value of a generic method is a closure that calls the method with the type arguments the checker took
 /// from its function type, on the receiver read once where the value is read. PHP's `$this->box(...)` would call it
-/// with none.
+/// with none. The closure takes the method's parameters by name with the types the function type gives them, so plain
+/// PHP that reads them by reflection finds what the method declares.
 #[test]
 fn a_generic_method_value_is_a_closure_that_calls_the_method_with_its_type_arguments() {
     let lowered = Lowered::with(
@@ -14874,9 +14875,9 @@ fn a_generic_method_value_is_a_closure_that_calls_the_method_with_its_type_argum
                       RETURN
                         CLOSURE "" @9-9
                           PARAM_LIST
-                            PARAM [16]
-                              null
-                              ZVAL "arguments"
+                            PARAM
+                              ZVAL "Lib\\Order"
+                              ZVAL "item"
                               null
                               null
                               null
@@ -14890,9 +14891,8 @@ fn a_generic_method_value_is_a_closure_that_calls_the_method_with_its_type_argum
                                   ZVAL "receiver"
                                 ZVAL "box"
                                 ARG_LIST
-                                  UNPACK
-                                    VAR
-                                      ZVAL "arguments"
+                                  VAR
+                                    ZVAL "item"
                                   SHARP_TYPE_ARGS
                                     null
                                     ZVAL "Lib.Order"
@@ -14917,6 +14917,214 @@ fn a_generic_method_value_is_a_closure_that_calls_the_method_with_its_type_argum
     assert_eq!(boxer.matches(r#"ZVAL "\0<sharp>\0types""#).count(), 2, "{boxer}");
     assert!(boxer.contains("SHARP_TYPE_ARGS\n"), "{boxer}");
     assert!(boxer.contains(r##"ZVAL "#0""##), "{boxer}");
+}
+
+/// ```php
+/// return function (float $ratio, bool $loud, ?int $count, int|string $key, int|string|null $code,
+///     \App\Report $report, \Closure $step, $tags, string $receiver#1, ...$arguments) use ($receiver) { … };
+/// return function (string ...$parts) use ($receiver) { … };
+/// ```
+///
+/// A method value's closure takes each parameter by the method's name for it, with the PHP type of its PHP# type, so
+/// a plain PHP library that reads a callback's parameters by reflection finds them: a nullable type as `?`, a union
+/// as `|`, a class by its full name and a function type as `\Closure`. A collection runs as an array or an object, so
+/// it gets no type. From the first parameter with a default on, the closure gathers the arguments, so the method gives
+/// each its own default, and a variadic parameter stays variadic. A parameter named `receiver` gets a hidden name,
+/// since the closure holds the receiver as `$receiver`.
+#[test]
+fn a_method_value_closure_takes_each_parameter_by_name_with_its_php_type() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport App.Shared.Text.Mixing;\n\nclass Report\n{\n    public Any mixer(string title) => title.mix;\n\n    public Any joiner(string title) => title.join;\n}\n",
+        &[(
+            "src/App/Shared/Text/Mixing.sharp",
+            "namespace App.Shared.Text;\n\nimport App.Report;\n\npublic static class Mixing\n{\n    extension(string text)\n    {\n        public string mix(float ratio, bool loud, int? count, int|string key, (int|string)? code, Report report, Function<int(int)> step, List<string> tags, string receiver, string tail = \"!\") => text + tail;\n\n        public string join(string ...parts) => text;\n    }\n}\n",
+        )],
+    );
+
+    assert_eq!(
+        lowered.body_of("mixer"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  CLOSURE "" @7-7
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @7-7
+                          PARAM_LIST
+                            PARAM
+                              ZVAL [1] "float"
+                              ZVAL "ratio"
+                              null
+                              null
+                              null
+                              null
+                            PARAM
+                              ZVAL [1] "bool"
+                              ZVAL "loud"
+                              null
+                              null
+                              null
+                              null
+                            PARAM
+                              ZVAL [257] "int"
+                              ZVAL "count"
+                              null
+                              null
+                              null
+                              null
+                            PARAM
+                              TYPE_UNION
+                                ZVAL [1] "int"
+                                ZVAL [1] "string"
+                              ZVAL "key"
+                              null
+                              null
+                              null
+                              null
+                            PARAM
+                              TYPE_UNION
+                                ZVAL [1] "int"
+                                ZVAL [1] "string"
+                                ZVAL [1] "null"
+                              ZVAL "code"
+                              null
+                              null
+                              null
+                              null
+                            PARAM
+                              ZVAL "App\\Report"
+                              ZVAL "report"
+                              null
+                              null
+                              null
+                              null
+                            PARAM
+                              ZVAL "Closure"
+                              ZVAL "step"
+                              null
+                              null
+                              null
+                              null
+                            PARAM
+                              null
+                              ZVAL "tags"
+                              null
+                              null
+                              null
+                              null
+                            PARAM
+                              ZVAL [1] "string"
+                              ZVAL "receiver#1"
+                              null
+                              null
+                              null
+                              null
+                            PARAM [16]
+                              null
+                              ZVAL "arguments"
+                              null
+                              null
+                              null
+                              null
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                          STMT_LIST
+                            RETURN
+                              STATIC_CALL
+                                ZVAL "App\\Shared\\Text\\Mixing"
+                                ZVAL "mix"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "receiver"
+                                  VAR
+                                    ZVAL "ratio"
+                                  VAR
+                                    ZVAL "loud"
+                                  VAR
+                                    ZVAL "count"
+                                  VAR
+                                    ZVAL "key"
+                                  VAR
+                                    ZVAL "code"
+                                  VAR
+                                    ZVAL "report"
+                                  VAR
+                                    ZVAL "step"
+                                  VAR
+                                    ZVAL "tags"
+                                  VAR
+                                    ZVAL "receiver#1"
+                                  UNPACK
+                                    VAR
+                                      ZVAL "arguments"
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    VAR
+                      ZVAL "title"
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("joiner"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  CLOSURE "" @9-9
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @9-9
+                          PARAM_LIST
+                            PARAM [16]
+                              ZVAL [1] "string"
+                              ZVAL "parts"
+                              null
+                              null
+                              null
+                              null
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                          STMT_LIST
+                            RETURN
+                              STATIC_CALL
+                                ZVAL "App\\Shared\\Text\\Mixing"
+                                ZVAL "join"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "receiver"
+                                  UNPACK
+                                    VAR
+                                      ZVAL "parts"
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    VAR
+                      ZVAL "title"
+        "#}
+    );
 }
 
 /// ```php
@@ -14955,18 +15163,18 @@ fn a_method_value_of_a_method_that_is_not_generic_is_a_first_class_callable() {
 
 /// ```php
 /// return (function ($receiver) {
-///     return function ($value) use ($receiver) { return \in_array($value, $receiver, true); };
+///     return function (int $value) use ($receiver) { return \in_array($value, $receiver, true); };
 /// })($ids);
 /// return (function ($receiver) {
-///     return function (...$arguments) use ($receiver) { return $receiver->has(...$arguments); };
+///     return function (string $key) use ($receiver) { return $receiver->has($key); };
 /// })($this->prices);
 /// return (function ($receiver) { return function () use ($receiver) { return \count($receiver); }; })($ids);
 /// ```
 ///
 /// Spec section 14.3: a collection method's value is a closure over the collection, read once where the value is read,
 /// so it holds the collection as it was then, as PHP copies an array into a parameter. A method the lowering writes as
-/// PHP on the array runs that PHP on it, with the method's parameter, and any other runs on `Sharp\Collection`, as its
-/// call does, with the arguments the value is called with.
+/// PHP on the array runs that PHP on it, and any other runs on `Sharp\Collection`, as its call does. Either way the
+/// closure takes the method's parameters by name, with the types the collection's type gives them.
 #[test]
 fn a_collection_method_value_is_a_closure_over_the_collection() {
     let lowered = Lowered::new(
@@ -14994,7 +15202,7 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
                         CLOSURE "" @7-7
                           PARAM_LIST
                             PARAM
-                              null
+                              ZVAL [1] "int"
                               ZVAL "value"
                               null
                               null
@@ -15041,9 +15249,9 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
                       RETURN
                         CLOSURE "" @9-9
                           PARAM_LIST
-                            PARAM [16]
-                              null
-                              ZVAL "arguments"
+                            PARAM
+                              ZVAL [1] "string"
+                              ZVAL "key"
                               null
                               null
                               null
@@ -15057,9 +15265,8 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
                                   ZVAL "receiver"
                                 ZVAL "has"
                                 ARG_LIST
-                                  UNPACK
-                                    VAR
-                                      ZVAL "arguments"
+                                  VAR
+                                    ZVAL "key"
                           null
                           null
                     null
@@ -15140,7 +15347,7 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
                           CLOSURE "" @19-19
                             PARAM_LIST
                               PARAM
-                                null
+                                ZVAL [1] "int"
                                 ZVAL "value"
                                 null
                                 null
@@ -15171,8 +15378,8 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
 
 /// ```php
 /// return (function ($receiver) {
-///     return function (...$arguments) use ($receiver) {
-///         return \App\Shared\Text\TextExtensions::slug($receiver, ...$arguments);
+///     return function (string $separator) use ($receiver) {
+///         return \App\Shared\Text\TextExtensions::slug($receiver, $separator);
 ///     };
 /// })($title);
 /// return \strtoupper(...);
@@ -15217,9 +15424,9 @@ fn an_extension_method_or_plain_php_function_value_calls_what_it_names() {
                       RETURN
                         CLOSURE "" @8-8
                           PARAM_LIST
-                            PARAM [16]
-                              null
-                              ZVAL "arguments"
+                            PARAM
+                              ZVAL [1] "string"
+                              ZVAL "separator"
                               null
                               null
                               null
@@ -15234,9 +15441,8 @@ fn an_extension_method_or_plain_php_function_value_calls_what_it_names() {
                                 ARG_LIST
                                   VAR
                                     ZVAL "receiver"
-                                  UNPACK
-                                    VAR
-                                      ZVAL "arguments"
+                                  VAR
+                                    ZVAL "separator"
                           null
                           null
                     null
@@ -19379,6 +19585,116 @@ fn a_for_counter_a_lambda_captures_by_reference_is_fresh_in_each_pass() {
                       ZVAL "step"
                     VAR
                       ZVAL "step#1"
+        "#}
+    );
+}
+
+/// ```php
+/// while ($extra > 0) {
+///     $extra -= 1;
+///     { unset($step); }
+///     for ($step = 0; $step < $extra; $step++) {
+///         do { if ($step == 1) { continue; } if ($step == 3) { break 2; } $show = function () use (&$step) { return $step; }; } while (false);
+///         $step#1 = $step; unset($step); $step = $step#1;
+///     }
+/// }
+/// ```
+///
+/// A `for` inside a loop gives its captured counter a fresh variable on each pass of the outer loop too, since a
+/// `break` leaves the inner loop before the counter moves, and a lambda of that pass keeps it. A header takes only
+/// expressions, so the `unset` runs as a statement before the `for`.
+#[test]
+fn a_for_counter_a_lambda_captures_inside_a_loop_is_unset_before_the_for() {
+    assert_eq!(
+        body_in(
+            "void run(int extra)",
+            "        while (extra > 0) {\n            extra -= 1;\n            for (let step = 0; step < extra; step++) {\n                if (step == 1) { continue; }\n                if (step == 3) { break; }\n                const show = () => step;\n            }\n        }\n",
+            &[],
+        ),
+        indoc! {r#"
+            STMT_LIST
+              WHILE
+                GREATER
+                  VAR
+                    ZVAL "extra"
+                  ZVAL 0
+                STMT_LIST
+                  ASSIGN_OP [2]
+                    VAR
+                      ZVAL "extra"
+                    ZVAL 1
+                  STMT_LIST
+                    STMT_LIST
+                      UNSET
+                        VAR
+                          ZVAL "step"
+                    FOR
+                      EXPR_LIST
+                        ASSIGN
+                          VAR
+                            ZVAL "step"
+                          ZVAL 0
+                      EXPR_LIST
+                        BINARY_OP [20]
+                          VAR
+                            ZVAL "step"
+                          VAR
+                            ZVAL "extra"
+                      EXPR_LIST
+                        POST_INC
+                          VAR
+                            ZVAL "step"
+                      STMT_LIST
+                        DO_WHILE
+                          STMT_LIST
+                            IF
+                              IF_ELEM
+                                BINARY_OP [16]
+                                  VAR
+                                    ZVAL "step"
+                                  ZVAL 1
+                                STMT_LIST
+                                  CONTINUE
+                                    null
+                            IF
+                              IF_ELEM
+                                BINARY_OP [16]
+                                  VAR
+                                    ZVAL "step"
+                                  ZVAL 3
+                                STMT_LIST
+                                  BREAK
+                                    ZVAL 2
+                            ASSIGN
+                              VAR
+                                ZVAL "show"
+                              CLOSURE "" @14-14
+                                PARAM_LIST
+                                CLOSURE_USES
+                                  ZVAL [1] "step"
+                                STMT_LIST
+                                  RETURN
+                                    VAR
+                                      ZVAL "step"
+                                SHARP_TYPE_ARGS
+                                  null
+                                  ZVAL "Function<int()>"
+                                null
+                          ZVAL false
+                        ASSIGN
+                          VAR
+                            ZVAL "step#1"
+                          VAR
+                            ZVAL "step"
+                        STMT_LIST
+                          UNSET
+                            VAR
+                              ZVAL "step"
+                        ASSIGN
+                          VAR
+                            ZVAL "step"
+                          VAR
+                            ZVAL "step#1"
         "#}
     );
 }

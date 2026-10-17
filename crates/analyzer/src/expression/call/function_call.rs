@@ -53,6 +53,7 @@ use crate::utils::names::display_code_member;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
 use crate::utils::names::sharp_code_class_name;
+use crate::utils::quoted_source;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
     fn analyze<'ctx, A>(
@@ -235,6 +236,9 @@ where
     );
     if let Some(metadata) = target.as_ref().and_then(InvocationTarget::get_function_like_metadata) {
         check_function_use(context, block_context, metadata, function, call.method.span());
+        if context.dialect.is_sharp() {
+            report_argument_by_reference(context, call, function, metadata);
+        }
     }
 
     let analyze = |context: &mut Context<'ctx, 'arena, A>| {
@@ -274,6 +278,61 @@ where
     }
 
     Ok(())
+}
+
+/// Refuses a PHP# call that gives a plain PHP function an argument it takes by reference, as `global.sort(numbers)`,
+/// which would change `numbers`: PHP# passes every argument by value. The message writes the standard library method
+/// that does the work where there is one. The standard library alone passes one, as only it imports `Sharp.Internal`,
+/// to give its methods, as `Regex.match`, the results PHP gives only that way.
+fn report_argument_by_reference<A>(
+    context: &mut Context<'_, '_, A>,
+    call: &MethodCall<'_>,
+    function: Word,
+    metadata: &FunctionLikeMetadata,
+) where
+    A: Arena,
+{
+    if context.source_file.is_standard_library {
+        return;
+    }
+
+    let parameters = &metadata.parameters;
+    let Some(argument) = call.argument_list.arguments.iter().enumerate().find_map(|(index, argument)| {
+        let parameter = match argument {
+            Argument::Named(named) => parameters
+                .iter()
+                .find(|parameter| parameter.name.0.as_bytes().strip_prefix(b"$") == Some(named.name.value)),
+            Argument::Positional(_) => {
+                parameters.get(index).or_else(|| parameters.last().filter(|last| last.flags.is_variadic()))
+            }
+        }?;
+
+        parameter.flags.is_by_reference().then(|| argument.value())
+    }) else {
+        return;
+    };
+
+    let written = quoted_source(context, call.object.span().join(call.method.span()));
+    let given = quoted_source(context, argument.span());
+    let name = function.as_bytes().rsplit(|byte| *byte == b'\\').next().unwrap_or_default().to_ascii_lowercase();
+    let fix = match name.as_slice() {
+        b"array_push" => Some(format!("{given}.add(…)")),
+        b"array_unshift" => Some(format!("{given}.insert(0, …)")),
+        b"sort" | b"rsort" | b"usort" => Some(format!("{given} = {given}.sortedBy(…)")),
+        _ => None,
+    };
+    let message = match fix {
+        Some(fix) => format!(
+            "`{written}` changes the variable it is given, and PHP# passes every argument by value: write `{fix}`."
+        ),
+        None => format!(
+            "`{written}` changes the variable it is given, and PHP# passes every argument by value, so `{given}` can't go there."
+        ),
+    };
+    context.collector.report_with_code(
+        IssueCode::InvalidPassByReference,
+        Issue::error(message).with_annotation(Annotation::primary(argument.span()).with_message("Passed by value.")),
+    );
 }
 
 /// The refusal of `global.exit(status)` or `global.die(…)` in a `.sharp` file: `die` in every form, and `exit` with a
@@ -494,6 +553,24 @@ where
                 span,
                 source: None,
             });
+        } else if context.dialect.is_sharp() {
+            // Spec sections 14.1 and 14.4: any expression that gives a function is called, and one that may be null is
+            // called with `?.(…)`.
+            let written = quoted_source(context, span);
+            let message = if atomic.is_null() && expression_type.types.iter().any(|other| !other.is_null()) {
+                format!("`{written}` may be null: call it as `{written}?.(…)`.")
+            } else {
+                format!(
+                    "Only a function value is called with `(…)`, and `{written}` is `{}`.",
+                    display_atomic(context, atomic)
+                )
+            };
+            context.collector.report_with_code(
+                IssueCode::InvalidCallable,
+                Issue::error(message).with_annotation(Annotation::primary(span).with_message("Called here.")),
+            );
+
+            encountered_invalid_targets = true;
         } else {
             let type_name = display_atomic(context, atomic);
 

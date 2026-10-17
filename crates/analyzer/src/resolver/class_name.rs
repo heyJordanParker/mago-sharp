@@ -912,6 +912,19 @@ where
         _ => name,
     };
 
+    // Spec section 14.1: one name covers every function type, so PHP's `Closure` gets the refusal of its import, written
+    // bare or through `global`.
+    if written.strip_prefix(b"global\\").unwrap_or(written).eq_ignore_ascii_case(b"Closure") {
+        context.collector.report_with_code(
+            IssueCode::NonExistentClassLike,
+            Issue::error("PHP# has no `Closure`: write `Function<R(P)>`.")
+                .with_annotation(Annotation::primary(span).with_message("Written here."))
+                .with_note("A function type names its return and parameter types, as in `Function<Money(Offer)>`, and plain PHP's closures arrive as function values."),
+        );
+
+        return true;
+    }
+
     if written.contains(&b'\\') {
         return context.codebase.class_like_exists(written) && report_full_class_name(context, written, span);
     }

@@ -1194,14 +1194,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // A computed property's expression runs on each read, as a method body does.
         (Node::ComputedProperty(_), FieldOrProperty) => Some(FieldOrProperty),
         (Node::Block(_) | Node::PropertyHookConcreteExpressionBody(_), FieldOrProperty | Parameter) => Some(Body),
-        // A constant initial value is the member's default, which PHP evaluates as a constant expression. A static
-        // member's that reads a static member, `Class.name`, runs as code, as `Property::initial_value_runs_after_class`
-        // decides.
+        // A constant initial value is the member's default, which PHP evaluates as a constant expression. One that
+        // reads a static member, `Class.name`, runs as code, as `Property::initial_value_runs_as_code` decides.
         (Node::Expression(value), FieldOrProperty) => {
             let uses_this = report_this_in_initial_value(node, context);
             let place = if !uses_this
                 && value.is_constant(&context.version, false)
-                && !is_static_initial_value_run_as_code(value, context)
+                && !is_initial_value_run_as_code(value, context)
             {
                 Constant
             } else {
@@ -6506,14 +6505,15 @@ fn enclosing_class<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> 
     declarations.classes.into_iter().find(|class| class.span.contains(&span.start))
 }
 
-/// Whether `value` is the initial value of a static member that runs as code once the class is built, which
-/// `Property::initial_value_runs_after_class` decides for the checker, the analyzer and the engine alike.
-fn is_static_initial_value_run_as_code(value: &Expression, context: &Context<'_, '_, '_>) -> bool {
+/// Whether `value` is the initial value of a member that runs as code, a static member's once the class is built and
+/// an instance member's in the constructor, which `Property::initial_value_runs_as_code` decides for the checker, the
+/// analyzer and the engine alike.
+fn is_initial_value_run_as_code(value: &Expression, context: &Context<'_, '_, '_>) -> bool {
     enclosing_class(context.program, value.span()).is_some_and(|class| {
         class.members.iter().any(|member| {
             matches!(member, ClassLikeMember::Property(property)
                 if property.initial_value().is_some_and(|initial_value| initial_value.span() == value.span())
-                    && property.initial_value_runs_after_class())
+                    && property.initial_value_runs_as_code())
         })
     })
 }

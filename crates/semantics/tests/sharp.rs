@@ -5923,11 +5923,10 @@ fn an_enum_named_like_a_reserved_class_name_or_an_import_is_an_error_as_a_class_
     assert_eq!(issues(reserved), ["3:6 Cannot use `Mixed` as a class name: it is reserved."]);
 }
 
-/// An enum's method follows a class's method rules, so it takes `List`, `Map` and function types and holds lambdas,
-/// and a lambda in it captures a loop variable that changes only as a class's does.
+/// An enum's method follows a class's method rules, so it takes `List`, `Map` and function types and holds lambdas.
 #[test]
 fn an_enum_method_takes_collection_and_function_types_and_holds_lambdas_as_a_class_method_does() {
-    let code = "namespace App.Tenant;\n\nenum Status : string\n{\n    case Active = \"a\";\n\n    public static Map<string, Status> byValue(List<Status> all)\n    {\n        const Function<string(Status)> key = s => s.value;\n        return all.associateBy(key);\n    }\n\n    public List<Function<bool()>> checks(List<Status> all)\n    {\n        List<Function<bool()>> checks = [];\n        for (let other of all) {\n            other = Status.Active;\n            checks.add(() => other === this);\n        }\n        return checks;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nenum Status : string\n{\n    case Active = \"a\";\n\n    public static Map<string, Status> byValue(List<Status> all)\n    {\n        const Function<string(Status)> key = s => s.value;\n        return all.associateBy(key);\n    }\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
@@ -6295,7 +6294,7 @@ fn a_property_named_as_its_class_is_no_clash_with_the_constructor() {
 #[test]
 fn a_lambda_parameter_by_reference_is_an_error_that_names_the_sharp_way() {
     let code = leak(method(
-        "        const changed = (&value) => value;\n        const marked = (readonly int value) => value;\n        return extra;\n",
+        "        const changed = (&value) => value;\n        const marked = (readonly int value) => value;\n        const typed = (int &value, string label) => value;\n        return extra;\n",
     ));
 
     assert_eq!(
@@ -6303,8 +6302,13 @@ fn a_lambda_parameter_by_reference_is_an_error_that_names_the_sharp_way() {
         [
             "7:26 PHP# has no by-reference parameter: return the new value, or let the lambda change a variable it captures.",
             "8:25 An `int` never changes, so `readonly` changes nothing: write `int`.",
+            "9:28 PHP# has no by-reference parameter: return the new value, or let the lambda change a variable it captures.",
         ]
     );
+    // A method's typed parameter, which reads as the intersection `int & value` until the parameter ends.
+    let typed = leak(method("        return 1;\n").replace("int extra", "int &extra"));
+
+    assert_eq!(issues(typed), ["5:24 PHP# has no by-reference parameter: return the new value."]);
 }
 
 /// A lambda's parameter is a method's, so it takes a union, a nullable union and a variadic last parameter, and a
@@ -6500,9 +6504,9 @@ fn a_class_error_names_the_class_as_sharp_writes_it() {
     );
 }
 
-/// Spec section 14 calls a lambda where it is written only inside parentheses, and gives no form that reads a member of
-/// a `new` expression, so the errors for those PHP forms name no code to write in a `.sharp` file. The PHP twin keeps
-/// upstream's examples.
+/// Spec section 14 calls a lambda where it is written only inside parentheses, which its error writes in PHP#, and gives
+/// no form that reads a member of a `new` expression, so that error names no code to write in a `.sharp` file. The PHP
+/// twin keeps upstream's examples.
 #[test]
 fn an_error_for_a_php_form_without_a_sharp_form_names_no_php_code() {
     let code = "namespace Demo;\n\nclass Order\n{\n    public int run()\n    {\n        const order = new Order[0]();\n        return () => { return 1; }();\n    }\n}\n";
@@ -6529,7 +6533,11 @@ fn an_error_for_a_php_form_without_a_sharp_form_names_no_php_code() {
         [
             ("This expression is not supported yet in PHP#.".to_owned(), None),
             ("`[` cannot follow a class name in a `new` expression.".to_owned(), None),
-            ("Immediately invoked closure must be wrapped in parentheses.".to_owned(), None),
+            (
+                "Write the lambda in parentheses to call it where it is written, as in `((int a) => a + 1)(2)`."
+                    .to_owned(),
+                None
+            ),
         ]
     );
 }

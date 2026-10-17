@@ -62,6 +62,7 @@ use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::Block;
 use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
@@ -306,13 +307,61 @@ pub fn report_untyped_lambda_parameters<A>(
 
 /// Refuses a PHP# lambda whose expression body gives a value where every function type it is written for returns
 /// `void`, spec section 14.1, as C#'s CS0201 refuses one: the body is a call, a change of a variable or `new`, or it
-/// throws.
+/// throws. A conditional of two such bodies is still refused, as in C#, and told to choose with `if`.
 pub fn report_value_for_void<A>(context: &mut Context<'_, '_, A>, expected: &TUnion, body: &Expression<'_>)
 where
     A: Arena,
 {
-    if !context.dialect.is_sharp() {
+    let Some(function_type) = void_function_type(context, expected) else {
         return;
+    };
+    if has_effect(body) {
+        return;
+    }
+
+    if let Expression::Conditional(conditional) = body.unparenthesized()
+        && conditional.then.is_some_and(has_effect)
+        && has_effect(conditional.r#else)
+    {
+        context.collector.report_with_code(
+            IssueCode::InvalidReturnStatement,
+            Issue::error(format!(
+                "A conditional gives a value, and `{function_type}` returns nothing: choose with `if` in a block body, as in `{{ if (…) {{ … }} else {{ … }} }}`."
+            ))
+            .with_annotation(Annotation::primary(body.span()).with_message("A conditional here.")),
+        );
+
+        return;
+    }
+
+    report_void_value(context, &function_type, body.span());
+}
+
+/// Refuses each `return` with a value in a PHP# lambda's block body where every function type it is written for
+/// returns `void`, as C#'s CS8030 does. A lambda nested in the block returns for itself, so its `return`s are its own.
+pub fn report_returned_value_for_void<A>(context: &mut Context<'_, '_, A>, expected: &TUnion, body: &Block<'_>)
+where
+    A: Arena,
+{
+    let Some(function_type) = void_function_type(context, expected) else {
+        return;
+    };
+
+    for r#return in body.statements.iter().flat_map(mago_syntax::utils::find_returns_in_statement) {
+        if let Some(value) = r#return.value {
+            report_void_value(context, &function_type, value.span());
+        }
+    }
+}
+
+/// The function type a PHP# lambda is written for, as code writes it, when every function type it is written for
+/// returns `void`.
+fn void_function_type<A>(context: &Context<'_, '_, A>, expected: &TUnion) -> Option<String>
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return None;
     }
 
     let mut signatures = expected.types.iter().filter_map(|atomic| match atomic {
@@ -323,7 +372,13 @@ where
         first.get_return_type().is_some_and(TUnion::is_void)
             && signatures.all(|signature| signature.get_return_type().is_some_and(TUnion::is_void))
     });
-    let has_effect = match body.unparenthesized() {
+
+    returns_void.then(|| crate::utils::names::display_type(context, expected))
+}
+
+/// Whether an expression is one C#'s CS0201 lets stand as a statement: a call, a change of a variable, `new` or a throw.
+fn has_effect(expression: &Expression<'_>) -> bool {
+    match expression.unparenthesized() {
         Expression::UnaryPrefix(prefix) => prefix.operator.is_increment_or_decrement(),
         expression => matches!(
             expression,
@@ -333,18 +388,20 @@ where
                 | Expression::Instantiation(_)
                 | Expression::Throw(_)
         ),
-    };
-    if !returns_void || has_effect {
-        return;
     }
+}
 
-    let function_type = crate::utils::names::display_type(context, expected);
+/// Refuses `value`, a value a PHP# lambda gives where `function_type`, written as code writes it, returns `void`.
+fn report_void_value<A>(context: &mut Context<'_, '_, A>, function_type: &str, value: Span)
+where
+    A: Arena,
+{
     context.collector.report_with_code(
         IssueCode::InvalidReturnStatement,
         Issue::error(format!(
-            "This lambda gives a value, and `{function_type}` returns nothing: write a call or a change, or give the function type a return type."
+            "This lambda gives a value, and `{function_type}` returns nothing: remove the value, or give the function type a return type."
         ))
-        .with_annotation(Annotation::primary(body.span()).with_message("Gives a value here.")),
+        .with_annotation(Annotation::primary(value).with_message("Gives a value here.")),
     );
 }
 
@@ -374,7 +431,8 @@ where
 /// return type, as a call gives an argument its parameter's type. Spec section 14.2: a PHP# lambda takes its parameter
 /// types from it. A member read takes them too, because a method value of a generic method infers its type arguments
 /// from them (section 14.3), and a generic call infers the type arguments nothing else fixes from it (section 11).
-/// `??`, `?:` and `match` give it to the sides and arms their value comes from.
+/// `??`, `?:` and `match` give it to the sides and arms their value comes from, and a collection literal gives each
+/// element the element type.
 pub fn expect_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -391,13 +449,14 @@ pub fn expect_type<A>(
     }
 }
 
-/// Whether `expression` takes the declared type its value goes into: a lambda, a call, a member read, or `??`, `?:` and
-/// `match`, which give it to their sides and arms.
+/// Whether `expression` takes the declared type its value goes into: a lambda, a call, a member read, or `??`, `?:`,
+/// `match` and a collection literal, which give it to their sides, arms and elements.
 pub fn takes_declared_type(expression: &Expression<'_>) -> bool {
     matches!(
         expression.unparenthesized(),
         Expression::ArrowFunction(_)
             | Expression::Closure(_)
+            | Expression::Array(_)
             | Expression::Call(_)
             | Expression::Conditional(_)
             | Expression::Match(_)
