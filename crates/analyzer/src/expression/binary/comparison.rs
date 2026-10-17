@@ -1,3 +1,4 @@
+use std::mem::discriminant;
 use std::rc::Rc;
 
 use mago_allocator::Arena;
@@ -783,23 +784,23 @@ fn comparands(union: &TUnion, codebase: &CodebaseMetadata) -> Vec<Comparand> {
     found
 }
 
-/// Whether a PHP# collection type is a `Map`, with its key and value types: what `==` compares, spec section 19.
-/// `None` when `union` is not one `List` or `Map`, besides `null`, as a `Set` or an iterable is not.
-fn collection_parts(union: &TUnion, codebase: &CodebaseMetadata) -> Option<(bool, TUnion, TUnion)> {
+/// The one collection a PHP# collection type is, a `List`, a `Map` or a `Set`, with the type of the values `==`
+/// compares: a list's or a set's elements, and a map's values, spec section 19. `None` when `union` is not one
+/// collection, besides `null`, as an iterable is not.
+fn collection_parts<'union>(union: &'union TUnion, codebase: &CodebaseMetadata) -> Option<(&'union TArray, TUnion)> {
     let mut collections = union.types.iter().filter(|atomic| !atomic.is_null());
-    let (Some(TAtomic::Array(array @ (TArray::List(_) | TArray::Keyed(_)))), None) =
-        (collections.next(), collections.next())
-    else {
+    let (Some(TAtomic::Array(array)), None) = (collections.next(), collections.next()) else {
         return None;
     };
-    let (key, value) = get_array_parameters(array, codebase);
+    let (_, value) = get_array_parameters(array, codebase);
 
-    Some((matches!(array, TArray::Keyed(_)), key, value))
+    Some((array, value))
 }
 
 /// Why `operator`, `==` or `!=`, may not compare a collection of `lhs_type` with one of `rhs_type`, spec section 19:
-/// two lists compare element by element in order, and two maps compare the values under each key regardless of order,
-/// each with its own `==`. A list never equals a map, and an empty literal equals either.
+/// two lists compare element by element in order, two maps compare the values under each key regardless of order, and
+/// two sets compare their elements regardless of order, each with its own `==`. A list, a map and a set never equal
+/// each other. An empty literal, whose elements are `never`, equals a list or a map, and a set equals only a set.
 fn collection_refusal(
     operator: &BinaryOperator<'_>,
     lhs_type: &TUnion,
@@ -807,12 +808,15 @@ fn collection_refusal(
     codebase: &CodebaseMetadata,
     visiting: &mut Vec<Word>,
 ) -> Option<Refusal> {
-    let (Some((lhs_map, _, lhs_value)), Some((rhs_map, _, rhs_value))) =
+    let (Some((lhs_array, lhs_value)), Some((rhs_array, rhs_value))) =
         (collection_parts(lhs_type, codebase), collection_parts(rhs_type, codebase))
     else {
         return Some(Refusal::Collection);
     };
-    if lhs_map != rhs_map && !lhs_value.is_never() && !rhs_value.is_never() {
+    let is_set = |array: &TArray| matches!(array, TArray::Set(_));
+    if discriminant(lhs_array) != discriminant(rhs_array)
+        && (is_set(lhs_array) || is_set(rhs_array) || (!lhs_value.is_never() && !rhs_value.is_never()))
+    {
         return Some(Refusal::DifferentTypes);
     }
 
@@ -831,8 +835,7 @@ where
     A: Arena,
 {
     let codebase = context.codebase;
-    let (Some((_, _, lhs)), Some((_, _, rhs))) =
-        (collection_parts(lhs_type, codebase), collection_parts(rhs_type, codebase))
+    let (Some((_, lhs)), Some((_, rhs))) = (collection_parts(lhs_type, codebase), collection_parts(rhs_type, codebase))
     else {
         unreachable!("`==` refuses elements only of two collections");
     };
@@ -863,7 +866,7 @@ pub(crate) enum Refusal {
     StructProperty,
     /// `==` or `!=` on two collections whose elements `==` cannot compare, spec section 19.
     CollectionElement,
-    /// `==` or `!=` on a `List`, `Map` or `Set`.
+    /// `==` or `!=` on an `Iterable`, or on a union that holds a `List`, a `Map` or a `Set` beside another type.
     Collection,
     /// `==` or `!=` on an instance of a class that declares no `operator ==`, or `<=>` or an ordering on one whose class
     /// declares no `operator <=>`.
@@ -960,7 +963,7 @@ fn refusal(
             } else if let Some(collection) = unchecked
                 && has(Comparand::Collection)
             {
-                // A `Set`'s elements have `==` and `hash()` already, so only a `List`'s or a `Map`'s are checked.
+                // Only a `List`'s, a `Map`'s or a `Set`'s elements are checked, and an `Iterable`'s are not.
                 collection_parts(collection, codebase)
                     .and_then(|_| collection_refusal(operator, collection, collection, codebase, visiting))
             } else if has(Comparand::Collection) {
@@ -1160,7 +1163,7 @@ pub(crate) fn report_sharp_refusal<A>(
                     element_reason(context, operator, lhs_type, rhs_type)
                 ))
                 .with_note(
-                    "Two lists are equal when their elements are, in order, and two maps when they hold equal values under the same keys.",
+                    "Two lists are equal when their elements are, in order, two maps when they hold equal values under the same keys, and two sets when they hold equal elements, in any order.",
                 ),
             )
         }
@@ -1169,7 +1172,7 @@ pub(crate) fn report_sharp_refusal<A>(
             Issue::error(format!(
                 "`{op}` on a collection is not supported yet, so it cannot compare `{lhs_name}` with `{rhs_name}`."
             ))
-            .with_note("A `List`, `Map` or `Set` is a PHP array at runtime, which `==` cannot compare strictly yet.")
+            .with_note("`==` compares two `List`s, two `Map`s or two `Set`s, and not yet an `Iterable` or a union that holds a collection beside another type.")
             .with_help("Compare the elements one by one."),
         ),
         Refusal::Instance => {
@@ -1277,9 +1280,9 @@ where
 /// an element of `element_type` with it, as spec section 12 decides: "`contains`, a `List`'s `remove`, `indexOf` and
 /// `Set<T>` need `==` on the element type." A search refuses what `element == value` refuses, so it agrees with
 /// `any(element => element == value)`: a class that declares no `operator ==` is refused with the reason `==` gives, as
-/// is an element the operator's call does not always take, a collection is not supported yet, as `==` on a collection
-/// is, and an `Any` element is refused unless the value is a string, a number or an enum case. A `null_safe` call's help
-/// keeps its `?.`.
+/// is an element the operator's call does not always take, an `Iterable` element, or one whose union holds a collection
+/// beside another type, is not supported yet, as `==` on it is, and an `Any` element is refused unless the value is a
+/// string, a number or an enum case. A `null_safe` call's help keeps its `?.`.
 pub(crate) fn check_element_equality<A>(
     context: &mut Context<'_, '_, A>,
     method: &str,
@@ -1370,7 +1373,7 @@ pub(crate) fn check_element_equality<A>(
             Issue::error(format!(
                 "`{method}` on `List<{element_name}>` is not supported yet: `==` on a collection is not supported yet."
             ))
-            .with_note("A `List`, `Map` or `Set` is a PHP array at runtime, which `==` cannot compare strictly yet.")
+            .with_note("`==` compares two `List`s, two `Map`s or two `Set`s, and not yet an `Iterable` or a union that holds a collection beside another type.")
             .with_help("Compare the elements one by one."),
         ),
         // A struct equals only the same struct, and declares no operator to change that.

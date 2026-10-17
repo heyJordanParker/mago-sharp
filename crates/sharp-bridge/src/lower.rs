@@ -2227,7 +2227,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.class = self.names.get(&event.name);
         let line = self.line(&event.parameter_list);
         let mut members = self.trait_members(event.inheritance.as_ref(), event.parameter_list.span());
-        members.push(self.promoted_constructor(event.name.span, &event.parameter_list));
+        members.extend(self.promoted_constructor(event.name.span, &event.parameter_list));
         members.extend(self.string_conversion(&[], event.parameter_list.span(), event.terminator.span()));
         members.extend(self.class_metadata(self.class, self.line(event.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
@@ -2244,13 +2244,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The public constructor of an event or a case that carries data, from `name` to the end of `parameters`, which
-    /// promotes each parameter to a `public readonly` property and has no statement.
-    fn promoted_constructor(&mut self, name: Span, parameter_list: &FunctionLikeParameterList) -> u32 {
+    /// makes each parameter a `public readonly` property, with the properties it declares before it. It promotes each
+    /// one and has no statement, unless a parameter holds a `Map` or a `Set`: a list literal or plain PHP passes one
+    /// as a PHP array, and PHP sets a promoted property before the body runs, so each parameter is then a plain one
+    /// beside the property it declares, and the body sets each property once [`Self::collection_parameters`] made the
+    /// object, as a class's constructor does: `$tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags;
+    /// $this->tags = $tags;`.
+    fn promoted_constructor(&mut self, name: Span, parameter_list: &FunctionLikeParameterList) -> Vec<u32> {
         self.enter(b"__construct");
+        let beside =
+            parameter_list.parameters.iter().any(|parameter| collection_hint(parameter.hint.as_ref()).is_some());
+        let mut members = Vec::new();
         let mut parameters = Vec::new();
         for parameter in &parameter_list.parameters {
             let index = self.parameter(parameter, None);
-            self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+            if beside {
+                let property = self.promoted_property(parameter);
+                self.nodes[property as usize].attr = ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+                members.push(property);
+            } else {
+                self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+            }
             parameters.push(index);
         }
 
@@ -2258,16 +2272,30 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let metadata = self.types.method_metadata(self.class, b"__construct");
         parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
+        let mut statements = Vec::new();
+        if beside {
+            statements.extend(self.collection_parameters(&parameter_list.parameters));
+            for parameter in &parameter_list.parameters {
+                let line = self.line(parameter);
+                let this = self.variable(parameter.variable.span, b"this");
+                let property = self.string(0, line, parameter.variable.name);
+                let place = self.node(SHARP_AST_PROP, 0, line, &[this, property]);
+                let value = self.variable(parameter.variable.span, parameter.variable.name);
+                statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[place, value]));
+            }
+        }
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
 
-        self.declaration(
+        members.push(self.declaration(
             SHARP_AST_METHOD,
             ZEND_ACC_PUBLIC,
             name,
             parameter_list,
             b"__construct",
             &[parameters, NULL, body, NULL, NULL],
-        )
+        ));
+
+        members
     }
 
     /// Spec section 20: an enum with a case that carries data is an abstract class, with the enum's header as its
@@ -2334,7 +2362,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let line = self.line(name.span);
             let case_class = [enum_name, b"\\", name.value].concat();
             let mut members = match &case.item {
-                EnumCaseItem::Data(item) => vec![self.promoted_constructor(name.span, &item.parameter_list)],
+                EnumCaseItem::Data(item) => self.promoted_constructor(name.span, &item.parameter_list),
                 EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => self.case_object(&case_class, name.span),
             };
             // A case of a generic enum passes its type arguments to the enum, as `Ok<T, TError>` to `Result<T, TError>`.

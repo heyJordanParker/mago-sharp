@@ -8194,6 +8194,200 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
 }
 
 /// ```php
+/// #[\Sharp\Crossing(['set', null])]
+/// public readonly \Sharp\Set $tags;
+/// public readonly int $id;
+/// public function __construct(\Sharp\Set|array $tags, int $id)
+/// {
+///     $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags;
+///     $this->tags = $tags;
+///     $this->id = $id;
+/// }
+/// ```
+///
+/// Spec sections 15 and 20: an event's parameter, and a field of a case that carries data, is a public get-only
+/// property, `[129]` `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`. A list literal or plain PHP passes a `Set` argument as a PHP
+/// array, and PHP sets a promoted property before the constructor's body runs, so where a parameter holds a `Map` or a
+/// `Set`, each parameter is a plain one beside the property it declares, and the constructor sets each property once
+/// the `Set` is made, as a class's constructor does. An event's property and parameters carry their type text, and a
+/// case's, which lowers in its enum's class, carry none, as they did before.
+#[test]
+fn an_event_or_a_case_makes_its_set_argument_a_set_before_it_sets_the_property() {
+    let event = Lowered::new("namespace App.Tenant;\n\npublic event Tagged(Set<string> tags, int id);\n");
+    let r#enum = Lowered::new("namespace App.Tenant;\n\nenum Label\n{\n    case Tagged(Set<string> tags);\n}\n");
+    let constructor = |lowered: &Lowered| lowered.render(lowered.method_named("__construct"));
+
+    assert_eq!(
+        property_groups(&event),
+        [
+            indoc! {r#"
+                PROP_GROUP [129]
+                  SHARP_TYPE_ARGS
+                    ZVAL "Sharp\\Set"
+                    ZVAL "Set<string>"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "tags"
+                      null
+                      null
+                      null
+                  ATTRIBUTE_LIST
+                    ATTRIBUTE_GROUP
+                      ATTRIBUTE
+                        ZVAL "Sharp\\Crossing"
+                        ARG_LIST
+                          ARRAY [3]
+                            ARRAY_ELEM
+                              ZVAL "set"
+                              null
+                            ARRAY_ELEM
+                              ZVAL null
+                              null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [129]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "id"
+                      null
+                      null
+                      null
+                  null
+            "#},
+        ]
+    );
+    assert_eq!(
+        constructor(&event),
+        indoc! {r#"
+            METHOD [1] "__construct" @3-3
+              PARAM_LIST
+                PARAM
+                  TYPE_UNION
+                    ZVAL "Sharp\\Set"
+                    TYPE [7]
+                  ZVAL "tags"
+                  null
+                  null
+                  null
+                  null
+                PARAM
+                  ZVAL [1] "int"
+                  ZVAL "id"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  null
+                  ZVAL "Set<string>, Any?"
+              null
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "tags"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    VAR
+                      ZVAL "tags"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "tags"
+                  VAR
+                    ZVAL "tags"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "id"
+                  VAR
+                    ZVAL "id"
+              null
+              null
+        "#}
+    );
+    assert_eq!(
+        property_groups(&r#enum),
+        [indoc! {r#"
+            PROP_GROUP [129]
+              ZVAL "Sharp\\Set"
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "tags"
+                  null
+                  null
+                  null
+              ATTRIBUTE_LIST
+                ATTRIBUTE_GROUP
+                  ATTRIBUTE
+                    ZVAL "Sharp\\Crossing"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "set"
+                          null
+                        ARRAY_ELEM
+                          ZVAL null
+                          null
+        "#}]
+    );
+    assert_eq!(
+        constructor(&r#enum),
+        indoc! {r#"
+            METHOD [1] "__construct" @5-5
+              PARAM_LIST
+                PARAM
+                  TYPE_UNION
+                    ZVAL "Sharp\\Set"
+                    TYPE [7]
+                  ZVAL "tags"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "tags"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    VAR
+                      ZVAL "tags"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "tags"
+                  VAR
+                    ZVAL "tags"
+              null
+              null
+        "#}
+    );
+}
+
+/// ```php
 /// $prefix = "v";
 /// $check = function (\Sharp\Set|array $tags) use ($prefix) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->contains($prefix); };
 /// $size = function (\Sharp\Set|array $tags) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->count(); };

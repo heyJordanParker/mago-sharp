@@ -119,8 +119,9 @@ fn an_extern_event_names_a_class() {
 }
 
 /// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
-/// `public` or `internal`, spec section 5, and each parameter is a type, a name and an optional default. An event is a
-/// class, so any capitalized word but a reserved type name names one, as `Print` and `Exit` do, and `Self` is refused.
+/// `public` or `internal`, spec section 5, and each parameter is a type, a `Set` among them, a name and an optional
+/// default. An event is a class, so any capitalized word but a reserved type name names one, as `Print` and `Exit` do,
+/// and `Self` is refused.
 #[test]
 fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties() {
     for (declaration, expected) in [
@@ -133,19 +134,13 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
                 "3:39 An event's parameter cannot be variadic: it is one property of the event.",
             ],
         ),
-        (
-            "public event Tagged(Set<string> tags);",
-            vec!["3:21 A `Set` parameter of an event is not supported yet in PHP#."],
-        ),
+        ("public event Tagged(Set<string> tags);", vec![]),
         ("[Logged] public event Noted(int id);", vec!["3:1 This construct is not supported yet in PHP#."]),
         (
             "public event Tracked(int id { get; });",
             vec!["3:29 An event's parameter takes no accessors: it is a get-only property of the event."],
         ),
-        (
-            "public event Maybe(int id, Set<int>? tags);",
-            vec!["3:28 A `Set` parameter of an event is not supported yet in PHP#."],
-        ),
+        ("public event Maybe(int id, Set<int>? tags);", vec![]),
         ("public event Paid(int orderId, string note = \"\") : Placed;", vec![]),
         ("event Moved(int id);", vec![]),
         ("interface Placed { }", vec![]),
@@ -5888,7 +5883,6 @@ fn enum_shapes_are_backed_or_not() {
         [
             "5:15 A case's field takes no modifier: it is a public get-only property of the case.",
             "6:26 A case's field cannot be variadic: it is one property of the case.",
-            "7:17 A `Set` field of a case is not supported yet in PHP#.",
             "8:29 A case's field takes no accessors: it is a get-only property of the case.",
         ]
     );

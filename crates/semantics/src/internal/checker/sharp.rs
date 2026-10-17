@@ -2843,11 +2843,8 @@ fn check_property_parameter(
     place: Place,
     context: &mut Context<'_, '_, '_>,
 ) -> Option<Place> {
-    let (part, word, owner, an_owner) = if place == Place::Case {
-        ("A case's field", "field", "case", "a case")
-    } else {
-        ("An event's parameter", "parameter", "event", "an event")
-    };
+    let (part, owner) =
+        if place == Place::Case { ("A case's field", "case") } else { ("An event's parameter", "event") };
     let remove = |span: Span, message: String| {
         Issue::error(message).with_annotation(Annotation::primary(span).with_message("Remove this."))
     };
@@ -2864,13 +2861,6 @@ fn check_property_parameter(
         remove(accessors.span(), format!("{part} takes no accessors: it is a get-only property of the {owner}."))
     } else if let Some(ellipsis) = parameter.ellipsis {
         remove(ellipsis, format!("{part} cannot be variadic: it is one property of the {owner}."))
-    } else if let Some(Hint::Generic(set) | Hint::Nullable(NullableHint { hint: Hint::Generic(set), .. })) =
-        &parameter.hint
-        && set.name.value == b"Set"
-    {
-        Issue::error(format!("A `Set` {word} of {an_owner} is not supported yet in PHP#."))
-            .with_annotation(Annotation::primary(set.span()).with_message("Not supported yet."))
-            .with_note(format!("{part} is its property, and {an_owner} cannot yet make its argument a `Set`."))
     } else {
         return enter(Node::FunctionLikeParameter(parameter), Place::Method, context);
     };
