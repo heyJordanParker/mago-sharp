@@ -1255,7 +1255,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             check_generic(generic, place, context)
         }
         // Spec section 2: a constant's value is known before the code runs, and a collection literal is.
-        (Node::GenericHint(generic), ClassConstant) if matches!(generic.name.value, b"List" | b"Map" | b"Set") => {
+        (Node::GenericHint(generic), ClassConstant)
+            if matches!(generic.name.value, b"List" | b"Map" | b"Set" | b"Iterable") =>
+        {
             check_generic(generic, place, context)
         }
         // A generic type's type arguments, and those of `new` and of a method call, are never `void`. Nor are they
@@ -1301,7 +1303,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(Parameter)
         }
         // A tuple's element types are checked as a parameter's type is, so `Self` in one is an error.
-        (Node::TupleHint(tuple), FieldOrProperty | Method | Signature | Parameter | Body) => check_tuple(tuple, context),
+        (Node::TupleHint(tuple), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body) => {
+            check_tuple(tuple, context)
+        }
         (Node::TupleElementHint(_), Parameter) => Some(Parameter),
         // The effects an `extern`, a function type or a method without a body lists, spec section 29, which the
         // analyzer's `check_uses` decides, because an effect is a `foreign` class any file may declare.
@@ -5464,7 +5468,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }
         Place::ClassConstant => {
-            "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class or a collection as in `Map<string, int>`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
+            "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class, a collection as in `Map<string, int>`, `Iterable<T>` or a tuple as in `[int, string]`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
         }
         Place::Method => {
             "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, optional type parameters as in `<TItem : DatabaseEntity>`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, a tuple as in `[Money, int]` or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."

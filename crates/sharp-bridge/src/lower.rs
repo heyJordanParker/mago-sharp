@@ -5670,6 +5670,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let member = self.member(member);
 
         match kind {
+            // A class constant holds no object, so a `Map` or a `Set` constant is its PHP array, which the read makes
+            // the object again, spec section 12.
+            DeclarationKind::Constant if self.crossing_array(self.types.expression_type(read)).is_some() => {
+                let r#type = self.types.expression_type(read).clone();
+
+                self.crossed_from(read.span(), &r#type, |this| {
+                    this.node(SHARP_AST_CLASS_CONST, 0, line, &[class, member])
+                })
+            }
             DeclarationKind::Constant | DeclarationKind::EnumCase => {
                 self.node(SHARP_AST_CLASS_CONST, 0, line, &[class, member])
             }
@@ -8418,15 +8427,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return self.expression(value);
         };
 
-        let span = value.span();
-        let taken = self.temporaries;
-        let name = self.hidden("crossing");
-        let place = self.variable(span, &name);
         let arrival = match self.crossing_array(r#type) {
             Some(TArray::Keyed(_)) => Arrival::Map(r#type),
             _ => Arrival::Read,
         };
-        let lowered = self.arriving(value, arrival);
+
+        self.crossed_from(value.span(), r#type, |this| this.arriving(value, arrival))
+    }
+
+    /// The value `lower` lowers, of `r#type`, which may be a PHP array, with each `Map` and `Set` the type holds made the
+    /// object, as [`Self::crossed`] makes it of a hidden variable the value is assigned to:
+    /// `\is_array($crossing#N = value) ? \Sharp\Map::from($crossing#N) : $crossing#N`.
+    fn crossed_from(&mut self, span: Span, r#type: &TUnion, lower: impl FnOnce(&mut Self) -> u32) -> u32 {
+        let taken = self.temporaries;
+        let name = self.hidden("crossing");
+        let place = self.variable(span, &name);
+        let lowered = lower(self);
         let first = self.node(SHARP_AST_ASSIGN, 0, self.line(span), &[place, lowered]);
         let crossed = self.crossed(span, r#type, &name, first);
         self.temporaries = taken;

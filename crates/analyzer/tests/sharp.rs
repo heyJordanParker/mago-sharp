@@ -16168,6 +16168,25 @@ fn a_constant_and_an_enum_case_are_named_as_sharp_writes_them() {
     );
 }
 
+/// An `Iterable` or a tuple constant takes a list literal whose elements fit its type, and refuses one whose elements
+/// don't, as a collection constant does.
+#[test]
+fn an_iterable_or_a_tuple_constant_checks_its_elements() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public const Iterable<int> STEPS = [1, 2];\n\n    public const [int, string] PAIR = [1, \"a\"];\n\n    public const Iterable<int> WORDS = [\"a\"];\n\n    public const [int, string] SWAPPED = [\"a\", 1];\n}\n";
+    let refused: Vec<String> = worded(("src/Demo/Order.sharp", sharp), &[])
+        .into_iter()
+        .map(|issue| issue.split(" | ").next().unwrap_or_default().to_owned())
+        .collect();
+
+    assert_eq!(
+        refused,
+        [
+            "9:40 invalid-constant-value Value for constant `Order.WORDS` is not assignable to its declared type.",
+            "11:42 invalid-constant-value Value for constant `Order.SWAPPED` is not assignable to its declared type.",
+        ]
+    );
+}
+
 /// A method or property a class does not have is named as PHP# writes it, `Order.missing`, on an instance, and
 /// through the class. The PHP twin keeps upstream's wording.
 #[test]

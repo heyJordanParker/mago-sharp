@@ -14176,6 +14176,94 @@ fn a_map_or_a_set_constant_is_its_php_array() {
 }
 
 /// ```php
+/// return \is_array($crossing#1 = \App\Tenant\Report::CODES) ? new \Sharp\Set($crossing#1) : $crossing#1;
+/// ```
+///
+/// A class constant holds no object, so a read of a `Set` or a `Map` constant makes its PHP array the object again,
+/// spec section 12, and PHP# runs its methods on that.
+#[test]
+fn a_read_of_a_set_constant_makes_the_set_of_its_array() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const Set<string> CODES = [\"a\", \"b\"];\n\n    public Set<string> codes() => Report.CODES;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body_of("codes"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "crossing#1"
+                        CLASS_CONST
+                          ZVAL "App\\Tenant\\Report"
+                          ZVAL "CODES"
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      VAR
+                        ZVAL "crossing#1"
+                  VAR
+                    ZVAL "crossing#1"
+        "#}
+    );
+}
+
+/// ```php
+/// public const iterable STEPS = [1, 2];
+/// public const array PAIR = [1, 'a'];
+/// ```
+///
+/// A constant's value is known before the code runs, spec section 2, so an `Iterable` holds a list literal and a tuple
+/// holds a list literal of constants. PHP types the one `iterable` and the other `array`.
+#[test]
+fn an_iterable_or_a_tuple_constant_holds_its_list_literal() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const Iterable<int> STEPS = [1, 2];\n    public const [int, string] PAIR = [1, \"a\"];\n}\n",
+    );
+    let class = lowered.child(lowered.root(), 2);
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 2)),
+        indoc! {r#"
+            STMT_LIST
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "STEPS"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL 1
+                        null
+                      ARRAY_ELEM
+                        ZVAL 2
+                        null
+                    null
+                null
+                ZVAL [1] "iterable"
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "PAIR"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL 1
+                        null
+                      ARRAY_ELEM
+                        ZVAL "a"
+                        null
+                    null
+                null
+                TYPE [7]
+        "#}
+    );
+}
+
+/// ```php
 /// class Bill extends \App\Record implements \App\Morphable
 /// {
 ///     public function getMorphClass(...$arguments): string { return parent::getMorphClass(...$arguments); }

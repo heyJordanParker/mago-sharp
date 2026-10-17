@@ -3986,6 +3986,15 @@ fn a_constant_or_static_member_named_without_its_class_is_an_error_that_names_th
     );
 }
 
+/// Spec section 2: a constant's value is known before the code runs, so a constant takes a collection, an `Iterable`
+/// of a list literal and a tuple of constants as its type.
+#[test]
+fn a_class_constant_may_have_a_collection_an_iterable_or_a_tuple_type() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const Map<string, int> LIMITS = [\"card\": 100];\n    public const Iterable<int> STEPS = [1, 2];\n    public const [int, string] PAIR = [1, \"a\"];\n    public const [int, string]? SPARE = null;\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
 /// Spec section 24 writes a union anywhere a type goes, and PHP 8.3 types a class constant with one.
 #[test]
 fn a_class_constant_may_have_a_union_type_or_a_nullable_union_type() {
