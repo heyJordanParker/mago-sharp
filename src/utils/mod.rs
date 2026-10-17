@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 use std::io::IsTerminal;
+use std::io::Write;
+use std::path::Path;
 
 use clap::ColorChoice;
 use diffy::PatchFormatter;
@@ -21,6 +23,28 @@ pub mod git;
 pub mod logger;
 pub mod progress;
 pub mod version;
+
+/// Writes `bytes` to a new file beside `path` and renames it over `path`, so a reader sees the old file or the new
+/// one, never part of one. The file gets the mode any new file gets, `0644` under the usual umask, so a server that
+/// runs PHP as another user reads it.
+pub(crate) fn write_by_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let folder = path.parent().unwrap_or(path);
+    std::fs::create_dir_all(folder)?;
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666));
+    let mut file = builder.tempfile_in(folder)?;
+    file.write_all(bytes)?;
+    let (file, written) = file.keep().map_err(|error| error.error)?;
+    drop(file);
+
+    // `NamedTempFile::persist` renames with `MoveFileExW` alone, which fails on Windows while a reader holds the old
+    // file open. `std::fs::rename` then falls back to a POSIX rename, which replaces it when every reader opened it with
+    // `FILE_SHARE_DELETE`, as Rust's `File::open` does, and leaves each reader the old file.
+    std::fs::rename(&written, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&written);
+    })
+}
 
 /// Determines whether colors should be used on stdout, by the rule [`ReportingColorChoice::should_use_colors`] holds.
 #[inline]

@@ -226,6 +226,29 @@ final class Set implements \ArrayAccess, \IteratorAggregate, \Countable, \JsonSe
 }
 
 /**
+ * The engine's container, which builds the services the app's modules bind. Plain PHP reaches it by name, as a
+ * framework's service provider does.
+ */
+final class Container
+{
+    /**
+     * The service `$id` names: a class name or a service id. Throws `ContainerError` when the container can't build it.
+     */
+    public function get(string $id): mixed {}
+
+    /**
+     * Whether a module binds `$id`.
+     */
+    public function has(string $id): bool {}
+}
+
+/**
+ * A failure of the container itself: the service no module binds, the class that needs itself, the parameter with no
+ * class type, or the bound class that isn't there.
+ */
+final class ContainerError extends \Error {}
+
+/**
  * The handle of a listener `Events.on` starts: the engine stops the listener when the handle is destroyed.
  */
 final class Listening
