@@ -186,6 +186,27 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
     );
 }
 
+/// Spec section 1: an attribute on a declaration the slice gives none, as an interface, an interface method or a
+/// constant, is not supported yet, since PHP# has not decided it. A case in an interface is a form neither PHP nor
+/// PHP# has, so it is no PHP# construct.
+#[test]
+fn an_unplaced_attribute_is_not_supported_yet_and_an_interface_case_is_no_php_sharp_construct() {
+    let interface =
+        "namespace App.Shop;\n\n[Marked]\npublic interface Shape\n{\n    [Marked] int area();\n\n    case Open;\n}\n";
+    let class = "namespace App.Shop;\n\npublic class Report\n{\n    [Marked] public const int LIMIT = 1;\n}\n";
+
+    assert_eq!(
+        issues(interface),
+        [
+            "8:5 Interface `Shape` cannot contain enum cases.",
+            "3:1 This construct is not supported yet in PHP#.",
+            "6:5 This construct is not supported yet in PHP#.",
+            "8:5 This class member is not part of PHP#.",
+        ]
+    );
+    assert_eq!(issues(class), ["5:5 This construct is not supported yet in PHP#."]);
+}
+
 /// Spec section 28: a law states a fact about the values of a class or an enum, and an interface has no values.
 #[test]
 fn a_law_is_a_member_of_a_class_or_an_enum_and_of_no_interface() {
@@ -1130,10 +1151,7 @@ fn declare_of_another_setting_is_one_error_that_names_it() {
 
         assert_eq!(
             issues,
-            [(
-                format!("PHP# has no `{head}`: a `.sharp` file runs with PHP's default settings."),
-                Some(help.to_owned())
-            )],
+            [(format!("PHP# has no `{head}`: a `.sharp` file takes no settings."), Some(help.to_owned()))],
             "{code}"
         );
     }
@@ -1826,7 +1844,7 @@ fn self_names_the_class_and_self_where_it_goes() {
 #[test]
 fn static_is_written_self() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n\n    public required Report(int|static copy)\n    {\n    }\n\n    public static int|static make()\n    {\n        let count = static.count;\n        let made = static.make();\n        return new static(static.count);\n    }\n}\n";
-    let message = "PHP# writes `Self` for PHP's `static`.";
+    let message = "PHP# has no `static` class name: write `Self`.";
 
     assert_eq!(
         issues(code),
@@ -3067,7 +3085,7 @@ fn an_expression_refused_at_part_of_it_has_the_rest_checked() {
             format!("8:27 PHP# has no `__LINE__`: {line}"),
             "9:19 PHP# has no `self`: write the class's own name, `Report`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
             format!("9:29 PHP# has no `__LINE__`: {line}"),
-            "10:23 PHP# writes `Self` for PHP's `static`.".to_owned(),
+            "10:23 PHP# has no `static` class name: write `Self`.".to_owned(),
             format!("10:30 PHP# has no `__LINE__`: {line}"),
             format!("11:25 PHP# has no `__LINE__`: {line}"),
             format!("12:19 {request}"),
@@ -3135,7 +3153,7 @@ fn a_map_key_is_refused_once() {
         issues(code),
         [
             "7:13 PHP# has no `callable`: write `Function<R(P)>`.".to_owned(),
-            "8:13 PHP# writes `Self` for PHP's `static`.".to_owned(),
+            "8:13 PHP# has no `static` class name: write `Self`.".to_owned(),
             format!("9:13 {key}"),
             "10:13 PHP# has no `callable`: write `Function<R(P)>`.".to_owned(),
             format!("11:13 {key}"),
@@ -4681,8 +4699,8 @@ fn a_type_php_sharp_writes_another_way_is_an_error_that_names_its_form() {
         ("Bool", "PHP# writes the type `bool`."),
         ("String", "PHP# writes the type `string`."),
         ("INT", "PHP# writes the type `int`."),
-        ("object", "PHP# writes `Object` for PHP's `object`."),
-        ("OBJECT", "PHP# writes `Object` for PHP's `object`."),
+        ("object", "PHP# has no `object`: write `Object`."),
+        ("OBJECT", "PHP# has no `OBJECT`: write `Object`."),
         ("any", "PHP# writes `Any`."),
         ("mixed", "PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null."),
         ("null", "A type holds null only with `?` after it: write the type, as in `int?`."),
@@ -4780,7 +4798,7 @@ fn types_outside_the_slice_are_an_error_and_an_intersection_is_not_supported_yet
     assert_eq!(
         issues(code),
         [
-            "3:12 PHP# writes `Object` for PHP's `object`.".to_owned(),
+            "3:12 PHP# has no `object`: write `Object`.".to_owned(),
             format!("3:23 {iterable}"),
             format!("3:40 {iterable}"),
             format!("3:52 {iterable}"),

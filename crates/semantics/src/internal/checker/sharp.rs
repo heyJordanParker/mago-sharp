@@ -656,7 +656,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                     _ => "Write its body's code without the `declare` around it.",
                 };
 
-                Issue::error(format!("PHP# has no `{head}`: a `.sharp` file runs with PHP's default settings."))
+                Issue::error(format!("PHP# has no `{head}`: a `.sharp` file takes no settings."))
                     .with_help(help)
             };
             context.report(issue.with_annotation(Annotation::primary(declare.span()).with_message("Written here.")));
@@ -4300,7 +4300,7 @@ fn type_written_another_way(hint: &Hint, place: Place, context: &Context<'_, '_,
         b"int" | b"float" | b"bool" | b"string" | b"void" if written != lowercase.as_slice() => {
             (format!("PHP# writes the type `{}`.", BytesDisplay(&lowercase)), None)
         }
-        b"object" if written != OBJECT => ("PHP# writes `Object` for PHP's `object`.".to_owned(), None),
+        b"object" if written != OBJECT => (format!("PHP# has no `{}`: write `Object`.", BytesDisplay(written)), None),
         b"any" if written != ANY => ("PHP# writes `Any`.".to_owned(), None),
         b"mixed" => (
             "PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.".to_owned(),
@@ -4816,7 +4816,7 @@ fn parent_instead(span: Span, context: &Context<'_, '_, '_>) -> String {
 /// Reports PHP's `static`, which spec section 25 writes `Self`.
 fn report_php_static(keyword: &Keyword, context: &mut Context<'_, '_, '_>) {
     context.report(
-        Issue::error("PHP# writes `Self` for PHP's `static`.")
+        Issue::error("PHP# has no `static` class name: write `Self`.")
             .with_annotation(Annotation::primary(keyword.span).with_message("Written here.")),
     );
 }
@@ -5591,9 +5591,9 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 /// Whether a node the slice does not have is a form PHP# has not decided, or that a later change builds, so it is not
 /// supported yet: `break` and `continue` with a level, an anonymous class, `|>`, a partial application, a member of
 /// `Self` read or written, as in `Self.count`, an interface's constants, property bodies and operators, an enum's
-/// operators, an event's attributes, a case's `value` or `name` in a constant value, an intersection type, a type with
-/// no test in a pattern, as a tuple or `Class<T>`, and a constant typed as a function, a tuple or a generic type, which
-/// the collections change builds.
+/// operators, attributes on a declaration the slice gives none, as an event or an interface, a case's `value` or
+/// `name` in a constant value, an intersection type, a type with no test in a pattern, as a tuple or `Class<T>`, and a
+/// constant typed as a function, a tuple or a generic type, which the collections change builds.
 fn is_undecided(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>) -> bool {
     match (node, place) {
         (
@@ -5619,7 +5619,7 @@ fn is_undecided(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>)
             Place::Interface,
         )
         | (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Place::Enum)
-        | (Node::AttributeList(_), Place::Event) => true,
+        | (Node::AttributeList(_), _) => true,
         (Node::Hint(Hint::Intersection(_)) | Node::IntersectionHint(_), _) => true,
         (Node::Hint(Hint::Parenthesized(parenthesized)), _) => matches!(parenthesized.hint, Hint::Intersection(_)),
         (Node::Hint(hint), Place::Pattern) => is_slice_type(hint) && !has_type_test(hint),
