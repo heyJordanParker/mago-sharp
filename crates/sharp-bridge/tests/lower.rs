@@ -20784,6 +20784,60 @@ fn attributes_on_an_interface_its_property_an_event_a_constant_and_a_lambda_lowe
     assert_eq!(limits.render(limits.child(closure, 4)), attribute("twice"));
 }
 
+/// ```php
+/// #[\Lib\Field([new \Lib\Throttle(perMinute: 60, window: new \App\Window(5))])]
+/// ```
+///
+/// Spec section 1: an attribute argument may `new` an object from constants, which lowers to the `NEW` php-src's
+/// grammar builds in a constant expression, so PHP creates the object each time it reads the attribute.
+#[test]
+fn a_new_in_an_attribute_argument_lowers_to_the_new_php_takes_there() {
+    let throttle = (
+        "src/Lib/Throttle.php",
+        "<?php namespace Lib; final class Throttle { public function __construct(public int $perMinute, public ?object $window = null) {} }",
+    );
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Window.sharp",
+                "namespace App;\n\npublic class Window\n{\n    public Window(public int seconds { get; }) { }\n}\n",
+            ),
+            (
+                "src/App/Orders.sharp",
+                "namespace App;\n\nimport Lib.Field;\nimport Lib.Throttle;\n\n[Field([new Throttle(perMinute: 60, window: new Window(5))])]\npublic class Orders\n{\n}\n",
+            ),
+        ],
+        &[common::FIELD, throttle],
+    );
+    let (lowered, class) = class_in(&files, "Orders");
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 3)),
+        indoc! {r#"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Field"
+                  ARG_LIST
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        NEW
+                          ZVAL "Lib\\Throttle"
+                          ARG_LIST
+                            NAMED_ARG
+                              ZVAL "perMinute"
+                              ZVAL 60
+                            NAMED_ARG
+                              ZVAL "window"
+                              NEW
+                                ZVAL "App\\Window"
+                                ARG_LIST
+                                  ZVAL 5
+                        null
+        "#}
+    );
+}
+
 /// Spec section 1: an interface method carries its attributes as a class method does, and so does the trait method
 /// that runs its default body.
 #[test]

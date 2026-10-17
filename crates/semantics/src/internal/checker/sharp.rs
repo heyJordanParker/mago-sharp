@@ -209,8 +209,9 @@ const OBJECT: &[u8] = b"Object";
 /// - Attributes: on a class, an interface, an enum, an enum case, an event, a constant, a method, an interface method, a
 ///   field, a property, a parameter and a lambda with its parameters in parentheses, written `[Name]` or
 ///   `[Name(arguments)]`, several in one list, as in `[Field("Name"), Searchable]`, or in several lists. An argument
-///   is positional or named, and is a constant expression as a parameter default is, list and map literals included.
-///   PHP's own check reports a spread argument. An attribute target, as in `[return: NotNull]`, is a parse error.
+///   is positional or named, and is a constant expression as a parameter default is, list and map literals included,
+///   or a `new` of a class by its name whose arguments are such values, as `check_attribute_object` decides. Anything
+///   else is an error that names the rule. PHP's own check reports a spread argument. An attribute target, as in `[return: NotNull]`, is a parse error.
 /// - A constant: an optional `public`, `protected` or `private`, an optional type from the types below but `void`, one
 ///   name, and a value as a parameter default is. Several names in one declaration are an error.
 /// - A field: an optional `private` or `protected`, an optional `static`, a type, one name and an optional initial
@@ -970,9 +971,22 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::PartialArgument(PartialArgument::Positional(_) | PartialArgument::Named(_)),
             Attribute,
         ) => Some(Attribute),
-        // PHP refuses a spread in attribute arguments, and `check_attribute_list` reports it.
+        // PHP refuses a spread in attribute arguments, and `check_attribute_list` reports it, as `check_attribute_object`
+        // does in a `new`'s arguments.
         (Node::PositionalArgument(argument), Attribute) => argument.ellipsis.is_none().then_some(Constant),
         (Node::NamedArgument(_), Attribute) => Some(Constant),
+        (Node::Expression(Expression::Instantiation(instantiation)), Constant)
+            if context.slice_places.contains(&Some(Attribute)) =>
+        {
+            check_attribute_object(instantiation, context)
+        }
+        (
+            Node::Instantiation(_)
+            | Node::Expression(Expression::Identifier(Identifier::Local(_)))
+            | Node::ArgumentList(_)
+            | Node::Argument(_),
+            Attribute,
+        ) => Some(Attribute),
 
         (Node::ClassLikeMember(ClassLikeMember::Method(_) | ClassLikeMember::Law(_)), Class | Enum) => Some(place),
         (Node::ClassLikeMember(ClassLikeMember::Extension(extension)), Class | Interface | Enum) => {
@@ -2262,12 +2276,72 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         ) => Some(FunctionCall),
         (Node::ArgumentList(_), FunctionCall) => Some(Body),
 
+        (Node::Expression(_), Constant) if context.slice_places.contains(&Some(Attribute)) => {
+            report_attribute_argument(node.span(), context);
+
+            None
+        }
         _ => {
             report_unsupported(node, place, context);
 
             None
         }
     }
+}
+
+/// Spec section 1: an attribute argument may create an object of a class it names, from arguments that are constants or
+/// more such objects, as PHP and Java's nested annotations take, and PHP creates it each time it reads the attribute. A
+/// named constructor, an object initializer and a spread run code there. PHP creates the object with no PHP# code to
+/// give it type arguments, so a generic class's object is an error.
+fn check_attribute_object(instantiation: &Instantiation, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    if let Some(type_arguments) = &instantiation.type_arguments {
+        context.report(
+            Issue::error(format!(
+                "An attribute argument cannot create an object of a generic class, as `{}` does: PHP creates it without its type arguments.",
+                BytesDisplay(context.get_code_snippet(instantiation))
+            ))
+            .with_annotation(Annotation::primary(type_arguments.span()).with_message("Written here.")),
+        );
+
+        return None;
+    }
+
+    let names_class = matches!(instantiation.class, Expression::Identifier(Identifier::Local(class))
+        if !context.names.is_type_parameter(class));
+    if !names_class
+        || instantiation.constructor.is_some()
+        || instantiation.initializer.is_some()
+        || instantiation.argument_list.is_none()
+    {
+        report_attribute_argument(instantiation.span(), context);
+
+        return None;
+    }
+
+    let spreads: Vec<Span> = instantiation
+        .argument_list
+        .iter()
+        .flat_map(|list| list.arguments.iter())
+        .filter_map(|argument| match argument {
+            Argument::Positional(positional) if positional.ellipsis.is_some() => Some(positional.span()),
+            _ => None,
+        })
+        .collect();
+    for spread in &spreads {
+        report_attribute_argument(*spread, context);
+    }
+
+    spreads.is_empty().then_some(Place::Attribute)
+}
+
+fn report_attribute_argument(span: Span, context: &mut Context<'_, '_, '_>) {
+    context.report(
+        Issue::error(format!(
+            "An attribute argument is a constant or a `new` of constants, and `{}` is neither.",
+            BytesDisplay(context.get_code_snippet(span))
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Written here.")),
+    );
 }
 
 /// Whether the slice has a method, with the refusal's message and note when it does not. Each rule keeps out a method
@@ -5488,7 +5562,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
         }
         Place::Constant => {
-            "A parameter default, an attribute argument, a constant's value, an enum case's value or a pattern's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
+            "A parameter default, a constant's value, an enum case's value or a pattern's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
         }
         Place::Pattern => {
             "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."

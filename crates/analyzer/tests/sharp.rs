@@ -5603,6 +5603,23 @@ fn attribute_arguments_are_checked_against_the_attribute_constructor_as_in_php()
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
+/// Spec section 1: a `new` in an attribute argument is checked against the constructor it calls, as PHP checks it.
+#[test]
+fn a_new_in_an_attribute_argument_is_checked_against_its_constructor_as_in_php() {
+    let route = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_ALL)]\nfinal class Route\n{\n    public function __construct(public string $path, public array $middleware = [])\n    {\n    }\n}\n\nfinal class Throttle\n{\n    public function __construct(public int $perMinute)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Route;\nimport Lib.Throttle;\n\n[Route(\"/a\", middleware: [new Throttle(perMinute: 60), new Throttle(\"sixty\")])]\nclass Report\n{\n    [Route(\"/b\", middleware: [new Throttle(), new Throttle(1, speed: 2)])]\n    public int run() => 1;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Route;\nuse Lib\\Throttle;\n\n#[Route(\"/a\", middleware: [new Throttle(perMinute: 60), new Throttle(\"sixty\")])]\nclass Report\n{\n    #[Route(\"/b\", middleware: [new Throttle(), new Throttle(1, speed: 2)])]\n    public function run(): int\n    {\n        return 1;\n    }\n}\n";
+
+    let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Route.php", route)]);
+    let php_issues = issues(("src/Demo/Report.php", php), &[("src/Lib/Route.php", route)]);
+
+    assert_eq!(
+        sharp_issues,
+        ["6:69 invalid-argument", "9:43 too-few-arguments", "9:63 invalid-named-argument", "9:63 too-many-arguments"]
+    );
+    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+}
+
 /// A plain PHP class whose values arrive in PHP# as `Any?`: typed `mixed`, or not typed at all.
 const SOURCE: &str = "<?php\n\nnamespace Demo;\n\nfinal class Source\n{\n    public static function value(string $key): mixed\n    {\n        return $key;\n    }\n\n    public static function untyped(string $key)\n    {\n        return $key;\n    }\n\n    public static function take(mixed $value): void\n    {\n    }\n\n    public static function takeUntyped($value): void\n    {\n    }\n\n    public static function takeInt(int $value): void\n    {\n    }\n}\n";
 

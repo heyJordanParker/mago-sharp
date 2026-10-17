@@ -3080,16 +3080,23 @@ fn attributes_on_an_interface_its_property_an_event_a_constant_and_a_lambda_are_
     assert_eq!(issues(class), Vec::<String>::new());
 }
 
+/// Spec section 1: an attribute argument is a constant or a `new` of constants, as PHP and Java's nested annotations
+/// take, and PHP builds the object each time it reads the attribute. Anything that runs code is an error that names the
+/// rule.
 #[test]
-fn attribute_arguments_outside_the_slice_are_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    [Field(typeof(Report).name)]\n    [Field(Mode.Write)]\n    [Field([this.run(1)])]\n    [Field(label: new Report())]\n    public int run(int extra)\n    {\n        return extra;\n    }\n}\n";
+fn an_attribute_argument_is_a_constant_or_a_new_of_constants() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    [Field(typeof(Report).name)]\n    [Field(Mode.Write)]\n    [Field([this.run(1)])]\n    [Field(label: new Report())]\n    [Route(\"/orders\", middleware: [new Throttle(perMinute: 60, window: new Window(typeof(Report), [1, 2], [\"a\": 1]))])]\n    [Route(\"/orders\", middleware: [new Throttle(this.run(1))])]\n    [Route(\"/orders\", middleware: [new Throttle(...[1])])]\n    [Route(\"/orders\", middleware: [new Throttle.hourly(1), new Throttle { perMinute: 1 }, new Box<int>(1)])]\n    public int run(int extra)\n    {\n        return extra;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "5:12 This expression is not supported yet in PHP#.",
-            "7:13 This expression is not supported yet in PHP#.",
-            "8:19 This expression is not supported yet in PHP#.",
+            "5:12 An attribute argument is a constant or a `new` of constants, and `typeof(Report).name` is neither.",
+            "7:13 An attribute argument is a constant or a `new` of constants, and `this.run(1)` is neither.",
+            "10:49 An attribute argument is a constant or a `new` of constants, and `this.run(1)` is neither.",
+            "11:49 An attribute argument is a constant or a `new` of constants, and `...[1]` is neither.",
+            "12:36 An attribute argument is a constant or a `new` of constants, and `new Throttle.hourly(1)` is neither.",
+            "12:60 An attribute argument is a constant or a `new` of constants, and `new Throttle { perMinute: 1 }` is neither.",
+            "12:98 An attribute argument cannot create an object of a generic class, as `new Box<int>(1)` does: PHP creates it without its type arguments.",
         ]
     );
 
