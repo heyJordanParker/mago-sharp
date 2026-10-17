@@ -13220,6 +13220,33 @@ fn a_type_test_of_a_tuple_a_class_value_or_object_narrows_to_the_type_written() 
     );
 }
 
+/// A list pattern of types alone, as `[int, string]`, matches the values of that tuple, so the value it narrows is the
+/// tuple, which unpacks and returns as one. A list pattern with a name or a rest narrows to a `List`, and a parameter's
+/// type may start with a tuple.
+#[test]
+fn a_list_pattern_of_types_alone_narrows_to_the_tuple() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static string unpacked(Any? pair)\n    {\n        if (pair is [int, string]) {\n            const [count, label] = pair;\n            return label;\n        }\n        return \"\";\n    }\n\n    public static [int, string]? kept(Any? pair) => pair is [int, string] ? pair : null;\n\n    public static [int, string]? named(Any? pair) => pair is [int count, string] ? pair : null;\n\n    public static bool held([int, string]|int|string held) => held is [int, string]|int;\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["16:54 invalid-return-statement"]);
+}
+
+/// A list pattern's element a tuple's element can never be reports the tuple's element at its index, once, in a loop
+/// too.
+#[test]
+fn a_list_pattern_element_a_tuple_never_holds_names_the_tuple_element() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static bool pair([int, string] value) => value is [int, int];\n\n    public static bool named([int, string] value) => value is [string first, ...List<Any?> rest];\n\n    public static bool looped(List<[int, string]> pairs)\n    {\n        for (const pair of pairs) {\n            if (pair is [int, int]) {\n                return true;\n            }\n        }\n        return false;\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "5:68 impossible-type-comparison This element is a `string` in a `[int, string]`, so it is never an `int`. Test the element against a type a `string` can be.",
+            "7:64 impossible-type-comparison `first` is an `int` in a `[int, string]`, so it is never a `string`. Test the element against a type an `int` can be.",
+            "12:31 impossible-type-comparison This element is a `string` in a `[int, string]`, so it is never an `int`. Test the element against a type a `string` can be.",
+            "12:17 impossible-condition This condition (type `false`) will always evaluate to `false`. Check the logic of this expression. If the code block is intended to be unreachable, consider removing it. Otherwise, revise the condition.",
+        ]
+    );
+}
+
 /// An `as` or an `is` of a type the value always has tests nothing, and PHP# says so in the words the code writes, for
 /// a class and a collection alike.
 #[test]

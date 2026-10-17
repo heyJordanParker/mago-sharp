@@ -6124,10 +6124,12 @@ fn a_second_default_arm_or_a_block_arm_in_a_match_that_gives_a_value_is_an_error
     );
 }
 
+/// A union with `null` is a nullable type written another way, so `is int|null` and `as int|null` are the errors of
+/// `is int?` and `as int?`.
 #[test]
 fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
     let code = leak(method(
-        "        const a = extra is int? n;\n        const b = extra as int?;\n        const c = extra as Map<string, float>?;\n        const d = extra as void;\n        return extra;\n",
+        "        const a = extra is int? n;\n        const b = extra as int?;\n        const c = extra as Map<string, float>?;\n        const d = extra as void;\n        const e = extra is int|null n;\n        const f = extra as int|string|null;\n        return extra;\n",
     ));
 
     assert_eq!(
@@ -6137,6 +6139,8 @@ fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
             "8:28 `as` converts to a type that is not nullable or `void`.",
             "9:28 `as` converts to a type that is not nullable or `void`.",
             "10:28 `as` converts to a type that is not nullable or `void`.",
+            "11:28 A type pattern is never nullable: null never matches a type.",
+            "12:28 `as` converts to a type that is not nullable or `void`.",
         ]
     );
     let helps: Vec<_> = check_in_type_file(code).into_iter().filter_map(|issue| issue.help).collect();
@@ -6145,7 +6149,27 @@ fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
         [
             "Test for null with `x == null`, or join both with `or`, as in `x is int or null`.",
             "Write `as int`.",
-            "Write `as Map<string, float>`."
+            "Write `as Map<string, float>`.",
+            "Test for null with `x == null`, or join both with `or`, as in `x is int or null`.",
+            "Write `as int|string`.",
+        ]
+    );
+}
+
+/// `void` and `Self` are only return types, so a pattern of either says so, as a local's type does.
+#[test]
+fn a_pattern_of_void_or_self_is_only_a_return_type() {
+    let code = leak(method(
+        "        const a = extra is void;\n        const b = extra is Self;\n        const c = extra as Self;\n        const d = match (extra) { Self s => 1, default => 2 };\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:28 A pattern's type is never `void`: `void` is only a return type.",
+            "8:28 `Self` is only a return type in PHP#.",
+            "9:28 `Self` is only a return type in PHP#.",
+            "10:35 `Self` is only a return type in PHP#.",
         ]
     );
 }
@@ -6161,30 +6185,15 @@ fn a_function_type_is_tested_like_any_type() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// Spec section 21: a tuple, a class value and `Object` are tested as any type is, alone or in a union. A tuple in a
-/// pattern is a member of a union, since a pattern that starts with `[` is a list pattern.
+/// Spec section 21: a tuple, a class value and `Object` are tested as any type is, alone or in a union. A pattern that
+/// starts with a tuple is a type pattern when a union or a name follows the tuple, and a list pattern otherwise.
 #[test]
 fn a_tuple_a_class_value_and_object_are_tested_like_any_type() {
     let code = leak(method(
-        "        const a = extra as [int, string];\n        const b = extra is int|[int, string] pair;\n        const c = match (extra) { string|[int, string] t => 1, default => 2 };\n        const d = extra as [int, string]|int;\n        const e = extra is Class<Report>;\n        const f = extra as Class<Report>;\n        const g = match (extra) { Class<Report> type => 1, default => 2 };\n        const h = extra is int|Class<Report>;\n        const i = extra is Object;\n        const j = extra as Object;\n        return extra;\n",
+        "        const a = extra as [int, string];\n        const b = extra is int|[int, string] pair;\n        const c = match (extra) { string|[int, string] t => 1, default => 2 };\n        const d = extra as [int, string]|int;\n        const e = extra is Class<Report>;\n        const f = extra as Class<Report>;\n        const g = match (extra) { Class<Report> type => 1, default => 2 };\n        const h = extra is int|Class<Report>;\n        const i = extra is Object;\n        const j = extra as Object;\n        const k = extra is [int, string]|int;\n        const l = extra is [int, string] pair;\n        const m = match (extra) { [int, string]|List<int> t => 1, [int, string] => 2, default => 3 };\n        const n = extra is [int, [int, string]]|Map<string, List<int>> and not [int];\n        return extra;\n",
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
-}
-
-/// A union that holds a type with no test, as `int|null` does, is refused, and the note names every type `as`
-/// converts to.
-#[test]
-fn an_as_to_a_type_without_a_test_names_the_types_as_converts_to() {
-    let code = leak(method("        const a = extra as int|null;\n        return extra;\n"));
-
-    let notes: Vec<_> = check_in_type_file(code).into_iter().flat_map(|issue| issue.notes).collect();
-    assert_eq!(
-        notes,
-        [
-            "`as` converts to `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a tuple as in `[int, string]`, a function type as in `Function<int(int)>`, or a union of them as in `int|string`."
-        ]
-    );
 }
 
 #[test]

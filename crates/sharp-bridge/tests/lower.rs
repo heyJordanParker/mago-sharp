@@ -21757,17 +21757,20 @@ fn is_and_as_of_any_or_a_union_are_the_engine_test_of_its_type() {
 /// $pair = <is [int, string]>($extra) ? $extra : null;
 /// $type = <is Class<App.Tenant.Report>>($extra);
 /// $object = <is Object|int>($extra);
+/// $boxed = <is Class<App.Tenant.Box<int>>>($extra);
+/// $box = <is Class<App.Tenant.Box>>($extra);
 /// ```
 ///
 /// `is` and `as` of a tuple, of a class value and of `Object` are the engine's test of the type, as a collection's are,
-/// which checks a tuple's count and each element and finds the class a class value names.
+/// which checks a tuple's count and each element and finds the class a class value names. A generic class written
+/// without type arguments in `Class<Box>` is the class alone, which takes it with any type arguments.
 #[test]
 fn is_and_as_of_a_tuple_a_class_value_or_object_are_the_engine_test_of_its_type() {
     assert_eq!(
         body_in(
             "void run(Any? extra)",
-            "        const pair = extra as [int, string];\n        const type = extra is Class<Report>;\n        const object = extra is int|Object;\n",
-            &[]
+            "        const pair = extra as [int, string];\n        const type = extra is Class<Report>;\n        const object = extra is int|Object;\n        const boxed = extra is Class<Box<int>>;\n        const box = extra is Class<Box>;\n",
+            &[("src/App/Tenant/Box.sharp", "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n}\n")]
         ),
         indoc! {r#"
             STMT_LIST
@@ -21796,6 +21799,20 @@ fn is_and_as_of_a_tuple_a_class_value_or_object_are_the_engine_test_of_its_type(
                   VAR
                     ZVAL "extra"
                   ZVAL "Object|int"
+              ASSIGN
+                VAR
+                  ZVAL "boxed"
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Class<App.Tenant.Box<int>>"
+              ASSIGN
+                VAR
+                  ZVAL "box"
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Class<App.Tenant.Box>"
         "#}
     );
 }
