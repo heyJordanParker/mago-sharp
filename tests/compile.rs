@@ -23,16 +23,17 @@ const MONEY_PATH: &str = "vendor/acme/money/src/Money.sharp";
 /// A project with `app/Order.sharp`, `app/Legacy.php` and the package file `vendor/acme/money/src/Money.sharp`.
 fn project(order: &str, money: &str) -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
-    write(
-        directory.path(),
-        "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n",
-    );
-    write(directory.path(), "composer.lock", "{}\n");
-    write(directory.path(), "app/Order.sharp", order);
-    write(directory.path(), "app/Legacy.php", LEGACY);
-    write(directory.path(), MONEY_PATH, money);
+    project_in(directory.path(), order, money);
     directory
+}
+
+/// Writes the files of `project` into `root`.
+fn project_in(root: &Path, order: &str, money: &str) {
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
+    write(root, "composer.lock", "{}\n");
+    write(root, "app/Order.sharp", order);
+    write(root, "app/Legacy.php", LEGACY);
+    write(root, MONEY_PATH, money);
 }
 
 fn write(root: &Path, name: &str, contents: &str) {
@@ -276,7 +277,7 @@ fn compile_replaces_a_compiled_file_by_rename_so_no_reader_sees_a_partial_file()
 }
 
 /// The PHP file `mago compile` writes beside `app/Order.sharp`, spec section 27.
-const ORDER_PHP: &str = "<?php\n\n// mago compile writes this file from Order.sharp, so PHP code that lists *.php files finds its class.\n\ndeclare(strict_types=1);\n\nfunction_exists('Sharp\\Internal\\requireNative') || throw new Error('This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.');\n\nrequire_once __DIR__ . '/Order.sharp';\n";
+const ORDER_PHP: &str = "<?php\n\n// mago compile writes this file from Order.sharp, so PHP code that lists *.php files finds its class.\n\ndeclare(strict_types=1);\n\nif (!is_file(__DIR__ . '/Order.sharp')) {\n    return;\n}\n\nfunction_exists('Sharp\\Internal\\requireNative')\n    || throw new Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/Order.sharp';\n";
 
 /// Spec section 27: each of the project's PHP# sources that declares a type gets a PHP file of the type's name beside
 /// it, so PHP code that finds classes by listing `*.php` files finds it. A module's file declares none, and a package
@@ -345,6 +346,23 @@ fn the_php_file_beside_a_source_passes_lint() {
     assert!(printed(&output).contains("No issues found."), "{}", printed(&output));
 }
 
+/// The PHP file is in mago's own format, so a project's `mago fmt --check` passes on a file nobody edits.
+#[test]
+fn the_php_file_beside_a_source_passes_fmt_check() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    compile_succeeds(root);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mago"))
+        .args(["--no-version-check", "--colors", "never", "fmt", "--check", "app/Order.php"])
+        .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+}
+
 /// A second compile leaves a current PHP file as it is, and puts back one whose text changed.
 #[test]
 fn compile_keeps_the_php_file_beside_a_source_current() {
@@ -381,8 +399,48 @@ fn compile_deletes_the_php_file_of_a_renamed_or_removed_source() {
     assert_eq!(files_under(&root.join("app")), [Path::new("Legacy.php")]);
 }
 
+/// The compile finds the PHP files it wrote on disk, so a project whose analyzer loads only PHP# files deletes them
+/// too, the file of a folder whose every source is gone included.
+#[test]
+fn compile_deletes_the_php_file_of_a_removed_source_whatever_the_analyzer_loads() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\nextensions = [\"sharp\"]\n",
+    );
+    write(root, "app/Shop/Cart.sharp", "namespace App.Shop;\n\npublic class Cart\n{\n}\n");
+    compile_succeeds(root);
+    assert!(root.join("app/Order.php").exists() && root.join("app/Shop/Cart.php").exists());
+
+    std::fs::remove_file(root.join("app/Order.sharp")).unwrap();
+    std::fs::remove_file(root.join("app/Shop/Cart.sharp")).unwrap();
+    compile_succeeds(root);
+
+    assert_eq!(files_under(&root.join("app")), [Path::new("Legacy.php")]);
+}
+
+/// The compiled files and the PHP files get the mode any new file gets, `0644` under the usual umask, as the source
+/// itself got, so a server that runs PHP as another user, as PHP-FPM's pool user, reads them.
+#[cfg(unix)]
+#[test]
+fn compile_writes_files_with_the_mode_of_a_new_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    compile_succeeds(root);
+
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let source = mode(&root.join("app/Order.sharp"));
+    for written in [root.join("app/Order.php"), compiled(root, "app/Order.sharp"), root.join(".sharp/listeners.php")] {
+        assert_eq!(mode(&written), source, "{}", written.display());
+    }
+}
+
 /// A PHP file someone wrote beside a source is what PHP loads for its name, so the compile refuses it, names both
-/// files, leaves it as it is, and still writes the compiled file.
+/// files and the class, leaves it as it is, still writes the compiled file, and prints its summary as an error.
 #[test]
 fn compile_refuses_a_php_file_someone_wrote_beside_a_source() {
     let directory = project(ORDER, MONEY);
@@ -394,16 +452,65 @@ fn compile_refuses_a_php_file_someone_wrote_beside_a_source() {
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(
         printed(&output).contains(
-            "app/Order.php is a PHP file beside app/Order.sharp, so PHP loads it instead of the PHP# class. Delete app/Order.php, or rename one of the two files."
+            "app/Order.php and app/Order.sharp both name App.Order. Delete app/Order.php, or rename one of them."
         ),
         "{}",
         printed(&output)
     );
+    let summary =
+        printed(&output).lines().find(|line| line.contains("Compiled 2 PHP# files into .sharp/.")).map(String::from);
+    assert!(summary.as_deref().is_some_and(|line| line.contains(" ERROR ")), "{}", printed(&output));
     assert_eq!(
         std::fs::read_to_string(root.join("app/Order.php")).unwrap(),
         "<?php\n\nnamespace App;\n\nfinal class OrderLegacy {}\n"
     );
     assert!(compiled(root, "app/Order.sharp").exists());
+}
+
+/// PHP names a class whatever its case, so a PHP file whose name differs from the source's only in case names the same
+/// class. The compile refuses it by its exact name on every disk, one that ignores case included, and writes no file
+/// of the source's name, which such a disk would write over it.
+#[test]
+fn compile_refuses_a_php_file_whose_name_differs_from_the_source_only_in_case() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "app/order.php", "<?php\n\nnamespace App;\n\nfinal class OrderLegacy {}\n");
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "app/order.php and app/Order.sharp both name App.Order. Delete app/order.php, or rename one of them."
+        ),
+        "{}",
+        printed(&output)
+    );
+    assert_eq!(
+        files_under(&root.join("app")),
+        [Path::new("Legacy.php"), Path::new("Order.sharp"), Path::new("order.php")]
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("app/order.php")).unwrap(),
+        "<?php\n\nnamespace App;\n\nfinal class OrderLegacy {}\n"
+    );
+}
+
+/// A PHP file the compile wrote under another case, as for a source whose class was renamed only in case, gives way to
+/// the file of the source's exact name, on a disk that ignores case and on one that does not.
+#[test]
+fn compile_names_the_php_file_exactly_like_its_source() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "app/order.php", &ORDER_PHP.replace("Order.sharp", "order.sharp"));
+
+    compile_succeeds(root);
+
+    assert_eq!(
+        files_under(&root.join("app")),
+        [Path::new("Legacy.php"), Path::new("Order.php"), Path::new("Order.sharp")]
+    );
+    assert_eq!(std::fs::read_to_string(root.join("app/Order.php")).unwrap(), ORDER_PHP);
 }
 
 /// Writing the PHP files leaves every compiled file current, as the engine checks it, a file whose namespace holds a
@@ -467,9 +574,6 @@ fn compile_keeps_the_php_files_out_of_git_in_a_clone_and_in_a_worktree() {
         untracked(&clone),
         "?? .sharp/app/Order.sharpc\n?? .sharp/listeners.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n"
     );
-    let excluded = |place: &Path, paths: &str| {
-        format!("# mago compile: the files it writes in {}\n{paths}# mago compile: end\n", place.display())
-    };
     let kept = "# git ls-files --others --exclude-from=.git/info/exclude\n*.log\n";
     assert_eq!(
         std::fs::read_to_string(clone.join(".git/info/exclude")).unwrap(),
@@ -504,6 +608,60 @@ fn compile_keeps_the_php_files_out_of_git_in_a_clone_and_in_a_worktree() {
         std::fs::read_to_string(clone.join(".git/info/exclude")).unwrap(),
         format!("{kept}{}", excluded(&worktree, "/app/Invoice.php\n/app/Order.php\n")),
         "a checkout with no PHP file left has no block"
+    );
+}
+
+/// The block of `info/exclude` that `mago compile` keeps for the workspace `place`, listing `paths`.
+fn excluded(place: &Path, paths: &str) -> String {
+    format!("# mago compile: the files it writes in {}\n{paths}# mago compile: end\n", place.display())
+}
+
+/// A PHP file a `.gitignore` already ignores needs no line of its own, so a compile in a folder git ignores, as a build
+/// folder, or of PHP files a `.gitignore` pattern covers, writes no block.
+#[test]
+fn compile_writes_no_block_for_the_php_files_git_already_ignores() {
+    let directory = tempfile::tempdir().unwrap();
+    let clone = std::fs::canonicalize(directory.path()).unwrap();
+    git(&clone, &["init", "--quiet"]);
+    write(&clone, ".gitignore", "/build/\n/covered/app/*.php\n");
+    write(&clone, ".git/info/exclude", "*.log\n");
+
+    for folder in ["build/project", "covered"] {
+        let root = clone.join(folder);
+        project_in(&root, ORDER, MONEY);
+        compile_succeeds(&root);
+        assert!(root.join("app/Order.php").exists(), "{folder}");
+    }
+
+    assert_eq!(std::fs::read_to_string(clone.join(".git/info/exclude")).unwrap(), "*.log\n");
+}
+
+/// A block whose folder is gone, or is now ignored, keeps nothing out of git, so the next compile in any checkout of
+/// the repository removes it, and keeps every other line.
+#[test]
+fn compile_removes_the_block_of_a_folder_that_is_gone_or_ignored() {
+    let directory = project(ORDER, MONEY);
+    let clone = std::fs::canonicalize(directory.path()).unwrap();
+    git(&clone, &["init", "--quiet"]);
+    write(&clone, ".gitignore", "/build/\n");
+    let gone = clone.join("old");
+    let ignored = clone.join("build/project");
+    std::fs::create_dir_all(&ignored).unwrap();
+    write(
+        &clone,
+        ".git/info/exclude",
+        &format!(
+            "*.log\n{}{}",
+            excluded(&gone, "/old/app/Order.php\n"),
+            excluded(&ignored, "/build/project/app/Order.php\n")
+        ),
+    );
+
+    compile_succeeds(&clone);
+
+    assert_eq!(
+        std::fs::read_to_string(clone.join(".git/info/exclude")).unwrap(),
+        format!("*.log\n{}", excluded(&clone, "/app/Order.php\n"))
     );
 }
 

@@ -20,6 +20,7 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 
 use crate::error::Error;
+use crate::utils::write_by_rename;
 
 /// Get staged file paths relative to the workspace.
 ///
@@ -164,13 +165,16 @@ where
     Ok(())
 }
 
-/// Keeps `paths`, each a file under `workspace`, out of git: they become the block of the repository's `info/exclude`
-/// that `owner` holds for `workspace`, and every other line of the file stays as it is. No path removes the block.
+/// Keeps `paths`, each a file under `workspace`, out of git: the ones no `.gitignore` already ignores become the block
+/// of the repository's `info/exclude` that `owner` holds for `workspace`. A workspace git ignores, as a build folder,
+/// has no block, and neither has one whose paths are all ignored. Every other line of the file stays as it is, except
+/// the blocks of `owner` for a folder that is gone or that git now ignores, which keep nothing out of git.
 ///
 /// `git rev-parse --git-path info/exclude` names the file, so a worktree and a submodule write the one git reads for
 /// them. The worktrees of a repository share that file, so each workspace keeps a block of its own, named by its path,
-/// and one worktree's compile never drops another's paths. A workspace outside a git repository, or with no `git` to
-/// run, writes nothing.
+/// and one worktree's compile never drops another's paths. The file is replaced by rename, so a compile that reads it
+/// while another writes it never reads part of it. A workspace outside a git repository, or with no `git` to run,
+/// writes nothing.
 pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), Error> {
     let Ok(output) = Command::new("git")
         .args(["rev-parse", "--show-toplevel", "--git-path", "info/exclude"])
@@ -187,7 +191,7 @@ pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), E
     let top = Path::new(top).canonicalize().unwrap_or_else(|_| PathBuf::from(top));
     let top = top.as_path();
     let file = workspace.join(file);
-    let begin = format!("# {owner}: the files it writes in {}", workspace.display());
+    let heading = format!("# {owner}: the files it writes in ");
     let end = format!("# {owner}: end");
 
     let before = match std::fs::read_to_string(&file) {
@@ -195,40 +199,74 @@ pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), E
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(Error::Database(DatabaseError::IOError(error))),
     };
-    if paths.is_empty() && !before.lines().any(|line| line == begin) {
-        return Ok(());
-    }
     let mut after = String::new();
-    let mut inside = false;
+    let mut kept = true;
     for line in before.lines() {
-        if line == begin {
-            inside = true;
-        } else if inside {
-            inside = line != end;
-        } else {
+        if let Some(folder) = line.strip_prefix(&heading) {
+            let folder = Path::new(folder);
+            kept = folder != workspace && folder.is_dir() && !ignores(folder, folder);
+        }
+        if kept {
             after.push_str(line);
             after.push('\n');
         }
+        kept |= line == end;
     }
-    if !paths.is_empty() {
-        after.push_str(&begin);
-        after.push('\n');
+    let mut block = String::new();
+    if !paths.is_empty() && !ignores(workspace, workspace) {
+        let ignored = ignored_by_gitignore(workspace)?;
         for path in paths {
-            if let Ok(relative) = path.strip_prefix(top) {
-                after.push_str(&pattern(relative));
-                after.push('\n');
+            let (Ok(relative), Ok(local)) = (path.strip_prefix(top), path.strip_prefix(workspace)) else {
+                continue;
+            };
+            if !ignored.iter().any(|entry| local.starts_with(entry)) {
+                block.push_str(&pattern(relative));
+                block.push('\n');
             }
         }
-        after.push_str(&end);
-        after.push('\n');
+    }
+    if !block.is_empty() {
+        after.push_str(&format!("{heading}{}\n{block}{end}\n", workspace.display()));
     }
     if after == before {
         return Ok(());
     }
 
-    std::fs::create_dir_all(file.parent().unwrap_or(top))
-        .and_then(|()| std::fs::write(&file, after))
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))
+    write_by_rename(&file, after.as_bytes()).map_err(|e| Error::Database(DatabaseError::IOError(e)))
+}
+
+/// Whether git, run in `folder`, ignores `path`.
+fn ignores(folder: &Path, path: &Path) -> bool {
+    Command::new("git")
+        .args(["check-ignore", "--quiet", "--"])
+        .arg(path)
+        .current_dir(folder)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// The untracked files and folders under `workspace` that its repository's `.gitignore` files ignore, relative to it.
+/// `info/exclude` is not read, so the block [`exclude`] writes there never counts. A workspace git ignores as a whole
+/// is not listed: git refuses to list from inside one.
+fn ignored_by_gitignore(workspace: &Path) -> Result<Vec<PathBuf>, Error> {
+    let output = Command::new("git")
+        .args(["ls-files", "-z", "--others", "--ignored", "--directory", "--exclude-per-directory=.gitignore"])
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+    if !output.status.success() {
+        return Err(Error::Database(DatabaseError::IOError(std::io::Error::other(format!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))));
+    }
+
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| PathBuf::from(String::from_utf8_lossy(entry).as_ref()))
+        .collect())
 }
 
 /// The gitignore pattern that names exactly the path `relative` to the repository's top folder: anchored with `/`,
