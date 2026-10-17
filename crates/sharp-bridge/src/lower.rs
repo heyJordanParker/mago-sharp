@@ -7197,12 +7197,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         if let Some(function) = self.types.namespace_function(expression) {
             let line = self.line(call);
+            let quiet = self.types.returns_its_failure(function);
             let function = self.string(ZEND_NAME_FQ, line, function.as_bytes());
 
             let (parameters, callee) = (self.types.call_parameters(expression), self.types.sharp_callee(expression));
 
+            // A built-in's failure is read from its value, so its warning for the same failure is silenced.
             return self.call(Some(call.span()), &call.argument_list, None, parameters, callee, |this, arguments| {
-                this.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+                let call = this.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+                if quiet { this.node(SHARP_AST_SILENCE, 0, line, &[call]) } else { call }
             });
         }
         if self.names.is_current_position(call) {

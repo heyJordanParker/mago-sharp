@@ -1274,6 +1274,27 @@ impl<'analysis> Types<'analysis> {
         Some(self.codebase.get_function(function.as_bytes()).map_or(*function, |metadata| metadata.original_name))
     }
 
+    /// Whether `function`, a plain PHP function, is one of PHP's built-ins whose declared return type holds its failure,
+    /// `false` or `null`, as `hex2bin` returns `string|false`. PHP# reads the failure from that value, so PHP's warning
+    /// for the same failure only repeats it, and the call runs without it. A plain PHP library's own function keeps its
+    /// warnings.
+    pub(crate) fn returns_its_failure(&self, function: Word) -> bool {
+        self.codebase.get_function(function.as_bytes()).is_some_and(|metadata| {
+            metadata.flags.is_built_in()
+                && metadata
+                    .return_type_declaration_metadata
+                    .as_ref()
+                    .or(metadata.return_type_metadata.as_ref())
+                    .is_some_and(|returned| {
+                        returned.type_union.types.iter().any(|atomic| match atomic {
+                            TAtomic::Null | TAtomic::Mixed(_) => true,
+                            TAtomic::Scalar(scalar) => scalar.is_false() || scalar.is_general_bool(),
+                            _ => false,
+                        })
+                    })
+        })
+    }
+
     /// The full name of the plain PHP constant the read `read` reaches through its namespace, as `global.PHP_EOL` and
     /// `Pdf.DEFAULT_DPI` read one, spec section 23. None for any other read.
     pub(crate) fn namespace_constant(&self, read: &Expression) -> Option<Word> {

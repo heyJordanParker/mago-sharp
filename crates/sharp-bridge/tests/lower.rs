@@ -9726,10 +9726,11 @@ fn a_spread_in_a_literal_is_an_unpack_among_its_elements() {
 /// \Lib\Calc::sum(...$extra);
 /// $this->run(1, ...$extra);
 /// $made = new \Lib\Calc(...$extra);
-/// return max(...$extra);
+/// return @\max($first, ...$extra);
 /// ```
 ///
-/// A spread argument is an `UNPACK` of its value, as php-src's grammar builds `...$extra`.
+/// A spread argument is an `UNPACK` of its value, as php-src's grammar builds `...$extra`. `max` returns `mixed`, which
+/// holds `null`, so its call runs without its warnings.
 #[test]
 fn a_spread_argument_is_an_unpack_of_its_value() {
     assert_eq!(
@@ -9769,14 +9770,15 @@ fn a_spread_argument_is_an_unpack_of_its_value() {
                       VAR
                         ZVAL "extra"
               RETURN
-                CALL
-                  ZVAL "max"
-                  ARG_LIST
-                    VAR
-                      ZVAL "first"
-                    UNPACK
+                SILENCE
+                  CALL
+                    ZVAL "max"
+                    ARG_LIST
                       VAR
-                        ZVAL "extra"
+                        ZVAL "first"
+                      UNPACK
+                        VAR
+                          ZVAL "extra"
         "#}
     );
 }
@@ -15444,21 +15446,58 @@ fn a_static_member_only_a_magic_method_serves_is_refused() {
     assert_eq!(lowered.diagnostics(), ["9:29 compile error: `Order.where` does not exist."]);
 }
 
-/// A constant expression reads only constants and enum cases, as PHP's does, so a parameter default of a static
-/// property or a static method is refused, and the lowering never emits a fetch PHP refuses there.
+/// ```php
+/// public function run(int $limit = (static function () { return \Lib\Order::$max; })()): int
+/// ```
+///
+/// A parameter default is any expression, spec section 7, so one that reads a static property or takes a static
+/// method runs in a static closure, as any default PHP's constant expression cannot hold does.
 #[test]
-fn a_static_property_or_method_in_a_constant_expression_is_refused() {
-    let property = Lowered::with(
+fn a_static_property_or_method_in_a_parameter_default_runs_in_a_static_closure() {
+    let property = [Lowered::with(
         "namespace App.Tenant;\n\nimport Lib.Order;\n\nclass Report\n{\n    public int run(int limit = Order.max)\n    {\n        return limit;\n    }\n}\n",
         &[MAGIC_ORDER],
-    );
-    let method = Lowered::with(
+    )];
+    let method = [Lowered::with(
         "namespace App.Tenant;\n\nimport Lib.Order;\n\nclass Report\n{\n    public int run(Function<int(int)> twice = Order.twice)\n    {\n        return twice(1);\n    }\n}\n",
         &[MAGIC_ORDER],
-    );
+    )];
 
-    assert_eq!(property.diagnostics(), ["7:38 compile error: Class-like constant `max` does not exist."]);
-    assert_eq!(method.diagnostics(), ["7:53 compile error: Class-like constant `twice` does not exist."]);
+    assert_eq!(
+        member_in(&property, "Report", &[0, 0, 0, 2]),
+        indoc! {r#"
+            CALL
+              CLOSURE [16] "" @7-7
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    STATIC_PROP
+                      ZVAL "Lib\\Order"
+                      ZVAL "max"
+                null
+                null
+              ARG_LIST
+        "#}
+    );
+    assert_eq!(
+        member_in(&method, "Report", &[0, 0, 0, 2]),
+        indoc! {r#"
+            CALL
+              CLOSURE [16] "" @7-7
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    STATIC_CALL
+                      ZVAL "Lib\\Order"
+                      ZVAL "twice"
+                      CALLABLE_CONVERT
+                null
+                null
+              ARG_LIST
+        "#}
+    );
 }
 
 /// ```php
@@ -18500,6 +18539,68 @@ fn a_call_through_a_namespace_is_a_call_of_its_plain_php_function() {
                                 NAMED_ARG
                                   ZVAL "mode"
                                   ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
+/// $size = \strlen($text);
+/// $decoded = \is_string(${'match#1'} = \Vendor\Pdf\decode($text));
+/// return \is_string(${'match#1'} = @\hex2bin($text));
+/// ```
+///
+/// PHP# reads a built-in's failure from its value, so a call of one whose declared return type holds `false` or `null`,
+/// as `hex2bin`'s `string|false` does, runs without PHP's warning for the same failure. A call of a built-in that
+/// cannot fail, as `strlen`, and of a plain PHP library's own function keep their warnings.
+#[test]
+fn a_call_of_a_built_in_that_returns_its_failure_runs_without_its_warning() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public bool run(string text)\n    {\n        int size = global.strlen(text);\n        bool decoded = Pdf.decode(text) is string;\n        return global.hex2bin(text) is string;\n    }\n}\n",
+        &[(
+            "src/Vendor/Pdf/functions.php",
+            "<?php namespace Vendor\\Pdf; function decode(string $text): string|false { return $text; }",
+        )],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "size"
+                CALL
+                  ZVAL "strlen"
+                  ARG_LIST
+                    VAR
+                      ZVAL "text"
+              ASSIGN
+                VAR
+                  ZVAL "decoded"
+                CALL
+                  ZVAL "is_string"
+                  ARG_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "match#1"
+                      CALL
+                        ZVAL "Vendor\\Pdf\\decode"
+                        ARG_LIST
+                          VAR
+                            ZVAL "text"
+              RETURN
+                CALL
+                  ZVAL "is_string"
+                  ARG_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "match#1"
+                      SILENCE
+                        CALL
+                          ZVAL "hex2bin"
+                          ARG_LIST
+                            VAR
+                              ZVAL "text"
         "#}
     );
 }

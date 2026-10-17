@@ -512,7 +512,8 @@ fn a_parameter_default_follows_its_accessors_and_behaviors() {
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     let arena = LocalArena::new();
-    let code = "class Report\n{\n    public required int count() { return 1; }\n\n    public int run() { return 1; }\n}\n";
+    let code =
+        "class Report\n{\n    public required int count() { return 1; }\n\n    public int run() { return 1; }\n}\n";
     let program = parse(&arena, "src/Report.sharp", code);
 
     let [error] = program.errors else {
