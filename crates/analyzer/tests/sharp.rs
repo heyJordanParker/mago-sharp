@@ -2655,7 +2655,7 @@ fn a_bare_call_of_a_plain_php_function_names_the_call_to_write() {
 fn each_function_an_effect_class_replaces_names_its_member() {
     let calls = (
         "app/Shop/Calls.sharp",
-        "namespace App.Shop;\n\npublic class Calls\n{\n    public static void run(Any? x)\n    {\n        curl_reset(x);\n        curl_init();\n        pg_connect(\"host\");\n        pg_query(x, \"sql\");\n        pg_version();\n        mysqli_ping(x);\n        mysqli_fetch_assoc(x);\n        apcu_fetch(\"k\");\n        apcu_store(\"k\", 1);\n        apcu_clear_cache();\n        putenv(\"A=1\");\n        mt_srand(1);\n        fopen(\"f\", \"r\");\n        fclose(x);\n        tmpfile();\n    }\n}\n",
+        "namespace App.Shop;\n\npublic class Calls\n{\n    public static void run(Any? x)\n    {\n        curl_reset(x);\n        curl_init();\n        pg_connect(\"host\");\n        pg_query(x, \"sql\");\n        pg_version();\n        mysqli_ping(x);\n        mysqli_fetch_assoc(x);\n        apcu_fetch(\"k\");\n        apcu_store(\"k\", 1);\n        apcu_clear_cache();\n        putenv(\"A=1\");\n        mt_srand(1);\n        fopen(\"f\", \"r\");\n        fclose(x);\n        tmpfile();\n        shell_exec(\"ls\");\n    }\n}\n",
     );
 
     let refused: Vec<String> = refusals(calls, &[])
@@ -2682,6 +2682,7 @@ fn each_function_an_effect_class_replaces_names_its_member() {
             "19:9 wrapped-function `fopen` is wrapped by the standard library: write `files.readLinesLazily(…)` or `files.append(…)` on the `Files` your constructor takes.".to_owned(),
             "20:9 wrapped-function `fclose` is wrapped by the standard library: write `files.readLinesLazily(…)` on the `Files` your constructor takes.".to_owned(),
             "21:9 wrapped-function `tmpfile` is wrapped by the standard library: write `files.temporaryFile()` on the `Files` your constructor takes.".to_owned(),
+            "22:9 wrapped-function `shell_exec` is wrapped by the standard library: write `process.run(…)` on the `Process` your constructor takes.".to_owned(),
         ]
     );
 }
