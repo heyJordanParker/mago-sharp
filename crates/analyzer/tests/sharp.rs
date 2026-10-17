@@ -7279,7 +7279,7 @@ fn an_issue_on_an_extension_call_names_the_member_on_its_type_and_counts_the_arg
 #[test]
 fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has() {
     let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public bool contains(string other) => global.str_contains(text, other);\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public int compared(string name) => name.compareTo(\"a\");\n    public int counted(int n) => n.missing();\n    public bool flipped(bool flag) => flag.negate();\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public int compared(string name) => name.shuffled(\"a\");\n    public int counted(int n) => n.missing();\n    public bool flipped(bool flag) => flag.negate();\n}\n";
 
     assert_eq!(
         refusals(
@@ -7287,7 +7287,7 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
             &[("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text)]
         ),
         [
-            "5:46 non-existent-method Method `compareTo` does not exist on `string`. | A `string` has the methods `contains`, `trim`.",
+            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `contains`, `trim`.",
             "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has no methods.",
             "7:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
         ]
