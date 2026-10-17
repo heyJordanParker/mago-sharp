@@ -3989,6 +3989,50 @@ fn super_without_a_dot_is_a_name() {
     assert_eq!(bare_name(expression(statement)), b"super");
 }
 
+/// `@` directly before a name makes a keyword a name, spec section 2, as C#'s `@class` does. The name spans the `@` and
+/// holds the word after it, so `@event` is the name `event`, and `@super` never reads as the parent class. `@this` keeps
+/// its `@`, so the name differs from the object `this`. Any other `@` stays an operator, which the checker refuses.
+#[test]
+fn an_at_before_a_letter_is_a_name() {
+    const CODE: &str = "class Page\n{\n    public int label(int @event)\n    {\n        const @class = @event;\n        const @this = @super.label;\n        return @(@this);\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Page.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(ClassLikeMember::Method(method)) = class_members(program).first() else {
+        panic!("expected a method, got {:#?}", class_members(program));
+    };
+    let parameter = method.parameter_list.parameters.first().expect("a parameter");
+    assert_eq!(parameter.variable.name, b"event");
+    assert_eq!(source(CODE, &parameter.variable), "@event");
+    let [
+        Statement::LocalDeclaration(class),
+        Statement::LocalDeclaration(this),
+        Statement::Return(Return { value: Some(silenced), .. }),
+    ] = method_body(program)
+    else {
+        panic!("expected two locals and a return, got {:#?}", method_body(program));
+    };
+    let (LocalTarget::Name(class_name), LocalTarget::Name(this_name)) = (&class.target, &this.target) else {
+        panic!("expected two named locals, got {:#?} and {:#?}", class.target, this.target);
+    };
+    assert_eq!((class_name.value, source(CODE, class_name)), (b"class".as_slice(), "@class"));
+    assert_eq!(bare_name(class.value), b"event");
+    assert_eq!((this_name.value, source(CODE, this_name)), (b"@this".as_slice(), "@this"));
+    let Expression::Access(Access::Property(label)) = this.value else {
+        panic!("expected a property read, got {:#?}", this.value);
+    };
+    assert_eq!(bare_name(label.object), b"super");
+    let Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::ErrorControl(_), operand }) = silenced
+    else {
+        panic!("expected `@` before parentheses, got {silenced:#?}");
+    };
+    let Expression::Parenthesized(parenthesized) = operand else {
+        panic!("expected parentheses, got {operand:#?}");
+    };
+    assert_eq!(bare_name(parenthesized.expression), b"@this");
+}
+
 /// `required` on a constructor is a modifier, spec section 25, and stays a name elsewhere. The parser keeps its own
 /// "not supported yet" error for `required` on any other member.
 #[test]

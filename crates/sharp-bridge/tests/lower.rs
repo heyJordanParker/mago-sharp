@@ -17040,28 +17040,33 @@ fn the_ternary_is_a_conditional_marked_when_parenthesized() {
 }
 
 /// ```php
-/// return @\trim($x);
+/// $class = $event;
+/// return $class + ${'@this'};
 /// ```
 ///
-/// php-src's grammar builds `@expr` as a `SILENCE` of one child, the expression.
+/// A name written with `@`, spec section 2, runs as the PHP variable of its word, so `@event` is `$event`, as a plain PHP
+/// parent names its parameter. `@this` keeps its `@`, a variable name PHP code never writes, since PHP forbids `$this`.
 #[test]
-fn error_control_is_a_silence_of_its_expression() {
-    let lowered = Lowered::named(
-        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp",
-        "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static string run(string x)\n    {\n        return @global.trim(x);\n    }\n}\n",
-    );
-
+fn a_name_written_with_at_runs_as_the_variable_of_its_word() {
     assert_eq!(
-        lowered.body(),
+        body_in(
+            "int run(int @event, int @this)",
+            "        const @class = @event;\n        return @class + @this;\n",
+            &[]
+        ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "class"
+                VAR
+                  ZVAL "event"
               RETURN
-                SILENCE
-                  CALL
-                    ZVAL "trim"
-                    ARG_LIST
-                      VAR
-                        ZVAL "x"
+                BINARY_OP [1]
+                  VAR
+                    ZVAL "class"
+                  VAR
+                    ZVAL "@this"
         "#}
     );
 }

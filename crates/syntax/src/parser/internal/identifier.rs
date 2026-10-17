@@ -68,6 +68,9 @@ where
         Ok(Identifier::Dotted(DottedIdentifier { span, value: self.bytes(&value) }))
     }
 
+    /// Parses a name, a keyword included. A name written with `@`, spec section 2, spans the `@`, and its value is the
+    /// word after it, so `@event` is the name `event`. `@this` keeps its `@`, because a bare `this` is the object the
+    /// method runs on, so the name `@this` differs from it wherever a name is read.
     pub(crate) fn parse_local_identifier(&mut self) -> Result<LocalIdentifier<'arena>, ParseError> {
         let token = self.stream.consume()?;
 
@@ -75,7 +78,12 @@ where
             return Err(self.stream.unexpected(Some(token), &[T![Identifier]]));
         }
 
-        Ok(LocalIdentifier { span: token.span_for(self.stream.file_id()), value: token.value })
+        let value = match token.value {
+            [b'@', word @ ..] if word != b"this" => word,
+            value => value,
+        };
+
+        Ok(LocalIdentifier { span: token.span_for(self.stream.file_id()), value })
     }
 
     pub(crate) fn parse_qualified_identifier(&mut self) -> Result<QualifiedIdentifier<'arena>, ParseError> {

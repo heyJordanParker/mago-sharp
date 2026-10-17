@@ -354,7 +354,6 @@ final class AnalyzerCodeModuleGenerator
         'invalid-local-assignment-value',
         'rejected-nullable-parameter',
         'native-body-outside-library',
-        'silence-outside-library',
         'reserved-name-outside-library',
         'internal-outside-library',
         'wrapped-function',

@@ -71,6 +71,7 @@ use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Trait;
+use mago_syntax::token::is_sharp_keyword;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
@@ -4341,15 +4342,22 @@ fn report_signature_compatibility_issue<'ctx, A>(
             parent_name: parent_param_name,
         } => {
             // PHP# keeps every parameter name of the method it overrides, spec section 22, so a rename is an error, and
-            // PHP# writes the names without `$`.
-            let (level, child_param_name, parent_param_name) = if context.dialect.is_sharp() {
+            // PHP# writes the names without `$`, and a keyword with `@`, spec section 2.
+            let (level, child_param_name, parent_param_name, help) = if context.dialect.is_sharp() {
+                let parent = word(mago_bytes::trim_start_byte(parent_param_name.as_bytes(), b'$'));
+                let mark = if is_sharp_keyword(parent.as_bytes()) { "@" } else { "" };
+
                 (
                     Level::Error,
                     word(mago_bytes::trim_start_byte(child_param_name.as_bytes(), b'$')),
-                    word(mago_bytes::trim_start_byte(parent_param_name.as_bytes(), b'$')),
+                    parent,
+                    format!("Name it `{mark}{parent}`, as the parent does."),
                 )
             } else {
-                (Level::Warning, child_param_name, parent_param_name)
+                let help =
+                    format!("Consider renaming the parameter to `{parent_param_name}` to match the parent method.");
+
+                (Level::Warning, child_param_name, parent_param_name, help)
             };
 
             context.collector.report_with_code(
@@ -4371,9 +4379,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                     Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
                 )
                 .with_note("Parameter name changes can break code using named arguments.")
-                .with_help(format!(
-                    "Consider renaming the parameter to `{parent_param_name}` to match the parent method."
-                )),
+                .with_help(help),
             );
         }
     }

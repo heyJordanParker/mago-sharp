@@ -375,6 +375,19 @@ impl<'input> Lexer<'input> {
                     unsafe { unreachable_unchecked() }
                 };
 
+                // Spec section 2: `@` directly before a name makes a keyword a name, as C#'s `@class` does. The token
+                // holds the `@`, and the parser reads the name after it.
+                if self.sharp
+                    && first_byte == b'@'
+                    && let Some(&next) = self.input.read(2).get(1)
+                    && IDENT_START_TABLE[next as usize]
+                {
+                    let (ident_len, _) = self.input.scan_identifier(1);
+                    let buffer = self.input.consume(1 + ident_len);
+                    let end = self.input.current_position();
+                    return Some(Ok(self.token(TokenKind::Identifier, buffer, start, end)));
+                }
+
                 if let Some(kind) = SIMPLE_TOKEN_TABLE[first_byte as usize] {
                     let buffer = self.input.consume(1);
                     let end = self.input.current_position();

@@ -372,9 +372,8 @@ const OBJECT: &[u8] = b"Object";
 ///   `===` and `<=>` in the next, and an operator of either row that takes an operand of its own row without
 ///   parentheses, as in `a < b < c` or `a is T is U`, is an error that names the groupings to write. So is a comparison
 ///   in the value of a comparison or value pattern, as in `x is > a < b`.
-/// - `@`, which hides PHP's warnings, in a method body of a file whose namespace is `Sharp` or below it, where the
-///   standard library writes it before a method throws its own exception. Anywhere else it is an error, and the
-///   analyzer refuses it in any file that is not the standard library's.
+/// - No `@` before a value: `@` before a name makes a keyword a name, spec section 2, and a PHP built-in's failure is
+///   the value it returns, which the bridge runs without PHP's warning.
 /// - The ternary `c ? a : b` in a method body, as spec section 21 writes it. PHP's `a ?: b` is an error, and
 ///   `a ? b : c ? d : e` is `a ? b : (c ? d : e)`, as in C#.
 /// - Pattern matching in a method body, as spec section 21 writes it: `x is pattern`, `x as T` to a type that is not
@@ -2019,14 +2018,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         // `check_cast` decided the cast at its `UnaryPrefix`.
         (Node::UnaryPrefixOperator(operator), Body | Constant) if operator.is_cast() => Some(place),
-        (Node::UnaryPrefixOperator(operator @ UnaryPrefixOperator::ErrorControl(_)), Body | Constant)
-            if !is_standard_library_namespace(context.program) =>
-        {
-            context.report(
-                Issue::error(
-                    "`@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.",
-                )
-                .with_annotation(Annotation::primary(operator.span()).with_message("Written here.")),
+        // Spec section 2: `@` before a name makes a keyword a name, and PHP# has no `@` before a value.
+        (Node::UnaryPrefixOperator(operator @ UnaryPrefixOperator::ErrorControl(_)), Body | Constant) => {
+            report_removed(
+                operator.span(),
+                b"@",
+                "a failure is the value a call returns, so test that value, as in `global.hex2bin(text) is string data`.",
+                "`@` before a name makes a keyword a name, as in `@event`.",
+                context,
             );
 
             None
@@ -4961,19 +4960,17 @@ const fn is_slice_binary_operator(operator: &BinaryOperator) -> bool {
     }
 }
 
-/// Whether the slice has a prefix operator at a place. A parameter default has no `++`, `--` or `@`, and `enter`
-/// refuses `@` outside the namespace `Sharp` before it calls this. Every operator is named, so a new one does not
-/// compile until it is decided.
+/// Whether the slice has a prefix operator at a place. A parameter default has no `++` or `--`, and `enter` refuses
+/// `@` before it calls this. Every operator is named, so a new one does not compile until it is decided.
 fn is_slice_prefix_operator(operator: &UnaryPrefixOperator, place: Place) -> bool {
     match operator {
         UnaryPrefixOperator::Negation(_)
         | UnaryPrefixOperator::Plus(_)
         | UnaryPrefixOperator::Not(_)
         | UnaryPrefixOperator::BitwiseNot(_) => true,
-        UnaryPrefixOperator::PreIncrement(_)
-        | UnaryPrefixOperator::PreDecrement(_)
-        | UnaryPrefixOperator::ErrorControl(_) => place == Place::Body,
-        UnaryPrefixOperator::Reference(_)
+        UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_) => place == Place::Body,
+        UnaryPrefixOperator::ErrorControl(_)
+        | UnaryPrefixOperator::Reference(_)
         | UnaryPrefixOperator::ArrayCast(..)
         | UnaryPrefixOperator::BoolCast(..)
         | UnaryPrefixOperator::BooleanCast(..)
@@ -6062,14 +6059,17 @@ fn declarations<'ast, 'arena>(program: &'ast Program<'arena>) -> Declarations<'a
     declarations
 }
 
-/// Checks the name of a PHP# local or parameter, which runs as the PHP variable of the same name, and a
-/// `__Something__` name, which spec section 27 removes.
+/// Checks the name of a PHP# local or parameter, and a `__Something__` name, which spec section 27 removes. A keyword
+/// names one only with `@` before it, spec section 2. The name of `@event` is `event`, and its span holds the `@` too,
+/// and the name of `@this` keeps its `@`.
 fn check_local_name(name: &[u8], span: Span, kind: &str, context: &mut Context<'_, '_, '_>) {
-    if name == b"this" {
+    let marked = span.length() as usize > name.len();
+    if is_sharp_keyword(name) && !marked {
+        let name = BytesDisplay(name);
+
         context.report(
-            Issue::error(format!("Cannot name a {kind} `this`: `this` is the object the method runs on."))
-                .with_annotation(Annotation::primary(span).with_message("Declared here."))
-                .with_note(format!("A PHP# {kind} runs as a PHP variable of the same name, and PHP forbids `$this`.")),
+            Issue::error(format!("`{name}` is a keyword; write `@{name}`."))
+                .with_annotation(Annotation::primary(span).with_message("Declared here.")),
         );
     } else if SUPERGLOBALS.contains(&name) {
         let name = BytesDisplay(name);
@@ -6079,20 +6079,11 @@ fn check_local_name(name: &[u8], span: Span, kind: &str, context: &mut Context<'
                 .with_annotation(Annotation::primary(span).with_message("Declared here."))
                 .with_note(format!("A PHP# {kind} runs as a PHP variable of the same name, which would be `${name}`.")),
         );
-    } else if is_sharp_keyword(name) {
-        let renamed = format!("{}Value", name.to_ascii_lowercase().escape_ascii());
-        let name = BytesDisplay(name);
-
-        context.report(
-            Issue::error(format!("`{name}` is a PHP# keyword, so it can't name a {kind}."))
-                .with_annotation(Annotation::primary(span).with_message("Declared here."))
-                .with_help(format!("Rename it, as in `{renamed}`.")),
-        );
     } else {
         let mut kind = kind.to_owned();
         kind[..1].make_ascii_uppercase();
 
-        check_declared_name(name, span, &kind, NameCase::Camel, context);
+        check_declared_name(name.strip_prefix(b"@").unwrap_or(name), span, &kind, NameCase::Camel, context);
     }
 }
 

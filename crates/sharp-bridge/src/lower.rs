@@ -8394,8 +8394,8 @@ fn prefix_kind(operator: &UnaryPrefixOperator) -> (sharp_kind, u32) {
         UnaryPrefixOperator::IntCast(..) => (SHARP_AST_CAST, IS_LONG),
         UnaryPrefixOperator::FloatCast(..) => (SHARP_AST_CAST, IS_DOUBLE),
         UnaryPrefixOperator::StringCast(..) => (SHARP_AST_CAST, IS_STRING),
-        UnaryPrefixOperator::ErrorControl(_) => (SHARP_AST_SILENCE, 0),
-        UnaryPrefixOperator::Reference(_)
+        UnaryPrefixOperator::ErrorControl(_)
+        | UnaryPrefixOperator::Reference(_)
         | UnaryPrefixOperator::ArrayCast(..)
         | UnaryPrefixOperator::BoolCast(..)
         | UnaryPrefixOperator::BooleanCast(..)

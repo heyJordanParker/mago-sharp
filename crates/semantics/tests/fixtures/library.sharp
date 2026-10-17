@@ -3,6 +3,4 @@ namespace Sharp.Text;
 public static class Text
 {
     public static extern string slug(string title);
-
-    public static string quiet(string title) => @global.trim(title);
 }

@@ -565,7 +565,7 @@ fn a_catch_variable_named_this_or_a_superglobal_is_an_error() {
     assert_eq!(
         issues(code),
         [
-            "8:26 Cannot name a catch variable `this`: `this` is the object the method runs on.",
+            "8:26 `this` is a keyword; write `@this`.",
             "9:25 `_GET` is the name of a PHP superglobal: rename this catch variable.",
         ]
     );
@@ -744,7 +744,7 @@ fn a_loop_variable_named_this_or_a_superglobal_is_an_error() {
     assert_eq!(
         issues(code),
         [
-            "7:20 Cannot name a loop variable `this`: `this` is the object the method runs on.",
+            "7:20 `this` is a keyword; write `@this`.",
             "9:21 `_GET` is the name of a PHP superglobal: rename this loop variable.",
         ]
     );
@@ -1102,17 +1102,17 @@ fn isset_empty_unset_array_and_list_written_as_calls_name_the_php_sharp_form() {
 #[test]
 fn the_keyword_names_example_reserves_only_the_keywords_php_sharp_uses() {
     let code = leak(method(
-        "        const list = [1, 2, 3];\n        let empty = true;\n        const print = \"draft\";\n        const match = 1;\n        return extra;\n",
+        "        const list = [1, 2, 3];\n        let empty = true;\n        const print = \"draft\";\n        const @emit = 1;\n        const match = 1;\n        return extra;\n",
     ));
 
-    assert_eq!(issues(code), ["10:15 `match` is a PHP# keyword, so it can't name a local."]);
+    assert_eq!(issues(code), ["11:15 `match` is a keyword; write `@match`."]);
 }
 
-/// Spec section 2, after C#'s keywords: every word that starts or structures PHP# syntax is reserved, so it can't name
-/// a `const` or `let` local, a parameter, a catch variable or a pattern variable. `this` keeps its own message. The
-/// name the help suggests compiles.
+/// Spec section 2, after C#'s keywords: every word that starts or structures PHP# syntax names a `const` or `let`
+/// local, a parameter, a catch variable, a pattern variable or a loop variable only with `@` before it, `this`
+/// included, and the error says to write it so.
 #[test]
-fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
+fn every_keyword_names_a_local_or_parameter_only_with_at() {
     const RESERVED: [&str; 53] = [
         "let",
         "const",
@@ -1170,7 +1170,6 @@ fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
     ];
 
     for word in RESERVED {
-        let renamed = format!("{}Value", word.to_lowercase());
         let rows = [
             (leak(method(&format!("        const {word} = 1;\n        return extra;\n"))), "7:15", "local"),
             (leak(method(&format!("        let {word} = 1;\n        return extra;\n"))), "7:13", "local"),
@@ -1193,24 +1192,29 @@ fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
             ),
         ];
 
-        for (code, at, kind) in rows {
-            let (message, help) = if word == "this" {
-                (format!("Cannot name a {kind} `this`: `this` is the object the method runs on."), None)
-            } else {
-                (
-                    format!("`{word}` is a PHP# keyword, so it can't name a {kind}."),
-                    Some(format!("Rename it, as in `{renamed}`.")),
-                )
-            };
-            let refused: Vec<(String, Option<String>)> =
-                check_in_type_file(code).into_iter().map(|issue| (issue.message, issue.help)).collect();
-
-            assert_eq!(refused, [(message, help)], "{code}");
-            assert_eq!(issues(code)[0].split_once(' ').map(|(location, _)| location), Some(at), "{code}");
+        for (code, at, _) in rows {
+            assert_eq!(issues(code), [format!("{at} `{word}` is a keyword; write `@{word}`.")], "{code}");
         }
 
-        let fixed = leak(method(&format!("        const {renamed} = 1;\n        return {renamed};\n")));
-        assert_eq!(issues(fixed), Vec::<String>::new(), "{fixed}");
+        let marked = [
+            format!("        const @{word} = 1;\n        return @{word};\n"),
+            format!("        let @{word} = 1;\n        @{word} = 2;\n        return @{word};\n"),
+            format!("        try {{ return 1; }} catch (Exception @{word}) {{ throw @{word}; }}\n"),
+            format!("        if (extra is int @{word}) {{ return @{word}; }}\n        return extra;\n"),
+            format!("        for (const @{word} of [1]) {{ return @{word}; }}\n        return extra;\n"),
+        ];
+        // `Self` is a name in Pascal case, which a local's name breaks with a warning.
+        if word == "Self" {
+            continue;
+        }
+        for body in marked {
+            let fixed = leak(method(&body));
+            assert_eq!(issues(fixed), Vec::<String>::new(), "{fixed}");
+        }
+        let parameter = leak(format!(
+            "namespace App.Tenant;\n\nclass Report\n{{\n    public int run(int @{word}) => @{word};\n}}\n"
+        ));
+        assert_eq!(issues(parameter), Vec::<String>::new(), "{parameter}");
     }
 }
 
@@ -2258,13 +2262,7 @@ fn two_imports_with_the_same_short_name_are_an_error() {
 fn a_parameter_or_local_named_this_is_an_error() {
     let code = "class Report\n{\n    public int run(int this) { return 1; }\n\n    public int total() { let this = 1; return 1; }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "3:24 Cannot name a parameter `this`: `this` is the object the method runs on.",
-            "5:30 Cannot name a local `this`: `this` is the object the method runs on.",
-        ]
-    );
+    assert_eq!(issues(code), ["3:24 `this` is a keyword; write `@this`.", "5:30 `this` is a keyword; write `@this`.",]);
 }
 
 #[test]
@@ -3633,28 +3631,19 @@ fn extern_on_a_field_is_not_supported_yet() {
     assert_eq!(issues(code), ["5:20 This modifier is not supported yet in PHP#."]);
 }
 
+/// Spec section 2: `@` before a name makes a keyword a name, and PHP# has no `@` before a value, in the standard
+/// library too, since the bridge runs a PHP built-in that returns its failure without its warning.
 #[test]
-fn the_error_control_operator_is_in_the_slice_under_the_sharp_namespace() {
-    for namespace in ["Sharp", "Sharp.Text", "SHARP.Text"] {
+fn the_error_control_operator_is_an_error_in_every_namespace() {
+    for namespace in ["Sharp", "Sharp.Text", "App"] {
         let code = leak(format!(
-            "namespace {namespace};\n\npublic static class Text\n{{\n    public static string quiet(string title) => @trim(title);\n}}\n"
-        ));
-
-        assert_eq!(issues(code), Vec::<String>::new(), "{namespace}");
-    }
-}
-
-#[test]
-fn the_error_control_operator_outside_the_sharp_namespace_is_an_error() {
-    for namespace in ["App", "Sharpen.Text", "App.Sharp"] {
-        let code = leak(format!(
-            "namespace {namespace};\n\npublic static class Text\n{{\n    public static string quiet(string title) => @trim(title);\n}}\n"
+            "namespace {namespace};\n\npublic static class Text\n{{\n    public static string quiet(string title) => @(global.trim(title));\n}}\n"
         ));
 
         assert_eq!(
             issues(code),
             [
-                "5:49 `@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens."
+                "5:49 PHP# has no `@`: a failure is the value a call returns, so test that value, as in `global.hex2bin(text) is string data`."
             ],
             "{namespace}"
         );
@@ -4387,12 +4376,12 @@ fn bitwise_operators_their_compound_assignments_and_modulo_assignment_are_in_the
 #[test]
 fn operators_outside_the_slice_are_not_supported_yet() {
     let code =
-        leak(method("        let a = extra;\n        a = @extra;\n        a = extra <> 1;\n        return a;\n"));
+        leak(method("        let a = extra;\n        a = @(extra);\n        a = extra <> 1;\n        return a;\n"));
 
     assert_eq!(
         issues(code),
         [
-            "8:13 `@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.",
+            "8:13 PHP# has no `@`: a failure is the value a call returns, so test that value, as in `global.hex2bin(text) is string data`.",
             "9:19 This operator is not supported yet in PHP#.",
         ]
     );
@@ -6118,7 +6107,7 @@ fn a_pattern_variable_used_where_its_test_does_not_hold_names_its_test() {
 fn a_pattern_variable_named_this_is_an_error() {
     let code = leak(method("        if (extra is int this) {\n        }\n        return extra;\n"));
 
-    assert_eq!(issues(code), ["7:26 Cannot name a pattern variable `this`: `this` is the object the method runs on."]);
+    assert_eq!(issues(code), ["7:26 `this` is a keyword; write `@this`."]);
 }
 
 /// Spec section 19 groups `< <= > >= is as` in one row and `== != === <=>` in the next, and neither row chains.

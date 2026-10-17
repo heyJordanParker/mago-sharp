@@ -365,13 +365,13 @@ fn analyze_fix_refuses_a_fix_that_would_edit_a_sharp_file() {
     assert_eq!(report(directory.path()), source);
 }
 
-/// The standard library's `Text`, with a native body, spec section 29, the `@` the library writes before it throws
-/// its own exception, and its extension on `string`, spec section 26, whose `trim` the checker names in place of PHP's.
-const TEXT: &str = "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n\n    public static string quiet(string title) => @global.trim(title);\n\n    public static string shout(string title) => global.strtoupper(title);\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
+/// The standard library's `Text`, with a native body, spec section 29, and its extension on `string`, spec section 26,
+/// whose `trim` the checker names in place of PHP's.
+const TEXT: &str = "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n\n    public static string shout(string title) => global.strtoupper(title);\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
 
 /// The standard library's `Environment`, the `foreign` class of the effect `Environment`, spec section 29. Its getter
 /// is pure: its constructor reads the arguments once, and its methods call plain PHP, as a `foreign` class's code does.
-const ENVIRONMENT: &str = "namespace Sharp;\n\nimport RuntimeException;\nimport ValueError;\n\npublic foreign class Environment\n{\n    public List<string> arguments { get; }\n\n    public Environment()\n    {\n        this.arguments = Environment.commandLine();\n    }\n\n    public string? variable(string name) => global.getenv(name) is string value ? value : null;\n\n    public string currentDirectory()\n        => global.getcwd() is string directory ? directory : throw new RuntimeException(\"Environment.currentDirectory: the current directory cannot be read\");\n\n    public void changeDirectory(string path)\n    {\n        if (!@global.chdir(path)) {\n            throw new RuntimeException(`Environment.changeDirectory: the directory \"${path}\" cannot be entered`);\n        }\n    }\n\n    public string require(string name)\n        => global.getenv(name) is string value ? value : throw new ValueError(`Environment.require: the environment variable \"${name}\" is not set`);\n\n    private static extern List<string> commandLine();\n}\n";
+const ENVIRONMENT: &str = "namespace Sharp;\n\nimport RuntimeException;\nimport ValueError;\n\npublic foreign class Environment\n{\n    public List<string> arguments { get; }\n\n    public Environment()\n    {\n        this.arguments = Environment.commandLine();\n    }\n\n    public string? variable(string name) => global.getenv(name) is string value ? value : null;\n\n    public string currentDirectory()\n        => global.getcwd() is string directory ? directory : throw new RuntimeException(\"Environment.currentDirectory: the current directory cannot be read\");\n\n    public void changeDirectory(string path)\n    {\n        if (!global.chdir(path)) {\n            throw new RuntimeException(`Environment.changeDirectory: the directory \"${path}\" cannot be entered`);\n        }\n    }\n\n    public string require(string name)\n        => global.getenv(name) is string value ? value : throw new ValueError(`Environment.require: the environment variable \"${name}\" is not set`);\n\n    private static extern List<string> commandLine();\n}\n";
 
 /// The standard library's `Int`, `Float` and `Bool`, spec section 24, with the library's signatures. Their names are
 /// reserved, and only the standard library declares them.
@@ -477,9 +477,9 @@ fn analyze_finds_no_issues_in_a_call_of_an_extern_method_of_the_standard_library
 }
 
 /// `mago compile` checks the vendored library as a project file, and it stays the standard library, so its `extern`
-/// method and its `@` compile.
+/// method compiles.
 #[test]
-fn compile_accepts_extern_methods_and_silence_in_the_vendored_standard_library() {
+fn compile_accepts_extern_methods_in_the_vendored_standard_library() {
     let directory = library_workspace(
         "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page\n{\n    public string slug() => Text.slug(\"Hello\");\n}\n",
     );
@@ -511,7 +511,7 @@ fn compile_inlines_a_vendored_library_form_into_a_project_caller() {
 }
 
 /// In the standard library's own repository, whose root `composer.json` names the package, `library/Sharp/` is the
-/// library: its `extern` method and its `@` compile, and a file of another package in the same repository inlines its
+/// library: its `extern` method compiles, and a file of another package in the same repository inlines its
 /// one-call method. That package is still a project, so its own `extern` method under `Sharp` is refused.
 #[test]
 fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
@@ -542,13 +542,11 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     assert!(title.windows(b"strtoupper".len()).any(|window| window == b"strtoupper"), "the form is inlined");
     assert!(!root.join(".sharp/example/App/Native.sharpc").exists(), "{printed}");
     assert!(printed.contains("native-body-outside-library"), "{printed}");
-    assert!(!printed.contains("silence-outside-library"), "{printed}");
 }
 
-/// Without a `composer.json` that names the package, `library/Sharp/` is project code: its `extern` method and its `@`
-/// are refused.
+/// Without a `composer.json` that names the package, `library/Sharp/` is project code: its `extern` method is refused.
 #[test]
-fn compile_refuses_extern_and_silence_under_library_sharp_without_the_composer_json_of_the_library() {
+fn compile_refuses_extern_under_library_sharp_without_the_composer_json_of_the_library() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n");
@@ -560,7 +558,6 @@ fn compile_refuses_extern_and_silence_under_library_sharp_without_the_composer_j
     assert_eq!(output.status.code(), Some(1), "{printed}");
     assert!(!root.join(".sharp/library/Sharp/Text/Text.sharpc").exists(), "{printed}");
     assert!(printed.contains("native-body-outside-library"), "{printed}");
-    assert!(printed.contains("silence-outside-library"), "{printed}");
 }
 
 #[test]
@@ -605,22 +602,6 @@ fn analyze_reports_an_extern_method_in_a_project_file() {
 
         assert_eq!(page_errors(&page), errors, "{namespace}");
     }
-}
-
-/// A project file under `Sharp` passes the semantic checks, which know only the namespace, and the analyzer refuses
-/// its namespace and both forms only the standard library may write.
-#[test]
-fn analyze_reports_extern_and_silence_in_a_project_file_under_sharp() {
-    assert_eq!(
-        page_errors(
-            "namespace Sharp.Mine;\n\npublic static class Page\n{\n    public static extern string slug(string title);\n\n    public static string quiet(string title) => @global.trim(title);\n}\n"
-        ),
-        [
-            library_namespace_error("Sharp.Mine"),
-            "src/App/Page.sharp:5:33:error - native-body-outside-library: Only the standard library declares native bodies: give `slug` a body.".to_string(),
-            "src/App/Page.sharp:7:49:error - silence-outside-library: `@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.".to_string(),
-        ]
-    );
 }
 
 /// A project calls the standard library's `Int`, `Float` and `Bool` by their bare names, with no import, spec
@@ -704,7 +685,7 @@ fn analyze_never_takes_the_standard_library_module_for_the_app_dispatcher() {
 }
 
 /// The standard library's own repository analyzes its sources as project code, and its root `composer.json` names
-/// the package, so its `extern` methods, `@`, and its `Int`, `Float` and `Bool` are the library's.
+/// the package, so its `extern` methods and its `Int`, `Float` and `Bool` are the library's.
 #[test]
 fn analyze_finds_no_issues_in_the_repository_of_the_standard_library() {
     let directory = tempfile::tempdir().unwrap();

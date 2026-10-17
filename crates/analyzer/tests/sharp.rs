@@ -2181,6 +2181,29 @@ fn replacing_a_php_method_follows_php_rules_with_override_required() {
     );
 }
 
+/// A plain PHP parent's parameter named as a PHP# keyword is written with `@`, spec section 2, so an override keeps
+/// `$event` as `@event`, and a rename names the `@event` to write.
+#[test]
+fn an_override_keeps_a_keyword_parameter_name_with_at() {
+    let library = "<?php\n\nnamespace Lib;\n\nabstract class Behavior\n{\n    abstract public function submit(string $form, string $event): string;\n}\n";
+    let others = [("src/Lib/Behavior.php", library)];
+    let kept = "namespace Demo;\n\nimport Lib.Behavior;\n\npublic class Form : Behavior\n{\n    public override string submit(string form, string @event) => @event;\n}\n";
+    let renamed = "namespace Demo;\n\nimport Lib.Behavior;\n\npublic class Form : Behavior\n{\n    public override string submit(string form, string e) => e;\n}\n";
+
+    assert_eq!(issues(("src/Demo/Form.sharp", kept), &others), Vec::<String>::new());
+    let refused: Vec<_> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Form.sharp", renamed), &others)
+        .into_iter()
+        .map(|issue| (issue.message, issue.help))
+        .collect();
+    assert_eq!(
+        refused,
+        [(
+            "Parameter #2 of `Form.submit` is named `e` but parent `Behavior.submit` names it `event`".to_owned(),
+            Some("Name it `@event`, as the parent does.".to_owned()),
+        )]
+    );
+}
+
 /// A plain PHP parent whose methods type a native `array` return and parameter in their docblocks.
 const COUNTER: &str = "<?php\n\nnamespace Lib;\n\nabstract class Counter\n{\n    /** @return list<int> */\n    public function counts(): array\n    {\n        return [];\n    }\n\n    /** @param list<string> $tags */\n    public function tag(array $tags): void\n    {\n    }\n}\n";
 
@@ -3731,7 +3754,7 @@ const LIBRARY_TYPE_CLASSES: [(&str, &str); 2] = [
 /// `vendor/`.
 const ENVIRONMENT: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Environment.sharp",
-    "namespace Sharp;\n\nimport RuntimeException;\nimport ValueError;\n\npublic foreign class Environment\n{\n    public List<string> arguments { get; }\n\n    public Environment()\n    {\n        this.arguments = Environment.commandLine();\n    }\n\n    public string? variable(string name) => global.getenv(name) is string value ? value : null;\n\n    public string currentDirectory()\n        => global.getcwd() is string directory ? directory : throw new RuntimeException(\"Environment.currentDirectory: the current directory cannot be read\");\n\n    public void changeDirectory(string path)\n    {\n        if (!@global.chdir(path)) {\n            throw new RuntimeException(`Environment.changeDirectory: the directory \"${path}\" cannot be entered`);\n        }\n    }\n\n    public string require(string name)\n        => global.getenv(name) is string value ? value : throw new ValueError(`Environment.require: the environment variable \"${name}\" is not set`);\n\n    private static extern List<string> commandLine();\n}\n",
+    "namespace Sharp;\n\nimport RuntimeException;\nimport ValueError;\n\npublic foreign class Environment\n{\n    public List<string> arguments { get; }\n\n    public Environment()\n    {\n        this.arguments = Environment.commandLine();\n    }\n\n    public string? variable(string name) => global.getenv(name) is string value ? value : null;\n\n    public string currentDirectory()\n        => global.getcwd() is string directory ? directory : throw new RuntimeException(\"Environment.currentDirectory: the current directory cannot be read\");\n\n    public void changeDirectory(string path)\n    {\n        if (!global.chdir(path)) {\n            throw new RuntimeException(`Environment.changeDirectory: the directory \"${path}\" cannot be entered`);\n        }\n    }\n\n    public string require(string name)\n        => global.getenv(name) is string value ? value : throw new ValueError(`Environment.require: the environment variable \"${name}\" is not set`);\n\n    private static extern List<string> commandLine();\n}\n",
 );
 
 /// The semantic checks let any file whose namespace is `Sharp` declare `Int`, `Float` and `Bool`, as the engine does,

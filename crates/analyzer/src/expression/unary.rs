@@ -174,18 +174,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
             return Ok(());
         }
 
-        // The semantic checks take `@` in any file under the namespace `Sharp`, because the engine compiles the
-        // standard library from `vendor/` as any other code. Only the analyzer knows the file's package.
-        if context.dialect.is_sharp() && self.operator.is_error_control() && !context.source_file.is_standard_library {
-            context.collector.report_with_code(
-                IssueCode::SilenceOutsideLibrary,
-                Issue::error(
-                    "`@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.",
-                )
-                .with_annotation(Annotation::primary(self.operator.span()).with_message("Written here.")),
-            );
-        }
-
         match self.operator {
             // operators that always retain the type of the operand
             UnaryPrefixOperator::Reference(_) => {
