@@ -20849,10 +20849,16 @@ fn a_new_in_an_attribute_argument_lowers_to_the_new_php_takes_there() {
 #[test]
 fn an_accessor_carries_its_attributes_on_its_hook_and_a_target_picks_the_part() {
     let files = lowered_each(
-        &[(
-            "src/App/Report.sharp",
-            "namespace App;\n\nimport Lib.Field;\n\npublic class Report\n{\n    public int count { [Field(\"get\")] get; [param: Field(\"value\")] [Field(\"set\")] set; } = 0;\n\n    public static int total { [Field(\"read\")] get => 1; }\n\n    public Report([param: Field(\"in\")] [property: Field(\"kept\")] public int id { get; }) { }\n}\n",
-        )],
+        &[
+            (
+                "src/App/Report.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic class Report\n{\n    public int count { [Field(\"get\")] get; [param: Field(\"value\")] [Field(\"set\")] set; } = 0;\n\n    public static int total { [Field(\"read\")] get => 1; }\n\n    public Report([param: Field(\"in\")] [property: Field(\"kept\")] public int id { get; }) { }\n}\n",
+            ),
+            (
+                "src/App/Sized.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic interface Sized\n{\n    int size { [Field(\"measured\")] get; [param: Field(\"new size\")] set; }\n}\n",
+            ),
+        ],
         &[common::FIELD],
     );
 
@@ -20875,6 +20881,8 @@ fn an_accessor_carries_its_attributes_on_its_hook_and_a_target_picks_the_part() 
     assert_eq!(member(&[1, 4]), attribute("read"));
     assert_eq!(member(&[2, 2]), attribute("kept"));
     assert_eq!(member(&[3, 0, 0, 3]), attribute("in"));
+    assert_eq!(member_in(&files, "Sized", &[0, 1, 0, 3, 0, 4]), attribute("measured"));
+    assert_eq!(member_in(&files, "Sized", &[0, 1, 0, 3, 1, 0, 0, 3]), attribute("new size"));
 }
 
 /// Spec section 1: an interface method carries its attributes as a class method does, and so does the trait method

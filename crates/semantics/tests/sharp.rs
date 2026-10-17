@@ -3087,9 +3087,15 @@ fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_att
     let code = "namespace App.Tenant;\n\n[type: Note]\npublic class Report\n{\n    [field: Note]\n    public const int MAX = 3;\n\n    [field: Note]\n    private int seen = 0;\n\n    [property: Note]\n    [field: Note]\n    public int count { [method: Note] get; [param: Note] [Note] set; } = 0;\n\n    public int size { [Note] get => 1; }\n\n    public Report([property: Note] [param: Note] public int id { get; }) { }\n\n    [method: Note]\n    public int run([param: Note] int extra) => extra;\n}\n";
     assert_eq!(issues(code), Vec::<String>::new());
 
-    let code =
-        "namespace App.Tenant;\n\npublic interface Sized\n{\n    int size { [Note] get; [param: Note] set; }\n}\n";
-    assert_eq!(issues(code), Vec::<String>::new());
+    for code in [
+        "namespace App.Tenant;\n\npublic interface Sized\n{\n    int size { [Note] get; [param: Note] set; }\n}\n",
+        "namespace App.Tenant;\n\n[type: Note]\npublic enum Mode\n{\n    [field: Note]\n    case Read;\n\n    [property: Note]\n    public string label => \"read\";\n}\n",
+        "namespace App.Tenant;\n\n[type: Note]\npublic struct Size { }\n",
+        "namespace App.Tenant;\n\n[type: Note]\npublic event Paid(int orderId);\n",
+        "namespace App.Tenant;\n\npublic class Doubler\n{\n    public Function<int(int)> twice() => [method: Note] (int n) => n * 2;\n\n    public Function<int(int)> thrice() => [method: Note] (int n) => { return n * 3; };\n}\n",
+    ] {
+        assert_eq!(issues(code), Vec::<String>::new(), "{code}");
+    }
 
     let code = "namespace App.Tenant;\n\n[method: Note]\npublic class Report\n{\n    [return: Note]\n    public int run() => 1;\n\n    [field: Note]\n    public int size { get => 1; }\n\n    public int count { get; [return: Note] set; didSet => this.run(); } = 0;\n\n    public int total { get; set; [Note] willSet => this.run(); } = 0;\n\n    public int scale([property: Note] int extra) => extra;\n\n    public int id { [Note] get; }\n\n    public static int sum { [Note] get; set; } = 0;\n}\n";
     assert_eq!(
