@@ -14191,9 +14191,15 @@ fn a_map_or_a_set_constant_is_its_php_array() {
 ///
 /// A class constant holds no object, so the first read of a `Set` or a `Map` constant makes its PHP array the object
 /// again, spec section 12, and keeps it under the constant's own key. Every later read shares that object, without a
-/// closure.
+/// closure. A read through a type parameter, whose class is known only when the code runs, makes the object each time.
 #[test]
 fn a_read_of_a_set_constant_makes_the_set_of_its_array() {
+    let generic = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const Set<string> CODES = [\"a\", \"b\"];\n\n    public static int counted<T : Report>() => T.CODES.count();\n}\n",
+    );
+    let counted = generic.body_of("counted");
+    assert!(!counted.contains("Sharp\\\\Internal\\\\keep") && counted.contains("ZVAL \"Sharp\\\\Set\""), "{counted}");
+
     let lowered = Lowered::new(
         "namespace App.Tenant;\n\nclass Report\n{\n    public const Set<string> CODES = [\"a\", \"b\"];\n\n    public Set<string> codes() => Report.CODES;\n}\n",
     );
@@ -19692,7 +19698,7 @@ fn a_method_that_yields_is_a_generator() {
 #[test]
 fn a_function_whose_result_holds_a_map_or_a_set_gives_plain_php_its_array() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Shelf\n{\n    public Map<string, int> sizes() => [:];\n\n    public Set<string> tags() => [];\n\n    public List<Map<string, int>> rows() => [];\n\n    public List<int> counts() => [];\n\n    public Function<Map<string, int>()> sizer() => () => [:];\n\n    public Any? anything() => null;\n\n    public T held<T>(T value) => value;\n\n    public Iterable<Map<string, int>> streamed(List<Map<string, int>> rows) => rows;\n\n    public Map<int|string, int> mixed() => [:];\n}\n",
+        "namespace App.Tenant;\n\nclass Shelf\n{\n    public Map<string, int> sizes() => [:];\n\n    public Set<string> tags() => [];\n\n    public List<Map<string, int>> rows() => [];\n\n    public List<int> counts() => [];\n\n    public Function<Map<string, int>()> sizer() => () => [:];\n\n    public Any? anything() => null;\n\n    public T held<T>(T value) => value;\n\n    public Iterable<Map<string, int>> streamed(List<Map<string, int>> rows) => rows;\n\n    public Map<int|string, int> mixed() => [:];\n\n    public List<Map<List<int>, int>> listed() => [];\n}\n",
     );
 
     assert_eq!(lowered.diagnostics(), Vec::<String>::new());
@@ -19735,6 +19741,7 @@ fn a_function_whose_result_holds_a_map_or_a_set_gives_plain_php_its_array() {
             "held true: null",
             "streamed true: ZVAL [1] \"iterable\"",
             "mixed false: ZVAL \"Sharp\\\\Map\"",
+            "listed false: TYPE [7]",
         ]
     );
     // The lambda declares no PHP result type, and its result crosses as a method's does.
