@@ -583,12 +583,10 @@ impl<'analysis> Types<'analysis> {
                 continue;
             };
             for method in &interface.methods {
-                let Some(declaring) = metadata.declaring_method_ids.get(method) else {
-                    continue;
-                };
-                let taken = self
-                    .codebase
-                    .get_method_by_id(declaring)
+                let taken = metadata
+                    .declaring_method_ids
+                    .get(method)
+                    .and_then(|declaring| self.codebase.get_method_by_id(declaring))
                     .filter(|taken| !taken.flags.is_sharp() && taken.return_type_declaration_metadata.is_none());
                 let required = self.codebase.get_method(interface.name.as_bytes(), method.as_bytes());
                 let (Some(_), Some(required)) = (taken, required) else {

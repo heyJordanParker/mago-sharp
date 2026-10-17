@@ -14077,15 +14077,18 @@ fn a_union_typed_class_constant_has_its_type_union() {
 /// public const array LEVELS = [\App\Tenant\Level::Low->value => 1];
 /// public const array CODES = ['a', 'b'];
 /// public const ?array SPARE = null;
+/// public const array NAMES = [...\App\Tenant\Report::CODES_LIST, 'c'];
+/// public const array CODES_LIST = ['a'];
 /// ```
 ///
 /// A class constant can hold no `new`, so a `Map` or a `Set` constant is the PHP array plain PHP reads, spec section
 /// 12, typed `array`: a `Map` of its entries, with a backed enum key as its backing value, and a `Set` of its
-/// elements. PHP# reads the constant as any PHP array that may hold a `Map`, and makes the object of it there.
+/// elements. PHP# reads the constant as any PHP array that may hold a `Map`, and makes the object of it there. A
+/// spread in a constant's collection literal stays PHP's spread.
 #[test]
 fn a_map_or_a_set_constant_is_its_php_array() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public const Map<string, int> LIMITS = [\"card\": 100];\n    public const Map<Level, int> LEVELS = [Level.Low: 1];\n    public const Set<string> CODES = [\"a\", \"b\"];\n    public const Map<string, int>? SPARE = null;\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const Map<string, int> LIMITS = [\"card\": 100];\n    public const Map<Level, int> LEVELS = [Level.Low: 1];\n    public const Set<string> CODES = [\"a\", \"b\"];\n    public const Map<string, int>? SPARE = null;\n    public const List<string> NAMES = [...Report.CODES_LIST, \"c\"];\n    public const List<string> CODES_LIST = [\"a\"];\n}\n",
         &[("src/App/Tenant/Level.php", "<?php namespace App\\Tenant; enum Level: string { case Low = 'low'; }")],
     );
     let class = lowered.child(lowered.root(), 2);
@@ -14142,6 +14145,32 @@ fn a_map_or_a_set_constant_is_its_php_array() {
                     null
                 null
                 TYPE [263]
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "NAMES"
+                    ARRAY [3]
+                      UNPACK
+                        CLASS_CONST
+                          ZVAL "App\\Tenant\\Report"
+                          ZVAL "CODES_LIST"
+                      ARRAY_ELEM
+                        ZVAL "c"
+                        null
+                    null
+                null
+                TYPE [7]
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "CODES_LIST"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL "a"
+                        null
+                    null
+                null
+                TYPE [7]
         "#}
     );
 }
@@ -14155,11 +14184,12 @@ fn a_map_or_a_set_constant_is_its_php_array() {
 ///
 /// A method a PHP# interface requires, which the class takes from a plain PHP parent declaring no return type, is the
 /// parent's method with the interface's return type, so PHP takes it as the implementation, spec section 22. A
-/// result PHP# types as `Any?` declares no PHP type, so `getKey` needs no such method.
+/// result PHP# types as `Any?` declares no PHP type, so `getKey` needs no such method. A method two interfaces require
+/// is forwarded once.
 #[test]
 fn a_method_an_interface_types_and_a_plain_parent_leaves_untyped_is_forwarded_with_the_type() {
     let lowered = Lowered::with(
-        "namespace App;\n\npublic class Bill : Record, Morphable\n{\n}\n",
+        "namespace App;\n\npublic class Bill : Record, Morphable, Named\n{\n}\n",
         &[
             (
                 "src/App/Record.php",
@@ -14169,8 +14199,15 @@ fn a_method_an_interface_types_and_a_plain_parent_leaves_untyped_is_forwarded_wi
                 "src/App/Morphable.sharp",
                 "namespace App;\n\npublic interface Morphable\n{\n    Any? getKey();\n\n    string getMorphClass();\n}\n",
             ),
+            ("src/App/Named.sharp", "namespace App;\n\npublic interface Named\n{\n    string getMorphClass();\n}\n"),
         ],
     );
+    let forwarders = lowered
+        .nodes()
+        .iter()
+        .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD && lowered.text(node.text) == "getMorphClass")
+        .count();
+    assert_eq!(forwarders, 1);
 
     assert_eq!(
         lowered.declared("getMorphClass"),
@@ -14199,6 +14236,87 @@ fn a_method_an_interface_types_and_a_plain_parent_leaves_untyped_is_forwarded_wi
         "#}
     );
     assert!(lowered.nodes().iter().all(|node| lowered.text(node.text) != "getKey"));
+}
+
+/// ```php
+/// public function shape(): mixed { return null; }
+/// public function raw() { return null; }
+/// ```
+///
+/// A result PHP# types as `Any?` erases to `mixed` and declares no PHP type, so a plain PHP parent's untyped method
+/// fits it. An override of a plain PHP method that declares a type, as `JsonSerializable::jsonSerialize(): mixed`,
+/// declares `mixed`, which PHP requires of it. Each carries the function type the engine reads for its method value.
+#[test]
+fn an_any_result_declares_mixed_only_where_a_typed_plain_php_method_requires_it() {
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Report : Shaped\n{\n    public override Any? shape() => null;\n\n    public Any? raw() => null;\n}\n",
+        &[(
+            "src/App/Shaped.php",
+            "<?php namespace App; abstract class Shaped { abstract public function shape(): mixed; }",
+        )],
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("shape"), 3)),
+        "SHARP_TYPE_ARGS\n  ZVAL [1] \"mixed\"\n  ZVAL \"Function<Any?()>\"\n"
+    );
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("raw"), 3)),
+        "SHARP_TYPE_ARGS\n  null\n  ZVAL \"Function<Any?()>\"\n"
+    );
+}
+
+/// A forwarded method declares the PHP type the interface's own method declares: a `Map` is `\Sharp\Map`, a `Set`
+/// `\Sharp\Set`, a `List` `array`, an `Iterable` `iterable` and a function type `\Closure`. `[257]` on `string?` is
+/// `ZEND_TYPE_NULLABLE | ZEND_NAME_NOT_FQ`, PHP's `?string`. A `void` result calls the parent without `return`.
+#[test]
+fn a_forwarded_method_declares_the_php_type_of_the_interface_method() {
+    let names = ["label", "touch", "owner", "level", "record", "sizes", "tags", "ids", "stream", "make"];
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Bill : Record, Shelved\n{\n}\n",
+        &[
+            (
+                "src/App/Record.php",
+                "<?php namespace App; class Record { public function label() {} public function touch() {} public function owner() {} public function level() {} public function record() {} public function sizes() {} public function tags() {} public function ids() {} public function stream() {} public function make() {} }",
+            ),
+            ("src/App/Level.php", "<?php namespace App; enum Level: string { case Low = 'low'; }"),
+            (
+                "src/App/Shelved.sharp",
+                "namespace App;\n\npublic interface Shelved\n{\n    string? label();\n    void touch();\n    Object owner();\n    Level level();\n    Record record();\n    Map<string, int> sizes();\n    Set<string> tags();\n    List<int> ids();\n    Iterable<int> stream();\n    Function<int()> make();\n}\n",
+            ),
+        ],
+    );
+
+    let declared: Vec<String> =
+        names.iter().map(|name| lowered.render(lowered.child(lowered.method_named(name), 3))).collect();
+    assert_eq!(
+        declared,
+        [
+            "ZVAL [257] \"string\"\n",
+            "ZVAL [1] \"void\"\n",
+            "ZVAL [1] \"object\"\n",
+            "ZVAL \"App\\\\Level\"\n",
+            "ZVAL \"App\\\\Record\"\n",
+            "ZVAL \"Sharp\\\\Map\"\n",
+            "ZVAL \"Sharp\\\\Set\"\n",
+            "TYPE [7]\n",
+            "ZVAL [1] \"iterable\"\n",
+            "ZVAL \"Closure\"\n",
+        ]
+    );
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("touch"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              STATIC_CALL
+                ZVAL [1] "parent"
+                ZVAL "touch"
+                ARG_LIST
+                  UNPACK
+                    VAR
+                      ZVAL "arguments"
+        "#}
+    );
 }
 
 /// ```php
