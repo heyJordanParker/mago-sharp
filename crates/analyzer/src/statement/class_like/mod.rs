@@ -3858,6 +3858,12 @@ fn check_interface_method_signatures<'ctx, A>(
             &mut issues,
         );
 
+        // Spec section 22: a PHP# class forwards a method its PHP# interface types and its plain PHP parent leaves
+        // untyped, as Eloquent's `getKey()`, with the interface's type, so PHP checks the parent's result there.
+        let forwarded = class_like_metadata.flags.is_sharp()
+            && interface_metadata.flags.is_sharp()
+            && !class_method.flags.is_sharp()
+            && class_method.return_type_declaration_metadata.is_none();
         for incompatibility in issues {
             if widens_parameter(
                 artifacts,
@@ -3865,7 +3871,9 @@ fn check_interface_method_signatures<'ctx, A>(
                 class_method_id.get_class_name(),
                 class_method,
                 &incompatibility,
-            ) {
+            ) || (forwarded
+                && matches!(incompatibility, SignatureCompatibilityIssue::MissingReturnTypeDeclaration { .. }))
+            {
                 continue;
             }
             report_signature_compatibility_issue(

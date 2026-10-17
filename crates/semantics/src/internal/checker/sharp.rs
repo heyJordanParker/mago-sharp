@@ -1254,12 +1254,16 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::GenericHint(generic), FieldOrProperty | Method | Signature | Parameter | Body) => {
             check_generic(generic, place, context)
         }
+        // Spec section 2: a constant's value is known before the code runs, and a collection literal is.
+        (Node::GenericHint(generic), ClassConstant) if matches!(generic.name.value, b"List" | b"Map" | b"Set") => {
+            check_generic(generic, place, context)
+        }
         // A generic type's type arguments, and those of `new` and of a method call, are never `void`. Nor are they
         // `never` in a return type, which is a type only as the whole return type, spec section 7, and which
         // `type_written_another_way` refuses everywhere else.
         (
             Node::TypeArgumentList(list),
-            FieldOrProperty | Method | Signature | Parameter | Body | Instantiation,
+            FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Instantiation,
         ) => {
             if let Some(void) = list.arguments.iter().find(|argument| matches!(argument, Hint::Void(_))) {
                 context.report(
@@ -5460,7 +5464,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }
         Place::ClassConstant => {
-            "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any` or a class, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
+            "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class or a collection as in `Map<string, int>`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
         }
         Place::Method => {
             "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, optional type parameters as in `<TItem : DatabaseEntity>`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, a tuple as in `[Money, int]` or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."
