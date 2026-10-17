@@ -307,7 +307,7 @@ fn header_reads_the_fields_of_a_current_file() {
 }
 
 #[test]
-fn header_refuses_a_short_file_a_wrong_magic_a_wrong_abi_and_a_wrong_length() {
+fn header_refuses_a_short_file_a_wrong_magic_a_wrong_abi_a_wrong_length_and_a_library_version_past_its_texts() {
     let bytes = encoded(SOURCE);
     let changed = |offset: usize| {
         let mut changed = bytes.clone();
@@ -325,6 +325,10 @@ fn header_refuses_a_short_file_a_wrong_magic_a_wrong_abi_and_a_wrong_length() {
     assert_eq!(header(&bytes[..bytes.len() - 1]), Err(FormatError::Length));
     assert_eq!(header(&changed(offset_of!(sharp_unit_header, node_count))), Err(FormatError::Length));
     assert_eq!(header(&changed(offset_of!(sharp_unit_header, facts_size))), Err(FormatError::Length));
+    assert_eq!(
+        header(&changed(offset_of!(sharp_unit_header, library_version) + offset_of!(sharp_str, len) + 3)),
+        Err(FormatError::Length)
+    );
 }
 
 fn write(root: &Path, name: &str, contents: &str) {
