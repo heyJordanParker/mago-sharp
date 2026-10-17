@@ -9842,14 +9842,14 @@ fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
         [
             "9:21 invalid-property-assignment-value Invalid type for property `Pricing.rate`: expected `Function<int(int)>`, but got `Function<int(int) uses Http>`.",
             "10:36 invalid-local-assignment-value Invalid assignment to `local`: it is declared as `Function<int(int)>`.",
-            "12:22 invalid-argument Invalid argument type for argument #1 of `Pricing.mail`: expected `Function<int(int) uses Mail>`, but found `Function<int(int) uses Http>`.",
+            "12:22 invalid-argument `fetch` has the effect `Http`, so a `Function<int(int) uses Mail>` cannot hold it.",
             "19:78 invalid-return-statement Invalid return type for method `Pricing.current`: expected `Function<int(int)>`, but found `Function<int(int) uses Http>`.",
         ]
     );
 }
 
-/// A nullable function type holds `null` and no function value with an effect it does not list, so only a value that
-/// may be `null` possibly fits it.
+/// A nullable function type holds `null` and no function value with an effect it does not list, whether or not the
+/// value may be `null`, and each is refused for the effect it has.
 #[test]
 fn a_nullable_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
     let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int) uses Mail>? step) => step == null ? 0 : step(1);\n\n    public int run(Function<int(int) uses Http> fetch, Function<int(int) uses Http>? maybe) => Pricing.apply(fetch) + Pricing.apply(maybe);\n}\n";
@@ -9860,8 +9860,8 @@ fn a_nullable_function_type_refuses_a_function_value_with_an_effect_it_does_not_
             .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
             .collect::<Vec<_>>(),
         [
-            "7:110 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int) uses Mail>?`, but found `Function<int(int) uses Http>`.",
-            "7:133 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Pricing.apply`: expected `Function<int(int) uses Mail>?`, but possibly received `Function<int(int) uses Http>?`.",
+            "7:110 invalid-argument `fetch` has the effect `Http`, so a `Function<int(int) uses Mail>?` cannot hold it.",
+            "7:133 invalid-argument `maybe` has the effect `Http`, so a `Function<int(int) uses Mail>?` cannot hold it.",
         ]
     );
 }
@@ -13927,7 +13927,7 @@ fn an_override_names_its_types_as_sharp_writes_them_and_the_erased_types_as_php_
     assert_eq!(
         worded(("src/Demo/Base.sharp", sharp), &[]),
         [
-            "26:26 incompatible-parameter-type Parameter `item` of `OrderBase.put` expects type `Line` but parent `Base.put` expects type `Order` | Parameter `item` expects type `Line` but parent expects `Order` | Parent method `Base.put` parameter defined here | In class `OrderBase` | Parameter types must be contravariant: child must accept equal or wider types than parent. | Change the parameter type to be compatible with the parent method.",
+            "26:26 incompatible-parameter-type Parameter `item` of `OrderBase.put` expects type `Line` but parent `Base.put` expects type `Order` | Parameter `item` expects type `Line` but parent expects `Order` | Parent method `Base.put` parameter defined here | In class `OrderBase` | A call through `Base` may pass `item` any `Order`, so `OrderBase.put` must take every `Order` too. | Change the parameter type to be compatible with the parent method.",
             "30:26 incompatible-return-type Return type `Line` of `OrderBase.get` is incompatible with parent return type `Order` of `Base.get` | Returns type `Line` but parent expects `Order` | Parent method `Base.get` return type defined here | In class `OrderBase` | Return types must be covariant: child must return equal or narrower types than parent. | Change the return type to be compatible with the parent method.",
             "24:21 incompatible-property-type Property `OrderBase.item` has an incompatible type declaration. | This type `Line?` is incompatible with the parent's type. | The parent property is defined with type `Order?` here. | PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class. | Change the type of `item` to `Order?` to match the parent property.",
             "35:21 incompatible-property-type Property `ListBase.item` must have `Any?`, the type `Base.item` erases to. | Erases to PHP's `array|null`. | Erases to `Any?`. | PHP# erases type parameters when it compiles, and PHP requires a property to keep the type of the property it overrides. | Write `item` with a type that erases to `Any?`.",
@@ -15942,7 +15942,7 @@ fn an_override_names_its_members_and_types_as_sharp_writes_them() {
     assert_eq!(
         worded(("src/Demo/Base.sharp", sharp), &[]),
         [
-            "26:26 incompatible-parameter-type Parameter `item` of `OrderBase.put` expects type `Line` but parent `Base.put` expects type `Order` | Parameter `item` expects type `Line` but parent expects `Order` | Parent method `Base.put` parameter defined here | In class `OrderBase` | Parameter types must be contravariant: child must accept equal or wider types than parent. | Change the parameter type to be compatible with the parent method.",
+            "26:26 incompatible-parameter-type Parameter `item` of `OrderBase.put` expects type `Line` but parent `Base.put` expects type `Order` | Parameter `item` expects type `Line` but parent expects `Order` | Parent method `Base.put` parameter defined here | In class `OrderBase` | A call through `Base` may pass `item` any `Order`, so `OrderBase.put` must take every `Order` too. | Change the parameter type to be compatible with the parent method.",
             "30:26 incompatible-return-type Return type `Line` of `OrderBase.get` is incompatible with parent return type `Order` of `Base.get` | Returns type `Line` but parent expects `Order` | Parent method `Base.get` return type defined here | In class `OrderBase` | Return types must be covariant: child must return equal or narrower types than parent. | Change the return type to be compatible with the parent method.",
             "24:21 incompatible-property-type Property `OrderBase.item` has an incompatible type declaration. | This type `Line?` is incompatible with the parent's type. | The parent property is defined with type `Order?` here. | PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class. | Change the type of `item` to `Order?` to match the parent property.",
         ]
@@ -16021,7 +16021,7 @@ fn an_override_names_its_parameter_as_sharp_writes_it() {
     assert_eq!(
         worded(("src/Demo/Base.sharp", sharp), &[]),
         [
-            "20:26 incompatible-parameter-type Parameter `item` of `Child.put` expects type `Line` but parent `Base.put` expects type `Order` | Parameter `item` expects type `Line` but parent expects `Order` | Parent method `Base.put` parameter defined here | In class `Child` | Parameter types must be contravariant: child must accept equal or wider types than parent. | Change the parameter type to be compatible with the parent method.",
+            "20:26 incompatible-parameter-type Parameter `item` of `Child.put` expects type `Line` but parent `Base.put` expects type `Order` | Parameter `item` expects type `Line` but parent expects `Order` | Parent method `Base.put` parameter defined here | In class `Child` | A call through `Base` may pass `item` any `Order`, so `Child.put` must take every `Order` too. | Change the parameter type to be compatible with the parent method.",
         ]
     );
 }
@@ -17692,7 +17692,7 @@ fn a_function_parameter_whose_type_states_no_effects_never_escapes() {
             ("19:60 invalid-property-assignment-value", "`f` can't be stored in a field", "Stored", either.to_owned()),
             (
                 "26:21 invalid-property-assignment-value",
-                "This local can't be stored in a field: it holds `f`, a function parameter whose type states no effects.",
+                "This local can't be stored in a field: it holds `f`, so it takes on each caller's effects.",
                 "Stored",
                 pure.to_owned(),
             ),
@@ -17714,13 +17714,13 @@ fn a_function_parameter_whose_type_states_no_effects_never_escapes() {
             ),
             (
                 "42:58 invalid-return-statement",
-                "This lambda can't be returned: it captures `f`, a function parameter whose type states no effects.",
+                "This lambda can't be returned: it captures `f`, so it takes on each caller's effects.",
                 "Returned",
                 either.to_owned(),
             ),
             (
                 "44:63 invalid-return-statement",
-                "This lambda can't be returned: it captures `f`, a function parameter whose type states no effects.",
+                "This lambda can't be returned: it captures `f`, so it takes on each caller's effects.",
                 "Returned",
                 either.to_owned(),
             ),
@@ -17751,7 +17751,7 @@ fn a_function_parameter_whose_type_states_no_effects_never_escapes() {
         ]
         .map(|(at, message, verb, help)| {
             let message =
-                if message.ends_with('.') { message.to_owned() } else { format!("{message}: its type states no effects.") };
+                if message.ends_with('.') { message.to_owned() } else { format!("{message}: it takes on each caller's effects.") };
             format!(
                 "{at} {message} | {verb} here. | A method takes on the effects of each function it is given, so that function runs only inside the method's call. | {help}"
             )
@@ -17772,8 +17772,8 @@ fn a_gap_in_a_collection_literal_holds_no_function_parameter() {
         worded(keeper, &[]).iter().map(|issue| issue.split(" | ").next().unwrap()).collect::<Vec<_>>(),
         [
             "5:67 invalid-array-element Missing array element: skipping elements is only allowed in list assignments (destructuring).",
-            "5:64 invalid-array-element `f` can't be stored in a collection: its type states no effects.",
-            "5:69 invalid-array-element `f` can't be stored in a collection: its type states no effects.",
+            "5:64 invalid-array-element `f` can't be stored in a collection: it takes on each caller's effects.",
+            "5:69 invalid-array-element `f` can't be stored in a collection: it takes on each caller's effects.",
         ]
     );
 }
@@ -17793,17 +17793,209 @@ fn a_function_parameter_typed_uses_none_takes_only_a_pure_function_and_may_escap
     assert_eq!(
         worded(pricing, &[rater, FETCH, FETCH_STUB]),
         [
-            "15:65 invalid-property-assignment-value `rate` can't be stored in a field: its type states no effects. | Stored here. | A method takes on the effects of each function it is given, so that function runs only inside the method's call. | Take a `Function<int(int) uses none>`, whose type states that it is pure.",
+            "15:65 invalid-property-assignment-value `rate` can't be stored in a field: it takes on each caller's effects. | Stored here. | A method takes on the effects of each function it is given, so that function runs only inside the method's call. | Take a `Function<int(int) uses none>`, whose type states that it is pure.",
             "29:46 invalid-effect `none` states that the function has no effect, so `uses` lists nothing beside it. | Written here. | Delete `none` to allow the other effects, or delete them to keep the function pure.",
         ]
     );
     assert_eq!(
         effect_issues(&[pricing, rater, FETCH, FETCH_STUB]),
         [
-            "app/Shop/Pricing.sharp:24:22 invalid-argument: `Pricing.live` calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it.",
-            "app/Shop/Pricing.sharp:25:22 invalid-argument: This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it.",
-            "app/Shop/Pricing.sharp:26:23 invalid-argument: This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:24:22 invalid-argument: `Pricing.live` calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int) uses none>` cannot hold it.",
+            "app/Shop/Pricing.sharp:25:22 invalid-argument: This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int) uses none>` cannot hold it.",
+            "app/Shop/Pricing.sharp:26:23 invalid-argument: This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int) uses none>` cannot hold it.",
         ]
+    );
+}
+
+#[test]
+fn an_override_takes_on_effects_wherever_the_method_it_overrides_does() {
+    let rater = (
+        "app/Holes/Rater.sharp",
+        "namespace App.Holes;\n\npublic interface Rater\n{\n    void setRate(Function<int(int)> rate);\n}\n",
+    );
+    let base = (
+        "app/Holes/BaseRater.sharp",
+        "namespace App.Holes;\n\npublic class BaseRater\n{\n    public virtual void setRate(Function<int(int)> rate) { }\n}\n",
+    );
+    let abstract_rater = (
+        "app/Holes/AbstractRater.sharp",
+        "namespace App.Holes;\n\npublic abstract class AbstractRater\n{\n    public abstract void setRate(Function<int(int)> rate);\n}\n",
+    );
+    let sink = (
+        "app/Holes/Sink.sharp",
+        "namespace App.Holes;\n\npublic interface Sink<T>\n{\n    void set(Function<T(T)> f);\n}\n",
+    );
+    let php_rater = (
+        "src/Lib/PhpRater.php",
+        "<?php\n\nnamespace Lib;\n\ninterface PhpRater\n{\n    public function setRate(\\Closure $rate): void;\n}\n",
+    );
+
+    let pure_rater = (
+        "app/Holes/PureRater.sharp",
+        "namespace App.Holes;\n\npublic class PureRater : Rater\n{\n    private Function<int(int)> rate = (int n) => n;\n\n    public void setRate(Function<int(int) uses none> rate) => this.rate = rate;\n\n    public int price() => this.rate(1);\n}\n",
+    );
+    let http_rater = (
+        "app/Holes/HttpRater.sharp",
+        "namespace App.Holes;\n\npublic class HttpRater : Rater\n{\n    private Function<int(int) uses Http> rate = (int n) => n;\n\n    public void setRate(Function<int(int) uses Http> rate) => this.rate = rate;\n\n    public int price() => this.rate(1);\n}\n",
+    );
+    let over_rater = (
+        "app/Holes/OverRater.sharp",
+        "namespace App.Holes;\n\npublic class OverRater : BaseRater\n{\n    private Function<int(int)> rate = (int n) => n;\n\n    public override void setRate(Function<int(int) uses none> rate) => this.rate = rate;\n\n    public int price() => this.rate(1);\n}\n",
+    );
+    let concrete_rater = (
+        "app/Holes/ConcreteRater.sharp",
+        "namespace App.Holes;\n\npublic class ConcreteRater : AbstractRater\n{\n    private Function<int(int)> rate = (int n) => n;\n\n    public override void setRate(Function<int(int) uses none> rate) => this.rate = rate;\n\n    public int price() => this.rate(1);\n}\n",
+    );
+    let int_sink = (
+        "app/Holes/IntSink.sharp",
+        "namespace App.Holes;\n\npublic class IntSink : Sink<int>\n{\n    private Function<int(int)> f = (int n) => n;\n\n    public void set(Function<int(int) uses none> f) => this.f = f;\n\n    public int price() => this.f(1);\n}\n",
+    );
+    let php_pure_rater = (
+        "app/Holes/PhpPureRater.sharp",
+        "namespace App.Holes;\n\nimport Lib.PhpRater;\n\npublic class PhpPureRater : PhpRater\n{\n    private Function<Any?(Any?)> rate = (Any? n) => n;\n\n    public void setRate(Function<Any?(Any?) uses none> rate) => this.rate = rate;\n\n    public Any? price() => this.rate(1);\n}\n",
+    );
+    let pure_setter = (
+        "app/Holes/PureSetter.sharp",
+        "namespace App.Holes;\n\npublic interface PureSetter : Rater\n{\n    void setRate(Function<int(int) uses none> rate);\n}\n",
+    );
+    let calling_rater = (
+        "app/Holes/CallingRater.sharp",
+        "namespace App.Holes;\n\npublic class CallingRater : Rater\n{\n    public void setRate(Function<int(int)> rate)\n    {\n        rate(1);\n    }\n}\n",
+    );
+    let take_on = |class: &str, member: &str, parameter: &str| {
+        format!(
+            "`{class}.{member}`'s `{parameter}` takes on each caller's effects, so a call through `{class}` may pass a function with any effect."
+        )
+    };
+    let state = |class: &str, member: &str, parameter: &str, stated: &str, taking: &str| {
+        format!(
+            "State the effects on `{class}.{member}`'s `{parameter}`, as `{stated}`, so every implementation may keep it, or take a `{taking}` here and call it only inside `{member}`."
+        )
+    };
+
+    assert_eq!(
+        [
+            worded(pure_rater, &[rater]),
+            worded(http_rater, &[rater]),
+            worded(over_rater, &[base]),
+            worded(concrete_rater, &[abstract_rater]),
+            worded(int_sink, &[sink]),
+            worded(php_pure_rater, &[php_rater]),
+            worded(pure_setter, &[rater]),
+            worded(calling_rater, &[rater]),
+        ]
+        .concat(),
+        [
+            format!(
+                "7:25 incompatible-parameter-type `PureRater.setRate` can't take a `Function<int(int) uses none>`: {} | {}",
+                take_on("Rater", "setRate", "rate"),
+                state("Rater", "setRate", "rate", "Function<int(int) uses none>", "Function<int(int)>")
+            ),
+            format!(
+                "7:25 incompatible-parameter-type `HttpRater.setRate` can't take a `Function<int(int) uses Http>`: {} | {}",
+                take_on("Rater", "setRate", "rate"),
+                state("Rater", "setRate", "rate", "Function<int(int) uses Http>", "Function<int(int)>")
+            ),
+            format!(
+                "7:34 incompatible-parameter-type `OverRater.setRate` can't take a `Function<int(int) uses none>`: {} | {}",
+                take_on("BaseRater", "setRate", "rate"),
+                state("BaseRater", "setRate", "rate", "Function<int(int) uses none>", "Function<int(int)>")
+            ),
+            format!(
+                "7:34 incompatible-parameter-type `ConcreteRater.setRate` can't take a `Function<int(int) uses none>`: {} | {}",
+                take_on("AbstractRater", "setRate", "rate"),
+                state("AbstractRater", "setRate", "rate", "Function<int(int) uses none>", "Function<int(int)>")
+            ),
+            format!(
+                "7:21 incompatible-parameter-type `IntSink.set` can't take a `Function<int(int) uses none>`: {} | {}",
+                take_on("Sink", "set", "f"),
+                state("Sink", "set", "f", "Function<T(T) uses none>", "Function<int(int)>")
+            ),
+            format!(
+                "9:25 incompatible-parameter-type `PhpPureRater.setRate` can't take a `Function<Any?(Any?) uses none>`: {} | Take a `Function<Any?(Any?)>` here and call it only inside `setRate`.",
+                take_on("PhpRater", "setRate", "rate")
+            ),
+            format!(
+                "5:18 incompatible-parameter-type `PureSetter.setRate` can't take a `Function<int(int) uses none>`: {} | {}",
+                take_on("Rater", "setRate", "rate"),
+                state("Rater", "setRate", "rate", "Function<int(int) uses none>", "Function<int(int)>")
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_function_in_a_collection_is_held_to_the_collection_s_element_type() {
+    let lists = (
+        "app/Shop/Lists.sharp",
+        "namespace App.Shop;\n\npublic class Lists\n{\n    private List<Function<int(int) uses none>> rates = [(int n) => global.fetch(n)];\n\n    private Map<string, Function<int(int) uses none>> named = [:];\n\n    public void setRates(List<Function<int(int) uses none>> rates) => this.rates = rates;\n\n    public void fill()\n    {\n        this.setRates([(int n) => global.fetch(n)]);\n        this.named[\"a\"] = (int n) => global.fetch(n);\n        this.rates.add((int n) => global.fetch(n));\n    }\n\n    public int run() => this.rates[0](1) + (this.named.get(\"a\")?.(1) ?? 0);\n}\n",
+    );
+
+    let held =
+        "This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it.";
+
+    assert_eq!(
+        (issues(lists, &[FETCH, FETCH_STUB]), effect_issues(&[lists, FETCH, FETCH_STUB])),
+        (
+            Vec::<String>::new(),
+            vec![
+                format!("app/Shop/Lists.sharp:5:56 invalid-property-default-value: {held}"),
+                format!("app/Shop/Lists.sharp:13:23 invalid-argument: {held}"),
+                format!("app/Shop/Lists.sharp:14:27 invalid-property-assignment-value: {held}"),
+                format!("app/Shop/Lists.sharp:15:24 invalid-argument: {held}"),
+            ],
+        )
+    );
+}
+
+#[test]
+fn a_function_value_refused_only_for_its_effects_is_named_with_them() {
+    let rates = (
+        "app/Shop/Rates.sharp",
+        "namespace App.Shop;\n\npublic class Rates\n{\n    private Function<int(int)> rate = (int n) => n;\n\n    private Function<int(int) uses none>|int either = 0;\n\n    public void setRate(Function<int(int) uses none> rate) => this.rate = rate;\n\n    public void setEither(Function<int(int) uses none>|int f) => this.either = f;\n\n    public void run(Function<int(int) uses Http> mailer)\n    {\n        this.setRate(mailer);\n        this.setEither((int n) => global.fetch(n));\n    }\n\n    public int price() => this.rate(1);\n\n    public Function<int(int) uses none>|int current() => this.either;\n}\n",
+    );
+
+    assert_eq!(
+        (worded(rates, &[FETCH, FETCH_STUB]), effect_issues(&[rates, FETCH, FETCH_STUB])),
+        (
+            vec![
+                "15:22 invalid-argument `mailer` has the effect `Http`, so a pure `Function<int(int) uses none>` cannot hold it."
+                    .to_owned()
+            ],
+            vec![
+                "app/Shop/Rates.sharp:16:24 invalid-argument: This lambda calls `global.fetch`, which has the effect `Http`, so the pure `Function<int(int) uses none>` of `int|Function<int(int) uses none>` cannot hold it."
+                    .to_owned()
+            ],
+        )
+    );
+}
+
+#[test]
+fn uses_none_is_refused_on_a_method_and_beside_another_effect() {
+    let quote = (
+        "app/Shop/Quote.sharp",
+        "namespace App.Shop;\n\npublic interface Quote\n{\n    int price() uses none;\n\n    int total() uses none, Http;\n\n    void mixed(Function<int(int) uses Http, none> f);\n\n    void typo(Function<int(int) uses none, Htp> f);\n}\n",
+    );
+    let on_method = "A method without `uses` is pure already, so delete `uses none`. | Written here.";
+    let beside = "`none` states that the function has no effect, so `uses` lists nothing beside it. | Written here. | Delete `none` to allow the other effects, or delete them to keep the function pure.";
+
+    let bodied = (
+        "app/Shop/Bodied.sharp",
+        "namespace App.Shop;\n\npublic class Bodied\n{\n    public int price() uses none => 1;\n}\n",
+    );
+
+    assert_eq!(
+        (worded(quote, &[]), compile_errors(bodied, &[])),
+        (
+            vec![
+                format!("5:22 invalid-effect {on_method}"),
+                format!("7:22 invalid-effect {on_method}"),
+                format!("9:45 invalid-effect {beside}"),
+                format!("11:38 invalid-effect {beside}"),
+                "11:44 invalid-effect `Htp` is not an effect: `uses` takes Cache, Clock, Console, Database, Environment, Files, Http, Mail, Process, Random, Events or a `foreign` class. | Written here. | An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`.".to_owned(),
+            ],
+            vec!["A method without `uses` is pure already, so delete `uses none`.".to_owned()],
+        )
     );
 }
 

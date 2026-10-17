@@ -70,6 +70,7 @@ use crate::effects::summary::parameter_index;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_like_identifier;
 use crate::utils::names::display_member;
+use crate::utils::names::display_sharp_parameter_type;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_imported_namespace;
 use crate::utils::names::namespace_function;
@@ -187,11 +188,10 @@ pub(crate) fn function_values_must_fit_their_types(
             };
             let body = if matches!(value.runs, Runs::Body(Body::Lambda(_))) { "lambda" } else { "method" };
             let allowed: Vec<String> = value.allowed.iter().map(|effect| effect_name(*effect)).collect();
-            let pure = if allowed.is_empty() { "pure " } else { "" };
 
             let issue = impure(
                 value.code,
-                format!("{reason}, so a {pure}`{}` cannot hold it.", value.declared),
+                format!("{reason}, so {} cannot hold it.", value.holder),
                 value.span,
                 body,
                 &impurity,
@@ -568,6 +568,15 @@ pub(crate) fn check_uses<A>(
     let mut found = UsesNames::default();
     UsesWalker.walk_program(program, &mut found);
 
+    // A method states its effects only without a body, and states none by writing no `uses`.
+    for none in found.none_on_method {
+        context.collector.report_with_code(
+            IssueCode::InvalidEffect,
+            Issue::error("A method without `uses` is pure already, so delete `uses none`.")
+                .with_annotation(Annotation::primary(none.span).with_message("Written here.")),
+        );
+    }
+
     for none in found.beside_none {
         context.collector.report_with_code(
             IssueCode::InvalidEffect,
@@ -634,16 +643,22 @@ pub(crate) fn check_uses<A>(
 
 /// The names every effect `uses` of a program writes. A method with a body names none, and a function parameter named
 /// in any method's is no effect, as the semantics checker holds them to. A function type's `uses none` names none, and
-/// is refused beside another effect.
+/// is refused beside another effect. A method without a body is pure without `uses`, so its `uses none` is refused.
 struct UsesWalker;
 
-/// The names [`UsesWalker`] collects, each `none` written beside another effect, and the `uses` of the methods and
-/// function types it read already.
+/// The names [`UsesWalker`] collects, each `none` written beside another effect or on a method without a body, and the
+/// `uses` of the methods and function types it read already.
 #[derive(Default)]
 struct UsesNames<'ast, 'arena> {
     names: Vec<&'ast LocalIdentifier<'arena>>,
     beside_none: Vec<&'ast LocalIdentifier<'arena>>,
+    none_on_method: Vec<&'ast LocalIdentifier<'arena>>,
     read: Vec<Span>,
+}
+
+/// Whether `name` is the `none` that states a function type is pure.
+fn is_none(name: &LocalIdentifier<'_>) -> bool {
+    name.value == b"none"
 }
 
 impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker {
@@ -654,7 +669,9 @@ impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker 
 
         found.read.push(uses.span());
         if method.is_abstract() {
-            found.names.extend(MethodParts::of_method(method).uses_effects());
+            for name in MethodParts::of_method(method).uses_effects() {
+                if is_none(name) { found.none_on_method.push(name) } else { found.names.push(name) }
+            }
         }
     }
 
@@ -664,11 +681,12 @@ impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker 
         };
 
         found.read.push(uses.span());
-        match uses.names.iter().find(|name| name.value == b"none") {
-            Some(none) if uses.names.len() > 1 => found.beside_none.push(none),
-            Some(_) => {}
-            None => found.names.extend(uses.names.iter()),
+        if uses.names.len() > 1
+            && let Some(none) = uses.names.iter().find(|name| is_none(name))
+        {
+            found.beside_none.push(none);
         }
+        found.names.extend(uses.names.iter().filter(|name| !is_none(name)));
     }
 
     fn walk_in_uses(&self, uses: &'ast Uses<'arena>, found: &mut UsesNames<'ast, 'arena>) {
@@ -800,16 +818,13 @@ pub(crate) fn report_escaping_functions<'ast, 'arena, A>(
     for escape in found {
         let parameter = &metadata.parameters[escape.parameter];
         let name = BytesDisplay(parameter.name.0.as_bytes().strip_prefix(b"$").unwrap_or(parameter.name.0.as_bytes()));
-        // The parameter's own function type, which ends in its `>` and may go on with `?`, stated pure.
+        // The parameter's own function type, stated pure.
         let pure = || {
-            let written = parameter
+            parameter
                 .type_metadata
                 .as_ref()
-                .map(|declared| display_sharp_type(context, &declared.type_union))
-                .unwrap_or_default();
-            let end = written.rfind('>').unwrap_or(written.len());
-
-            format!("{} uses none{}", &written[..end], &written[end..])
+                .map(|declared| display_sharp_parameter_type(context, &declared.type_union))
+                .unwrap_or_default()
         };
         let help = match escape.suggested {
             Suggested::Stated(stated) => format!("Take a `{stated}`, whose type states the effects it may have."),
@@ -829,13 +844,13 @@ pub(crate) fn report_escaping_functions<'ast, 'arena, A>(
             Place::Return => (IssueCode::InvalidReturnStatement, "returned".to_owned(), "Returned here."),
         };
         let message = match escape.via {
-            Via::Parameter => format!("`{name}` can't be {verb}: its type states no effects."),
-            Via::Local => format!(
-                "This local can't be {verb}: it holds `{name}`, a function parameter whose type states no effects."
-            ),
-            Via::Lambda => format!(
-                "This lambda can't be {verb}: it captures `{name}`, a function parameter whose type states no effects."
-            ),
+            Via::Parameter => format!("`{name}` can't be {verb}: it takes on each caller's effects."),
+            Via::Local => {
+                format!("This local can't be {verb}: it holds `{name}`, so it takes on each caller's effects.")
+            }
+            Via::Lambda => {
+                format!("This lambda can't be {verb}: it captures `{name}`, so it takes on each caller's effects.")
+            }
         };
         context.collector.report_with_code(
             code,
