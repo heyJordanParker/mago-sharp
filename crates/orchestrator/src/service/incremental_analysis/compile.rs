@@ -39,6 +39,7 @@ use mago_sharp_bridge::check;
 use mago_sharp_bridge::inline_forms;
 use mago_sharp_bridge::lower;
 use mago_sharp_bridge::unit::Input;
+use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::Read;
 use mago_sharp_bridge::unit::Reads;
 use mago_sharp_bridge::unit::SOURCE_LISTING;
@@ -196,6 +197,8 @@ impl IncrementalAnalysisService {
     /// file is there. It is called once per input. An input no file is at is stored absent: its size, modification
     /// time and hash are all zero. No file has that stamp, because the hash of an empty file is not zero.
     ///
+    /// Each compiled file's header names `standard_library`, the standard library the project compiles against.
+    ///
     /// # Errors
     ///
     /// Returns [`OrchestratorError`] when no analysis ran yet, when re-analyzing a file fails, or when `stamp`, `rules`
@@ -205,6 +208,7 @@ impl IncrementalAnalysisService {
         mut stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
         mut rules: impl FnMut(&[u8]) -> std::io::Result<Vec<Vec<u8>>>,
         check: impl FnOnce(Vec<Translation>, &[String]) -> std::io::Result<HashMap<FileId, IssueCollection>>,
+        standard_library: &Library,
     ) -> Result<Vec<(FileId, Compilation)>, OrchestratorError> {
         if !self.initialized {
             return Err(OrchestratorError::General("analyze() must be called before compile()".to_string()));
@@ -397,7 +401,7 @@ impl IncrementalAnalysisService {
                         inputs.push(input);
                     }
 
-                    Compilation::Accepted(encode(&unit, &file.contents, key, &inputs, &[]))
+                    Compilation::Accepted(encode(&unit, &file.contents, key, &inputs, &[], standard_library))
                 }
             };
 
@@ -844,6 +848,7 @@ mod tests {
     use mago_database::DatabaseConfiguration;
     use mago_prelude::Prelude;
     use mago_sharp_bridge::unit::header;
+    use mago_sharp_bridge::unit::sharp_unit_header;
     use mago_syntax::settings::ParserSettings;
 
     use super::*;
@@ -950,7 +955,7 @@ mod tests {
         service: &mut IncrementalAnalysisService,
         stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
     ) -> std::collections::BTreeMap<String, Compilation> {
-        let compiled = service.compile(stamp, module_leans, proved).expect("the compile runs");
+        let compiled = service.compile(stamp, module_leans, proved, &Library::default()).expect("the compile runs");
         let database = service.database();
 
         compiled
@@ -983,11 +988,12 @@ mod tests {
     fn inputs(bytes: &[u8]) -> Vec<Input> {
         let word = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         let (count, nodes, children) = (word(80), word(84), word(88));
-        let texts = 104 + 40 * count + 56 * nodes + 4 * children;
+        let header = size_of::<sharp_unit_header>();
+        let texts = header + 40 * count + 56 * nodes + 4 * children;
 
         (0..count)
             .map(|index| {
-                let input = 104 + 40 * index;
+                let input = header + 40 * index;
                 let (offset, length) = (word(input), word(input + 4));
 
                 Input {
@@ -1013,11 +1019,12 @@ mod tests {
     const ORDER: &str = "namespace App;\n\npublic class Order\n{\n    public int total(int extra)\n    {\n        return extra + 1;\n    }\n}\n";
 
     #[test]
-    fn an_accepted_file_compiles_to_bytes_whose_header_names_its_source() {
+    fn an_accepted_file_compiles_to_bytes_whose_header_names_its_source_and_the_standard_library() {
         let database = project(&[("app/Order.sharp", ORDER)]);
         let mut service = analyzed(&database);
+        let library = Library { native_fingerprint: [0x2d; 16], version: b"0.3.2".to_vec() };
 
-        let compiled = service.compile(empty_stamp, module_leans, proved).expect("the compile runs");
+        let compiled = service.compile(empty_stamp, module_leans, proved, &library).expect("the compile runs");
 
         assert_eq!(compiled.len(), 1, "{compiled:?}");
         let (file_id, Compilation::Accepted(bytes)) = &compiled[0] else {
@@ -1027,6 +1034,7 @@ mod tests {
         let header = header(bytes).expect("the header is valid");
         assert_eq!(header.source_hash, source_hash(ORDER.as_bytes()));
         assert_eq!(header.source_size, ORDER.len() as u64);
+        assert_eq!(header.library, library);
     }
 
     #[test]
@@ -1924,6 +1932,7 @@ mod tests {
                     created.set(true);
                     Ok(HashMap::default())
                 },
+                &Library::default(),
             )
             .expect("the compile runs");
 
@@ -1943,11 +1952,16 @@ mod tests {
         let money = FileId::new(b"app/Shared/Money.sharp");
 
         let compiled = service
-            .compile(empty_stamp, module_leans, |_, _| {
-                let mut issues = IssueCollection::default();
-                issues.push(Issue::error("Law addKeepsCurrency is not proven."));
-                Ok(HashMap::from_iter([(money, issues)]))
-            })
+            .compile(
+                empty_stamp,
+                module_leans,
+                |_, _| {
+                    let mut issues = IssueCollection::default();
+                    issues.push(Issue::error("Law addKeepsCurrency is not proven."));
+                    Ok(HashMap::from_iter([(money, issues)]))
+                },
+                &Library::default(),
+            )
             .expect("the compile runs");
 
         for (file_id, compilation) in &compiled {
@@ -1967,7 +1981,7 @@ mod tests {
         let mut service = analyzed(&database);
 
         let error = service
-            .compile(empty_stamp, module_leans, |_, _| Err(std::io::Error::other("lake crashed")))
+            .compile(empty_stamp, module_leans, |_, _| Err(std::io::Error::other("lake crashed")), &Library::default())
             .expect_err("the Lean step failed");
 
         assert_eq!(error.to_string(), "The Lean step failed: lake crashed.");
@@ -1992,11 +2006,16 @@ mod tests {
         let mut given = Vec::new();
 
         service
-            .compile(empty_stamp, module_leans, |translations, namespaces| {
-                assert_eq!(translations.len(), 1);
-                given = namespaces.to_vec();
-                Ok(HashMap::default())
-            })
+            .compile(
+                empty_stamp,
+                module_leans,
+                |translations, namespaces| {
+                    assert_eq!(translations.len(), 1);
+                    given = namespaces.to_vec();
+                    Ok(HashMap::default())
+                },
+                &Library::default(),
+            )
             .expect("the compile runs");
 
         assert_eq!(given, ["App", "App.Legacy", "App.Shared.Schema", "Illuminate.Support.Facades"]);

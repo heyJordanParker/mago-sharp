@@ -30,6 +30,7 @@ use mago_sharp_bridge::sharp_str;
 use mago_sharp_bridge::sharp_value;
 use mago_sharp_bridge::unit::FormatError;
 use mago_sharp_bridge::unit::Input;
+use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::Read;
 use mago_sharp_bridge::unit::Reads;
 use mago_sharp_bridge::unit::SHARP_UNIT_MAGIC;
@@ -52,14 +53,18 @@ fn lowered(source: &str) -> Unit {
     common::checked("src/Report.sharp", source, &[], lower).expect("the checker accepts the source")
 }
 
-/// The compiled file of `source`, with the test key, inputs and facts.
+/// The compiled file of `source`, with the test key, inputs, facts and standard library.
 fn encoded(source: &str) -> Vec<u8> {
-    encode(&lowered(source), source.as_bytes(), KEY, &inputs(), FACTS)
+    encode(&lowered(source), source.as_bytes(), KEY, &inputs(), FACTS, &library())
 }
 
 const KEY: [u8; 16] = *b"0123456789abcdef";
 
 const FACTS: &[u8] = b"facts the engine skips";
+
+fn library() -> Library {
+    Library { native_fingerprint: *b"fedcba9876543210", version: b"0.3.2".to_vec() }
+}
 
 fn inputs() -> Vec<Input> {
     vec![
@@ -154,7 +159,7 @@ fn every_text_of_a_lowered_unit_is_an_offset_into_its_texts() {
 fn an_absent_input_reads_back_as_an_all_zero_stamp_that_no_existing_file_has() {
     let absent = Input { path: b"composer.lock".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] };
 
-    let decoded = Decoded::new(&encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &[absent], FACTS));
+    let decoded = Decoded::new(&encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &[absent], FACTS, &library()));
 
     let [input] = decoded.inputs[..] else { panic!("one input: {:?}", decoded.inputs.len()) };
     assert_eq!(decoded.text(input.path), b"composer.lock");
@@ -165,7 +170,7 @@ fn an_absent_input_reads_back_as_an_all_zero_stamp_that_no_existing_file_has() {
 #[test]
 fn a_compiled_file_reads_back_through_the_c_layout() {
     let lowered = lowered(SOURCE);
-    let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, &inputs(), FACTS));
+    let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, &inputs(), FACTS, &library()));
     let header = decoded.header;
 
     assert_eq!(header.magic, *b"SHARPC\0\0");
@@ -176,6 +181,8 @@ fn a_compiled_file_reads_back_through_the_c_layout() {
     assert_eq!(header.source_hash, xxh3_128(SOURCE.as_bytes()).to_be_bytes());
     assert_eq!(header.source_size, SOURCE.len() as u64);
     assert_eq!(header.root, lowered.root());
+    assert_eq!(header.native_fingerprint, *b"fedcba9876543210");
+    assert_eq!(decoded.text(header.library_version), b"0.3.2");
 
     let read_inputs: Vec<(&[u8], u64, i64, [u8; 16])> =
         decoded.inputs.iter().map(|input| (decoded.text(input.path), input.size, input.mtime_ns, input.hash)).collect();
@@ -250,6 +257,7 @@ fn every_header_field_and_section_starts_aligned_for_its_type() {
         ("root", offset_of!(sharp_unit_header, root), align_of::<u32>()),
         ("texts_size", offset_of!(sharp_unit_header, texts_size), align_of::<u32>()),
         ("facts_size", offset_of!(sharp_unit_header, facts_size), align_of::<u32>()),
+        ("library_version", offset_of!(sharp_unit_header, library_version), align_of::<sharp_str>()),
         ("sharp_input.size", offset_of!(sharp_input, size), align_of::<u64>()),
         ("sharp_input.mtime_ns", offset_of!(sharp_input, mtime_ns), align_of::<i64>()),
     ] {
@@ -258,7 +266,7 @@ fn every_header_field_and_section_starts_aligned_for_its_type() {
 
     let lowered = lowered(SOURCE);
     for count in 0..=inputs().len() {
-        let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, &inputs()[..count], FACTS));
+        let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, &inputs()[..count], FACTS, &library()));
         let [inputs_at, nodes_at, children_at, ..] = decoded.offsets;
 
         assert_eq!(inputs_at % align_of::<sharp_input>(), 0, "{count} inputs");
@@ -295,6 +303,7 @@ fn header_reads_the_fields_of_a_current_file() {
     assert_eq!(header.source_hash, source_hash(SOURCE.as_bytes()));
     assert_eq!(header.source_hash, xxh3_128(SOURCE.as_bytes()).to_be_bytes());
     assert_eq!(header.source_size, SOURCE.len() as u64);
+    assert_eq!(header.library, library());
 }
 
 #[test]
@@ -430,7 +439,7 @@ fn compiled_with_inputs(root: &Path, names: &[&str]) -> Vec<u8> {
         })
         .collect();
 
-    encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &inputs, &[])
+    encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &inputs, &[], &library())
 }
 
 #[test]
@@ -583,6 +592,8 @@ fn the_c_header_lays_out_every_type_as_the_bridge_does() {
         ("offsetof(sharp_unit_header, root)", offset_of!(sharp_unit_header, root)),
         ("offsetof(sharp_unit_header, texts_size)", offset_of!(sharp_unit_header, texts_size)),
         ("offsetof(sharp_unit_header, facts_size)", offset_of!(sharp_unit_header, facts_size)),
+        ("offsetof(sharp_unit_header, native_fingerprint)", offset_of!(sharp_unit_header, native_fingerprint)),
+        ("offsetof(sharp_unit_header, library_version)", offset_of!(sharp_unit_header, library_version)),
         ("sizeof(sharp_input)", size_of::<sharp_input>()),
         ("offsetof(sharp_input, size)", offset_of!(sharp_input, size)),
         ("offsetof(sharp_input, mtime_ns)", offset_of!(sharp_input, mtime_ns)),
