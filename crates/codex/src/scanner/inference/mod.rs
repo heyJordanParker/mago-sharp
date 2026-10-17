@@ -527,6 +527,12 @@ where
         Expression::Access(Access::Property(
             property_access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(constant), .. },
         )) if let Some(class) = context.resolved_names.static_property_class(property_access) => {
+            // Spec section 23: `global.PHP_INT_MAX` reads PHP's constant through its root namespace.
+            if class.name.value() == b"global" {
+                return get_literal_constant_type(constant.value)
+                    .or_else(|| get_platform_constant_type(constant.value));
+            }
+
             Some(infer_class_constant(
                 context.resolved_names.get(&class.name),
                 constant.value,

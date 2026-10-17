@@ -1689,6 +1689,15 @@ fn a_data_case_arm_that_binds_its_fields_reports_no_redundant_test() {
     assert_eq!(issues(("src/App/ChargeError.sharp", code), &[]), Vec::<String>::new());
 }
 
+/// Spec section 23: a constant whose value reads a plain PHP constant through `global.`, as the standard library's
+/// `Int.MAX`, has that constant's type.
+#[test]
+fn a_constant_read_from_a_plain_php_constant_has_its_type() {
+    let code = "namespace App;\n\npublic class Limits\n{\n    public const int TOP = global.PHP_INT_MAX;\n\n    public static int top() => Limits.TOP;\n}\n";
+
+    assert_eq!(issues(("src/App/Limits.sharp", code), &[]), Vec::<String>::new());
+}
+
 /// Spec section 22: a call of a default body names the method by its interface, which PHP# code writes, and never by
 /// the trait that holds the body.
 #[test]
@@ -12160,8 +12169,8 @@ fn a_generic_class_is_never_serializable() {
     assert_eq!(
         explained(("src/Demo/Page.sharp", sharp), &[]),
         [
-            "5:14 invalid-implement `Page` has type parameters, so it cannot be a `Serializable`: `serialize` drops the type arguments its objects carry. Leave `Serializable` out: `serialize()` then uses `__serialize` and `__unserialize`, or its default form, which keep them.",
-            "16:14 invalid-implement `OrderPage` has type parameters, so it cannot be a `Serializable`: `serialize` drops the type arguments its objects carry. Leave `Serializable` out: `serialize()` then uses `__serialize` and `__unserialize`, or its default form, which keep them.",
+            "5:14 invalid-implement `Page` has type parameters, so it cannot be a `Serializable`: `serialize` drops the type arguments its objects carry. Leave `Serializable` out: an object serialized as it is keeps its type arguments.",
+            "16:14 invalid-implement `OrderPage` has type parameters, so it cannot be a `Serializable`: `serialize` drops the type arguments its objects carry. Leave `Serializable` out: an object serialized as it is keeps its type arguments.",
         ]
     );
 }

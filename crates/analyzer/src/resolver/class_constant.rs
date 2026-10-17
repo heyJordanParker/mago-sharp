@@ -3,6 +3,7 @@ use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::class_like_constant::ClassLikeConstantMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
@@ -343,21 +344,7 @@ where
             const_span,
         );
 
-        // Prefer the docblock type (@var) when it exists, as it reflects the user's
-        // intended type. When type_metadata was merely copied from the type declaration
-        // (they are equal), fall back to the more specific inferred type.
-        let mut const_type = if let Some(type_metadata) = &constant_metadata.type_metadata
-            && type_metadata.from_docblock
-        {
-            type_metadata.type_union.clone()
-        } else {
-            constant_metadata
-                .inferred_type
-                .clone()
-                .map(wrap_atomic)
-                .or_else(|| constant_metadata.type_metadata.clone().map(|s| s.type_union))
-                .unwrap_or_else(get_mixed)
-        };
+        let mut const_type = read_type(constant_metadata);
 
         expander::expand_union(
             context.codebase,
@@ -392,18 +379,7 @@ where
         };
 
         if let Some(constant_metadata) = required_metadata.constants.get(&const_name) {
-            let mut const_type = if let Some(type_metadata) = &constant_metadata.type_metadata
-                && type_metadata.from_docblock
-            {
-                type_metadata.type_union.clone()
-            } else {
-                constant_metadata
-                    .inferred_type
-                    .clone()
-                    .map(wrap_atomic)
-                    .or_else(|| constant_metadata.type_metadata.clone().map(|s| s.type_union))
-                    .unwrap_or_else(get_mixed)
-            };
+            let mut const_type = read_type(constant_metadata);
 
             expander::expand_union(
                 context.codebase,
@@ -439,6 +415,24 @@ where
 }
 
 /// Reports an error for a class-like that cannot be found in the codebase.
+/// The type a read of `constant` gives. Its docblock type (`@var`) reflects the type the user intends, so it comes first.
+/// The type its value is inferred to have is more specific than the declared type, which it is copied from, so it comes
+/// next.
+fn read_type(constant: &ClassLikeConstantMetadata) -> TUnion {
+    if let Some(type_metadata) = &constant.type_metadata
+        && type_metadata.from_docblock
+    {
+        return type_metadata.type_union.clone();
+    }
+
+    constant
+        .inferred_type
+        .clone()
+        .map(wrap_atomic)
+        .or_else(|| constant.type_metadata.clone().map(|declared| declared.type_union))
+        .unwrap_or_else(get_mixed)
+}
+
 fn report_non_existent_class<A>(context: &mut Context<'_, '_, A>, classname: Word, class_span: Span)
 where
     A: Arena,
