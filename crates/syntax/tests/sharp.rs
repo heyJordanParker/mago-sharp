@@ -511,31 +511,22 @@ fn a_parameter_default_follows_its_accessors_and_behaviors() {
 /// still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
-    for (member, message, start) in
-        [("public required int count() { return 1; }", "`required` is not supported yet in PHP#.", "required")]
-    {
-        let arena = LocalArena::new();
-        let code: &'static str = Box::leak(
-            format!("class Report\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
-        );
-        let program = parse(&arena, "src/Report.sharp", code);
+    let arena = LocalArena::new();
+    let code = "class Report\n{\n    public required int count() { return 1; }\n\n    public int run() { return 1; }\n}\n";
+    let program = parse(&arena, "src/Report.sharp", code);
 
-        let [error] = program.errors else {
-            panic!("expected one error for `{member}`, got {:#?}", program.errors);
-        };
-        assert_eq!(error.to_string(), message, "{member}");
-        assert_eq!(source(code, error), start, "{member}");
-        let Some(Statement::Class(class)) = program.statements.first() else {
-            panic!("expected a class for `{member}`, got {:#?}", program.statements);
-        };
-        assert!(
-            class
-                .members
-                .iter()
-                .any(|member| matches!(member, ClassLikeMember::Method(run) if run.name.value == b"run")),
-            "the class keeps parsing after `{member}`"
-        );
-    }
+    let [error] = program.errors else {
+        panic!("expected one error, got {:#?}", program.errors);
+    };
+    assert_eq!(error.to_string(), "`required` is not supported yet in PHP#.");
+    assert_eq!(source(code, error), "required");
+    let Some(Statement::Class(class)) = program.statements.first() else {
+        panic!("expected a class, got {:#?}", program.statements);
+    };
+    assert!(
+        class.members.iter().any(|member| matches!(member, ClassLikeMember::Method(run) if run.name.value == b"run")),
+        "the class keeps parsing after `required`"
+    );
 }
 
 /// Spec section 6.4: a property names its behaviors after its accessors, `via` and types separated by commas, which

@@ -1621,7 +1621,7 @@ pub fn get_sharp_received_type(r#type: &TUnion) -> TUnion {
             non_empty,
             ..
         })) if !key_type.types.is_empty() && key_type.types.iter().all(TAtomic::is_int) => {
-            let mut list = TList::new(value_type.clone());
+            let mut list = TList::new(Arc::clone(value_type));
             list.non_empty = *non_empty;
 
             TAtomic::Array(TArray::List(list))
