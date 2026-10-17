@@ -958,7 +958,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Node::FunctionLikeReturnTypeHint(_) | Node::On(_) | Node::MethodBody(_) | Node::MethodAbstractBody(_),
             Signature,
         ) => Some(Signature),
-        (Node::AttributeList(_), Class | Enum | Method | FieldOrProperty | Parameter) => Some(Attribute),
+        (Node::AttributeList(_), Class | Enum | Method | Signature | FieldOrProperty | Parameter) => Some(Attribute),
         (
             Node::Attribute(_)
             | Node::PartialArgumentList(_)
@@ -5438,7 +5438,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# interface has an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
         }
         Place::Signature => {
-            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
+            "A PHP# interface method has attributes, no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
         }
         Place::Enum => {
             "A PHP# enum has attributes, an optional `public`, a name, optional type parameters as in `<T, TError : Error>` when it has no backing type, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, computed properties, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."

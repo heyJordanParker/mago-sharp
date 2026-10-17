@@ -5246,6 +5246,33 @@ fn a_plain_php_method_of_a_property_s_name_is_its_value_where_a_function_is_take
     );
 }
 
+/// Spec section 14.3: a plain PHP class that defines `__get` has the properties it reads, typed by its `@property` and
+/// `@property-read` lines and `Any?` otherwise. `row.owner` reads the property `__get` serves, as `$row->owner` does in
+/// PHP, and the method `owner` is the value only where the code takes a function. `row.owner()` calls the method.
+#[test]
+fn a_plain_php_class_with_get_has_the_properties_it_reads() {
+    let row = "<?php\n\nnamespace Lib;\n\n/** @property-read Contact $contact */\nclass Row\n{\n    public function contact(): Contact\n    {\n        return new Contact('relation');\n    }\n\n    public function owner(): Contact\n    {\n        return new Contact('relation');\n    }\n\n    public function __get(string $name): mixed\n    {\n        return new Contact($name);\n    }\n}\n";
+    let contact = "<?php\n\nnamespace Lib;\n\nfinal class Contact\n{\n    public function __construct(public string $name)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Contact;\nimport Lib.Row;\nextern Row.owner;\n\nclass Report\n{\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = row.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        const loaded = owner as Contact;\n        return global.strlen(contact.name + relation().name + called.name + (loaded?.name ?? \"\"));\n    }\n}\n";
+
+    let (issues, artifacts) = analyze_with_artifacts(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Demo/Report.sharp", sharp),
+        &[("src/Lib/Row.php", row), ("src/Lib/Contact.php", contact)],
+    );
+    let type_at = |line: &str, read: &str| {
+        let start = (sharp.find(line).unwrap() + line.find(read).unwrap()) as u32;
+        artifacts.expression_types.get(&(start, start + read.len() as u32)).map(|r#type| r#type.get_id().to_string())
+    };
+
+    assert_eq!(issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(), ["12:27 non-documented-property"]);
+    assert_eq!(type_at("const contact = row.contact;", "row.contact").as_deref(), Some("Lib\\Contact"));
+    assert_eq!(type_at("const owner = row.owner;", "row.owner").as_deref(), Some("mixed"));
+    assert_eq!(type_at("relation = row.owner;", "row.owner").as_deref(), Some("(closure(): Lib\\Contact)"));
+    assert_eq!(type_at("const called = row.owner();", "row.owner()").as_deref(), Some("Lib\\Contact"));
+}
+
 /// Spec section 14.3 with section 12: a method value holds the collection as it was when the value was made, so a
 /// method that changes the collection would change only that copy. As in Swift, which refuses a value of a `mutating`
 /// method, it is refused, with the lambda that changes the collection itself.
@@ -13691,6 +13718,23 @@ fn a_member_whose_kind_differs_across_the_receivers_classes_is_an_error() {
             "`doc.total` is a method on `Order` but a property on `Invoice`, so PHP# cannot tell how to read it.",
             "`three.total` is a method on `Order` and `Quote` but a property on `Invoice`, so PHP# cannot tell how to read it.",
             "`doc.total()` calls a method on `Order` but a function in a property on `Invoice`, so PHP# cannot tell how to call it.",
+        ]
+    );
+}
+
+/// A plain PHP class that defines `__get` has the properties it reads, spec section 14.3, so its method's name read
+/// through a receiver that can also be a class with only the method is a property on one and a method on the other. Where
+/// the code takes a function, the read is the method on both.
+#[test]
+fn a_name_a_plain_php_class_s_get_serves_and_another_class_has_a_method_of_differs_in_kind() {
+    let sharp = "namespace Demo;\n\nimport Lib.Order;\nimport Lib.Row;\nextern Order.total;\nextern Row.total;\n\nclass Report\n{\n    public int run(Order|Row doc)\n    {\n        const read = doc.total;\n        Function<int()> total = doc.total;\n        return total() + doc.total();\n    }\n}\n";
+    let library = "<?php\n\nnamespace Lib;\n\nfinal class Order\n{\n    public function total(): int\n    {\n        return 1;\n    }\n}\n\nfinal class Row\n{\n    public function total(): int\n    {\n        return 2;\n    }\n\n    public function __get(string $name): mixed\n    {\n        return 3;\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Lib/Order.php", library)]),
+        [
+            "Ambiguous property access: $total on class `Row`.",
+            "`doc.total` is a method on `Order` but a property on `Row`, so PHP# cannot tell how to read it.",
         ]
     );
 }

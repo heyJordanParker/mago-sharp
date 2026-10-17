@@ -1055,10 +1055,20 @@ where
         true, // `instance_access`
         block_context.scope.get_class_like_name(),
     );
-    if !for_assignment
-        && let Some(declared) = &resolution
-        && reads_method_over_property(context, artifacts, declared, class_id, method_name, read_span)
-    {
+    // Spec section 14.3: a plain PHP class that defines `__get` has the properties it reads, `Any?` where no
+    // `@property` line types one.
+    let serves_property = has_magic_method && !class_metadata.flags.is_sharp();
+    let property_type = match &resolution {
+        Some(declared) => {
+            (!declared.declaring_class.flags.is_sharp()).then(|| declared.declared_type(context.codebase))
+        }
+        None => serves_property.then(get_mixed),
+    };
+    let reads_method = !for_assignment
+        && property_type.is_some_and(|property_type| {
+            reads_method_over_property(context, artifacts, &property_type, class_id, method_name, read_span)
+        });
+    if reads_method {
         // The lowering takes the read as the method's value, where the engine would read the property.
         artifacts.record_call_target(
             read_span,
@@ -1068,12 +1078,14 @@ where
     }
 
     let Some(resolution) = resolution else {
-        // A PHP# read of a declared method is its closure, ahead of anything the class serves through `__get`.
+        // A PHP# read of a method is its closure where the class has no property of the name, or where the code takes
+        // the method over the property.
         let self_parameter = match written_atomic {
             TAtomic::GenericParameter(parameter) => Some(parameter),
             _ => None,
         };
         if !for_assignment
+            && (reads_method || !serves_property)
             && let Some(method_type) = resolve_method_value(
                 context,
                 block_context,
@@ -2122,13 +2134,14 @@ fn report_possibly_non_existent_property<A>(
     );
 }
 
-/// Spec section 14.3: a plain PHP class may declare a property and a method of one name, as PHP keeps the two apart.
-/// The PHP# read `x.name` is the property's, as in PHP, unless the code takes it as a function the property's type does
-/// not fit, where the property's value would be an error: there it is the value of the method `name`.
+/// Spec section 14.3: a plain PHP class may have a property and a method of one name, as PHP keeps the two apart. The
+/// PHP# read `x.name` is the property's, of `property_type`, as in PHP, unless the code takes it as a function the
+/// property's type does not fit, where the property's value would be an error: there it is the value of the method
+/// `name`.
 fn reads_method_over_property<A>(
     context: &Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
-    declared: &DeclaredProperty<'_>,
+    property_type: &TUnion,
     class_id: Word,
     method_name: Word,
     read_span: Span,
@@ -2137,13 +2150,12 @@ where
     A: Arena,
 {
     context.dialect.is_sharp()
-        && !declared.declaring_class.flags.is_sharp()
         && context.codebase.method_exists(class_id.as_bytes(), method_name.as_bytes())
         && artifacts.get_expected_type(&read_span).is_some_and(|expected| {
             expected.to_non_nullable().is_callable()
                 && !union_comparator::is_contained_by(
                     context.codebase,
-                    &declared.declared_type(context.codebase),
+                    property_type,
                     expected,
                     false,
                     false,

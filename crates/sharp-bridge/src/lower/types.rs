@@ -968,7 +968,8 @@ impl<'analysis> Types<'analysis> {
 
     /// The declaration `member` of the fully qualified class name `class` resolves to when code reads it: an enum case,
     /// a constant, a property, then a method, which the read takes as a first-class callable. Only when the class
-    /// declares none of them is it a property its `__get` serves. A call is [`Self::call_target`]'s.
+    /// declares none of them is it a property its `__get` serves. A read of an object is [`Self::read_member`]'s, and a
+    /// call is [`Self::call_target`]'s.
     #[must_use]
     pub fn member_declaration(&self, class: &[u8], member: &[u8]) -> Declaration {
         self.declared_member(class, member).unwrap_or_else(|| {
@@ -1002,6 +1003,29 @@ impl<'analysis> Types<'analysis> {
             Some(declared(DeclarationKind::Constant, constant.visibility.is_public()))
         } else {
             self.property_declaration(class, member).or_else(|| self.method_declaration(class, member))
+        }
+    }
+
+    /// The member a read `object.member` of an object of the fully qualified class name `class` reaches, as
+    /// [`Self::declared_member`] finds it, except that a plain PHP class that defines `__get` has the properties it
+    /// reads, spec section 14.3: its `__get` serves a name the class declares a method of, or nothing of.
+    pub(crate) fn read_member(&self, class: &[u8], member: &[u8]) -> Option<Declaration> {
+        let declared = self.declared_member(class, member);
+        let serves_property = self.codebase.method_exists(class, b"__get")
+            && self.codebase.get_class_like(class).is_some_and(|metadata| !metadata.flags.is_sharp());
+
+        match declared {
+            None | Some(Declaration { kind: DeclarationKind::Method { .. } | DeclarationKind::StaticMethod, .. })
+                if serves_property =>
+            {
+                Some(Declaration {
+                    kind: DeclarationKind::Property { typed: false },
+                    class: word(class),
+                    name: word(member),
+                    public: true,
+                })
+            }
+            declared => declared,
         }
     }
 
@@ -1138,9 +1162,9 @@ impl<'analysis> Types<'analysis> {
             .collect()
     }
 
-    /// Whether the read `read` of a plain PHP class's member gives the value of its method where the class also
-    /// declares a property of that name, spec section 14.3, as the analysis resolved it where the code takes the read
-    /// as a function the property's type does not fit.
+    /// Whether the read `read` of a plain PHP class's member gives the value of its method where the class also has a
+    /// property of that name, declared or served by its `__get`, spec section 14.3, as the analysis resolved it where
+    /// the code takes the read as a function the property's type does not fit.
     pub(crate) fn reads_method_over_property(&self, read: &Expression) -> bool {
         matches!(read, Expression::Access(_))
             && matches!(

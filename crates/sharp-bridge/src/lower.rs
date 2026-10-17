@@ -5622,7 +5622,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// Whether the read `read`, `object.member`, reads a method, which the read takes as a first-class callable. The
     /// member is the same kind on every class the receiver can be. A class intersected with others takes the member the
-    /// first of them declares, as the checker's `resolve_method_value` does. A plain PHP class's method reads over its
+    /// first of them has, as the checker's `resolve_method_value` does. A plain PHP class's method reads over its
     /// property of that name where the checker took the read as the method's value.
     fn is_method_value(&self, read: &Expression, object: &Expression, member: &ClassLikeMemberSelector) -> bool {
         if self.types.reads_method_over_property(read) {
@@ -5636,7 +5636,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let kind = agreed_kind(receivers.into_iter().map(|classes| {
             classes
                 .iter()
-                .find_map(|class| self.types.declared_member(class, name.value))
+                .find_map(|class| self.types.read_member(class, name.value))
                 .unwrap_or_else(|| self.types.member_declaration(classes[0], name.value))
                 .kind
         }));

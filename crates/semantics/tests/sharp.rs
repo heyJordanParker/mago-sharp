@@ -1814,7 +1814,7 @@ fn a_type_an_interface_method_cannot_take_names_what_it_has() {
     assert_eq!(
         check_in_type_file(code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
         [[
-            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
+            "A PHP# interface method has attributes, no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
         ]]
     );
 }
@@ -3067,6 +3067,15 @@ fn implements_is_not_supported_yet() {
 #[test]
 fn attributes_on_a_class_its_members_and_their_parameters_are_in_the_slice() {
     let code = "namespace App.Tenant;\n\n[Entity(label: \"Order Items\"), Searchable]\n[Table(\"orders\")]\nclass Report\n{\n    [Field] private int count = 0;\n    [Field(label: \"Name\", width: 2 * 3, limit: PHP_INT_MAX)] public string name { get; set; }\n\n    public Report([Field(label: null)] public string tenant { get; }, [Field] private int page = 1)\n    {\n    }\n\n    [Action(true, -1.5)]\n    [Retry(3)]\n    public int run([Field(\"extra\")] int extra)\n    {\n        return extra;\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Spec section 1: attributes follow C#'s rules, which allow one on an interface method, with or without a default
+/// body.
+#[test]
+fn attributes_on_an_interface_method_are_in_the_slice() {
+    let code = "namespace App.Tenant;\n\npublic interface Labeled\n{\n    [Note(\"shown in lists\"), Searchable]\n    string label();\n\n    [Note(\"shown in headings\")]\n    [Retry(3)]\n    string title([Field] int width) => \"Untitled\";\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }

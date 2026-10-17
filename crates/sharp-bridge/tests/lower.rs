@@ -20722,6 +20722,52 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
 }
 
 /// ```php
+/// interface Labeled {
+///     #[\Lib\Field('shown in lists')] public function label(): string;
+///     #[\Lib\Entity('shown in headings')] public function title(): string;
+/// }
+/// trait Labeled\Defaults { #[\Lib\Entity('shown in headings')] public function title(): string { … } }
+/// ```
+///
+/// Spec section 1: an interface method carries its attributes as a class method does, and so does the trait method
+/// that runs its default body.
+#[test]
+fn an_interface_method_carries_its_attributes() {
+    let files = lowered_each(
+        &[(
+            "src/App/Labeled.sharp",
+            "namespace App;\n\nimport Lib.Field;\nimport Lib.Entity;\n\npublic interface Labeled\n{\n    [Field(\"shown in lists\")]\n    string label();\n\n    [Entity(\"shown in headings\")]\n    string title() => \"Untitled\";\n}\n",
+        )],
+        &[common::FIELD, common::ENTITY],
+    );
+    let member = |name: &str, path: &[u32]| member_in(&files, name, path);
+
+    assert_eq!(
+        [member("Labeled", &[0, 4]), member("Labeled", &[1, 4]), member("Labeled\\Defaults", &[0, 4])].concat(),
+        indoc! {r#"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Field"
+                  ARG_LIST
+                    ZVAL "shown in lists"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Entity"
+                  ARG_LIST
+                    ZVAL "shown in headings"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Entity"
+                  ARG_LIST
+                    ZVAL "shown in headings"
+        "#}
+    );
+}
+
+/// ```php
 /// public \Sharp\Map $stock;    #[\Sharp\Crossing(['map', 'string', null])]
 /// public \Sharp\Map $names;    #[\Sharp\Crossing(['map', null, null])]
 /// public \Sharp\Map $counts;   #[\Sharp\Crossing(['map', 'App\Tenant\Status', null])]
@@ -20910,6 +20956,70 @@ fn a_plain_php_method_of_a_property_s_name_read_as_a_function_is_a_first_class_c
                     VAR
                       ZVAL "gadget"
                     ZVAL "format"
+            "#},
+        ]
+    );
+}
+
+/// ```php
+/// $contact = $row->contact;
+/// $owner = $row->owner;
+/// $relation = $row->owner(...);
+/// $called = $row->owner();
+/// ```
+///
+/// A plain PHP class that defines `__get` has the properties it reads, spec section 14.3, so a read of a name it also
+/// has a method of reads the property, typed by an `@property-read` line or not. The method is the value where the code
+/// takes a function, and a call calls it.
+#[test]
+fn a_read_of_a_plain_php_class_with_get_reads_the_property_and_takes_the_method_as_a_function() {
+    let row = (
+        "src/Lib/Row.php",
+        "<?php\n\nnamespace Lib;\n\n/** @property-read Contact $contact */\nclass Row\n{\n    public function contact(): Contact\n    {\n        return new Contact();\n    }\n\n    public function owner(): Contact\n    {\n        return new Contact();\n    }\n\n    public function __get(string $name): mixed\n    {\n        return new Contact();\n    }\n}\n",
+    );
+    let contact = ("src/Lib/Contact.php", "<?php\n\nnamespace Lib;\n\nfinal class Contact\n{\n}\n");
+    let code = "namespace App.Tenant;\n\nimport Lib.Contact;\nimport Lib.Row;\nextern Row.owner;\n\nclass Report\n{\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = row.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        return [contact, relation(), called].count() + (owner is Contact ? 1 : 0);\n    }\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[row, contact], 0..4),
+        [
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "contact"
+                  PROP
+                    VAR
+                      ZVAL "row"
+                    ZVAL "contact"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "owner"
+                  PROP
+                    VAR
+                      ZVAL "row"
+                    ZVAL "owner"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "relation"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "row"
+                    ZVAL "owner"
+                    CALLABLE_CONVERT
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "called"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "row"
+                    ZVAL "owner"
+                    ARG_LIST
             "#},
         ]
     );
