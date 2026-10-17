@@ -4,24 +4,35 @@
 
 /// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the
 /// prelude, which the engine declares. Sorted.
-pub(crate) const SHARP_CLASSES: [&str; 19] = [
+pub(crate) const SHARP_CLASSES: [&str; 30] = [
     "Sharp\\Behavior",
     "Sharp\\Bool",
+    "Sharp\\Cache",
     "Sharp\\Class",
     "Sharp\\ClassMembers",
+    "Sharp\\Clock",
+    "Sharp\\Console",
+    "Sharp\\Database",
     "Sharp\\Dispatcher",
     "Sharp\\Environment",
     "Sharp\\Error",
     "Sharp\\Events",
+    "Sharp\\Files",
     "Sharp\\Float",
+    "Sharp\\Http",
     "Sharp\\ImmediateDispatcher",
     "Sharp\\Int",
     "Sharp\\InvalidFields",
     "Sharp\\Key",
     "Sharp\\List",
     "Sharp\\Listening",
+    "Sharp\\Mail",
     "Sharp\\Map",
     "Sharp\\Position",
+    "Sharp\\Process",
+    "Sharp\\ProcessResult",
+    "Sharp\\Random",
     "Sharp\\Result",
+    "Sharp\\Scope",
     "Sharp\\Set",
 ];

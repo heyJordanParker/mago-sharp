@@ -53,28 +53,66 @@ pub const INLINED_COLLECTION_METHODS: [(&str, &str); 10] = [
     ("List", "toSet"),
 ];
 
-/// The standard effects that are names and no class, spec section 29, in the spec's order. As `Events` is, each is an
-/// effect only an `extern` gives plain PHP.
-pub const NAMED_EFFECTS: [&str; 9] = [
-    "Sharp\\Database",
-    "Sharp\\Http",
-    "Sharp\\Files",
-    "Sharp\\Console",
-    "Sharp\\Process",
-    "Sharp\\Clock",
-    "Sharp\\Random",
-    "Sharp\\Cache",
-    "Sharp\\Mail",
+/// The exception classes in PHP's root namespace that the standard library's `Builtins.sharp` declares, which a bare
+/// name in a `.sharp` file names by default, spec section 23.
+pub const STANDARD_EXCEPTIONS: [&str; 47] = [
+    "ArgumentCountError",
+    "ArithmeticError",
+    "AssertionError",
+    "BadFunctionCallException",
+    "BadMethodCallException",
+    "CompileError",
+    "DOMException",
+    "DateError",
+    "DateException",
+    "DateInvalidOperationException",
+    "DateInvalidTimeZoneException",
+    "DateMalformedIntervalStringException",
+    "DateMalformedPeriodStringException",
+    "DateMalformedStringException",
+    "DateObjectError",
+    "DateRangeError",
+    "DivisionByZeroError",
+    "DomainException",
+    "ErrorException",
+    "Exception",
+    "FiberError",
+    "IntlException",
+    "InvalidArgumentException",
+    "JsonException",
+    "LengthException",
+    "LogicException",
+    "OutOfBoundsException",
+    "OutOfRangeException",
+    "OverflowException",
+    "PDOException",
+    "ParseError",
+    "PharException",
+    "RangeException",
+    "ReflectionException",
+    "RequestParseBodyException",
+    "RuntimeException",
+    "SNMPException",
+    "SQLite3Exception",
+    "SoapFault",
+    "SodiumException",
+    "TypeError",
+    "UnderflowException",
+    "UnexpectedValueException",
+    "UnhandledMatchError",
+    "ValueError",
+    "com_exception",
+    "mysqli_sql_exception",
 ];
 
-/// The names directly in `Sharp` that a bare name in a `.sharp` file names by default, spec section 23, and that a
-/// class-like of the file's namespace can win over: the [named effects](NAMED_EFFECTS), then every class-like the
-/// standard library or the prelude declares directly in `Sharp`, but the [fixed one](fixed_default_class).
+/// The class-likes that a bare name in a `.sharp` file names by default, spec section 23, and that a class-like of the
+/// file's namespace can win over: every class-like the standard library or the prelude declares directly in `Sharp`,
+/// then the [standard exceptions](STANDARD_EXCEPTIONS), but the [fixed one](fixed_default_class).
 pub(crate) fn default_classes() -> impl Iterator<Item = &'static str> {
-    NAMED_EFFECTS
+    sharp_classes::SHARP_CLASSES
         .into_iter()
-        .chain(sharp_classes::SHARP_CLASSES)
-        .filter(|class| fixed_default_class(&class.as_bytes()[b"Sharp\\".len()..]).is_none())
+        .chain(STANDARD_EXCEPTIONS)
+        .filter(|class| fixed_default_class(default_short_name(class)).is_none())
 }
 
 /// The default class-like that a bare name in a `.sharp` file always names, whatever the file imports or declares or
@@ -84,16 +122,21 @@ pub(crate) fn fixed_default_class(name: &[u8]) -> Option<&'static [u8]> {
     (name == b"Error").then_some(b"Sharp\\Error".as_slice())
 }
 
-/// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`. A
-/// lowercase `int` is the built-in type, so the name is compared exactly.
+/// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`, and
+/// `ValueError` for `ValueError`. A lowercase `int` is the built-in type, so the name is compared exactly.
 pub(crate) fn default_class(name: &[u8]) -> Option<&'static [u8]> {
-    default_classes().find(|class| class.as_bytes()[b"Sharp\\".len()..] == *name).map(str::as_bytes)
+    default_classes().find(|class| default_short_name(class) == name).map(str::as_bytes)
 }
 
 /// Whether a class-like whose short name is `name` wins over a default class-like in its namespace, compared ignoring
 /// case as PHP compares class names.
 pub(crate) fn shadows_a_default_class(name: &[u8]) -> bool {
-    default_classes().any(|class| class.as_bytes()[b"Sharp\\".len()..].eq_ignore_ascii_case(name))
+    default_classes().any(|class| default_short_name(class).eq_ignore_ascii_case(name))
+}
+
+/// The name a `.sharp` file writes the default class-like `class` by: `Cache` for `Sharp\Cache`.
+pub(crate) fn default_short_name(class: &str) -> &[u8] {
+    class.rsplit('\\').next().unwrap_or(class).as_bytes()
 }
 
 /// The last segment of the full name `name`, as a PHP# import writes it.

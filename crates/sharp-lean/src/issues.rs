@@ -14,28 +14,29 @@ use crate::runner::Refused;
 use crate::translate::Law;
 use crate::translate::Unmodeled;
 
-pub(crate) const FLOAT: &str = "Lean cannot prove facts about float arithmetic; use int.";
-pub(crate) const OVERRIDABLE: &str = "Lean cannot see which implementation runs.";
-pub(crate) const IDENTITY: &str = "Classes keep no identity in Lean.";
-pub(crate) const PROPERTY_WRITE: &str = "Lean models objects as values.";
+pub(crate) const FLOAT: &str = "A law cannot reason about float arithmetic, which rounds; use int.";
+pub(crate) const OVERRIDABLE: &str = "A law cannot know which implementation runs.";
+pub(crate) const IDENTITY: &str = "A law sees an object as its values, so it has no identity to compare.";
+pub(crate) const PROPERTY_WRITE: &str = "A law sees an object as its values, so nothing changes it in place.";
 pub(crate) const TRY_CATCH: &str = "An exception is a bug, and a law reasons about values.";
 pub(crate) const TYPE_TEST: &str = "It reads types while the code runs.";
 pub(crate) const STATIC_PROPERTY: &str = "It is state outside the arguments.";
 pub(crate) const LAZY: &str = "A lazy sequence has no value to reason about.";
-pub(crate) const EXTERN: &str = "Its body is native code, which Lean cannot read.";
-pub(crate) const RESERVED_NAME: &str = "Lean declares a member of that name for every structure and inductive.";
-pub(crate) const PLAIN_PHP: &str = "Lean cannot see inside plain PHP.";
-pub(crate) const COLLECTION: &str = "Mago does not translate collections to Lean.";
-pub(crate) const LIBRARY: &str = "Mago does not translate the standard library to Lean.";
-pub(crate) const LOOP: &str = "Mago does not translate loops to Lean.";
-pub(crate) const RECURSION: &str = "Mago does not translate recursion to Lean.";
-pub(crate) const LAMBDA: &str = "Mago does not translate lambdas to Lean.";
-pub(crate) const INHERITANCE: &str = "Mago does not translate inheritance to Lean.";
+pub(crate) const EXTERN: &str = "Its body is native code, which a law cannot read.";
+pub(crate) const RESERVED_NAME: &str =
+    "A `.lean` proof file gives every class a member of that name, so a law cannot reach a member that has it.";
+pub(crate) const PLAIN_PHP: &str = "A law cannot see inside plain PHP.";
+pub(crate) const COLLECTION: &str = "A law cannot reason about this use of a collection.";
+pub(crate) const LIBRARY: &str = "A law cannot reason about the standard library's code.";
+pub(crate) const LOOP: &str = "A law cannot reason about a loop.";
+pub(crate) const RECURSION: &str = "A law cannot reason about recursion.";
+pub(crate) const LAMBDA: &str = "A law cannot reason about this lambda.";
+pub(crate) const INHERITANCE: &str = "A law cannot reason about inheritance.";
 pub(crate) const INTERFACE_METHOD: &str =
-    "Mago does not translate interface methods to Lean, because the implementation that runs is chosen at run time.";
-pub(crate) const ACCESSOR: &str = "Mago does not translate accessor bodies to Lean.";
-pub(crate) const CONSTRUCTOR_BODY: &str = "Mago does not translate constructor bodies to Lean.";
-pub(crate) const NOT_TRANSLATED: &str = "Mago does not translate it to Lean.";
+    "A law cannot reason about an interface method, because the implementation that runs is chosen at run time.";
+pub(crate) const ACCESSOR: &str = "A law cannot reason about an accessor's body.";
+pub(crate) const CONSTRUCTOR_BODY: &str = "A law cannot reason about a constructor's body.";
+pub(crate) const NOT_TRANSLATED: &str = "A law cannot reason about it.";
 
 /// A construct the translation does not model, which `law` reaches: on the construct when the law's file holds it, and
 /// else on the law, pointing to the construct.
@@ -66,12 +67,12 @@ pub(crate) fn refused_reach(law: &Law, place: &str) -> Issue {
     )
 }
 
-/// A law that reaches a declaration of an accepted file the translation left out: a bug in Mago.
+/// A law that reaches a declaration of an accepted file the translation left out: a bug in the checker.
 pub(crate) fn untranslated(law: &Law, place: &str) -> Issue {
     unproven(
         law,
         format!(
-            "Law {} is not proven: Mago did not translate {place}, which the law reaches. This is a bug in Mago; report it to Mago's maintainers.",
+            "Law {} is not proven: the checker left out {place}, which the law reaches. This is a bug in the PHP# checker; report it to its maintainers.",
             law.name
         ),
     )
@@ -140,7 +141,7 @@ pub(crate) fn axiom(law: &Law, proof: &str, axiom: &str) -> Issue {
     )
 }
 
-/// A law whose generated module Lean refused: a bug in Mago's translation, never in the project.
+/// A law whose generated module Lean refused: a bug in the checker's translation, never in the project.
 pub(crate) fn generated_module_refused(law: &Law, module: &str, line: u32, message: &str) -> Issue {
     let first = message.lines().next().unwrap_or(message);
     let place = if line == 0 { String::new() } else { format!(", at line {line}") };
@@ -148,7 +149,7 @@ pub(crate) fn generated_module_refused(law: &Law, module: &str, line: u32, messa
     unproven(
         law,
         format!(
-            "Law {} is not proven: Lean refused the module {module} that Mago generated for it{place}: {first}. This is a bug in Mago; report it to Mago's maintainers.",
+            "Law {} is not proven: the module {module} the checker generated for it is wrong{place}: {first}. This is a bug in the PHP# checker; report it to its maintainers.",
             law.name
         ),
     )
@@ -265,7 +266,7 @@ fn rejected_lean_error(span: Span, rejection: String, at: &str, error: &Message)
 pub(crate) fn stopped(stop: Stop, what: &str) -> String {
     match stop {
         Stop::Processor => format!(
-            "it ran past {} processor seconds, the limit Mago sets on each Lean process. Make {what} end sooner",
+            "it ran past {} processor seconds, the limit the checker sets on each Lean process. Make {what} end sooner",
             library::processor_seconds()
         ),
         Stop::Waited => {
@@ -288,9 +289,9 @@ pub(crate) fn owned_root(namespace: &str, file: &str) -> String {
     let first = namespace.split('.').next().unwrap_or(namespace);
     let kept = match package::owner(namespace) {
         Some(owner) if owner != first => format!(
-            "`{first}` names the same folder as `{owner}` on a disk that ignores case, and `{owner}` is a name Lean or Mago keeps"
+            "`{first}` names the same folder as `{owner}` on a disk that ignores case, and `{owner}` is a name Lean or the checker keeps"
         ),
-        _ => format!("`{first}` is a name Lean or Mago keeps"),
+        _ => format!("`{first}` is a name Lean or the checker keeps"),
     };
 
     format!(
@@ -334,9 +335,9 @@ pub(crate) fn lake_not_found(span: Span, failure: &str) -> Issue {
 /// glibc Linux, where Lean runs, and on Alpine, where neither Mago's glibc build nor Lean starts.
 pub(crate) fn uninstallable_lean(span: Span) -> Issue {
     let reason = if cfg!(target_env = "musl") {
-        "This musl build of Mago can't install Lean, because Lean has no musl build. On glibc Linux, Mago's glibc build installs Lean itself.".to_owned()
+        "This musl build of the checker can't install Lean, because Lean has no musl build. On glibc Linux, the checker's glibc build installs Lean itself.".to_owned()
     } else {
-        format!("This {} {} build of Mago can't install Lean.", std::env::consts::OS, std::env::consts::ARCH)
+        format!("This {} {} build of the checker can't install Lean.", std::env::consts::OS, std::env::consts::ARCH)
     };
 
     Issue::error(format!("Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. {reason}"))

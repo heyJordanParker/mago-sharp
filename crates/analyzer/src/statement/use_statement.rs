@@ -1,6 +1,5 @@
 use mago_allocator::Arena;
 use mago_codex::metadata::CodebaseMetadata;
-use mago_names::NAMED_EFFECTS;
 use mago_names::scope::php_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -90,12 +89,8 @@ pub(crate) fn check_sharp_import<A>(context: &mut Context<'_, '_, A>, name: &Ide
 where
     A: Arena,
 {
-    // A standard effect that is a name and no class, as `Sharp.Mail`, is imported to rename it, spec section 29.
     let fqn = php_name(name);
-    if context.codebase.class_like_exists(&fqn)
-        || holds_function_or_constant(context.codebase, &fqn)
-        || NAMED_EFFECTS.iter().any(|effect| effect.as_bytes().eq_ignore_ascii_case(&fqn))
-    {
+    if context.codebase.class_like_exists(&fqn) || holds_function_or_constant(context.codebase, &fqn) {
         return;
     }
 

@@ -2306,7 +2306,7 @@ pub(super) fn report_non_documented_property<A>(
             Annotation::secondary(obj_span).with_message(format!("On an object of type `{classname}`")),
         )
         .with_note(
-            format!("While this {access_type} might be handled by `{magic_method}()`, Mago cannot determine its type without a corresponding `@property` docblock tag."),
+            format!("While this {access_type} might be handled by `{magic_method}()`, the checker cannot determine its type without a corresponding `@property` docblock tag."),
         )
         .with_help(format!(
             "To enable type checking, add a `@property`, `@property-read`, or `@property-write` tag to the docblock of the `{classname}` class. For example: `/** @property string {property_name} */`",

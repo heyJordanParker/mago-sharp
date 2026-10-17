@@ -44,6 +44,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects;
 use crate::effects::Body;
+use crate::effects::check::check_declaration_uses;
 use crate::error::AnalysisError;
 use crate::expression::call::static_method_call::analyze_static_method_call;
 use crate::plugin::hook::StaticCall;
@@ -308,6 +309,10 @@ where
         );
     }
 
+    if context.dialect.is_sharp() && matches!(method.body, MethodBody::Abstract(_)) {
+        check_declaration_uses(context, class_like_metadata, method_metadata, method.name_span);
+    }
+
     let body = match method.body {
         MethodBody::Abstract(_) => None,
         MethodBody::Concrete(block) => Some(FunctionLikeBody::Statements(block.statements.as_slice(), block.span())),
@@ -348,6 +353,7 @@ where
                 initializer,
                 body,
             );
+            effects::check::report_escaping_functions(context, artifacts, method_metadata, method.parameter_list, body);
         }
 
         if method_metadata.return_from_body.is_some() {

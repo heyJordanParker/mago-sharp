@@ -765,7 +765,9 @@ fn every_line_is_the_line_the_zend_scanner_counts() {
     let refused = Lowered::new("class Report\r{\r    public void run() { echo 1; }\r}\r");
     assert_eq!(
         refused.diagnostics(),
-        ["3:25 compile error: PHP# has no `echo`: write `global.printf` or `global.fwrite`."]
+        [
+            "3:25 compile error: PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes."
+        ]
     );
 }
 
@@ -999,7 +1001,7 @@ fn the_standard_library_module_binds_its_services_for_the_root_namespace() {
         ("app/Module.sharp", "App", "ZVAL \"app\"\n"),
     ] {
         let code = format!("namespace {namespace};\n\n{binding}");
-        let lowered = Lowered(common::checked(path, &code, &[common::ENVIRONMENT], lower));
+        let lowered = Lowered(common::checked(path, &code, &[], lower));
         // `return [[namespace, service, class, lifetime, value]];`, the file's third statement.
         let table = lowered.child(lowered.root(), 2);
         let entry = lowered.child(lowered.child(lowered.child(table, 0), 0), 0);
@@ -1387,7 +1389,7 @@ fn a_field_is_a_property_group_of_one_property() {
 #[test]
 fn a_field_without_an_access_modifier_is_a_private_property() {
     let lowered = Lowered::with(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Money(Offer)> priceOf, Function<Charge(Cart) uses Http> charge)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n    }\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer) uses Http> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Money(Offer) uses Http> priceOf, Function<Charge(Cart) uses Http> charge)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n    }\n}\n",
         &[
             SHOP,
             (
@@ -1999,7 +2001,9 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 /// `protected set`, and `willSet` before and `didSet` after the write. Prefix `++` and `--` give the value written and
 /// postfix `--` the value read, `??=` writes only when the read is null, and `+=` on a string appends. A static's
 /// initial value fills its storage, spec section 6.2: a constant one is its default, and any other a write of the
-/// storage in `#statics`, which runs when a request first builds the class's statics, so it runs no observer.
+/// storage in `#statics`, which runs when a request first builds the class's statics, so it runs no observer. `run`
+/// uses the statics, so it has the effects of `global.strval(1)`, which no `extern` declares here, and no function
+/// type names it.
 #[test]
 fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_methods() {
     let lowered = Lowered::new(
@@ -2277,7 +2281,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                           ZVAL "value#1"
                     SHARP_TYPE_ARGS
                       ZVAL [1] "void"
-                      ZVAL "Function<void()>"
+                      ZVAL "void"
                     null
                   METHOD [20] "#statics" @6-6
                     PARAM_LIST
@@ -8689,10 +8693,11 @@ fn an_emptied_list_loop_by_key_and_value_is_refused_before_lowering() {
 /// ```
 ///
 /// A function type runs as PHP's `\Closure`, so its type is the full name `Closure` with `ZEND_NAME_FQ`, which is 0.
+/// `step` states its effect, since a function parameter whose type states none is never returned (spec section 29).
 #[test]
 fn a_function_type_is_the_closure_class() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public Function<int(string, int)> apply(Function<int(string, int)> step, Function<void()>? other = null) { return step; }\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Function<int(string, int) uses Http> apply(Function<int(string, int) uses Http> step, Function<void()>? other = null) { return step; }\n}\n",
     );
     let method = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_METHOD).expect("a method");
 
@@ -8721,7 +8726,7 @@ fn a_function_type_is_the_closure_class() {
         indoc! {r#"
             SHARP_TYPE_ARGS
               ZVAL "Closure"
-              ZVAL "Function<Function<int(string, int)>(Function<int(string, int)>, Function<void()>?)>"
+              ZVAL "Function<Function<int(string, int) uses Sharp.Http>(Function<int(string, int) uses Sharp.Http>, Function<void()>?)>"
         "#}
     );
 }
@@ -8798,7 +8803,7 @@ fn a_map_of_function_types_with_two_effects_is_the_map_class() {
 #[test]
 fn a_function_type_taking_a_function_type_with_effects_is_the_closure_class() {
     let (hint, declaration) = lowered_field(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Function<int(Function<int(int) uses Http>) uses Mail> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>) uses Mail> apply)\n    {\n        this.apply = apply;\n    }\n}\n",
     );
 
     assert_eq!(hint, "ZVAL \"Closure\"\n");
@@ -15951,7 +15956,7 @@ fn a_file_lowers_to_the_same_bytes_from_any_workspace_root_and_names_no_path() {
 }
 
 /// ```php
-/// $settings = new \Sharp\Environment();
+/// $settings = \Sharp\Environment::class;
 /// $lines = \Sharp\List::wrap($extra);
 /// $type = \Sharp\Class::of($this);
 /// return 1;
@@ -15961,17 +15966,16 @@ fn environment_list_and_class_are_the_classes_of_the_sharp_namespace() {
     assert_eq!(
         body_in(
             RUN,
-            "        const settings = new Environment();\n        const lines = List.wrap(extra);\n        const type = Class.of(this);\n        return 1;\n",
-            &[common::ENVIRONMENT]
+            "        const settings = typeof(Environment);\n        const lines = List.wrap(extra);\n        const type = Class.of(this);\n        return 1;\n",
+            &[]
         ),
         indoc! {r#"
             STMT_LIST
               ASSIGN
                 VAR
                   ZVAL "settings"
-                NEW
+                CLASS_NAME
                   ZVAL "Sharp\\Environment"
-                  ARG_LIST
               ASSIGN
                 VAR
                   ZVAL "lines"

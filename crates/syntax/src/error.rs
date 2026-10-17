@@ -87,6 +87,10 @@ pub enum ParseError {
     /// A `uses` clause written after a PHP# function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, at
     /// the clause. A function type lists its effects inside its brackets.
     UsesAfterFunctionTypeInSharp(Span),
+    /// A PHP# method's function parameter named in its `uses`, as `f` in `apply(Function<int()> f) uses f`, with the
+    /// name, at the name. Spec section 29: a method takes on the effects of each function it is given, with nothing
+    /// written.
+    FunctionParameterInUsesInSharp(Box<str>, Span),
     /// A `uses` clause written on a PHP# `import`, as in `import Vendor.Pdf uses Files;`, at the clause. Spec section
     /// 23: a library's effect lives in its one `extern` declaration.
     UsesOnImportInSharp(Span),
@@ -166,6 +170,7 @@ impl HasFileId for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::FunctionParameterInUsesInSharp(_, span)
             | ParseError::UsesOnImportInSharp(span)
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
@@ -220,6 +225,7 @@ impl HasSpan for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::FunctionParameterInUsesInSharp(_, span)
             | ParseError::UsesOnImportInSharp(span)
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
@@ -366,6 +372,9 @@ impl std::fmt::Display for ParseError {
                 "A function type lists its effects inside its brackets, as in `Function<Charge(Cart) uses Http>`."
                     .to_string()
             }
+            ParseError::FunctionParameterInUsesInSharp(name, _) => format!(
+                "`{name}` is a function parameter, and a method takes on the effects of each function it is given, so `uses` names no parameter: delete it."
+            ),
             ParseError::UsesOnImportInSharp(_) => {
                 "An import never carries `uses`: declare the library's effect once, with `extern`.".to_string()
             }
@@ -463,6 +472,7 @@ impl From<&ParseError> for Issue {
             | ParseError::ConditionalInGuardInSharp(..)
             | ParseError::UndeclarableOperatorInSharp(..)
             | ParseError::UsesAfterFunctionTypeInSharp(..)
+            | ParseError::FunctionParameterInUsesInSharp(..)
             | ParseError::UsesOnImportInSharp(..)
             | ParseError::ReadonlyNotLastInSharp(..)
             | ParseError::OtherMemberInSharpModule(..)

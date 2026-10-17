@@ -1771,7 +1771,7 @@ fn check_class_like_extends<'ctx, 'arena, A>(
                 IssueCode::NonExistentClassLike,
                 Issue::error(format!("{using_kind_capitalized} `{using_name}` cannot extend unknown type `{extended_name}`"))
                     .with_annotation(Annotation::primary(extended_type.span()).with_message("This type could not be found"))
-                    .with_note("Mago could not find a definition for this class, interface, or trait.")
+                    .with_note("The checker could not find a definition for this class, interface, or trait.")
                     .with_help("Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable."),
             );
             continue;
@@ -2134,7 +2134,7 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                 ("A struct's header lists the interfaces it implements.", "Check the interface's name and its import.")
             } else {
                 (
-                    "Mago could not find a definition for this interface. The `implements` keyword is for interfaces only.",
+                    "The checker could not find a definition for this interface. The `implements` keyword is for interfaces only.",
                     "Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable.",
                 )
             };
@@ -2179,7 +2179,7 @@ fn check_class_like_use<'ctx, 'arena, A>(
                 IssueCode::NonExistentClassLike,
                 Issue::error(format!("{using_kind_capitalized} `{using_name}` cannot use unknown type `{used_name}`"))
                     .with_annotation(Annotation::primary(used_type.span()).with_message("This type could not be found"))
-                    .with_note("Mago could not find a definition for this trait. The `use` keyword is for traits only.")
+                    .with_note("The checker could not find a definition for this trait. The `use` keyword is for traits only.")
                     .with_help("Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable."),
             );
 

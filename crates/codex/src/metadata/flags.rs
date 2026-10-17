@@ -105,6 +105,10 @@ impl MetadataFlags {
     /// A PHP# parameter whose default is `Position.current()`, spec section 27: a PHP# call that leaves it out passes
     /// the caller's position, as C++20's `std::source_location::current()` default does.
     pub const CALLER_POSITION: MetadataFlags = MetadataFlags(1 << 62);
+    /// A PHP# function parameter whose type states no effects, spec section 29, as `f` in `map(Function<R(T)> f)`: each
+    /// call of the method takes on the effects of the function it passes there, which the type does not limit. A
+    /// standard library collection method's function, which the prelude declares as a `\Closure`, is one too.
+    pub const TAKES_ON_EFFECTS: MetadataFlags = MetadataFlags(1 << 63);
 }
 
 impl MetadataFlags {
@@ -325,6 +329,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_caller_position(self) -> bool {
         self.contains(Self::CALLER_POSITION)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn takes_on_effects(self) -> bool {
+        self.contains(Self::TAKES_ON_EFFECTS)
     }
 
     #[inline]
@@ -630,6 +640,7 @@ mod tests {
             ("FIELD", MetadataFlags::FIELD),
             ("RUNTIME_INITIAL_VALUE", MetadataFlags::RUNTIME_INITIAL_VALUE),
             ("CALLER_POSITION", MetadataFlags::CALLER_POSITION),
+            ("TAKES_ON_EFFECTS", MetadataFlags::TAKES_ON_EFFECTS),
         ];
 
         let mut seen = MetadataFlags::empty();

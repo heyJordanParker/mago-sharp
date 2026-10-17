@@ -19,6 +19,7 @@ use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Assignment;
 use mago_syntax::cst::AssignmentOperator;
 use mago_syntax::cst::Binary;
@@ -123,7 +124,12 @@ impl<'body, 'program> Body<'body, 'program> {
             Hint::Generic(generic) => {
                 // The name resolver leaves the built-in collections' names as written.
                 let name = self.checked.names().resolve(&generic.name).unwrap_or(generic.name.value);
-                if is_collection(name) {
+                // A `List` is Lean's `List`, which `map`, `filter` and `count` read as Lean's own functions.
+                if names::short_name(name) == "List"
+                    && let Some(element) = generic.type_arguments.arguments.first()
+                {
+                    format!("(List {})", self.r#type(element))
+                } else if is_collection(name) {
                     self.unmodeled(hint.span(), "a collection".to_owned(), issues::COLLECTION)
                 } else {
                     self.class_type(hint.span(), name)
@@ -315,6 +321,17 @@ impl<'body, 'program> Body<'body, 'program> {
             Expression::Instantiation(instantiation) => self.instantiation(instantiation),
             Expression::Access(Access::Property(access)) => self.property(expression, access),
             Expression::Access(Access::NullSafeProperty(access)) => self.null_safe_property(expression, access),
+            Expression::Array(array) if self.is_list(expression) => {
+                let mut elements = Vec::new();
+                for element in &array.elements {
+                    let ArrayElement::Value(element) = element else {
+                        return self.unmodeled(element.span(), "a spread in a list".to_owned(), issues::COLLECTION);
+                    };
+                    elements.push(self.value(element.value));
+                }
+
+                format!("[{}]", elements.join(", "))
+            }
             Expression::Array(_)
             | Expression::LegacyArray(_)
             | Expression::List(_)
@@ -652,6 +669,9 @@ impl<'body, 'program> Body<'body, 'program> {
             _ => {}
         }
 
+        if self.is_list(call.object) {
+            return self.list_call(expression, call);
+        }
         if let Some(extension) = self.checked.types().extension(expression) {
             if !self.is_translated_class(expression.span(), extension.class.as_bytes()) {
                 return "default".to_owned();
@@ -685,6 +705,67 @@ impl<'body, 'program> Body<'body, 'program> {
         };
         let receiver = self.value(call.object);
         self.call(expression, target.class.as_bytes(), class, method, Some(receiver), Some(&call.argument_list))
+    }
+
+    /// Whether `expression`'s value is a `List`, null aside.
+    fn is_list(&self, expression: &Expression) -> bool {
+        let r#type = self.checked.types().expression_type(expression);
+        let mut types = r#type.types.iter().filter(|atomic| !atomic.is_null()).peekable();
+
+        types.peek().is_some() && types.all(TAtomic::is_list)
+    }
+
+    /// A `List` method a law reasons about, as the Lean function it is: `count()` is `List.length`, and `map` and
+    /// `filter` of a lambda are `List.map` and `List.filter`. Every other method of a collection is refused by name.
+    fn list_call(&mut self, expression: &Expression, call: &MethodCall) -> String {
+        let Some(method) = self.method_name(&call.method) else {
+            return "default".to_owned();
+        };
+        let arguments = &call.argument_list.arguments;
+        match (method, arguments.len()) {
+            (b"count", 0) => {
+                let list = self.value(call.object);
+
+                format!("(Int64.ofNat (List.length {list}))")
+            }
+            (b"map" | b"filter", 1) => {
+                let list = self.value(call.object);
+                let Some(function) = arguments.first().and_then(|argument| self.lambda(argument.value())) else {
+                    return "default".to_owned();
+                };
+                let lean = if method == b"map" { "map" } else { "filter" };
+
+                format!("(List.{lean} {function} {list})")
+            }
+            _ => {
+                let what = format!("the List method {}", String::from_utf8_lossy(method));
+                self.unmodeled(expression.span(), what, issues::COLLECTION)
+            }
+        }
+    }
+
+    /// A lambda `map` or `filter` takes, as a Lean `fun`. Its body is one expression that cannot throw, so the function
+    /// is pure, as `List.map` and `List.filter` take it.
+    fn lambda(&mut self, expression: &Expression) -> Option<String> {
+        let Expression::ArrowFunction(arrow) = expression else {
+            self.unmodeled(expression.span(), "a function value that is no lambda".to_owned(), issues::LAMBDA);
+            return None;
+        };
+        let parameters: Vec<String> = arrow
+            .parameter_list
+            .parameters
+            .iter()
+            .map(|parameter| {
+                names::identifier(parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name))
+            })
+            .collect();
+        let (lines, body) = self.nested(|body| body.value(arrow.expression));
+        if !lines.is_empty() {
+            self.unmodeled(arrow.expression.span(), "a lambda whose body can throw".to_owned(), issues::LAMBDA);
+            return None;
+        }
+
+        Some(format!("(fun {} => {body})", parameters.join(" ")))
     }
 
     /// `object?.m(…)`, which calls `m` only when `object` is not null.

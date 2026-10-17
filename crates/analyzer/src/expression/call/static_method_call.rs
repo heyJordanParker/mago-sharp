@@ -22,6 +22,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::call::analyze_invocation_targets;
+use crate::expression::call::function_call::report_wrapped_class;
 use crate::expression::call::method_call::analyze_undocumented_method_return_type;
 use crate::expression::call::method_call::prepare_unresolved_method_targets;
 use crate::expression::call::record_external_method_call;
@@ -179,6 +180,9 @@ where
             resolved_method.method_identifier.get_method_name(),
         );
         crate::utils::availability::check_method_availability(context, method_metadata, &method_display, call.span);
+        if resolved_method.is_static {
+            report_wrapped_class(context, block_context, artifacts, metadata, Some(method_metadata), call.span);
+        }
 
         let method_name = resolved_method.method_identifier.get_method_name();
         if context.dialect.is_sharp()

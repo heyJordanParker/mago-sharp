@@ -195,44 +195,14 @@ pub(crate) fn record_function_values<A>(
             _ => None,
         };
         let runs = match source {
-            Some(FunctionLikeIdentifier::Closure(name)) => Runs::Body(Body::Lambda(name)),
+            Some(FunctionLikeIdentifier::Closure(name)) => Some(Runs::Body(Body::Lambda(name))),
             Some(FunctionLikeIdentifier::Method(class, method)) => {
-                let Some(declaring_class) = codebase.get_declaring_method_class(class.as_bytes(), method.as_bytes())
-                else {
-                    continue;
-                };
-                let Some(declaring) = codebase.get_class_like(declaring_class.as_bytes()) else {
-                    continue;
-                };
-                let Some(metadata) = codebase.get_method(declaring_class.as_bytes(), method.as_bytes()) else {
-                    continue;
-                };
-
-                // `class` is the class the value is read through, where a call's `extern` lookup starts too.
-                let class_name =
-                    codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
-                let callee = (class_name, metadata.original_name);
-                let lowercase_method = ascii_lowercase_word(method.as_bytes());
-                if let Some(effect) = foreign_class(codebase, class) {
-                    Runs::Foreign { callee, effects: vec![Effect::Foreign(effect)] }
-                } else if declaring.flags.is_sharp() && metadata.method_metadata.as_ref().is_some_and(|m| m.is_abstract)
-                {
-                    Runs::Foreign {
-                        callee,
-                        effects: metadata.uses.iter().map(|effect| Effect::Foreign(*effect)).collect(),
-                    }
-                } else if declaring.flags.is_sharp() {
-                    Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), lowercase_method))
-                } else if is_prelude_stub(declaring_class) {
-                    Runs::Foreign { callee, effects: Vec::new() }
-                } else {
-                    Runs::Foreign {
-                        callee,
-                        effects: plain_php_effects(extern_of(codebase, class, lowercase_method), callee),
-                    }
-                }
+                method_value_runs(codebase, class, method.as_bytes())
             }
-            Some(FunctionLikeIdentifier::Function(_)) | None => continue,
+            Some(FunctionLikeIdentifier::Function(_)) | None => None,
+        };
+        let Some(runs) = runs else {
+            continue;
         };
 
         artifacts.function_values.push(FunctionValue {
@@ -243,6 +213,31 @@ pub(crate) fn record_function_values<A>(
             code,
         });
     }
+}
+
+/// What a method value of `method`, read through `class`, runs wherever it is called: the PHP# method's body, or the
+/// effects a call of the method has without one, `None` when `class` has no such method.
+fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: &[u8]) -> Option<Runs> {
+    let declaring_class = codebase.get_declaring_method_class(class.as_bytes(), method)?;
+    let declaring = codebase.get_class_like(declaring_class.as_bytes())?;
+    let metadata = codebase.get_method(declaring_class.as_bytes(), method)?;
+
+    // `class` is the class the value is read through, where a call's `extern` lookup starts too.
+    let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+    let callee = (class_name, metadata.original_name);
+    let lowercase_method = ascii_lowercase_word(method);
+
+    Some(if let Some(effect) = foreign_class(codebase, class) {
+        Runs::Foreign { callee, effects: vec![Effect::Foreign(effect)] }
+    } else if declaring.flags.is_sharp() && metadata.method_metadata.as_ref().is_some_and(|m| m.is_abstract) {
+        Runs::Foreign { callee, effects: metadata.uses.iter().map(|effect| Effect::Foreign(*effect)).collect() }
+    } else if declaring.flags.is_sharp() {
+        Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), lowercase_method))
+    } else if is_prelude_stub(declaring_class) {
+        Runs::Foreign { callee, effects: Vec::new() }
+    } else {
+        Runs::Foreign { callee, effects: plain_php_effects(extern_of(codebase, class, lowercase_method), callee) }
+    })
 }
 
 /// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
@@ -274,11 +269,30 @@ where
         scope: Arc::clone(&scope),
     };
 
+    // The method's function parameters whose types state no effects, whose functions each caller runs as part of
+    // its call.
+    let effect_taking_parameters = match body {
+        Body::Method(class, method) => context
+            .codebase
+            .get_method(class.as_bytes(), method.as_bytes())
+            .map(|metadata| {
+                metadata
+                    .parameters
+                    .iter()
+                    .zip(&parameters)
+                    .filter(|(parameter, _)| parameter.flags.takes_on_effects())
+                    .map(|(_, declaration)| *declaration)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
     let mut recorder = Recorder {
         context,
         artifacts,
         class,
         parameters,
+        effect_taking_parameters,
         locals: HashMap::default(),
         lambdas: HashMap::default(),
         subjects: Vec::new(),
@@ -336,6 +350,9 @@ where
     class: Word,
     /// Where each parameter of the body is declared, by index.
     parameters: Vec<Span>,
+    /// Where each function parameter whose type states no effects is declared, spec section 29: a call of its function
+    /// adds no effect here, since each caller of the method adds the effects of the function it passes.
+    effect_taking_parameters: Vec<Span>,
     /// The roots of each local and lambda parameter, by where it is declared.
     locals: HashMap<Span, Roots>,
     /// The lambda literal each local holds, by where the local is declared.
@@ -595,14 +612,46 @@ where
         for callee in self.accessors(object, property, b"get") {
             self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments: Vec::new() });
         }
+
+        if let Expression::ConstantAccess(class) = object.unparenthesized()
+            && self.context.resolved_names.binding(&class.name) == Some(Binding::Class)
+            && let ClassLikeMemberSelector::Identifier(name) = property
+        {
+            self.use_statics(word(self.context.resolved_names.get(&class.name)), name.value, span);
+        }
     }
 
-    /// A member read without `this.` runs its `get` accessor as `this.member` does.
+    /// Records a use of `property` through `class` when it is a static: the first use of the statics of the class that
+    /// declares it runs each of their initial values that is not constant, spec section 6, so it has their effects.
+    fn use_statics(&mut self, class: Word, property: &[u8], span: Span) {
+        let codebase = self.codebase();
+        let property = php_variable_name(property);
+        let Some(declaring) = codebase
+            .get_class_like(class.as_bytes())
+            .and_then(|class| class.declaring_property_ids.get(&property))
+            .and_then(|declaring| codebase.get_class_like(declaring.as_bytes()))
+            .filter(|declaring| declaring.properties.get(&property).is_some_and(|used| used.flags.is_static()))
+        else {
+            return;
+        };
+
+        for (name, static_property) in &declaring.properties {
+            if static_property.flags.is_static() && static_property.flags.has_runtime_initial_value() {
+                let callee = Body::InitialValue(declaring.name, *name);
+                self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
+            }
+        }
+    }
+
+    /// A member read without `this.` runs its `get` accessor as `this.member` does, and a static's uses its class's
+    /// statics as `Class.member` does.
     fn read_member(&mut self, name: &ConstantAccess<'arena>) {
-        if self.context.resolved_names.binding(&name.name) == Some(Binding::Member)
-            && let Some(callee) = self.accessor(self.class, name.name.value(), b"get")
-        {
-            let span = name.span();
+        if self.context.resolved_names.binding(&name.name) != Some(Binding::Member) {
+            return;
+        }
+
+        let span = name.span();
+        if let Some(callee) = self.accessor(self.class, name.name.value(), b"get") {
             self.summary.calls.push(Call {
                 callee,
                 span,
@@ -610,6 +659,7 @@ where
                 arguments: Vec::new(),
             });
         }
+        self.use_statics(self.class, name.name.value(), span);
     }
 
     /// The roots of each argument, by the index of the parameter it binds.
@@ -619,18 +669,8 @@ where
         parameters: &[FunctionLikeParameterMetadata],
     ) -> Vec<Roots> {
         let mut roots = vec![Roots::new(); parameters.len()];
-        let last = parameters.len().saturating_sub(1);
         for (position, argument) in arguments.arguments.iter().enumerate() {
-            let index = match argument {
-                Argument::Named(named) => {
-                    let name = php_variable_name(named.name.value);
-                    parameters.iter().position(|parameter| parameter.name.0 == name).unwrap_or(position)
-                }
-                // Arguments past the last parameter are its variadic values.
-                Argument::Positional(_) => position.min(last),
-            };
-
-            if let Some(parameter_roots) = roots.get_mut(index) {
+            if let Some(parameter_roots) = roots.get_mut(parameter_index(argument, position, parameters)) {
                 parameter_roots.extend(self.roots(argument.value()));
             }
         }
@@ -644,7 +684,12 @@ where
             return Some(lambda);
         }
 
-        let name = match callee.unparenthesized() {
+        self.lambdas.get(&self.local(callee)?.declaration).copied()
+    }
+
+    /// The local or parameter an expression names.
+    fn local(&self, expression: &Expression<'arena>) -> Option<Local> {
+        let name = match expression.unparenthesized() {
             Expression::ConstantAccess(name) => &name.name,
             Expression::Identifier(name) => name,
             _ => return None,
@@ -653,7 +698,12 @@ where
             return None;
         };
 
-        self.lambdas.get(&local.declaration).copied()
+        Some(local)
+    }
+
+    /// Whether an expression names one of the method's function parameters whose types state no effects.
+    fn is_effect_taking_parameter(&self, expression: &Expression<'arena>) -> bool {
+        self.local(expression).is_some_and(|local| self.effect_taking_parameters.contains(&local.declaration))
     }
 
     /// Walks a lambda's body as part of the call that runs it, with its parameters given `parameter_roots`.
@@ -729,6 +779,7 @@ where
         }
 
         if let Some(function) = function
+            && !self.is_effect_taking_parameter(function)
             && let Some(function_type) = self.artifacts.get_expression_type(function)
         {
             let cause = (empty_word(), self.text(function.span()));
@@ -862,6 +913,9 @@ where
 
         let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
         let cause = (class_name, metadata.original_name);
+        let receiver_roots = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
+        let roots = self.argument_roots(arguments, &metadata.parameters);
+        self.passed_functions(arguments, &metadata.parameters, &receiver_roots, &roots);
         if let Some(effect) = foreign_class(codebase, class) {
             self.summary.effects.push((Effect::Foreign(effect), span, cause));
 
@@ -869,8 +923,7 @@ where
         }
 
         if codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|declaring| declaring.flags.is_sharp()) {
-            // A method without a body has the effects its `uses` lists, which each implementation is held to, spec
-            // section 29.
+            // A method without a body has the effects its `uses` lists, which each implementation is held to.
             if metadata.method_metadata.as_ref().is_some_and(|method| method.is_abstract) {
                 for effect in &metadata.uses {
                     self.summary.effects.push((Effect::Foreign(*effect), span, cause));
@@ -883,45 +936,68 @@ where
                 ascii_lowercase_word(declaring_class.as_bytes()),
                 ascii_lowercase_word(method_name.as_bytes()),
             );
-            let receiver = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
-            let arguments = self.argument_roots(arguments, &metadata.parameters);
-            self.summary.calls.push(Call { callee, span, receiver, arguments });
+            self.summary.calls.push(Call { callee, span, receiver: receiver_roots, arguments: roots });
 
             return;
         }
 
+        // `passed_functions` already took on the functions a collection method is given, as a PHP# method's, and plain
+        // PHP may run any function it is given.
         if is_prelude_stub(declaring_class) {
-            self.prelude_stub_call(metadata, span, receiver, arguments);
+            self.prelude_stub_call(metadata, span, receiver);
         } else {
             let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
+            self.callbacks(arguments);
         }
-        self.callbacks(arguments);
+    }
+
+    /// Records each function a call passes to a function parameter that takes on its effects, spec section 29: one
+    /// whose type states no effects, of a PHP# method or of a collection method. The method may run it on its receiver,
+    /// with the roots `receiver`, and on anything it is given, with the roots `roots` by parameter.
+    fn passed_functions(
+        &mut self,
+        arguments: &'ast ArgumentList<'arena>,
+        parameters: &[FunctionLikeParameterMetadata],
+        receiver: &Roots,
+        roots: &[Roots],
+    ) {
+        let reached: Roots = roots.iter().flatten().chain(receiver).copied().collect();
+        for (position, argument) in arguments.arguments.iter().enumerate() {
+            if parameters
+                .get(parameter_index(argument, position, parameters))
+                .is_some_and(|parameter| parameter.flags.takes_on_effects())
+            {
+                self.passed_function(argument.value(), &reached);
+            }
+        }
     }
 
     /// Records the function values plain PHP is given, as `global.array_map(x => …, list)` gives one, since plain PHP
-    /// may run each: a lambda runs here, a method value calls its method, and any other function value has the effects
-    /// its function type lists.
+    /// may run each.
     fn callbacks(&mut self, arguments: &'ast ArgumentList<'arena>) {
         for argument in arguments.arguments.iter() {
-            let value = argument.value();
-            if let Some(lambda) = self.lambda(value) {
-                self.inline(lambda, |_| Roots::new());
+            self.passed_function(argument.value(), &Roots::new());
+        }
+    }
 
-                continue;
-            }
+    /// Records `value`, a function passed to code that may run it on values with the roots `reached`: a lambda runs
+    /// here, a method value calls its method, and any other function value has the effects its function type lists.
+    fn passed_function(&mut self, value: &'ast Expression<'arena>, reached: &Roots) {
+        if let Some(lambda) = self.lambda(value) {
+            self.inline(lambda, |_| reached.clone());
 
-            let span = value.span();
-            if let Expression::Access(Access::Property(access)) = value.unparenthesized() {
-                self.method_value(access, span, &Roots::new());
-            }
+            return;
+        }
 
-            // A value the analysis gave no type passes no function type's effects.
-            let effects = self.artifacts.get_expression_type(value).map(declared_effects).unwrap_or_default();
-            let cause = (empty_word(), self.text(span));
-            for effect in effects {
-                self.summary.effects.push((Effect::Foreign(effect), span, cause));
-            }
+        let span = value.span();
+        self.method_value(value, span, reached);
+
+        // A value the analysis gave no type passes no function type's effects.
+        let effects = self.artifacts.get_expression_type(value).map(declared_effects).unwrap_or_default();
+        let cause = (empty_word(), self.text(span));
+        for effect in effects {
+            self.summary.effects.push((Effect::Foreign(effect), span, cause));
         }
     }
 
@@ -931,8 +1007,9 @@ where
     }
 
     /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the
-    /// effects its `extern` declares. The class that declares the constructor decides, whatever class `new` names, and
-    /// the class `new` names decides when no class declares one. A named constructor is the class's own, spec section
+    /// effects of the `extern` of the class `new` names, which an error names as `new` does, or its nearest plain PHP
+    /// parent when PHP# declares it. The class that declares the constructor decides between the two, and the class
+    /// `new` names decides when no class declares one. A named constructor is the class's own, spec section
     /// 9.1, and its body runs on the object its `: this(…)` creates.
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
@@ -964,16 +1041,22 @@ where
                 return;
             };
 
-            let arguments = instantiation
-                .argument_list
-                .as_ref()
-                .map(|arguments| self.argument_roots(arguments, &metadata.parameters))
-                .unwrap_or_default();
+            let mut roots = Vec::new();
+            if let Some(arguments) = &instantiation.argument_list {
+                roots = self.argument_roots(arguments, &metadata.parameters);
+                self.passed_functions(arguments, &metadata.parameters, &Roots::new(), &roots);
+            }
             let callee = Body::Method(ascii_lowercase_word(declaring.name.as_bytes()), constructor);
-            self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
+            self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: roots });
         } else if !is_prelude_stub(class.name) {
             let declaration = extern_of(codebase, class.name, constructor);
-            self.plain_php(declaration, span, (declaring.original_name, empty_word()));
+            // Only plain PHP takes an `extern`, so a PHP# class's error names its nearest plain PHP parent.
+            let named = std::iter::successors(Some(class), |class| {
+                class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+            })
+            .find(|class| !class.flags.is_sharp())
+            .unwrap_or(declaring);
+            self.plain_php(declaration, span, (named.original_name, empty_word()));
         }
     }
 
@@ -994,25 +1077,15 @@ where
         }
     }
 
+    /// Records a call of a prelude stub, such as `List.add`, which changes its receiver unless the stub is free of
+    /// mutation.
     // Deleted once the standard library's `.sharp` sources replace the prelude stubs (php-sharp issue #60).
     fn prelude_stub_call(
         &mut self,
         metadata: &FunctionLikeMetadata,
         span: Span,
         receiver: Option<&'ast Expression<'arena>>,
-        arguments: &'ast ArgumentList<'arena>,
     ) {
-        // A function passed to the stub runs on the receiver's elements, as `uses f` will declare.
-        let elements = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
-        for argument in &arguments.arguments {
-            let value = argument.value();
-            if let Some(lambda) = self.lambda(value) {
-                self.inline(lambda, |_| elements.clone());
-            } else if let Expression::Access(Access::Property(method)) = value.unparenthesized() {
-                self.method_value(method, span, &elements);
-            }
-        }
-
         if !metadata.flags.is_mutation_free()
             && let Some(receiver) = receiver
         {
@@ -1020,27 +1093,42 @@ where
         }
     }
 
-    /// A method value, such as `this.label`, passed to a call that runs it on `elements`.
-    fn method_value(&mut self, value: &PropertyAccess<'arena>, span: Span, elements: &Roots) {
-        let ClassLikeMemberSelector::Identifier(name) = &value.property else {
-            return;
+    /// A method value, such as `this.label` or `Job.ping`, passed to a call that runs it on `elements`: a call of each
+    /// method its type names the analysis resolved it to, with the object it is read from as the receiver, which has
+    /// the effects a call of the method has.
+    fn method_value(&mut self, value: &'ast Expression<'arena>, span: Span, elements: &Roots) {
+        let receiver = match value.unparenthesized() {
+            Expression::Access(Access::Property(access)) => self.roots(access.object),
+            _ => Roots::new(),
         };
-
-        let receiver = self.roots(value.object);
-        for class in self.object_classes(value.object) {
-            let codebase = self.codebase();
-            let Some(declaring_class) = codebase.get_declaring_method_class(class.as_bytes(), name.value) else {
-                continue;
-            };
-            let Some(metadata) = codebase.get_method(declaring_class.as_bytes(), name.value) else {
-                continue;
-            };
-
-            if codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|declaring| declaring.flags.is_sharp()) {
-                let callee =
-                    Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), ascii_lowercase_word(name.value));
-                let arguments = vec![elements.clone(); metadata.parameters.len()];
-                self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments });
+        let codebase = self.codebase();
+        let runs: Vec<(Runs, usize)> = self
+            .artifacts
+            .get_expression_type(value)
+            .into_iter()
+            .flat_map(|value| value.types.iter())
+            .filter_map(|atomic| match atomic {
+                TAtomic::Callable(TCallable::Signature(TCallableSignature {
+                    source: Some(FunctionLikeIdentifier::Method(class, method)),
+                    ..
+                })) => Some((
+                    method_value_runs(codebase, *class, method.as_bytes())?,
+                    codebase.get_declaring_method(class.as_bytes(), method.as_bytes())?.parameters.len(),
+                )),
+                _ => None,
+            })
+            .collect();
+        for (runs, parameters) in runs {
+            match runs {
+                Runs::Body(callee) => {
+                    let arguments = vec![elements.clone(); parameters];
+                    self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments });
+                }
+                Runs::Foreign { callee, effects } => {
+                    for effect in effects {
+                        self.summary.effects.push((effect, span, callee));
+                    }
+                }
             }
         }
     }
@@ -1279,6 +1367,22 @@ fn foreign_class(codebase: &CodebaseMetadata, class: Word) -> Option<Word> {
         .chain(metadata.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(parent.as_bytes())))
         .find(|metadata| metadata.flags.is_foreign())
         .map(|metadata| metadata.original_name)
+}
+
+/// The index of the parameter of `parameters` that `argument`, at `position` in its call, is given to: the one it
+/// names, or the one at its position. Arguments past the last parameter are its variadic values.
+pub(crate) fn parameter_index(
+    argument: &Argument<'_>,
+    position: usize,
+    parameters: &[FunctionLikeParameterMetadata],
+) -> usize {
+    match argument {
+        Argument::Named(named) => {
+            let name = php_variable_name(named.name.value);
+            parameters.iter().position(|parameter| parameter.name.0 == name).unwrap_or(position)
+        }
+        Argument::Positional(_) => position.min(parameters.len().saturating_sub(1)),
+    }
 }
 
 /// The lambda an expression is, unparenthesized.

@@ -1,12 +1,13 @@
-//! The words a `.sharp` message must not name, because only PHP has them. The tests that analyze `.sharp` files
-//! include this module and check every issue those files get against it.
+//! The words a `.sharp` message must not name, because only PHP has them or only the checker's own workings do. The
+//! tests that analyze `.sharp` files include this module and check every issue those files get against it.
 
 use std::sync::LazyLock;
 
 use mago_reporting::Issue;
 use regex::Regex;
 
-/// What a `.sharp` message must not name, each with the pattern that finds it.
+/// What a `.sharp` message must not name, each with the pattern that finds it. Lean stays where a message is about the
+/// developer's own `.lean` file or the Lean install, and `vendor/bin/mago compile` stays as the command.
 static BANNED: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
     [
         ("`mixed`", r"\bmixed\b"),
@@ -16,6 +17,8 @@ static BANNED: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
         ("a PHP class name with a backslash", r"\w\\\w"),
         ("PHP member access", r"(->|::)\$?[A-Za-z_]"),
         ("a spec section", r"(?i)\bsections?\s+\d|§"),
+        ("the checker's own name", r"\bMago\b"),
+        ("Lean as the checker's translation", r"\b(?:to|in) Lean\b|\bLean (?:models|declares|cannot (?:prove|see))\b"),
     ]
     .into_iter()
     .map(|(name, pattern)| (name, Regex::new(pattern).expect("a valid pattern")))

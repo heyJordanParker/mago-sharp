@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use mago_names::binding;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
+use mago_names::binding::takes_on_effects;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_phpdoc_syntax::cst::AssertPattern;
@@ -56,6 +57,7 @@ use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::function_like::MethodMetadata;
+use crate::metadata::parameter::FunctionLikeParameterMetadata;
 use crate::metadata::property::PropertyMetadata;
 use crate::metadata::ttype::TypeMetadata;
 use crate::misc::GenericParent;
@@ -139,7 +141,17 @@ where
         .parameters
         .iter()
         .filter_map(|p| {
-            scan_function_like_parameter(p, Some(class_like_metadata.original_name), &type_context, context, scope)
+            let mut parameter = scan_function_like_parameter(
+                p,
+                Some(class_like_metadata.original_name),
+                &type_context,
+                context,
+                scope,
+            )?;
+            let takes_on = takes_on_effects(p) || runs_inside_collection_method(class_like_metadata, &parameter);
+            parameter.flags.set(MetadataFlags::TAKES_ON_EFFECTS, takes_on);
+
+            Some(parameter)
         })
         .collect();
     // Spec section 13: a method marked `readonly` keeps `this` readonly, and so do `int hash()` and `string toString()`,
@@ -253,6 +265,22 @@ where
     }
 
     Some(metadata)
+}
+
+/// Spec section 29: whether `parameter` is a function a standard library collection method runs only inside its call,
+/// as `List.map` runs its lambda, so the call takes on that function's effects, as a PHP# method's function parameter
+/// whose type states no effects does. The prelude declares the collection methods on `Sharp\Internal\ListMethods`,
+/// `MapMethods`, `SetMethods` and `IterableMethods`, each taking its function as a `\Closure`.
+fn runs_inside_collection_method(class: &ClassLikeMetadata, parameter: &FunctionLikeParameterMetadata) -> bool {
+    [
+        "Sharp\\Internal\\ListMethods",
+        "Sharp\\Internal\\MapMethods",
+        "Sharp\\Internal\\SetMethods",
+        "Sharp\\Internal\\IterableMethods",
+    ]
+    .iter()
+    .any(|collection| collection.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()))
+        && parameter.type_metadata.as_ref().is_some_and(|declared| declared.type_union.has_callable())
 }
 
 /// Scans a PHP# law, spec section 28, as a static method that returns `bool`, so its body is analyzed as one.

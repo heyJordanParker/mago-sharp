@@ -1054,22 +1054,22 @@ fn compact_extract_and_global_are_errors() {
     );
 }
 
-/// Spec section 8 removes `echo` and `print`: output goes through `global.printf` or `global.fwrite`. Spec section 2
+/// Spec section 8 removes `echo` and `print`: output goes through the standard library's `Console`. Spec section 2
 /// makes `echo` a plain name, so `echo` written as a call is a call of a function no code declares, refused the same
 /// way.
 #[test]
-fn echo_is_an_error_that_names_printf_and_fwrite() {
+fn echo_is_an_error_that_names_console_write() {
     let code = leak(method("        echo \"total\", extra;\n        echo(\"total\");\n        return extra;\n"));
-    let message = "PHP# has no `echo`: write `global.printf` or `global.fwrite`.";
+    let message = "PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.";
 
     assert_eq!(issues(code), [format!("7:9 {message}"), format!("8:9 {message}")]);
 }
 
 #[test]
-fn print_is_an_error_that_names_printf_and_fwrite() {
+fn print_is_an_error_that_names_console_write() {
     let code =
         leak(method("        const shown = print \"total\";\n        print(\"total\");\n        return extra;\n"));
-    let message = "PHP# has no `print`: write `global.printf` or `global.fwrite`.";
+    let message = "PHP# has no `print`: write `console.write(text)` on the `Console` your constructor takes.";
 
     assert_eq!(issues(code), [format!("7:23 {message}"), format!("8:9 {message}")]);
 }
@@ -1216,11 +1216,11 @@ fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
 
 /// `die("…")` prints its message and exits with status 0, which reports success, so spec section 8 removes `die`.
 #[test]
-fn die_in_every_form_is_an_error_that_names_stderr_and_exit() {
+fn die_in_every_form_is_an_error_that_names_write_error_and_exit() {
     let code = leak(method(
         "        die;\n        die();\n        die(\"failed\");\n        die(1);\n        return extra;\n",
     ));
-    let message = "PHP# has no `die`: write the message to STDERR, then `global.exit(1)`.";
+    let message = "PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`.";
 
     assert_eq!(
         issues(code),
@@ -2538,19 +2538,21 @@ fn a_local_or_parameter_named_after_a_superglobal_is_an_error() {
     );
 }
 
-/// Spec section 29 removes every superglobal, written with `$` or bare as in `_SERVER["HTTP_HOST"]`.
+/// Spec section 29 removes every superglobal, written with `$` or bare as in `_SERVER["HTTP_HOST"]`. Only `_ENV` names
+/// `Environment`, and `GLOBALS`, which holds no request data, names a parameter.
 #[test]
 fn a_superglobal_with_or_without_dollar_is_an_error_that_names_a_request() {
     let code = leak(method(
         "        Store.keep(GLOBALS[\"a\"], $GLOBALS);\n        Store.keep(_SERVER[\"a\"], $_SERVER);\n        Store.keep(_GET[\"a\"], $_GET);\n        Store.keep(_POST[\"a\"], $_POST);\n        Store.keep(_FILES[\"a\"], $_FILES);\n        Store.keep(_COOKIE[\"a\"], $_COOKIE);\n        Store.keep(_SESSION[\"a\"], $_SESSION);\n        Store.keep(_REQUEST[\"a\"], $_REQUEST);\n        Store.keep(_ENV[\"a\"], $_ENV);\n        return extra;\n",
     ));
     let message = "PHP# has no superglobals; take a Request";
+    let globals = "PHP# has no global variables; take the value as a constructor or method parameter";
 
     assert_eq!(
         issues(code),
         [
-            format!("7:20 {message}"),
-            format!("7:34 {message}"),
+            format!("7:20 {globals}"),
+            format!("7:34 {globals}"),
             format!("8:20 {message}"),
             format!("8:34 {message}"),
             format!("9:20 {message}"),
@@ -2565,8 +2567,42 @@ fn a_superglobal_with_or_without_dollar_is_an_error_that_names_a_request() {
             format!("13:35 {message}"),
             format!("14:20 {message}"),
             format!("14:35 {message}"),
-            format!("15:20 {message}"),
-            format!("15:31 {message}"),
+            "15:20 PHP# has no superglobals; take an Environment".to_owned(),
+            "15:31 PHP# has no superglobals; take an Environment".to_owned(),
+        ]
+    );
+}
+
+/// Spec section 29: for the environment and the command-line arguments the error names `Environment`, so `_ENV` and a
+/// read of `_SERVER`'s `"argv"` or `"argc"` do, with or without `$`, and every other read of `_SERVER` names a request.
+#[test]
+fn an_environment_superglobal_is_an_error_that_names_environment() {
+    let code = leak(method(
+        "        Store.keep(_ENV[\"HOME\"], $_ENV);\n        Store.keep(_SERVER[\"argv\"], $_SERVER[\"argc\"]);\n        Store.keep(_SERVER[\"HTTP_HOST\"], _SERVER[extra]);\n        return extra;\n",
+    ));
+    let environment = "PHP# has no superglobals; take an Environment";
+    let request = "PHP# has no superglobals; take a Request";
+
+    assert_eq!(
+        issues(code),
+        [
+            format!("7:20 {environment}"),
+            format!("7:34 {environment}"),
+            format!("8:20 {environment}"),
+            format!("8:37 {environment}"),
+            format!("9:20 {request}"),
+            format!("9:42 {request}"),
+        ]
+    );
+    // A file whose import takes the short name `Environment` is told the aliased import to write.
+    let shadowed = leak(
+        method("        Store.keep(_ENV);\n        return extra;\n")
+            .replace("namespace App.Tenant;\n", "namespace App.Tenant;\n\nimport App.Shared.Environment;\n"),
+    );
+    assert_eq!(
+        issues(shadowed),
+        [
+            "9:20 PHP# has no superglobals; take a SharpEnvironment after `import Sharp.Environment as SharpEnvironment;`"
         ]
     );
 }
@@ -2624,7 +2660,7 @@ fn a_superglobal_or_a_double_underscore_name_before_a_member_is_an_error() {
         issues(code),
         [
             format!("7:20 {superglobal}"),
-            format!("8:20 {superglobal}"),
+            "8:20 PHP# has no global variables; take the value as a constructor or method parameter".to_owned(),
             format!("9:9 {superglobal}"),
             format!("10:9 {superglobal}"),
             format!("11:20 {magic}"),
@@ -2760,7 +2796,7 @@ fn a_method_refused_at_its_name_has_its_body_checked() {
         [
             "5:17 A method named after its class is not supported yet in PHP#.",
             "7:22 PHP# has no superglobals; take a Request",
-            "8:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
+            "8:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
         ]
     );
 }
@@ -2781,7 +2817,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
         issues(r#enum),
         [
             "7:12 An enum has no constructor: its cases are its only values.",
-            "9:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
+            "9:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
         ]
     );
     assert_eq!(
@@ -2795,7 +2831,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             format!("8:54 PHP# has no `__LINE__`: {line}"),
             "14:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.".to_owned(),
             "14:18 PHP# has no `callable`: write `Function<R(P)>`.".to_owned(),
-            "15:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
+            "15:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.".to_owned(),
         ]
     );
 }
@@ -2844,16 +2880,16 @@ fn a_function_or_namespace_refused_at_its_name_has_its_code_checked() {
         issues(code),
         [
             "3:10 PHP# has no top-level functions: move `helper` into a class as a static method.",
-            "5:5 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
+            "5:5 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
             "8:1 This namespace is not supported yet in PHP#.",
-            "14:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
+            "14:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
         ]
     );
     assert_eq!(
         issues(braced),
         [
             "1:1 This namespace is not supported yet in PHP#.",
-            "6:13 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
+            "6:13 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
         ]
     );
 }
@@ -3596,13 +3632,10 @@ fn an_extern_method_is_static_in_a_static_or_foreign_class_with_no_body_in_any_n
 }
 
 /// Spec section 29 works a body's effects out from its code, so only a method without a body, an interface's or an
-/// abstract class's, names effects in `uses`. A method with a body names only its function parameters there, as in
-/// `charge(…) uses prepare => …`.
+/// abstract class's, names effects in `uses`. A function parameter in `uses` is the parser's error.
 #[test]
-fn a_method_with_a_body_names_only_its_function_parameters_in_uses() {
-    let refused = |name: &str| {
-        format!("A method with a body takes no effect in `uses`, and `{name}` is not one of its function parameters.")
-    };
+fn a_method_with_a_body_names_no_effect_in_uses() {
+    let refused = |name: &str| format!("A method with a body takes no effect in `uses`, and it names `{name}`.");
     for (code, expected) in [
         (
             "public class Gateway\n{\n    public int charge(int cents) uses Http => cents;\n}\n",
@@ -3613,16 +3646,8 @@ fn a_method_with_a_body_names_only_its_function_parameters_in_uses() {
             vec![format!("5:39 {}", refused("Http"))],
         ),
         (
-            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
-            vec![],
-        ),
-        (
-            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)>? prepare) uses prepare => cents;\n}\n",
-            vec![],
-        ),
-        (
-            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare, cents, Http => cents;\n}\n",
-            vec![format!("5:76 {}", refused("cents")), format!("5:83 {}", refused("Http"))],
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses cents, Http => prepare(cents);\n}\n",
+            vec![format!("5:67 {}", refused("cents")), format!("5:74 {}", refused("Http"))],
         ),
         ("public interface Gateway\n{\n    int charge(int cents) uses Http;\n}\n", vec![]),
         ("public abstract class Gateway\n{\n    public abstract int charge(int cents) uses Http;\n}\n", vec![]),
@@ -3642,7 +3667,7 @@ fn an_extern_method_with_a_body_has_its_body_checked() {
         issues(code),
         [
             "5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
-            "7:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
+            "7:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
         ]
     );
 }
@@ -6606,7 +6631,7 @@ fn an_operator_body_is_a_method_body() {
 
     assert_eq!(
         issues_in("src/Money.sharp", code),
-        ["7:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`."]
+        ["7:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes."]
     );
 }
 

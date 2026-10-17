@@ -8,6 +8,7 @@ use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
@@ -52,6 +53,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::access::report_full_name;
+use crate::expression::call::function_call::report_wrapped_class;
 use crate::expression::is_refused_type;
 use crate::expression::with::analyze_object_initializer;
 use crate::invocation::Invocation;
@@ -274,6 +276,51 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     }
 }
 
+/// Spec section 29: a `foreign` object is created in a module binding, and nowhere else, so a `.sharp` file's `new` of
+/// a class that is `foreign`, or extends one, is refused outside a binding's expression, a lambda in it included.
+fn check_foreign_outside_module<A>(
+    context: &mut Context<'_, '_, A>,
+    metadata: &ClassLikeMetadata,
+    class: &Word,
+    span: Span,
+    class_span: Span,
+) where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+    let Some(foreign) = std::iter::once(metadata)
+        .chain(
+            metadata.all_parent_classes.iter().filter_map(|parent| context.codebase.get_class_like(parent.as_bytes())),
+        )
+        .find(|class| class.flags.is_foreign())
+    else {
+        return;
+    };
+    let in_binding = context.codebase.modules.iter().flat_map(|module| &module.bindings).any(|binding| {
+        matches!(binding.value, BindingValueMetadata::Expression(_))
+            && binding.span.file_id == span.file_id
+            && binding.span.contains(&span.start)
+    });
+    if in_binding {
+        return;
+    }
+
+    let what = if std::ptr::eq(foreign, metadata) {
+        "`foreign`".to_owned()
+    } else {
+        format!("a `foreign` `{}`", display_class_like_name(context, foreign.original_name))
+    };
+    context.collector.report_with_code(
+        IssueCode::ForeignOutsideModule,
+        Issue::error(format!("`{class}` is {what}, so only a module binding creates it."))
+            .with_annotation(Annotation::primary(class_span))
+            .with_note("A module binding decides how often a `foreign` object is created.")
+            .with_help("Take it as a constructor or method parameter, and create it in a module binding."),
+    );
+}
+
 /// Reports a PHP# `new` that leaves a required property unset, spec sections 6.1 and 10. The object initializer names
 /// every required property the constructor that runs does not assign: the main constructor, or a named constructor
 /// together with the main constructor it runs first.
@@ -459,6 +506,8 @@ where
     let classname_str = display_class_like_name(context, metadata.original_name);
 
     crate::utils::availability::check_class_like_availability(context, metadata, &classname_str, class_expression_span);
+    check_foreign_outside_module(context, metadata, &classname_str, instantiation_span, class_expression_span);
+    report_wrapped_class(context, block_context, artifacts, metadata, None, instantiation_span);
 
     if metadata.kind.is_interface() && !classname.is_from_class_string() {
         context.collector.report_with_code(
