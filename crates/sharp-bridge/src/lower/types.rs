@@ -1339,6 +1339,29 @@ impl<'analysis> Types<'analysis> {
         Some((collection, method.as_bytes().to_ascii_lowercase()))
     }
 
+    /// The name in lowercase of the `List` method the method call `call` runs on a value that may also be a `Map` or a
+    /// `Set`: the analyzer checked it against `Sharp\Internal\ListMethods` and the other collections' method of that
+    /// name. None for a call on one collection, or on anything else.
+    pub(crate) fn list_method_on_several_collections(&self, call: &Expression) -> Option<Vec<u8>> {
+        let (mut list, mut others) = (None, false);
+        for callee in self.artifacts.get_callees(call) {
+            let CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } = callee else {
+                return None;
+            };
+            if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\ListMethods") {
+                list = Some(method.as_bytes().to_ascii_lowercase());
+            } else if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\MapMethods")
+                || class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\SetMethods")
+            {
+                others = true;
+            } else {
+                return None;
+            }
+        }
+
+        list.filter(|_| others)
+    }
+
     /// Whether the method call `call`, null-safe or not, runs a `Map` method that leaves its receiver as it is, which
     /// `Sharp\Internal\MapMethods` declares mutation-free.
     pub(crate) fn reads_map(&self, call: &Expression) -> bool {
@@ -1375,11 +1398,18 @@ impl<'analysis> Types<'analysis> {
 
     /// Whether `function`, a plain PHP function, is one of PHP's built-ins whose declared return type holds its failure,
     /// `false` or `null`, as `hex2bin` returns `string|false`. PHP# reads the failure from that value, so PHP's warning
-    /// for the same failure only repeats it, and the call runs without it. A plain PHP library's own function keeps its
-    /// warnings.
+    /// for the same failure only repeats it, and the call runs without it. A built-in that takes a function, as
+    /// `call_user_func` and `array_reduce` do, runs that function's code inside the call, whose warnings are no failure of
+    /// the built-in, so it keeps its warnings, as a plain PHP library's own function does.
     pub(crate) fn returns_its_failure(&self, function: Word) -> bool {
         self.codebase.get_function(function.as_bytes()).is_some_and(|metadata| {
             metadata.flags.is_built_in()
+                && !metadata.parameters.iter().any(|parameter| {
+                    [parameter.get_type_declaration_metadata(), parameter.get_type_metadata()]
+                        .into_iter()
+                        .flatten()
+                        .any(|declared| declared.type_union.has_callable())
+                })
                 && metadata
                     .return_type_declaration_metadata
                     .as_ref()

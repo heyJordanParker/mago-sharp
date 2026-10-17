@@ -972,7 +972,7 @@ where
         }
     }
 
-    /// Records the function values plain PHP is given, as `global.array_map(x => …, list)` gives one, since plain PHP
+    /// Records the function values plain PHP is given, as `global.usort(list, (a, b) => …)` gives one, since plain PHP
     /// may run each.
     fn callbacks(&mut self, arguments: &'ast ArgumentList<'arena>) {
         for argument in arguments.arguments.iter() {
@@ -1338,7 +1338,7 @@ fn function_extern(codebase: &CodebaseMetadata, function: Word) -> ((Word, Word)
 /// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)
 /// falls under: the member's, then the class's, then the same for each parent class, nearest first. A function in a
 /// namespace is declared as `extern Pdf.render`, which the binder reads as a class and its member, spec section 23.
-fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) -> Option<&ExternMetadata> {
+pub(crate) fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) -> Option<&ExternMetadata> {
     let declared = |key: (Word, Word)| codebase.externs.get(&key).and_then(|declarations| declarations.first());
     if class.is_empty() {
         return declared((empty_word(), member)).or_else(|| {

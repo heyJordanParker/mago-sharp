@@ -7015,18 +7015,37 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         arguments: &ArgumentList,
         null_safe: bool,
     ) -> Option<u32> {
-        let (collection_name, method, reads_twice) = self.php_collection_method(call)?;
+        let (collection_name, method, reads_twice, several) = self.php_collection_method(call)?;
         let line = self.line(call);
         let element = arguments.arguments.first().map(|argument| Side::Expression(argument.value()));
+        // A value that may also be a `Map` or a `Set` runs the `List`'s PHP when it is an array, and the collection's
+        // own method otherwise. `count` needs no test: PHP's `\count` counts a `Map` and a `Set` too.
+        let tests_list = several && method != b"count";
 
-        let mut collection = self.collection_receiver(receiver, reads_twice || null_safe);
+        let mut collection = self.collection_receiver(receiver, reads_twice || null_safe || tests_list);
         let test = null_safe.then(|| {
             let receiver = self.read_collection(&mut collection, line, true);
 
             self.is_null(line, receiver)
         });
+        let is_list = tests_list.then(|| {
+            let receiver = self.read_collection(&mut collection, line, false);
+
+            self.global_call(line, b"is_array", &[receiver])
+        });
         let lowered =
             self.inlined_collection_method(call.span(), receiver, (collection_name, &method), &mut collection, element);
+        let lowered = match is_list {
+            Some(is_list) => {
+                let other = self.read_collection(&mut collection, line, false);
+                let name = self.string(0, line, &method);
+                let arguments = self.collection_arguments(arguments);
+                let own = self.node(SHARP_AST_METHOD_CALL, 0, line, &[other, name, arguments]);
+
+                self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_list, lowered, own])
+            }
+            None => lowered,
+        };
         self.release_collection(collection);
 
         Some(match test {
@@ -7056,8 +7075,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
 
         match (collection_name, method) {
+            // The elements are the `List`'s, of a value that may also be a `Map` or a `Set`.
             ("List", b"contains" | b"indexof" | b"remove") => {
-                let element_type = self.types.element_type(self.types.expression_type(receiver));
+                let receiver_type = self.types.expression_type(receiver);
+                let list_type = receiver_type.clone_with_types(
+                    receiver_type
+                        .types
+                        .iter()
+                        .filter(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+                        .cloned()
+                        .collect(),
+                );
+                let element_type = self.types.element_type(&list_type);
                 let search = match method {
                     b"contains" => Search::Contains,
                     b"indexof" => Search::IndexOf,
@@ -7066,7 +7095,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.element_search(at, collection, &element_type, element(), search)
             }
-            ("List", b"last") => {
+            // `last()`, `max()` and `min()` are `($list === [] ? throw new \OutOfRangeException(…) : \array_last($list))`,
+            // with `\max` or `\min` in place of `\array_last`.
+            ("List", b"last" | b"max" | b"min") => {
                 let list = self.read_collection(collection, line, false);
                 let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
                 let is_empty = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[list, empty]);
@@ -7076,9 +7107,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let exception = self.node(SHARP_AST_NEW, 0, line, &[class, message]);
                 let throw = self.node(SHARP_AST_THROW, 0, line, &[exception]);
                 let list = self.read_collection(collection, line, false);
-                let function = self.string(ZEND_NAME_FQ, line, b"array_last");
-                let list = self.node(SHARP_AST_ARG_LIST, 0, line, &[list]);
-                let element = self.node(SHARP_AST_CALL, 0, line, &[function, list]);
+                let function = if method == b"last" { b"array_last".as_slice() } else { method };
+                let element = self.global_call(line, function, &[list]);
 
                 self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_empty, throw, element])
             }
@@ -7137,7 +7167,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn collection_method_value(&mut self, value: &Expression, receiver: &Expression) -> u32 {
         let line = self.line(value);
         let target = self.expression(receiver);
-        if let Some((collection_name, method, _)) = self.php_collection_method(value) {
+        if let Some((collection_name, method, _, _)) = self.php_collection_method(value) {
             let parameter_type = self.types.value_parameter_type(value);
             let parameters: Vec<(&[u8], u32, u32)> = match &parameter_type {
                 Some(r#type) => vec![(b"value", 0, self.parameter_type(line, r#type))],
@@ -7300,18 +7330,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the method the method call `call` runs as
-    /// PHP on the array, one of the [`INLINED_COLLECTION_METHODS`], and whether that PHP reads the receiver twice. None
-    /// for a call of any other method.
-    fn php_collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>, bool)> {
-        let (collection, method) = self.types.collection_method(call)?;
+    /// PHP on the array, one of the [`INLINED_COLLECTION_METHODS`], whether that PHP reads the receiver twice, and
+    /// whether the value may also be a `Map` or a `Set`, which runs its own method of that name. None for a call of any
+    /// other method.
+    fn php_collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>, bool, bool)> {
+        let (collection, method, several) = match self.types.collection_method(call) {
+            Some((collection, method)) => (collection, method, false),
+            None => ("List", self.types.list_method_on_several_collections(call)?, true),
+        };
         if !INLINED_COLLECTION_METHODS.iter().any(|(inlined_collection, inlined)| {
             *inlined_collection == collection && inlined.as_bytes().eq_ignore_ascii_case(&method)
         }) {
             return None;
         }
-        let reads_twice = matches!(method.as_slice(), b"remove" | b"last");
+        let reads_twice = matches!(method.as_slice(), b"remove" | b"last" | b"max" | b"min");
 
-        Some((collection, method, reads_twice))
+        Some((collection, method, reads_twice, several))
     }
 
     /// The receiver of a collection method call. A method that reads it `twice` holds a value or an object that runs

@@ -648,7 +648,8 @@ fn get_list_accepting_set_type(parameter_type: &TUnion) -> Option<TUnion> {
 }
 
 /// Gets the element type when unpacking an argument with the spread operator. In PHP# a type that may not be iterable
-/// adds no element type, as `report_non_list_spread` reports it, so a value of only such types gives `None`.
+/// adds no element type, as `report_non_list_spread` reports it, and neither does an empty list, as in
+/// `Math.max(0, ...[])`, so a value of only such types gives `None`.
 pub fn get_unpacked_argument_type<A>(
     context: &mut Context<'_, '_, A>,
     argument_value_type: &TUnion,
@@ -661,6 +662,10 @@ where
     let mut reported_an_error = false;
 
     for atomic_type in argument_value_type.types.as_ref() {
+        if context.dialect.is_sharp() && atomic_type.is_empty_array() {
+            continue;
+        }
+
         if let Some(value_parameter) = get_iterable_value_parameter(atomic_type, context.codebase) {
             potential_element_types.push(value_parameter);
 
@@ -719,7 +724,8 @@ where
 }
 
 /// Reports a spread, in a PHP# file, of a value that may not be a list, such as an `array<string, int>`, a
-/// `Traversable` or an `int`, whatever parameters it fills. Spec section 7 spreads an existing list.
+/// `Traversable` or an `int`, whatever parameters it fills. Spec section 7 spreads an existing list, and `[]` is the
+/// empty one.
 pub fn report_non_list_spread<A>(context: &mut Context<'_, '_, A>, argument_value_type: &TUnion, span: Span)
 where
     A: Arena,
@@ -728,8 +734,10 @@ where
         return;
     }
 
-    let Some(atomic_type) =
-        argument_value_type.types.iter().find(|atomic_type| !atomic_type.is_list() && !atomic_type.is_never())
+    let Some(atomic_type) = argument_value_type
+        .types
+        .iter()
+        .find(|atomic_type| !atomic_type.is_list() && !atomic_type.is_never() && !atomic_type.is_empty_array())
     else {
         return;
     };

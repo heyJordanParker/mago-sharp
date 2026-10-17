@@ -71,6 +71,7 @@ use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::block::BlockContext;
+use crate::effects::summary::extern_of;
 use crate::error::AnalysisError;
 use crate::expression::analyze_php_shape;
 use crate::expression::assignment::analyze_assignment;
@@ -879,8 +880,8 @@ fn report_statement_that_never_runs<A>(
     );
 }
 
-/// Refuses, in a `.sharp` file, the `condition` of an `if` or a `for … of` that never finishes, as `global.exit(1)`
-/// does, so the block it guards never runs (spec section 7). `block_context` is the context once the condition is
+/// Refuses, in a `.sharp` file, the `condition` of an `if` or a `for … of` that never finishes, as a `throw` does,
+/// so the block it guards never runs (spec section 7). `block_context` is the context once the condition is
 /// analyzed. The help replaces the whole statement, which never gets past its condition, with the condition. Returns
 /// whether it refused, and the caller then reads no statement of the block, as `analyze_statements` reads none after a
 /// statement that ends its block.
@@ -1011,8 +1012,17 @@ fn detect_unused_statement_expressions<'ast, 'arena, A>(
                 return;
             };
 
-            // If the function has side effects, we don't report it as useless.
-            if !function.flags.is_pure() {
+            // If the function has side effects, we don't report it as useless. A `.sharp` file's call into plain PHP
+            // has the effects its `extern` declares, spec section 29, as `global.apache_getenv` uses `Environment`.
+            if !function.flags.is_pure()
+                || (context.dialect.is_sharp()
+                    && extern_of(
+                        context.codebase,
+                        empty_word(),
+                        ascii_lowercase_word(function.original_name.as_bytes()),
+                    )
+                    .is_some_and(|declaration| !declaration.effects.is_empty()))
+            {
                 return;
             }
 

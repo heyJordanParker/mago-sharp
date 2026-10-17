@@ -339,6 +339,28 @@ final class ListMethods
     public function sumOf(\Closure $selector): int|float {}
 
     /**
+     * @return T the largest element.
+     *
+     * @throws \OutOfRangeException when the list is empty.
+     *
+     * @where T is int
+     *
+     * @mutation-free
+     */
+    public function max(): mixed {}
+
+    /**
+     * @return T the smallest element.
+     *
+     * @throws \OutOfRangeException when the list is empty.
+     *
+     * @where T is int
+     *
+     * @mutation-free
+     */
+    public function min(): mixed {}
+
+    /**
      * @param \Closure(T): bool $predicate
      *
      * @return T the first element `$predicate` keeps.

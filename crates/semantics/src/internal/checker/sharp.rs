@@ -2054,7 +2054,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             report_removed(
                 operator.span(),
                 b"@",
-                "a failure is the value a call returns, so test that value, as in `global.hex2bin(text) is string data`.",
+                "a failure is the value a call returns, so test that value, as in `global.iconv(from, to, text) is string converted`.",
                 "`@` before a name makes a keyword a name, as in `@event`.",
                 context,
             );
@@ -4478,8 +4478,8 @@ fn check_generic(generic: &GenericHint, place: Place, context: &mut Context<'_, 
 }
 
 /// Checks a union type. Each member in the slice is decided with the parts inside it as it is outside a union, so a
-/// generic member takes the type arguments it takes alone. Two members the engine can't tell apart while the code runs
-/// are refused, as [`overlap`] finds them.
+/// generic member takes the type arguments it takes alone. Two members that overlap are refused, as [`overlap`] finds
+/// them: one type written twice, two collections, as a type is one collection, and a collection beside an `Iterable`.
 fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_>) {
     let mut members = Vec::new();
     union_members(union, &mut members);
@@ -4525,14 +4525,16 @@ fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_
                 .with_annotation(Annotation::primary(member.span()).with_message("Written again here."))
                 .with_annotation(Annotation::secondary(first.span()).with_message("First written here."))
                 .with_help("Remove the second one, as PHP refuses a union that names a type twice."),
-            Overlap::Array => Issue::error(format!(
-                "`{}` and `{}` both run as a PHP array, so a union can't hold both.",
-                written(first),
-                written(member)
-            ))
-            .with_annotation(Annotation::primary(member.span()).with_message("A PHP array here."))
-            .with_annotation(Annotation::secondary(first.span()).with_message("A PHP array here too."))
-            .with_help("Keep one collection type, as the literal rules need to know which one a place holds."),
+            Overlap::Array => {
+                Issue::error(format!("A type can't be both a `{}` and a `{}`.", written(first), written(member)))
+                    .with_annotation(Annotation::primary(member.span()).with_message("The second collection."))
+                    .with_annotation(Annotation::secondary(first.span()).with_message("The first collection."))
+                    .with_help(format!(
+                        "Take the `{}` and the `{}` as two parameters, or as an enum with one case that holds each.",
+                        written(first),
+                        written(member)
+                    ))
+            }
             Overlap::Iterated { collection, iterable } => Issue::error(format!(
                 "`{}` is already an `{}`, so the union is `{}`.",
                 written(collection),
@@ -4564,18 +4566,18 @@ fn report_null_in_union(null: &Hint, members: &[&Hint], context: &mut Context<'_
         .report(Issue::error(message).with_annotation(Annotation::primary(null.span()).with_message("Written here.")));
 }
 
-/// How two members of a union overlap, which the engine can't tell apart while the code runs.
+/// How two members of a union overlap, so the union is refused.
 enum Overlap<'hint, 'arena> {
     /// One type written twice.
     Written,
-    /// Two of `List`, `Map` and `Set`, which share PHP's one array kind.
+    /// Two of `List`, `Map` and `Set`: a type is one collection, as in C#, Java, Kotlin and Swift.
     Array,
     /// A collection beside an `Iterable` of its element type, which already holds it.
     Iterated { collection: &'hint Hint<'arena>, iterable: &'hint Hint<'arena> },
 }
 
 /// How the union members `first` and `second` overlap, if they do. Type arguments reach the running program, so a
-/// generic class with other type arguments is another type, and only the collections share a run-time kind.
+/// generic class with other type arguments is another type.
 fn overlap<'hint, 'arena>(
     first: &'hint Hint<'arena>,
     second: &'hint Hint<'arena>,
@@ -5148,7 +5150,7 @@ const REMOVED_CONSTRUCTS: [(&[u8], &str, &str); 8] = [
     (
         b"die",
         "write the message with `console.writeError(text)`, then `process.exit(1)`.",
-        "`die(\"…\")` and `exit(\"…\")` print the message and exit with status 0, which reports success.",
+        "`die(\"…\")` prints the message and exits with status 0, which reports success.",
     ),
     (b"isset", "test it against null, as in `value != null`.", "A PHP# value is never undefined."),
     (
@@ -6047,7 +6049,10 @@ pub fn check_global(global: &Global, context: &mut Context<'_, '_, '_>) {
 
 fn check_variable(variable: &Variable, context: &mut Context<'_, '_, '_>) {
     match variable {
-        Variable::Direct(direct) => report_dollar_variable(direct.name, direct.span, context),
+        Variable::Direct(direct) => match COMMAND_LINE_VARIABLES.iter().find(|(name, _)| *name == direct.name) {
+            Some((_, member)) => report_command_line_variable(direct.name, member, direct.span, context),
+            None => report_dollar_variable(direct.name, direct.span, context),
+        },
         Variable::Indirect(_) | Variable::Nested(_) => context.report(
             Issue::error("Variable variables are not part of PHP#.")
                 .with_annotation(Annotation::primary(variable.span()).with_message("Used here."))
@@ -6251,6 +6256,29 @@ fn names_class(full_name: &[u8], namespace: Option<&[u8]>, class_name: &[u8]) ->
 
     import_class.eq_ignore_ascii_case(class_name)
         && import_namespace.eq_ignore_ascii_case(namespace.unwrap_or_default())
+}
+
+/// PHP's command-line variables, which spec section 29 gives `Environment`, each with the member that reads it.
+const COMMAND_LINE_VARIABLES: [(&[u8], &str); 2] = [(b"$argv", "arguments"), (b"$argc", "arguments.count()")];
+
+/// Reports a read of PHP's `$argv` or `$argc`, naming the `Environment` member that reads it.
+fn report_command_line_variable(name: &[u8], member: &str, span: Span, context: &mut Context<'_, '_, '_>) {
+    let (environment, after) = standard_class("Environment", context);
+    let object = format!(
+        "{}{}",
+        environment.get(..1).unwrap_or_default().to_lowercase(),
+        environment.get(1..).unwrap_or_default()
+    );
+
+    report_removed(
+        span,
+        name,
+        &format!("write `{object}.{member}` on the `{environment}` your constructor takes{after}."),
+        &format!(
+            "The command-line arguments arrive as `{environment}`'s `arguments`, starting with the script's name."
+        ),
+        context,
+    );
 }
 
 fn report_dollar_variable(name: &[u8], span: Span, context: &mut Context<'_, '_, '_>) {

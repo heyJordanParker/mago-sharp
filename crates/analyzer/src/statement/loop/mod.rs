@@ -1296,7 +1296,7 @@ fn can_condition_be_initially_false(pre_condition: &Expression<'_>, artifacts: &
 }
 
 /// The statements of a loop's body to analyze in `body_context`, the context once the loop's conditions are applied:
-/// none in a `.sharp` file when a condition never finishes, as `global.exit(1)` does, because the body then never runs
+/// none in a `.sharp` file when a condition never finishes, as a `throw` does, because the body then never runs
 /// (spec section 7). The condition refused is the one whose type is `never`, or the last one when the code that never
 /// finishes sits inside a condition. The loop scope then records that the loop is never left, so the code after it is
 /// refused too. A `do … while` runs its body before its condition, so it keeps its body. Each pass of the loop analysis

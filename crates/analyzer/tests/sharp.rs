@@ -437,7 +437,7 @@ fn a_later_value_of_an_untyped_null_start_adds_no_issue() {
 /// collection too.
 #[test]
 fn a_let_local_takes_any_value_of_its_first_values_general_type() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int run()\n    {\n        let total = 0;\n        total = 5;\n        let sizes = [5];\n        sizes = [];\n        sizes.add(6);\n        sizes.add(\"six\");\n        let rows = [[1]];\n        rows = [[2, 3], []];\n        let prices = [\"a\": 1];\n        prices = [\"b\": 2, \"c\": 3];\n        prices = [1.5];\n        return total + global.count(sizes) + global.count(rows) + global.count(prices);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int run()\n    {\n        let total = 0;\n        total = 5;\n        let sizes = [5];\n        sizes = [];\n        sizes.add(6);\n        sizes.add(\"six\");\n        let rows = [[1]];\n        rows = [[2, 3], []];\n        let prices = [\"a\": 1];\n        prices = [\"b\": 2, \"c\": 3];\n        prices = [1.5];\n        return total + sizes.count() + rows.count() + prices.count();\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[]),
@@ -2517,8 +2517,8 @@ fn a_catch_variable_has_the_caught_classes_as_its_type_as_in_php() {
 fn a_plain_php_function_is_called_through_its_namespace() {
     let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n";
     let helpers = "<?php\n\nfunction helper(int $value): int\n{\n    return $value;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public static int total(int extra, string html)\n    {\n        const name = global.sprintf(\"%d items\", global.count([extra, 2], mode: 0));\n        return global.strlen(name) + global.helper(extra) + global.strlen(Pdf.render(html));\n    }\n\n    public static int wrong() => global.strlen(Pdf.render(5)) + global.helper(\"one\");\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse function Vendor\\Pdf\\render;\n\nclass Report\n{\n    public static function total(int $extra, string $html): int\n    {\n        $name = \\sprintf(\"%d items\", \\count([$extra, 2], mode: 0));\n        return \\strlen($name) + \\helper($extra) + \\strlen(render($html));\n    }\n\n    public static function wrong(): int { return \\strlen(render(5)) + \\helper(\"one\"); }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public static int total(int extra, string html)\n    {\n        const name = global.sprintf(\"%s items\", global.str_pad(\"x\", length: extra));\n        return global.strlen(name) + global.helper(extra) + global.strlen(Pdf.render(html));\n    }\n\n    public static int wrong() => global.strlen(Pdf.render(5)) + global.helper(\"one\");\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse function Vendor\\Pdf\\render;\n\nclass Report\n{\n    public static function total(int $extra, string $html): int\n    {\n        $name = \\sprintf(\"%s items\", \\str_pad(\"x\", length: $extra));\n        return \\strlen($name) + \\helper($extra) + \\strlen(render($html));\n    }\n\n    public static function wrong(): int { return \\strlen(render(5)) + \\helper(\"one\"); }\n}\n";
     let others = [("src/Vendor/Pdf/functions.php", pdf), ("src/helpers.php", helpers)];
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &others);
@@ -2617,20 +2617,77 @@ fn a_message_names_a_plain_php_function_as_the_file_calls_it() {
 /// member that wraps it, its PHP# syntax, or the call through its namespace, `global.strlen(…)` or, for a function an
 /// imported namespace declares, `Pdf.render(…)`. A function whose member the library lacks gets the call through
 /// `global`, and Mago's `exit` construct is a bare call too, of the function `Process.exit` wraps. A function of the
-/// file's own namespace is named through
-/// that namespace, with the import the file lacks. A `.php` file calls each.
+/// file's own namespace is named through that namespace, with the import the file lacks. A function a collection method
+/// replaces, spec section 12, names the method on the call's collection, and the kind of collection when only one kind
+/// has it. A `.php` file calls each.
 #[test]
 fn a_bare_call_of_a_plain_php_function_names_the_call_to_write() {
     let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n";
     let tally = "<?php\n\nnamespace Demo;\n\nfunction tally(int $value): int\n{\n    return $value;\n}\n";
-    let math = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static float ceil(float x) => global.ceil(x);\n}\n";
-    let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public static int length(string html) => strlen(html);\n    public static string draft(string html) => render(html);\n    public static bool text(Any? value) => is_string(value);\n    public static float up(float x) => ceil(x);\n    public static float down(float x) => floor(x);\n    public static void stop() { exit(1); }\n    public static int count(int value) => tally(value);\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse function Vendor\\Pdf\\render;\n\nclass Report\n{\n    public static function length(string $html): int { return strlen($html); }\n    public static function draft(string $html): string { return render($html); }\n    public static function text(mixed $value): bool { return is_string($value); }\n    public static function up(float $x): float { return ceil($x); }\n    public static function down(float $x): float { return floor($x); }\n    public static function stop(): void { exit(1); }\n    public static function count(int $value): int { return tally($value); }\n}\n";
+    let math = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static float ceil(float x) => global.ceil(x);\n    public static int max(int first, int ...rest) => global.max([first, ...rest]);\n    public static int min(int first, int ...rest) => global.min([first, ...rest]);\n}\n";
+    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public List<string> parseCsv() => [text];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public static int length(string html) => strlen(html);\n    public static string draft(string html) => render(html);\n    public static bool text(Any? value) => is_string(value);\n    public static float up(float x) => ceil(x);\n    public static float down(float x) => floor(x);\n    public static void stop() { exit(1); }\n    public static int count(int value) => tally(value);\n    public static int larger(int a, int b) => max(a, b);\n    public static int smaller(int a, int b) => min(a, b);\n    public static Any? parsed(string line) => str_getcsv(line);\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse function Vendor\\Pdf\\render;\n\nclass Report\n{\n    public static function length(string $html): int { return strlen($html); }\n    public static function draft(string $html): string { return render($html); }\n    public static function text(mixed $value): bool { return is_string($value); }\n    public static function up(float $x): float { return ceil($x); }\n    public static function down(float $x): float { return floor($x); }\n    public static function stop(): void { exit(1); }\n    public static function count(int $value): int { return tally($value); }\n    public static function larger(int $a, int $b): int { return max($a, $b); }\n    public static function smaller(int $a, int $b): int { return min($a, $b); }\n    public static function parsed(string $line): mixed { return str_getcsv($line); }\n}\n";
     let others = [
         ("src/Vendor/Pdf/functions.php", pdf),
         ("src/Demo/functions.php", tally),
         ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp", math),
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text),
     ];
+
+    let mut differing = Vec::new();
+    for (signature, call, form) in [
+        ("int counted(List<int> items)", "count(items)", "`items.count()`"),
+        ("int sized(List<int> items)", "sizeof(items)", "`items.count()`"),
+        ("Any? kept(List<int> items, Function<bool(int)> keep)", "array_filter(items, keep)", "`items.filter(keep)`"),
+        ("Any? doubled(List<int> items, Function<int(int)> twice)", "array_map(twice, items)", "`items.map(twice)`"),
+        ("bool anyKept(List<int> items, Function<bool(int)> keep)", "array_any(items, keep)", "`items.any(keep)`"),
+        ("Any? found(List<int> items, Function<bool(int)> keep)", "array_find(items, keep)", "`items.first(keep)`"),
+        ("bool holds(List<int> items, int item)", "in_array(item, items)", "`items.contains(item)`"),
+        ("Any? at(List<int> items, int item)", "array_search(item, items)", "`items.indexOf(item)`"),
+        ("Any? latest(List<int> items)", "end(items)", "`items.last()`"),
+        ("Any? pushed(List<int> items, int item)", "array_push(items, item)", "`items.add(item)`"),
+        ("bool priced(Map<string, int> prices, string key)", "array_key_exists(key, prices)", "`prices.has(key)`"),
+        ("bool listed(Map<string, int> prices, string key)", "key_exists(key, prices)", "`prices.has(key)`"),
+        ("Any? names(Map<string, int> prices)", "array_keys(prices)", "`prices.keys()`"),
+        ("Any? amounts(Map<string, int> prices)", "array_values(prices)", "`prices.values()`"),
+        // Each kind of collection takes its own method, and a kind that has none names the kinds that do.
+        ("bool stocked(Map<string, int> stock, int item)", "in_array(item, stock)", "`stock.values().contains(item)`"),
+        ("bool seen(Set<int> seen, int item)", "in_array(item, seen)", "`seen.contains(item)`"),
+        ("Any? newest(Map<string, int> prices)", "end(prices)", "`prices.values().last()`"),
+        ("Any? where(Map<string, int> prices, int item)", "array_search(item, prices)", "`x.indexOf(…)` on a `List`"),
+        ("bool indexed(List<int> items)", "array_key_exists(0, items)", "`x.has(…)` on a `Map`"),
+        ("Any? positions(List<int> items)", "array_keys(items)", "`x.keys()` on a `Map`"),
+        (
+            "bool either(bool flag, List<int> items, Map<string, int> stock, int item)",
+            "in_array(item, flag ? items : stock)",
+            "`x.contains(…)` on a `List` or a `Set`, or `x.values().contains(…)` on a `Map`",
+        ),
+        // An argument that is no name is written `…`, and a call with an argument the method drops writes none.
+        ("bool small(List<int> items)", "in_array(1, items)", "`items.contains(…)`"),
+        ("Any? truthy(List<int> items)", "array_filter(items)", "`items.filter(…)`"),
+        ("int kept(List<int> items)", "count(items.filter(n => n > 0))", "`x.count()`"),
+        ("Any? addedTwice(List<int> items, int item)", "array_push(items, item, item)", "`x.add(…)`"),
+        ("int deep(List<int> items)", "count(items, 1)", "`x.count()`"),
+        ("Any? zipped(List<int> items)", "array_map(null, items, items)", "`x.map(…)`"),
+    ] {
+        let collection =
+            leak(format!("namespace Demo;\n\nclass Report\n{{\n    public static {signature} => {call};\n}}\n"));
+        let column = "    public static ".len() + signature.len() + " => ".len() + 1;
+        let function = &call[..call.find('(').expect("a call")];
+        let expected =
+            format!("5:{column} wrapped-function `{function}` is wrapped by the standard library: write {form}. | ");
+        // A refused call still checks its arguments against PHP's signature, as `array_any`'s callback of two
+        // parameters, so only the refusal is compared.
+        let found: Vec<String> = refusals(("src/Demo/Report.sharp", collection), &[])
+            .into_iter()
+            .filter(|refusal| refusal.contains(" wrapped-function "))
+            .collect();
+        if found != [expected] {
+            differing.push(format!("{call}: {found:?}"));
+        }
+    }
+    assert_eq!(differing, Vec::<String>::new());
 
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &others),
@@ -2642,9 +2699,152 @@ fn a_bare_call_of_a_plain_php_function_names_the_call_to_write() {
             "11:42 bare-function-call A plain PHP function is called through its namespace: write `global.floor(…)`. | ",
             "12:33 wrapped-function `exit` is wrapped by the standard library: write `process.exit(…)` on the `Process` your constructor takes. | ",
             "13:43 bare-function-call A plain PHP function is called through its namespace: write `Demo.tally(…)`. Add `import Demo;` to the file. | ",
+            "14:47 wrapped-function `max` is wrapped by the standard library: write `Math.max(…)`. Add `import Sharp.Math.Math;` to the file. | ",
+            "15:48 wrapped-function `min` is wrapped by the standard library: write `Math.min(…)`. Add `import Sharp.Math.Math;` to the file. | ",
+            "16:47 wrapped-function `str_getcsv` is wrapped by the standard library: write `line.parseCsv()`. | ",
         ]
     );
     assert_eq!(issues(("src/Demo/Report.php", php), &others), Vec::<String>::new());
+}
+
+/// Spec sections 8 and 23: a call through `global` of a function the standard library replaces is refused as its bare
+/// call is, naming the member to write, so PHP# code never reaches around the library. That holds for the functions
+/// the effect classes of section 29 replace, so output, exit, the clock and files go through `Console`, `Process`,
+/// `Clock` and `Files`, and an exit with a message names `process.exit` as a bare `exit` does. A function the library
+/// has no member for, a function PHP# syntax replaces, and a call inside the standard library itself, whose members
+/// are made of those calls, still go through `global`.
+#[test]
+fn a_global_call_of_a_function_the_library_replaces_names_the_member_to_write() {
+    let math = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static int max(int first, int ...rest) => global.max([first, ...rest]);\n}\n";
+    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
+    let library = [
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp", math),
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text),
+    ];
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string label(string name) => global.trim(name);\n    public static int larger(int a, int b) => global.max(a, b);\n    public static int counted(List<int> items) => global.count(items);\n    public static bool holds(List<int> items, int item) => global.in_array(item, items);\n    public static int distance(string a, string b) => global.levenshtein(a, b);\n    public static string shown(int value) => global.strval(value);\n    public static void say() { global.printf(\"x\"); }\n    public static void stop() { global.exit(1); }\n    public static void fail() { global.exit(\"failed\"); }\n    public static int started() => global.time();\n    public static void save(string path, string text) { global.file_put_contents(path, text); }\n}\n";
+    let effects = [
+        "11:32 wrapped-function `printf` is wrapped by the standard library: write `console.write(…)` on the `Console` your constructor takes. | ",
+        "12:33 wrapped-function `exit` is wrapped by the standard library: write `process.exit(…)` on the `Process` your constructor takes. | ",
+        "13:33 wrapped-function `exit` is wrapped by the standard library: write `process.exit(…)` on the `Process` your constructor takes. | ",
+        "14:36 wrapped-function `time` is wrapped by the standard library: write `clock.now()` on the `Clock` your constructor takes. | ",
+        "15:57 wrapped-function `file_put_contents` is wrapped by the standard library: write `files.write(…)` or `files.append(…)` on the `Files` your constructor takes. | ",
+    ];
+    let collections = [
+        "7:51 wrapped-function `count` is wrapped by the standard library: write `items.count()`. | ",
+        "8:60 wrapped-function `in_array` is wrapped by the standard library: write `items.contains(item)`. | ",
+    ];
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &library),
+        [
+            &[
+                "5:48 wrapped-function `trim` is wrapped by the standard library: write `name.trim()`. | ",
+                "6:47 wrapped-function `max` is wrapped by the standard library: write `Math.max(…)`. Add `import Sharp.Math.Math;` to the file. | ",
+            ][..],
+            &collections,
+            &effects,
+        ]
+        .concat()
+    );
+    // Without the library's members, `global` is the only way to reach `trim` and `max`. The collection methods are
+    // declared with the collection types and the effect classes come with PHP#, so their functions stay refused.
+    assert_eq!(refusals(("src/Demo/Report.sharp", sharp), &[]), [&collections[..], &effects].concat());
+    assert_eq!(refusals(library[0], &library[1..]), Vec::<String>::new());
+    assert_eq!(refusals(library[1], &library[..1]), Vec::<String>::new());
+}
+
+/// Spec sections 8 and 23: a function the standard library replaces, read through `global` as a value, names the
+/// member to write, as its call does, and the value is refused once, so the call it is given to reports nothing more.
+/// A function with no member, and one PHP# syntax replaces, are function values, spec section 14.3.
+#[test]
+fn a_replaced_function_read_as_a_value_names_the_member_to_write() {
+    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
+    let library = [("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text)];
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static List<string> trimmed(List<string> names) => names.map(global.trim);\n    public static Any counted() => global.count;\n    public static Any measured() => global.strlen;\n    public static Any shown() => global.strval;\n}\n";
+    let lambda = "Pass a lambda that makes the call in its place.";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &library),
+        [
+            format!("5:73 wrapped-function `trim` is wrapped by the standard library: write `x.trim()`. | {lambda}"),
+            format!("6:36 wrapped-function `count` is wrapped by the standard library: write `x.count()`. | {lambda}"),
+        ]
+    );
+}
+
+/// A method that only some kinds of a collection value have, as `contains` on a value that may be a `List` or a
+/// `Map`, is one error: the call is refused once, so nothing that uses its result reports again.
+#[test]
+fn a_method_only_some_kinds_of_a_collection_value_have_is_one_error() {
+    let sharp = "namespace Demo;\n\nclass Kinds\n{\n    public bool held(bool listed, List<string> names, Map<string, int> stock)\n    {\n        let held = listed ? names : stock;\n        return held.contains(\"tea\");\n    }\n\n    public int? indexed(bool listed, List<string> names, Set<string> tags)\n    {\n        let held = listed ? names : tags;\n        return held.indexOf(\"tea\");\n    }\n}\n";
+    let codes: Vec<String> = refusals(("src/Demo/Kinds.sharp", sharp), &[])
+        .into_iter()
+        .map(|refusal| refusal.split(' ').take(2).collect::<Vec<_>>().join(" "))
+        .collect();
+
+    assert_eq!(codes, ["8:21 non-existent-method", "14:21 non-existent-method"]);
+}
+
+/// Spec section 29: a `.sharp` file's call of a plain PHP function has the effects its `extern` declares, so a call of
+/// `apache_getenv`, which uses `Environment`, is never a pure call whose result goes unused.
+#[test]
+fn a_call_of_a_function_whose_extern_declares_an_effect_is_never_unused() {
+    let builtins = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Builtins.sharp",
+        "extern global.apache_getenv uses Environment;\n",
+    );
+    let sharp = "namespace Demo;\n\nclass Shell\n{\n    public void run(string name)\n    {\n        apache_getenv(name);\n    }\n}\n";
+    let unused = |others: &[(&'static str, &'static str)]| -> Vec<String> {
+        issues(("src/Demo/Shell.sharp", sharp), others).into_iter().filter(|issue| issue.contains("unused")).collect()
+    };
+
+    assert_eq!(unused(&[builtins]), Vec::<String>::new());
+    // PHP's own declaration of `apache_getenv` calls it pure, which only a declared effect corrects.
+    assert_eq!(unused(&[]), ["7:9 unused-statement"]);
+}
+
+/// Spec section 7: `Math.max(0, ...prices)` gives 0 for an empty list, and the empty list may be written `[]`.
+#[test]
+fn a_spread_of_an_empty_list_passes_no_values() {
+    let math = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static int max(int first, int ...rest) => global.max([first, ...rest]);\n}\n";
+    let library = [("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp", math)];
+    let sharp = "namespace Demo;\n\nimport Sharp.Math.Math;\n\nclass Sizes\n{\n    public static int largest() => Math.max(0, ...[]);\n}\n";
+
+    assert_eq!(refusals(("src/Demo/Sizes.sharp", sharp), &library), Vec::<String>::new());
+}
+
+/// Spec section 29: `Environment` replaces `getenv()` and PHP's other environment functions, so a call of each, bare
+/// or through `global`, names the member that does its work. `getopt` names the `arguments` property, and `getenv`
+/// names both the read of one variable and the read of them all.
+#[test]
+fn each_environment_function_names_the_environment_member_that_replaces_it() {
+    let mut differing = Vec::new();
+    for (call, form) in [
+        ("getenv(name)", "`environment.variable(…)` or `environment.variables()`"),
+        ("getenv()", "`environment.variable(…)` or `environment.variables()`"),
+        ("apache_getenv(name)", "`environment.variable(…)`"),
+        ("putenv(name)", "`environment.setVariable(…)`"),
+        ("apache_setenv(name, name)", "`environment.setVariable(…)`"),
+        ("getopt(name)", "`environment.arguments`"),
+        ("getcwd()", "`environment.currentDirectory()`"),
+        ("chdir(name)", "`environment.changeDirectory(…)`"),
+    ] {
+        for written in [call.to_owned(), format!("global.{call}")] {
+            let sharp = leak(format!(
+                "namespace Demo;\n\nclass Shell\n{{\n    public static Any? run(string name) => {written};\n}}\n"
+            ));
+            let function = &call[..call.find('(').expect("a call")];
+            let expected = format!(
+                "5:44 wrapped-function `{function}` is wrapped by the standard library: write {form} on the `Environment` your constructor takes. | "
+            );
+            let found = refusals(("src/Demo/Shell.sharp", sharp), &[]);
+            if found != [expected] {
+                differing.push(format!("{written}: {found:?}"));
+            }
+        }
+    }
+
+    assert_eq!(differing, Vec::<String>::new());
 }
 
 /// Spec section 29: each family of functions an effect class replaces names its member. Every `curl_*` function names
@@ -2714,26 +2914,29 @@ fn an_import_of_one_function_is_refused_with_the_namespace_to_import() {
 /// Spec section 31 makes an exception a bug and an expected failure a `Result`, so PHP# declares no thrown exceptions.
 #[test]
 fn check_throws_skips_sharp_files_and_keeps_reporting_in_php() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string token()\n    {\n        return global.random_bytes(16);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function token(): string\n    {\n        return random_bytes(16);\n    }\n}\n";
+    let vault = "<?php\n\nnamespace Lib;\n\nfinal class Vault\n{\n    /** @throws \\RuntimeException */\n    public static function seal(string $text): string\n    {\n        throw new \\RuntimeException($text);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Vault;\n\nclass Report\n{\n    public static string token()\n    {\n        return Vault.seal(\"a\");\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Vault;\n\nclass Report\n{\n    public static function token(): string\n    {\n        return Vault::seal('a');\n    }\n}\n";
+    let others = [("src/Lib/Vault.php", vault)];
 
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
-    assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["9:16 unhandled-thrown-type"]);
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &others), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Report.php", php), &others), ["11:16 unhandled-thrown-type"]);
 }
 
-/// Spec section 7 refuses a statement that can never run, as Java and Zig do: one after `return`, `throw`,
-/// `global.exit(…)`, `break` or `continue` in its block, one after an `if` whose every branch ends the block, one after
+/// Spec section 7 refuses a statement that can never run, as Java and Zig do: one after `return`, `throw`, a call that
+/// never returns, `break` or `continue` in its block, one after an `if` whose every branch ends the block, one after
 /// a loop that never ends, and a block after a condition that never finishes, which is refused at the condition. The
 /// first statement that never runs is refused once for its block, naming the line that ends the block, and a bare call
 /// that never runs is refused for that alone. `finally`, a `catch`, and code after a loop that breaks or an `if` with no
 /// `else` all run. A `.php` file keeps Mago's help.
 #[test]
 fn a_statement_that_can_never_run_is_refused() {
-    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Flow\n{\n    public static int afterReturn()\n    {\n        return 1;\n        return 2;\n    }\n\n    public static int afterThrow()\n    {\n        throw new RuntimeException(\"no\");\n        return 3;\n    }\n\n    public static void afterExit()\n    {\n        global.exit(1);\n        return;\n    }\n\n    public static void afterBreak()\n    {\n        while (true) {\n            break;\n            global.printf(\"never\");\n        }\n    }\n\n    public static void afterContinue(List<int> items)\n    {\n        for (const item of items) {\n            continue;\n            global.printf(\"%d\", item);\n        }\n    }\n\n    public static int bareCall()\n    {\n        return 4;\n        strlen(\"never\");\n    }\n\n    public static int afterEveryBranch(bool up)\n    {\n        if (up) {\n            return 5;\n        } else {\n            return 6;\n        }\n        return 7;\n    }\n\n    public static void conditionNeverFinishes()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n\n    public static int afterReturnThree()\n    {\n        return 8;\n        global.printf(\"one\");\n        global.printf(\"two\");\n        global.printf(\"three\");\n    }\n\n    public static int doNeverEnds(bool again)\n    {\n        do {\n            return 9;\n        } while (again);\n        return 10;\n    }\n\n    public static int loopNeverEnds()\n    {\n        while (true) {\n            global.printf(\"again\");\n        }\n        return 11;\n    }\n\n    public static int finallyAfterReturn()\n    {\n        try {\n            return 12;\n        } finally {\n            global.printf(\"done\");\n        }\n    }\n\n    public static int afterLoopWithBreak()\n    {\n        while (true) {\n            break;\n        }\n        return 13;\n    }\n\n    public static int afterIfWithoutElse(bool up)\n    {\n        if (up) {\n            return 14;\n        }\n        return 15;\n    }\n\n    public static int catchAfterReturningTry()\n    {\n        try {\n            return 16;\n        } catch (RuntimeException failure) {\n            return 17;\n        }\n    }\n\n    public static int doThatBreaks(bool stop, bool again)\n    {\n        do {\n            if (stop) {\n                break;\n            }\n            return 18;\n        } while (again);\n        return 19;\n    }\n\n    public static void conditionNeverFinishesWithElse()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        } else {\n            global.printf(\"never either\");\n        }\n    }\n\n    public static void iterableNeverFinishes()\n    {\n        for (const item of global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n\n    public static void whileConditionNeverFinishes()\n    {\n        while (global.exit(1)) {\n            global.printf(\"never\");\n        }\n        global.printf(\"after\");\n    }\n\n    public static void forConditionNeverFinishes()\n    {\n        for (int step = 0; global.exit(1); step++) {\n            global.printf(\"never\");\n        }\n        global.printf(\"after\");\n    }\n\n    public static void exitInForOfBody(List<int> items)\n    {\n        for (const item of items) {\n            global.exit(1);\n            global.printf(\"%d\", item);\n        }\n    }\n\n    public static void exitInWhileBody(bool again)\n    {\n        while (again) {\n            global.exit(1);\n            global.printf(\"never\");\n        }\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Flow\n{\n    public static int afterReturn()\n    {\n        return 1;\n        return 2;\n    }\n\n    public static int afterThrow()\n    {\n        throw new RuntimeException(\"no\");\n        return 3;\n    }\n\n    public static void afterNever()\n    {\n        Halt.now();\n        return;\n    }\n\n    public static void afterBreak()\n    {\n        while (true) {\n            break;\n            Halt.note(\"never\");\n        }\n    }\n\n    public static void afterContinue(List<int> items)\n    {\n        for (const item of items) {\n            continue;\n            Halt.note(item);\n        }\n    }\n\n    public static int bareCall()\n    {\n        return 4;\n        strlen(\"never\");\n    }\n\n    public static int afterEveryBranch(bool up)\n    {\n        if (up) {\n            return 5;\n        } else {\n            return 6;\n        }\n        return 7;\n    }\n\n    public static void conditionNeverFinishes()\n    {\n        if (Halt.now()) {\n            Halt.note(\"never\");\n        }\n    }\n\n    public static int afterReturnThree()\n    {\n        return 8;\n        Halt.note(\"one\");\n        Halt.note(\"two\");\n        Halt.note(\"three\");\n    }\n\n    public static int doNeverEnds(bool again)\n    {\n        do {\n            return 9;\n        } while (again);\n        return 10;\n    }\n\n    public static int loopNeverEnds()\n    {\n        while (true) {\n            Halt.note(\"again\");\n        }\n        return 11;\n    }\n\n    public static int finallyAfterReturn()\n    {\n        try {\n            return 12;\n        } finally {\n            Halt.note(\"done\");\n        }\n    }\n\n    public static int afterLoopWithBreak()\n    {\n        while (true) {\n            break;\n        }\n        return 13;\n    }\n\n    public static int afterIfWithoutElse(bool up)\n    {\n        if (up) {\n            return 14;\n        }\n        return 15;\n    }\n\n    public static int catchAfterReturningTry()\n    {\n        try {\n            return 16;\n        } catch (RuntimeException failure) {\n            return 17;\n        }\n    }\n\n    public static int doThatBreaks(bool stop, bool again)\n    {\n        do {\n            if (stop) {\n                break;\n            }\n            return 18;\n        } while (again);\n        return 19;\n    }\n\n    public static void conditionNeverFinishesWithElse()\n    {\n        if (Halt.now()) {\n            Halt.note(\"never\");\n        } else {\n            Halt.note(\"never either\");\n        }\n    }\n\n    public static void iterableNeverFinishes()\n    {\n        for (const item of Halt.now()) {\n            Halt.note(\"never\");\n        }\n    }\n\n    public static void whileConditionNeverFinishes()\n    {\n        while (Halt.now()) {\n            Halt.note(\"never\");\n        }\n        Halt.note(\"after\");\n    }\n\n    public static void forConditionNeverFinishes()\n    {\n        for (int step = 0; Halt.now(); step++) {\n            Halt.note(\"never\");\n        }\n        Halt.note(\"after\");\n    }\n\n    public static void neverInForOfBody(List<int> items)\n    {\n        for (const item of items) {\n            Halt.now();\n            Halt.note(item);\n        }\n    }\n\n    public static void neverInWhileBody(bool again)\n    {\n        while (again) {\n            Halt.now();\n            Halt.note(\"never\");\n        }\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Flow\n{\n    public static function afterReturn(): int\n    {\n        return 1;\n        return 2;\n    }\n}\n";
+    let halt = "<?php\n\nnamespace Demo;\n\nfinal class Halt\n{\n    public static function now(): never\n    {\n        exit(1);\n    }\n\n    public static function note(int|string $value): void\n    {\n    }\n}\n";
 
     assert_eq!(
-        refusals(("src/Demo/Flow.sharp", sharp), &[]),
+        refusals(("src/Demo/Flow.sharp", sharp), &[("src/Demo/Halt.php", halt)]),
         [
             "10:9 unevaluated-code This statement never runs, because line 9 ends the block. | Delete it, or move it above line 9.",
             "16:9 unevaluated-code This statement never runs, because line 15 ends the block. | Delete it, or move it above line 15.",
@@ -2742,15 +2945,15 @@ fn a_statement_that_can_never_run_is_refused() {
             "37:13 unevaluated-code This statement never runs, because line 36 ends the block. | Delete it, or move it above line 36.",
             "44:9 unevaluated-code This statement never runs, because line 43 ends the block. | Delete it, or move it above line 43.",
             "54:9 unevaluated-code This statement never runs, because line 49 ends the block. | Delete it, or move it above line 49.",
-            "59:13 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `if`.",
+            "59:13 unevaluated-code This condition never finishes, so its block never runs. | Write `Halt.now();` as its own statement, and delete the `if`.",
             "67:9 unevaluated-code This statement never runs, because line 66 ends the block. | Delete it, or move it above line 66.",
             "77:9 unevaluated-code This statement never runs, because line 74 ends the block. | Delete it, or move it above line 74.",
             "85:9 unevaluated-code This statement never runs, because line 82 ends the block. | Delete it, or move it above line 82.",
-            "135:13 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `if`.",
-            "144:28 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `for`.",
-            "151:16 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `while`.",
+            "135:13 unevaluated-code This condition never finishes, so its block never runs. | Write `Halt.now();` as its own statement, and delete the `if`.",
+            "144:28 unevaluated-code This condition never finishes, so its block never runs. | Write `Halt.now();` as its own statement, and delete the `for`.",
+            "151:16 unevaluated-code This condition never finishes, so its block never runs. | Write `Halt.now();` as its own statement, and delete the `while`.",
             "154:9 unevaluated-code This statement never runs, because line 151 ends the block. | Delete it, or move it above line 151.",
-            "159:28 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `for`.",
+            "159:28 unevaluated-code This condition never finishes, so its block never runs. | Write `Halt.now();` as its own statement, and delete the `for`.",
             "162:9 unevaluated-code This statement never runs, because line 159 ends the block. | Delete it, or move it above line 159.",
             "169:13 unevaluated-code This statement never runs, because line 168 ends the block. | Delete it, or move it above line 168.",
             "177:13 unevaluated-code This statement never runs, because line 176 ends the block. | Delete it, or move it above line 176.",
@@ -3682,91 +3885,8 @@ fn a_cast_of_a_value_that_is_not_a_number_is_an_invalid_operand() {
     );
 }
 
-#[test]
-fn exit_with_a_never_value_has_the_issues_of_its_php_twin() {
-    let halt = "<?php\n\nnamespace Lib;\n\nfinal class Halt\n{\n    public static function now(): never\n    {\n        exit(1);\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Halt;\n\nclass Shutdown\n{\n    public void stop()\n    {\n        global.exit(Halt.now());\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Halt;\n\nclass Shutdown\n{\n    public function stop(): void\n    {\n        exit(Halt::now());\n    }\n}\n";
-    let others = [("src/Lib/Halt.php", halt)];
-
-    let sharp_issues = issues(("src/Demo/Shutdown.sharp", sharp), &others);
-    let php_issues = issues(("src/Demo/Shutdown.php", php), &others);
-
-    assert_eq!(sharp_issues, ["9:21 no-value"]);
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
-}
-
-/// In a `.sharp` file, a `global.exit` argument that can hold a string gets the `die` message, because
-/// `global.exit("…")` prints the message and exits with status 0, which reports success (spec section 8). A `.php` file
-/// still takes it.
-#[test]
-fn exit_with_a_value_that_is_not_an_int_names_the_message_to_write_and_exit_1() {
-    let any = "<?php\n\nnamespace Lib;\n\nfinal class Any\n{\n    public static function value(): mixed\n    {\n        return 1;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Any;\n\nclass Shutdown\n{\n    public void reason(string reason)\n    {\n        global.exit(reason);\n    }\n\n    public void either(int|string status)\n    {\n        global.exit(status);\n    }\n\n    public void any()\n    {\n        global.exit(Any.value());\n    }\n\n    public void named(string reason)\n    {\n        global.exit(status: reason);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Shutdown\n{\n    public function reason(string $reason): void\n    {\n        exit($reason);\n    }\n\n    public function either(int|string $status): void\n    {\n        exit($status);\n    }\n}\n";
-    let others = [("src/Lib/Any.php", any)];
-
-    assert_eq!(
-        issues(("src/Demo/Shutdown.sharp", sharp), &others),
-        ["9:9 invalid-argument", "14:9 invalid-argument", "19:9 invalid-argument", "24:9 invalid-argument"]
-    );
-    let refusals = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shutdown.sharp", sharp), &others);
-    for refusal in &refusals {
-        assert_eq!(
-            refusal.message,
-            "PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`."
-        );
-        assert_eq!(
-            refusal.notes,
-            [
-                "`global.die(\"…\")` and `global.exit(\"…\")` print the message and exit with status 0, which reports success."
-            ]
-        );
-    }
-    let annotations: Vec<String> =
-        refusals.iter().filter_map(|issue| issue.primary_annotation()?.message.clone()).collect();
-    assert_eq!(
-        annotations,
-        [
-            "This is `string`, not an `int`.",
-            "This is `int|string`, not an `int`.",
-            "This is `Any?`, not an `int`.",
-            "This is `string`, not an `int`.",
-        ]
-    );
-    assert_eq!(issues(("src/Demo/Shutdown.php", php), &[]), Vec::<String>::new());
-}
-
-/// A `global.exit` argument that cannot hold a string is no message, so it names the `int` status `global.exit` takes.
-#[test]
-fn exit_with_a_value_that_cannot_be_a_message_names_the_int_status() {
-    let sharp = "namespace Demo;\n\nclass Shutdown\n{\n    public void maybe(int? code)\n    {\n        global.exit(code);\n    }\n\n    public void fraction(float code)\n    {\n        global.exit(code);\n    }\n\n    public void flag(bool done)\n    {\n        global.exit(done);\n    }\n\n    public void listed(List<int> codes)\n    {\n        global.exit(codes);\n    }\n}\n";
-
-    let refusals = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shutdown.sharp", sharp), &[]);
-    assert_eq!(
-        refusals.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
-        ["7:9 invalid-argument", "12:9 invalid-argument", "17:9 invalid-argument", "22:9 invalid-argument"]
-    );
-    assert_eq!(
-        refusals.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>(),
-        [
-            "`global.exit` takes an `int` status: this is `int?`.",
-            "`global.exit` takes an `int` status: this is `float`.",
-            "`global.exit` takes an `int` status: this is `bool`.",
-            "`global.exit` takes an `int` status: this is `List<int>`.",
-        ]
-    );
-    for refusal in &refusals {
-        assert_eq!(
-            refusal.primary_annotation().and_then(|annotation| annotation.message.as_deref()),
-            Some("This status is not an `int`.")
-        );
-        assert!(refusal.notes.is_empty(), "{:?}", refusal.notes);
-    }
-}
-
-/// `global.die("…")` prints its message and exits with status 0, which reports success, so spec section 8 removes
-/// `die` in every form.
+/// `die("…")` prints its message and exits with status 0, which reports success, so spec section 8 removes `die` in
+/// every form, and `global.die` is refused as a `global.` call of any function the library replaces is.
 #[test]
 fn die_in_every_form_is_an_error_that_names_write_error_and_exit() {
     let sharp = "namespace Demo;\n\nclass Shutdown\n{\n    public void stop()\n    {\n        global.die();\n    }\n\n    public void fail()\n    {\n        global.die(\"failed\");\n    }\n\n    public void code()\n    {\n        global.die(1);\n    }\n}\n";
@@ -3774,28 +3894,18 @@ fn die_in_every_form_is_an_error_that_names_write_error_and_exit() {
     assert_eq!(
         refusals(("src/Demo/Shutdown.sharp", sharp), &[]),
         [
-            "7:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "12:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "17:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
+            "7:9 wrapped-function PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
+            "12:9 wrapped-function PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
+            "17:9 wrapped-function PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
         ]
     );
-}
+    for refusal in analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shutdown.sharp", sharp), &[]) {
+        let annotations: Vec<_> =
+            refusal.annotations.iter().map(|annotation| annotation.message.as_deref().unwrap_or_default()).collect();
 
-/// `global.exit("…")` prints its message and exits with status 0, as `global.die("…")` does, in every way a string
-/// literal or a template reaches it.
-#[test]
-fn exit_with_a_string_literal_is_an_error_as_die_is() {
-    let sharp = "namespace Demo;\n\nclass Shutdown\n{\n    public void literal()\n    {\n        global.exit(\"failed\");\n    }\n\n    public void named()\n    {\n        global.exit(status: \"failed\");\n    }\n\n    public void template()\n    {\n        global.exit(`failed`);\n    }\n\n    public void parenthesized()\n    {\n        global.exit((\"failed\"));\n    }\n}\n";
-
-    assert_eq!(
-        refusals(("src/Demo/Shutdown.sharp", sharp), &[]),
-        [
-            "7:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "12:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "17:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "22:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-        ]
-    );
+        assert_eq!(annotations, ["Called here."]);
+        assert_eq!(refusal.notes, ["`die(\"…\")` prints the message and exits with status 0, which reports success."]);
+    }
 }
 
 /// The standard library's `Int` and `Float`, with the library's signatures, which a project reads from `vendor/`.
@@ -5255,6 +5365,8 @@ fn a_lambda_fits_a_function_type_only_with_its_parameters_and_its_void() {
 /// changes the variable an argument names is no function value, since PHP# passes every argument by value, and neither
 /// is one that reads the variables of the code that calls it, which PHP runs only when the call names it. A direct call
 /// that would change a PHP# variable is refused too, with the standard library method that does the work where one does.
+/// A function the standard library replaces, as `array_push` and `shuffle`, is refused once, with the member to write,
+/// as every `global.` call of it is.
 #[test]
 fn a_plain_php_function_that_changes_or_reads_the_callers_variables_is_no_function_value() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> numbers, string text)\n    {\n        const sort = global.sort;\n        const pack = global.compact;\n        const args = global.func_get_args;\n        const vars = global.extract;\n        global.sort(numbers);\n        global.array_push(numbers, 4);\n        global.shuffle(numbers);\n        global.preg_match(\"/a/\", text, numbers);\n        global.array_unshift(numbers, 0);\n        global.usort(callback: (a, b) => 0, array: numbers);\n        return global.preg_match(\"/a/\", text) ?: 0;\n    }\n}\n";
@@ -5268,8 +5380,8 @@ fn a_plain_php_function_that_changes_or_reads_the_callers_variables_is_no_functi
             "9:22 invalid-callable: `global.func_get_args` reads the variables of the code that calls it, so it is no function value.",
             "10:22 invalid-callable: `global.extract` reads the variables of the code that calls it, so it is no function value.",
             "11:21 invalid-pass-by-reference: `global.sort` changes the variable it is given, and PHP# passes every argument by value: write `numbers = numbers.sortedBy(…)`.",
-            "12:27 invalid-pass-by-reference: `global.array_push` changes the variable it is given, and PHP# passes every argument by value: write `numbers.add(…)`.",
-            "13:24 invalid-pass-by-reference: `global.shuffle` changes the variable it is given, and PHP# passes every argument by value, so `numbers` can't go there.",
+            "12:9 wrapped-function: `array_push` is wrapped by the standard library: write `numbers.add(…)`.",
+            "13:9 wrapped-function: `shuffle` is wrapped by the standard library: write `random.shuffle(…)` on the `Random` your constructor takes.",
             "14:40 invalid-pass-by-reference: `global.preg_match` changes the variable it is given, and PHP# passes every argument by value, so `numbers` can't go there.",
             "15:30 invalid-pass-by-reference: `global.array_unshift` changes the variable it is given, and PHP# passes every argument by value: write `numbers.insert(0, …)`.",
             "16:52 invalid-pass-by-reference: `global.usort` changes the variable it is given, and PHP# passes every argument by value: write `numbers = numbers.sortedBy(…)`.",
@@ -5384,6 +5496,18 @@ fn a_php_mixed_or_untyped_value_arrives_as_any_and_goes_back_to_php() {
     let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public Any? read(string key)\n    {\n        const value = Source.value(key);\n        Any? raw = Source.untyped(key);\n        Source.take(value);\n        Source.takeUntyped(raw);\n        return key == \"raw\" ? raw : value;\n    }\n\n    public Any keep(Any value)\n    {\n        const kept = value;\n        Source.take(kept);\n        return kept;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Inbox.sharp", sharp), &[("src/Demo/Source.php", SOURCE)]), Vec::<String>::new());
+}
+
+/// A method call on an unchecked `Any` is refused once: its result is refused too, so a return, an operator or an
+/// argument that uses it reports nothing more.
+#[test]
+fn a_method_call_on_an_unchecked_any_is_refused_once() {
+    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public int counted(Any? cells) => cells.count();\n    public int more(Any cells) => cells.count() + 1;\n    public void kept(Any? cells)\n    {\n        Source.takeInt(cells.count());\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Inbox.sharp", sharp), &[("src/Demo/Source.php", SOURCE)]),
+        ["5:45 mixed-method-access", "6:41 mixed-method-access", "9:30 mixed-method-access"]
+    );
 }
 
 #[test]
@@ -5753,13 +5877,17 @@ fn a_data_case_compares_by_value() {
 /// Spec section 21: a `match` statement runs one arm, so one with a `default` whose every arm returns, continues or
 /// breaks leaves the code around it: an `if` around it narrows what follows, and a method needs no return after it. A
 /// `break` in an arm leaves the loop, so a method whose loop it ends still needs its return. An expression arm leaves
-/// when its expression never returns, as `global.exit(1)`.
+/// when its expression never returns, as a call of a method declared `never` does.
 #[test]
 fn a_match_statement_whose_every_arm_leaves_leaves_the_code_around_it() {
-    let code = "namespace App;\n\nclass Shows\n{\n    public int size(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => {\n                    return 0;\n                },\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    public int sum(List<string?> values, int k)\n    {\n        let total = 0;\n        for (const value of values) {\n            if (value == null) {\n                match (k) {\n                    0 => {\n                        continue;\n                    },\n                    default => {\n                        break;\n                    },\n                }\n            }\n            total += this.take(value);\n        }\n\n        return total;\n    }\n\n    public int pick(Any? value)\n    {\n        match (value) {\n            int n => {\n                return n;\n            },\n            default => {\n                return 0;\n            },\n        }\n    }\n\n    public int never(int x)\n    {\n        while (true) {\n            match (x) {\n                0 => {\n                    break;\n                },\n                default => { },\n            }\n        }\n    }\n\n    public int exited(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => global.exit(1),\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    public int shown(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => this.take(\"a\"),\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    private int take(string s) => 1;\n}\n";
+    let halt = "<?php\n\nnamespace App;\n\nfinal class Halt\n{\n    public static function now(): never\n    {\n        exit(1);\n    }\n}\n";
+    let code = "namespace App;\n\nclass Shows\n{\n    public int size(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => {\n                    return 0;\n                },\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    public int sum(List<string?> values, int k)\n    {\n        let total = 0;\n        for (const value of values) {\n            if (value == null) {\n                match (k) {\n                    0 => {\n                        continue;\n                    },\n                    default => {\n                        break;\n                    },\n                }\n            }\n            total += this.take(value);\n        }\n\n        return total;\n    }\n\n    public int pick(Any? value)\n    {\n        match (value) {\n            int n => {\n                return n;\n            },\n            default => {\n                return 0;\n            },\n        }\n    }\n\n    public int never(int x)\n    {\n        while (true) {\n            match (x) {\n                0 => {\n                    break;\n                },\n                default => { },\n            }\n        }\n    }\n\n    public int exited(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => Halt.now(),\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    public int shown(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => this.take(\"a\"),\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    private int take(string s) => 1;\n}\n";
 
     assert_eq!(
-        written(code, &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shows.sharp", code), &[])),
+        written(
+            code,
+            &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shows.sharp", code), &[("src/App/Halt.php", halt)])
+        ),
         [
             "53:16 missing-return-statement Missing return statement in method `Shows.never`",
             "90:26 possibly-null-argument Argument #1 of method `Shows.take` is possibly `null`, but parameter type `string` does not accept it.",
@@ -6283,7 +6411,7 @@ fn a_case_pattern_on_no_case_reports_only_that() {
 #[test]
 fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
     let store = "<?php\n\nnamespace Demo;\n\nfinal class Store\n{\n    public static function name(): string\n    {\n        return 'a';\n    }\n\n    public static function maybe(): ?string\n    {\n        return null;\n    }\n\n    public static function keep(mixed $value): void\n    {\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void run(Store store)\n    {\n        string? text = Store.maybe();\n        text .= Store.name();\n        int wrong = \"a\";\n        global.printf(text ?? \"\");\n        global.printf(store->missing());\n        global.printf(Store::missing());\n        global.printf(store?->missing());\n        Store.keep(fn(int x) => x.missing());\n        Store.keep(function(int x) { return x.missing(); });\n        Store.keep([\"a\" => Store.missing()]);\n        Store.keep(match (store) { Store found when found == store ? true : Store.missing() => 1, default => 2 });\n        let found = store->missing();\n        global.printf(found);\n        Map<string, int> counts = [\"a\" => 1];\n        Store.keep(wrong);\n        Store.keep(counts);\n        let report = new Report();\n        report.label = store->missing();\n        global.printf(report.label);\n        Store.keep(found + 1);\n        Store.keep(found.missing());\n        Store.keep(found.name);\n        int either = Store.maybe() ?? found;\n    }\n\n    public static Map<string, int> made() => [\"a\" => 1, \"b\" => 2];\n\n    public static int counted(Store store)\n    {\n        let found = store->missing();\n        return found;\n    }\n\n    public static void used(Store store, List<int> items)\n    {\n        let found = store->missing();\n        Store.keep(found - 1);\n        Store.keep(found < 1);\n        Store.keep(found == 1);\n        Store.keep(found && found);\n        Store.keep(!found);\n        Store.keep(-found);\n        Store.keep(found[0]);\n        Store.keep(`a ${found}`);\n        if (found) { Store.keep(1); }\n        while (found) { break; }\n        Store.keep(found ? 1 : 2);\n        Store.keep(match (found) { 1 => 2, default => 3 });\n        Store.keep(found is Store);\n        for (const value of found) { Store.keep(value); }\n        Store.keep(found?.name);\n        Store.keep(found ?? 1);\n        int number = found;\n        number += found;\n        Store.keep(found.missing().other());\n        Store.keep(items[found]);\n        Store.keep(found(1));\n        int called = found(1);\n        Store.keep(found + \"a\");\n        found.name = \"a\";\n        found[0] = 1;\n        throw found;\n    }\n\n    private string label = \"\";\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void run(Store store)\n    {\n        string? text = Store.maybe();\n        text .= Store.name();\n        int wrong = \"a\";\n        Store.keep(text ?? \"\");\n        Store.keep(store->missing());\n        Store.keep(Store::missing());\n        Store.keep(store?->missing());\n        Store.keep(fn(int x) => x.missing());\n        Store.keep(function(int x) { return x.missing(); });\n        Store.keep([\"a\" => Store.missing()]);\n        Store.keep(match (store) { Store found when found == store ? true : Store.missing() => 1, default => 2 });\n        let found = store->missing();\n        Store.keep(found);\n        Map<string, int> counts = [\"a\" => 1];\n        Store.keep(wrong);\n        Store.keep(counts);\n        let report = new Report();\n        report.label = store->missing();\n        Store.keep(report.label);\n        Store.keep(found + 1);\n        Store.keep(found.missing());\n        Store.keep(found.name);\n        int either = Store.maybe() ?? found;\n    }\n\n    public static Map<string, int> made() => [\"a\" => 1, \"b\" => 2];\n\n    public static int counted(Store store)\n    {\n        let found = store->missing();\n        return found;\n    }\n\n    public static void used(Store store, List<int> items)\n    {\n        let found = store->missing();\n        Store.keep(found - 1);\n        Store.keep(found < 1);\n        Store.keep(found == 1);\n        Store.keep(found && found);\n        Store.keep(!found);\n        Store.keep(-found);\n        Store.keep(found[0]);\n        Store.keep(`a ${found}`);\n        if (found) { Store.keep(1); }\n        while (found) { break; }\n        Store.keep(found ? 1 : 2);\n        Store.keep(match (found) { 1 => 2, default => 3 });\n        Store.keep(found is Store);\n        for (const value of found) { Store.keep(value); }\n        Store.keep(found?.name);\n        Store.keep(found ?? 1);\n        int number = found;\n        number += found;\n        Store.keep(found.missing().other());\n        Store.keep(items[found]);\n        Store.keep(found(1));\n        int called = found(1);\n        Store.keep(found + \"a\");\n        found.name = \"a\";\n        found[0] = 1;\n        throw found;\n    }\n\n    private string label = \"\";\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function run(Store $store): void\n    {\n        $text = Store::maybe();\n        $text .= Store::name();\n        printf($text ?? '');\n        printf($store->missing());\n        printf(Store::missing());\n        printf($store?->missing());\n        Store::keep(fn(int $x) => $x->missing());\n        Store::keep(function (int $x) { return $x->missing(); });\n        Store::keep(['a' => Store::missing()]);\n    }\n}\n";
     let reports = |analyzed: (&'static str, &'static str)| -> Vec<String> {
         analyze(&PLUGIN_REGISTRY, settings(), analyzed, &[("src/Demo/Store.php", store)])
@@ -6312,9 +6440,9 @@ fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
         reports(("src/Demo/Report.sharp", sharp)),
         [
             "8:14 parse `.=` is PHP syntax: in PHP# `.` is member access",
-            "11:28 parse `->` is PHP syntax: PHP# writes member access with `.`",
-            "12:28 parse `::` is PHP syntax: PHP# writes static access with `.`",
-            "13:28 parse `?->` is PHP syntax: PHP# writes null-safe member access with `?.`",
+            "11:25 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "12:25 parse `::` is PHP syntax: PHP# writes static access with `.`",
+            "13:25 parse `?->` is PHP syntax: PHP# writes null-safe member access with `?.`",
             "14:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
             "15:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
             "16:25 parse PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow",
@@ -7569,7 +7697,7 @@ fn an_override_of_a_variadic_parameter_is_variadic() {
 
 #[test]
 fn a_backed_enum_and_a_class_using_it_have_the_issues_of_their_php_twins() {
-    let sharp = "namespace Demo;\n\nenum Status : string\n{\n    case Active = \"a\";\n    case Paused = \"p\";\n\n    public string label()\n    {\n        return this.name + \": \" + this.value;\n    }\n\n    public static Status fallback()\n    {\n        return Status.from(\"a\");\n    }\n}\n\nclass Report\n{\n    private Status status;\n\n    public Report(Status status)\n    {\n        this.status = status;\n    }\n\n    public string describe(string code)\n    {\n        const found = Status.tryFrom(code);\n        if (found == null || global.count(Status.cases()) < 2) {\n            return this.status.label();\n        }\n        return found.value + found.name;\n    }\n\n    public static Report make()\n    {\n        return new Report(Status.fallback());\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nenum Status : string\n{\n    case Active = \"a\";\n    case Paused = \"p\";\n\n    public string label()\n    {\n        return this.name + \": \" + this.value;\n    }\n\n    public static Status fallback()\n    {\n        return Status.from(\"a\");\n    }\n}\n\nclass Report\n{\n    private Status status;\n\n    public Report(Status status)\n    {\n        this.status = status;\n    }\n\n    public string describe(string code)\n    {\n        const found = Status.tryFrom(code);\n        if (found == null || Status.cases().count() < 2) {\n            return this.status.label();\n        }\n        return found.value + found.name;\n    }\n\n    public static Report make()\n    {\n        return new Report(Status.fallback());\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nenum Status: string\n{\n    case Active = \"a\";\n    case Paused = \"p\";\n\n    public function label(): string\n    {\n        return $this->name . \": \" . $this->value;\n    }\n\n    public static function fallback(): Status\n    {\n        return Status::from(\"a\");\n    }\n}\n\nclass Report\n{\n    private Status $status;\n\n    public function __construct(Status $status)\n    {\n        $this->status = $status;\n    }\n\n    public function describe(string $code): string\n    {\n        $found = Status::tryFrom($code);\n        if ($found === null || count(Status::cases()) < 2) {\n            return $this->status->label();\n        }\n        return $found->value . $found->name;\n    }\n\n    public static function make(): Report\n    {\n        return new Report(Status::fallback());\n    }\n}\n";
 
     // `check_throws` skips `.sharp` files, so the PHP twin is analyzed without it.
@@ -8132,7 +8260,7 @@ const TOTALS: &str = "<?php\n\nnamespace Lib;\n\nfinal class Totals\n{\n    /** 
 
 #[test]
 fn lists_and_maps_type_their_literals_indexes_and_loops_as_php_arrays() {
-    let sharp = "namespace Demo;\n\nimport Lib.Totals;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(List<Line> extra)\n    {\n        List<Line> all = [new Line(1), extra[0]];\n        this.lines = all;\n        this.counts[\"lines\"] = this.lines.count();\n        const named = [\"a\": 1, \"b\": 2];\n        let sum = (named[\"a\"] ?? 0) + Totals.sum(Totals.sizes()) + all[1].cents;\n        for (const line of all) {\n            sum += line.cents;\n        }\n        for (const [name, size] of this.counts) {\n            if (name == \"lines\") {\n                sum += size;\n            }\n        }\n        for (const line of this.lines) {\n            sum += line.cents;\n        }\n        if (global.in_array(2, Totals.sizes(), true)) {\n            sum += 1;\n        }\n        return sum + (this.counts[\"lines\"] ?? 0);\n    }\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Totals;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(List<Line> extra)\n    {\n        List<Line> all = [new Line(1), extra[0]];\n        this.lines = all;\n        this.counts[\"lines\"] = this.lines.count();\n        const named = [\"a\": 1, \"b\": 2];\n        let sum = (named[\"a\"] ?? 0) + Totals.sum(Totals.sizes()) + all[1].cents;\n        for (const line of all) {\n            sum += line.cents;\n        }\n        for (const [name, size] of this.counts) {\n            if (name == \"lines\") {\n                sum += size;\n            }\n        }\n        for (const line of this.lines) {\n            sum += line.cents;\n        }\n        if (Totals.sizes().contains(2)) {\n            sum += 1;\n        }\n        return sum + (this.counts[\"lines\"] ?? 0);\n    }\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Order.sharp", sharp), &[("src/Lib/Totals.php", TOTALS)]), Vec::<String>::new());
 }
@@ -9074,8 +9202,8 @@ fn a_place_declared_a_map_or_a_set_takes_a_list_literal() {
 /// every literal.
 #[test]
 fn a_local_or_a_property_declared_a_set_or_a_map_takes_either_literal() {
-    let set_first = "namespace Demo;\n\nclass Tags\n{\n    private Set<int>|Map<string, int> kept = [1];\n\n    public int ids()\n    {\n        Set<int>|Map<string, int> tags = [\"a\": 1];\n        tags = [1];\n        tags = [\"a\": 1];\n        tags = [];\n        tags = [:];\n        this.kept = [1];\n        this.kept = [\"a\": 1];\n        this.kept = [];\n        this.kept = [:];\n        return global.count(tags) + global.count(this.kept);\n    }\n}\n";
-    let map_first = "namespace Demo;\n\nclass Tags\n{\n    private Map<string, int>|Set<int> kept = [\"a\": 1];\n\n    public int ids()\n    {\n        Map<string, int>|Set<int> tags = [1];\n        tags = [1];\n        tags = [\"a\": 1];\n        tags = [];\n        tags = [:];\n        this.kept = [1];\n        this.kept = [\"a\": 1];\n        this.kept = [];\n        this.kept = [:];\n        return global.count(tags) + global.count(this.kept);\n    }\n}\n";
+    let set_first = "namespace Demo;\n\nclass Tags\n{\n    private Set<int>|Map<string, int> kept = [1];\n\n    public int ids()\n    {\n        Set<int>|Map<string, int> tags = [\"a\": 1];\n        tags = [1];\n        tags = [\"a\": 1];\n        tags = [];\n        tags = [:];\n        this.kept = [1];\n        this.kept = [\"a\": 1];\n        this.kept = [];\n        this.kept = [:];\n        return tags.count() + this.kept.count();\n    }\n}\n";
+    let map_first = "namespace Demo;\n\nclass Tags\n{\n    private Map<string, int>|Set<int> kept = [\"a\": 1];\n\n    public int ids()\n    {\n        Map<string, int>|Set<int> tags = [1];\n        tags = [1];\n        tags = [\"a\": 1];\n        tags = [];\n        tags = [:];\n        this.kept = [1];\n        this.kept = [\"a\": 1];\n        this.kept = [];\n        this.kept = [:];\n        return tags.count() + this.kept.count();\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tags.sharp", set_first), &[]), Vec::<String>::new());
     assert_eq!(issues(("src/Demo/Tags.sharp", map_first), &[]), Vec::<String>::new());
@@ -9201,7 +9329,7 @@ fn a_bare_index_read_of_a_local_that_may_be_a_list_or_a_map_is_an_error() {
 /// element and throws past the end, and a `Map` one inserts a key, so a write by index to it is refused.
 #[test]
 fn a_local_that_may_be_a_list_or_a_map_is_not_written_by_index_after_it_holds_the_map() {
-    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int run(bool ready, List<int> sizes, Map<int, int> counts)\n    {\n        let rows = ready ? sizes : counts;\n        rows = counts;\n        rows[1] = 2;\n        return global.count(rows);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int run(bool ready, List<int> sizes, Map<int, int> counts)\n    {\n        let rows = ready ? sizes : counts;\n        rows = counts;\n        rows[1] = 2;\n        return rows.count();\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Sizes.sharp", sharp), &[]),
@@ -9542,8 +9670,8 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
     );
     let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer) uses Http> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback = null;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers = [:];\n    Function<int(Function<int(int) uses Http>) uses Http> apply;\n\n    public Checkout(Function<Money(Offer) uses Http> priceOf, Function<Charge(Cart) uses Http> charge, Function<int(Function<int(int) uses Http>) uses Http> apply)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n        this.apply = apply;\n    }\n}\n";
     let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, Plan> */\n    private array $cache = [];\n    /** @var \\Closure(Offer): Money */\n    private \\Closure $priceOf;\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers = [];\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n\n    /**\n     * @param \\Closure(Offer): Money $priceOf\n     * @param \\Closure(Cart): Charge $charge\n     * @param \\Closure(\\Closure(int): int): int $apply\n     */\n    public function __construct(\\Closure $priceOf, \\Closure $charge, \\Closure $apply)\n    {\n        $this->priceOf = $priceOf;\n        $this->charge = $charge;\n        $this->apply = $apply;\n    }\n}\n";
-    let sharp_reader = "namespace App.Shop;\n\npublic class Receipt\n{\n    public static int size(Checkout checkout) => global.count(checkout.cache);\n}\n";
-    let php_reader = "<?php\n\nnamespace App\\Shop;\n\nfinal class Receipt\n{\n    public static function size(Checkout $checkout): int { return count($checkout->cache); }\n}\n";
+    let sharp_reader = "namespace App.Shop;\n\npublic class Receipt\n{\n    public static int size(Checkout checkout) => (int)global.array_sum(checkout.cache);\n}\n";
+    let php_reader = "<?php\n\nnamespace App\\Shop;\n\nfinal class Receipt\n{\n    public static function size(Checkout $checkout): int { return (int)array_sum($checkout->cache); }\n}\n";
 
     let sharp_issues = issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP, offers]);
     let php_issues = issues(("src/App/Shop/Checkout.php", php), &[SHOP, offers]);
@@ -9564,11 +9692,11 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
         issues(("src/App/Shop/Receipt.sharp", sharp_reader), &[("src/App/Shop/Checkout.sharp", sharp), SHOP, offers]);
     let php_issues =
         issues(("src/App/Shop/Receipt.php", php_reader), &[("src/App/Shop/Checkout.php", php), SHOP, offers]);
-    assert_eq!(sharp_issues, ["5:72 invalid-property-read", "5:63 no-value"]);
+    assert_eq!(sharp_issues, ["5:81 invalid-property-read", "5:72 no-value"]);
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
     let refused =
         refusals(("src/App/Shop/Receipt.sharp", sharp_reader), &[("src/App/Shop/Checkout.sharp", sharp), SHOP, offers]);
-    assert!(refused[0].starts_with("5:72 invalid-property-read Cannot read private property `Checkout.cache`."));
+    assert!(refused[0].starts_with("5:81 invalid-property-read Cannot read private property `Checkout.cache`."));
     assert_eq!(
         messages(("src/App/Shop/Receipt.php", php_reader), &[("src/App/Shop/Checkout.php", php), SHOP, offers])
             .into_iter()
@@ -9871,7 +9999,7 @@ fn list_wrap_of_a_map_literal_holds_the_map() {
 /// A return or a parameter that declares both a `List` and a `Map` takes a literal of either collection.
 #[test]
 fn a_literal_where_a_list_or_a_map_is_declared_is_accepted() {
-    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public List<int>|Map<string, int> none() => [:];\n\n    public List<int>|Map<string, int> empty() => [];\n\n    public int fill() => Grid.size([:]) + Grid.size([]);\n\n    private static int size(List<int>|Map<string, int> cells) => global.count(cells);\n}\n";
+    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public List<int>|Map<string, int> none() => [:];\n\n    public List<int>|Map<string, int> empty() => [];\n\n    public int fill() => Grid.size([:]) + Grid.size([]);\n\n    private static int size(List<int>|Map<string, int> cells) => cells.count();\n}\n";
 
     assert_eq!(issues(("src/Demo/Grid.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -9879,7 +10007,7 @@ fn a_literal_where_a_list_or_a_map_is_declared_is_accepted() {
 /// A return or a parameter that declares a `Map` before a `List` takes a literal of either collection too.
 #[test]
 fn a_literal_where_a_map_or_a_list_is_declared_is_accepted() {
-    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public Map<string, int>|List<int> none() => [:];\n\n    public Map<string, int>|List<int> empty() => [];\n\n    public int fill() => Grid.size([:]) + Grid.size([]);\n\n    private static int size(Map<string, int>|List<int> cells) => global.count(cells);\n}\n";
+    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public Map<string, int>|List<int> none() => [:];\n\n    public Map<string, int>|List<int> empty() => [];\n\n    public int fill() => Grid.size([:]) + Grid.size([]);\n\n    private static int size(Map<string, int>|List<int> cells) => cells.count();\n}\n";
 
     assert_eq!(issues(("src/Demo/Grid.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -10033,7 +10161,7 @@ fn a_sharp_list_property_emptied_through_any_object_stays_a_list() {
 /// so the local refuses a `List` literal.
 #[test]
 fn a_local_copied_from_a_php_array_property_refuses_a_list_literal() {
-    let sharp = "namespace Demo;\n\nimport Lib.Store;\n\nclass Report\n{\n    public int run(Store store)\n    {\n        let items = store.items;\n        items = [];\n        return global.count(items);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Store;\n\nclass Report\n{\n    public int run(Store store)\n    {\n        let items = store.items;\n        items = [];\n        return items.count();\n    }\n}\n";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[STORE])
@@ -10048,7 +10176,7 @@ fn a_local_copied_from_a_php_array_property_refuses_a_list_literal() {
 /// as a `Map`: its `Map` methods and its `[k, v]` loop check clean, and a bare index read is refused.
 #[test]
 fn an_emptied_php_array_property_keeps_the_map_rules() {
-    let sharp = "namespace Demo;\n\nimport Lib.Store;\n\npublic class Rows : Store\n{\n    public int total()\n    {\n        this.items = [];\n        this.items.remove(\"a\");\n        let total = 0;\n        for (const [key, value] of this.items) {\n            total += 1;\n        }\n        this.items = [:];\n        const first = this.items.get(\"a\");\n        return total + global.count(this.items) + (first == null ? 0 : 1);\n    }\n\n    public Any? read() => this.items[\"b\"];\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Store;\n\npublic class Rows : Store\n{\n    public int total()\n    {\n        this.items = [];\n        this.items.remove(\"a\");\n        let total = 0;\n        for (const [key, value] of this.items) {\n            total += 1;\n        }\n        this.items = [:];\n        const first = this.items.get(\"a\");\n        return total + this.items.count() + (first == null ? 0 : 1);\n    }\n\n    public Any? read() => this.items[\"b\"];\n}\n";
 
     assert_eq!(issues(("src/Demo/Rows.sharp", sharp), &[STORE]), ["20:27 possibly-undefined-array-index"]);
 }
@@ -10071,7 +10199,6 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
             "25:16 non-existent-method",
             "26:15 non-existent-method",
             "27:27 non-existent-method",
-            "27:21 invalid-local-assignment-value",
             "35:21 invalid-local-assignment-value",
             "36:36 invalid-argument",
             "37:32 too-many-arguments",
@@ -10143,22 +10270,38 @@ fn every_collection_counts_its_elements() {
     assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["24:23 too-many-arguments"]);
 }
 
-/// A `List` method the bridge lowers to PHP on the array, such as `count` or `contains`, cannot run on a value that can
-/// also be an object, whose own method the PHP would skip. Any other collection method, and every `Set` and `Map`
-/// method, is a method call the engine sends to the object or the collection the value holds when it runs. A `.php`
-/// file has no PHP# collection.
+/// A method a `List` shares with a `Map` or a `Set` runs on a value that may be either: `remove`, `contains`, `clear`
+/// and `count` on a `List|Map` or a `List|Set` local check clean, as `filter` does.
 #[test]
-fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_yet() {
+fn a_method_a_list_shares_with_another_collection_runs_on_a_value_that_may_be_either() {
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int run(bool listed, List<string> names, Map<string, int> stock, Set<string> tags)\n    {\n        let held = listed ? names : stock;\n        let kept = listed ? names : tags;\n        const removed = held.remove(\"tea\") && kept.remove(\"tea\");\n        const found = kept.contains(\"pie\");\n        kept.clear();\n        return held.count() + kept.count() + (removed || found ? 1 : 0);\n    }\n}\n";
+
+    assert_eq!(refusals(("src/Demo/Shelf.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// A `List` method the bridge lowers to PHP on the array, such as `count` or `contains`, is refused on a value that can
+/// also be an object, whose own method the PHP would skip, as a method on a value that is no object is. Any other
+/// collection method, and every `Set` and `Map` method, is a method call the engine sends to the object or the
+/// collection the value holds when it runs. A `.php` file has no PHP# collection.
+#[test]
+fn a_collection_method_on_a_value_that_can_also_be_an_object_is_refused() {
     let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public bool any(Function<bool(int)> predicate) => true;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1) || items.contains(1)) {\n            return items.any(i => i > 0) ? 1 : 0;\n        }\n        return items.count();\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int>|list<int> $sizes\n     */\n    public function run(ListMethods|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[]);
 
     assert_eq!(
         issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
-        ["16:39 not-supported-yet", "19:22 not-supported-yet"]
+        ["16:39 invalid-method-access", "19:22 invalid-method-access"]
     );
-    assert_eq!(issues[1].message, "Calling `count` on `List<int>|Box` is not supported by the engine yet.");
-    assert!(!codes(&self::issues(("src/Demo/Shelf.php", php), &[])).contains(&"not-supported-yet"));
+    assert_eq!(
+        issues[1].message,
+        "`List<int>|Box` may be a collection or an object, and `count` runs a different method on each."
+    );
+    assert!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.php", php), &[])
+            .iter()
+            .all(|issue| !issue.message.contains("may be a collection or an object"))
+    );
 }
 
 /// The analyzer checks a collection method against `Sharp\Internal\ListMethods` or `Sharp\Internal\MapMethods`, and
@@ -10210,11 +10353,25 @@ fn a_list_of_a_nullable_type_takes_null_and_refuses_another_type() {
     );
 }
 
+/// A `List<int>` has `max()` and `min()`, its largest and smallest element, typed `int`. A list of any other element
+/// type has neither, and the refusal names the elements they need.
+#[test]
+fn a_list_of_int_has_its_largest_and_smallest_element() {
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int largest(List<int> sizes) => sizes.max();\n    public int smallest(List<int> sizes) => sizes.min();\n    public string first(List<string> names) => names.max();\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Sizes.sharp", sharp), &[]),
+        [
+            "7:54 where-constraint-violation `max` needs elements of type `int`, and this is a `List<string>`. | Call it on a collection whose elements are `int`."
+        ]
+    );
+}
+
 /// The semantic checks refuse an empty literal declared without a type, so a method called on it reports nothing
 /// more, and never names the `Map<never, never>` the literal alone would give.
 #[test]
 fn a_method_on_an_untyped_empty_literal_adds_no_issue() {
-    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public int run()\n    {\n        let messages = [];\n        messages.add(\"a\");\n        const totals = [:];\n        totals.set(\"a\", 1);\n        return global.count(messages);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public int run()\n    {\n        let messages = [];\n        messages.add(\"a\");\n        const totals = [:];\n        totals.set(\"a\", 1);\n        return messages.count();\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Inbox.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -10341,7 +10498,7 @@ fn a_set_property_without_a_set_refuses_a_changing_method() {
 /// `List|Set` local and `filter` on a `List|Map` or a `List|Set` run.
 #[test]
 fn a_changing_method_of_a_union_of_collections_is_refused_once() {
-    let sharp = "namespace Demo;\n\nclass Box\n{\n    public bool add(int value) => true;\n    public bool remove(string key) => true;\n}\n\nclass Shop\n{\n    public int run(bool ready, List<int> lines, Set<int> ids, Map<string, int> counts, Box box)\n    {\n        (ready ? lines : ids).add(1);\n        (ready ? counts : ids).add(1);\n        (ready ? ids : box).add(1);\n        let tags = ready ? lines : ids;\n        tags.add(3);\n        (ready ? lines : counts).filter(n => n > 0);\n        (ready ? counts : box).remove(\"a\");\n        return global.count(tags.filter(tag => tag > 0));\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Box\n{\n    public bool add(int value) => true;\n    public bool remove(string key) => true;\n}\n\nclass Shop\n{\n    public int run(bool ready, List<int> lines, Set<int> ids, Map<string, int> counts, Box box)\n    {\n        (ready ? lines : ids).add(1);\n        (ready ? counts : ids).add(1);\n        (ready ? ids : box).add(1);\n        let tags = ready ? lines : ids;\n        tags.add(3);\n        (ready ? lines : counts).filter(n => n > 0);\n        (ready ? counts : box).remove(\"a\");\n        return tags.filter(tag => tag > 0).count();\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Shop.sharp", sharp), &[]),
@@ -10444,14 +10601,14 @@ fn map_get_has_and_remove_take_a_backed_enum_key_in_sharp_and_in_php() {
 
 /// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
 /// keys are `int` or `string`. A `Map` keyed by a unit enum, a struct or a `float` has no such array, so the call is
-/// refused, naming the parameter and the key type, whether the parameter's type is native, from a stub as `count`'s,
+/// refused, naming the parameter and the key type, whether the parameter's type is native, from a stub as `array_sum`'s,
 /// or from a docblock. A parameter of a plain PHP closure a local holds, which has no name, is named by its position.
 /// A `Map<string, int>` crosses, and so does a `Map<Status, int>` of a backed enum, with each case's backing value as
 /// its key. A parameter typed `iterable`, `mixed` or nothing takes the `Map` itself, whose keys stay `Status`, so an
 /// `iterable<string, int>` takes `Map<string, int>` and refuses `Map<Status, int>`.
 #[test]
 fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
-    let sharp = "namespace Demo;\n\nimport Lib.Pure;\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts, Map<Spot, int> spots, Map<string, int> named, Map<float, int> prices, Map<Pure, int> pure)\n    {\n        const counter = Sink.counter();\n        return Sink.plain(counts) + Sink.documented(spots) + global.count(spots) + Sink.plain(named) + Sink.each(counts) + Sink.anything(spots) + Sink.untyped(counts) + counter(spots) + Sink.keyed(named) + Sink.keyed(counts) + Sink.plain(prices) + Sink.plain(pure);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Pure;\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts, Map<Spot, int> spots, Map<string, int> named, Map<float, int> prices, Map<Pure, int> pure)\n    {\n        const counter = Sink.counter();\n        return Sink.plain(counts) + Sink.documented(spots) + (int)global.array_sum(spots) + Sink.plain(named) + Sink.each(counts) + Sink.anything(spots) + Sink.untyped(counts) + counter(spots) + Sink.keyed(named) + Sink.keyed(counts) + Sink.plain(prices) + Sink.plain(pure);\n    }\n}\n";
     let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    /** @param array<string, int> $counts */\n    public static function documented($counts): int\n    {\n        return count($counts);\n    }\n\n    public static function each(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    /** @param iterable<string, int> $counts */\n    public static function keyed(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    public static function anything(mixed $counts): int\n    {\n        return 1;\n    }\n\n    public static function untyped($counts): int\n    {\n        return 1;\n    }\n\n    /** @return Closure(array): int */\n    public static function counter(): Closure\n    {\n        return static fn (array $counts): int => count($counts);\n    }\n}\n";
     let spot = "namespace Lib;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n";
 
@@ -10467,11 +10624,11 @@ fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
         .collect::<Vec<_>>(),
         [
             "13:53 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.documented`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "13:75 invalid-argument `Map<Spot, int>` can't be passed to the parameter `value` of function `global.count`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "13:178 invalid-argument `Map<Spot, int>` can't be passed to the argument #1 of function value `counter`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "13:218 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Sink.keyed`: expected `iterable<string, int>`, but possibly received `Map<Status, int>`.",
-            "13:239 invalid-argument `Map<float, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `float`.",
-            "13:260 invalid-argument `Map<Pure, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Pure`.",
+            "13:84 invalid-argument `Map<Spot, int>` can't be passed to the parameter `array` of function `global.array_sum`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "13:187 invalid-argument `Map<Spot, int>` can't be passed to the argument #1 of function value `counter`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "13:227 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Sink.keyed`: expected `iterable<string, int>`, but possibly received `Map<Status, int>`.",
+            "13:248 invalid-argument `Map<float, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `float`.",
+            "13:269 invalid-argument `Map<Pure, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Pure`.",
         ]
     );
 }
@@ -10859,7 +11016,7 @@ fn a_map_key_type_that_is_no_value_is_an_error() {
 /// call whose argument is refused, as `groupBy(5)` or `groupBy(selector: …)`, gives that one issue, as on master.
 #[test]
 fn a_group_key_is_checked_only_where_a_function_fills_the_key_parameter() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int group(List<int> items)\n    {\n        const byFive = items.groupBy(5);\n        const bySelector = items.groupBy(selector: n => n);\n        const byHalf = items.associateBy(key: n => new Tally());\n        return global.count(byFive) + global.count(bySelector) + global.count(byHalf);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int group(List<int> items)\n    {\n        const byFive = items.groupBy(5);\n        const bySelector = items.groupBy(selector: n => n);\n        const byHalf = items.associateBy(key: n => new Tally());\n        return byFive.count() + bySelector.count() + byHalf.count();\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[]),
@@ -10978,7 +11135,7 @@ fn a_field_or_local_type_naming_a_missing_class_is_reported_as_a_parameter_type_
     );
     assert_eq!(messages(("src/Demo/Tally.sharp", sharp), &[]), ["Cannot find type `Demo.Missing`."; 3]);
 
-    let used = "namespace Demo;\n\nclass Tally\n{\n    public Missing? kept = null;\n    public Missing owner = 5;\n    public Missing named { get; set; } = 5;\n\n    public int size(Missing item, Map<Missing, int> counts)\n    {\n        Missing? local = item;\n        return global.strlen(item) + global.count(counts) + global.strlen(local) + global.strlen(this.kept) + global.strlen(this.found(5));\n    }\n\n    public Missing found(Missing item) => item;\n\n    public Missing made() => 5;\n\n    public Missing madeInBlock()\n    {\n        return 5;\n    }\n}\n";
+    let used = "namespace Demo;\n\nclass Tally\n{\n    public Missing? kept = null;\n    public Missing owner = 5;\n    public Missing named { get; set; } = 5;\n\n    public int size(Missing item, Map<Missing, int> counts)\n    {\n        Missing? local = item;\n        return global.strlen(item) + counts.count() + global.strlen(local) + global.strlen(this.kept) + global.strlen(this.found(5));\n    }\n\n    public Missing found(Missing item) => item;\n\n    public Missing made() => 5;\n\n    public Missing madeInBlock()\n    {\n        return 5;\n    }\n}\n";
     assert_eq!(
         issues(("src/Demo/Tally.sharp", used), &[]),
         [
@@ -11423,7 +11580,7 @@ fn an_iterable_has_no_index() {
 /// `List<T>`.
 #[test]
 fn lazy_operations_on_an_iterable_type_their_results_by_the_elements() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Iterable<Order> orders, Iterable<Order>? maybe)\n    {\n        Iterable<Order> paid = orders.filter(o => o.paid);\n        Iterable<string> numbers = paid.map(o => o.number);\n        Iterable<string> first = numbers.take(100);\n        List<string> list = first.toList();\n        Iterable<int> wrongMap = paid.map(o => o.number);\n        List<int> wrongList = first.toList();\n        Iterable<Order>? kept = maybe?.filter(o => o.paid);\n        List<string> chain = orders.filter(o => o.paid).map(o => o.number).take(100).toList();\n        return global.count(list) + global.count(wrongList) + global.count(chain) + (kept == null ? 0 : 1) + Report.size(wrongMap);\n    }\n\n    private static int size(Iterable<int> values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; }, public string number { get; })\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Iterable<Order> orders, Iterable<Order>? maybe)\n    {\n        Iterable<Order> paid = orders.filter(o => o.paid);\n        Iterable<string> numbers = paid.map(o => o.number);\n        Iterable<string> first = numbers.take(100);\n        List<string> list = first.toList();\n        Iterable<int> wrongMap = paid.map(o => o.number);\n        List<int> wrongList = first.toList();\n        Iterable<Order>? kept = maybe?.filter(o => o.paid);\n        List<string> chain = orders.filter(o => o.paid).map(o => o.number).take(100).toList();\n        return list.count() + wrongList.count() + chain.count() + (kept == null ? 0 : 1) + Report.size(wrongMap);\n    }\n\n    private static int size(Iterable<int> values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; }, public string number { get; })\n    {\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[]),
@@ -11461,7 +11618,7 @@ fn a_method_an_iterable_does_not_have_is_an_error_naming_the_iterable() {
 /// an `Iterable<T>`, the same value has the lazy operations, whatever the analyzer saw assigned to the place last.
 #[test]
 fn a_list_keeps_its_methods_until_it_is_held_as_an_iterable() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<Order> items, List<Order> others)\n    {\n        List<Order> kept = items.filter(o => o.paid);\n        Iterable<Order> held = items;\n        Iterable<Order> lazy = held.filter(o => o.paid);\n        List<Order> wrong = held.filter(o => o.paid);\n        held = others;\n        List<Order> firstTwo = held.take(2).toList();\n        items.take(1);\n        return global.count(kept) + global.count(wrong) + global.count(firstTwo) + Report.size(lazy);\n    }\n\n    private static int size(Iterable<Order> values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<Order> items, List<Order> others)\n    {\n        List<Order> kept = items.filter(o => o.paid);\n        Iterable<Order> held = items;\n        Iterable<Order> lazy = held.filter(o => o.paid);\n        List<Order> wrong = held.filter(o => o.paid);\n        held = others;\n        List<Order> firstTwo = held.take(2).toList();\n        items.take(1);\n        return kept.count() + wrong.count() + firstTwo.count() + Report.size(lazy);\n    }\n\n    private static int size(Iterable<Order> values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[]),
@@ -11489,7 +11646,7 @@ fn a_lazy_operation_refuses_a_lambda_of_another_element_type() {
 #[test]
 fn a_plain_php_iterable_class_keeps_its_methods_until_it_is_held_as_an_iterable() {
     let cursor = "<?php\n\nnamespace Lib;\n\nuse Demo\\Order;\n\n/** @implements \\IteratorAggregate<int, Order> */\nfinal class Cursor implements \\IteratorAggregate\n{\n    public static function open(): self\n    {\n        return new self();\n    }\n\n    /** @param \\Closure(Order): bool $keep */\n    public function filter(\\Closure $keep): self\n    {\n        return $this;\n    }\n\n    public function only(): self\n    {\n        return $this;\n    }\n\n    /** @return \\Generator<int, Order, mixed, void> */\n    public function getIterator(): \\Generator\n    {\n        yield new Order(true);\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Cursor;\n\nclass Report\n{\n    public int run()\n    {\n        Cursor cursor = Cursor.open().filter(o => o.paid).only();\n        Iterable<Order> rows = Cursor.open();\n        List<Order> some = rows.filter(o => o.paid).take(2).toList();\n        rows.only();\n        return global.count(some) + Report.size(cursor);\n    }\n\n    private static int size(Cursor values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Cursor;\n\nclass Report\n{\n    public int run()\n    {\n        Cursor cursor = Cursor.open().filter(o => o.paid).only();\n        Iterable<Order> rows = Cursor.open();\n        List<Order> some = rows.filter(o => o.paid).take(2).toList();\n        rows.only();\n        return some.count() + Report.size(cursor);\n    }\n\n    private static int size(Cursor values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
     let others = [("src/Lib/Cursor.php", cursor)];
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &others), ["12:14 non-existent-method"]);
@@ -11736,13 +11893,13 @@ fn a_yielded_spread_error_writes_the_spread_as_the_file_does() {
 /// `Set.from` is an unknown method, as `\Sharp\Set::from` is in PHP.
 #[test]
 fn the_engines_set_class_is_not_a_class_sharp_code_calls() {
-    let sharp = "namespace Demo;\n\nimport Sharp.Set;\n\nclass Tags\n{\n    public int count(List<string> tags)\n    {\n        const made = Set.from(tags);\n        return global.count(made);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /** @param list<string> $tags */\n    public function count(array $tags): int\n    {\n        $made = \\Sharp\\Set::from($tags);\n        return count($made);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Sharp.Set;\n\nclass Tags\n{\n    public int count(List<string> tags)\n    {\n        const made = Set.from(tags);\n        return global.strlen(made);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /** @param list<string> $tags */\n    public function count(array $tags): int\n    {\n        $made = \\Sharp\\Set::from($tags);\n        return strlen($made);\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["9:26 non-existent-method", "10:29 mixed-argument"]);
+    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["9:26 non-existent-method", "10:30 mixed-argument"]);
     assert_eq!(
         issues(("src/Demo/Tags.php", php), &[]),
-        ["10:29 non-existent-method", "10:9 mixed-assignment", "11:22 mixed-argument"]
+        ["10:29 non-existent-method", "10:9 mixed-assignment", "11:23 mixed-argument"]
     );
 }
 
@@ -11837,10 +11994,10 @@ fn an_empty_map_literal_written_as_a_value_of_a_map_of_lists_or_of_sets_is_an_er
 }
 
 /// A `Set` crosses into a plain PHP `array` parameter as the list of its elements, so it passes where plain PHP takes
-/// an `array`, and to `count` and `in_array`.
+/// an `array`, and to `implode`.
 #[test]
 fn a_set_passes_where_plain_php_takes_an_array() {
-    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Set<string> tags, Set<Status> statuses)\n    {\n        return global.count(tags) + Sink.plain(tags) + Sink.plain(statuses) + (global.in_array(\"vip\", tags, true) ? 1 : 0);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Set<string> tags, Set<Status> statuses)\n    {\n        return Sink.plain(tags) + Sink.plain(statuses) + (global.implode(\",\", tags) == \"vip\" ? 1 : 0);\n    }\n}\n";
     let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $values): int\n    {\n        return count($values);\n    }\n}\n";
 
     assert_eq!(
@@ -13370,7 +13527,7 @@ fn the_php_twin_of_the_generic_checks_keeps_its_issues() {
 /// in declaration order.
 #[test]
 fn the_type_arguments_of_a_generic_call_and_a_generic_new_are_recorded_by_span() {
-    let sharp = "namespace Demo;\n\nimport Lib.Box;\nimport Lib.Pairs;\n\nclass Report\n{\n    public int run()\n    {\n        const pair = Pairs.of(5, \"tea\");\n        const box = new Box<float>(2.5);\n        return global.count(pair) + (int)box.item;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Box;\nimport Lib.Pairs;\n\nclass Report\n{\n    public int run()\n    {\n        const pair = Pairs.of(5, \"tea\");\n        const box = new Box<float>(2.5);\n        return pair.count() + (int)box.item;\n    }\n}\n";
     let library = "<?php\n\nnamespace Lib;\n\n/** @template T */\nfinal class Box\n{\n    /** @param T $item */\n    public function __construct(public mixed $item) {}\n}\n\nfinal class Pairs\n{\n    /**\n     * @template K\n     * @template V\n     *\n     * @param K $key\n     * @param V $value\n     *\n     * @return list<K|V>\n     */\n    public static function of(mixed $key, mixed $value): array\n    {\n        return [$key, $value];\n    }\n}\n";
     let call = sharp.find("Pairs.of").unwrap() as u32;
     let instantiation = sharp.find("new Box").unwrap() as u32;
@@ -13509,7 +13666,7 @@ fn recorded_type_arguments(analyzed: (&'static str, &'static str), library: &'st
 /// A template no argument binds has no type argument the code chose, so it is `mixed`, whatever its constraint.
 #[test]
 fn a_call_template_no_argument_binds_records_mixed() {
-    let sharp = "namespace Demo;\n\nimport Lib.Pairs;\n\nclass Report\n{\n    public int run()\n    {\n        const none = Pairs.none();\n        return global.count(none);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Pairs;\n\nclass Report\n{\n    public int run()\n    {\n        const none = Pairs.none();\n        return none.count();\n    }\n}\n";
     let library = "<?php\n\nnamespace Lib;\n\nfinal class Pairs\n{\n    /**\n     * @template T of int\n     *\n     * @return list<T>\n     */\n    public static function none(): array\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(recorded_type_arguments(("src/Demo/Report.sharp", sharp), library, "Pairs.none()"), ["mixed"]);
@@ -13549,7 +13706,7 @@ fn new_on_a_generic_class_without_a_constructor_records_the_type_arguments_it_wr
 /// A literal records its scalar type once, however many literals bind the template.
 #[test]
 fn a_template_bound_by_several_literals_records_their_scalar_type_once() {
-    let sharp = "namespace Demo;\n\nimport Lib.Lists;\n\nclass Report\n{\n    public int run()\n    {\n        const sizes = Lists.of(5, 6);\n        const flags = Lists.of(true, false);\n        return global.count(sizes) + global.count(flags);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Lists;\n\nclass Report\n{\n    public int run()\n    {\n        const sizes = Lists.of(5, 6);\n        const flags = Lists.of(true, false);\n        return sizes.count() + flags.count();\n    }\n}\n";
     let library = "<?php\n\nnamespace Lib;\n\nfinal class Lists\n{\n    /**\n     * @template T\n     *\n     * @param T ...$items\n     *\n     * @return list<T>\n     */\n    public static function of(mixed ...$items): array\n    {\n        return $items;\n    }\n}\n";
     let analyzed = ("src/Demo/Report.sharp", sharp);
 

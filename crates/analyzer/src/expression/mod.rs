@@ -657,7 +657,9 @@ where
                     || span.is_none_or(|span| !field_tests.iter().any(|test| test.start == span.start)))
                 && (!is_code(issue, IssueCode::MatchArmAlwaysTrue)
                     || span.is_none_or(|span| Some(span.start.offset) != covering_list_arm))
-                && (!(is_code(issue, IssueCode::ReplacedBySyntax) || is_code(issue, IssueCode::BareFunctionCall))
+                && (!(is_code(issue, IssueCode::ReplacedBySyntax)
+                    || is_code(issue, IssueCode::BareFunctionCall)
+                    || is_code(issue, IssueCode::WrappedFunction))
                     || called.is_none())
                 && (!always_true || called.is_none_or(|call| !is_shape(call)))
                 && (!always_true

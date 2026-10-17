@@ -2639,6 +2639,35 @@ fn an_environment_superglobal_is_an_error_that_names_environment() {
     );
 }
 
+/// Spec section 29: PHP's `$argv` and `$argc` hold the command-line arguments, so a read of either names the
+/// `Environment` member that reads them. A parameter of that name declares a local and reads nothing, so it gets the
+/// `$` error.
+#[test]
+fn a_command_line_variable_is_an_error_that_names_the_environment_member() {
+    let code = leak(method("        Store.keep($argv, $argc);\n        return extra;\n"));
+    let parameter = "class Report\n{\n    public int run(int $argv) { return 1; }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:20 PHP# has no `$argv`: write `environment.arguments` on the `Environment` your constructor takes.",
+            "7:27 PHP# has no `$argc`: write `environment.arguments.count()` on the `Environment` your constructor takes.",
+        ]
+    );
+    assert_eq!(issues(parameter), ["3:24 PHP# variables have no `$`: write `argv`."]);
+    // A file whose import takes the short name `Environment` is told the aliased import to write.
+    let shadowed = leak(
+        method("        Store.keep($argv);\n        return extra;\n")
+            .replace("namespace App.Tenant;\n", "namespace App.Tenant;\n\nimport App.Shared.Environment;\n"),
+    );
+    assert_eq!(
+        issues(shadowed),
+        [
+            "9:20 PHP# has no `$argv`: write `sharpEnvironment.arguments` on the `SharpEnvironment` your constructor takes after `import Sharp.Environment as SharpEnvironment;`."
+        ]
+    );
+}
+
 /// A write to a superglobal's element names the request as a read does, not the write target.
 #[test]
 fn a_write_to_a_superglobal_is_an_error_that_names_a_request() {
@@ -3718,7 +3747,7 @@ fn the_error_control_operator_is_an_error_in_every_namespace() {
         assert_eq!(
             issues(code),
             [
-                "5:49 PHP# has no `@`: a failure is the value a call returns, so test that value, as in `global.hex2bin(text) is string data`."
+                "5:49 PHP# has no `@`: a failure is the value a call returns, so test that value, as in `global.iconv(from, to, text) is string converted`."
             ],
             "{namespace}"
         );
@@ -4456,7 +4485,7 @@ fn operators_outside_the_slice_are_not_supported_yet() {
     assert_eq!(
         issues(code),
         [
-            "8:13 PHP# has no `@`: a failure is the value a call returns, so test that value, as in `global.hex2bin(text) is string data`.",
+            "8:13 PHP# has no `@`: a failure is the value a call returns, so test that value, as in `global.iconv(from, to, text) is string converted`.",
             "9:19 This operator is not supported yet in PHP#.",
         ]
     );
@@ -6361,10 +6390,11 @@ fn an_enum_returns_self_holds_union_constants_and_refuses_new_self() {
     assert_eq!(issues(code), ["14:34 An enum has no constructor: its cases are its only values."]);
 }
 
-/// `List` and `Map` both run as PHP's `array`, and every function type as `\Closure`, so a union of two of either
-/// holds two types the engine can't tell apart.
+/// A type is one collection, as in C#, Java, Kotlin and Swift, so a union of two collections is refused, and the
+/// refusal names the two parameters or the enum to write. Every function type runs as `\Closure`, so a union of two
+/// is one type written twice.
 #[test]
-fn a_union_of_two_collections_or_two_function_types_is_a_type_written_twice() {
+fn a_union_of_two_collections_or_of_two_function_types_is_refused() {
     let code = leak(method("        return 1;\n").replace(
         "int extra",
         "List<int>|Map<string, int> items, Function<int()>|Function<string()> make, List<int>|string fine",
@@ -6373,18 +6403,24 @@ fn a_union_of_two_collections_or_two_function_types_is_a_type_written_twice() {
     assert_eq!(
         issues(code),
         [
-            "5:30 `List<int>` and `Map<string, int>` both run as a PHP array, so a union can't hold both.",
+            "5:30 A type can't be both a `List<int>` and a `Map<string, int>`.",
             "5:70 Duplicate type `Function<string()>` is redundant."
         ]
     );
+    assert_eq!(
+        check_in_type_file(code)[0].help.as_deref(),
+        Some(
+            "Take the `List<int>` and the `Map<string, int>` as two parameters, or as an enum with one case that holds each."
+        )
+    );
 }
 
-/// Spec section 11: type arguments reach the running program, so a union is refused only where the engine can't tell
-/// two members apart. Two generic classes, or one class with other type arguments, compile. `List`, `Map` and `Set`
-/// share PHP's one array kind, and a collection beside an `Iterable` of its element type adds nothing to it, while a
-/// collection beside another generic class compiles.
+/// Spec section 11: type arguments reach the running program, so two generic classes, or one class with other type
+/// arguments, compile. A type written twice is refused, and so are two of `List`, `Map` and `Set`, as a type is one
+/// collection, and a collection beside an `Iterable` of its element type, which adds nothing to it, while a collection
+/// beside another generic class compiles.
 #[test]
-fn a_union_refuses_only_members_the_engine_cannot_tell_apart() {
+fn a_union_refuses_a_type_written_twice_two_collections_and_a_collection_beside_its_iterable() {
     let code = leak(method("        return 1;\n").replace(
         "int extra",
         "Box<Order>|Pair<Order> a, Box<int>|Box<string> b, Box<Order>|Box<Order> c, List<int>|Map<string, int> d, List<int>|Set<int> e, Iterable<int>|List<int> f, Iterable<int>|Map<string, int> g, Set<int>|Iterable<int> h, Iterable<string>|List<int> i, Iterable<string>|Map<string, int> j, Order|Entity k, List<Order>|Box<Order> l",
@@ -6394,8 +6430,8 @@ fn a_union_refuses_only_members_the_engine_cannot_tell_apart() {
         issues(code),
         [
             "5:81 Duplicate type `Box<Order>` is redundant.",
-            "5:105 `List<int>` and `Map<string, int>` both run as a PHP array, so a union can't hold both.",
-            "5:135 `List<int>` and `Set<int>` both run as a PHP array, so a union can't hold both.",
+            "5:105 A type can't be both a `List<int>` and a `Map<string, int>`.",
+            "5:135 A type can't be both a `List<int>` and a `Set<int>`.",
             "5:161 `List<int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
             "5:188 `Map<string, int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
             "5:217 `Set<int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
