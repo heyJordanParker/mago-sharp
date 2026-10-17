@@ -39,6 +39,7 @@ use crate::utils::expression::is_this;
 use crate::utils::get_type_diff;
 use crate::utils::int_refused_for_float;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::quoted_source;
@@ -202,12 +203,17 @@ where
                 &mut union_comparison_result,
             );
 
-        if type_match_found && let Some(value_span) = assigned_value_span {
+        // A write through an index passes the whole collection, whose new element `array_assignment` holds.
+        if type_match_found
+            && matches!(write_kind, PropertyWriteKind::Direct | PropertyWriteKind::Coalesce)
+            && let Some(value_span) = assigned_value_span
+        {
             record_function_values(
                 context,
                 artifacts,
                 assigned_value_type,
                 &resolved_property.property_type,
+                display_sharp_type,
                 value_span,
                 IssueCode::InvalidPropertyAssignmentValue,
             );

@@ -38,6 +38,7 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extern;
+use mago_syntax::cst::FunctionHint;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::LocalDeclaration;
@@ -69,6 +70,7 @@ use crate::effects::summary::parameter_index;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_like_identifier;
 use crate::utils::names::display_member;
+use crate::utils::names::display_sharp_parameter_type;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_imported_namespace;
 use crate::utils::names::namespace_function;
@@ -189,7 +191,7 @@ pub(crate) fn function_values_must_fit_their_types(
 
             let issue = impure(
                 value.code,
-                format!("{reason}, so a `{}` cannot hold it.", value.declared),
+                format!("{reason}, so {} cannot hold it.", value.holder),
                 value.span,
                 body,
                 &impurity,
@@ -566,6 +568,24 @@ pub(crate) fn check_uses<A>(
     let mut found = UsesNames::default();
     UsesWalker.walk_program(program, &mut found);
 
+    // A method states its effects only without a body, and states none by writing no `uses`.
+    for none in found.none_on_method {
+        context.collector.report_with_code(
+            IssueCode::InvalidEffect,
+            Issue::error("A method without `uses` is pure already, so delete `uses none`.")
+                .with_annotation(Annotation::primary(none.span).with_message("Written here.")),
+        );
+    }
+
+    for none in found.beside_none {
+        context.collector.report_with_code(
+            IssueCode::InvalidEffect,
+            Issue::error("`none` states that the function has no effect, so `uses` lists nothing beside it.")
+                .with_annotation(Annotation::primary(none.span).with_message("Written here."))
+                .with_help("Delete `none` to allow the other effects, or delete them to keep the function pure."),
+        );
+    }
+
     for name in found.names {
         let effect = context.resolved_names.get(name);
         artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, ascii_lowercase_word(effect), false);
@@ -622,14 +642,23 @@ pub(crate) fn check_uses<A>(
 }
 
 /// The names every effect `uses` of a program writes. A method with a body names none, and a function parameter named
-/// in any method's is no effect, as the semantics checker holds them to.
+/// in any method's is no effect, as the semantics checker holds them to. A function type's `uses none` names none, and
+/// is refused beside another effect. A method without a body is pure without `uses`, so its `uses none` is refused.
 struct UsesWalker;
 
-/// The names [`UsesWalker`] collects, and the `uses` of the methods it read already.
+/// The names [`UsesWalker`] collects, each `none` written beside another effect or on a method without a body, and the
+/// `uses` of the methods and function types it read already.
 #[derive(Default)]
 struct UsesNames<'ast, 'arena> {
     names: Vec<&'ast LocalIdentifier<'arena>>,
-    methods: Vec<Span>,
+    beside_none: Vec<&'ast LocalIdentifier<'arena>>,
+    none_on_method: Vec<&'ast LocalIdentifier<'arena>>,
+    read: Vec<Span>,
+}
+
+/// Whether `name` is the `none` that states a function type is pure.
+fn is_none(name: &LocalIdentifier<'_>) -> bool {
+    name.value == b"none"
 }
 
 impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker {
@@ -638,14 +667,30 @@ impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker 
             return;
         };
 
-        found.methods.push(uses.span());
+        found.read.push(uses.span());
         if method.is_abstract() {
-            found.names.extend(MethodParts::of_method(method).uses_effects());
+            for name in MethodParts::of_method(method).uses_effects() {
+                if is_none(name) { found.none_on_method.push(name) } else { found.names.push(name) }
+            }
         }
     }
 
+    fn walk_in_function_hint(&self, function_hint: &'ast FunctionHint<'arena>, found: &mut UsesNames<'ast, 'arena>) {
+        let Some(uses) = &function_hint.uses else {
+            return;
+        };
+
+        found.read.push(uses.span());
+        if uses.names.len() > 1
+            && let Some(none) = uses.names.iter().find(|name| is_none(name))
+        {
+            found.beside_none.push(none);
+        }
+        found.names.extend(uses.names.iter().filter(|name| !is_none(name)));
+    }
+
     fn walk_in_uses(&self, uses: &'ast Uses<'arena>, found: &mut UsesNames<'ast, 'arena>) {
-        if !found.methods.contains(&uses.span()) {
+        if !found.read.contains(&uses.span()) {
             found.names.extend(uses.names.iter());
         }
     }
@@ -773,17 +818,19 @@ pub(crate) fn report_escaping_functions<'ast, 'arena, A>(
     for escape in found {
         let parameter = &metadata.parameters[escape.parameter];
         let name = BytesDisplay(parameter.name.0.as_bytes().strip_prefix(b"$").unwrap_or(parameter.name.0.as_bytes()));
-        // The parameter's own function type, which ends in its `>` and may go on with `?`, with a place for effects.
-        let suggested = escape.suggested.unwrap_or_else(|| {
-            let written = parameter
+        // The parameter's own function type, stated pure.
+        let pure = || {
+            parameter
                 .type_metadata
                 .as_ref()
-                .map(|declared| display_sharp_type(context, &declared.type_union))
-                .unwrap_or_default();
-            let end = written.rfind('>').unwrap_or(written.len());
-
-            format!("{} uses …{}", &written[..end], &written[end..])
-        });
+                .map(|declared| display_sharp_parameter_type(context, &declared.type_union))
+                .unwrap_or_default()
+        };
+        let help = match escape.suggested {
+            Suggested::Stated(stated) => format!("Take a `{stated}`, whose type states the effects it may have."),
+            Suggested::Pure => format!("Take a `{}`, whose type states that it is pure.", pure()),
+            Suggested::PureOrStated => format!("Take a `{}`, or state its effects in place of `none`.", pure()),
+        };
         let (code, verb, at) = match &escape.place {
             Place::Field => (IssueCode::InvalidPropertyAssignmentValue, "stored in a field".to_owned(), "Stored here."),
             Place::Collection => (IssueCode::InvalidArrayElement, "stored in a collection".to_owned(), "Stored here."),
@@ -797,20 +844,20 @@ pub(crate) fn report_escaping_functions<'ast, 'arena, A>(
             Place::Return => (IssueCode::InvalidReturnStatement, "returned".to_owned(), "Returned here."),
         };
         let message = match escape.via {
-            Via::Parameter => format!("`{name}` can't be {verb}: its type states no effects."),
-            Via::Local => format!(
-                "This local can't be {verb}: it holds `{name}`, a function parameter whose type states no effects."
-            ),
-            Via::Lambda => format!(
-                "This lambda can't be {verb}: it captures `{name}`, a function parameter whose type states no effects."
-            ),
+            Via::Parameter => format!("`{name}` can't be {verb}: it takes on each caller's effects."),
+            Via::Local => {
+                format!("This local can't be {verb}: it holds `{name}`, so it takes on each caller's effects.")
+            }
+            Via::Lambda => {
+                format!("This lambda can't be {verb}: it captures `{name}`, so it takes on each caller's effects.")
+            }
         };
         context.collector.report_with_code(
             code,
             Issue::error(message)
                 .with_annotation(Annotation::primary(escape.span).with_message(at))
                 .with_note("A method takes on the effects of each function it is given, so that function runs only inside the method's call.")
-                .with_help(format!("Take a `{suggested}`, whose type states the effects it may have.")),
+                .with_help(help),
         );
     }
 }
@@ -853,14 +900,22 @@ enum Via {
     Lambda,
 }
 
-/// One function parameter that escapes at `span`: the parameter's index, the place, what holds it, and the type the
-/// place states when that type states its effects.
+/// One function parameter that escapes at `span`: the parameter's index, the place, what holds it, and the type to
+/// take instead.
 struct Escape {
     span: Span,
     parameter: usize,
     place: Place,
     via: Via,
-    suggested: Option<String>,
+    suggested: Suggested,
+}
+
+/// The type an escaping function parameter takes instead: the type of the place it goes to, which states its effects,
+/// the parameter's own type stated pure when the place is a pure function type, and otherwise either.
+enum Suggested {
+    Stated(String),
+    Pure,
+    PureOrStated,
 }
 
 /// The state of [`EscapeWalker`]'s walk of one body: where each parameter that takes on effects is declared, and each
@@ -959,15 +1014,18 @@ where
         self.check_stated(value, place, None);
     }
 
-    /// As [`Self::check`], where `stated` is the type of the place, which names the type to take instead when it is a
-    /// function type that states its effects.
+    /// As [`Self::check`], where `stated` is the type of the place, which decides the type to take instead when it is a
+    /// function type.
     fn check_stated(&mut self, value: &Expression<'arena>, place: Place, stated: Option<&TUnion>) {
         let Some((parameter, via)) = self.holds(value) else {
             return;
         };
 
-        let suggested =
-            stated.filter(|stated| states_effects(stated)).map(|stated| display_sharp_type(self.context, stated));
+        let suggested = match stated.map(|stated| (stated, lists_effects(stated))) {
+            Some((stated, Some(true))) => Suggested::Stated(display_sharp_type(self.context, stated)),
+            Some((_, Some(false))) => Suggested::Pure,
+            _ => Suggested::PureOrStated,
+        };
         self.found.push(Escape { span: value.span(), parameter, place, via, suggested });
     }
 
@@ -1038,15 +1096,23 @@ where
     }
 }
 
-/// Whether every type of `union` is a function type that states its effects, as `Function<Charge(Cart) uses Http>`.
-fn states_effects(union: &TUnion) -> bool {
-    union.types.iter().all(|atomic| match atomic {
-        TAtomic::Callable(TCallable::Signature(signature)) => {
-            signature.effects.as_ref().is_some_and(|effects| !effects.is_empty())
-        }
-        TAtomic::Null => true,
-        _ => false,
-    }) && holds_a_callable(union)
+/// Whether every PHP# function type of `union`, whose other types are only null, lists effects, as
+/// `Function<Charge(Cart) uses Http>`, or none does, as `Function<Charge(Cart)>`. `None` for any other type, and for a
+/// union of both.
+fn lists_effects(union: &TUnion) -> Option<bool> {
+    let lists: Vec<bool> = union
+        .types
+        .iter()
+        .filter(|atomic| !matches!(atomic, TAtomic::Null))
+        .map(|atomic| match atomic {
+            TAtomic::Callable(TCallable::Signature(signature)) => {
+                signature.effects.as_ref().map(|effects| !effects.is_empty())
+            }
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+
+    lists.first().copied().filter(|first| lists.iter().all(|each| each == first))
 }
 
 /// Whether a parameter of the type `union` takes a function: a function type, or plain PHP's `callable` or `Closure`,

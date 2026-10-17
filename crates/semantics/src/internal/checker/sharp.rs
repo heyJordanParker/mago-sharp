@@ -2822,14 +2822,24 @@ fn is_extern(method: &Method) -> bool {
 }
 
 /// Refuses every name in the `uses` of a method with a body, spec section 29: the checker works a body's effects out
-/// from its code, so only a method without a body states the effects its implementations may have. A function
-/// parameter in `uses`, as the old `charge(…) uses prepare => …` wrote it, is the parser's error.
+/// from its code, so only a method without a body states the effects its implementations may have. A method is pure
+/// without `uses`, so its `none` says to delete it. A function parameter in `uses`, as the old
+/// `charge(…) uses prepare => …` wrote it, is the parser's error.
 fn check_method_uses(method: &Method, context: &mut Context<'_, '_, '_>) {
     if method.is_abstract() {
         return;
     }
 
     for name in MethodParts::of_method(method).uses_effects() {
+        if name.value == b"none" {
+            context.report(
+                Issue::error("A method without `uses` is pure already, so delete `uses none`.")
+                    .with_annotation(Annotation::primary(name.span).with_message("Written here.")),
+            );
+
+            continue;
+        }
+
         context.report(
             Issue::error(format!(
                 "A method with a body takes no effect in `uses`, and it names `{}`.",

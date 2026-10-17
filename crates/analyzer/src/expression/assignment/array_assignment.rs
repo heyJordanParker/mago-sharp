@@ -42,6 +42,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::block::ReferenceConstraintSource;
+use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
@@ -58,6 +59,7 @@ use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_index_id;
 use crate::utils::int_refused_for_float;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::report_int_for_float;
@@ -126,6 +128,15 @@ where
     {
         check_sharp_literal_kind(context, Some(block_context), artifacts, value, &element);
         set_literal_type = get_set_literal_type(context, artifacts, value, &element);
+
+        // Spec section 29: a function written into a collection is held to its element type, as one written to a
+        // local or a field is to theirs.
+        let code = if matches!(root_array_expression.unparenthesized(), Expression::ConstantAccess(_)) {
+            IssueCode::InvalidLocalAssignmentValue
+        } else {
+            IssueCode::InvalidPropertyAssignmentValue
+        };
+        record_function_values(context, artifacts, assign_value_type, &element, display_sharp_type, value.span(), code);
     }
     let assign_value_type = set_literal_type.as_ref().unwrap_or(assign_value_type);
 
