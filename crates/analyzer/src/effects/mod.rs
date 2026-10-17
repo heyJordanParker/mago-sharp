@@ -175,7 +175,7 @@ pub(crate) fn member_of_foreign_class() -> (Word, Word) {
 }
 
 impl Impurity {
-    /// The reason as a sentence's predicate, such as "calls `global.getenv`, which has no `extern` declaration", with each
+    /// The reason as a sentence's predicate, such as "calls `Pdf.render`, which has no `extern` declaration", with each
     /// class named by `class_name` and each effect by `effect_name`.
     pub(crate) fn describe(&self, class_name: &dyn Fn(Word) -> String, effect_name: &dyn Fn(Word) -> String) -> String {
         if self.cause == member_of_foreign_class()

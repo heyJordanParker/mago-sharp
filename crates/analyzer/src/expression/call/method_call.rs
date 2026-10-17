@@ -535,6 +535,7 @@ where
         );
     }
 
+    let lacks_collection_method = method_resolution.lacks_collection_method;
     if has_resolved_methods || method_resolution.undocumented_methods.is_empty() {
         analyze_invocation_targets(
             context,
@@ -603,14 +604,16 @@ where
     }
 
     // A call on a refused receiver, or on an `Any`, which `mixed-method-access` refuses, is refused once: its result is
-    // refused too, so nothing that uses it reports again.
+    // refused too, so nothing that uses it reports again. So is a call of a method one kind of a collection value
+    // lacks, as `contains` on a value that may be a `List` or a `Map`.
     if let Some(object_type) = artifacts.get_rc_expression_type(object).cloned() {
         if is_refused_type(&object_type) {
             artifacts.set_rc_expression_type(&span, object_type);
         } else if context.dialect.is_sharp()
-            && !has_resolved_methods
-            && object_type.types.iter().any(TAtomic::is_mixed)
-            && object_type.types.iter().all(|atomic| atomic.is_mixed() || atomic.is_null())
+            && (lacks_collection_method
+                || (!has_resolved_methods
+                    && object_type.types.iter().any(TAtomic::is_mixed)
+                    && object_type.types.iter().all(|atomic| atomic.is_mixed() || atomic.is_null())))
         {
             artifacts.set_expression_type(&span, TUnion::from_atomic(TAtomic::Error));
         }

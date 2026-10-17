@@ -202,6 +202,9 @@ pub struct MethodResolutionResult {
     pub has_ambiguous_target: bool,
     /// True if any resolution path was definitively invalid (e.g., method not found, call on non-object).
     pub has_invalid_target: bool,
+    /// True when a kind of PHP# collection the receiver may be lacks the method, as `contains` on a value that may be
+    /// a `Map`. The call is refused once, so its result is refused too.
+    pub lacks_collection_method: bool,
     /// True if an access on a `mixed` type was encountered.
     pub encountered_mixed: bool,
     /// True if an access on a `null` type was encountered.
@@ -454,6 +457,7 @@ where
                                     );
 
                                     result.has_invalid_target = true;
+                                    result.lacks_collection_method = true;
                                 } else {
                                     // A PHP# union of one generic class, as `Pair<int, Order>|Pair<string, Order>`,
                                     // misses the method once.

@@ -2580,18 +2580,33 @@ fn a_bare_call_of_a_plain_php_function_names_the_call_to_write() {
         ("Any? doubled(List<int> items, Function<int(int)> twice)", "array_map(twice, items)", "`items.map(twice)`"),
         ("bool anyKept(List<int> items, Function<bool(int)> keep)", "array_any(items, keep)", "`items.any(keep)`"),
         ("Any? found(List<int> items, Function<bool(int)> keep)", "array_find(items, keep)", "`items.first(keep)`"),
-        ("bool holds(List<int> items, int item)", "in_array(item, items)", "`items.contains(item)` on a `List`"),
-        ("Any? at(List<int> items, int item)", "array_search(item, items)", "`items.indexOf(item)` on a `List`"),
-        ("Any? latest(List<int> items)", "end(items)", "`items.last()` on a `List`"),
-        ("Any? pushed(List<int> items, int item)", "array_push(items, item)", "`items.add(item)` on a `List`"),
+        ("bool holds(List<int> items, int item)", "in_array(item, items)", "`items.contains(item)`"),
+        ("Any? at(List<int> items, int item)", "array_search(item, items)", "`items.indexOf(item)`"),
+        ("Any? latest(List<int> items)", "end(items)", "`items.last()`"),
+        ("Any? pushed(List<int> items, int item)", "array_push(items, item)", "`items.add(item)`"),
+        ("bool priced(Map<string, int> prices, string key)", "array_key_exists(key, prices)", "`prices.has(key)`"),
+        ("bool listed(Map<string, int> prices, string key)", "key_exists(key, prices)", "`prices.has(key)`"),
+        ("Any? names(Map<string, int> prices)", "array_keys(prices)", "`prices.keys()`"),
+        ("Any? amounts(Map<string, int> prices)", "array_values(prices)", "`prices.values()`"),
+        // Each kind of collection takes its own method, and a kind that has none names the kinds that do.
+        ("bool stocked(Map<string, int> stock, int item)", "in_array(item, stock)", "`stock.values().contains(item)`"),
+        ("bool seen(Set<int> seen, int item)", "in_array(item, seen)", "`seen.contains(item)`"),
+        ("Any? newest(Map<string, int> prices)", "end(prices)", "`prices.values().last()`"),
+        ("Any? where(Map<string, int> prices, int item)", "array_search(item, prices)", "`x.indexOf(…)` on a `List`"),
+        ("bool indexed(List<int> items)", "array_key_exists(0, items)", "`x.has(…)` on a `Map`"),
+        ("Any? positions(List<int> items)", "array_keys(items)", "`x.keys()` on a `Map`"),
         (
-            "bool priced(Map<string, int> prices, string key)",
-            "array_key_exists(key, prices)",
-            "`prices.has(key)` on a `Map`",
+            "bool either(bool flag, List<int> items, Map<string, int> stock, int item)",
+            "in_array(item, flag ? items : stock)",
+            "`x.contains(…)` on a `List` or a `Set`, or `x.values().contains(…)` on a `Map`",
         ),
-        ("bool listed(Map<string, int> prices, string key)", "key_exists(key, prices)", "`prices.has(key)` on a `Map`"),
-        ("Any? names(Map<string, int> prices)", "array_keys(prices)", "`prices.keys()` on a `Map`"),
-        ("Any? amounts(Map<string, int> prices)", "array_values(prices)", "`prices.values()` on a `Map`"),
+        // An argument that is no name is written `…`, and a call with an argument the method drops writes none.
+        ("bool small(List<int> items)", "in_array(1, items)", "`items.contains(…)`"),
+        ("Any? truthy(List<int> items)", "array_filter(items)", "`items.filter(…)`"),
+        ("int kept(List<int> items)", "count(items.filter(n => n > 0))", "`x.count()`"),
+        ("Any? addedTwice(List<int> items, int item)", "array_push(items, item, item)", "`x.add(…)`"),
+        ("int deep(List<int> items)", "count(items, 1)", "`x.count()`"),
+        ("Any? zipped(List<int> items)", "array_map(null, items, items)", "`x.map(…)`"),
     ] {
         let collection =
             leak(format!("namespace Demo;\n\nclass Report\n{{\n    public static {signature} => {call};\n}}\n"));
@@ -2648,7 +2663,7 @@ fn a_global_call_of_a_function_the_library_replaces_names_the_member_to_write() 
     ];
     let collections = [
         "7:51 wrapped-function `count` is wrapped by the standard library: write `items.count()`. | ",
-        "8:60 wrapped-function `in_array` is wrapped by the standard library: write `items.contains(item)` on a `List`. | ",
+        "8:60 wrapped-function `in_array` is wrapped by the standard library: write `items.contains(item)`. | ",
     ];
 
     assert_eq!(
@@ -2668,6 +2683,99 @@ fn a_global_call_of_a_function_the_library_replaces_names_the_member_to_write() 
     assert_eq!(refusals(("src/Demo/Report.sharp", sharp), &[]), [&collections[..], &effects].concat());
     assert_eq!(refusals(library[0], &library[1..]), Vec::<String>::new());
     assert_eq!(refusals(library[1], &library[..1]), Vec::<String>::new());
+}
+
+/// Spec sections 8 and 23: a function the standard library replaces, read through `global` as a value, names the
+/// member to write, as its call does, and the value is refused once, so the call it is given to reports nothing more.
+/// A function with no member, and one PHP# syntax replaces, are called through `global` instead.
+#[test]
+fn a_replaced_function_read_as_a_value_names_the_member_to_write() {
+    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
+    let library = [("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text)];
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static List<string> trimmed(List<string> names) => names.map(global.trim);\n    public static Any counted() => global.count;\n    public static Any measured() => global.strlen;\n    public static Any shown() => global.strval;\n}\n";
+    let lambda = "Pass a lambda that makes the call in its place.";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &library),
+        [
+            format!("5:73 wrapped-function `trim` is wrapped by the standard library: write `x.trim()`. | {lambda}"),
+            format!("6:36 wrapped-function `count` is wrapped by the standard library: write `x.count()`. | {lambda}"),
+            "7:37 non-existent-constant `global.strlen` is a plain PHP function, not a constant: call it, as in `global.strlen(…)`. | ".to_owned(),
+            "8:34 non-existent-constant `global.strval` is a plain PHP function, not a constant: call it, as in `global.strval(…)`. | ".to_owned(),
+        ]
+    );
+}
+
+/// `@` is refused outside the standard library, and the call it silences is analyzed as any other, so a refused call
+/// under it reports too.
+#[test]
+fn the_error_control_operator_outside_the_library_is_refused_beside_the_call_it_silences() {
+    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => @global.trim(text);\n    }\n}\n";
+    let library = [("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text)];
+    let silence =
+        "`@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.";
+
+    for namespace in ["Demo", "Sharp.Mine"] {
+        let sharp = leak(format!(
+            "namespace {namespace};\n\nclass Report\n{{\n    public static string quiet(string name) => @global.trim(name);\n    public static string loud(string name) => @global.strtoupper(name);\n}}\n"
+        ));
+        let found: Vec<String> = refusals(("src/Demo/Report.sharp", sharp), &library)
+            .into_iter()
+            .filter(|refusal| !refusal.contains("reserved-name-outside-library"))
+            .collect();
+
+        assert_eq!(
+            found,
+            [
+                "5:49 wrapped-function `trim` is wrapped by the standard library: write `name.trim()`. | ".to_owned(),
+                format!("5:48 silence-outside-library {silence} | "),
+                format!("6:47 silence-outside-library {silence} | "),
+            ],
+            "{namespace}"
+        );
+    }
+    assert_eq!(refusals(library[0], &[]), Vec::<String>::new());
+}
+
+/// A method that only some kinds of a collection value have, as `contains` on a value that may be a `List` or a
+/// `Map`, is one error: the call is refused once, so nothing that uses its result reports again.
+#[test]
+fn a_method_only_some_kinds_of_a_collection_value_have_is_one_error() {
+    let sharp = "namespace Demo;\n\nclass Kinds\n{\n    public bool held(bool listed, List<string> names, Map<string, int> stock)\n    {\n        let held = listed ? names : stock;\n        return held.contains(\"tea\");\n    }\n\n    public int? indexed(bool listed, List<string> names, Set<string> tags)\n    {\n        let held = listed ? names : tags;\n        return held.indexOf(\"tea\");\n    }\n}\n";
+    let codes: Vec<String> = refusals(("src/Demo/Kinds.sharp", sharp), &[])
+        .into_iter()
+        .map(|refusal| refusal.split(' ').take(2).collect::<Vec<_>>().join(" "))
+        .collect();
+
+    assert_eq!(codes, ["8:21 non-existent-method", "14:21 non-existent-method"]);
+}
+
+/// Spec section 29: a `.sharp` file's call of a plain PHP function has the effects its `extern` declares, so a call of
+/// `apache_getenv`, which uses `Environment`, is never a pure call whose result goes unused.
+#[test]
+fn a_call_of_a_function_whose_extern_declares_an_effect_is_never_unused() {
+    let builtins = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Builtins.sharp",
+        "extern global.apache_getenv uses Environment;\n",
+    );
+    let sharp = "namespace Demo;\n\nclass Shell\n{\n    public void run(string name)\n    {\n        apache_getenv(name);\n    }\n}\n";
+    let unused = |others: &[(&'static str, &'static str)]| -> Vec<String> {
+        issues(("src/Demo/Shell.sharp", sharp), others).into_iter().filter(|issue| issue.contains("unused")).collect()
+    };
+
+    assert_eq!(unused(&[builtins]), Vec::<String>::new());
+    // PHP's own declaration of `apache_getenv` calls it pure, which only a declared effect corrects.
+    assert_eq!(unused(&[]), ["7:9 unused-statement"]);
+}
+
+/// Spec section 7: `Math.max(0, ...prices)` gives 0 for an empty list, and the empty list may be written `[]`.
+#[test]
+fn a_spread_of_an_empty_list_passes_no_values() {
+    let math = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static int max(int first, int ...rest) => global.max([first, ...rest]);\n}\n";
+    let library = [("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp", math)];
+    let sharp = "namespace Demo;\n\nimport Sharp.Math.Math;\n\nclass Sizes\n{\n    public static int largest() => Math.max(0, ...[]);\n}\n";
+
+    assert_eq!(refusals(("src/Demo/Sizes.sharp", sharp), &library), Vec::<String>::new());
 }
 
 /// Spec section 29: `Environment` replaces `getenv()` and PHP's other environment functions, so a call of each, bare
@@ -3741,8 +3849,8 @@ fn a_cast_of_a_value_that_is_not_a_number_is_an_invalid_operand() {
     );
 }
 
-/// `global.die("…")` prints its message and exits with status 0, which reports success, so spec section 8 removes
-/// `die` in every form.
+/// `die("…")` prints its message and exits with status 0, which reports success, so spec section 8 removes `die` in
+/// every form, and `global.die` is refused as a `global.` call of any function the library replaces is.
 #[test]
 fn die_in_every_form_is_an_error_that_names_write_error_and_exit() {
     let sharp = "namespace Demo;\n\nclass Shutdown\n{\n    public void stop()\n    {\n        global.die();\n    }\n\n    public void fail()\n    {\n        global.die(\"failed\");\n    }\n\n    public void code()\n    {\n        global.die(1);\n    }\n}\n";
@@ -3750,16 +3858,17 @@ fn die_in_every_form_is_an_error_that_names_write_error_and_exit() {
     assert_eq!(
         refusals(("src/Demo/Shutdown.sharp", sharp), &[]),
         [
-            "7:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "12:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "17:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
+            "7:9 wrapped-function PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
+            "12:9 wrapped-function PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
+            "17:9 wrapped-function PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
         ]
     );
     for refusal in analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shutdown.sharp", sharp), &[]) {
-        assert_eq!(
-            refusal.notes,
-            ["`global.die(\"…\")` prints the message and exits with status 0, which reports success."]
-        );
+        let annotations: Vec<_> =
+            refusal.annotations.iter().map(|annotation| annotation.message.as_deref().unwrap_or_default()).collect();
+
+        assert_eq!(annotations, ["Called here."]);
+        assert_eq!(refusal.notes, ["`die(\"…\")` prints the message and exits with status 0, which reports success."]);
     }
 }
 
@@ -9593,7 +9702,6 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
             "25:16 non-existent-method",
             "26:15 non-existent-method",
             "27:27 non-existent-method",
-            "27:21 invalid-local-assignment-value",
             "35:21 invalid-local-assignment-value",
             "36:36 invalid-argument",
             "37:32 too-many-arguments",

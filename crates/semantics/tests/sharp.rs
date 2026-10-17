@@ -3708,32 +3708,21 @@ fn extern_on_a_field_is_not_supported_yet() {
     assert_eq!(issues(code), ["5:20 This modifier is not supported yet in PHP#."]);
 }
 
+/// The analyzer refuses `@` in a file that is not the standard library's, which only it can tell, so the semantic
+/// checks take it in a method body of any namespace.
 #[test]
-fn the_error_control_operator_is_in_the_slice_under_the_sharp_namespace() {
-    for namespace in ["Sharp", "Sharp.Text", "SHARP.Text"] {
+fn the_error_control_operator_is_in_the_slice_in_a_method_body() {
+    for namespace in ["Sharp", "Sharp.Text", "SHARP.Text", "App", "Sharpen.Text", "App.Sharp"] {
         let code = leak(format!(
             "namespace {namespace};\n\npublic static class Text\n{{\n    public static string quiet(string title) => @trim(title);\n}}\n"
         ));
 
         assert_eq!(issues(code), Vec::<String>::new(), "{namespace}");
     }
-}
 
-#[test]
-fn the_error_control_operator_outside_the_sharp_namespace_is_an_error() {
-    for namespace in ["App", "Sharpen.Text", "App.Sharp"] {
-        let code = leak(format!(
-            "namespace {namespace};\n\npublic static class Text\n{{\n    public static string quiet(string title) => @trim(title);\n}}\n"
-        ));
-
-        assert_eq!(
-            issues(code),
-            [
-                "5:49 `@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens."
-            ],
-            "{namespace}"
-        );
-    }
+    let default =
+        "namespace Sharp;\n\npublic static class Text\n{\n    public static int quiet(int size = @1) => size;\n}\n";
+    assert_eq!(issues(default), ["5:40 This operator is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -4462,16 +4451,9 @@ fn bitwise_operators_their_compound_assignments_and_modulo_assignment_are_in_the
 
 #[test]
 fn operators_outside_the_slice_are_not_supported_yet() {
-    let code =
-        leak(method("        let a = extra;\n        a = @extra;\n        a = extra <> 1;\n        return a;\n"));
+    let code = leak(method("        let a = extra;\n        a = extra <> 1;\n        return a;\n"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "8:13 `@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.",
-            "9:19 This operator is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), ["8:19 This operator is not supported yet in PHP#."]);
 }
 
 /// `<=>` orders two values, as spec section 19 writes it for numbers, strings and instances whose class declares
@@ -6353,9 +6335,9 @@ fn an_enum_returns_self_holds_union_constants_and_refuses_new_self() {
 
 /// A type is one collection, as in C#, Java, Kotlin and Swift, so a union of two collections is refused, and the
 /// refusal names the two parameters or the enum to write. Every function type runs as `\Closure`, so a union of two
-/// holds types the engine can't tell apart.
+/// is one type written twice.
 #[test]
-fn a_union_of_two_collections_or_two_function_types_is_a_type_written_twice() {
+fn a_union_of_two_collections_or_of_two_function_types_is_refused() {
     let code = leak(method("        return 1;\n").replace(
         "int extra",
         "List<int>|Map<string, int> items, Function<int()>|Function<string()> make, List<int>|string fine",
@@ -6376,12 +6358,12 @@ fn a_union_of_two_collections_or_two_function_types_is_a_type_written_twice() {
     );
 }
 
-/// Spec section 11: type arguments reach the running program, so a union is refused only where the engine can't tell
-/// two members apart. Two generic classes, or one class with other type arguments, compile. Two of `List`, `Map` and
-/// `Set` are refused, as a type is one collection, and a collection beside an `Iterable` of its element type adds
-/// nothing to it, while a collection beside another generic class compiles.
+/// Spec section 11: type arguments reach the running program, so two generic classes, or one class with other type
+/// arguments, compile. A type written twice is refused, and so are two of `List`, `Map` and `Set`, as a type is one
+/// collection, and a collection beside an `Iterable` of its element type, which adds nothing to it, while a collection
+/// beside another generic class compiles.
 #[test]
-fn a_union_refuses_only_members_the_engine_cannot_tell_apart() {
+fn a_union_refuses_a_type_written_twice_two_collections_and_a_collection_beside_its_iterable() {
     let code = leak(method("        return 1;\n").replace(
         "int extra",
         "Box<Order>|Pair<Order> a, Box<int>|Box<string> b, Box<Order>|Box<Order> c, List<int>|Map<string, int> d, List<int>|Set<int> e, Iterable<int>|List<int> f, Iterable<int>|Map<string, int> g, Set<int>|Iterable<int> h, Iterable<string>|List<int> i, Iterable<string>|Map<string, int> j, Order|Entity k, List<Order>|Box<Order> l",

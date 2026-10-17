@@ -626,6 +626,20 @@ fn analyze_reports_extern_and_silence_in_a_project_file_under_sharp() {
     );
 }
 
+/// The refusal of `@` leaves the call it silences analyzed, so one run reports both refusals.
+#[test]
+fn analyze_reports_silence_and_the_refusal_of_the_call_it_silences() {
+    assert_eq!(
+        page_errors(
+            "namespace App;\n\npublic static class Page\n{\n    public static int quiet(List<int> items) => @global.count(items);\n}\n"
+        ),
+        [
+            "src/App/Page.sharp:5:50:error - wrapped-function: `count` is wrapped by the standard library: write `items.count()`.",
+            "src/App/Page.sharp:5:49:error - silence-outside-library: `@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.",
+        ]
+    );
+}
+
 /// A project calls the standard library's `Int`, `Float` and `Bool` by their bare names, with no import, spec
 /// section 24. The checker reads them from the vendored package and gives each call the library's return type.
 #[test]

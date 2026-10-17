@@ -3,6 +3,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::object::TObject;
@@ -79,14 +80,21 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
         }
 
         let mut template_result = TemplateResult::default();
-        let (invocation_targets, encountered_invalid_targets) = resolve_targets(
-            context,
-            block_context,
-            artifacts,
-            self.function,
-            Some(&self.argument_list),
-            &mut template_result,
-        )?;
+        let (invocation_targets, encountered_invalid_targets) =
+            resolve_targets(context, block_context, artifacts, self.function, &mut template_result)?;
+        // Spec section 23 refuses a bare call of a plain PHP function once its arguments are analyzed, so the form it
+        // names fits the kind of collection a collection function is given.
+        let bare_function = match self.function {
+            Expression::Identifier(name)
+                if context.dialect.is_sharp() && get_bare_name_variable_id(name, context.resolved_names).is_none() =>
+            {
+                invocation_targets
+                    .first()
+                    .and_then(InvocationTarget::get_function_like_metadata)
+                    .map(|metadata| (metadata, name.span()))
+            }
+            _ => None,
+        };
 
         analyze_invocation_targets(
             context,
@@ -102,6 +110,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
             false,
             false, // object_has_nullsafe_null - not applicable for function calls
         )?;
+        if let Some((function, span)) = bare_function {
+            report_bare_function_call(context, block_context, artifacts, function, Some(&self.argument_list), span);
+        }
 
         if let Some(callee_type) = artifacts.get_rc_expression_type(self.function).cloned()
             && is_refused_type(&callee_type)
@@ -235,12 +246,14 @@ where
         None,
         block_context.known_functions.contains(&ascii_lowercase_word(function.as_bytes())),
     );
-    if let Some(metadata) = target.as_ref().and_then(InvocationTarget::get_function_like_metadata) {
+    let metadata = target.as_ref().and_then(InvocationTarget::get_function_like_metadata);
+    if let Some(metadata) = metadata {
         check_function_use(context, block_context, metadata, function, call.method.span());
-        report_replaced_global_call(context, block_context, artifacts, metadata, &call.argument_list, call.span());
     }
 
-    let analyze = |context: &mut Context<'ctx, 'arena, A>| {
+    let analyze = |context: &mut Context<'ctx, 'arena, A>,
+                   block_context: &mut BlockContext<'ctx>,
+                   artifacts: &mut AnalysisArtifacts| {
         analyze_invocation_targets(
             context,
             block_context,
@@ -258,20 +271,25 @@ where
     };
 
     if !function.as_bytes().eq_ignore_ascii_case(b"die") {
-        return analyze(context);
+        analyze(context, block_context, artifacts)?;
+        if let Some(metadata) = metadata {
+            report_replaced_global_call(context, block_context, artifacts, metadata, &call.argument_list, call.span());
+        }
+
+        return Ok(());
     }
 
     // Spec section 8 removes `die` in every form, because `die("…")` prints its message and exits with status 0, which
     // reports success. The refusal replaces the signature's report on its message, so the call gets one refusal.
-    let (result, recorded) = context.record(analyze);
+    let (result, recorded) = context.record(|context| analyze(context, block_context, artifacts));
     result?;
     let message = call.argument_list.arguments.first().map(|argument| argument.value().span());
     context.collector.extend(recorded.into_iter().filter(|issue| issue.primary_span() != message));
     context.collector.report_with_code(
-        IssueCode::InvalidArgument,
+        IssueCode::WrappedFunction,
         Issue::error("PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`.")
-            .with_annotation(Annotation::primary(call.span()))
-            .with_note("`global.die(\"…\")` prints the message and exits with status 0, which reports success."),
+            .with_annotation(Annotation::primary(call.span()).with_message("Called here."))
+            .with_note("`die(\"…\")` prints the message and exits with status 0, which reports success."),
     );
 
     Ok(())
@@ -282,7 +300,6 @@ pub(super) fn resolve_targets<'ctx, 'arena, A>(
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     expression: &Expression<'arena>,
-    arguments: Option<&ArgumentList<'arena>>,
     template_result: &mut TemplateResult,
 ) -> Result<(Vec<InvocationTarget<'ctx>>, bool), AnalysisError>
 where
@@ -343,15 +360,8 @@ where
             );
         }
 
-        if let Some(t) = target.as_ref()
-            && let Some(metadata) = t.get_function_like_metadata()
-        {
-            let span = function_name.span();
-            if context.dialect.is_sharp() {
-                report_bare_function_call(context, block_context, artifacts, metadata, arguments, span);
-            }
-
-            check_function_use(context, block_context, metadata, name, span);
+        if let Some(metadata) = target.as_ref().and_then(InvocationTarget::get_function_like_metadata) {
+            check_function_use(context, block_context, metadata, name, function_name.span());
         }
 
         return Ok(if let Some(t) = target { (vec![t], false) } else { (vec![], false) });
@@ -484,10 +494,14 @@ enum Replacement {
     /// (section 12) or `for … of` (section 17). `{x}` stands for the call's first argument, `{a}` and `{b}` for its
     /// first two, and `{...}` for every argument, each spread.
     Syntax(&'static str),
-    /// A collection method of spec section 12, written on the call's collection with the same placeholders as
-    /// [`Replacement::Syntax`], and with the kind of collection when only one kind has the method.
-    CollectionMethod(&'static str),
+    /// A collection method of spec section 12, by the kinds of collection, `List`, `Map` and `Set`, that have it: each
+    /// group of kinds with the method written on the call's collection, with the placeholders of
+    /// [`Replacement::Syntax`]. The placeholder the method is written on, `{a}` or `{b}`, is the collection.
+    CollectionMethod(&'static [(&'static [&'static str], &'static str)]),
 }
+
+/// Every kind of PHP# collection, spec section 12, for a method each of them has.
+const EVERY_COLLECTION: &[&str] = &["List", "Map", "Set"];
 
 /// Each plain PHP function PHP# replaces, with its replacement. A row that names a standard library member lands in
 /// the change that ships the member, and a test holds every row to the library. A name that ends in `*` is a family,
@@ -503,20 +517,26 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("array_merge", Replacement::Syntax("`[{...}]`")),
     ("array_replace", Replacement::Syntax("`[{...}]`")),
     ("array_walk_recursive", Replacement::Syntax("a `for … of` loop")),
-    ("count", Replacement::CollectionMethod("`{a}.count()`")),
-    ("sizeof", Replacement::CollectionMethod("`{a}.count()`")),
-    ("array_filter", Replacement::CollectionMethod("`{a}.filter({b})`")),
-    ("array_map", Replacement::CollectionMethod("`{b}.map({a})`")),
-    ("array_any", Replacement::CollectionMethod("`{a}.any({b})`")),
-    ("array_find", Replacement::CollectionMethod("`{a}.first({b})`")),
-    ("in_array", Replacement::CollectionMethod("`{b}.contains({a})` on a `List`")),
-    ("array_search", Replacement::CollectionMethod("`{b}.indexOf({a})` on a `List`")),
-    ("end", Replacement::CollectionMethod("`{a}.last()` on a `List`")),
-    ("array_push", Replacement::CollectionMethod("`{a}.add({b})` on a `List`")),
-    ("array_key_exists", Replacement::CollectionMethod("`{b}.has({a})` on a `Map`")),
-    ("key_exists", Replacement::CollectionMethod("`{b}.has({a})` on a `Map`")),
-    ("array_keys", Replacement::CollectionMethod("`{a}.keys()` on a `Map`")),
-    ("array_values", Replacement::CollectionMethod("`{a}.values()` on a `Map`")),
+    ("count", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{a}.count()")])),
+    ("sizeof", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{a}.count()")])),
+    ("array_filter", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{a}.filter({b})")])),
+    ("array_map", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{b}.map({a})")])),
+    ("array_any", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{a}.any({b})")])),
+    ("array_find", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{a}.first({b})")])),
+    (
+        "in_array",
+        Replacement::CollectionMethod(&[
+            (&["List", "Set"], "{b}.contains({a})"),
+            (&["Map"], "{b}.values().contains({a})"),
+        ]),
+    ),
+    ("array_search", Replacement::CollectionMethod(&[(&["List"], "{b}.indexOf({a})")])),
+    ("end", Replacement::CollectionMethod(&[(&["List"], "{a}.last()"), (&["Map"], "{a}.values().last()")])),
+    ("array_push", Replacement::CollectionMethod(&[(&["List", "Set"], "{a}.add({b})")])),
+    ("array_key_exists", Replacement::CollectionMethod(&[(&["Map"], "{b}.has({a})")])),
+    ("key_exists", Replacement::CollectionMethod(&[(&["Map"], "{b}.has({a})")])),
+    ("array_keys", Replacement::CollectionMethod(&[(&["Map"], "{a}.keys()")])),
+    ("array_values", Replacement::CollectionMethod(&[(&["Map"], "{a}.values()")])),
     ("intval", Replacement::Members(&[("Sharp\\Int", "parse")])),
     ("floatval", Replacement::Members(&[("Sharp\\Float", "parse")])),
     (
@@ -823,21 +843,61 @@ fn report_replaced_global_call<A>(
 ) where
     A: Arena,
 {
-    if context.source_file.is_standard_library {
-        return;
-    }
-    let name = function.original_name;
-    let Some(replacement @ (Replacement::Members(_) | Replacement::CollectionMethod(_))) = replacement_of(name) else {
-        return;
-    };
-    if let Some((code, message)) =
-        replacement_refusal(context, block_context, artifacts, name, replacement, Some(arguments))
+    if let Some((code, message)) = replaced_global_refusal(context, block_context, artifacts, function, Some(arguments))
     {
         context.collector.report_with_code(
             code,
             Issue::error(message).with_annotation(Annotation::primary(span).with_message("Called here.")),
         );
     }
+}
+
+/// Spec sections 8 and 23: a read through `global` of a function the standard library replaces, as a value, as in
+/// `names.map(global.trim)`, is refused with the member to write, as its call is. Returns whether it reported one.
+pub(crate) fn report_replaced_function_value<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    function: &FunctionLikeMetadata,
+    span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    let Some((code, message)) = replaced_global_refusal(context, block_context, artifacts, function, None) else {
+        return false;
+    };
+    context.collector.report_with_code(
+        code,
+        Issue::error(message)
+            .with_annotation(Annotation::primary(span).with_message("Reads the function without calling it."))
+            .with_help("Pass a lambda that makes the call in its place."),
+    );
+
+    true
+}
+
+/// The refusal of a call or a read through `global` of `function`, outside the standard library, whose members are
+/// made of those calls, when the library replaces the function. A function PHP# syntax replaces keeps `global.`.
+fn replaced_global_refusal<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    function: &FunctionLikeMetadata,
+    arguments: Option<&ArgumentList<'_>>,
+) -> Option<(IssueCode, String)>
+where
+    A: Arena,
+{
+    if context.source_file.is_standard_library {
+        return None;
+    }
+    let name = function.original_name;
+    let replacement @ (Replacement::Members(_) | Replacement::CollectionMethod(_)) = replacement_of(name)? else {
+        return None;
+    };
+
+    replacement_refusal(context, block_context, artifacts, name, replacement, arguments)
 }
 
 /// The row of [`REPLACEMENTS`] that replaces the plain PHP function `name`: the row of its whole name, or else the row
@@ -879,7 +939,9 @@ where
             IssueCode::ReplacedBySyntax,
             format!("`{name}` is replaced by PHP# syntax: write {}.", syntax_form(context, form, arguments)),
         )),
-        Replacement::CollectionMethod(form) => Some(wrapped(format!("{}.", syntax_form(context, form, arguments)))),
+        Replacement::CollectionMethod(groups) => {
+            Some(wrapped(format!("{}.", collection_form(context, artifacts, groups, arguments))))
+        }
         Replacement::Members(members) => {
             for (class, member) in *members {
                 let class = ascii_lowercase_word(class.as_bytes());
@@ -978,6 +1040,78 @@ fn lower_first(name: &str) -> String {
     let mut letters = name.chars();
 
     letters.next().map(|first| first.to_lowercase().chain(letters).collect()).unwrap_or_default()
+}
+
+/// The collection method `groups` gives a call, spec section 12: the method of the group that holds every kind, or the
+/// kind of the call's collection, which the analyzed type of its argument gives, written on that collection. Otherwise
+/// each group's method on a collection `x`, with the kinds that have it, so the call's collection is never written into
+/// a method its kind lacks.
+fn collection_form<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    groups: &[(&[&str], &str)],
+    arguments: Option<&ArgumentList<'_>>,
+) -> String
+where
+    A: Arena,
+{
+    let receiver = groups.first().map_or(0, |(_, form)| usize::from(form.starts_with("{b}")));
+    let kind = arguments
+        .and_then(|arguments| arguments.arguments.get(receiver))
+        .and_then(|argument| artifacts.get_expression_type(argument.value()))
+        .and_then(collection_kind);
+    let chosen =
+        groups.iter().find(|(kinds, _)| *kinds == EVERY_COLLECTION || kind.is_some_and(|kind| kinds.contains(&kind)));
+
+    match chosen {
+        Some((_, form)) => format!("`{}`", collection_call(context, form, receiver, arguments)),
+        None => groups
+            .iter()
+            .map(|(kinds, form)| {
+                let kinds: Vec<String> = kinds.iter().map(|kind| format!("a `{kind}`")).collect();
+
+                format!("`{}` on {}", collection_call(context, form, receiver, None), kinds.join(" or "))
+            })
+            .collect::<Vec<_>>()
+            .join(", or "),
+    }
+}
+
+/// The collection method `form` written with the call's arguments: each that is a name or a member read as written,
+/// and each other one as `…`, the collection as `x`. A call whose arguments the method does not all take is written
+/// with none of them, so a dropped argument never reads as kept.
+fn collection_call<A>(
+    context: &Context<'_, '_, A>,
+    form: &str,
+    receiver: usize,
+    arguments: Option<&ArgumentList<'_>>,
+) -> String
+where
+    A: Arena,
+{
+    let taken = if form.contains("{b}") { 2 } else { 1 };
+    let arguments = arguments.filter(|arguments| arguments.arguments.len() <= taken);
+    let written = |index: usize| {
+        arguments
+            .and_then(|arguments| arguments.arguments.get(index))
+            .and_then(|argument| argument_text(context, argument))
+            .unwrap_or_else(|| if index == receiver { "x" } else { "…" }.to_owned())
+    };
+
+    form.replace("{a}", &written(0)).replace("{b}", &written(1))
+}
+
+/// The kind of PHP# collection, `List`, `Map` or `Set`, every type of `union` is, if one is.
+fn collection_kind(union: &TUnion) -> Option<&'static str> {
+    let kind = |atomic: &TAtomic| match atomic {
+        TAtomic::Array(TArray::List(_)) => Some("List"),
+        TAtomic::Array(TArray::Keyed(_)) => Some("Map"),
+        TAtomic::Array(TArray::Set(_)) => Some("Set"),
+        _ => None,
+    };
+    let first = kind(union.types.first()?)?;
+
+    union.types.iter().all(|atomic| kind(atomic) == Some(first)).then_some(first)
 }
 
 /// The PHP# syntax `form` with each argument that is a name or a member read written into it.

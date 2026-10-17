@@ -371,9 +371,9 @@ const OBJECT: &[u8] = b"Object";
 ///   `===` and `<=>` in the next, and an operator of either row that takes an operand of its own row without
 ///   parentheses, as in `a < b < c` or `a is T is U`, is an error that names the groupings to write. So is a comparison
 ///   in the value of a comparison or value pattern, as in `x is > a < b`.
-/// - `@`, which hides PHP's warnings, in a method body of a file whose namespace is `Sharp` or below it, where the
-///   standard library writes it before a method throws its own exception. Anywhere else it is an error, and the
-///   analyzer refuses it in any file that is not the standard library's.
+/// - `@`, which hides PHP's warnings, in a method body, where the standard library writes it before a method throws
+///   its own exception. The analyzer refuses it in any file that is not the standard library's, since only it knows a
+///   file's package, and so the refusal leaves the rest of the line analyzed.
 /// - The ternary `c ? a : b` in a method body, as spec section 21 writes it. PHP's `a ?: b` is an error, and
 ///   `a ? b : c ? d : e` is `a ? b : (c ? d : e)`, as in C#.
 /// - Pattern matching in a method body, as spec section 21 writes it: `x is pattern`, `x as T` to a type that is not
@@ -2002,18 +2002,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         // `check_cast` decided the cast at its `UnaryPrefix`.
         (Node::UnaryPrefixOperator(operator), Body | Constant) if operator.is_cast() => Some(place),
-        (Node::UnaryPrefixOperator(operator @ UnaryPrefixOperator::ErrorControl(_)), Body | Constant)
-            if !is_standard_library_namespace(context.program) =>
-        {
-            context.report(
-                Issue::error(
-                    "`@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.",
-                )
-                .with_annotation(Annotation::primary(operator.span()).with_message("Written here.")),
-            );
-
-            None
-        }
         (Node::UnaryPrefixOperator(operator), Body | Constant) if is_slice_prefix_operator(operator, place) => {
             Some(place)
         }
@@ -4436,8 +4424,8 @@ fn check_generic(generic: &GenericHint, place: Place, context: &mut Context<'_, 
 }
 
 /// Checks a union type. Each member in the slice is decided with the parts inside it as it is outside a union, so a
-/// generic member takes the type arguments it takes alone. Two members the engine can't tell apart while the code runs
-/// are refused, as [`overlap`] finds them.
+/// generic member takes the type arguments it takes alone. Two members that overlap are refused, as [`overlap`] finds
+/// them: one type written twice, two collections, as a type is one collection, and a collection beside an `Iterable`.
 fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_>) {
     let mut members = Vec::new();
     union_members(union, &mut members);
@@ -4524,7 +4512,7 @@ fn report_null_in_union(null: &Hint, members: &[&Hint], context: &mut Context<'_
         .report(Issue::error(message).with_annotation(Annotation::primary(null.span()).with_message("Written here.")));
 }
 
-/// How two members of a union overlap, which the engine can't tell apart while the code runs.
+/// How two members of a union overlap, so the union is refused.
 enum Overlap<'hint, 'arena> {
     /// One type written twice.
     Written,
@@ -4535,7 +4523,7 @@ enum Overlap<'hint, 'arena> {
 }
 
 /// How the union members `first` and `second` overlap, if they do. Type arguments reach the running program, so a
-/// generic class with other type arguments is another type, and only the collections share a run-time kind.
+/// generic class with other type arguments is another type.
 fn overlap<'hint, 'arena>(
     first: &'hint Hint<'arena>,
     second: &'hint Hint<'arena>,
@@ -4967,9 +4955,8 @@ const fn is_slice_binary_operator(operator: &BinaryOperator) -> bool {
     }
 }
 
-/// Whether the slice has a prefix operator at a place. A parameter default has no `++`, `--` or `@`, and `enter`
-/// refuses `@` outside the namespace `Sharp` before it calls this. Every operator is named, so a new one does not
-/// compile until it is decided.
+/// Whether the slice has a prefix operator at a place. A parameter default has no `++`, `--` or `@`. Every operator is
+/// named, so a new one does not compile until it is decided.
 fn is_slice_prefix_operator(operator: &UnaryPrefixOperator, place: Place) -> bool {
     match operator {
         UnaryPrefixOperator::Negation(_)
@@ -5096,7 +5083,7 @@ const REMOVED_CONSTRUCTS: [(&[u8], &str, &str); 8] = [
     (
         b"die",
         "write the message with `console.writeError(text)`, then `process.exit(1)`.",
-        "`die(\"…\")` and `exit(\"…\")` print the message and exit with status 0, which reports success.",
+        "`die(\"…\")` prints the message and exits with status 0, which reports success.",
     ),
     (b"isset", "test it against null, as in `value != null`.", "A PHP# value is never undefined."),
     (

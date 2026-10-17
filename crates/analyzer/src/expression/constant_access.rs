@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use mago_codex::metadata::constant::ConstantMetadata;
 use mago_codex::scanner::inference::get_literal_constant_type;
 use mago_codex::scanner::inference::get_platform_constant_type;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_mixed;
@@ -31,6 +32,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::call::function_call::report_replaced_function_value;
 use crate::expression::variable::read_variable;
 use crate::resolver::class_name::report_keyword_in_another_case;
 use crate::utils::expression::get_bare_name_variable_id;
@@ -177,8 +179,8 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
 
 /// Analyzes the PHP# read `read` of `namespace_name.member`, as `global.PHP_EOL`, or `Pdf.DEFAULT_DPI` after
 /// `import Vendor.Pdf;`, as a read of the plain PHP constant `member` of `namespace`, which [`member_namespace`] found
-/// (spec section 23). The read is refused when the namespace has a function of that name, which the code calls, or no
-/// constant of that name.
+/// (spec section 23). The read is refused when the namespace has a function of that name, which the code calls, or
+/// names the member to write when the standard library replaces it, or when it has no constant of that name.
 ///
 /// [`member_namespace`]: crate::utils::names::member_namespace
 pub(crate) fn analyze_namespace_constant<A>(
@@ -203,8 +205,17 @@ pub(crate) fn analyze_namespace_constant<A>(
         return;
     }
 
+    // The read is refused once, so nothing that uses it reports again.
+    artifacts.set_expression_type(read, TUnion::from_atomic(TAtomic::Error));
+    let function = context.codebase.get_function(full_name.as_bytes());
+    if function.is_some_and(|function| {
+        report_replaced_function_value(context, block_context, artifacts, function, read.span())
+    }) {
+        return;
+    }
+
     let written = format!("{}.{}", BytesDisplay(namespace_name.value()), BytesDisplay(member.value));
-    let issue = if context.codebase.function_exists(full_name.as_bytes()) {
+    let issue = if function.is_some() {
         Issue::error(format!("`{written}` is a plain PHP function, not a constant: call it, as in `{written}(…)`."))
             .with_annotation(Annotation::primary(read.span()).with_message("Reads the function without calling it."))
     } else {
@@ -222,7 +233,6 @@ pub(crate) fn analyze_namespace_constant<A>(
             .with_help(format!("Check `{}` for typos.", BytesDisplay(member.value)))
     };
     context.collector.report_with_code(IssueCode::NonExistentConstant, issue);
-    artifacts.set_expression_type(read, get_mixed());
 }
 
 /// The type of a read at `span` of the constant `metadata`, whose full name is `name`, once the read is checked as

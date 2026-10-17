@@ -174,8 +174,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
             return Ok(());
         }
 
-        // The semantic checks take `@` in any file under the namespace `Sharp`, because the engine compiles the
-        // standard library from `vendor/` as any other code. Only the analyzer knows the file's package.
+        // Only the analyzer knows the file's package, because the engine compiles the standard library from `vendor/`
+        // as any other code. The operand is analyzed as any other, so a refusal inside it is reported too.
         if context.dialect.is_sharp() && self.operator.is_error_control() && !context.source_file.is_standard_library {
             context.collector.report_with_code(
                 IssueCode::SilenceOutsideLibrary,
