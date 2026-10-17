@@ -622,14 +622,46 @@ where
         for callee in self.accessors(object, property, b"get") {
             self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments: Vec::new() });
         }
+
+        if let Expression::ConstantAccess(class) = object.unparenthesized()
+            && self.context.resolved_names.binding(&class.name) == Some(Binding::Class)
+            && let ClassLikeMemberSelector::Identifier(name) = property
+        {
+            self.use_statics(word(self.context.resolved_names.get(&class.name)), name.value, span);
+        }
     }
 
-    /// A member read without `this.` runs its `get` accessor as `this.member` does.
+    /// Records a use of `property` through `class` when it is a static: the first use of the statics of the class that
+    /// declares it runs each of their initial values that is not constant, spec section 6, so it has their effects.
+    fn use_statics(&mut self, class: Word, property: &[u8], span: Span) {
+        let codebase = self.codebase();
+        let property = php_variable_name(property);
+        let Some(declaring) = codebase
+            .get_class_like(class.as_bytes())
+            .and_then(|class| class.declaring_property_ids.get(&property))
+            .and_then(|declaring| codebase.get_class_like(declaring.as_bytes()))
+            .filter(|declaring| declaring.properties.get(&property).is_some_and(|used| used.flags.is_static()))
+        else {
+            return;
+        };
+
+        for (name, static_property) in &declaring.properties {
+            if static_property.flags.is_static() && static_property.flags.has_runtime_initial_value() {
+                let callee = Body::InitialValue(declaring.name, *name);
+                self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
+            }
+        }
+    }
+
+    /// A member read without `this.` runs its `get` accessor as `this.member` does, and a static's uses its class's
+    /// statics as `Class.member` does.
     fn read_member(&mut self, name: &ConstantAccess<'arena>) {
-        if self.context.resolved_names.binding(&name.name) == Some(Binding::Member)
-            && let Some(callee) = self.accessor(self.class, name.name.value(), b"get")
-        {
-            let span = name.span();
+        if self.context.resolved_names.binding(&name.name) != Some(Binding::Member) {
+            return;
+        }
+
+        let span = name.span();
+        if let Some(callee) = self.accessor(self.class, name.name.value(), b"get") {
             self.summary.calls.push(Call {
                 callee,
                 span,
@@ -637,6 +669,7 @@ where
                 arguments: Vec::new(),
             });
         }
+        self.use_statics(self.class, name.name.value(), span);
     }
 
     /// The roots of each argument, by the index of the parameter it binds.
@@ -907,18 +940,20 @@ where
             return;
         }
 
+        // `passed_functions` already took on the functions a collection method is given, as a PHP# method's, and plain
+        // PHP may run any function it is given.
         if is_prelude_stub(declaring_class) {
-            self.prelude_stub_call(metadata, span, receiver, arguments);
+            self.prelude_stub_call(metadata, span, receiver);
         } else {
             let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
+            self.callbacks(arguments);
         }
-        self.callbacks(arguments);
     }
 
-    /// Records each function a call of a PHP# method passes to a function parameter whose type states no effects, spec
-    /// section 29, since the call takes on that function's effects. The method may run it on its receiver, with the roots `receiver`,
-    /// and on anything it is given, with the roots `roots` by parameter.
+    /// Records each function a call passes to a function parameter that takes on its effects, spec section 29: one
+    /// whose type states no effects, of a PHP# method or of a collection method. The method may run it on its receiver,
+    /// with the roots `receiver`, and on anything it is given, with the roots `roots` by parameter.
     fn passed_functions(
         &mut self,
         arguments: &'ast ArgumentList<'arena>,
@@ -971,8 +1006,9 @@ where
     }
 
     /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the
-    /// effects its `extern` declares. The class that declares the constructor decides, whatever class `new` names, and
-    /// the class `new` names decides when no class declares one. A named constructor is the class's own, spec section
+    /// effects of the `extern` of the class `new` names, which an error names as `new` does, or its nearest plain PHP
+    /// parent when PHP# declares it. The class that declares the constructor decides between the two, and the class
+    /// `new` names decides when no class declares one. A named constructor is the class's own, spec section
     /// 9.1, and its body runs on the object its `: this(…)` creates.
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
@@ -1013,7 +1049,13 @@ where
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: roots });
         } else if !is_prelude_stub(class.name) {
             let declaration = extern_of(codebase, class.name, constructor);
-            self.plain_php(declaration, span, (declaring.original_name, empty_word()));
+            // Only plain PHP takes an `extern`, so a PHP# class's error names its nearest plain PHP parent.
+            let named = std::iter::successors(Some(class), |class| {
+                class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+            })
+            .find(|class| !class.flags.is_sharp())
+            .unwrap_or(declaring);
+            self.plain_php(declaration, span, (named.original_name, empty_word()));
         }
     }
 
@@ -1034,25 +1076,15 @@ where
         }
     }
 
+    /// Records a call of a prelude stub, such as `List.add`, which changes its receiver unless the stub is free of
+    /// mutation.
     // Deleted once the standard library's `.sharp` sources replace the prelude stubs (php-sharp issue #60).
     fn prelude_stub_call(
         &mut self,
         metadata: &FunctionLikeMetadata,
         span: Span,
         receiver: Option<&'ast Expression<'arena>>,
-        arguments: &'ast ArgumentList<'arena>,
     ) {
-        // A function passed to the stub runs on the receiver's elements, as a function parameter of a PHP# method does.
-        let elements = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
-        for argument in &arguments.arguments {
-            let value = argument.value();
-            if let Some(lambda) = self.lambda(value) {
-                self.inline(lambda, |_| elements.clone());
-            } else {
-                self.method_value(value, span, &elements);
-            }
-        }
-
         if !metadata.flags.is_mutation_free()
             && let Some(receiver) = receiver
         {

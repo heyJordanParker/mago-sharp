@@ -50,6 +50,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::Foreach;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LiteralInteger;
+use mago_syntax::cst::Node;
 use mago_syntax::cst::Statement;
 use mago_word::Word;
 use mago_word::WordSet;
@@ -339,6 +340,25 @@ where
         always_assigned_before_loop_body_variables =
             BlockContext::get_new_or_updated_locals(loop_parent_context, loop_context);
     } else {
+        // The formula of a PHP# `is` reads what its analysis records, such as the type a `Map<string, int>` test reads,
+        // so a condition that holds one is analyzed first, as an `if` condition is, in a copy of the loop's block whose
+        // issues the analysis that applies the condition reports.
+        let holds_is = |condition: &&Expression| {
+            !Node::Expression(condition)
+                .filter_map(|node| matches!(node, Node::Expression(Expression::Is(_))).then_some(()))
+                .is_empty()
+        };
+        if pre_conditions.iter().any(holds_is) {
+            let mut typing = loop_context.clone();
+            loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
+                let (typed, _) = context.record(|context| {
+                    pre_conditions.iter().try_for_each(|condition| condition.analyze(context, &mut typing, artifacts))
+                });
+
+                typed
+            })?;
+        }
+
         let assertion_context = context.get_assertion_context_from_block(loop_context);
 
         let mut complex_conditions = vec![];

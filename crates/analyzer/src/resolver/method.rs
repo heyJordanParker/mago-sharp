@@ -1752,7 +1752,7 @@ pub(crate) fn report_non_documented_method<A>(
             Annotation::secondary(obj_span).with_message(format!("On an object of type `{classname}`")),
         )
         .with_note(
-            "While this call might be handled by `__call()` or `__callStatic()`, Mago cannot verify its arguments or return type without a corresponding `@method` docblock tag.",
+            "While this call might be handled by `__call()` or `__callStatic()`, the checker cannot verify its arguments or return type without a corresponding `@method` docblock tag.",
         )
         .with_help(format!(
             "To enable full analysis, add a `@method` tag to the docblock of the `{classname}` class. For example: `/** @method returnType {method_name}(argType $argName) */`"

@@ -86,8 +86,9 @@ use crate::utils::names::is_prelude_stub;
 use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 
-/// Whether `parameter` is a PHP# function parameter whose type states no effects, spec section 29: a call takes on the
-/// effects of the function it passes there, so that function is held to no effect list.
+/// Whether `parameter` is a PHP# function parameter whose type states no effects, or a collection method's function,
+/// spec section 29: a call takes on the effects of the function it passes there, so that function is held to no effect
+/// list.
 fn takes_on_effects(parameter: InvocationTargetParameter<'_>) -> bool {
     matches!(parameter, InvocationTargetParameter::FunctionLike(metadata) if metadata.flags.takes_on_effects())
 }

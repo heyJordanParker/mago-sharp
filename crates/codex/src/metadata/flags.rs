@@ -106,7 +106,8 @@ impl MetadataFlags {
     /// the caller's position, as C++20's `std::source_location::current()` default does.
     pub const CALLER_POSITION: MetadataFlags = MetadataFlags(1 << 62);
     /// A PHP# function parameter whose type states no effects, spec section 29, as `f` in `map(Function<R(T)> f)`: each
-    /// call of the method takes on the effects of the function it passes there, which the type does not limit.
+    /// call of the method takes on the effects of the function it passes there, which the type does not limit. A
+    /// standard library collection method's function, which the prelude declares as a `\Closure`, is one too.
     pub const TAKES_ON_EFFECTS: MetadataFlags = MetadataFlags(1 << 63);
 }
 

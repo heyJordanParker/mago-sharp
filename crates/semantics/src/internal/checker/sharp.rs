@@ -69,6 +69,7 @@ use mago_syntax::cst::Keyword;
 use mago_syntax::cst::Leave;
 use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
+use mago_syntax::cst::LiteralString;
 use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::LocalTarget;
@@ -1838,12 +1839,21 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         // Spec sections 27 and 29 remove PHP's superglobals and its `__Something__` names, written bare as well. A
         // method body walks an index of a superglobal and reports the superglobal at its name. A constant expression
-        // has no index, so it reports the superglobal over the whole index.
+        // has no index, so it reports the superglobal over the whole index. A body reports a read of the command-line
+        // arguments at its index, whose literal decides the message, and the index has nothing else to check.
         (Node::Expression(expression @ (Expression::ConstantAccess(_) | Expression::Variable(_))), Body | Constant)
         | (Node::Expression(expression @ Expression::ArrayAccess(_)), Constant)
             if let Some(span) = superglobal_span(expression, context) =>
         {
-            report_superglobal(span, context);
+            report_superglobal(span, expression, reads_the_environment(expression), context);
+
+            None
+        }
+        (Node::Expression(expression @ Expression::ArrayAccess(_)), Body)
+            if reads_the_environment(expression)
+                && let Some(span) = superglobal_span(expression, context) =>
+        {
+            report_superglobal(span, expression, true, context);
 
             None
         }
@@ -5126,11 +5136,19 @@ fn report_first_class_callable(application: &PartialApplication, context: &mut C
 /// and why. A `.sharp` file reads the word as a plain name, so the construct written as a call, or a bare `die`,
 /// reaches the checker as a call of a function, or a read of a constant, that no code declares.
 const REMOVED_CONSTRUCTS: [(&[u8], &str, &str); 8] = [
-    (b"echo", "write `global.printf` or `global.fwrite`.", "Output is a function call in PHP#."),
-    (b"print", "write `global.printf` or `global.fwrite`.", "Output is a function call in PHP#."),
+    (
+        b"echo",
+        "write `console.write(text)` on the `Console` your constructor takes.",
+        "Output is a call of the standard library's `Console`.",
+    ),
+    (
+        b"print",
+        "write `console.write(text)` on the `Console` your constructor takes.",
+        "Output is a call of the standard library's `Console`.",
+    ),
     (
         b"die",
-        "write the message to STDERR, then `global.exit(1)`.",
+        "write the message with `console.writeError(text)`, then `process.exit(1)`.",
         "`die(\"…\")` and `exit(\"…\")` print the message and exit with status 0, which reports success.",
     ),
     (b"isset", "test it against null, as in `value != null`.", "A PHP# value is never undefined."),
@@ -5261,16 +5279,54 @@ fn check_declared_name(name: &[u8], span: Span, kind: &str, case: NameCase, cont
     );
 }
 
-/// Reports a PHP superglobal, written with `$` or bare, which spec section 29 removes.
-fn report_superglobal(span: Span, context: &mut Context<'_, '_, '_>) {
+/// Whether a superglobal read reads the process environment or the command-line arguments, which spec section 29 gives
+/// `Environment`: `_ENV` through any index, and `_SERVER`'s `"argv"` or `"argc"`.
+fn reads_the_environment(expression: &Expression) -> bool {
+    match expression {
+        Expression::ArrayAccess(access) => {
+            let argument = matches!(
+                access.index,
+                Expression::Literal(Literal::String(LiteralString { value: Some(b"argv" | b"argc"), .. }))
+            );
+
+            (argument && names_superglobal(access.array, b"_SERVER")) || reads_the_environment(access.array)
+        }
+        expression => names_superglobal(expression, b"_ENV"),
+    }
+}
+
+/// Whether `expression` is the superglobal `superglobal`, written with `$` or bare.
+fn names_superglobal(expression: &Expression, superglobal: &[u8]) -> bool {
+    match expression {
+        Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(local) }) => local.value == superglobal,
+        Expression::Variable(Variable::Direct(direct)) => direct.name.strip_prefix(b"$") == Some(superglobal),
+        _ => false,
+    }
+}
+
+/// Reports a PHP superglobal, written with `$` or bare, which spec section 29 removes, naming `Environment` for a read
+/// of the environment or the arguments, a parameter for `GLOBALS`, which holds global variables PHP# has none of, and
+/// a request for anything else.
+fn report_superglobal(span: Span, expression: &Expression, environment_read: bool, context: &mut Context<'_, '_, '_>) {
     let (environment, after) = standard_class("Environment", context);
+    let mut superglobal = expression;
+    while let Expression::ArrayAccess(access) = superglobal {
+        superglobal = access.array;
+    }
+    let message = if environment_read {
+        let article = if environment.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" };
+
+        format!("PHP# has no superglobals; take {article} {environment}{after}")
+    } else if names_superglobal(superglobal, b"GLOBALS") {
+        "PHP# has no global variables; take the value as a constructor or method parameter".to_owned()
+    } else {
+        "PHP# has no superglobals; take a Request".to_owned()
+    };
 
     context.report(
-        Issue::error("PHP# has no superglobals; take a Request")
-            .with_annotation(Annotation::primary(span).with_message("Written here."))
-            .with_note(format!(
-                "Request data arrives as an object, such as a framework's `Request`, and the process environment as `{environment}`{after}."
-            )),
+        Issue::error(message).with_annotation(Annotation::primary(span).with_message("Written here.")).with_note(format!(
+            "Request data arrives as an object, such as a framework's `Request`, and the process environment as `{environment}`{after}."
+        )),
     );
 }
 

@@ -169,7 +169,7 @@ where
                                     .with_message(format!("Type is: `{variable_type_str}`")),
                             )
                             .with_note(
-                                "Spotted a `@psalm-trace` tag! While this works for compatibility, Mago has a more powerful way to inspect types.",
+                                "Spotted a `@psalm-trace` tag! While this works for compatibility, the checker has a more powerful way to inspect types.",
                             )
                             .with_help(
                                 "For more flexible debugging, try using `Mago\\inspect()` directly in your code. It can inspect any expression, not just variables (e.g., `Mago\\inspect($foo->bar());`)."
