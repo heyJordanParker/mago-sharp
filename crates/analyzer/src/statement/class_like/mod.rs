@@ -84,7 +84,7 @@ use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_statics;
 use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
-use crate::resolver::class_name::report_unknown_sharp_class;
+use crate::resolver::class_name::report_missing_class;
 use crate::resolver::extension::class_member;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
@@ -1765,6 +1765,9 @@ fn check_class_like_extends<'ctx, 'arena, A>(
 
         // Case: The extended type does not exist.
         let Some(extended_class_metadata) = extended_class_metadata else {
+            if report_missing_class(context, extended_type_str, extended_type.span()) {
+                continue;
+            }
             let extended_name = BytesDisplay(extended_type.value());
 
             context.collector.report_with_code(
@@ -2128,7 +2131,7 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                 implemented_metadata,
                 checked_signatures,
             );
-        } else if !report_unknown_sharp_class(context, implemented_type_str, implemented_type.span()) {
+        } else if !report_missing_class(context, implemented_type_str, implemented_type.span()) {
             let implemented_name = BytesDisplay(implemented_type.value());
             let (note, help) = if is_struct {
                 ("A struct's header lists the interfaces it implements.", "Check the interface's name and its import.")
@@ -2173,6 +2176,9 @@ fn check_class_like_use<'ctx, 'arena, A>(
         let used_trait_metadata = context.codebase.get_class_like(used_type_str);
 
         let Some(used_trait_metadata) = used_trait_metadata else {
+            if report_missing_class(context, used_type_str, used_type.span()) {
+                continue;
+            }
             let used_name = BytesDisplay(used_type.value());
 
             context.collector.report_with_code(

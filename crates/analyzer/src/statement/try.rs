@@ -33,7 +33,7 @@ use crate::context::scope::control_action::ControlAction;
 use crate::context::scope::finally_scope::FinallyScope;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
-use crate::resolver::class_name::report_unknown_sharp_class;
+use crate::resolver::class_name::report_missing_class;
 use crate::statement::analyze_statements;
 use crate::statement::function_like::HintPlace;
 use crate::statement::get_type_from_hint;
@@ -633,7 +633,7 @@ where
 
         let Some(class_like_metadata) = context.codebase.get_class_like(caught_type.as_bytes()) else {
             // The error names the class the code meant, so the block catches what any class does, with no second error.
-            if report_unknown_sharp_class(context, caught_type.as_bytes(), caught_span) {
+            if report_missing_class(context, caught_type.as_bytes(), caught_span) {
                 caught_classes.insert(throwable);
                 continue;
             }

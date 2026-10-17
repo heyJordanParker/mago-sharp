@@ -869,7 +869,7 @@ pub fn report_non_existent_class_like<A>(context: &mut Context<'_, '_, A>, span:
 where
     A: Arena,
 {
-    if report_unknown_sharp_class(context, classname.as_bytes(), span) {
+    if report_missing_class(context, classname.as_bytes(), span) {
         return;
     }
 
@@ -929,6 +929,55 @@ where
         [class] => report_not_imported(context, written, *class, span),
         _ => false,
     }
+}
+
+/// Reports the class `name`, as the binder resolved what a `.sharp` file's code wrote at `span`, which no analyzed file
+/// or stub declares: what the spec says the code meant, as [`report_unknown_sharp_class`] says, or else the missing
+/// type by its PHP# name, as [`report_missing_sharp_type`] says. Returns whether it reported, which it does in every
+/// `.sharp` file, so a plain PHP file alone keeps the caller's own error.
+pub(crate) fn report_missing_class<A>(context: &mut Context<'_, '_, A>, name: &[u8], span: Span) -> bool
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return false;
+    }
+    if !report_unknown_sharp_class(context, name, span) {
+        report_missing_sharp_type(context, name, span);
+    }
+
+    true
+}
+
+/// Reports the class `name`, which no analyzed file or stub declares, by its PHP# name, where Mago reports a PHP class
+/// form, so no message on a `.sharp` file names one. A name one `Error` or `Exception` ending away from a class the file
+/// reaches by its bare name gets that class suggested, as `OutOfRangeError` gets `OutOfRangeException`.
+fn report_missing_sharp_type<A>(context: &mut Context<'_, '_, A>, name: &[u8], span: Span)
+where
+    A: Arena,
+{
+    let name = mago_bytes::trim_start_byte(name, b'\\');
+    let short = short_name(name);
+    let written = short.as_bytes();
+    let shown = String::from_utf8_lossy(name).replace('\\', ".");
+    let stem = |suffix: &[u8]| written.strip_suffix(suffix).filter(|stem| !stem.is_empty());
+    let suggested = [(b"Error".as_slice(), b"Exception".as_slice()), (b"Exception", b"Error")]
+        .into_iter()
+        .filter_map(|(written_suffix, other)| Some([stem(written_suffix)?, other].concat()))
+        .find(|other| {
+            context.codebase.class_like_exists(other)
+                || context.codebase.class_like_exists(&[b"Sharp\\", other.as_slice()].concat())
+        });
+    let mut issue = Issue::error(format!("Cannot find type `{shown}`."))
+        .with_annotation(Annotation::primary(span).with_message("No type of this name is declared."));
+    issue = match suggested {
+        Some(other) => issue.with_help(format!("Did you mean `{}`?", String::from_utf8_lossy(&other))),
+        None => issue.with_help(
+            "Check the name's spelling, and import the type with `import` when another namespace declares it.",
+        ),
+    };
+
+    context.collector.report_with_code(IssueCode::NonExistentClassLike, issue);
 }
 
 /// Reports `name`, written at `span` in a PHP# file where it names nothing, as the PHP# keyword it spells in another

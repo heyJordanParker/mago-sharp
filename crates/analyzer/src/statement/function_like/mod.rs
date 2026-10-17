@@ -82,7 +82,7 @@ use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::instantiation::report_missing_type_arguments;
-use crate::resolver::class_name::report_unknown_sharp_class;
+use crate::resolver::class_name::report_missing_class;
 use crate::resolver::property::localize_property_type;
 use crate::resolver::property::resolve_declared_property;
 use crate::statement::analyze_statements;
@@ -1942,27 +1942,17 @@ pub(crate) fn report_undefined_type<A>(context: &mut Context<'_, '_, A>, name: W
 where
     A: Arena,
 {
-    if report_unknown_sharp_class(context, name.as_bytes(), span) {
+    if report_missing_class(context, name.as_bytes(), span) {
         return;
     }
 
-    let issue = if context.dialect.is_sharp() {
-        let name = display_class_like_name(context, name);
-        Issue::error(format!("Cannot find type `{name}`."))
-            .with_annotation(
-                Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
-            )
-            .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
-            .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.")
-    } else {
-        Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
-            .with_annotation(
-                Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
-            )
-            .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
-            .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
-            .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present.")
-    };
+    let issue = Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
+        .with_annotation(
+            Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
+        )
+        .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
+        .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
+        .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present.");
     context.collector.report_with_code(IssueCode::NonExistentClassLike, issue);
 }
 

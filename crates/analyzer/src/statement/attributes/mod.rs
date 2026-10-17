@@ -33,7 +33,7 @@ use crate::invocation::InvocationTarget;
 use crate::invocation::MethodInvocationKind;
 use crate::invocation::MethodTargetContext;
 use crate::invocation::analyzer::analyze_invocation;
-use crate::resolver::class_name::report_unknown_sharp_class;
+use crate::resolver::class_name::report_missing_class;
 use crate::utils::names::display_class_like_name;
 use crate::visibility::check_method_visibility;
 
@@ -132,7 +132,7 @@ where
         };
 
         let Some(metadata) = context.codebase.get_class_like(attribute_name_bytes) else {
-            if !report_unknown_sharp_class(context, attribute_name_bytes, attribute.name.span()) {
+            if !report_missing_class(context, attribute_name_bytes, attribute.name.span()) {
                 context.collector.report_with_code(
                     IssueCode::NonExistentAttributeClass,
                     Issue::error(format!("Attribute class `{attribute_name}` not found or could not be autoloaded."))

@@ -31,6 +31,7 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::resolver::class_name::ResolutionOrigin;
 use crate::resolver::class_name::ResolvedClassname;
+use crate::resolver::class_name::report_missing_class;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::selector::ResolvedSelector;
 use crate::resolver::selector::resolve_constant_selector;
@@ -442,6 +443,9 @@ fn report_non_existent_class<A>(context: &mut Context<'_, '_, A>, classname: Wor
 where
     A: Arena,
 {
+    if report_missing_class(context, classname.as_bytes(), class_span) {
+        return;
+    }
     let classname = display_class_like_name(context, classname);
 
     context.collector.report_with_code(

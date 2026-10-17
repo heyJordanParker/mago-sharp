@@ -47,6 +47,7 @@ use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
+use crate::resolver::class_name::report_missing_class;
 use crate::statement::analyze_statements;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
@@ -301,7 +302,9 @@ where
         _ => return None,
     };
     let Some(class) = context.codebase.get_class_like(name.as_bytes()) else {
-        // PHP# creates a behavior with `new`, so an unknown one is named as `new` names it.
+        if report_missing_class(context, name.as_bytes(), behavior.span()) {
+            return None;
+        }
         let missing = display_class_like_name(context, name);
         context.collector.report_with_code(
             IssueCode::NonExistentClass,

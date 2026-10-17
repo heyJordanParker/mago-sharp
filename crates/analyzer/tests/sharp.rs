@@ -2009,7 +2009,7 @@ fn nameof_names_a_property_the_class_has_and_is_a_string() {
             "Property `Order.totl` does not exist.",
             "`Order.secret` is `private`, so `nameof` can't name it here.",
             "Property `Order.sum` does not exist.",
-            "Class, Interface, or Trait `Missing` does not exist.",
+            "Cannot find type `Demo.Missing`.",
             "Invalid return type for method `Report.number`: expected `int`, but found `string`.",
         ]
     );
@@ -6206,7 +6206,7 @@ fn super_without_a_constructor_above_takes_no_arguments() {
         &[
             "14:35 too-many-arguments: `Entity` has no constructor to call: remove the arguments.",
             "19:35 too-many-arguments: `Root` has no base class to call: remove the arguments.",
-            "22:14 non-existent-class-like: Class `Lost` cannot implement unknown type `Missing`",
+            "22:14 non-existent-class-like: Cannot find type `Demo.Missing`.",
         ],
     );
 }
@@ -6923,7 +6923,7 @@ fn every_required_property_is_set_where_its_object_is_created() {
             format!("78:28 missing-required-property `new Label` must set `tone` and `size`. | {note}"),
             format!("84:31 missing-required-property `new Ticket` must set `price` and `note`. | {note}"),
             format!("88:29 missing-required-property `new Point` must set `y` and `label`. | {note}"),
-            "98:13 non-existent-class Class `Missing` not found. | ".to_owned(),
+            "98:13 non-existent-class-like Cannot find type `Demo.Missing`. | ".to_owned(),
         ]
     );
 }
@@ -7464,7 +7464,7 @@ fn a_name_without_its_import_names_the_import_or_the_namespace() {
         // Plain PHP extensions declare classes named `Event` too, so no one import is the advice.
         (
             keyword_named("Event").0,
-            "Cannot find type `Event`. | `Event` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            "Cannot find type `App.Event`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
         ),
         keyword_named("Match"),
         keyword_named("Case"),
@@ -7485,45 +7485,63 @@ fn a_name_without_its_import_names_the_import_or_the_namespace() {
 }
 
 /// A missing class that is no keyword in another case, no full name and the short name of no class the file could
-/// import keeps the error of the place that names it. So does a name the file imports, as `Log` after `import Log;`,
-/// and a class directly in `Sharp` that a newer standard library declares, which the file already names by default.
+/// import is one error wherever the code names it, "Cannot find type" with its PHP# name, so no message on a `.sharp`
+/// file names a PHP class form. So is a name the file imports, as `Log` after `import Log;`, and a class directly in
+/// `Sharp` that a newer standard library declares, which the file already names by default. A name one `Error` or
+/// `Exception` ending away from a class the file reaches by its bare name gets that class suggested.
 #[test]
-fn a_missing_class_the_spec_says_nothing_about_keeps_the_error_of_its_place() {
+fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
     const FRESH: &str = "namespace Sharp;\n\npublic static class Fresh\n{\n    public static int make() => 1;\n}\n";
     const HIDDEN: &str = "namespace Sharp.Internal;\n\npublic class Hidden\n{\n}\n";
     let others = [
         ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Fresh.sharp", FRESH),
         ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Internal/Hidden.sharp", HIDDEN),
     ];
+    let missing = |at: &str, name: &str| {
+        format!(
+            "{at} non-existent-class-like Cannot find type `{name}`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it."
+        )
+    };
 
     for (code, expected) in [
+        ("namespace App;\n\n[Missing]\nclass Report\n{\n}\n", vec![missing("3:2", "App.Missing")]),
+        ("namespace App;\n\nclass Report : Missing\n{\n}\n", vec![missing("3:16", "App.Missing")]),
+        ("namespace App;\n\ninterface Report : Missing\n{\n}\n", vec![missing("3:20", "App.Missing")]),
+        ("namespace App;\n\nstruct Report : Missing\n{\n}\n", vec![missing("3:17", "App.Missing")]),
         (
-            "namespace App;\n\n[Missing]\nclass Report\n{\n}\n",
-            vec!["Attribute class `Missing` not found or could not be autoloaded."],
+            "namespace App;\n\nclass Report\n{\n    public void run()\n    {\n        const made = new Missing();\n        made.run();\n    }\n}\n",
+            vec![missing("7:26", "App.Missing")],
         ),
         (
-            "namespace App;\n\nclass Report\n{\n    public int run()\n    {\n        try {\n            return 1;\n        } catch (Missing e) {\n            return 0;\n        }\n    }\n}\n",
+            "namespace App;\n\nclass Report\n{\n    public void run()\n    {\n        try { } catch (Missing e) { }\n    }\n}\n",
+            vec![missing("7:24", "App.Missing")],
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n    public void run()\n    {\n        try { } catch (OutOfRangeError e) { }\n    }\n}\n",
             vec![
-                "Attempting to catch an undefined class or interface: `Missing`.",
-                "None of the types specified in the `catch` declaration are valid catchable exceptions.",
+                "7:24 non-existent-class-like Cannot find type `App.OutOfRangeError`. | No type of this name is declared. | Did you mean `OutOfRangeException`?"
+                    .to_owned(),
             ],
         ),
         (
             "namespace App;\n\nimport Log;\n\nclass Report\n{\n    public void run(Log log)\n    {\n    }\n}\n",
-            vec!["Imported class, interface, trait, or enum `Log` does not exist.", "Cannot find type `Log`."],
+            vec![
+                "3:8 non-existent-use-import Imported class, interface, trait, or enum `Log` does not exist. | `Log` not found | Ensure that the class, interface, trait, or enum `Log` is defined in the codebase.".to_owned(),
+                missing("7:21", "Log"),
+            ],
         ),
         (
             "namespace App;\n\nclass Report\n{\n    public void run(Fresh fresh)\n    {\n    }\n}\n",
-            vec!["Cannot find type `Fresh`."],
+            vec![missing("5:21", "App.Fresh")],
         ),
         // Only the standard library imports `Sharp.Internal`, spec section 15, so no import is the advice for one of
         // its classes, as for the prelude's `ListMethods`.
         (
             "namespace App;\n\nclass Report\n{\n    public void run(Hidden hidden)\n    {\n    }\n}\n",
-            vec!["Cannot find type `Hidden`."],
+            vec![missing("5:21", "App.Hidden")],
         ),
     ] {
-        assert_eq!(messages(("src/App/Report.sharp", code), &others), expected, "{code}");
+        assert_eq!(worded(("src/App/Report.sharp", code), &others), expected, "{code}");
     }
 }
 
@@ -10107,7 +10125,7 @@ fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
         [
             "13:14 invalid-struct A struct can't inherit: `Base` is a class.",
             "25:15 invalid-struct `Name` is a struct, which can't be inherited.",
-            "30:14 non-existent-class-like Struct `Odd` cannot implement unknown type `Missing`",
+            "30:14 non-existent-class-like Cannot find type `Demo.Missing`.",
         ]
     );
     assert_eq!(messages(twice, &[]), ["Struct `Dup` is already defined elsewhere."]);
@@ -10324,7 +10342,7 @@ fn a_sharp_class_cannot_implement_the_struct_marker() {
         messages(("src/Demo/Fake.sharp", sharp), &[]),
         [
             "Imported class, interface, trait, or enum `Sharp.Struct` does not exist.",
-            "Class `Fake` cannot implement unknown type `Struct`"
+            "Cannot find type `Sharp.Struct`."
         ]
     );
 }
@@ -10367,8 +10385,8 @@ fn a_map_key_type_that_is_no_value_is_an_error() {
         [
             "9:12 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`.",
             "11:33 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`.",
-            "11:56 non-existent-class-like Cannot find type `Username`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
-            "14:9 non-existent-class-like Cannot find type `Username`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            "11:56 non-existent-class-like Cannot find type `Demo.Username`. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
+            "14:9 non-existent-class-like Cannot find type `Demo.Username`. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
             "20:36 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`.",
         ]
     );
@@ -10490,7 +10508,7 @@ fn a_field_or_local_type_naming_a_missing_class_is_reported_as_a_parameter_type_
         issues(("src/Demo/Tally.sharp", sharp), &[]),
         ["5:12 non-existent-class-like", "7:22 non-existent-class-like", "9:9 non-existent-class-like"]
     );
-    assert_eq!(messages(("src/Demo/Tally.sharp", sharp), &[]), ["Cannot find type `Missing`."; 3]);
+    assert_eq!(messages(("src/Demo/Tally.sharp", sharp), &[]), ["Cannot find type `Demo.Missing`."; 3]);
 
     let used = "namespace Demo;\n\nclass Tally\n{\n    public Missing? kept = null;\n    public Missing owner = 5;\n    public Missing named { get; set; } = 5;\n\n    public int size(Missing item, Map<Missing, int> counts)\n    {\n        Missing? local = item;\n        return global.strlen(item) + global.count(counts) + global.strlen(local) + global.strlen(this.kept) + global.strlen(this.found(5));\n    }\n\n    public Missing found(Missing item) => item;\n\n    public Missing made() => 5;\n\n    public Missing madeInBlock()\n    {\n        return 5;\n    }\n}\n";
     assert_eq!(
@@ -12254,7 +12272,7 @@ fn out_and_in_are_checked_on_the_type_arguments_of_the_header() {
             "18:35 invalid-template-parameter `TItem` is declared `in`, so the header `Source<TItem>` cannot hand it out.",
             "22:38 invalid-template-parameter `TItem` is declared `out`, so the header `Slot<TItem>` cannot take it in.",
             "34:36 invalid-template-parameter `TItem` is declared `in`, so the header `Source<List<TItem>>` cannot hand it out.",
-            "38:36 non-existent-class-like Interface `Lost` cannot extend unknown type `Missing` Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable.",
+            "38:36 non-existent-class-like Cannot find type `Demo.Missing`. Check the name's spelling, and import the type with `import` when another namespace declares it.",
         ]
     );
 }
@@ -17162,7 +17180,7 @@ fn a_listener_takes_no_parameter_or_one_that_every_listed_event_is() {
             "5:49 invalid-event `send` takes an `OrderPaid`, and it listens to `OrderRefunded`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, such as `OrderEvent`, or take no parameter.",
             "7:49 invalid-event `ship` takes an `OrderPaid`, and it listens to `Shipped`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, or take no parameter.",
             "9:34 invalid-event A listener takes only its event, and `log` also takes `logger`. | Not the event. | A listener gets everything else through its class's constructor.",
-            "11:55 non-existent-class-like Cannot find type `OrderSettled`. | `OrderSettled` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            "11:55 non-existent-class-like Cannot find type `App.Shop.OrderSettled`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
             "11:40 invalid-event `settle` takes an `OrderPaid`, and it listens to `OrderRefunded`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, or take no parameter.",
             "13:43 invalid-event `bill` takes a `Charge`, and it listens to `Credit`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, such as `Charged`, or take no parameter.",
             "15:50 invalid-event `watch` takes an `OrderPaid`, and it listens to `OrderEvent`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, such as `OrderEvent`, or take no parameter.",
@@ -17196,7 +17214,7 @@ fn an_on_clause_lists_events_or_interfaces_an_event_implements() {
         [
             format!("5:39 invalid-event `Logger` is not an event. | Listed here. | {note}"),
             format!("7:28 invalid-event No event implements `Tracked`, so `track` never runs. | Listed here. | {note}"),
-            "7:37 non-existent-class-like Cannot find type `OrderSettled`. | `OrderSettled` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.".to_owned(),
+            "7:37 non-existent-class-like Cannot find type `App.Shop.OrderSettled`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.".to_owned(),
             format!("9:29 invalid-event `int` is not an event. | Listed here. | {note}"),
             format!("9:34 invalid-event `string` is not an event. | Listed here. | {note}"),
             format!("11:26 invalid-event `Any` is not an event. | Listed here. | {note}"),
@@ -18173,7 +18191,7 @@ fn a_behavior_implements_behavior_for_the_property_s_type() {
             format!(
                 "8:40 invalid-property-behavior `Trimmed` is a `Behavior<string>`, and `count` is an `int`. | Named here. | {note} | Name a behavior that implements `Behavior<int>`, as `count` is an `int`."
             ),
-            "9:42 non-existent-class Class `Missing` not found. | `Missing` is not defined or cannot be autoloaded | Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.".to_owned(),
+            "9:42 non-existent-class-like Cannot find type `Demo.Missing`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.".to_owned(),
             format!(
                 "10:42 invalid-property-behavior `Behavior` can't be created: PHP# creates each behavior with `new` for each object. | Named here. | {note} | Name a class that implements `Behavior` for the property's type, such as one that extends `Behavior`."
             ),
@@ -19663,13 +19681,13 @@ fn emit_takes_an_event() {
     assert_eq!(
         worded(raiser, &[order_event, order_paid, refunded, failed, money, spot]),
         [
-            "11:116 non-existent-class-like Cannot find type `Missing`. | `Missing` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.".to_owned(),
+            "11:116 non-existent-class-like Cannot find type `App.Shop.Missing`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.".to_owned(),
             format!("16:14 invalid-event `emit` takes an event, and `OrderEvent` is not one. | Emitted here. | {note}"),
             format!("17:14 invalid-event `emit` takes an event, and `Money` is not one. | Emitted here. | {note}"),
             format!("18:14 invalid-event `emit` takes an event, and `Ledger` is not one. | Emitted here. | {note}"),
             format!("19:14 invalid-event `emit` takes an event, and `int` is not one. | Emitted here. | {note}"),
             format!("20:14 invalid-event `emit` takes an event, and `null` is not one. | Emitted here. | {note}"),
-            "21:18 non-existent-class Class `Missing` not found. | `Missing` is not defined or cannot be autoloaded | Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.".to_owned(),
+            "21:18 non-existent-class-like Cannot find type `App.Shop.Missing`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.".to_owned(),
             format!("27:14 invalid-event `emit` takes an event, and `OrderPaid?` is not one. | Emitted here. | {note}"),
             format!("28:14 invalid-event `emit` takes an event, and `Money|OrderPaid` is not one. | Emitted here. | {note}"),
             format!("30:14 invalid-event `emit` takes an event, and `Spot` is not one. | Emitted here. | {note}"),
@@ -20161,19 +20179,19 @@ fn a_binding_gives_its_service_a_class_a_list_of_classes_or_one_expression_of_th
         (
             "    singleton Mailer = Missing;",
             vec![
-                "15:24 non-existent-class-like Cannot find type `Missing`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+                "15:24 non-existent-class-like Cannot find type `App.Shop.Missing`. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
             ],
         ),
         (
             "    singleton Missing = SmtpMailer;",
             vec![
-                "15:15 non-existent-class-like Cannot find type `Missing`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+                "15:15 non-existent-class-like Cannot find type `App.Shop.Missing`. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
             ],
         ),
         (
             "    singleton Mailer for Missing = SmtpMailer;",
             vec![
-                "15:26 non-existent-class-like Cannot find type `Missing`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+                "15:26 non-existent-class-like Cannot find type `App.Shop.Missing`. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
             ],
         ),
         (
@@ -20915,8 +20933,8 @@ fn try_returns_from_a_method_or_a_get_accessor_and_reads_either_case() {
         [
             "`try` returns its failure, so its function returns a `Result`, and this one returns `void`.",
             "`try` returns its failure, so its function returns a `Result`, and this one returns `int`.",
-            "Cannot find type `Missing`.",
-            "Cannot find type `Unknown`.",
+            "Cannot find type `App.Missing`.",
+            "Cannot find type `App.Unknown`.",
             "`try` returns its failure from the method it is in, and it stands in no method here.",
             "`try` returns its failure, so its function returns a `Result`, and this one returns `void`.",
         ]

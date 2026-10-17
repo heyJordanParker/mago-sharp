@@ -67,8 +67,8 @@ use crate::resolver::class_name::ResolvedClassname;
 use crate::resolver::class_name::class_value_class;
 use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_class_value_of_no_class;
+use crate::resolver::class_name::report_missing_class;
 use crate::resolver::class_name::report_non_existent_class_like;
-use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::statement::function_like::get_this_type;
 use crate::utils::names::article;
@@ -432,10 +432,11 @@ where
     };
 
     let Some(metadata) = context.codebase.get_class_like(fq_classname.as_bytes()) else {
-        if report_unknown_sharp_class(context, fq_classname.as_bytes(), class_expression_span) {
+        // The error names the class, so the object gets the refused type, and no read or assignment of it adds a second.
+        if report_missing_class(context, fq_classname.as_bytes(), class_expression_span) {
             argument_list.analyze(context, block_context, artifacts)?;
 
-            return Ok(get_never());
+            return Ok(wrap_atomic(TAtomic::Error));
         }
 
         let missing_class = display_class_like_name(context, fq_classname);
